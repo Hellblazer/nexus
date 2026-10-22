@@ -5044,6 +5044,95 @@ class HttpVectorClient:
                 )
             after = nxt
 
+    # ── the cross-model re-embed job (RDR-210 Phase 6 Step 3, nexus-cnxjk) ─────
+    #
+    # Local engine only: an engine without the job (a managed one, or one started without the supervisor's
+    # NX_ENGINE_LOCAL) answers 503 naming local mode on every route, and one that predates the routes answers
+    # 404. The engine reads request bodies strictly (an unknown field is a 400), so each method sends
+    # exactly the fields its route takes and nothing else.
+
+    _REEMBED = "/v1/vectors/reembed"
+
+    def reembed_plan(self, source_collection: str, *, target_collection: str | None = None) -> dict:
+        """POST /v1/vectors/reembed/plan: what a job on ``source_collection`` would do, writing nothing.
+
+        ``target_collection`` is the conformant name the engine registers when no live sibling of the
+        source's ``(content_type, owner_id)`` carries the profile model; it is ignored when one does, and it
+        goes on the start request too. Returns the plan as the engine sends it (counts, token estimate,
+        target and what would happen to it); 409 raises :class:`VectorServiceError` with the engine's
+        reason, naming the holding job when a job holds the source.
+        """
+        body: dict[str, Any] = {"source_collection": source_collection}
+        if target_collection:
+            body["target_collection"] = target_collection
+        return _post(f"{self._REEMBED}/plan", body, tenant=self._tenant)
+
+    def reembed_start(
+        self,
+        source_collection: str,
+        *,
+        target_collection: str | None = None,
+        token_cap: int | None = None,
+        keep_source: bool = False,
+        force_delete: bool = False,
+    ) -> dict:
+        """POST /v1/vectors/reembed/jobs: start the job (201, the job row).
+
+        ``keep_source``, ``force_delete`` and ``token_cap`` are stored on the job row, so the runner and a
+        later re-entry honour them with no client. ``token_cap`` is omitted when ``None`` (no cap). A resent
+        start finds the source's lock and answers 409 naming the existing job.
+        """
+        body: dict[str, Any] = {
+            "source_collection": source_collection,
+            "keep_source": bool(keep_source),
+            "force_delete": bool(force_delete),
+        }
+        if target_collection:
+            body["target_collection"] = target_collection
+        if token_cap is not None:
+            body["token_cap"] = int(token_cap)
+        return _post(f"{self._REEMBED}/jobs", body, tenant=self._tenant)
+
+    def reembed_status(self) -> list[dict]:
+        """GET /v1/vectors/reembed/status: every job row of the tenant, newest first."""
+        result = _get(f"{self._REEMBED}/status", tenant=self._tenant)
+        jobs = result.get("jobs") if isinstance(result, dict) else None
+        if not isinstance(jobs, list):
+            raise VectorServiceError(f"GET {self._REEMBED}/status answered a body with no jobs list: {result!r}")
+        return jobs
+
+    def reembed_pause(self, job_id: str) -> dict:
+        """POST /v1/vectors/reembed/jobs/{id}/pause: the job row; ``"unchanged": true`` when already paused."""
+        return _post(f"{self._REEMBED}/jobs/{job_id}/pause", {}, tenant=self._tenant)
+
+    def reembed_resume(self, job_id: str, *, token_cap: int | None = None) -> dict:
+        """POST /v1/vectors/reembed/jobs/{id}/resume; ``token_cap`` may only raise the job's cap."""
+        body: dict[str, Any] = {}
+        if token_cap is not None:
+            body["token_cap"] = int(token_cap)
+        return _post(f"{self._REEMBED}/jobs/{job_id}/resume", body, tenant=self._tenant)
+
+    def reembed_abort(self, job_id: str) -> dict:
+        """POST /v1/vectors/reembed/jobs/{id}/abort: moved documents stay moved."""
+        return _post(f"{self._REEMBED}/jobs/{job_id}/abort", {}, tenant=self._tenant)
+
+    def served_embedding_models(self) -> list[str] | None:
+        """``GET /version``'s ``embedding_models``: the model tokens the engine can embed with now.
+
+        ``None`` when the engine does not report the field (an older engine) or cannot be read: "cannot
+        tell" is never "served" and never "missing". The plan reads this before it starts a job into a
+        family a degraded boot left unserved (nexus-q6t89).
+        """
+        try:
+            body = _get("/version", tenant=self._tenant, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 — advisory read: the engine's own refusal at start is the backstop
+            _log.debug("served_embedding_models_unread", error=str(exc))
+            return None
+        models = body.get("embedding_models") if isinstance(body, dict) else None
+        if isinstance(models, list) and all(isinstance(m, str) for m in models):
+            return list(models)
+        return None
+
     #: Catalog attribute keys the RDR-204 Phase 2 engine joins into
     #: ``/v1/vectors/stats`` rows (``PgVectorRepository`` joins
     #: ``catalog_collections`` by name). Carried through by

@@ -261,7 +261,8 @@ class ReembedLocalGateTest {
             String[][] requests = {
                 {"POST", "/jobs", "{\"source_collection\":\"x\"}"}, {"POST", "/jobs", ""}, {"GET", "/jobs", ""},
                 {"POST", "/jobs/" + someJob + "/pause", ""}, {"POST", "/jobs/" + someJob + "/resume", ""},
-                {"POST", "/jobs/" + someJob + "/abort", ""}, {"POST", "/nope", ""}};
+                {"POST", "/jobs/" + someJob + "/abort", ""}, {"POST", "/nope", ""},
+                {"POST", "/plan", "{\"source_collection\":\"x\"}"}, {"GET", "/status", ""}};
             for (String[] req : requests) {
                 var r = call(s, req[0], req[1], req[2]);
                 assertThat(r.statusCode()).as("NX_ENGINE_LOCAL=" + value + " " + req[0] + " " + req[1] + " " + r.body())

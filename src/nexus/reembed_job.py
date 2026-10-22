@@ -1,0 +1,261 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The client half of the cross-model re-embed job (RDR-210 Phase 6 Step 3, nexus-cnxjk).
+
+The engine owns the job: a ``reembed_jobs`` row, a runner, the state table. This module holds what the
+client decides before it asks the engine to start one, and renders back what the engine says:
+
+* which collections are stale (``--all`` candidacy) and which a running job already holds;
+* the conformant name of the target sibling, which the engine registers when none exists (the engine has
+  no renderer; the client owns names, ``corpus.py``);
+* whether the engine can serve the target model at all (``GET /version`` ``embedding_models``), because a
+  degraded boot (Technical Design 2) leaves a family unserved and a job started into it moves nothing;
+* the token cap (a default for Voyage targets, none for the on-device bge model);
+* the one-line hint that names ``nx collection re-embed --all``, printed where a profile change leaves
+  collections on the previous model.
+
+Pure functions where possible, so the CLI tests do not need an engine.
+"""
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable
+
+import structlog
+
+_log = structlog.get_logger(__name__)
+
+#: The job states that hold a source's lock (the engine's partial unique index). A source in one of them is
+#: named by ``--all``, never planned a second time.
+LOCK_STATES: frozenset[str] = frozenset({"planned", "running", "paused", "cutover", "failed"})
+
+#: RDR-210 "Cost": each run has a token cap with a default of 10 million; a plan above it is refused before
+#: any write unless a flag raises it. A bge re-embed has no cap (Sam, Q5).
+DEFAULT_TOKEN_CAP: int = 10_000_000
+
+REEMBED_ALL_COMMAND: str = "nx collection re-embed --all"
+
+#: The line printed where a profile change leaves collections on the previous model (RDR-210 "Re-embed to the
+#: profile default"): after ``nx config set`` / ``unset`` flips the profile, and after ``nx daemon service
+#: start`` when a live collection is off the profile.
+REEMBED_HINT: str = (
+    "Collections on the previous embedding model keep their vectors. "
+    f"To move them to the new profile: {REEMBED_ALL_COMMAND}"
+)
+
+#: How long ``nx daemon service start`` waits for the catalog read behind the hint. The hint is a courtesy;
+#: a slow engine must not hold the start command.
+HINT_READ_TIMEOUT_S: float = 5.0
+
+
+def model_family(model: str) -> str | None:
+    """``voyage`` or ``bge`` from a model token's prefix (the doctor's rule); ``None`` for any other."""
+    if not isinstance(model, str):
+        return None
+    if model.startswith("voyage"):
+        return "voyage"
+    if model.startswith("bge"):
+        return "bge"
+    return None
+
+
+def effective_token_cap(target_model: str, flag: int | None) -> int | None:
+    """The cap sent in the start body: ``flag`` or the default for a Voyage target, ``None`` for any other.
+
+    A bge target is embedded on this machine and bills nothing, so it has no cap and a ``--token-cap`` given
+    with it is not sent (the caller says so).
+    """
+    if model_family(target_model) != "voyage":
+        return None
+    return flag if flag is not None else DEFAULT_TOKEN_CAP
+
+
+def target_collection_name(content_type: str, owner_id: str, target_model: str) -> str:
+    """The conformant name (``<content_type>__<owner>__<model>__v1``) the engine registers for the target sibling.
+
+    Built from the source's catalog ROW, never parsed from its name (RDR-204): ``owner_id`` with ``.`` read as
+    ``-`` (a tumbler owner such as ``1.87`` is ``1-87`` in a name, as ``repos.py`` and ``nx index`` mint it).
+    The engine registers this name only when no live sibling of the same ``(content_type, owner_id, model)``
+    exists; otherwise it uses that sibling and ignores the name. It checks the registered row's tuple either way,
+    so the name is a label and never the authority.
+    """
+    return f"{content_type}__{str(owner_id).replace('.', '-')}__{target_model}__v1"
+
+
+# ── the engine's side of "can it serve the target" ───────────────────────────
+
+
+def missing_piece(target_model: str, served: Iterable[str]) -> str | None:
+    """``None`` when ``target_model`` is among ``served``; else the sentence naming what the engine lacks.
+
+    ``served`` is ``GET /version``'s ``embedding_models``. nexus-q6t89: a degraded boot serves one family and
+    answers 422 for the other, so a plan that does not look would start a job into a family that cannot embed.
+    """
+    served = list(served)
+    if target_model in served:
+        return None
+    from nexus.corpus import _SERVICE_RESTART_COMMAND  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    listed = ", ".join(served) or "no model"
+    family = model_family(target_model)
+    if family == "voyage":
+        piece = (
+            "it has no Voyage key. Persist one with `nx config set voyage_api_key --stdin` (or export "
+            f"VOYAGE_API_KEY), then restart the service: `{_SERVICE_RESTART_COMMAND}`"
+        )
+    elif family == "bge":
+        piece = (
+            "it found no bge model files. Run `nx init --service` to provision them, then restart the "
+            f"service: `{_SERVICE_RESTART_COMMAND}`"
+        )
+    else:
+        piece = f"{target_model!r} is not a model it can load"
+    return f"the engine does not serve {target_model} (it serves {listed}): {piece}"
+
+
+# ── --all candidacy ──────────────────────────────────────────────────────────
+
+
+def is_superseded(row: dict) -> bool:
+    return bool(row.get("superseded_by"))
+
+
+def stale_rows(rows: Iterable[dict], profile: dict[str, str]) -> list[dict]:
+    """The live, unsuperseded rows whose model differs from the profile's model for their content type.
+
+    Quarantine, dormant and disputed rows are never candidates (they drain through their own lifecycle), and
+    a superseded row is not one either: ``--all`` lists a superseded source only through
+    :func:`reentry_candidates`. A row whose content type has no profile model cannot be judged and is left out.
+    """
+    out = []
+    for row in rows:
+        if row.get("lifecycle_state") != "live" or is_superseded(row):
+            continue
+        want = profile.get(str(row.get("content_type")))
+        if want is not None and row.get("embedding_model") != want:
+            out.append(row)
+    return sorted(out, key=lambda r: str(r.get("name", "")))
+
+
+@dataclass(frozen=True)
+class Reentry:
+    """A source a ``kept_tombstoned`` job left superseded, listed again as that job's re-entry (not a new job).
+
+    ``kind`` is ``cutover`` when purge-trash has left the source with no document row, ``running`` when a
+    restore has made a document live in it. The engine route that performs the re-entry lands with Step 4
+    (nexus-09iho); the client lists the candidate and names the job.
+    """
+
+    job: dict
+    source_row: dict
+    kind: str
+
+
+@dataclass
+class Candidates:
+    stale: list[dict] = field(default_factory=list)
+    held: list[tuple[dict, dict]] = field(default_factory=list)
+    reentries: list[Reentry] = field(default_factory=list)
+
+
+def reentry_candidates(
+    jobs: Iterable[dict],
+    rows_by_name: dict[str, dict],
+    live_docs: Callable[[str], int],
+    all_docs: Callable[[str], int],
+) -> list[Reentry]:
+    """The ``kept_tombstoned`` jobs whose source is ready to be re-entered.
+
+    Never a ``kept_by_flag`` or ``kept_residue`` source: those keep a superseded source on purpose. A job is a
+    candidate when it is ``done`` with disposition ``kept_tombstoned``, its source row is still superseded BY
+    ITS TARGET (a source revived by a later job the other way names no successor, or another one, and must not
+    be re-entered: nexus-f98bg critique, significant 2), no job holds the source's lock, and the source now
+    holds either no document row (``cutover``) or a live one (``running``). Documents still tombstoned and
+    none live: not yet.
+    """
+    jobs = list(jobs)
+    locked = {j["source_collection"] for j in jobs if j.get("state") in LOCK_STATES}
+    newest: dict[str, dict] = {}
+    for job in jobs:  # the status route lists newest first; keep the first job per source
+        newest.setdefault(str(job.get("source_collection")), job)
+    out: list[Reentry] = []
+    for source, job in newest.items():
+        if job.get("state") != "done" or job.get("disposition") != "kept_tombstoned" or source in locked:
+            continue
+        row = rows_by_name.get(source)
+        if row is None or row.get("superseded_by") != job.get("target_collection"):
+            continue
+        if live_docs(source) > 0:
+            out.append(Reentry(job, row, "running"))
+        elif all_docs(source) == 0:
+            out.append(Reentry(job, row, "cutover"))
+    return sorted(out, key=lambda r: str(r.job.get("source_collection")))
+
+
+def candidates(
+    rows: Iterable[dict],
+    profile: dict[str, str],
+    jobs: Iterable[dict],
+    live_docs: Callable[[str], int],
+    all_docs: Callable[[str], int],
+) -> Candidates:
+    """``--all``: the stale collections to plan, the ones a job already holds, and the re-entries."""
+    rows = list(rows)
+    jobs = list(jobs)
+    holder: dict[str, dict] = {}
+    for job in jobs:
+        if job.get("state") in LOCK_STATES:
+            holder.setdefault(str(job.get("source_collection")), job)
+    result = Candidates()
+    for row in stale_rows(rows, profile):
+        job = holder.get(str(row.get("name")))
+        (result.held.append((row, job)) if job is not None else result.stale.append(row))
+    result.reentries = reentry_candidates(
+        jobs, {str(r.get("name")): r for r in rows}, live_docs, all_docs,
+    )
+    return result
+
+
+# ── the hint ─────────────────────────────────────────────────────────────────
+
+
+def profile_models(reader: Any) -> dict[str, str]:
+    """``{content_type: embedding_model}`` from the engine's own profile (never the client's intent)."""
+    return {str(r["content_type"]): str(r["embedding_model"]) for r in reader.embedding_profile()}
+
+
+def has_off_profile_collection(reader: Any) -> bool:
+    """Whether any live collection is off the engine's profile: the doctor row's rule, with a superseded row
+    (a source ``--keep-source`` kept, or a rename's tombstone) left out because ``--all`` would never list it."""
+    profile = profile_models(reader)
+    if not profile:
+        return False
+    return bool(stale_rows(reader.list_collections(), profile))
+
+
+def off_profile_hint(reader_factory: Callable[[], Any] | None = None) -> str | None:
+    """:data:`REEMBED_HINT` when a live collection is off the profile, else ``None``.
+
+    Best effort: any failure (the engine unreachable, an engine below the profile route) is no hint. The read
+    runs on a thread that is abandoned after :data:`HINT_READ_TIMEOUT_S`, so a hung engine cannot hold the
+    caller (``nx daemon service start``).
+    """
+    box: list[bool] = []
+
+    def read() -> None:
+        try:
+            factory = reader_factory
+            if factory is None:
+                from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+                factory = make_catalog_reader
+            reader = factory()
+            if reader is not None:
+                box.append(has_off_profile_collection(reader))
+        except Exception as exc:  # noqa: BLE001 — a courtesy line: no failure may reach the start command
+            _log.debug("reembed_hint_read_failed", error=str(exc))
+
+    worker = threading.Thread(target=read, name="reembed-hint", daemon=True)
+    worker.start()
+    worker.join(HINT_READ_TIMEOUT_S)
+    return REEMBED_HINT if box and box[0] else None

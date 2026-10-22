@@ -3471,6 +3471,22 @@ def run_storage_supervisor(
         uninstall_session_end()
 
 
+def _announce_reembed_hint() -> None:
+    """Print the re-embed hint to stderr when a live collection is off the engine's profile (RDR-210).
+
+    A courtesy: ``off_profile_hint`` swallows every failure and bounds its own read, and so does this.
+    """
+    try:
+        from nexus.reembed_job import off_profile_hint  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+        hint = off_profile_hint()
+        if hint:
+            sys.stderr.write(hint + "\n")
+            sys.stderr.flush()
+    except Exception as exc:  # noqa: BLE001 — a hint must never reach the supervisor loop
+        _log.debug("reembed_hint_failed", error=str(exc))
+
+
 def _supervise_until_stopped(
     sup: StorageServiceSupervisor,
     stop_requested: threading.Event,
@@ -3523,6 +3539,13 @@ def _supervise_until_stopped(
         event="storage_service_already_running_healthy",
     ):
         return 0
+
+    # RDR-210 Phase 6 Step 3: the engine is up and this process owns it. `--foreground` prints no running
+    # line, so the re-embed hint comes from here, on stderr. On its own thread: the catalog read behind it is
+    # bounded but must not delay the first heartbeat of the lease this process now holds.
+    threading.Thread(
+        target=_announce_reembed_hint, name="reembed-hint-announce", daemon=True,
+    ).start()
 
     # nexus-cd1k0.18: the loop body is wrapped in try/finally so the
     # breadcrumb -> flush -> sup.stop() tail ALWAYS runs, exception

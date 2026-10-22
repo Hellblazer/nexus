@@ -13,6 +13,7 @@ import dev.nexus.service.db.ReembedJobRepository.Job;
 import dev.nexus.service.db.ReembedJobRepository.JobLockHeld;
 import dev.nexus.service.db.ReembedJobRepository.LockContention;
 import dev.nexus.service.db.ReembedJobRepository.Transition;
+import dev.nexus.service.db.ReembedSourceReader;
 import dev.nexus.service.reembed.ReembedStateMachine;
 import dev.nexus.service.reembed.ReembedStateMachine.Applied;
 import dev.nexus.service.reembed.ReembedStateMachine.Event;
@@ -48,6 +49,11 @@ import java.util.function.Predicate;
  * {@code /v1/vectors/reembed} (the longest-prefix context, so it wins over {@code /v1/vectors}).
  *
  * <ul>
+ *   <li>{@code POST /plan} {@code {source_collection, target_collection?}}: what a job on the source would do, with
+ *       every refusal a start would make, writing nothing (200). The plan states the chosen target and what would
+ *       happen to it ({@code existing}, {@code revive} or {@code register}), the documents and chunks it moves, the
+ *       token estimate, and the counts the source's delete would destroy (RDR-210 Cutover).</li>
+ *   <li>{@code GET /status}: every job row of the tenant, newest first, as {@code {"jobs": [...]}}.</li>
  *   <li>{@code POST /jobs} {@code {source_collection, target_collection?, token_cap?, keep_source?, force_delete?}}:
  *       plan the target, then start the job (201 with the job row).</li>
  *   <li>{@code POST /jobs/{id}/pause}, {@code /resume} ({@code {token_cap?}}), {@code /abort}: 200 with the job
@@ -96,6 +102,7 @@ public final class ReembedHandler implements HttpHandler {
 
     private static final Set<String> START_FIELDS = Set.of(
         "source_collection", "target_collection", "token_cap", "keep_source", "force_delete");
+    private static final Set<String> PLAN_FIELDS = Set.of("source_collection", "target_collection");
     private static final Set<String> RESUME_FIELDS = Set.of("token_cap");
     private static final Set<String> NO_FIELDS = Set.of();
 
@@ -104,18 +111,21 @@ public final class ReembedHandler implements HttpHandler {
 
     private final ReembedJobRepository jobs;
     private final CatalogRepository catalog;
+    private final ReembedSourceReader reader;
     private final String unavailable;
     private final Runnable wakeRunner;
 
     /**
+     * @param reader      counts the plan states ({@link ReembedSourceReader#planCounts})
      * @param unavailable null when a runner exists; else the message of the 503 every route answers
      * @param wakeRunner  asks the runner to run now ({@code NexusService#kickReembed}); called after a start or a
      *                    resume has committed
      */
-    public ReembedHandler(ReembedJobRepository jobs, CatalogRepository catalog, String unavailable,
-                          Runnable wakeRunner) {
+    public ReembedHandler(ReembedJobRepository jobs, CatalogRepository catalog, ReembedSourceReader reader,
+                          String unavailable, Runnable wakeRunner) {
         this.jobs = jobs;
         this.catalog = catalog;
+        this.reader = reader;
         this.unavailable = unavailable;
         this.wakeRunner = wakeRunner;
     }
@@ -149,6 +159,14 @@ public final class ReembedHandler implements HttpHandler {
             if (op.equals("/jobs")) {
                 requirePost(method);
                 start(exchange, tenant);
+            } else if (op.equals("/plan")) {
+                requirePost(method);
+                plan(exchange, tenant);
+            } else if (op.equals("/status")) {
+                if (!"GET".equals(method)) {
+                    throw new Reply(405, "{\"error\":\"method not allowed\"}");
+                }
+                status(exchange, tenant);
             } else if (op.startsWith("/jobs/")) {
                 String[] parts = op.substring("/jobs/".length()).split("/", -1);
                 Event event = parts.length == 2 ? controlEvent(parts[1]) : null;
@@ -205,15 +223,30 @@ public final class ReembedHandler implements HttpHandler {
         }
     }
 
-    // ── POST /jobs ───────────────────────────────────────────────────────────
+    // ── GET /status ──────────────────────────────────────────────────────────
 
-    private void start(HttpExchange exchange, String tenant) throws IOException {
-        Map<String, Object> body = readBody(exchange, START_FIELDS);
-        String source = requireString(body, "source_collection");
-        String requestedTarget = optionalString(body, "target_collection");
-        Long tokenCap = optionalPositiveLong(body, "token_cap");
-        boolean keepSource = optionalBoolean(body, "keep_source");
-        boolean forceDelete = optionalBoolean(body, "force_delete");
+    private void status(HttpExchange exchange, String tenant) throws IOException {
+        List<Map<String, Object>> rows = new java.util.ArrayList<>();
+        for (Job j : jobs.listAll(tenant)) {
+            rows.add(row(j));
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(orderedMap("jobs", rows)));
+    }
+
+    // ── POST /plan, POST /jobs ───────────────────────────────────────────────
+
+    /**
+     * What a start decides before it writes: the source's row, the profile model, the target the job would use and
+     * what would happen to it. Every refusal a start makes without writing is made here ({@link Reply}), so the plan
+     * and the start refuse identically.
+     *
+     * @param decision {@link UseLive}, {@link Revive} or {@link Absent}'s outcome (neither of those: a register)
+     */
+    private record Resolved(String source, String sourceModel, String contentType, String owner,
+                            String profileModel, TargetSelection.Decision decision) {
+    }
+
+    private Resolved resolve(String tenant, String source, String requestedTarget) throws JsonProcessingException {
         if (source.equals(requestedTarget)) {
             throw new IllegalArgumentException("target_collection must differ from source_collection");
         }
@@ -246,7 +279,8 @@ public final class ReembedHandler implements HttpHandler {
             throw new Reply(409, error("the tenant has no embedding profile for content type " + contentType
                 + "; there is no model to re-embed " + source + " into"));
         }
-        if (profileModel.equals(String.valueOf(srcRow.get("embedding_model")))) {
+        String sourceModel = String.valueOf(srcRow.get("embedding_model"));
+        if (profileModel.equals(sourceModel)) {
             throw new Reply(409, error("source collection " + source + " already holds the profile model "
                 + profileModel + " for content type " + contentType + "; nothing to re-embed"));
         }
@@ -262,8 +296,6 @@ public final class ReembedHandler implements HttpHandler {
                 .map(j -> new LockHolder(j.jobId(), j.state())).orElse(null);
 
         TargetSelection.Decision decision = TargetSelection.decide(found, source, holder);
-        final String target;
-        final String action;
         if (decision instanceof Refuse r) {
             Map<String, Object> refusal = orderedMap("error", r.reason(), "collection", candidate);
             if (holder != null) {
@@ -271,7 +303,73 @@ public final class ReembedHandler implements HttpHandler {
                 refusal.put("state", holder.state());
             }
             throw new Reply(409, MAPPER.writeValueAsString(refusal));
-        } else if (decision instanceof UseLive u) {
+        }
+        if (!(decision instanceof UseLive) && !(decision instanceof Revive)) {
+            requireRegistrable(tenant, requestedTarget, contentType, owner, profileModel, locked);
+        }
+        return new Resolved(source, sourceModel, contentType, owner, profileModel, decision);
+    }
+
+    /** {@code POST /plan}: the start's decision and refusals, the counts the cutover will destroy, and no write. */
+    private void plan(HttpExchange exchange, String tenant) throws IOException {
+        Map<String, Object> body = readBody(exchange, PLAN_FIELDS);
+        String source = requireString(body, "source_collection");
+        String requestedTarget = optionalString(body, "target_collection");
+        Resolved r = resolve(tenant, source, requestedTarget);
+
+        final String target;
+        final String action;
+        if (r.decision() instanceof UseLive u) {
+            target = u.name();
+            action = "existing";
+        } else if (r.decision() instanceof Revive v) {
+            target = v.name();
+            action = "revive";
+        } else {
+            target = requestedTarget;
+            action = "register";
+        }
+        ReembedSourceReader.PlanCounts n = reader.planCounts(tenant, source);
+        Map<String, Object> out = orderedMap(
+            "source_collection", source,
+            "content_type", r.contentType(),
+            "owner_id", r.owner(),
+            "source_model", r.sourceModel(),
+            "target_model", r.profileModel(),
+            "target_collection", target,
+            "target_action", action,
+            "documents", n.documents(),
+            "tombstoned_documents", n.tombstonedDocuments(),
+            "chunks", n.chunks(),
+            "ownerless_chunks", n.ownerlessChunks(),
+            "token_estimate", n.tokenEstimate(),
+            "quarantine_rows", n.quarantineRows(),
+            "foreign_topic_assignments", n.foreignTopicAssignments(),
+            "topic_links", n.topicLinks(),
+            "unmatched_satellite_rows", n.unmatchedSatelliteRows());
+        log.info("event=reembed_plan tenant={} source={} target={} target_action={} documents={} chunks={} "
+                + "token_estimate={} quarantine_rows={} foreign_topic_assignments={} topic_links={} "
+                + "unmatched_satellite_rows={}", tenant, source, target, action, n.documents(), n.chunks(),
+            n.tokenEstimate(), n.quarantineRows(), n.foreignTopicAssignments(), n.topicLinks(),
+            n.unmatchedSatelliteRows());
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
+    }
+
+    private void start(HttpExchange exchange, String tenant) throws IOException {
+        Map<String, Object> body = readBody(exchange, START_FIELDS);
+        String source = requireString(body, "source_collection");
+        String requestedTarget = optionalString(body, "target_collection");
+        Long tokenCap = optionalPositiveLong(body, "token_cap");
+        boolean keepSource = optionalBoolean(body, "keep_source");
+        boolean forceDelete = optionalBoolean(body, "force_delete");
+
+        Resolved resolved = resolve(tenant, source, requestedTarget);
+        TargetSelection.Decision decision = resolved.decision();
+        String contentType = resolved.contentType();
+        String owner = resolved.owner();
+        final String target;
+        final String action;
+        if (decision instanceof UseLive u) {
             target = u.name();
             action = "existing";
         } else if (decision instanceof Revive v) {
@@ -282,7 +380,8 @@ public final class ReembedHandler implements HttpHandler {
             target = v.name();
             action = "revived";
         } else {
-            target = register(tenant, requestedTarget, contentType, owner, profileModel, locked);
+            target = register(tenant, requestedTarget, contentType, owner, resolved.profileModel(),
+                jobs.listByStates(tenant, ReembedJobRepository.LOCK_STATES));
             action = "registered";
         }
 
@@ -304,13 +403,17 @@ public final class ReembedHandler implements HttpHandler {
         HttpUtil.send(exchange, 201, MAPPER.writeValueAsString(out));
     }
 
+    private static String needOf(String contentType, String owner, String profileModel) {
+        return "content type " + contentType + ", owner " + owner + ", model " + profileModel;
+    }
+
     /**
-     * Register {@code requested} as the job's target and check what was registered. Returns the name.
-     * Nothing is written when the name is missing, held as a lock-state job's source, or already registered.
+     * The refusals that stand before a target is registered, none of which writes: no name sent, the name held as a
+     * lock-state job's source, the name already registered. The plan runs them too, so it refuses what the start would.
      */
-    private String register(String tenant, String requested, String contentType, String owner, String profileModel,
-                            List<Job> locked) {
-        String need = "content type " + contentType + ", owner " + owner + ", model " + profileModel;
+    private void requireRegistrable(String tenant, String requested, String contentType, String owner,
+                                    String profileModel, List<Job> locked) {
+        String need = needOf(contentType, owner, profileModel);
         if (requested == null) {
             throw new IllegalArgumentException("no registered collection has " + need
                 + "; send target_collection to register one");
@@ -327,6 +430,16 @@ public final class ReembedHandler implements HttpHandler {
                     + existing.get("embedding_model") + ", which is not a live collection of " + need,
                 "collection", requested)));
         }
+    }
+
+    /**
+     * Register {@code requested} as the job's target and check what was registered. Returns the name.
+     * Nothing is written when the name is missing, held as a lock-state job's source, or already registered.
+     */
+    private String register(String tenant, String requested, String contentType, String owner, String profileModel,
+                            List<Job> locked) {
+        requireRegistrable(tenant, requested, contentType, owner, profileModel, locked);
+        String need = needOf(contentType, owner, profileModel);
         catalog.upsertCollection(tenant, orderedMap("name", requested, "content_type", contentType, "owner_id", owner));
         // The profile gate fixed the model and a trigger may have settled the owner: check what is there now.
         Result registered = TargetSelection.select(rows(tenant, contentType), contentType, owner, profileModel);

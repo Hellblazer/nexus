@@ -6,13 +6,17 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Condition;
 import org.jooq.Field;
+import org.jooq.Record1;
+import org.jooq.Select;
 import org.jooq.impl.DSL;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.ASPECT_EXTRACTION_QUEUE;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -20,6 +24,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.TOPIC_LINKS;
 
 /**
  * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): what a re-embed job reads from its source collection. Read-only;
@@ -140,6 +147,98 @@ public final class ReembedSourceReader {
             long highlights = ctx.fetchCount(DOCUMENT_HIGHLIGHTS,
                 DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source)));
             return new Residue(live, tombstoned, liveElsewhere, aspects, queue, highlights);
+        });
+    }
+
+    /**
+     * What a job on {@code source} would move and what its cutover delete would take, counted before anything
+     * runs (RDR-210 Phase 6 Step 3, bead nexus-cnxjk). One snapshot per statement; nothing is written.
+     *
+     * @param documents               live candidate documents: the ones the job moves
+     * @param tombstonedDocuments     soft-deleted documents homed at or naming the source: never moved, and a source
+     *                                that holds one ends {@code kept_tombstoned} instead of deleted
+     * @param chunks                  distinct chunks a live document of the source owns by a manifest row: the ones
+     *                                that are embedded into the target
+     * @param ownerlessChunks         chunks of the source no live manifest row names: never moved
+     * @param tokenEstimate           the provisional token estimate of {@code chunks}' text, in the unit the runner's
+     *                                cap check uses ({@code VoyageEmbedder#estimateTokens}: UTF-8 bytes / 4, at least 1
+     *                                for a non-empty text); it overstates by the chunks the target already holds
+     * @param quarantineRows          the source's rows in its quarantine siblings, which the source's delete removes
+     * @param foreignTopicAssignments topic assignments of OTHER collections that point at the source's topics, which
+     *                                the topic delete's cascade removes
+     * @param topicLinks              links of the source's topics, removed by the same cascade
+     * @param unmatchedSatelliteRows  aspect, queue and highlight rows naming the source whose document the job does not
+     *                                move (a tombstoned document's, or one homed here whose chunks are elsewhere):
+     *                                the delete refuses to run while any remain unless the job's {@code force_delete} is set
+     */
+    public record PlanCounts(long documents, long tombstonedDocuments, long chunks, long ownerlessChunks,
+                             long tokenEstimate, long quarantineRows, long foreignTopicAssignments, long topicLinks,
+                             long unmatchedSatelliteRows) {
+    }
+
+    public PlanCounts planCounts(String tenant, String source) {
+        return scope.withTenant(tenant, ctx -> {
+            var d = CATALOG_DOCUMENTS;
+            var c = CATALOG_DOCUMENT_CHUNKS;
+            Condition namesSource = DSL.exists(ctx.selectOne().from(c)
+                .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)).and(c.COLLECTION.eq(source)));
+            Condition hasNoManifest = DSL.notExists(ctx.selectOne().from(c)
+                .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)));
+            Condition candidateShape = namesSource.or(hasNoManifest.and(d.PHYSICAL_COLLECTION.eq(source)));
+            long documents = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(candidateShape));
+            long tombstoned = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNotNull())
+                .and(namesSource.or(d.PHYSICAL_COLLECTION.eq(source))));
+
+            // Chunks a live document owns by a manifest row naming the source: what the job embeds.
+            var oc = CATALOG_DOCUMENT_CHUNKS.as("plan_owner_chunks");
+            var od = CATALOG_DOCUMENTS.as("plan_owner_docs");
+            Select<Record1<byte[]>> owned = ctx.selectDistinct(oc.CHASH).from(oc).join(od)
+                .on(od.TENANT_ID.eq(oc.TENANT_ID).and(od.TUMBLER.eq(oc.DOC_ID)))
+                .where(oc.TENANT_ID.eq(tenant).and(oc.COLLECTION.eq(source)).and(od.DELETED_AT.isNull()));
+            long chunks = ctx.fetchCount(owned);
+            long stored = ctx.fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(source)));
+
+            Field<Integer> bytes = DSL.octetLength(CHUNKS.CHUNK_TEXT);
+            Field<Integer> estimate = DSL.when(bytes.isNull().or(bytes.eq(0)), DSL.inline(0))
+                .otherwise(DSL.greatest(bytes.div(4), DSL.inline(1)));
+            BigDecimal tokens = ctx.select(DSL.coalesce(DSL.sum(estimate), BigDecimal.ZERO)).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(source)).and(CHUNKS.CHASH.in(owned)))
+                .fetchOne(0, BigDecimal.class);
+
+            long quarantine = QuarantineOrigin.countRowsOf(ctx, tenant, source);
+
+            Select<Record1<Long>> sourceTopics = ctx.select(TOPICS.ID).from(TOPICS)
+                .where(TOPICS.TENANT_ID.eq(tenant).and(TOPICS.COLLECTION.eq(source)));
+            long foreignAssignments = ctx.fetchCount(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID.eq(tenant)
+                .and(TOPIC_ASSIGNMENTS.TOPIC_ID.in(sourceTopics))
+                .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.ne(source)));
+            long links = ctx.fetchCount(TOPIC_LINKS, TOPIC_LINKS.TENANT_ID.eq(tenant)
+                .and(TOPIC_LINKS.FROM_TOPIC_ID.in(sourceTopics).or(TOPIC_LINKS.TO_TOPIC_ID.in(sourceTopics))));
+
+            // A satellite row belongs to a document by doc_id; one whose document the job does not move stays
+            // naming the source, and the delete would take it.
+            var md = CATALOG_DOCUMENTS.as("plan_matched_docs");
+            var mc = CATALOG_DOCUMENT_CHUNKS.as("plan_matched_chunks");
+            Condition matchedShape = DSL.exists(ctx.selectOne().from(mc)
+                    .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)).and(mc.COLLECTION.eq(source)))
+                .or(DSL.notExists(ctx.selectOne().from(mc)
+                    .where(mc.TENANT_ID.eq(tenant)).and(mc.DOC_ID.eq(md.TUMBLER)))
+                    .and(md.PHYSICAL_COLLECTION.eq(source)));
+            Function<Field<String>, Condition> moved = docId -> DSL.exists(ctx.selectOne().from(md)
+                .where(md.TENANT_ID.eq(tenant)).and(md.TUMBLER.eq(docId)).and(md.DELETED_AT.isNull())
+                .and(matchedShape));
+            long unmatched =
+                ctx.fetchCount(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
+                    .and(DOCUMENT_ASPECTS.COLLECTION.eq(source)).and(DSL.not(moved.apply(DOCUMENT_ASPECTS.DOC_ID))))
+                + ctx.fetchCount(ASPECT_EXTRACTION_QUEUE, ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant)
+                    .and(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(source))
+                    .and(DSL.not(moved.apply(ASPECT_EXTRACTION_QUEUE.DOC_ID))))
+                + ctx.fetchCount(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
+                    .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
+                    .and(DSL.not(moved.apply(DOCUMENT_HIGHLIGHTS.DOC_ID))));
+
+            return new PlanCounts(documents, tombstoned, chunks, Math.max(0, stored - chunks),
+                tokens == null ? 0 : tokens.longValue(), quarantine, foreignAssignments, links, unmatched);
         });
     }
 

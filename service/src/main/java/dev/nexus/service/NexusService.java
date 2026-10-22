@@ -917,10 +917,11 @@ public final class NexusService {
         // any job left planned, running or in cutover; the control routes wake it through kickReembed().
         // Tenants are the reaper's: the default tenant plus every token-bearing one, since the job tables are FORCE RLS.
         var reembedJobs = new dev.nexus.service.db.ReembedJobRepository(tenantScope);
+        var reembedReader = new dev.nexus.service.db.ReembedSourceReader(tenantScope);
         if (localEngineEnabled(env) && combinedWriteService != null) {
             var runner = new dev.nexus.service.reembed.ReembedRunner(
                 reembedJobs,
-                new dev.nexus.service.db.ReembedSourceReader(tenantScope), catalogRepo, combinedWriteService,
+                reembedReader, catalogRepo, combinedWriteService,
                 this::reaperTenants,
                 reembedSettings != null ? reembedSettings : dev.nexus.service.reembed.ReembedRunner.Settings.DEFAULT);
             this.reembedRunner = runner;
@@ -954,8 +955,8 @@ public final class NexusService {
                     + "=1 (local mode)"
                 : "re-embed jobs need an embedder and this engine has none";
         var reembedCtx = server.createContext(dev.nexus.service.http.ReembedHandler.PATH,
-                new dev.nexus.service.http.ReembedHandler(reembedJobs, catalogRepo, reembedUnavailable,
-                        this::kickReembed));
+                new dev.nexus.service.http.ReembedHandler(reembedJobs, catalogRepo, reembedReader,
+                        reembedUnavailable, this::kickReembed));
         reembedCtx.getFilters().addAll(authFilter);
 
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it

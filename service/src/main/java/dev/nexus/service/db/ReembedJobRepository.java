@@ -312,6 +312,14 @@ public final class ReembedJobRepository {
             .map(Job::from));
     }
 
+    /** Every job row of the tenant, newest first (the status route; the table is a job log and stays small). */
+    public List<Job> listAll(String tenant) {
+        return scope.withTenant(tenant, ctx -> ctx.selectFrom(REEMBED_JOBS)
+            .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+            .orderBy(REEMBED_JOBS.STARTED_AT.desc(), REEMBED_JOBS.JOB_ID.desc())
+            .fetch(Job::from));
+    }
+
     /** The tenant's jobs in any of {@code states}, oldest first. */
     public List<Job> listByStates(String tenant, Collection<String> states) {
         if (states.isEmpty()) {

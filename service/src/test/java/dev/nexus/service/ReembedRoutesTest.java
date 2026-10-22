@@ -815,4 +815,118 @@ class ReembedRoutesTest {
         assertThat(r.statusCode()).as("RLS hides the row: not found, not forbidden").isEqualTo(404);
         assertThat(job(theirs, jobId).state()).isEqualTo("running");
     }
+
+    // ── plan: the start's decision and refusals, the counts, and no write (nexus-cnxjk) ──────────────
+
+    private static String planBody(String source) {
+        return "{\"source_collection\":\"" + source + "\"}";
+    }
+
+    @Test
+    void planNamesTheLiveSiblingStatesEveryCountAndWritesNothing() throws Exception {
+        Tn t = tenant("plan");
+        int wakes = wakeUps();
+
+        var r = post(t, "/plan", planBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        Map<String, Object> plan = json(r);
+        assertThat(plan).containsEntry("source_collection", t.src()).containsEntry("content_type", TYPE)
+            .containsEntry("source_model", BGE).containsEntry("target_model", MINI)
+            .containsEntry("target_collection", t.tgt()).containsEntry("target_action", "existing")
+            .containsEntry("documents", 0).containsEntry("tombstoned_documents", 0).containsEntry("chunks", 0)
+            .containsEntry("ownerless_chunks", 0).containsEntry("token_estimate", 0)
+            .containsEntry("quarantine_rows", 0).containsEntry("foreign_topic_assignments", 0)
+            .containsEntry("topic_links", 0).containsEntry("unmatched_satellite_rows", 0);
+        assertThat(jobs.listAll(t.tenant())).as("a plan starts nothing").isEmpty();
+        assertThat(wakeUps()).as("and wakes nothing").isEqualTo(wakes);
+        assertThat(get(t, "/plan").statusCode()).as("a GET on the plan route").isEqualTo(405);
+    }
+
+    @Test
+    void planOfAnAbsentTargetSaysRegisterAndRegistersNothing() throws Exception {
+        Tn t = tenant("planreg");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        String fresh = name(t, MINI, 2);
+
+        var r = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + fresh
+            + "\"}");
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(json(r)).containsEntry("target_collection", fresh).containsEntry("target_action", "register");
+        assertThat(catalog.getCollection(t.tenant(), fresh)).as("the plan registered nothing").isNull();
+    }
+
+    @Test
+    void planRefusesWhatAStartWouldRefuse() throws Exception {
+        Tn t = tenant("planref");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+
+        var noName = post(t, "/plan", planBody(t.src()));
+        assertThat(noName.statusCode()).as("an absent target and no name to register").isEqualTo(400);
+        assertThat(json(noName).get("error").toString()).contains("target_collection");
+
+        var taken = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\""
+            + t.src() + "\"}");
+        assertThat(taken.statusCode()).as("target equal to source").isEqualTo(400);
+
+        assertThat(post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"token_cap\":5}").statusCode())
+            .as("a start field is not a plan field").isEqualTo(400);
+        assertThat(post(t, "/plan", "{}").statusCode()).isEqualTo(400);
+        assertThat(post(t, "/plan", planBody("knowledge__nobody__" + BGE + "__v1")).statusCode()).isEqualTo(404);
+
+        setProfile(t.tenant(), BGE, 768);
+        var same = post(t, "/plan", planBody(t.src()));
+        assertThat(same.statusCode()).isEqualTo(409);
+        assertThat(json(same).get("error").toString()).contains("already holds the profile model");
+        assertThat(jobs.listAll(t.tenant())).isEmpty();
+    }
+
+    @Test
+    void planOfASourceAJobHoldsIsRefusedNamingTheJob() throws Exception {
+        Tn t = tenant("planheld");
+        UUID jobId = id(startOk(t, t.src()));
+
+        var r = post(t, "/plan", planBody(t.src()));
+
+        assertThat(r.statusCode()).isEqualTo(409);
+        assertThat(json(r)).containsEntry("job_id", jobId.toString()).containsEntry("state", "planned");
+    }
+
+    // ── status: every job row of the tenant, newest first ─────────────────────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> statusJobs(HttpResponse<String> r) throws Exception {
+        return (List<Map<String, Object>>) json(r).get("jobs");
+    }
+
+    @Test
+    void statusListsEveryJobNewestFirstWithTheRowShapeAndNoOtherTenantsJobs() throws Exception {
+        Tn t = tenant("status");
+        Tn other = tenant("statusother");
+        startOk(other, other.src());
+        assertThat(statusJobs(get(t, "/status"))).as("an empty tenant").isEmpty();
+
+        UUID first = id(startOk(t, t.src()));
+        advance(t, first, "running", "failed");
+        // the failed job holds the lock; abort it so a second job on the source can start
+        advance(t, first, "aborted");
+        UUID second = id(startOk(t, t.src()));
+
+        var r = get(t, "/status");
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        List<Map<String, Object>> rows = statusJobs(r);
+        assertThat(rows).extracting(m -> m.get("job_id")).containsExactly(second.toString(), first.toString());
+        assertThat(rows.get(0)).containsKeys("job_id", "source_collection", "target_collection", "state",
+            "disposition", "failure_reason", "last_error", "doc_cursor", "documents_moved", "documents_skipped",
+            "chunks_embedded", "chunks_reused", "tokens_billed", "token_cap", "keep_source", "force_delete",
+            "started_at", "updated_at", "finished_at");
+        assertThat(rows.get(0)).containsEntry("state", "planned");
+        assertThat(rows.get(1)).containsEntry("state", "aborted");
+        assertThat(post(t, "/status", "").statusCode()).as("POST on status").isEqualTo(405);
+    }
 }

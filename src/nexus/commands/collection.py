@@ -1738,23 +1738,379 @@ def _reembed_source_model(db: object, name: str) -> str:
     return model if model else embedding_model_for_collection(name)
 
 
+#: The model the on-device engine embeds with (the bge profile). ``--to`` takes it since RDR-210 Phase 6.
+_REEMBED_BGE_MODEL = "bge-base-en-v15-768"
+
+#: The ``--status`` value that means "every job", given when the flag carries no job id.
+_ALL_JOBS = "__all__"
+
+
+def _reembed_job_error(exc: Exception) -> click.ClickException:
+    """A re-embed route's refusal as a ClickException that says what the engine said.
+
+    503 is the engine's local-mode refusal (a managed engine, or one started without the supervisor's
+    ``NX_ENGINE_LOCAL``); 404 is an engine below the routes; 409 names the job that holds the source or the
+    state a control was refused from.
+    """
+    code = getattr(exc, "code", None)
+    body = getattr(exc, "engine_body", None)
+    text = str(body.get("error")) if isinstance(body, dict) and body.get("error") else str(exc)
+    if code == 404:
+        return click.ClickException(
+            f"this engine does not serve the re-embed routes ({text}); upgrade it "
+            "(nx upgrade, then nx daemon service stop && nx daemon service start)."
+        )
+    if code == 503:
+        return click.ClickException(f"the engine refuses the re-embed job: {text}")
+    if isinstance(body, dict) and body.get("job_id"):
+        return click.ClickException(f"{text} (job {body['job_id']}, {body.get('state', '?')})")
+    return click.ClickException(text)
+
+
+def _require_local_engine(db: object) -> None:
+    """The re-embed job runs on the local engine only (Sam, 2026-10-17): refuse in any other mode."""
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; patched in tests at the module attribute
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if not is_local_mode():
+        raise click.ClickException(
+            "the cross-model re-embed job runs on the local engine only; this install is not in local mode. "
+            "A managed install re-indexes from source (nx index repo / nx index pdf)."
+        )
+    if not is_service_backed(db):
+        raise click.ClickException("the re-embed job needs the nexus service; this handle is not backed by it.")
+
+
+def _job_line(job: dict) -> str:
+    """One job row as a line: id, state (disposition, failure reason), source to target, counts."""
+    state = str(job.get("state"))
+    if job.get("disposition"):
+        state += f"/{job['disposition']}"
+    if job.get("failure_reason"):
+        state += f" ({job['failure_reason']})"
+    cap = job.get("token_cap")
+    tokens = f"{job.get('tokens_billed', 0)} of {cap}" if cap else f"{job.get('tokens_billed', 0)}"
+    line = (
+        f"{job.get('job_id')}  {state}  {job.get('source_collection')} -> {job.get('target_collection')}  "
+        f"moved {job.get('documents_moved', 0)}, skipped {job.get('documents_skipped', 0)}, "
+        f"embedded {job.get('chunks_embedded', 0)}, reused {job.get('chunks_reused', 0)}, tokens {tokens}"
+    )
+    if job.get("last_error"):
+        line += f"\n    last error: {job['last_error']}"
+    return line
+
+
+def _reembed_controls(
+    db: object, *, status_job: str | None, pause_job: str | None, resume_job: str | None,
+    abort_job: str | None, token_cap: int | None,
+) -> None:
+    """``--status [JOB]``, ``--pause JOB``, ``--resume JOB`` (``--token-cap`` raises the cap), ``--abort JOB``."""
+    _require_local_engine(db)
+    try:
+        if status_job is not None:
+            jobs = db.reembed_status()  # type: ignore[attr-defined]
+            _log.info("reembed_status_poll", jobs=len(jobs), job=None if status_job == _ALL_JOBS else status_job)
+            if status_job != _ALL_JOBS:
+                jobs = [j for j in jobs if j.get("job_id") == status_job]
+                if not jobs:
+                    raise click.ClickException(f"no re-embed job {status_job}")
+            if not jobs:
+                click.echo("No re-embed jobs.")
+            for job in jobs:
+                click.echo(_job_line(job))
+            return
+        if pause_job is not None:
+            job = db.reembed_pause(pause_job)  # type: ignore[attr-defined]
+        elif resume_job is not None:
+            job = db.reembed_resume(resume_job, token_cap=token_cap)  # type: ignore[attr-defined]
+        else:
+            job = db.reembed_abort(abort_job)  # type: ignore[attr-defined]
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — boundary: the engine's refusal reaches the user as its own words
+        raise _reembed_job_error(exc) from exc
+    unchanged = " (already in that state; nothing changed)" if job.get("unchanged") else ""
+    click.echo(_job_line(job) + unchanged)
+
+
+class _Planned:
+    """One source's plan, or the reason it cannot start."""
+
+    def __init__(self, row: dict, target_model: str | None) -> None:
+        self.row = row
+        self.target_model = target_model
+        self.plan: dict | None = None
+        self.cap: int | None = None
+        self.refusal: str | None = None
+
+
+def _plan_lines(p: _Planned) -> list[str]:
+    """The plan as text: what moves, what it costs, what the source's delete takes with it."""
+    plan = p.plan or {}
+    lines = [
+        f"{p.row.get('name')} ({p.row.get('embedding_model')}) -> {plan.get('target_collection')} "
+        f"({p.target_model}); target: {plan.get('target_action')}",
+        f"  documents: {plan.get('documents', 0)} live to move, {plan.get('tombstoned_documents', 0)} tombstoned "
+        f"(not moved; a source holding one is kept, not deleted)",
+        f"  chunks: {plan.get('chunks', 0)} to embed; {plan.get('ownerless_chunks', 0)} ownerless (not moved)",
+    ]
+    if p.cap is not None:
+        lines.append(f"  tokens: about {plan.get('token_estimate', 0):,} estimated, cap {p.cap:,}")
+    else:
+        lines.append(
+            f"  tokens: none billed (the model runs on this machine; no cap). {plan.get('chunks', 0)} chunk(s) "
+            f"to embed here; the time depends on the machine"
+        )
+    lines.append(
+        "  the source's delete removes (--keep-source keeps the source and all of it): "
+        f"{plan.get('quarantine_rows', 0)} quarantine row(s); "
+        f"{plan.get('foreign_topic_assignments', 0)} topic assignment(s) of other collections that point at its "
+        f"topics; {plan.get('topic_links', 0)} topic link(s)"
+    )
+    lines.append(
+        f"  satellite rows naming it that match no live document: {plan.get('unmatched_satellite_rows', 0)} "
+        f"(the delete is refused while any remain unless --force-delete)"
+    )
+    return lines
+
+
+def _plan_source(
+    db: object, row: dict, profile: dict[str, str], served: list[str] | None, token_cap: int | None,
+) -> _Planned:
+    """Plan one source: the profile's model, can the engine serve it, the engine's plan, the cap."""
+    from nexus.reembed_job import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        effective_token_cap,
+        missing_piece,
+        target_collection_name,
+    )
+
+    name = str(row.get("name"))
+    content_type = str(row.get("content_type"))
+    target_model = profile.get(content_type)
+    planned = _Planned(row, target_model)
+    if target_model is None:
+        planned.refusal = f"{name}: the engine's profile has no model for content type {content_type}"
+        return planned
+    if served is not None and (piece := missing_piece(target_model, served)):
+        planned.refusal = f"{name}: {piece}"
+        return planned
+    target_name = target_collection_name(content_type, str(row.get("owner_id")), target_model)
+    try:
+        planned.plan = db.reembed_plan(name, target_collection=target_name)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 — boundary: the engine's refusal is this source's reason
+        planned.refusal = f"{name}: {_reembed_job_error(exc).message}"
+        return planned
+    _log.info(
+        "reembed_plan_submitted", source=name, target=planned.plan.get("target_collection"),
+        target_model=target_model, chunks=planned.plan.get("chunks"),
+        token_estimate=planned.plan.get("token_estimate"),
+    )
+    planned.cap = effective_token_cap(target_model, token_cap)
+    estimate = int(planned.plan.get("token_estimate") or 0)
+    if planned.cap is not None and estimate > planned.cap:
+        planned.refusal = (
+            f"{name}: the plan needs about {estimate:,} tokens, above the cap of {planned.cap:,}. A Voyage "
+            f"re-embed bills them; raise the cap with --token-cap N to run it."
+        )
+    return planned
+
+
+def _reembed_jobs(
+    db: object,
+    sources: list[dict],
+    *,
+    profile: dict[str, str],
+    held: list[tuple[dict, dict]],
+    reentries: list,
+    dry_run: bool,
+    yes: bool,
+    keep_source: bool,
+    force_delete: bool,
+    token_cap: int | None,
+) -> None:
+    """Plan each source and, with ``--no-dry-run``, start one job per source.
+
+    Every source is planned before any is started, and a refusal on any (the cap, an engine that cannot serve
+    the target, a source another job holds as a target) stops the whole run before a write: the RDR's "refused
+    before any write".
+    """
+    served = db.served_embedding_models()  # type: ignore[attr-defined]
+    planned = [_plan_source(db, row, profile, served, token_cap) for row in sources]
+    for p in planned:
+        if p.plan is not None:
+            for line in _plan_lines(p):
+                click.echo(line)
+            if p.cap is None and token_cap is not None:
+                click.echo("  --token-cap is not sent: this model has no cap")
+    for row, job in held:
+        click.echo(
+            f"{row.get('name')}: held by job {job.get('job_id')} ({job.get('state')}); "
+            f"not planned. nx collection re-embed --status {job.get('job_id')}"
+        )
+    for r in reentries:
+        click.echo(
+            f"{r.source_row.get('name')}: re-entry of job {r.job.get('job_id')} ({r.kind}): the source's "
+            f"tombstones are gone; the engine's re-entry route is not available yet, so it is listed and not started."
+        )
+    refused = [p for p in planned if p.refusal]
+    if refused:
+        for p in refused:
+            click.echo(f"refused: {p.refusal}", err=True)
+        raise click.exceptions.Exit(1)
+    if not planned:
+        if not held and not reentries:
+            click.echo("No collection is off the profile.")
+        return
+    if dry_run:
+        click.echo(
+            f"dry-run: {len(planned)} job(s) would start. Pass --no-dry-run --yes to start them."
+        )
+        return
+    if not yes:
+        click.confirm(
+            f"Start {len(planned)} re-embed job(s)? Each moves its collection's documents to the profile's model "
+            f"and then {'keeps' if keep_source else 'deletes'} the source.",
+            abort=True,
+        )
+    failures = 0
+    for p in planned:
+        name = str(p.row.get("name"))
+        try:
+            job = db.reembed_start(  # type: ignore[attr-defined]
+                name,
+                target_collection=(p.plan or {}).get("target_collection"),
+                token_cap=p.cap,
+                keep_source=keep_source,
+                force_delete=force_delete,
+            )
+        except Exception as exc:  # noqa: BLE001 — boundary: one source's refusal must not stop the others
+            failures += 1
+            click.echo(f"{name}: not started: {_reembed_job_error(exc).message}", err=True)
+            continue
+        click.echo(f"started {_job_line(job)}")
+    if failures:
+        raise click.exceptions.Exit(1)
+    click.echo("Watch with: nx collection re-embed --status")
+
+
+def _reembed_all(
+    db: object, *, dry_run: bool, yes: bool, keep_source: bool, force_delete: bool, token_cap: int | None,
+) -> None:
+    """``--all``: every live collection off the engine's profile, one job each."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.reembed_job import candidates, profile_models  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    _require_local_engine(db)
+    reader = make_catalog_reader()
+    try:
+        profile = profile_models(reader)
+        rows = reader.list_collections()
+        jobs = db.reembed_status()  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 — boundary: an unreadable catalog or engine is the whole answer
+        raise _reembed_job_error(exc) from exc
+    if not profile:
+        raise click.ClickException(
+            "the engine has written no embedding profile for this tenant yet, so there is no model to re-embed "
+            "to (the first collection registration seeds it)."
+        )
+    counts: dict[bool, dict[str, int]] = {}
+
+    def doc_count(deleted: bool) -> Callable[[str], int]:
+        def count(name: str) -> int:
+            if deleted not in counts:
+                counts[deleted] = reader.collection_doc_counts(include_deleted=deleted)
+            return counts[deleted].get(name, 0)
+        return count
+
+    found = candidates(rows, profile, jobs, doc_count(False), doc_count(True))
+    _reembed_jobs(
+        db, found.stale, profile=profile, held=found.held, reentries=found.reentries,
+        dry_run=dry_run, yes=yes, keep_source=keep_source, force_delete=force_delete, token_cap=token_cap,
+    )
+
+
+def _reembed_cross_model(
+    db: object, name: str, target_model: str, *, dry_run: bool, yes: bool, keep_source: bool,
+    force_delete: bool, token_cap: int | None,
+) -> None:
+    """``NAME --to MODEL`` where MODEL differs from the collection's: the job, if MODEL is the profile's."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.reembed_job import is_superseded, profile_models  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    _require_local_engine(db)
+    reader = make_catalog_reader()
+    try:
+        row = reader.get_collection(name)
+        profile = profile_models(reader)
+    except Exception as exc:  # noqa: BLE001 — boundary: an unreadable catalog or engine is the whole answer
+        raise _reembed_job_error(exc) from exc
+    if row is None:
+        raise click.ClickException(f"collection {name!r} has no catalog row; there is nothing to move.")
+    if row.get("lifecycle_state") != "live" or is_superseded(row):
+        raise click.ClickException(
+            f"collection {name!r} is not a live, current collection ({row.get('lifecycle_state')}"
+            f"{', superseded by ' + str(row['superseded_by']) if is_superseded(row) else ''}); it is not re-embedded."
+        )
+    want = profile.get(str(row.get("content_type")))
+    if want is None:
+        raise click.ClickException(
+            f"the engine's profile has no model for content type {row.get('content_type')}; nothing to move to."
+        )
+    if target_model != want:
+        raise click.ClickException(
+            f"--to {target_model!r} is not the profile's model for {row.get('content_type')} collections "
+            f"({want!r}). A cross-model re-embed moves a collection to the profile's model; to change the "
+            f"profile, nx config set local.embed_model (or voyage_api_key) and restart the service."
+        )
+    _reembed_jobs(
+        db, [row], profile=profile, held=[], reentries=[], dry_run=dry_run, yes=yes,
+        keep_source=keep_source, force_delete=force_delete, token_cap=token_cap,
+    )
+
+
 @collection.command("re-embed")
-@click.argument("name")
+@click.argument("name", required=False)
 @click.option(
-    "--to", "target_model", required=True,
-    type=click.Choice(_REEMBED_SUPPORTED_MODELS),
-    help="Target embedding model; in service mode it must be the model the "
-         "collection's catalog row records (the model its name encodes when "
-         "no row backs the name).",
+    "--to", "target_model",
+    type=click.Choice((*_REEMBED_SUPPORTED_MODELS, _REEMBED_BGE_MODEL)),
+    help="Target embedding model. The collection's own model re-embeds it in place (service mode: the "
+         "model its catalog row records). A different model starts a re-embed job, and must be the "
+         "profile's model for the collection's content type (local engine only).",
 )
+@click.option("--all", "all_collections", is_flag=True, default=False,
+              help="Plan every live collection off the engine's profile; with --no-dry-run --yes, start one "
+                   "job per collection (local engine only).")
+@click.option("--keep-source", is_flag=True, default=False,
+              help="Job only: keep the emptied source collection (superseded, with its quarantine rows and "
+                   "topic data) instead of deleting it.")
+@click.option("--force-delete", is_flag=True, default=False,
+              help="Job only: delete the source even when satellite rows that match no live document "
+                   "still name it.")
+@click.option("--token-cap", type=click.IntRange(min=1), default=None,
+              help="Job only: tokens a Voyage target may bill (default 10000000; none for the on-device "
+                   "model). With --resume, raises the cap of a job that stopped on it.")
+@click.option("--status", "status_job", is_flag=False, flag_value=_ALL_JOBS,
+              metavar="[JOB]", help="Show re-embed jobs: all, or the one JOB id.")
+@click.option("--pause", "pause_job", default=None, metavar="JOB", help="Pause a running job.")
+@click.option("--resume", "resume_job", default=None, metavar="JOB",
+              help="Resume a paused or failed job (re-checks the profile).")
+@click.option("--abort", "abort_job", default=None, metavar="JOB",
+              help="Abort a job; documents already moved stay moved.")
 @click.option("--dry-run/--no-dry-run", default=True,
               help="Default dry-run. Pass --no-dry-run to actually write.")
 @click.option("--yes", is_flag=True, default=False,
               help="Skip the destructive-action confirmation prompt.")
 def reembed_cmd(
-    name: str, target_model: str, dry_run: bool, yes: bool,
+    name: str | None, target_model: str | None, all_collections: bool, keep_source: bool,
+    force_delete: bool, token_cap: int | None, status_job: str | None, pause_job: str | None,
+    resume_job: str | None, abort_job: str | None, dry_run: bool, yes: bool,
 ) -> None:
-    """In-place re-embed: preserve content, swap embedding model.
+    """Re-embed a collection: in place with its own model, or into the profile's model with a job.
+
+    \b
+      nx collection re-embed NAME --to MODEL    in place when MODEL is NAME's model; else a job
+      nx collection re-embed --all              plan every collection off the profile
+      nx collection re-embed --status [JOB]     jobs; --pause/--resume/--abort JOB act on one
 
     nexus-bw65: rebuild embeddings for every chunk in NAME that has a
     live catalog document, using --to MODEL. Chunk ids, document text,
@@ -1772,19 +2128,44 @@ def reembed_cmd(
     vector server-side (nexus-tysei: voyage-context-3 chunks the retired
     client path embedded with document context).
 
+    RDR-210 Phase 6: a different MODEL, or --all, runs a job on the local
+    engine. It moves each live document, one transaction apiece, into the
+    sibling collection that carries the profile's model, then supersedes and
+    deletes the source (--keep-source keeps it). The plan states the token
+    estimate and the cap (10000000 for a Voyage target, none for the on-device
+    model) and what the source's delete would remove, and a plan above the cap
+    is refused before anything is written. Dry run is the default.
+
     Limitations:
-      - The collection's name often encodes the embedding model
-        (RDR-103 / nexus-1-1__voyage-code-3__v1). This command does
-        NOT rename the collection; run ``nx collection rename`` if
-        the name needs to track the new model.
+      - The in-place form does NOT rename the collection; run
+        ``nx collection rename`` if the name needs to track the new model.
     """
-    if not dry_run and not yes:
-        click.confirm(
-            f"Re-embed {name!r} with {target_model!r}? This rewrites the vector "
-            f"of every chunk that has a live catalog document, in place; chunks "
-            f"with none keep their old vector.",
-            abort=True,
+    controls = [c for c in (status_job, pause_job, resume_job, abort_job) if c is not None]
+    if controls:
+        if len(controls) > 1 or name or all_collections or target_model or keep_source or force_delete:
+            raise click.UsageError(
+                "--status, --pause, --resume and --abort each stand alone (--token-cap goes with --resume)."
+            )
+        if token_cap is not None and resume_job is None:
+            raise click.UsageError("--token-cap with a job control goes with --resume.")
+        _reembed_controls(
+            _t3(), status_job=status_job, pause_job=pause_job, resume_job=resume_job,
+            abort_job=abort_job, token_cap=token_cap,
         )
+        return
+    job_flags = keep_source or force_delete or token_cap is not None
+    if all_collections:
+        if name or target_model:
+            raise click.UsageError(
+                "--all moves every collection off the profile to the profile's model; it takes no NAME or --to."
+            )
+        _reembed_all(
+            _t3(), dry_run=dry_run, yes=yes, keep_source=keep_source, force_delete=force_delete,
+            token_cap=token_cap,
+        )
+        return
+    if not name or not target_model:
+        raise click.UsageError("give NAME and --to MODEL, or --all, or a job control (--status ...).")
 
     db = _t3()
 
@@ -1795,13 +2176,22 @@ def reembed_cmd(
     # client-computed vectors are discarded. A --to that differs from the
     # encoded model would therefore silently no-op with the OLD model while
     # stamping the NEW model into metadata (corrupting staleness checks)
-    # and printing false success. Fail loud instead; cross-model moves are
-    # the rename --cross-model flow.
+    # and printing false success. Fail loud instead. RDR-210 Phase 6: on the
+    # local engine a different model starts the re-embed job, which moves the
+    # documents into the sibling collection that carries the model.
     from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if is_service_backed(db):
         encoded = _reembed_source_model(db, name)
         if encoded != target_model:
+            from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; patched in tests at the module attribute
+
+            if is_local_mode():
+                _reembed_cross_model(
+                    db, name, target_model, dry_run=dry_run, yes=yes, keep_source=keep_source,
+                    force_delete=force_delete, token_cap=token_cap,
+                )
+                return
             raise click.ClickException(
                 f"service mode re-embeds server-side using the model the "
                 f"collection's catalog row records — or, when no row backs the "
@@ -1814,6 +2204,19 @@ def reembed_cmd(
                 f"'nx collection rename' does NOT re-embed and would "
                 f"corrupt the name-encoded model contract."
             )
+    if job_flags:
+        raise click.UsageError(
+            "--keep-source, --force-delete and --token-cap belong to the re-embed job (a different --to MODEL, "
+            "or --all); an in-place re-embed has none of them."
+        )
+
+    if not dry_run and not yes:
+        click.confirm(
+            f"Re-embed {name!r} with {target_model!r}? This rewrites the vector "
+            f"of every chunk that has a live catalog document, in place; chunks "
+            f"with none keep their old vector.",
+            abort=True,
+        )
 
     if dry_run:
         try:
