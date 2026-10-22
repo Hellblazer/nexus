@@ -51,6 +51,15 @@ def engine_t3(t2_service_env: str):
     inject_t3(None)
 
 
+@pytest.fixture(autouse=True)
+def _no_row_without_an_engine(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``note_pieces`` reads the collection's catalog row first (nexus-z8mi2). A test
+    with no engine has no row to read, so it answers none and the name decides; a test
+    on ``engine_t3`` reads the real row."""
+    if "engine_t3" not in request.fixturenames:
+        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: None)
+
+
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     catalog_dir = tmp_path / "catalog"

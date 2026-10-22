@@ -159,6 +159,44 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
 NOTE_SPLIT_CHARS = 1689
 
 
+def _note_window_model(collection: str) -> str:
+    """The embedding model whose token window a note in *collection* is split to
+    (nexus-z8mi2): the catalog row's ``embedding_model`` when a row backs the name,
+    else the model the name derives.
+
+    The row first because the engine embeds by the row. A legacy name carries no model
+    token, so the derivation answers what the install embeds legacy names with NOW: a
+    collection whose row says ``voyage-context-3`` on a bge-profile engine was split
+    to bge's 512-token window instead of Voyage's none. A conformant name's token can
+    disagree with its row too: a rename keeps the source row's model under the new
+    name. The same row-preferred rule search uses (nexus-noayy, nexus-ml9vu), through
+    :func:`nexus.corpus.resolve_row_preferred`.
+
+    The row comes from the shared collections cache (``mcp_infra.get_collection_row``),
+    which fills itself on a cold or stale cache with one catalog-only (routing)
+    listing: a fresh ``nx store put`` process pays one, then every later read in the
+    TTL window is the cached one. A write that invalidates the cache (MCP
+    ``store_put`` does, after each committed note) makes the next note's read a
+    refill. A listing that cannot be fetched, a collection with no row, and a row
+    with no ``embedding_model`` all fall to the name derivation, which is the
+    behaviour before this read existed. The listing omits a registered collection
+    that holds no chunk yet, so the first note into an empty legacy collection still
+    follows the name. A failed listing never fails the write but can delay it: the
+    client's gateway retries, or its 30 s read timeout per attempt for an error the
+    cache does not remember.
+    """
+    from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle
+        embedding_model_for_collection_calibrated,
+        resolve_row_preferred,
+    )
+
+    # Calibrated: the plain resolver reads a legacy two-segment local
+    # collection as Voyage (nexus-mc1l1), which would leave it unsplit.
+    return resolve_row_preferred(
+        collection, "embedding_model", embedding_model_for_collection_calibrated,
+    ) or embedding_model_for_collection_calibrated(collection)
+
+
 def note_pieces(content: str, collection: str) -> list[str]:
     """The chunks a stored note is written as (nexus-spujb, nexus-b2tld).
 
@@ -186,11 +224,8 @@ def note_pieces(content: str, collection: str) -> list[str]:
     The byte quota is :func:`raise_if_oversized`'s, unchanged.
     """
     from nexus.chunker import split_text_to_char_cap, split_text_to_token_window  # noqa: PLC0415 — deferred, heavy import graph
-    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred to avoid import cycle
 
-    # Calibrated: the plain resolver reads a legacy two-segment local
-    # collection as Voyage (nexus-mc1l1), which would leave it unsplit.
-    window = window_for_model(embedding_model_for_collection_calibrated(collection))
+    window = window_for_model(_note_window_model(collection))
     if window is None:
         # No window to fit: split for retrieval granularity instead.
         if len(content) <= NOTE_SPLIT_CHARS:
