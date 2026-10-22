@@ -2042,7 +2042,8 @@ def _reembed_all(
 
     nexus-kyzmw: a skipped source is not planned and is listed as skipped, so a source that is refused for
     good (a held target name, a target collision) does not make ``--all`` unusable. Without ``--skip`` the
-    run stays all-or-nothing: a refused plan starts nothing. A NAME ``--all`` would not plan is an error.
+    run stays all-or-nothing: a refused plan starts nothing. A NAME that is not one of ``--all``'s candidates
+    (stale, held by a job, or a re-entry) is an error.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.reembed_job import candidates, profile_models  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -2080,7 +2081,8 @@ def _reembed_all(
         unknown = [n for n in skipped if n not in known]
         if unknown:
             raise click.ClickException(
-                f"--skip names {', '.join(unknown)}, which --all would not plan; its candidates are: "
+                f"--skip names {', '.join(unknown)}, which is not one of --all's candidates (stale, held by a "
+                f"job, or a re-entry); they are: "
                 f"{', '.join(known) or '(none)'}."
             )
     _reembed_jobs(
@@ -2144,8 +2146,9 @@ def _reembed_cross_model(
               help="Plan every live collection off the engine's profile; with --no-dry-run --yes, start one "
                    "job per collection (local engine only).")
 @click.option("--skip", "skip", multiple=True, metavar="NAME",
-              help="With --all: leave NAME out of the run (repeatable). It is listed as skipped; a NAME --all "
-                   "would not plan is an error. Without it, one refused plan starts nothing.")
+              help="With --all: leave NAME out of the run (repeatable). It is listed as skipped; a NAME that is "
+                   "not one of --all's candidates (stale, held or a re-entry) is an error. Without it, one refused "
+                   "plan starts nothing.")
 @click.option("--keep-source", is_flag=True, default=False,
               help="Job only: keep the emptied source collection (superseded, with its quarantine rows and "
                    "topic data) instead of deleting it.")

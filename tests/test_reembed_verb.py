@@ -416,7 +416,8 @@ class TestAllSkip:
         db = _engine()
         result = _invoke(runner, db, self._cat(), ["--all", "--skip", "docs__nope"])
         assert result.exit_code != 0
-        assert "docs__nope" in result.output and self.A in result.output and self.B in result.output
+        assert "docs__nope" in result.output and "not one of --all's candidates" in result.output
+        assert self.A in result.output and self.B in result.output
         db.reembed_plan.assert_not_called()
 
     def test_a_held_source_can_be_skipped(self, runner):
@@ -425,6 +426,30 @@ class TestAllSkip:
         result = _invoke(runner, db, self._cat(), ["--all", "--skip", self.B])
         assert result.exit_code == 0, result.output
         assert "held by job" not in result.output and f"{self.B}: skipped (--skip)" in result.output
+
+    def test_a_reentry_source_can_be_skipped(self, runner):
+        src, tgt = "docs__9-9__bge-base-en-v15-768__v1", "docs__9-9__voyage-model-a__v1"
+        jobs = [_job(JOB, source=src, target=tgt, state="done", disposition="kept_tombstoned")]
+        cat = FakeCatalog([_row(src, superseded_by=tgt)], {"docs": VA}, doc_counts={}, all_doc_counts={})
+        result = _invoke(runner, _engine(jobs=jobs), cat, ["--all", "--skip", src])
+        assert result.exit_code == 0, result.output
+        assert "re-entry of job" not in result.output and f"{src}: skipped (--skip)" in result.output
+
+    def test_skipping_one_source_leaves_a_refusal_on_another_stopping_the_run(self, runner):
+        c = "docs__3-3__bge-base-en-v15-768__v1"
+        db = _engine({self.A: _plan(token_estimate=10), self.B: _plan(token_estimate=10),
+                      c: _plan(token_estimate=99_999_999)})
+        cat = FakeCatalog([_row(self.A, owner="1.1"), _row(self.B, owner="2.2"), _row(c, owner="3.3")], {"docs": VA})
+        result = _invoke(runner, db, cat, ["--all", "--skip", self.B, "--no-dry-run", "--yes"])
+        assert result.exit_code != 0 and "99,999,999" in result.output
+        db.reembed_start.assert_not_called()
+
+    @pytest.mark.parametrize("args", [["--status"], ["--pause", JOB]])
+    def test_skip_with_a_job_control_is_a_usage_error(self, runner, args):
+        db = _engine()
+        result = _invoke(runner, db, self._cat(), [*args, "--skip", self.A])
+        assert result.exit_code != 0 and "--skip goes with --all" in result.output
+        db.reembed_status.assert_not_called()
 
     def test_skip_goes_with_all_only(self, runner):
         result = _invoke(runner, _engine(), self._cat(), [self.A, "--to", BGE, "--skip", self.B])
