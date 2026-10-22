@@ -60,9 +60,17 @@ def pytest_collection_finish(session):
     """Mutate the fake real-config dir mid-session, AFTER the guard's
     sessionstart baseline snapshot and BEFORE its sessionfinish check."""
     d = pathlib.Path(os.environ["NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"]) / ".config" / "nexus"
-    if os.environ["NX_PROBE_MODE"] == "append":
+    mode = os.environ["NX_PROBE_MODE"]
+    lock = d / ("data_token_mint_lock." + "a" * 64)
+    if mode == "append":
         with (d / "routing_log.jsonl").open("a") as fh:
             fh.write('{"evt": 2}\\n')
+    elif mode == "mint-touch":
+        # what a live host's mint does to a lock it reuses (nexus-ndfc1)
+        st = lock.stat()
+        os.utime(lock, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    elif mode == "mint-rewrite":
+        lock.write_text('{"pid": 2}\\n')
     else:
         (d / "backfill_state.json").write_text('{"a": 2}\\n')
 '''
@@ -76,6 +84,7 @@ def _run_inner(tmp_path: Path, mode: str, *pytest_args: str) -> tuple[int, str]:
     fake_config.mkdir(parents=True)
     (fake_config / "routing_log.jsonl").write_text('{"evt": 1}\n')
     (fake_config / "backfill_state.json").write_text('{"a": 1}\n')
+    (fake_config / ("data_token_mint_lock." + "a" * 64)).write_text('{"pid": 1, "pytest_current_test": null}\n')
 
     plugin_dir = tmp_path / "probeplug"
     plugin_dir.mkdir()
@@ -136,3 +145,19 @@ def test_an_in_place_state_rewrite_reddens_a_real_run_under_xdist(tmp_path: Path
     assert "backfill_state.json" in out, out[-3000:]
     # a bare `rc != 0` would also pass for any other reason the child session ended non-zero
     assert_exit_failed_for(rc, out, "FAIL: nexus-pfuns", "backfill_state.json")
+
+
+def test_a_mint_lock_touched_with_unchanged_bytes_does_not_redden_a_real_run(tmp_path: Path) -> None:
+    """nexus-2edpf: a live host's mint refreshes a reused lock's mtime and
+    nothing else; the session reports it and exits 0. Pins the sessionstart
+    baseline and the sessionfinish wiring, which the helper tests cannot."""
+    rc, out = _run_inner(tmp_path, "mint-touch", "-p", "no:xdist")
+    assert "NOTE: nexus-pfuns" in out and "data_token_mint_lock." in out, out[-3000:]
+    assert "FAIL: nexus-pfuns" not in out, out[-3000:]
+    assert rc == 0, f"a touched mint lock must not fail the run (rc={rc})\n{out[-3000:]}"
+
+
+def test_a_mint_lock_whose_bytes_changed_reddens_a_real_run(tmp_path: Path) -> None:
+    rc, out = _run_inner(tmp_path, "mint-rewrite", "-p", "no:xdist")
+    assert "FAIL: nexus-pfuns" in out, out[-3000:]
+    assert_exit_failed_for(rc, out, "FAIL: nexus-pfuns", "data_token_mint_lock.")

@@ -644,7 +644,7 @@ def pytest_sessionstart(session):
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
     global _real_config_dir_baseline_dir, _real_autostart_baseline, _real_manager_baseline
-    global _this_session_conexus_version, _last_seen_version_baseline_content
+    global _this_session_conexus_version, _last_seen_version_baseline_content, _mint_lock_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
     # BEFORE the fence below replaces them: the guard's read-only manager probe
     # must ask the operator's real manager.
@@ -716,6 +716,7 @@ def pytest_sessionstart(session):
         _real_manager_baseline = _snapshot_manager_state()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
         _last_seen_version_baseline_content = _snapshot_last_seen_version_content()
+        _mint_lock_baseline_content = _snapshot_mint_lock_contents(_real_config_dir_for_guard())
 
 
 def _check_fixture_cache_leaks(session) -> None:
@@ -972,12 +973,14 @@ def _split_appends_from_state(
     last_seen_version_content: str | None = None,
     last_seen_version_baseline_content: str | None = None,
     this_session_version: str | None = None,
+    mint_lock_baseline_content: dict[str, bytes] | None = None,
+    mint_lock_content: dict[str, bytes] | None = None,
 ) -> tuple[list[_DiffEntry], list[_DiffEntry]]:
     """Split :func:`_diff_config_dir_snapshots` entries (``(verb, rel_path)``
     pairs) into (state_mutations, benign_appends), preserving each entry
     verbatim in whichever list it lands.
 
-    Three ways to be benign. (1) The path lives under a directory a live
+    Four ways to be benign. (1) The path lives under a directory a live
     daemon owns (:data:`_AMBIENT_DAEMON_DIRS`), in which case any change is
     ambient output rather than suite behaviour. (2) Its basename is a known
     append-only log, it existed before, and its size strictly GREW. A log
@@ -987,7 +990,16 @@ def _split_appends_from_state(
     deliberately never does for most files; the directory can hold a live
     user's real data). (3) nexus-b2eaw, ``last_seen_version`` only -- its
     baseline and post-session CONTENT are byte-identical, so nothing real
-    happened regardless of whose version it is (see below).
+    happened regardless of whose version it is (see below). (4) nexus-2edpf,
+    a root-level ``data_token_mint_lock.*`` that existed at session start,
+    kept its bytes, and whose attribution line names no pytest test. This is
+    NOT the b2eaw argument: a lock's bytes are written only when it is
+    created, and every later mint, a test's included, only touches its mtime
+    (nexus-ndfc1), so unchanged bytes do not prove no test reused it. What
+    the rule stands on is the creator: a lock first created under pytest
+    names its test (develop source always writes the line, nexus-28bzt) and
+    is never exempt, so a leak fails on every run, not just the first. A
+    created, rewritten or removed lock stays state.
 
     nexus-b2eaw round 2 (review finding, CRITICAL): an EARLIER version of
     this function also exempted ``last_seen_version`` whenever its content
@@ -1056,9 +1068,19 @@ def _split_appends_from_state(
         ):
             # Content-based: the mtime/size diff fired, but the bytes never
             # changed -- no real event, regardless of anyone's version.
-            # Deliberately the ONLY content-driven exemption left: unlike a
-            # version-mismatch, "before == after byte-for-byte" cannot be
-            # produced by a genuine state mutation, in-session or not.
+            # Unlike a version-mismatch, "before == after byte-for-byte"
+            # cannot be produced by a genuine state mutation, in-session or
+            # not. (The mint-lock rule below is creator-based, see (4).)
+            appends.append(entry)
+        elif (
+            rel.startswith(_MINT_LOCK_FILE_PREFIX)
+            and mint_lock_baseline_content is not None
+            and mint_lock_content is not None
+            and rel in mint_lock_baseline_content
+            and mint_lock_content.get(rel) == mint_lock_baseline_content[rel]
+            and _mint_lock_created_outside_pytest(mint_lock_baseline_content[rel])
+        ):
+            # A live host's mint touched a lock pytest did not create; see (4).
             appends.append(entry)
         elif (
             rel in (_ROTATED_LOG_NAME, _ROTATED_LOG_BACKUP_NAME)
@@ -1196,6 +1218,56 @@ def _resolve_this_session_conexus_version() -> str | None:
 #: content can prove a write is NOT this session's when the versions differ,
 #: but can never prove it IS, and the diagnostic must not claim otherwise).
 _last_seen_version_baseline_content: str | None = None
+
+#: ``nexus.db.data_token._MINT_LOCK_PREFIX``, spelled here so the guard does
+#: not import product code at session start.
+_MINT_LOCK_FILE_PREFIX: str = "data_token_mint_lock."
+
+#: Largest mint lock whose bytes the guard reads; a real one is one JSON line.
+_MINT_LOCK_MAX_READ_BYTES: int = 64 * 1024
+
+#: Session-start bytes of each root-level mint lock under the real config dir,
+#: for :func:`_split_appends_from_state`'s byte-identical check (a live
+#: ``nx-mcp`` host's mint touches the mtime and nothing else).
+_mint_lock_baseline_content: dict[str, bytes] = {}
+
+
+def _mint_lock_created_outside_pytest(content: bytes) -> bool:
+    """True when a mint lock's attribution line names no pytest test, or it
+    has none (written by a release before nexus-ndfc1; tests run develop
+    source, which always writes one). A line that does not parse is not
+    trusted."""
+    if not content.strip():
+        return True
+    import json  # noqa: PLC0415 — read only when a mint lock changed during the run
+
+    try:
+        record = json.loads(content.splitlines()[0])
+    except ValueError:
+        return False
+    return isinstance(record, dict) and not record.get("pytest_current_test")
+
+
+def _snapshot_mint_lock_contents(config_dir: Path) -> dict[str, bytes]:
+    """``{name: bytes}`` for every root-level mint lock in *config_dir*. The
+    bytes are the lock's own attribution line (pid, argv0, endpoint, tenant),
+    not user data. A file that cannot be read, or is over the cap, is left
+    out, so its change stays a state mutation."""
+    out: dict[str, bytes] = {}
+    try:
+        entries = list(os.scandir(config_dir))
+    except OSError:
+        return out
+    for de in entries:
+        if not de.name.startswith(_MINT_LOCK_FILE_PREFIX):
+            continue
+        try:
+            if not de.is_file(follow_symlinks=False) or de.stat().st_size > _MINT_LOCK_MAX_READ_BYTES:
+                continue
+            out[de.name] = Path(de.path).read_bytes()
+        except OSError:
+            continue
+    return out
 
 
 def _snapshot_last_seen_version_content() -> str | None:
@@ -1631,7 +1703,7 @@ def _check_real_config_dir_mutations(session) -> None:
         return
     # nexus-b2eaw: read the stamp's actual post-session content so
     # _split_appends_from_state can tell a genuine content change from a
-    # spurious stat touch (byte-identical content -- the ONE content-driven
+    # spurious stat touch (byte-identical content -- the one content-driven
     # exemption left after round 2's CRITICAL finding removed the
     # version-mismatch exemption). See _this_session_conexus_version's and
     # _last_seen_version_baseline_content's docstrings for why reading this
@@ -1648,6 +1720,8 @@ def _check_real_config_dir_mutations(session) -> None:
         last_seen_version_content=_stamp_content,
         last_seen_version_baseline_content=_last_seen_version_baseline_content,
         this_session_version=_this_session_conexus_version,
+        mint_lock_baseline_content=_mint_lock_baseline_content,
+        mint_lock_content=_snapshot_mint_lock_contents(_real_config_dir_for_guard()),
     )
     if benign_appends:
         print(
@@ -1656,7 +1730,8 @@ def _check_real_config_dir_mutations(session) -> None:
             f"(an append-only log grew, or a live daemon wrote/rotated its own "
             f"output): "
             f"{', '.join(_format_diff_entry(e) for e in benign_appends)}\n"
-            f"  Reported, not failed: these are append-only logs, not state. "
+            f"  Reported, not failed: append-only logs, daemon output, or a mint lock a live "
+            f"host touched (nexus-2edpf), not state. "
             f"A truncation or in-place rewrite of the same file WOULD fail.\n"
         )
     if not changed:
