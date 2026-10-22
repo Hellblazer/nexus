@@ -716,6 +716,10 @@ public final class TupleHandler implements HttpHandler {
         // session, or the row predates the column. A claim,
         // not authentication: JDR-002.
         m.put("sender_session", t.senderSession());
+        // nexus-x907o: when the CURRENT claim started (set by the claim, never moved by renew,
+        // cleared with claim_id); null on an unclaimed row or a claim that predates the column.
+        // claim_id itself stays unrendered (see above); this is a time, not a credential.
+        m.put("claimed_at", t.claimedAt());
         return m;
     }
 

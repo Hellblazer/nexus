@@ -116,6 +116,16 @@ class TestOut:
         claimed = store.in_(f"mailbox/{addr}", {"to": addr}, claimant=addr, lease_s=30)
         assert claimed is not None and claimed[0].sender_session == session_id
 
+        # nexus-x907o, same economy: an unclaimed row has no claimed_at; a claim stamps one,
+        # the in_ result and a later rd agree on it, and a renew leaves it where it was.
+        assert row.claimed_at is None
+        assert claimed[0].claimed_at is not None
+        held = store.rd(f"mailbox/{addr}", {"to": addr})[0]
+        assert held.claimed_at == claimed[0].claimed_at
+        store.renew(claimed[1], addr, 60)
+        renewed = store.rd(f"mailbox/{addr}", {"to": addr})[0]
+        assert renewed.claimed_at == claimed[0].claimed_at
+
         # No token: the write lands, unstamped (null, but known: the engine rendered the key).
         monkeypatch.delenv("NX_T1_SESSION")
         a2 = _uniq("addr")
@@ -439,6 +449,19 @@ class TestReleaseAgainstAnOldEngine:
 
 
 # ── registry / census ────────────────────────────────────────────────────
+
+
+class TestClaimedAtWire:
+    """nexus-x907o: the claim start parses off the wire, and an engine that
+    renders no such key (one predating it) reads as None, never an error."""
+
+    def test_the_key_parses_and_its_absence_reads_as_none(self) -> None:
+        from nexus.db.t2.http_tuple_store import _body_to_tuple_row
+
+        stamp = "2026-10-22T12:00:00.123456Z"
+        assert _body_to_tuple_row({"claimed_at": stamp}).claimed_at == stamp
+        assert _body_to_tuple_row({"claimed_at": None}).claimed_at is None
+        assert _body_to_tuple_row({}).claimed_at is None
 
 
 class TestRegistry:

@@ -69,7 +69,9 @@ migration_wal_bytes_per_worker = 11038000
 # statements to a fresh migration; measured by a scoped substrate run of this tree (ddl: migration=2105).
 # 2105 -> 2106 (2026-10-22): tuples-008-1 (nexus-fetre, nexus.tuples.sender_session) adds one ALTER TABLE ADD COLUMN
 # to a fresh migration; commit 6629bea44.
-migration_ddl_per_worker = 2106
+# 2106 -> 2107 (2026-10-22): tuples-009-1 (nexus-x907o, nexus.tuples.claimed_at) adds one ALTER TABLE ADD COLUMN
+# to a fresh migration; commit <sha>.
+migration_ddl_per_worker = 2107
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

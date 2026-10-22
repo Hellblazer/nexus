@@ -417,6 +417,10 @@ public final class TupleRepository {
      * null} when the writer (for an ack reply, the acker; nexus-g2ckl) presented none, or the
      * row predates the column. Written on
      * INSERT only; never overwritten by a refire.
+     *
+     * <p>{@code claimedAt} (bead nexus-x907o): when the CURRENT claim started, or {@code
+     * null} when the row is unclaimed or its claim predates the column. Set by the claim,
+     * cleared wherever {@code claimId} is cleared, never moved by renew.
      */
     public record TupleRow(
             byte[] id, String subspace, String template,
@@ -426,7 +430,7 @@ public final class TupleRepository {
             OffsetDateTime consumedAt, String consumedBy,
             OffsetDateTime expiresAt, OffsetDateTime createdAt,
             OffsetDateTime announcedAt, int announceCount,
-            String senderSession) {
+            String senderSession, OffsetDateTime claimedAt) {
     }
 
     public record ClaimedTuple(TupleRow tuple, String claimId) {
@@ -714,6 +718,10 @@ public final class TupleRepository {
                     .set(TUPLES.LEASE_UNTIL,
                             DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.LEASE_UNTIL))
                                     .otherwise(TUPLES.LEASE_UNTIL))
+                    // nexus-x907o: cleared with claim_id; a live lock's refire keeps it.
+                    .set(TUPLES.CLAIMED_AT,
+                            DSL.when(expired, DSL.val((OffsetDateTime) null, TUPLES.CLAIMED_AT))
+                                    .otherwise(TUPLES.CLAIMED_AT))
                     .execute();
         } else {
             // A refire touches expires_at ONLY -- never body, claim state or
@@ -1904,6 +1912,7 @@ public final class TupleRepository {
                                 .set(TUPLES.CLAIM_STATE, CLAIM_STATE_DEAD)
                                 .set(TUPLES.CLAIMANT, (String) null)
                                 .set(TUPLES.CLAIM_ID, (String) null)
+                                .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
                                 .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
                                 .set(TUPLES.ATTEMPTS, attempts)
                                 .where(TUPLES.ID.eq(row.getId()))
@@ -1936,10 +1945,15 @@ public final class TupleRepository {
                         ? now.plusSeconds(t.retentionSeconds()).truncatedTo(java.time.temporal.ChronoUnit.MICROS)
                         : row.getExpiresAt();
                 OffsetDateTime leaseUntil = clampedLeaseUntil(now, leaseSeconds, expiresAtForClaim);
+                // nexus-x907o: the claim's start, at the column's own (microsecond)
+                // precision so this response and a later read-back agree, as leaseUntil's
+                // truncation above does. Written ONLY here; renew never touches it.
+                OffsetDateTime claimedAt = now.truncatedTo(java.time.temporal.ChronoUnit.MICROS);
                 var claimUpdate = ctx.update(TUPLES)
                         .set(TUPLES.CLAIM_STATE, CLAIM_STATE_CLAIMED)
                         .set(TUPLES.CLAIMANT, claimant)
                         .set(TUPLES.CLAIM_ID, newClaimId)
+                        .set(TUPLES.CLAIMED_AT, claimedAt)
                         .set(TUPLES.LEASE_UNTIL, leaseUntil)
                         .set(TUPLES.ATTEMPTS, attempts);
                 if (t.lock()) {
@@ -1953,7 +1967,8 @@ public final class TupleRepository {
                         fromJsonb(row.getKeys()), fromJsonb(row.getDims()), row.getBody(),
                         CLAIM_STATE_CLAIMED, claimant, newClaimId, leaseUntil, attempts,
                         null, null, expiresAtForClaim, row.getCreatedAt(),
-                        row.getAnnouncedAt(), row.getAnnounceCount(), row.getSenderSession());
+                        row.getAnnouncedAt(), row.getAnnounceCount(), row.getSenderSession(),
+                        claimedAt);
                 return Optional.of(new ClaimedTuple(claimed, newClaimId));
             }
             return Optional.empty(); // NX_TUPLE_CLAIM_PASSES exhausted: the probe result
@@ -2370,6 +2385,7 @@ public final class TupleRepository {
                 .set(TUPLES.CLAIM_STATE, dead ? CLAIM_STATE_DEAD : null)
                 .set(TUPLES.CLAIMANT, (String) null)
                 .set(TUPLES.CLAIM_ID, (String) null)
+                .set(TUPLES.CLAIMED_AT, (OffsetDateTime) null)
                 .set(TUPLES.LEASE_UNTIL, (OffsetDateTime) null)
                 .set(TUPLES.ATTEMPTS, attempts)
                 .where(liveClaimCondition(tupleId, claimId))
@@ -3023,7 +3039,7 @@ public final class TupleRepository {
                 r.getLeaseUntil(), r.getAttempts(),
                 r.getConsumedAt(), r.getConsumedBy(),
                 r.getExpiresAt(), r.getCreatedAt(),
-                announcedAt, announceCount, r.getSenderSession());
+                announcedAt, announceCount, r.getSenderSession(), r.getClaimedAt());
     }
 
     private static JSONB toJsonb(Map<String, String> map) {

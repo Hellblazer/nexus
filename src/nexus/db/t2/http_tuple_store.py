@@ -486,6 +486,10 @@ def _body_to_tuple_row(body: dict[str, Any]) -> TupleRow:
         # stays distinct from a present null (written with no live session).
         sender_session=body.get("sender_session"),
         sender_session_known="sender_session" in body,
+        # nexus-x907o: the current claim's start. A missing key (an engine
+        # predating it) and a null both read as None, which a caller must treat
+        # as "unknown, use another source", so no known-flag is carried.
+        claimed_at=body.get("claimed_at"),
     )
 
 

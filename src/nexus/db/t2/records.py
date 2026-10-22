@@ -163,6 +163,13 @@ class TupleRow:
     engine rendered the key (so ``None`` means "no stamp"), ``False`` when it
     did not (so ``None`` means "this engine cannot say"). A row built by hand
     defaults to ``False``: unknown is the safe reading.
+
+    ``claimed_at`` (bead nexus-x907o) is when the row's CURRENT claim started:
+    set by the claim, never moved by a renew, cleared with the claim. ``None``
+    covers an unclaimed row, a claim made before the engine carried the column,
+    and an engine that renders no such key; a reader that needs the start and
+    finds ``None`` on a claimed row must treat it as unknown and use another
+    source.
     """
 
     id: str
@@ -183,6 +190,7 @@ class TupleRow:
     announce_count: int | None = 0
     sender_session: str | None = None
     sender_session_known: bool = False
+    claimed_at: str | None = None
 
     def effective_claim_state(self, now: datetime | None = None) -> str | None:
         """``claim_state`` as a reader should see it: a claim whose

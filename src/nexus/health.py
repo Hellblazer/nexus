@@ -7723,10 +7723,14 @@ def _check_tuple_lock_held(
 
     The engine census finds lock-template subspaces with a claimed row and
     ``rd`` names each live holder. Only then does the row need the claim's
-    start time, which it reads through the local nexus_diag path. A box with
-    no held lock, a virgin box included, never reaches psql and reports not
-    applicable. A managed deployment has no local diag path, so a held lock
-    there is informational, naming the holder with the duration unmeasured.
+    start time. An engine that renders ``claimed_at`` (nexus-x907o) gives it
+    on the row, and that is used first: it works the same on a local box and
+    a managed deployment. A claim with no ``claimed_at`` (an older engine, or
+    a claim made before its column) falls back to the local nexus_diag path.
+    A box with no held lock, a virgin box included, never reaches psql and
+    reports not applicable. A managed deployment has no local diag path, so a
+    held lock there with no ``claimed_at`` is informational, naming the holder
+    with the duration unmeasured.
     """
     label = _TUPLE_LOCK_HELD_LABEL
 
@@ -7770,8 +7774,9 @@ def _check_tuple_lock_held(
         )]
 
     now = datetime.now(UTC)
-    # (subspace, claimant, threshold_s)
-    held: list[tuple[str, str, float]] = []
+    # (subspace, claimant, threshold_s, started): started is the claim's start
+    # off the wire (nexus-x907o), None when the engine gave none.
+    held: list[tuple[str, str, float, datetime | None]] = []
     # A claimed subspace no template resolves might be a lock this client
     # cannot recognise; named, never silently dropped (the unmatched rule
     # _template_take_enabled states).
@@ -7799,7 +7804,7 @@ def _check_tuple_lock_held(
             # available, and a renew after the lapse is refused.
             if r.claim_state != "claimed" or not r.claimant or lease_until is None or lease_until <= now:
                 continue
-            held.append((census.subspace, r.claimant, threshold_s))
+            held.append((census.subspace, r.claimant, threshold_s, _parse_tuple_timestamp(r.claimed_at)))
 
     unresolved_note = (
         f"claimed subspace(s) with no resolvable template, not checked: {', '.join(unresolved)}"
@@ -7810,57 +7815,16 @@ def _check_tuple_lock_held(
             return [HealthResult(label=label, ok=False, warn=True, detail=unresolved_note)]
         return [HealthResult(label=label, ok=True, detail="not applicable: no lock is held")]
 
-    holders = "; ".join(f"{s} by {c}" for s, c, _ in held)
-    if diag_credentials is None:
-        from nexus.db.diag_connection import resolve_diag_credentials  # noqa: PLC0415 — deferred to avoid circular import
-        diag_credentials = resolve_diag_credentials(creds_path)
-    if diag_credentials is None:
-        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
-        if is_local_mode():
-            # A fixable local setup gap, so a warning.
-            return [HealthResult(
-                label=label, ok=False, warn=True,
-                detail=(
-                    f"held: {holders}; hold duration not measured: no nexus_diag "
-                    "diagnostic credentials. Re-run `nx init --service` to "
-                    "backfill the diagnostic role."
-                    + (f" Also {unresolved_note}." if unresolved else "")
-                ),
-            )]
-        # A managed deployment has no local diag path by design (nexus-y3wuu).
-        # A held lock is normal, so without a duration this is informational,
-        # never a verdict either way.
-        return [HealthResult(
-            label=label, ok=not unresolved, warn=bool(unresolved),
-            detail=(
-                f"informational: held: {holders}; hold duration is not "
-                "measurable from this client on a managed deployment"
-                + (f". Also {unresolved_note}" if unresolved else "")
-            ),
-        )]
-
-    from nexus.db.diag_connection import run_diagnostic_sql  # noqa: PLC0415 — deferred to avoid circular import
-
     over: list[str] = []
     reported: list[str] = []
-    for subspace, claimant, threshold_s in held:
-        try:
-            out = run_diagnostic_sql(
-                (_lock_claim_started_sql(subspace, claimant),), diag_credentials,
-                psql_bin=psql_bin, psql_runner=diag_runner,
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort per-lock; report it unmeasured, never clean
-            _log.debug("doctor_tuple_lock_held_diag_failed", subspace=subspace, error=str(exc))
-            over.append(f"{subspace} by {claimant} (hold duration not measured: {exc})")
-            continue
-        started = _parse_tuple_timestamp(out[0] if out else None)
+    # A claim whose start the engine rendered (claimed_at) is measured from the
+    # wire, so it needs no diag path and is as good on a managed deployment as on
+    # a local box. Only a claim with no start on the wire (an engine predating
+    # nexus-x907o, or a claim made before its column) goes to the diag path.
+    pending: list[tuple[str, str, float]] = []
+    for subspace, claimant, threshold_s, started in held:
         if started is None:
-            # The claim row is gone: purged past the template's
-            # claim_log_ttl_seconds, far longer than any threshold here.
-            over.append(
-                f"{subspace} by {claimant} (no claim row in tuple_claim_log: "
-                "held past the claim log's retention, or never logged)"
-            )
+            pending.append((subspace, claimant, threshold_s))
             continue
         age_s = (now - started).total_seconds()
         reported.append(f"{subspace} held {_fmt_age(age_s)} by {claimant}")
@@ -7871,15 +7835,91 @@ def _check_tuple_lock_held(
             )
 
     tail = f". Also {unresolved_note}" if unresolved else ""
+    fix = [
+        "Ask the named holder whether it is still working; a holder "
+        "that has stopped leaves the lock blocked until it releases "
+        "or stops renewing.",
+    ]
+
+    def over_text() -> str:
+        return f"{len(over)} lock(s) held past the renewal bound: " + "; ".join(over)
+
+    if pending:
+        holders = "; ".join(f"{s} by {c}" for s, c, _ in pending)
+        if diag_credentials is None:
+            from nexus.db.diag_connection import resolve_diag_credentials  # noqa: PLC0415 — deferred to avoid circular import
+            diag_credentials = resolve_diag_credentials(creds_path)
+        if diag_credentials is None:
+            from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+            if is_local_mode():
+                # A fixable local setup gap, so a warning.
+                return [HealthResult(
+                    label=label, ok=False, warn=True,
+                    detail=(
+                        (over_text() + "; " if over else "")
+                        + f"held: {holders}; hold duration not measured: no nexus_diag "
+                        "diagnostic credentials. Re-run `nx init --service` to "
+                        "backfill the diagnostic role."
+                        + (f" Also {unresolved_note}." if unresolved else "")
+                    ),
+                )]
+            # A managed deployment has no local diag path by design (nexus-y3wuu).
+            # A held lock is normal, so without a duration this is informational,
+            # never a verdict either way. An engine that renders claimed_at never
+            # reaches here for its own claims; this is an older engine's claim.
+            if over:
+                return [HealthResult(
+                    label=label, ok=False, warn=True,
+                    detail=(
+                        over_text()
+                        + f"; also held, duration not measurable from this client: {holders}" + tail
+                    ),
+                    fix_suggestions=fix,
+                )]
+            measured = ("; ".join(reported) + "; ") if reported else ""
+            return [HealthResult(
+                label=label, ok=not unresolved, warn=bool(unresolved),
+                detail=(
+                    f"informational: {measured}held: {holders}; hold duration is not "
+                    "measurable from this client on a managed deployment"
+                    + (f". Also {unresolved_note}" if unresolved else "")
+                ),
+            )]
+
+        from nexus.db.diag_connection import run_diagnostic_sql  # noqa: PLC0415 — deferred to avoid circular import
+
+        for subspace, claimant, threshold_s in pending:
+            try:
+                out = run_diagnostic_sql(
+                    (_lock_claim_started_sql(subspace, claimant),), diag_credentials,
+                    psql_bin=psql_bin, psql_runner=diag_runner,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort per-lock; report it unmeasured, never clean
+                _log.debug("doctor_tuple_lock_held_diag_failed", subspace=subspace, error=str(exc))
+                over.append(f"{subspace} by {claimant} (hold duration not measured: {exc})")
+                continue
+            started = _parse_tuple_timestamp(out[0] if out else None)
+            if started is None:
+                # The claim row is gone: purged past the template's
+                # claim_log_ttl_seconds, far longer than any threshold here.
+                over.append(
+                    f"{subspace} by {claimant} (no claim row in tuple_claim_log: "
+                    "held past the claim log's retention, or never logged)"
+                )
+                continue
+            age_s = (now - started).total_seconds()
+            reported.append(f"{subspace} held {_fmt_age(age_s)} by {claimant}")
+            if age_s > threshold_s:
+                over.append(
+                    f"{subspace} by {claimant} (held {_fmt_age(age_s)}, over "
+                    f"{_fmt_age(threshold_s)})"
+                )
+
     if over:
         return [HealthResult(
             label=label, ok=False, warn=True,
-            detail=f"{len(over)} lock(s) held past the renewal bound: " + "; ".join(over) + tail,
-            fix_suggestions=[
-                "Ask the named holder whether it is still working; a holder "
-                "that has stopped leaves the lock blocked until it releases "
-                "or stops renewing.",
-            ],
+            detail=over_text() + tail,
+            fix_suggestions=fix,
         )]
     if unresolved:
         return [HealthResult(label=label, ok=False, warn=True, detail="; ".join(reported) + tail)]

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-x907o (tuples.lock_held on a managed deployment).
+
+    nexus.tuples.claimed_at TIMESTAMPTZ NULL: when the row's CURRENT claim started,
+    i.e. the claim transition's time for the row's current claim_id. It is set by the
+    claim (the same instant the claim transition's tuple_claim_log row carries) and
+    cleared wherever claim_id is cleared (release, nack, a lapse reclaimed or
+    dead-lettered, the lock reset of an expired row). It is NOT touched by renew,
+    which moves lease_until (and a lock's expires_at) and nothing else, so it bounds
+    how long one claim has been held. An ack leaves the claim columns as they were,
+    so it leaves this one too.
+
+    A column rather than a read of tuple_claim_log: the log row is the same fact, but
+    it is a second table to join on every rd/in render, it is purged on its own TTL
+    (claim_log_ttl_seconds), and the client reads it today only through a local
+    nexus_diag path that a managed deployment does not have.
+
+    NULL is the true prior state of every existing row: a claim made before this
+    column existed has no recorded start on the row, so a client treats NULL on a
+    claimed row as "cannot tell" and falls back to its older path. There is no
+    backfill (the claim log would give an answer only while the log row survives, and
+    a guessed value is worse than an absent one).
+
+    ADD COLUMN only (no UPDATE, no ALTER ... TYPE ... USING), so there is no DATA
+    EFFECT line, matching tuples-008-sender-session.xml and
+    tuples-006-announce-columns.xml: scripts/data_effect_lint.py's own scope excludes
+    ADD COLUMN. DDL is unaffected by FORCE ROW LEVEL SECURITY on nexus.tuples.
+
+    Placed after tuples-008-sender-session.xml and before the grants-nexus-svc.xml
+    runAlways block (the established late-append convention, D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="tuples-009-1" author="nexus-x907o">
+        <comment>Adds nexus.tuples.claimed_at TIMESTAMPTZ NULL -- an additive column only (ADD COLUMN, no data mutation of any existing row), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. NULL is the true prior state of every existing row. Set by TupleRepository.claimOnce, cleared with claim_id, never touched by renew.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples
+    ADD COLUMN claimed_at TIMESTAMPTZ NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.tuples DROP COLUMN IF EXISTS claimed_at;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

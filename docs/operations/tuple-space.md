@@ -35,12 +35,16 @@ the addressed agent or instance is still alive and draining with `tuple_in`.
 **Cause**: a holder that keeps renewing a `lock/<resource>` claim without
 releasing it. Every other taker blocks until it releases or stops renewing
 and its lease lapses. The bound is four times the template's
-`max_lease_seconds`. The hold's start is the claim's `claim` row in
+`max_lease_seconds`. The hold's start is the row's `claimed_at` (set by the
+claim, never moved by a renew; engine-service-v0.1.163 and later), which any
+deployment can read. A claim with no `claimed_at` (an older engine, or a claim
+made before the column) falls back to the claim's `claim` row in
 `nexus.tuple_claim_log`, read through the local nexus_diag path. `no claim
 row` means that row is gone: it was purged past the template's
 `claim_log_ttl_seconds` (30 days for locks), or it was never written. A
-managed deployment cannot run the diag path, so there the row is
-informational: it names the holder and says the duration is not measurable. Unlike the three RDR-205 rows, this
+managed deployment cannot run the diag path, so a held lock with no
+`claimed_at` there is informational: it names the holder and says the duration
+is not measurable. Unlike the three RDR-205 rows, this
 row has no engine-floor gate: every engine at or above the pinned floor
 serves the routes and tables it reads.
 
