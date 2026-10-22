@@ -13,7 +13,10 @@ helper without standing up a live MCP server.
 """
 from __future__ import annotations
 
+import signal
+
 import pytest
+from mcp import types
 
 from nexus.db.local_ef import _TIER0_MODEL, _TIER1_MODEL
 from nexus.db.pg_provision import CREDENTIALS_FILENAME
@@ -170,7 +173,7 @@ class TestApplyEmbedderNotice:
 class TestCoreMainWiring:
     @pytest.mark.t2_tenant
     def test_main_applies_embedder_notice_before_run(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
     ) -> None:
         """core.main() must wire the notice onto the live server before serving
         — proven by stopping at the stdio run call and inspecting the instructions."""
@@ -184,14 +187,15 @@ class TestCoreMainWiring:
         # start from no instructions, and restore at teardown on every exit path
         monkeypatch.setattr(core.mcp._mcp_server, "instructions", None)
         # main() installs SIGTERM/SIGINT handlers for the serving process;
-        # left in place they would replace the worker's own
-        monkeypatch.setattr("signal.signal", lambda *a, **k: None)
+        # put the worker's own back at teardown
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            request.addfinalizer(
+                lambda sig=sig, prev=signal.getsignal(sig): signal.signal(sig, prev)
+            )
         # main() installs the stale-host hook over the shared server's
         # CallToolRequest handler; restore it at teardown, or a later test in
         # the worker sees the stale-host wrapper, not the tool-call-log one
         # (test_mcp_tool_call_log.py::TestCoreWiring, develop CI 39836696552).
-        from mcp import types
-
         handlers = core.mcp._mcp_server.request_handlers
         monkeypatch.setitem(
             handlers, types.CallToolRequest, handlers[types.CallToolRequest]
