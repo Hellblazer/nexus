@@ -632,7 +632,7 @@ def tuple_directory_cmd(name: str, json_out: bool) -> None:
 def _row_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]:
     # fresh_claim: the row `in` just claimed. The engine set its lease a moment ago, so it
     # is "claimed"; relabelling it against this box's clock could call it "lapsed".
-    return {
+    out = {
         "id": row.id, "subspace": row.subspace, "template": row.template,
         "keys": row.keys, "dims": row.dims, "body": row.body,
         "claim_state": row.claim_state if fresh_claim else row.effective_claim_state(),
@@ -641,6 +641,11 @@ def _row_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]:
         "consumed_at": row.consumed_at, "consumed_by": row.consumed_by,
         "expires_at": row.expires_at, "created_at": row.created_at,
     }
+    # nexus-ztwp4 (F3 step 2): null = written with no live session; omitted when
+    # the engine predates the stamp.
+    if row.sender_session_known:
+        out["sender_session"] = row.sender_session
+    return out
 
 
 def _census_dict(c: Any) -> dict[str, Any]:
@@ -661,6 +666,8 @@ def _print_row(row: Any, *, fresh_claim: bool = False) -> None:
     click.echo(f"  body: {row.body}")
     click.echo(f"  claim_state: {row.claim_state if fresh_claim else row.effective_claim_state()}")
     click.echo(f"  created_at: {row.created_at}")
+    if row.sender_session_known:
+        click.echo(f"  sender_session: {row.sender_session}")
 
 
 def _render_rows(rows: list, json_out: bool) -> None:

@@ -152,6 +152,15 @@ class TupleRow:
     entirely -- :class:`~nexus.mcp.channel.ChannelWaiter` uses exactly
     this to refuse to run against such an engine, mirroring how it
     already refuses on a 404 from ``/wait`` itself.
+
+    ``sender_session`` (bead nexus-ztwp4, F3 step 2) is the session id the
+    engine stamped on ``out`` from the writer's minted T1 session token, or
+    ``None`` when the write carried no live token (unstamped). A ``None`` is
+    ambiguous on its own: an engine predating the stamp renders no key at all.
+    ``sender_session_known`` tells the two apart -- ``True`` when the engine
+    rendered the key (so ``None`` means "unstamped"), ``False`` when it did not
+    (so ``None`` means "this engine cannot say"). A row built by hand defaults
+    to ``False``: unknown is the safe reading.
     """
 
     id: str
@@ -170,6 +179,8 @@ class TupleRow:
     created_at: str | None
     announced_at: str | None = None
     announce_count: int | None = 0
+    sender_session: str | None = None
+    sender_session_known: bool = False
 
     def effective_claim_state(self, now: datetime | None = None) -> str | None:
         """``claim_state`` as a reader should see it: a claim whose

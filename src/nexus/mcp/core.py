@@ -7499,7 +7499,7 @@ def _tuple_row_to_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]
     moment ago, so it is ``claimed`` by definition; relabelling it against this box's
     clock would call a brand-new claim ``lapsed`` whenever the client runs ahead of
     the engine by more than the lease."""
-    return {
+    out = {
         "id": row.id,
         "subspace": row.subspace,
         "template": row.template,
@@ -7524,6 +7524,12 @@ def _tuple_row_to_dict(row: Any, *, fresh_claim: bool = False) -> dict[str, Any]
         "announced_at": row.announced_at,
         "announce_count": row.announce_count,
     }
+    # nexus-ztwp4 (F3 step 2): the session id the engine stamped on `out`. Null =
+    # written with no live session; the key is OMITTED when the engine predates
+    # the stamp, so a consumer can tell "unstamped" from "this engine cannot say".
+    if row.sender_session_known:
+        out["sender_session"] = row.sender_session
+    return out
 
 
 def _tuple_census_to_dict(c: Any) -> dict[str, Any]:

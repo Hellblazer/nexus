@@ -88,7 +88,9 @@ timeout could fire on its own.
 """
 from __future__ import annotations
 
+import contextvars
 import json
+import os
 import re
 from collections.abc import Sequence
 from datetime import datetime
@@ -147,6 +149,22 @@ _MAX_WAIT_SPECS: int = 34
 _PARK_TIMEOUT_MARGIN_S: float = 5.0
 
 _ROUTE_PREFIX: str = "/v1/tuples"
+
+#: nexus-ztwp4 (F3 step 2): the T1 session TOKEN (the minted secret the MCP
+#: lifespan exports) rides this header on tuple requests so the engine can stamp
+#: ``sender_session`` on ``out``. Never the identifier ``NX_T1_SESSION_ID``.
+#: Same names ``HttpScratchStore`` uses.
+_SESSION_ENV: str = "NX_T1_SESSION"
+_HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
+
+#: Per-request state for the stale-token fallback, in a ContextVar so concurrent
+#: callers of one shared store never see each other's flags.
+_drop_session_header: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nexus_tuple_drop_session_header", default=False,
+)
+_session_header_sent: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nexus_tuple_session_header_sent", default=False,
+)
 
 
 # ── Typed errors (mirrors dev.nexus.service.db.TupleException's thirteen subtypes) ──
@@ -451,6 +469,10 @@ def _body_to_tuple_row(body: dict[str, Any]) -> TupleRow:
         # genuine 0 (a row nothing has ever announced). See `TupleRow
         # .announce_count`'s own docstring for why that distinction matters.
         announce_count=body.get("announce_count"),
+        # nexus-ztwp4 (F3 step 2): a missing key (engine predates the stamp)
+        # stays distinct from a present null (written with no live session).
+        sender_session=body.get("sender_session"),
+        sender_session_known="sender_session" in body,
     )
 
 
@@ -596,6 +618,39 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     ``super()._post``/``_get`` (``RefreshableHttpStoreMixin._send``),
     never ``self._client`` directly.
     """
+
+    # ── Session header (nexus-ztwp4, F3 step 2) ──────────────────────────────
+
+    def _auth_headers(self) -> dict[str, str]:
+        """The mixin's headers plus ``X-Nexus-T1-Session`` when ``NX_T1_SESSION``
+        is set. Read per request (the T1 handoff swaps the env on ``/clear``),
+        and added here per request, never on the shared T2 client's defaults,
+        which nine stores ride."""
+        headers = super()._auth_headers()
+        token = "" if _drop_session_header.get() else os.environ.get(_SESSION_ENV, "").strip()
+        _session_header_sent.set(bool(token))
+        if token:
+            headers[_HEADER_T1_SESSION] = token
+        return headers
+
+    def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:
+        """One round trip. AuthFilter 401s any request whose session header is
+        present but not live, on every route, and its body does not say which
+        credential failed. A tuple write must not fail for a stale session, so a
+        401 to a request that carried the header is retried ONCE without it,
+        before the mixin's data-token re-mint path sees the 401. A 401 that
+        survives the drop is the data token's and goes down that path unchanged."""
+        try:
+            return super()._request_once(method, path, **kwargs)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 401 or not _session_header_sent.get():
+                raise
+            _log.info("tuple_session_header_dropped", method=method, path=path)
+            reset = _drop_session_header.set(True)
+            try:
+                return super()._request_once(method, path, **kwargs)
+            finally:
+                _drop_session_header.reset(reset)
 
     # ── Internal transport (route prefix + 8 KB guard + typed errors) ───────
 
