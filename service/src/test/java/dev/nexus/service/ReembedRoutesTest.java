@@ -872,6 +872,94 @@ class ReembedRoutesTest {
         assertThat(job(u, id(json(capped))).tokenCap()).isEqualTo(777L);
     }
 
+    /** {@code n} chunks of about {@code bytes} each in the tenant's source, all owned by one live document. */
+    private void seedLiveChunks(Tn t, int n, int bytes) {
+        List<String> texts = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            texts.add("chunk " + i + " " + t.owner() + " " + "ab ".repeat(Math.max(1, bytes / 3)));
+        }
+        List<String> hashes = texts.stream().map(x -> dev.nexus.service.db.Chash.ofText(x).toHex()).toList();
+        su(ctx -> {
+            PgContainerHelper.insertChunks(ctx, t.tenant(), t.src(), hashes, texts,
+                texts.stream().map(x -> new float[768]).toList(), texts.stream().map(x -> Map.<String, Object>of()).toList());
+            PgContainerHelper.ownChunks(ctx, t.tenant(), t.src(), hashes.toArray(new String[0]));
+            return null;
+        });
+    }
+
+    @Test
+    void aStartWhosePlanIsAboveTheEffectiveCapIsRefusedBeforeAnyWrite() throws Exception {
+        Tn t = tenantWithProfile("capover", VOYAGE, 1024);
+        seedLiveChunks(t, 3, 3_000);                               // about 2,250 tokens
+        int wakes = wakeUps();
+
+        var over = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"token_cap\":100}");
+
+        assertThat(over.statusCode()).as(over.body()).isEqualTo(409);
+        assertThat(json(over).get("error").toString()).contains("above the cap of 100").contains("token_cap");
+        assertThat(jobs.listAll(t.tenant())).as("a refused start writes no job").isEmpty();
+        assertThat(wakeUps()).as("and wakes nothing").isEqualTo(wakes);
+
+        var raised = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"token_cap\":100000}");
+        assertThat(raised.statusCode()).as("a raised cap passes the same plan").isEqualTo(201);
+    }
+
+    @Test
+    void aVoyageStartOverTheDefaultCapIsRefused_andARaisedCapRunsIt() throws Exception {
+        Tn t = tenantWithProfile("capdefaultover", VOYAGE, 1024);
+        seedLiveChunks(t, 41, 1_000_000);                          // about 10.25 million tokens, above the default
+
+        var over = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(over.statusCode()).as(over.body()).isEqualTo(409);
+        assertThat(json(over).get("error").toString()).contains("above the cap of 10,000,000");
+        assertThat(jobs.listAll(t.tenant())).isEmpty();
+
+        var plan = post(t, "/plan", planBody(t.src()));
+        assertThat(((Number) json(plan).get("token_estimate")).longValue()).isGreaterThan(10_000_000L);
+
+        var raised = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"token_cap\":20000000}");
+        assertThat(raised.statusCode()).as(raised.body()).isEqualTo(201);
+        assertThat(job(t, id(json(raised))).tokenCap()).isEqualTo(20_000_000L);
+    }
+
+    @Test
+    void aLocalTargetIsNeverRefusedForSize() throws Exception {
+        Tn t = tenant("caplocalbig");                              // minilm profile: bills nothing, no cap
+        seedLiveChunks(t, 5, 20_000);
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
+        assertThat(job(t, id(json(r))).tokenCap()).isNull();
+    }
+
+    @Test
+    void aTokenCapOfZeroOrNegativeIs400_andAnExplicitNullMeansAbsent() throws Exception {
+        Tn t = tenantWithProfile("capvalues", VOYAGE, 1024);
+        for (String bad : List.of("0", "-1", "-10000000")) {
+            var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"token_cap\":" + bad + "}");
+            assertThat(r.statusCode()).as("token_cap " + bad + ": " + r.body()).isEqualTo(400);
+            assertThat(json(r).get("error").toString()).contains("token_cap");
+        }
+        assertThat(jobs.listAll(t.tenant())).as("a refused body starts nothing").isEmpty();
+
+        var nul = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"token_cap\":null}");
+        assertThat(nul.statusCode()).as(nul.body()).isEqualTo(201);
+        assertThat(job(t, id(json(nul))).tokenCap()).as("null is absent: a Voyage start gets the default")
+            .isEqualTo(10_000_000L);
+    }
+
+    @Test
+    void aMiniLmTargetStartsUncapped() throws Exception {
+        // minilm is the tenant() default profile model, with a live sibling: local, no cap.
+        Tn mini = tenant("capmini");
+        var m = post(mini, "/jobs", startBody(mini.src()));
+        assertThat(m.statusCode()).as(m.body()).isEqualTo(201);
+        assertThat(json(m)).containsEntry("target_collection", mini.tgt()).containsEntry("token_cap", null);
+
+    }
+
     @Test
     void theEngineDefaultIsAppliedWhenTheBilledTargetIsRegisteredByTheStart() throws Exception {
         Tn t = tenant("capregister");

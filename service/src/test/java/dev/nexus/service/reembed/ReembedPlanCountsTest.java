@@ -321,8 +321,11 @@ class ReembedPlanCountsTest extends ReembedFixture {
     void anotherTenantsSameNamedSourceChangesNoCount() {
         Fx fx = pair("xtenant");
         seedEveryCount(fx, 2);
+        // A document of the first tenant whose manifest names the source: the other tenant will hold a bare document
+        // (homed at the source, no manifest) under the SAME tumbler.
+        String sharedTumbler = seedDoc(fx, "mover", List.of("mover chunk " + fx.tag()));
         PlanCounts before = reader.planCounts(fx.tenant(), fx.src());
-        assertThat(before.documents()).isEqualTo(2);
+        assertThat(before.documents()).isEqualTo(3);
         assertThat(before.tombstonedDocuments()).isEqualTo(1);
         assertThat(before.liveHomedElsewhere()).isEqualTo(1);
         assertThat(before.ownerlessChunks()).isPositive();
@@ -339,8 +342,11 @@ class ReembedPlanCountsTest extends ReembedFixture {
         register(other.tenant(), other.tgt());
         setProfile(other.tenant(), MINI, 384);
         seedEveryCount(other, 5);
+        catalog.upsertDocument(other.tenant(), Map.of("tumbler", sharedTumbler, "title", "t",
+            "content_type", CONTENT_TYPE, "corpus", CONTENT_TYPE, "physical_collection", other.src(),
+            "chunk_count", 0));
         PlanCounts theirs = reader.planCounts(other.tenant(), other.src());
-        assertThat(theirs.documents()).as("the other tenant's rows are really there").isEqualTo(5);
+        assertThat(theirs.documents()).as("5 seeded, and the bare document: a candidate by its home").isEqualTo(6);
 
         assertThat(reader.planCounts(fx.tenant(), fx.src())).as("the first tenant's counts, unchanged")
             .isEqualTo(before);

@@ -71,3 +71,11 @@ def test_the_clients_request_bodies_use_exactly_the_engines_fields(bodies):
     assert set(bodies["jobs"]) == _java_string_set(_HANDLER, "START_FIELDS")
     assert set(bodies["resume"]) == _java_string_set(_HANDLER, "RESUME_FIELDS")
     assert bodies["pause"] == {} and bodies["abort"] == {}, "NO_FIELDS: these routes take no body field"
+
+
+def test_the_default_token_cap_is_the_same_on_both_sides():
+    m = re.search(r"public static final long DEFAULT_TOKEN_CAP\s*=\s*([0-9_]+)L;", _HANDLER)
+    assert m, "ReembedHandler.DEFAULT_TOKEN_CAP not found: the Java declaration moved, update this reader"
+    engine = int(m.group(1).replace("_", ""))
+    assert engine >= 1_000_000, "non-vacuity: a real cap was read, not a placeholder"
+    assert reembed_job.DEFAULT_TOKEN_CAP == engine

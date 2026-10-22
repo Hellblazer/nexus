@@ -57,8 +57,9 @@ import java.util.function.Predicate;
  *   <li>{@code GET /status}: every job row of the tenant, newest first, as {@code {"jobs": [...]}}.</li>
  *   <li>{@code POST /jobs} {@code {source_collection, target_collection?, token_cap?, keep_source?, force_delete?}}:
  *       plan the target, then start the job (201 with the job row). A start that sends no {@code token_cap} gets
- *       {@link #DEFAULT_TOKEN_CAP} when the target model is a billed (Voyage) one and no cap when it is a local one;
- *       a value sent is kept as sent, higher or lower than the default.</li>
+ *       {@link #DEFAULT_TOKEN_CAP} unless the target model is a local one (bge, MiniLM), which has no cap; a value
+ *       sent is kept as sent, higher or lower than the default. A start whose plan's token estimate is above the cap
+ *       it will carry is refused with a 409 before anything is written.</li>
  *   <li>{@code POST /jobs/{id}/pause}, {@code /resume} ({@code {token_cap?}}), {@code /abort}: 200 with the job
  *       row; a repeat of what the job already is answers 200 with {@code "unchanged": true} and touches nothing; a
  *       transition the state machine refuses is 409 naming the state.</li>
@@ -375,6 +376,17 @@ public final class ReembedHandler implements HttpHandler {
         // An explicit cap wins, higher or lower; none on a billed target is the RDR's default; none on a local one
         // stays none. The runner and the repository read null as "no cap", so the default is applied here.
         Long tokenCap = requestedCap != null ? requestedCap : defaultTokenCap(resolved.profileModel());
+        if (tokenCap != null) {
+            // RDR-210 Cost: a plan above the cap is refused before any write, unless the request raises it.
+            long estimate = reader.planCounts(tenant, source).tokenEstimate();
+            if (estimate > tokenCap) {
+                throw new Reply(409, jsonOf(orderedMap(
+                    "error", String.format(Locale.ROOT, "the plan for %s needs about %,d tokens, above the cap of "
+                        + "%,d. A billed re-embed bills them; send a higher token_cap to run it.",
+                        source, estimate, tokenCap),
+                    "collection", source, "token_estimate", estimate, "token_cap", tokenCap)));
+            }
+        }
         TargetSelection.Decision decision = resolved.decision();
         String contentType = resolved.contentType();
         String owner = resolved.owner();
@@ -416,12 +428,21 @@ public final class ReembedHandler implements HttpHandler {
 
     /**
      * The cap a start applies when the request sends none (RDR-210 Cost): {@link #DEFAULT_TOKEN_CAP} for a billed
-     * target model, null (no cap) for a model embedded on this machine, which bills nothing. Billed means a Voyage
-     * model, the same family test {@code EmbedderRouter} and the client's {@code model_family} make; any other
-     * model (bge, the bundled MiniLM) bills nothing.
+     * target model, null (no cap) only for a model embedded on this machine, which bills nothing ({@link
+     * #isLocalModel}); any other model is treated as billed.
      */
     static Long defaultTokenCap(String targetModel) {
-        return targetModel != null && targetModel.startsWith("voyage-") ? DEFAULT_TOKEN_CAP : null;
+        return isLocalModel(targetModel) ? null : DEFAULT_TOKEN_CAP;
+    }
+
+    /**
+     * Whether a model token names a family this engine embeds on this machine (bge, the bundled MiniLM), which bills
+     * nothing. Fails closed: a model of any other family, or none, is treated as billed and gets the default cap.
+     * ({@code EmbedderRouter} tests {@code voyage-} and {@code bge-} separately for its own routing; the set of
+     * families that bill nothing is this predicate's alone.)
+     */
+    private static boolean isLocalModel(String model) {
+        return model != null && (model.startsWith("bge-") || model.startsWith("minilm-"));
     }
 
     private static String needOf(String contentType, String owner, String profileModel) {

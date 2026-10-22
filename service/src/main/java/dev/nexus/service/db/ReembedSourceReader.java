@@ -5,6 +5,7 @@ package dev.nexus.service.db;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Condition;
+import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record1;
 import org.jooq.Select;
@@ -54,6 +55,40 @@ public final class ReembedSourceReader {
         this.scope = scope;
     }
 
+    // The document shapes, defined once for the pass, the delete guard and the plan, so the plan cannot count a
+    // different set than the cutover refuses on. Each is a condition on CATALOG_DOCUMENTS (unaliased) rows.
+
+    /** A manifest row of the document names {@code source}. */
+    private static Condition namesSource(DSLContext ctx, String tenant, String source) {
+        var d = CATALOG_DOCUMENTS;
+        var c = CATALOG_DOCUMENT_CHUNKS;
+        return DSL.exists(ctx.selectOne().from(c)
+            .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)).and(c.COLLECTION.eq(source)));
+    }
+
+    /** A candidate's shape: a manifest row names {@code source}, or there is no manifest and the document is homed there. */
+    private static Condition candidateShape(DSLContext ctx, String tenant, String source) {
+        var d = CATALOG_DOCUMENTS;
+        var c = CATALOG_DOCUMENT_CHUNKS;
+        Condition hasNoManifest = DSL.notExists(ctx.selectOne().from(c)
+            .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)));
+        return namesSource(ctx, tenant, source).or(hasNoManifest.and(d.PHYSICAL_COLLECTION.eq(source)));
+    }
+
+    /** A soft-deleted document whose manifest names {@code source} or that is homed there. */
+    private static Condition tombstonedShape(DSLContext ctx, String tenant, String source) {
+        var d = CATALOG_DOCUMENTS;
+        return d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNotNull())
+            .and(namesSource(ctx, tenant, source).or(d.PHYSICAL_COLLECTION.eq(source)));
+    }
+
+    /** A live document homed at {@code source} that is not a candidate: its manifest names only other collections. */
+    private static Condition liveHomedElsewhereShape(DSLContext ctx, String tenant, String source) {
+        var d = CATALOG_DOCUMENTS;
+        return d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(d.PHYSICAL_COLLECTION.eq(source))
+            .and(DSL.not(candidateShape(ctx, tenant, source)));
+    }
+
     /**
      * The live candidates of {@code source} whose tumbler sorts after {@code afterDocId} (the empty string is
      * before every tumbler), in tumbler order, at most {@code limit}. The order is the column's own text order,
@@ -66,17 +101,13 @@ public final class ReembedSourceReader {
         return scope.withTenant(tenant, ctx -> {
             var d = CATALOG_DOCUMENTS;
             var c = CATALOG_DOCUMENT_CHUNKS;
-            Condition namesSource = DSL.exists(ctx.selectOne().from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)).and(c.COLLECTION.eq(source)));
-            Condition hasNoManifest = DSL.notExists(ctx.selectOne().from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)));
             Field<Integer> rows = DSL.field(ctx.selectCount().from(c)
                 .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)));
             return ctx.select(d.TUMBLER, rows).from(d)
                 .where(d.TENANT_ID.eq(tenant))
                 .and(d.DELETED_AT.isNull())
                 .and(d.TUMBLER.gt(afterDocId))
-                .and(namesSource.or(hasNoManifest.and(d.PHYSICAL_COLLECTION.eq(source))))
+                .and(candidateShape(ctx, tenant, source))
                 .orderBy(d.TUMBLER)
                 .limit(limit)
                 .fetch(r -> new Candidate(r.value1(), r.value2()));
@@ -127,19 +158,10 @@ public final class ReembedSourceReader {
     public Residue residue(String tenant, String source) {
         return scope.withTenant(tenant, ctx -> {
             var d = CATALOG_DOCUMENTS;
-            var c = CATALOG_DOCUMENT_CHUNKS;
-            Condition namesSource = DSL.exists(ctx.selectOne().from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)).and(c.COLLECTION.eq(source)));
-            Condition hasNoManifest = DSL.notExists(ctx.selectOne().from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)));
-            Condition candidateShape = namesSource.or(hasNoManifest.and(d.PHYSICAL_COLLECTION.eq(source)));
-            Condition homedHere = d.PHYSICAL_COLLECTION.eq(source);
             boolean live = ctx.fetchExists(ctx.selectOne().from(d)
-                .where(d.TENANT_ID.eq(tenant)).and(d.DELETED_AT.isNull()).and(candidateShape));
-            long tombstoned = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNotNull())
-                .and(namesSource.or(homedHere)));
-            long liveElsewhere = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull())
-                .and(homedHere).and(DSL.not(candidateShape)));
+                .where(d.TENANT_ID.eq(tenant)).and(d.DELETED_AT.isNull()).and(candidateShape(ctx, tenant, source)));
+            long tombstoned = ctx.fetchCount(d, tombstonedShape(ctx, tenant, source));
+            long liveElsewhere = ctx.fetchCount(d, liveHomedElsewhereShape(ctx, tenant, source));
             long aspects = ctx.fetchCount(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.COLLECTION.eq(source)));
             long queue = ctx.fetchCount(ASPECT_EXTRACTION_QUEUE,
@@ -183,17 +205,10 @@ public final class ReembedSourceReader {
     public PlanCounts planCounts(String tenant, String source) {
         return scope.withTenant(tenant, ctx -> {
             var d = CATALOG_DOCUMENTS;
-            var c = CATALOG_DOCUMENT_CHUNKS;
-            Condition namesSource = DSL.exists(ctx.selectOne().from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)).and(c.COLLECTION.eq(source)));
-            Condition hasNoManifest = DSL.notExists(ctx.selectOne().from(c)
-                .where(c.TENANT_ID.eq(tenant)).and(c.DOC_ID.eq(d.TUMBLER)));
-            Condition candidateShape = namesSource.or(hasNoManifest.and(d.PHYSICAL_COLLECTION.eq(source)));
-            long documents = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull()).and(candidateShape));
-            long tombstoned = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNotNull())
-                .and(namesSource.or(d.PHYSICAL_COLLECTION.eq(source))));
-            long liveElsewhere = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull())
-                .and(d.PHYSICAL_COLLECTION.eq(source)).and(DSL.not(candidateShape)));
+            long documents = ctx.fetchCount(d, d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull())
+                .and(candidateShape(ctx, tenant, source)));
+            long tombstoned = ctx.fetchCount(d, tombstonedShape(ctx, tenant, source));
+            long liveElsewhere = ctx.fetchCount(d, liveHomedElsewhereShape(ctx, tenant, source));
 
             // Chunks a live document owns by a manifest row naming the source: what the job embeds.
             var oc = CATALOG_DOCUMENT_CHUNKS.as("plan_owner_chunks");
