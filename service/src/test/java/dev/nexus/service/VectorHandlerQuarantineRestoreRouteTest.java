@@ -205,6 +205,29 @@ class VectorHandlerQuarantineRestoreRouteTest {
     }
 
     @Test
+    void aRestoreIntoASupersededOrigin_is409NamingTheSuccessor_andMovesNothing() throws Exception {
+        // nexus-mp8ys: a rename leaves the old origin row live (lifecycle_state 'live') with superseded_by set, so
+        // the lifecycle check alone let a restore strand its chunks under the tombstone. Fails if checkRestoreOrigin
+        // goes back to a plain lookup. Every other source form shares the origin check, so the named-chash form
+        // stands for them.
+        String o = col();
+        String successor = o.replace("__v1", "__v2");
+        List<String> hs = quarantined(TENANT_A, o, "2026-09-01T00:00:00Z", "sup");
+        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(o)).execute());
+
+        var r = post(TOKEN_A, req(o, "chashes", hs, "actor", "route-test"));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        var body = json(r);
+        assertThat(body.get("reason")).isEqualTo("collection_superseded");
+        assertThat(body.get("collection")).isEqualTo(o);
+        assertThat(body.get("superseded_by")).isEqualTo(successor);
+        assertThat(in(TENANT_A, o, hs.get(0))).as("nothing strands under the tombstone").isFalse();
+        assertThat(in(TENANT_A, "quarantine-" + o, hs.get(0))).as("the chunk stays quarantined").isTrue();
+    }
+
+    @Test
     void aDryRunMovesNothing() throws Exception {
         String o = col();
         List<String> hs = quarantined(TENANT_A, o, "2026-09-01T00:00:00Z", "dry");

@@ -5008,6 +5008,34 @@ public final class CatalogRepository {
            .fetch();
     }
 
+    /**
+     * nexus-mp8ys: the batch manifest writers ({@code write_many}, {@code append_many}) catch a per-document
+     * failure into {@code failed_doc_ids} and answer 200, so the refusal that {@link #insertManifestChunkRows}
+     * raises for a retired collection name would be reported as a per-document failure and never as the typed
+     * 409. This runs once, before any document, and only when some document carries rows (a rows-less
+     * document writes nothing under the name). An unregistered or otherwise unresolvable collection is left to
+     * the per-document path, as before; only the superseded refusal propagates.
+     */
+    private void refuseRowsUnderSupersededCollection(String tenant, String collection,
+                                                      List<Map<String, Object>> docs) {
+        if (docs == null) return;
+        boolean anyRows = false;
+        for (Map<String, Object> d : docs) {
+            if (d != null && d.get("rows") instanceof List<?> l && !l.isEmpty()) {
+                anyRows = true;
+                break;
+            }
+        }
+        if (!anyRows) return;
+        try {
+            CollectionRegistry.lookupWritable(tenantScope, tenant, collection);
+        } catch (CollectionSupersededException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            // Unregistered, or a row the registry cannot resolve: each document reports it as it always did.
+        }
+    }
+
     /** Which {@code ON CONFLICT} shape {@link #insertManifestChunkRows} applies. */
     private enum ManifestInsertMode {
         /** Bare insert, no conflict handling — the caller ({@link #writeManifestRows}) has
@@ -5073,7 +5101,14 @@ public final class CatalogRepository {
         // pooled connection mid-transaction) and is the same value every chunk row of the collection was
         // written with. An unregistered collection answers 422 'register it first' here, as the chunk
         // writers do, instead of the opaque foreign-key violation it used to surface as.
-        final String embeddingModel = CollectionRegistry.require(ctx, tenant, coll).embeddingModel();
+        // nexus-mp8ys: a manifest row written under a retired (superseded) name strands exactly as a chunk
+        // does, and the manifest-only routes (no 'chunks' key) never pass through the combined writers'
+        // refusal. PLAIN and UPSERT_APPEND are the live writers (manifest/write, write_many, append,
+        // append_many) and are refused. UPSERT_IMPORT is the fidelity-preserving collection import, which
+        // legitimately carries tombstoned collections and keeps the plain registration check.
+        final String embeddingModel = (mode == ManifestInsertMode.UPSERT_IMPORT
+                ? CollectionRegistry.require(ctx, tenant, coll)
+                : CollectionRegistry.requireWritable(ctx, tenant, coll)).embeddingModel();
         var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                 CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
@@ -5660,6 +5695,7 @@ public final class CatalogRepository {
                                                   Map<String, String> complete, boolean sweep,
                                                   Map<String, ResolvedChunk> resolvedChunks) {
         requireNonBlank(collection, "collection");
+        refuseRowsUnderSupersededCollection(tenant, collection, docs);
         // nexus-h6d89: write_manifest_many_timing — the manifest-write twin
         // of register_many_timing (line ~1469). tMethodStart/tMethodEnd
         // bracket the WHOLE call (identical convention to that event's
@@ -6687,6 +6723,7 @@ public final class CatalogRepository {
                                                   List<Map<String, Object>> docs,
                                                   Map<String, ResolvedChunk> resolvedChunks) {
         requireNonBlank(collection, "collection");
+        refuseRowsUnderSupersededCollection(tenant, collection, docs);
         long tStart = System.nanoTime();
         List<Map<String, Object>> results = new ArrayList<>();
         List<String> failed = new ArrayList<>();

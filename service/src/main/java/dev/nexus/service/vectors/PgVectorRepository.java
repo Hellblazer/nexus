@@ -5839,7 +5839,10 @@ FROM scope s
         // The origin is the registered catalog row, never a name: an origin that is gone fails loud here. It must
         // be live, the only state the reaper visits; restoring into a dormant or disputed collection would put
         // chunks where nothing is looking after them.
-        var origin = CollectionRegistry.lookup(tenantScope, tenant, originCollection);
+        // nexus-mp8ys: a renamed-away origin keeps lifecycle_state 'live' and names its successor, so the
+        // lifecycle test below cannot see it; restoring into it would strand the chunks under a name nothing
+        // routes to. Refused 409 naming the successor, as every other implicit write to a retired name is.
+        var origin = CollectionRegistry.lookupWritable(tenantScope, tenant, originCollection);
         if (!"live".equals(origin.lifecycleState())) {
             throw new IllegalArgumentException(originCollection + " is not a live collection (lifecycle_state="
                 + origin.lifecycleState() + "); a restore goes into a live collection");

@@ -274,8 +274,11 @@ public final class CollectionRegistry {
     /**
      * {@link #require}, for a caller that is about to WRITE chunks into {@code collection}
      * (nexus-mp8ys): refuses a retired name instead of returning it. Reads, listings and the
-     * quarantine paths keep using {@link #require} / {@link #lookup}, which hand a tombstone back
-     * with {@link CollectionRow#supersededBy()} set.
+     * fidelity-preserving collection import ({@code UPSERT_IMPORT}, which legitimately carries
+     * tombstoned collections) keep using {@link #require} / {@link #lookup}, which hand a tombstone
+     * back with {@link CollectionRow#supersededBy()} set. The quarantine restore writes chunks back
+     * into its origin and so refuses a retired origin too ({@code PgVectorRepository#checkRestoreOrigin}).
+     * Callers: the manifest row writers (plain and append modes) and the taxonomy centroid upsert.
      *
      * @throws UnregisteredCollectionException if no row exists for the pair
      * @throws CollectionSupersededException if the row names a successor
