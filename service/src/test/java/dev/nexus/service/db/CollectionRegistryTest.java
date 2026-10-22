@@ -433,6 +433,22 @@ class CollectionRegistryTest {
     }
 
     @Test
+    void aMissThatRacesAnEvictAll_doesNotCache() {
+        // nexus-5tykh: evictAll (the singleton lock's regain hook) counts as an evict, so a miss whose read began
+        // before it caches nothing. Dropping its evictions++ would let the live row back into a cache another
+        // engine may have outdated.
+        String name = "code__cr-race-all__voyage-code-3__v1";
+        seedRegisteredWithAttributes(name, "code", "cr-race-all", "voyage-code-3", 1024, "live");
+        CollectionRegistry.afterMissReadForTests = CollectionRegistry::evictAll;
+        try {
+            tenantScope.withTenant(TENANT, ctx -> CollectionRegistry.require(ctx, TENANT, name));
+        } finally {
+            CollectionRegistry.afterMissReadForTests = null;
+        }
+        assertThat(CollectionRegistry.cached(TENANT, name)).as("a fill that raced evictAll is dropped").isEmpty();
+    }
+
+    @Test
     void aMissThatRacesAClear_doesNotCache() {
         String name = "code__cr-race-clear__voyage-code-3__v1";
         seedRegisteredWithAttributes(name, "code", "cr-race-clear", "voyage-code-3", 1024, "live");

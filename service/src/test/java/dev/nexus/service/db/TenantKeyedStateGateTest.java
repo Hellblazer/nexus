@@ -492,7 +492,8 @@ public class TenantKeyedStateGateTest {
             + "decides on it, so it is not a cache a reset must clear";
 
         private static final String SINGLETON_LOCK = "the engine's one-engine-per-database lock (nexus-5tykh): its "
-            + "own JDBC connection and the two callbacks Main hands it; one per process, tenant-independent. Its "
+            + "own JDBC connection, the two callbacks Main hands it and a test-adjustable wait; one per process, "
+            + "tenant-independent. Its "
             + "regain hook is what clears CollectionRegistry for every tenant";
 
         private static final String TOKEN_CACHE_REF = "a reference to the TokenCache, which is evicted under "
@@ -897,6 +898,7 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("EngineSingletonLock.connection", SINGLETON_LOCK);
             notKeyed.put("EngineSingletonLock.onRegained", SINGLETON_LOCK);
             notKeyed.put("EngineSingletonLock.onFatal", SINGLETON_LOCK);
+            notKeyed.put("EngineSingletonLock.staleTerminationWait", SINGLETON_LOCK);
             notKeyed.put("PciPlanCheck.lastSampled", PCI_OFF);
             notKeyed.put("PciCatalog.Snapshot.valid", PCI_OFF);
             notKeyed.put("PciCatalog.LeafBuilder.tenant", PCI_OFF);

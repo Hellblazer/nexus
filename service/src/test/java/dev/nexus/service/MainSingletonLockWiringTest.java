@@ -54,6 +54,10 @@ class MainSingletonLockWiringTest {
         assertThat(body).as("a loss to another engine exits with the lock's status, off the checking thread")
             .contains("System.exit(EngineSingletonLock.EXIT_STATUS)").contains("new Thread(");
         assertThat(dev.nexus.service.db.EngineSingletonLock.EXIT_STATUS).isNotZero();
+        assertThat(body).as("the lock connection's name is the pool's plus the shared suffix")
+            .contains("poolApplicationName + EngineSingletonLock.NAME_SUFFIX");
+        assertThat(body).as("a pooler is refused at boot, with the exception's own structured line")
+            .contains("catch (EngineSingletonLock.PoolerSuspectedException e)");
         for (String refusal : new String[] {
                 "event=engine_singleton_lock_env_invalid", "e.getMessage()", "event=engine_singleton_lock_connect_failed"}) {
             assertThat(body).contains(refusal);

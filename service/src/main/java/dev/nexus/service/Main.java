@@ -667,7 +667,7 @@ public final class Main {
      */
     private static EngineSingletonLock bootSingletonLock(HikariDataSource ds, String dbUrl, String dbUser,
                                                          String dbPass, String poolApplicationName) {
-        String lockApplicationName = poolApplicationName + "/singleton-lock";
+        String lockApplicationName = poolApplicationName + EngineSingletonLock.NAME_SUFFIX;
         try {
             var settings = EngineSingletonLock.Settings.fromEnv(System::getenv);
             var lock = EngineSingletonLock.acquireAtBoot(settings,
@@ -685,6 +685,9 @@ public final class Main {
             ds.close();
             log.error("event=engine_singleton_lock_env_invalid error=\"{}\"", e.getMessage());
         } catch (EngineSingletonLock.HeldElsewhereException e) {
+            ds.close();
+            log.error(e.getMessage());
+        } catch (EngineSingletonLock.PoolerSuspectedException e) {
             ds.close();
             log.error(e.getMessage());
         } catch (java.sql.SQLException e) {
