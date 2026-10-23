@@ -178,6 +178,7 @@ def test_the_judgement_names_the_superseded_rows_it_could_not_judge_when_the_job
     verdict = rj.judge_off_profile_rows(rows, PROFILE, boom, lambda n: 1, lambda n: 1)
     assert _names(verdict.rows) == ["docs__a"]
     assert _names(verdict.unjudged) == ["docs__s"]
+    assert verdict.unread == "job table"
 
 
 def test_the_judgement_names_them_when_the_doc_counts_are_unread_too():
@@ -188,6 +189,7 @@ def test_the_judgement_names_them_when_the_doc_counts_are_unread_too():
 
     verdict = rj.judge_off_profile_rows(rows, PROFILE, lambda: [_job("docs__s", disposition=KT)], boom, boom)
     assert verdict.rows == [] and _names(verdict.unjudged) == ["docs__s"]
+    assert verdict.unread == "document counts"
 
 
 def test_a_judged_catalog_has_nothing_unjudged():
@@ -195,6 +197,7 @@ def test_a_judged_catalog_has_nothing_unjudged():
     verdict = rj.judge_off_profile_rows(rows, PROFILE, lambda: [_job("docs__s", disposition="kept_by_flag")],
                                         lambda n: 0, lambda n: 0)
     assert verdict.rows == [] and verdict.unjudged == []
+    assert verdict.unread == ""
 
     def no_jobs():
         raise AssertionError("jobs were read with no superseded row in the catalog")
@@ -214,3 +217,11 @@ def test_the_collections_form_carries_the_unjudged_rows():
     # The list form the hint reads is unchanged.
     assert rj.off_profile_collections(reader, rows=reader.list_collections(), profile=PROFILE, jobs=boom) == []
 
+
+
+def test_the_judgement_names_the_job_that_holds_a_stale_row():
+    rows = [_row("docs__h"), _row("docs__f"), _source(), _target()]
+    jobs = [_job("docs__h", state="running"), _job("docs__s", disposition=KT)]
+    verdict = rj.judge_off_profile_rows(rows, PROFILE, lambda: jobs, lambda n: 0, lambda n: 3)
+    assert _names(verdict.rows) == ["docs__f", "docs__h"]
+    assert list(verdict.held) == ["docs__h"] and verdict.held["docs__h"]["state"] == "running"

@@ -9133,23 +9133,29 @@ def _check_embedding_profile() -> list[HealthResult]:
     from nexus.reembed_job import is_superseded, judge_off_profile_collections  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     profile_model = {str(ct): str(prow["embedding_model"]) for ct, prow in by_ct.items()}
-    verdict = judge_off_profile_collections(reader, rows=rows, profile=profile_model)
+    verdict = judge_off_profile_collections(reader, rows=rows, profile=profile_model, read_jobs=True)
 
     def _off(r: dict) -> str:
         return f"{r.get('name')} ({r.get('embedding_model')} vs profile {profile_model.get(str(r.get('content_type')))})"
 
+    def _held(r: dict) -> str:
+        job = verdict.held[str(r.get("name"))]
+        return f"{_off(r)} held by job {job.get('job_id')} ({job.get('state')})"
+
     # A superseded row here is a kept_tombstoned source a restore put a live document back in. The routing listing
     # leaves a superseded source out, so "reads still route by the row's own model" is false for it, and a reindex
     # is not its remedy: only the job's re-entry (``re-embed --all``) moves that document (RDR-210 :1173-1180).
-    stale = sorted(_off(r) for r in verdict.rows if not is_superseded(r))
+    live_rows = [r for r in verdict.rows if not is_superseded(r)]
+    stale = sorted(_off(r) for r in live_rows if str(r.get("name")) not in verdict.held)
+    held = sorted(_held(r) for r in live_rows if str(r.get("name")) in verdict.held)
     restored = sorted(_off(r) for r in verdict.rows if is_superseded(r))
     # nexus-s08oe: with the job table (or the counts) unread the superseded rows were not judged. Say so rather
     # than let a clean 'none' stand over rows nobody looked at.
     not_judged = (
-        f"superseded sources not judged (job table unread): {len(verdict.unjudged)} superseded collection(s) skipped"
+        f"superseded sources not judged ({verdict.unread} unread): {len(verdict.unjudged)} superseded collection(s) skipped"
         if verdict.unjudged else ""
     )
-    if stale or restored:
+    if stale or held or restored:
         parts: list[str] = []
         fixes: list[str] = []
         if stale:
@@ -9162,6 +9168,13 @@ def _check_embedding_profile() -> list[HealthResult]:
                 if is_local_mode() else
                 "re-embed under the current profile: nx collection reindex <name>"
             )
+        if held:
+            # ``--all`` names a source a job holds and plans nothing for it, so a rerun would not move these.
+            parts.append(
+                f"{len(held)} live collection(s) under another model that a re-embed job already holds "
+                f"(re-embed --all names the job and plans nothing for them): {_name_list(held)}"
+            )
+            fixes.append("let the holding job finish, or resume or abort it: nx collection re-embed --status")
         if restored:
             parts.append(
                 f"{len(restored)} superseded source(s) that hold a live document again (nothing serves it "
@@ -9303,10 +9316,18 @@ def _check_reembed_jobs() -> list[HealthResult]:
             fixes.extend(_reembed_failed_fixes(j))
     if blocked:
         lines = [f"{_reembed_job_summary(j)}: {j.get('last_error')}" for j in blocked]
-        parts.append(f"{len(blocked)} job(s) blocked in cutover, waiting for a person: {_name_list(lines)}")
+        # The state machine has no resume edge out of cutover, and the engine refuses an abort once the delete step
+        # has started (ReembedStateMachine.decide); the job row carries the marker as ``cutover_step``.
+        deleting = [j for j in blocked if j.get("cutover_step") == "delete_started"]
+        why = "a resume is refused in cutover, so only an abort moves it"
+        if deleting:
+            why += f"; {len(deleting)} of them started the delete step, where the engine refuses the abort too"
+        parts.append(
+            f"{len(blocked)} job(s) blocked in cutover, waiting for a person ({why}): {_name_list(lines)}"
+        )
         fixes.extend(
             f"nx collection re-embed --abort {j.get('job_id')}  (the job's last error says why it waits)"
-            for j in blocked[:_MAX_FAILED_JOB_FIXES]
+            for j in [b for b in blocked if b not in deleting][:_MAX_FAILED_JOB_FIXES]
         )
     if in_flight:
         counts = ", ".join(

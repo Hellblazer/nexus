@@ -222,6 +222,15 @@ def reentry_candidates(
     return sorted(out, key=lambda r: str(r.job.get("source_collection")))
 
 
+def _lock_holders(jobs: Iterable[dict]) -> dict[str, dict]:
+    """Source name to the newest job holding its lock (:data:`LOCK_STATES`)."""
+    holder: dict[str, dict] = {}
+    for job in jobs:
+        if job.get("state") in LOCK_STATES:
+            holder.setdefault(str(job.get("source_collection")), job)
+    return holder
+
+
 def candidates(
     rows: Iterable[dict],
     profile: dict[str, str],
@@ -232,10 +241,7 @@ def candidates(
     """``--all``: the stale collections to plan, the ones a job already holds, and the re-entries."""
     rows = list(rows)
     jobs = list(jobs)
-    holder: dict[str, dict] = {}
-    for job in jobs:
-        if job.get("state") in LOCK_STATES:
-            holder.setdefault(str(job.get("source_collection")), job)
+    holder = _lock_holders(jobs)
     result = Candidates()
     for row in stale_rows(rows, profile):
         job = holder.get(str(row.get("name")))
@@ -332,12 +338,16 @@ class OffProfile:
     """The off-profile predicate's answer: the rows owed a re-embed, and the superseded rows it could not judge.
 
     ``unjudged`` is empty unless the job table or the document counts could not be read, in which case it holds
-    every superseded row (each is a kept source whose live-document check needs both). The hint ignores it; the
-    doctor says it, so "nothing is off-profile" is never printed over rows nobody looked at.
+    every superseded row (each is a kept source whose live-document check needs both) and ``unread`` names the read
+    that failed (``"job table"`` or ``"document counts"``). The hint ignores both; the doctor says them, so
+    "nothing is off-profile" is never printed over rows nobody looked at. ``held`` maps the name of each stale
+    row a job holds (its lock states) to that job: ``--all`` names the job instead of planning the source.
     """
 
     rows: list[dict] = field(default_factory=list)
     unjudged: list[dict] = field(default_factory=list)
+    unread: str = ""
+    held: dict[str, dict] = field(default_factory=dict)
 
 
 def off_profile_rows(
@@ -357,6 +367,8 @@ def judge_off_profile_rows(
     jobs: Callable[[], Iterable[dict]],
     live_docs: Callable[[str], int],
     all_docs: Callable[[str], int],
+    *,
+    read_jobs: bool = False,
 ) -> OffProfile:
     """THE off-profile predicate (nexus-n6mh0, RDR-210 Phase 6 Step 5, S-R2-5): the rows still owed a re-embed.
 
@@ -376,20 +388,33 @@ def judge_off_profile_rows(
 
     ``jobs`` is a thunk and is read only when some row is superseded, the one case that needs it. An unreadable
     job table (or unreadable document counts) leaves the superseded rows out (the hint and the doctor are best
-    effort), keeps the rest, and returns those superseded rows as ``unjudged``.
+    effort), keeps the rest, and returns those superseded rows as ``unjudged``. ``read_jobs`` (the doctor) also
+    reads the job table when only stale rows exist, so a row a running or failed job holds can be named with its job.
     """
     rows = list(rows)
     if not any(is_superseded(r) for r in rows):
-        return OffProfile(stale_rows(rows, profile))
+        stale = stale_rows(rows, profile)
+        if not (read_jobs and stale):
+            return OffProfile(stale)
+        try:
+            holders = _lock_holders(list(jobs()))
+        except Exception as exc:  # noqa: BLE001 — boundary: holders only annotate rows that are reported anyway
+            _log.debug("off_profile_holders_unread", error=str(exc))
+            return OffProfile(stale)
+        return OffProfile(stale, held={str(r.get("name")): holders[str(r.get("name"))] for r in stale if str(r.get("name")) in holders})
+    unread = "job table"
     try:
-        found = candidates(rows, profile, list(jobs()), live_docs, all_docs)
+        job_rows = list(jobs())
+        unread = "document counts"
+        found = candidates(rows, profile, job_rows, live_docs, all_docs)
     except Exception as exc:  # noqa: BLE001 — boundary: the exception needs the job table and counts; without them only the rows speak
-        _log.debug("off_profile_exception_unread", error=str(exc))
+        _log.debug("off_profile_exception_unread", error=str(exc), unread=unread)
         unjudged = sorted((r for r in rows if is_superseded(r)), key=lambda r: str(r.get("name", "")))
-        return OffProfile(stale_rows(rows, profile), unjudged)
+        return OffProfile(stale_rows(rows, profile), unjudged, unread)
     out = list(found.stale) + [row for row, _job in found.held]
     out += [r.source_row for r in found.reentries if r.kind == "running"]
-    return OffProfile(sorted(out, key=lambda r: str(r.get("name", ""))))
+    held = {str(row.get("name")): job for row, job in found.held}
+    return OffProfile(sorted(out, key=lambda r: str(r.get("name", ""))), held=held)
 
 
 def local_jobs() -> list[dict]:
@@ -424,8 +449,9 @@ def judge_off_profile_collections(
     rows: Iterable[dict] | None = None,
     profile: dict[str, str] | None = None,
     jobs: Callable[[], Iterable[dict]] | None = None,
+    read_jobs: bool = False,
 ) -> OffProfile:
-    """:func:`judge_off_profile_rows` over a catalog reader: what the doctor row calls.
+    """:func:`judge_off_profile_rows` over a catalog reader: what the doctor row calls (with ``read_jobs``).
 
     ``rows`` and ``profile`` are taken when the caller has already read them (the doctor has). The document
     counts the re-entry check needs are read once each, and only if a job makes a superseded row a candidate.
@@ -444,7 +470,9 @@ def judge_off_profile_collections(
             return counts[deleted].get(name, 0)
         return count
 
-    return judge_off_profile_rows(rows, profile, jobs or local_jobs, doc_count(False), doc_count(True))
+    return judge_off_profile_rows(
+        rows, profile, jobs or local_jobs, doc_count(False), doc_count(True), read_jobs=read_jobs,
+    )
 
 
 def has_off_profile_collection(reader: Any, jobs: Callable[[], Iterable[dict]] | None = None) -> bool:

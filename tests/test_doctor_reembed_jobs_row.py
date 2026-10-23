@@ -102,11 +102,28 @@ def test_running_jobs_are_green_with_counts_by_state(local, monkeypatch) -> None
     assert "docs__old" not in r.detail, "a finished job is history, not in flight"
 
 
-def test_a_job_parked_in_a_blocked_cutover_warns_with_its_reason_and_the_abort(local, monkeypatch) -> None:
-    r = _with_jobs(monkeypatch, [_job("a", "cutover", error="cutover is blocked: the source is no longer registered")])
+def test_a_job_parked_in_a_blocked_cutover_warns_and_offers_only_the_abort_and_says_why(local, monkeypatch) -> None:
+    r = _with_jobs(monkeypatch, [_job("jb", "cutover", error="cutover is blocked: the source is no longer registered")])
     assert r.ok is False and r.warn is True
-    assert "blocked" in r.detail and "no longer registered" in r.detail and "a" in r.detail
-    assert any("--abort a" in s for s in r.fix_suggestions)
+    assert "blocked in cutover" in r.detail and "no longer registered" in r.detail and "jb" in r.detail
+    # The state machine has no resume edge out of cutover (ReembedStateMachine.TRANSITIONS), so only an abort moves it.
+    assert "a resume is refused in cutover" in r.detail
+    assert r.fix_suggestions == [r.fix_suggestions[0]] and "--abort jb" in r.fix_suggestions[0]
+    assert not any("--resume" in s for s in r.fix_suggestions)
+
+
+def test_a_blocked_job_whose_delete_step_has_started_is_offered_no_abort(local, monkeypatch) -> None:
+    """The engine refuses an abort once the cutover's delete step has started, so the row must not offer one."""
+    r = _with_jobs(monkeypatch, [_job("jb", "cutover", error="cutover is blocked: x", cutover_step="delete_started")])
+    assert r.warn is True and "started the delete step" in r.detail
+    assert r.fix_suggestions == []
+
+
+def test_blocked_jobs_are_capped_in_the_fixes_but_counted(local, monkeypatch) -> None:
+    jobs = [_job(f"b{i}", "cutover", source=f"docs__s{i}", error="cutover is blocked: x") for i in range(8)]
+    r = _with_jobs(monkeypatch, jobs)
+    assert "8 job(s) blocked in cutover" in r.detail
+    assert len(r.fix_suggestions) == health._MAX_FAILED_JOB_FIXES == 5
 
 
 # ── failed ───────────────────────────────────────────────────────────────────
@@ -138,23 +155,36 @@ def test_failed_and_running_jobs_report_both(local, monkeypatch) -> None:
     assert "1 failed" in r.detail and "parity_mismatch" in r.detail and "running 1" in r.detail
 
 
-def test_many_failed_jobs_are_capped_in_the_detail_but_counted(local, monkeypatch) -> None:
+def test_many_failed_jobs_are_capped_in_the_detail_and_the_fixes_but_counted(local, monkeypatch) -> None:
     jobs = [_job(f"j{i:02d}", "failed", reason="batch_failed", source=f"docs__s{i:02d}") for i in range(14)]
     r = _with_jobs(monkeypatch, jobs)
-    assert "14 failed" in r.detail and "(+" in r.detail
-    assert len(r.fix_suggestions) <= 2 * health._MAX_NAMED_COLLECTIONS + 2
+    assert "14 failed" in r.detail and "(+4 more)" in r.detail
+    # Five jobs get fixes, two each (resume, abort): the cap is pinned to the number, not to a loose bound.
+    assert health._MAX_FAILED_JOB_FIXES == 5 and len(r.fix_suggestions) == 10
+    assert not any("j05" in s for s in r.fix_suggestions)
 
 
 # ── registration ─────────────────────────────────────────────────────────────
 
 
-def test_the_row_is_in_the_real_sweep_and_green_on_a_virgin_box(monkeypatch) -> None:
-    """Registered in ``run_health_checks`` (unregistering it fails this), once, and a box with no job table
-    does not warn: the fresh-install zero-warning bar."""
-    import inspect
+@pytest.mark.t2_tenant
+def test_the_real_sweep_carries_the_row_once(tmp_path, monkeypatch) -> None:
+    """One call of the real ``run_health_checks`` (no engine, so every other row degrades): the label is in its
+    result exactly once and carries the job table's state. Unregistering the call, or wrapping it in a condition
+    that is false here, fails this; a source-text count did not."""
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.reembed_job.local_jobs", lambda: [_job("jsweep", "failed", reason="batch_failed")])
+    results, _local = health.run_health_checks()
+    assert len(results) > 20, "premise: this is the whole sweep, not a stub"
+    (row,) = [r for r in results if r.label == _LABEL]
+    assert row.warn is True and "jsweep" in row.detail
 
-    source = inspect.getsource(health.run_health_checks)
-    assert source.count("_check_reembed_jobs()") == 1
+
+def test_a_virgin_box_with_no_engine_is_not_applicable(monkeypatch) -> None:
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
 
     def no_engine():

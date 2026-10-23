@@ -1141,7 +1141,39 @@ def test_embedding_profile_off_profile_row_unreadable_doc_counts_say_the_same(mo
     health = _patch_profile_check(monkeypatch, reader)
     monkeypatch.setattr("nexus.reembed_job.local_jobs", lambda: [_kept_job("kept_tombstoned")])
     r = _by_label(health._check_embedding_profile(), "Collections off-profile")
-    assert r.ok is True and "superseded sources not judged (job table unread)" in r.detail
+    assert r.ok is True and "superseded sources not judged (document counts unread)" in r.detail
+    assert "job table" not in r.detail, "the job table was read; the row must not blame it"
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_off_profile_row_in_cloud_mode_never_blames_a_job_table(monkeypatch) -> None:
+    """Outside local mode the job table is not read (``local_jobs`` answers ``[]``), so only the counts can fail."""
+    class _NoCounts(_FakeReader):
+        def collection_doc_counts(self, *, include_deleted: bool = False):
+            raise RuntimeError("counts down")
+
+    reader = _NoCounts(_VOYAGE_PROFILE, [_coll(_SRC, "code", _BGE, superseded_by=_TGT), _coll(_TGT, "code", "voyage-code-3")])
+    health = _patch_profile_check(monkeypatch, reader)
+    # No stub: the real local_jobs, which answers [] outside local mode without touching the engine.
+    r = _by_label(health._check_embedding_profile(), "Collections off-profile")
+    assert r.ok is True and "job table" not in r.detail
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_off_profile_held_rows_name_the_holding_job_not_all(monkeypatch) -> None:
+    """A stale row a job holds is not planned by ``--all`` (it names the job), so the row says who holds it."""
+    held, free = "code__1-1__held-a__v1", "code__1-1__free-a__v1"
+    reader = _FakeReader(_VOYAGE_PROFILE, [_coll(held, "code", _BGE), _coll(free, "code", _BGE), _coll(_TGT, "code", "voyage-code-3")])
+    health = _patch_profile_check(monkeypatch, reader)
+    job = {"job_id": "jhold", "source_collection": held, "target_collection": _TGT, "state": "running"}
+    monkeypatch.setattr("nexus.reembed_job.local_jobs", lambda: [job])
+    r = _by_label(health._check_embedding_profile(), "Collections off-profile")
+    assert "jhold" in r.detail and "running" in r.detail
+    held_part = [p for p in r.detail.split("; ") if "jhold" in p][0]
+    assert held in held_part and free not in held_part
+    free_part = [p for p in r.detail.split("; ") if free in p][0]
+    assert "jhold" not in free_part
+    assert any("--status" in s for s in r.fix_suggestions)
 
 
 @pytest.mark.usefixtures("cloud_mode")
