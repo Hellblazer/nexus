@@ -195,7 +195,7 @@ Most PDFs work fine with the default (`auto`). You only need to think about this
 - Large PDFs are automatically split into 5-page batches, each processed in
   an isolated subprocess to prevent OOM on formula-dense documents
 
-**MinerU is included by default** since nexus-2fyb. Previously gated behind a `[mineru]` extra; the extras gate produced silent formula loss because fresh installs never picked it up. First use of `auto` or `mineru` modes downloads the unimernet model (~2-3 GB). If MinerU is missing at runtime, your install is corrupt — reinstall with [`nx self install`](#nx-self-install) (from a dev checkout, `scripts/reinstall-tool.sh`). The runtime error prints the command for the layout it finds, so a box still on the legacy uv tree is told the uv form instead.
+**MinerU is included by default** since nexus-2fyb. Previously gated behind a `[mineru]` extra; the extras gate produced silent formula loss because fresh installs never picked it up. First use of `auto` or `mineru` modes downloads MinerU's models, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23). If MinerU is missing at runtime, your install is corrupt — reinstall with [`nx self install`](#nx-self-install) (from a dev checkout, `scripts/reinstall-tool.sh`). The runtime error prints the command for the layout it finds, so a box still on the legacy uv tree is told the uv form instead.
 
 **Setting a default backend (sticky config):**
 
@@ -4877,7 +4877,7 @@ MinerU also **auto-starts on demand** (nexus-1qdb9): when the PDF pipeline
 routes a document to MinerU and no server is running, it spawns one
 automatically — race-free across concurrent indexing runs — and waits up to
 two minutes for it to come healthy. A first-ever start may still be
-downloading models (~2-3 GB); in that case the current document falls back
+downloading models (about 1.2 GB); in that case the current document falls back
 to the in-process extractor and the warmed server handles later ones — the
 warm-up wait is a shared budget, so a slow first start never stalls each
 document in a batch. If the spawned process dies immediately (for example
