@@ -26,6 +26,7 @@ from nexus.db.http_vector_client import (
     PerCollectionEnvelopeError,
     VectorServiceError,
     per_collection_route_enabled,
+    route_lexical_enabled,
 )
 from nexus.errors import (
     SearchEmbeddingProfileMismatchError,
@@ -1795,9 +1796,12 @@ def search_cross_corpus(
         a pool of 8, instead of failing the group, and the group is remembered
         for 10 minutes so later searches go straight to per-collection.
 
-        ``--lexical`` (nexus-xd2rc): the request asks the engine for each
+        ``--lexical`` (nexus-xd2rc): with ``NX_SEARCH_ROUTE_LEXICAL`` set
+        (nexus-n51v1; off by default, the engine's per-collection lexical arms
+        made the search slower) the request asks the engine for each
         collection's lexical arm too (``lexical: true``), so the leg costs no
-        second round trip. The engine unions those rows in, threshold-exempt
+        second round trip. Without it the field is not sent and the leg runs
+        on ``/hybrid-search`` as described at the end of this paragraph. The engine unions those rows in, threshold-exempt
         and outside its ``limit`` cut, with the vector copy winning a tie, and
         names each collection's lexical ids. A lexical arm that failed raises
         :class:`LexicalLegUnavailableError`, as the batched path does. An
@@ -1859,8 +1863,11 @@ def search_cross_corpus(
                 **rerank_cap_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
-                # nexus-xd2rc: the lexical arms ride the same request; absent keeps it byte-identical.
-                **({"lexical": True} if lexical else {}),
+                # nexus-xd2rc: the lexical arms can ride the same request; absent keeps it byte-identical.
+                # nexus-n51v1: only on opt-in. One lexical arm per collection cost the engine 0.3 to 0.65 s
+                # each, so the field made a --lexical search 1.74x slower than the batched /hybrid-search
+                # leg the code below runs when the engine served no lexical.
+                **({"lexical": True} if lexical and route_lexical_enabled() else {}),
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.
                 **(

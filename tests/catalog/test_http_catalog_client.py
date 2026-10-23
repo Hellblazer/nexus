@@ -158,11 +158,10 @@ BGE_EMBEDDING_PROFILE_ROWS: list[dict[str, Any]] = [
 class FakeCatalogHandler(BaseHTTPRequestHandler):
     """Routes matching the real CatalogHandler.java switch cases exactly."""
 
-    #: nexus-gaou3: last body POSTed to /collections/rename (for cross_model assertions).
+    #: nexus-gaou3: last body POSTed to /collections/rename (what the client sends).
     last_rename_body: dict[str, Any] = {}
-    #: nexus-gaou3: when True, /collections/rename 409s a plain (cross_model-absent)
-    #: rename, mirroring the server's collision guard so the client's error
-    #: propagation can be asserted.
+    #: nexus-gaou3: when True, /collections/rename 409s the rename, mirroring the
+    #: server's collision guard so the client's error propagation can be asserted.
     rename_conflicts: bool = False
 
     #: RDR-168 P3 wire-semantics regression coverage.
@@ -833,9 +832,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"updated": 5})
         elif op == "/collections/rename":
             # RDR-164 P3: consolidated endpoint returns per-table re-home counts.
-            # nexus-gaou3: stash the body so tests can assert cross_model threading.
+            # nexus-gaou3: stash the body so tests can assert what the client sends.
             FakeCatalogHandler.last_rename_body = body
-            if FakeCatalogHandler.rename_conflicts and body.get("cross_model") is not True:
+            if FakeCatalogHandler.rename_conflicts:
                 self._send_json({"error": "target collection already exists"}, code=409)
             else:
                 # nexus-cecqy: the canonical branch RETIRES the old registry row
@@ -2006,19 +2005,9 @@ class TestHttpCatalogClientRoundTrip:
         FakeCatalogHandler.last_rename_body = {}
         n = client.rename_collection("old__coll", "new__coll")
         assert n == 3
-        # nexus-gaou3: default rename omits cross_model (server 409s an existing target).
+        # nexus-avjrb: the client never sends cross_model (its last caller went
+        # with nexus-0khi2); the server 409s an existing target.
         assert "cross_model" not in FakeCatalogHandler.last_rename_body
-
-        # nexus-gaou3: the deliberate cross-model repoint sends cross_model:true
-        # so the server takes the RDR-162 COPY branch instead of 409ing the
-        # existing target.
-        FakeCatalogHandler.last_rename_body = {}
-        client.rename_collection("old__coll", "new__coll", cross_model=True)
-        assert FakeCatalogHandler.last_rename_body.get("cross_model") is True
-
-        FakeCatalogHandler.last_rename_body = {}
-        client.rename_collection_cascade("old__coll", "new__coll", cross_model=True)
-        assert FakeCatalogHandler.last_rename_body.get("cross_model") is True
 
         # nexus-gaou3: a plain rename onto an existing target gets a 409 from the
         # server; the client must surface it (not swallow it into a 0 count).
@@ -2026,12 +2015,6 @@ class TestHttpCatalogClientRoundTrip:
         try:
             with pytest.raises(httpx.HTTPStatusError):
                 client.rename_collection("old__coll", "new__coll")
-
-            # nexus-gaou3: cross_model=True takes the RDR-162 repoint branch
-            # even when the server would 409 a plain rename — no exception,
-            # repoint count returned.
-            n2 = client.rename_collection("old__coll", "new__coll", cross_model=True)
-            assert n2 == 3
         finally:
             FakeCatalogHandler.rename_conflicts = False
 

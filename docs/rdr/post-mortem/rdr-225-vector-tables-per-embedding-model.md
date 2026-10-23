@@ -88,7 +88,7 @@ started this work were addressed by RDR-227's per-collection indexes.
    walk's 979 locks for 32 leaves) divided a fixed part in too: walks counted
    end to end fit about 18.5 per leaf, about 80 per model and about 60 fixed,
    so at four models and two parents the default lock table
-   (`max_locks_per_transaction` 64 x 100 connections) covers about 39 tenants.
+   (`max_locks_per_transaction` 64 x 122 backend slots, the size Postgres guarantees) covers about 48 tenants.
    The engine now refuses to start the walk past its lock table, and a
    populated 768-dimension local walk (100k chunks) ran in 135 s
    (nexus-vxmcl). Found while measuring tenant creation

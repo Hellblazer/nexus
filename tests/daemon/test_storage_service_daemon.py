@@ -3910,6 +3910,26 @@ class TestPdeathsigOrphanPrevention:
         sup._spawn_service()
         assert captured["env"].get("NX_SERVICE_PARENT_DEATH_EXIT") == "1"
 
+    def test_spawn_service_marks_the_engine_local_for_the_reembed_runner(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        """RDR-210 Phase 6 Step 2 (nexus-f98bg): the supervisor-spawned engine is the local one, so it gets
+        NX_ENGINE_LOCAL=1, the variable the engine reads (the value 1, whitespace ignored) to start the re-embed job runner.
+        An inherited value, set or empty, does not change what the local engine is told."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        monkeypatch.setattr(ssd_mod, "_popen", lambda argv, **kw: captured.update(kw) or _FakeProc(pid=49204))
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+        for inherited in (None, "", "0", "true"):
+            captured: dict = {}
+            if inherited is None:
+                monkeypatch.delenv("NX_ENGINE_LOCAL", raising=False)
+            else:
+                monkeypatch.setenv("NX_ENGINE_LOCAL", inherited)
+            sup = _make_supervisor(config_dir, clock)
+            sup._spawn_service()
+            assert captured["env"].get("NX_ENGINE_LOCAL") == "1", f"inherited={inherited!r}"
+
     def test_spawn_service_hands_the_engine_the_pg_data_dir_for_the_disk_preflight(
         self, config_dir: Path, clock: _FakeClock, monkeypatch
     ) -> None:

@@ -45,9 +45,15 @@ Never emitted when it cannot succeed
 
 The instance-name mailbox
     The ``ListAgents`` row name (e.g. ``nexus-19``) reaches no environment
-    variable anywhere and it reaches no FILE this module could read either,
-    so this module reads NOTHING to guess it. The name exists only in the
-    model's own knowledge, from the ``ListAgents`` tool's "This session is
+    variable anywhere, so this module reads NOTHING to guess it. It is not
+    only the model's knowledge any more (nexus-u839f): Claude Code's
+    ``<config>/sessions/<pid>.json`` carries it, and the MCP server leases
+    the name from there itself at start and after a ``/clear``, re-reading it
+    about once a minute (``nexus.mcp.subscriptions.resolve_session_name``).
+    The instruction below is the fallback for a host without that registry,
+    and a no-op when the names agree (the name stays registry-derived, so a
+    ``/rename`` is still followed). From the model's side
+    the name is known from the ``ListAgents`` tool's "This session is
     <name>" line, and the rendered instruction says so: pass it to
     ``tuple_subscribe("mailbox/<name>")``, taken from a fresh
     ``ListAgents`` call, never from memory. Subscribing it arms a
@@ -169,9 +175,10 @@ def mailbox_arm_instruction(session_id: str) -> str:
     it directly.
 
     Carries no instance-name literal (nexus-6konb.9 defect fix, still true
-    under RDR-211): that name exists only in the model's own knowledge,
-    from ``ListAgents``'s "This session is <name>" line, never in this
-    process's environment or any file this module could read. The
+    under RDR-211): this hook process cannot read the name (it is in
+    Claude Code's session registry, which the MCP server reads, not this
+    module), so from the model's side it comes from ``ListAgents``'s
+    "This session is <name>" line. The
     rendered call therefore always names the placeholder ``<name>``, taken
     from a FRESH ``ListAgents`` call rather than memory (nexus-6konb.20):
     ListAgents renames a session on resume (measured nexus-58 to nexus-03,

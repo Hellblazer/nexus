@@ -22,6 +22,8 @@ import java.util.List;
 import java.util.TreeSet;
 import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
+import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -287,6 +289,79 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                 assertThatThrownBy(() -> countAs(diag, "nexus", "request_ledger"))
                     .as("nexus_diag must hold no SELECT on nexus.request_ledger")
                     .hasMessageContaining("permission denied for table request_ledger");
+            }
+        }
+    }
+
+    /**
+     * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): after a full production-shaped walk, nexus_svc holds
+     * SELECT, INSERT, UPDATE and DELETE on {@code nexus.reembed_jobs} and {@code nexus.reembed_job_moves}
+     * (from the grants-nexus-svc-1 loop and its default privileges, with no per-table edit; job_id is
+     * app-generated, so there is no sequence to grant), and nexus_diag holds NOTHING on either: the
+     * job's collection columns hold collection names and nexus_diag bypasses RLS.
+     */
+    @Test
+    void reembedJobTables_svcHasDml_diagIsDenied() throws Exception {
+        assertThat(CatalogRepository.NEXUS_DIAG_READABLE_TABLES)
+            .as("the re-embed job tables are deliberately not diag-readable (nexus-f98bg)")
+            .doesNotContain("reembed_jobs", "reembed_job_moves");
+
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(pg.getJdbcUrl());
+            cfg.setUsername("nexus_svc");
+            cfg.setPassword("nexus_svc_pass");
+            cfg.setMaximumPoolSize(2);
+            cfg.setAutoCommit(true);
+            try (var svcDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+                TenantScope scope = new TenantScope(svcDs);
+                String tenant = "reembed-grants";
+                UUID job = UUID.randomUUID();
+                OffsetDateTime now = OffsetDateTime.now();
+                scope.withTenant(tenant, ctx -> ctx.insertInto(REEMBED_JOBS)
+                    .set(REEMBED_JOBS.TENANT_ID, tenant)
+                    .set(REEMBED_JOBS.JOB_ID, job)
+                    .set(REEMBED_JOBS.SOURCE_COLLECTION, "docs__o__bge-base-en-v15-768__v1")
+                    .set(REEMBED_JOBS.TARGET_COLLECTION, "docs__o__minilm-l6-v2-384__v1")
+                    .set(REEMBED_JOBS.STATE, "planned")
+                    .set(REEMBED_JOBS.STARTED_AT, now)
+                    .set(REEMBED_JOBS.UPDATED_AT, now)
+                    .execute());
+                scope.withTenant(tenant, ctx -> ctx.insertInto(REEMBED_JOB_MOVES)
+                    .set(REEMBED_JOB_MOVES.TENANT_ID, tenant)
+                    .set(REEMBED_JOB_MOVES.JOB_ID, job)
+                    .set(REEMBED_JOB_MOVES.DOC_ID, "1.1.1")
+                    .set(REEMBED_JOB_MOVES.OUTCOME, "moved")
+                    .set(REEMBED_JOB_MOVES.PASS_NUMBER, (short) 1)
+                    .set(REEMBED_JOB_MOVES.AT, now)
+                    .execute());
+                int updated = scope.withTenant(tenant, ctx -> ctx.update(REEMBED_JOBS)
+                    .set(REEMBED_JOBS.STATE, "running")
+                    .where(REEMBED_JOBS.JOB_ID.eq(job))
+                    .execute());
+                assertThat(updated).as("nexus_svc UPDATE on reembed_jobs").isEqualTo(1);
+                String state = scope.withTenant(tenant, ctx -> ctx.select(REEMBED_JOBS.STATE)
+                    .from(REEMBED_JOBS).where(REEMBED_JOBS.JOB_ID.eq(job)).fetchOne(REEMBED_JOBS.STATE));
+                assertThat(state).as("nexus_svc SELECT on reembed_jobs").isEqualTo("running");
+                int deleted = scope.withTenant(tenant, ctx -> ctx.deleteFrom(REEMBED_JOBS)
+                    .where(REEMBED_JOBS.JOB_ID.eq(job)).execute());
+                assertThat(deleted).as("nexus_svc DELETE on reembed_jobs").isEqualTo(1);
+                int movesLeft = scope.withTenant(tenant, ctx -> ctx.fetchCount(REEMBED_JOB_MOVES,
+                    REEMBED_JOB_MOVES.JOB_ID.eq(job)));
+                assertThat(movesLeft).as("the job's delete cascades to its moves").isZero();
+            }
+
+            try (Connection diag = DriverManager.getConnection(
+                    pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> countAs(diag, "nexus", "reembed_jobs"))
+                    .as("nexus_diag must hold no SELECT on nexus.reembed_jobs")
+                    .hasMessageContaining("permission denied for table reembed_jobs");
+                assertThatThrownBy(() -> countAs(diag, "nexus", "reembed_job_moves"))
+                    .as("nexus_diag must hold no SELECT on nexus.reembed_job_moves")
+                    .hasMessageContaining("permission denied for table reembed_job_moves");
             }
         }
     }

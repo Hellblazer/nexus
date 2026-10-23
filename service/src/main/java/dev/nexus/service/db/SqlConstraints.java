@@ -37,7 +37,20 @@ public final class SqlConstraints {
     /** PostgreSQL SQLSTATE for {@code foreign_key_violation}. */
     public static final String FOREIGN_KEY_VIOLATION = "23503";
 
+    /** PostgreSQL SQLSTATE for {@code lock_not_available}: a {@code lock_timeout} expiring on a lock wait. */
+    public static final String LOCK_NOT_AVAILABLE = "55P03";
+
     private SqlConstraints() {
+    }
+
+    /** True if a {@code 55P03} (a lock wait that hit its {@code lock_timeout}) appears anywhere in {@code t}'s cause chain. */
+    public static boolean isLockNotAvailable(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof SQLException se && LOCK_NOT_AVAILABLE.equals(se.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

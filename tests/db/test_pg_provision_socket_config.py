@@ -96,7 +96,7 @@ def test_preserves_foreign_conf_lines(tmp_path: Path) -> None:
 # ── max_locks_per_transaction (nexus-o26hs) ───────────────────────────────────
 # The engine's RDR-225 walk creates models x tenants x 2 leaf partitions in one
 # transaction and refuses to start (WalkLockPreflight) when their locks would not
-# fit the lock table; at the PostgreSQL default of 64 that is about 39 tenants.
+# fit the lock table; at the PostgreSQL default of 64 that is about 48 tenants.
 # The managed block raises it, unless the user's own conf already sets it.
 
 

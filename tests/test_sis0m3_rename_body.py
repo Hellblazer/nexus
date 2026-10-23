@@ -45,9 +45,3 @@ def test_rename_sends_the_new_names_type_and_owner(monkeypatch):
     client.rename_collection_cascade("knowledge__old-subj", "knowledge__new-subj")
     assert sent[0]["content_type"] == "knowledge"
     assert sent[0]["owner_id"] == "new-subj"
-
-
-def test_cross_model_rename_sends_no_attributes(monkeypatch):
-    client, sent = _capture(monkeypatch)
-    client.rename_collection_cascade("docs__a__m__v1", "docs__a__n__v1", cross_model=True)
-    assert "owner_id" not in sent[0] and "content_type" not in sent[0]

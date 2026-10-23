@@ -34,6 +34,28 @@ SERVICE_RESTART_HINT: str = (
 )
 
 
+def _embed_profile_if_restart_key(key: str) -> str | None:
+    """``local_embed_profile()`` before a write to a key that can move it, else ``None`` (RDR-210 Technical Design 2)."""
+    if key not in RESTART_HINT_KEYS:
+        return None
+    from nexus.config import local_embed_profile  # noqa: PLC0415 — deliberate function-scoped import (avoid circular import)
+
+    return local_embed_profile()
+
+
+def _echo_reembed_hint_if_profile_changed(before: str | None) -> None:
+    """RDR-210 "Re-embed to the profile default": when the change flipped ``local_embed_profile()``'s answer, a
+    second line names the verb that moves the existing collections. A change that leaves the answer alone (a
+    Voyage key set beside a recorded bge choice, say) prints nothing: no collection became stale."""
+    if before is None:
+        return
+    from nexus.config import local_embed_profile  # noqa: PLC0415 — deliberate function-scoped import (avoid circular import)
+    from nexus.reembed_job import REEMBED_HINT  # noqa: PLC0415 — deliberate function-scoped import (CLI startup cost)
+
+    if local_embed_profile() != before:
+        click.echo(REEMBED_HINT)
+
+
 def _get_config_value(dotted_key: str) -> str | None:
     """Look up a dotted key (e.g. ``pdf.mineru_server_url``) in the merged config.
 
@@ -144,6 +166,7 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
         key = key_value
 
     key = key.strip().lower().replace("-", "_")
+    profile_before = _embed_profile_if_restart_key(key)
     if "." in key:
         from nexus.config import set_config_value  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         try:
@@ -164,6 +187,7 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
         )
     if key in RESTART_HINT_KEYS:
         click.echo(SERVICE_RESTART_HINT)
+        _echo_reembed_hint_if_profile_changed(profile_before)
 
 
 @config_group.command("unset")
@@ -178,6 +202,7 @@ def config_unset(key: str) -> None:
       nx config unset service_token
     """
     key = key.strip().lower().replace("-", "_")
+    profile_before = _embed_profile_if_restart_key(key)
     try:
         removed = unset_credential(key)
     except ValueError as exc:
@@ -189,6 +214,7 @@ def config_unset(key: str) -> None:
         click.echo(f"Note: {env_var} is set in the environment and still applies.", err=True)
     if removed and key in RESTART_HINT_KEYS:
         click.echo(SERVICE_RESTART_HINT)
+        _echo_reembed_hint_if_profile_changed(profile_before)
 
 
 # ── get ───────────────────────────────────────────────────────────────────────

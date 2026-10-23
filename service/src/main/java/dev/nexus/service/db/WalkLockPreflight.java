@@ -3,7 +3,6 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
-import org.jooq.Record3;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
@@ -21,8 +20,8 @@ import java.util.List;
  *
  * <p>The walk {@code vectors-030-1} creates a leaf partition for every (model, tenant) pair on both partitioned
  * parents inside one transaction, and holds every new relation's locks until it commits. Those locks live in the
- * server's shared lock table, which has room for {@code max_locks_per_transaction x (max_connections +
- * max_prepared_transactions)} entries. A walk that needs more fails with "out of shared memory" after it has done
+ * server's shared lock table, which Postgres sizes at {@code max_locks_per_transaction x (MaxBackends +
+ * max_prepared_transactions)} entries (see Capacity below). A walk that needs more fails with "out of shared memory" after it has done
  * most of its work. The transaction rolls back and the store is untouched, but the engine exits, and every restart
  * repeats the whole copy and fails the same way until the setting is raised; on a local install nobody is watching
  * that loop. This check refuses before the copy instead, naming the setting to raise.
@@ -44,8 +43,8 @@ import java.util.List;
  * <p><strong>When it runs:</strong> only while {@code vectors-030-1} is not yet in {@code
  * public.databasechangelog}, and only on a store that has a {@code nexus.chunks} table to walk (a fresh install
  * creates its leaves for {@code 'default'} alone). It reads the lock-table size with {@code current_setting},
- * which every role may read for these three settings, so unlike the disk preflight it needs no local path and
- * applies to a managed database too.
+ * which every role may read for these settings, so unlike the disk preflight it needs no local path and applies
+ * to a managed database too.
  *
  * <p><strong>Reading the tenants.</strong> {@code nexus.chunks} and {@code nexus.taxonomy_centroids} carry FORCE
  * ROW LEVEL SECURITY and the migration role has no BYPASSRLS, so a plain read on this connection sees zero rows
@@ -54,9 +53,19 @@ import java.util.List;
  * {@code catalog-036} has no {@code nexus.embedding_models} yet; the walk will find the four models
  * {@code catalog-036-2} seeds, so that count stands in.
  *
- * <p><strong>Capacity.</strong> Postgres sizes the lock table on every backend slot (autovacuum and background
- * workers and WAL senders too), so the figure here is a little below the real table. Other sessions' locks
- * share it, so that slack is kept as headroom rather than counted.
+ * <p><strong>Capacity.</strong> A lower bound on the table Postgres guarantees: {@code max_locks_per_transaction}
+ * times every backend slot, MaxBackends ({@code max_connections + autovacuum_max_workers + 1 +
+ * max_worker_processes + max_wal_senders}; {@code autovacuum_worker_slots} in place of
+ * {@code autovacuum_max_workers} where the server has it; PostgreSQL 17 counts one more special worker than the
+ * {@code + 1} here, so this is a slot short there, on the safe side), plus {@code max_prepared_transactions}. A
+ * setting the server does not have counts as 0; an unreadable {@code max_locks_per_transaction} or
+ * {@code max_connections} skips the check. The estimate is admitted up to the whole table: room for other
+ * sessions' locks is the shared-memory slack past it, which Postgres does not promise. Measured once, on one host
+ * (laptop colima, {@code max_locks_per_transaction} 64, {@code max_connections} 20, default shared_buffers;
+ * computed table 2,688): the walk passed holding 6,278 locks at 40 tenants and failed with SQLSTATE 53200 by 44
+ * (T2 {@code nexus_rdr/225-xzit5-walk-lock-failure-boundary-2026-10-22}). How that slack scales with other
+ * settings was not measured. {@code WalkLockPreflightIntegrationTest} walks the largest tenant count admitted at
+ * a lowered setting.
  */
 public final class WalkLockPreflight {
 
@@ -108,12 +117,16 @@ public final class WalkLockPreflight {
             long tenants = tenants(conn);
             long leaves = models * tenants * 2;
             long estimated = estimatedLocks(models, leaves);
-            Record3<Integer, Integer, Integer> s = ctx.select(
-                    setting("max_locks_per_transaction"), setting("max_connections"),
-                    setting("max_prepared_transactions"))
-                .fetchOne();
-            long perTransaction = s.value1();
-            long slots = (long) s.value2() + s.value3();
+            long perTransaction = setting(ctx, "max_locks_per_transaction");
+            if (perTransaction <= 0 || setting(ctx, "max_connections") <= 0) {
+                log.warn("event=walk_lock_preflight_skipped reason=\"the lock-table settings are unreadable\"");
+                return;
+            }
+            long workerSlots = setting(ctx, "autovacuum_worker_slots");
+            long slots = setting(ctx, "max_connections")
+                + (workerSlots > 0 ? workerSlots : setting(ctx, "autovacuum_max_workers")) + 1
+                + setting(ctx, "max_worker_processes") + setting(ctx, "max_wal_senders")
+                + setting(ctx, "max_prepared_transactions");
             long capacity = perTransaction * slots;
             if (estimated > capacity) {
                 // Rounded up to a multiple of 64 (the default), which also leaves headroom for other sessions.
@@ -132,12 +145,12 @@ public final class WalkLockPreflight {
                     + models + " models x " + tenants + " tenants x 2 tables) in one transaction and holds about "
                     + estimated + " relation locks until it commits, but the server's lock table has room for "
                     + capacity + " (max_locks_per_transaction " + perTransaction + " x " + slots
-                    + " connection and prepared-transaction slots). Set max_locks_per_transaction to at least "
+                    + " backend and prepared-transaction slots). Set max_locks_per_transaction to at least "
                     + needed + " " + how + ".");
             }
             log.info("event=walk_lock_preflight_passed estimated_locks={} lock_table_capacity={} leaves={} models={} "
                 + "tenants={}", estimated, capacity, leaves, models, tenants);
-        } catch (DataAccessException | SQLException e) {
+        } catch (DataAccessException | SQLException | NumberFormatException e) {
             // Advisory: a check that cannot read its inputs must not stop a boot the walk itself may finish.
             log.warn("event=walk_lock_preflight_skipped reason=\"lock preflight query failed: {}\"", e.toString());
         }
@@ -185,8 +198,11 @@ public final class WalkLockPreflight {
         }
     }
 
-    private static org.jooq.Field<Integer> setting(String name) {
-        return DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val(name)).cast(SQLDataType.INTEGER);
+    /** An integer server setting, 0 when this server version has no such setting. */
+    private static long setting(DSLContext ctx, String name) {
+        String value = ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val(name), DSL.val(true)))
+            .fetchOne(0, String.class);
+        return value == null || value.isBlank() ? 0L : Long.parseLong(value.strip());
     }
 
     private static boolean exists(DSLContext ctx, String qualifiedName) {

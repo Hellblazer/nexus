@@ -107,6 +107,24 @@ class MemorySchemaLiquibaseTest {
         }
     }
 
+    // ── nexus-8oxsb: the bounded list and its count read one partial index ──
+    //
+    // The key matches listEntries' WHERE and ORDER BY, and the predicate matches NOT_QUARANTINED,
+    // so countEntries can stay in the index (memory-005 records the measured plans; a plan
+    // assertion here would pin a cost-based choice on a test-sized table).
+
+    @Test
+    void liveProjectTimestampIndex_isPartialOnTheListKey() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(PgCatalogProbes.indexDef(ctx, "nexus", "idx_memory_live_tenant_project_ts"))
+                .as("memory-005-1")
+                .isNotNull()
+                .contains("ON nexus.memory USING btree (tenant_id, project, \"timestamp\" DESC, id DESC)")
+                .endsWith("WHERE (quarantined_at IS NULL)");
+        }
+    }
+
     // ── Test 2: RLS flags and policy ─────────────────────────────────────────
 
     @Test

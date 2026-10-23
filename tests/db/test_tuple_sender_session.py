@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 
 import httpx
@@ -43,6 +44,8 @@ _ROW = {
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The rejected-token memo is process-wide (nexus-z1xox); each test starts clean.
+    monkeypatch.setattr(HttpTupleStore, "_rejected_sessions", {})
     monkeypatch.setenv("NX_SERVICE_TOKEN", "data-token")
     monkeypatch.delenv("NX_T1_SESSION", raising=False)
     monkeypatch.setenv("NX_T1_SESSION_ID", SESSION_ID)
@@ -340,20 +343,80 @@ class TestStaleTokenMemo:
             "stale-one", None, None, "stale-two", None, None,
         ]
 
-    def test_the_memo_is_per_store_instance(self, monkeypatch) -> None:
+    def test_the_memo_is_process_wide_so_a_fresh_store_does_not_resend(self, monkeypatch) -> None:
+        """nexus-z1xox: the MCP channel waiter opens a fresh T2Database (hence a
+        fresh HttpTupleStore) on every tick. A memo held on the instance died with
+        it, so each tick re-sent the rejected token and logged again."""
         monkeypatch.setenv("NX_T1_SESSION", TOKEN)
         seen: list[httpx.Request] = []
         _store(self._gated(seen)).rd("mailbox/x", {"to": "x"})
         _store(self._gated(seen)).rd("mailbox/x", {"to": "x"})
-        assert [HEADER in r.headers for r in seen] == [True, False, True, False]
+        assert [HEADER in r.headers for r in seen] == [True, False, False]
+
+    def test_waiter_ticks_each_on_a_fresh_store_send_the_rejected_header_once_and_log_once(
+        self, monkeypatch, info_logs,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        seen: list[httpx.Request] = []
+        with capture_logs() as logs:
+            for _ in range(5):  # ChannelWaiter._call: store_factory() per tick
+                _store(self._gated(seen)).rd("mailbox/x", {"to": "x"})
+        assert sum(HEADER in r.headers for r in seen) == 1
+        assert len(seen) == 6  # the one headered 401, its headerless retry, 4 clean ticks
+        dropped = [e for e in logs if e["event"] == "tuple_session_header_dropped"]
+        assert len(dropped) == 1
+        assert dropped[0]["pid"] == os.getpid()
+        assert TOKEN not in repr(logs)
+
+    def test_a_changed_token_is_sent_again_by_a_fresh_store(self, monkeypatch, info_logs) -> None:
+        seen: list[httpx.Request] = []
+        with capture_logs() as logs:
+            monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+            _store(self._gated(seen, live="fresh")).rd("mailbox/x", {"to": "x"})
+            monkeypatch.setenv("NX_T1_SESSION", "fresh")
+            _store(self._gated(seen, live="fresh")).rd("mailbox/x", {"to": "x"})
+            _store(self._gated(seen, live="fresh")).rd("mailbox/x", {"to": "x"})
+        assert [r.headers.get(HEADER) for r in seen] == [TOKEN, None, "fresh", "fresh"]
+        assert len([e for e in logs if e["event"] == "tuple_session_header_dropped"]) == 1
+
+    def test_one_tenants_rejection_does_not_suppress_another_tenants_token(self, monkeypatch) -> None:
+        # The memo is scoped by endpoint and data token (the data token names the
+        # tenant): a store whose engine rejects the session token as another
+        # tenant's must not stop a store on its own tenant from sending it.
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        rejected: list[httpx.Request] = []
+        other = _store(self._gated(rejected))
+        other._token = "other-tenant-data-token"
+        other.rd("mailbox/x", {"to": "x"})
+        accepted: list[httpx.Request] = []
+        own = _store(lambda request: (accepted.append(request), _ok(request))[1])
+        own.rd("mailbox/x", {"to": "x"})
+        assert [HEADER in r.headers for r in rejected] == [True, False]
+        assert accepted[0].headers.get(HEADER) == TOKEN
+
+    def test_a_rejection_expires_and_the_token_is_offered_again(self, monkeypatch) -> None:
+        import nexus.db.t2.http_tuple_store as hts
+
+        clock = [1000.0]
+        monkeypatch.setattr(hts, "_monotonic", lambda: clock[0])
+        monkeypatch.setenv("NX_T1_SESSION", TOKEN)
+        seen: list[httpx.Request] = []
+        _store(self._gated(seen)).rd("mailbox/x", {"to": "x"})
+        clock[0] += hts._REJECTED_SESSION_TTL_S - 1
+        _store(self._gated(seen)).rd("mailbox/x", {"to": "x"})
+        clock[0] += 2
+        _store(self._gated(seen)).rd("mailbox/x", {"to": "x"})
+        # rejected + retry, suppressed inside the window, offered again after it
+        assert [HEADER in r.headers for r in seen] == [True, False, False, True, False]
 
     def test_the_store_keeps_a_hash_never_the_raw_token(self, monkeypatch) -> None:
         monkeypatch.setenv("NX_T1_SESSION", TOKEN)
         store = _store(self._gated([]))
         store.rd("mailbox/x", {"to": "x"})
         digest = hashlib.sha256(TOKEN.encode()).hexdigest()
-        assert store._rejected_session_hash == digest  # type: ignore[attr-defined]
+        assert store._current_rejected_hash() == digest
         assert TOKEN not in repr(vars(store))
+        assert TOKEN not in repr(HttpTupleStore._rejected_sessions)
 
     def test_a_data_token_rotated_between_attempts_sets_no_memo(self, monkeypatch) -> None:
         """A concurrent re-mint between the headered 401 and the headerless retry
@@ -374,7 +437,7 @@ class TestStaleTokenMemo:
         holder.append(store)
         store.out("mailbox/x", {"to": "x"}, {"from": "y"}, "b", nonce="n")
         assert seen == [True, False]
-        assert store._rejected_session_hash is None  # type: ignore[attr-defined]
+        assert store._current_rejected_hash() is None
         store.out("mailbox/x", {"to": "x"}, {"from": "y"}, "b", nonce="n2")
         assert seen[2] is True, "the live session token is sent again"
 
@@ -389,7 +452,7 @@ class TestStaleTokenMemo:
         store = _store(handler)
         with pytest.raises(httpx.HTTPStatusError):
             store.rd("mailbox/x", {"to": "x"})
-        assert store._rejected_session_hash is None  # type: ignore[attr-defined]
+        assert store._current_rejected_hash() is None
 
     def test_info_log_once_per_token_and_none_for_the_suppressed_calls(
         self, monkeypatch, info_logs,

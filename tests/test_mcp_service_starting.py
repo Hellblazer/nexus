@@ -39,6 +39,13 @@ from tests._epipe_server import (
 
 _NO_COLLECTIONS = "No collections match corpus"
 
+#: The longest a gated stats request waits for its gate; a bound, so a test that never opens it ends.
+_GATE_LIMIT_S = 10.0
+
+#: How long a test's end waits for the background fan-out counts refresh (nexus-vpa9q) to finish.
+#: The engine is still serving then, so it ends in milliseconds; the bound is for a wedged one.
+_REFRESH_DRAIN_S = 30.0
+
 
 class _Engine(BaseHTTPRequestHandler):
     """The slice of the engine a collection listing reads."""
@@ -46,6 +53,10 @@ class _Engine(BaseHTTPRequestHandler):
     stats_status = 200
     stats_rows: list[dict] = []
     stats_hits = 0
+    #: When set, a stats request announces itself on ``stats_arrived`` and answers only once
+    #: the gate opens (or after ``_GATE_LIMIT_S``): a request that is in flight when a test ends.
+    stats_gate: threading.Event | None = None
+    stats_arrived = threading.Event()
 
     def log_message(self, *args):  # silence
         pass
@@ -56,6 +67,9 @@ class _Engine(BaseHTTPRequestHandler):
             self.rfile.read(length)
         if self.path.startswith("/v1/vectors/stats"):
             type(self).stats_hits += 1
+            if (gate := type(self).stats_gate) is not None:
+                type(self).stats_arrived.set()
+                gate.wait(_GATE_LIMIT_S)
             status, payload = type(self).stats_status, type(self).stats_rows
             if status != 200:
                 payload = {"error": "vector backend not serving yet"}
@@ -72,11 +86,36 @@ class _Engine(BaseHTTPRequestHandler):
     do_POST = _serve
 
 
+def _stop_engine(server: ThreadingHTTPServer, thread: threading.Thread) -> bool:
+    """End a test's engine without leaving a request of the test's own to outlive it.
+
+    A search on a not-ready engine starts the background fan-out counts refresh
+    (``mcp_infra.get_fanout_counts``) and returns without it: the refresh is still asking the
+    engine when the test ends. Closing the engine first sent that request to a closed port,
+    where the vector client's connection-refused branch waits up to 12 s for a lease
+    republication, far past the 2 s ``reset_singletons`` gives it. The thread then ran into the
+    next test on the worker (listing that test's engine, so a not-ready reader found a fresh
+    cache and did not raise) or past the last one (a late storage touch). So: open any gate,
+    let the refresh finish against the live engine, and only then close it. Returns whether the
+    refresh finished in time (the fixture asserts it, after its own ``reset_singletons`` so the
+    singleton lint, which reads the fixture body, sees the reset).
+    """
+    if _Engine.stats_gate is not None:
+        _Engine.stats_gate.set()
+    drained = mcp_infra.join_fanout_counts_refresh(_REFRESH_DRAIN_S)
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+    return drained
+
+
 @pytest.fixture
 def engine(monkeypatch):
     _Engine.stats_status = 200
     _Engine.stats_rows = []
     _Engine.stats_hits = 0
+    _Engine.stats_gate = None
+    _Engine.stats_arrived = threading.Event()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Engine)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -90,10 +129,9 @@ def engine(monkeypatch):
     try:
         yield _Engine
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        drained = _stop_engine(server, thread)
         mcp_infra.reset_singletons()
+        assert drained, f"the fan-out counts refresh was still running {_REFRESH_DRAIN_S} s after the test ended"
 
 
 def _assert_not_answering_message(text: str) -> None:
@@ -315,6 +353,19 @@ def test_a_failed_listing_is_no_row_for_a_write_path_caller(engine, status):
     assert mcp_infra.get_collection_row(_ROW_NAME) is None
 
 
+def test_a_strict_read_of_a_failed_listing_raises(engine):
+    """nexus-s8r5o: a caller that must not read "unreadable" as "no row" (the indexers'
+    unchanged-content skip) asks with ``strict=True`` and gets the failure."""
+    from nexus.db.http_vector_client import VectorServiceError
+
+    engine.stats_status = 503
+    client = mcp_infra.get_t3()
+    with pytest.raises((mcp_infra.ServiceNotReadyError, VectorServiceError)):
+        client._resolve_collection_row(_ROW_NAME, strict=True)
+    with pytest.raises((mcp_infra.ServiceNotReadyError, VectorServiceError)):
+        mcp_infra.get_collection_row(_ROW_NAME, strict=True)
+
+
 def test_a_refused_listing_is_no_row_for_get_collection_row(monkeypatch):
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
@@ -443,3 +494,34 @@ def test_a_good_cache_install_forgets_the_remembered_failure(engine, monkeypatch
     engine.stats_rows = [row]
     assert mcp_infra.get_collection_counts(max_age=0) == {_ROW_NAME: 3}
     assert engine.stats_hits > after_first
+
+
+# ── the background counts refresh does not outlive its test ───────────────────────────────────
+
+
+def test_a_counts_refresh_in_flight_when_a_test_ends_is_finished_before_the_next_test(pytester):
+    """A search on a not-ready engine starts ``get_fanout_counts``'s background refresh and returns
+    while the refresh is still asking. Two nested tests, the first ending with a refresh blocked
+    in the engine: the second must find no refresh thread alive. Before the engine fixture drained
+    the refresh ahead of closing the engine, the thread outlived ``reset_singletons`` (nexus-uca6q)
+    and the second test saw it: the source of two CI reds, a late storage touch and a not-ready
+    reader that did not raise."""
+    pytester.makepyfile(
+        """
+        import threading
+        import nexus.mcp_infra as mcp_infra
+        from tests.test_mcp_service_starting import engine  # noqa: F401  (the fixture under test)
+
+        def test_1_ends_with_a_refresh_in_flight(engine):
+            engine.stats_gate = threading.Event()
+            mcp_infra.get_fanout_counts()  # a cold cache: starts the background refresh
+            assert engine.stats_arrived.wait(10), "the refresh never reached the engine"
+
+        def test_2_finds_no_refresh_alive(engine):
+            thread = mcp_infra._fanout_counts_refresh
+            assert thread is not None, "test_1 started no refresh: the pin is vacuous"
+            assert not thread.is_alive()
+        """
+    )
+    result = pytester.runpytest_inprocess("-p", "no:randomly", "-p", "no:cacheprovider", "-q")
+    result.assert_outcomes(passed=2)

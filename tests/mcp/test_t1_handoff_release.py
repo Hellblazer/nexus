@@ -35,6 +35,7 @@ from nexus.daemon.t1_handoff import (
 )
 from tests._module_seam import module_time
 
+_REAL_START_CHANNEL_WAITER = core._start_channel_waiter  # the autouse fixture below stubs the module attribute
 _CLAUDE_PID = 4242
 _MCP_PID = 4300
 
@@ -138,6 +139,95 @@ async def test_valid_marker_rekeys_the_channel_waiter_and_subscriptions(monkeypa
     assert events[-1] == ("start", "new-sess"), events  # the new waiter starts AFTER the swap
     assert "old-sess" not in core._channel._ACTIVE
     assert "old-sess" not in core._subscriptions._CACHE
+
+
+# ── nexus-u839f: a /clear moves the directory name with the session ──────────
+
+
+@pytest.mark.asyncio
+async def test_a_clear_handoff_releases_the_old_name_and_arms_the_new_sessions_name(
+    monkeypatch, tmp_path,
+) -> None:
+    """The old id's set releases its `directory/<old name>` row (nexus-kdxyv)
+    and the REAL `_start_channel_waiter` that the tick calls for the new id
+    arms the name Claude Code's registry now shows for it (nexus-u839f), so a
+    `/clear` does not leave the session unreachable by name until the model
+    happens to re-subscribe."""
+    import time
+    import uuid
+    from contextlib import contextmanager
+
+    from nexus.db import t1 as t1_mod
+    from nexus.mcp.subscriptions import SubscriptionSet
+
+    new_sid = str(uuid.uuid4())  # the env tier of the session-id resolver wants a UUID
+    calls: list[tuple] = []
+
+    class _Tuples:
+        def out(self, subspace, keys, dims=None, body=None, *, nonce=None, ttl_seconds=None):
+            calls.append((subspace, dims["session_id"], ttl_seconds))
+            return "id"
+
+    @contextmanager
+    def _store():
+        yield type("_Db", (), {"tuples": _Tuples()})()
+
+    class _T1:
+        def list_entries(self):
+            return []
+
+    class _Waiter:
+        def __init__(self, session_id, *a, **k) -> None:
+            self.session_id = session_id
+
+        def start(self) -> None:
+            pass
+
+    sessions = tmp_path / "claude" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / f"{os.getpid()}.json").write_text(
+        '{"pid": %d, "kind": "interactive", "sessionId": "%s", "name": "after-clear", "updatedAt": 2}'
+        % (os.getpid(), new_sid),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.delenv("NX_MCP_PROBE", raising=False)
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _fake_mint)
+    monkeypatch.setattr("nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID)
+    monkeypatch.setattr(core, "_start_channel_waiter", _REAL_START_CHANNEL_WAITER)
+    monkeypatch.setattr(core, "_get_t1", lambda: (_T1(), None))
+    monkeypatch.setattr(core, "_t2_ctx", _store)
+    monkeypatch.setattr(core._channel, "ChannelWaiter", _Waiter)
+    monkeypatch.setattr(core._channel, "_ACTIVE", {})
+    monkeypatch.setattr(core._subscriptions, "_CACHE", {})
+
+    write_handoff_marker(
+        _MCP_PID, new_session_id=new_sid, claude_pid=_CLAUDE_PID, config_dir=nexus_config_dir(),
+    )
+    os.environ["NX_T1_SESSION_ID"] = "old-sess"
+    os.environ["NX_T1_SESSION"] = "old-token"
+    old = SubscriptionSet(session_id="old-sess")
+    old.arm_session_name("before-clear", store_factory=_store)
+    core._subscriptions._CACHE["old-sess"] = old
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not calls:
+            time.sleep(0.01)
+        assert ("directory/before-clear", "old-sess", int(300)) in calls, calls  # armed under the old id
+
+        await core._t1_handoff_tick(_MCP_PID, MagicMock())
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any(c[0] == "directory/after-clear" for c in calls):
+            time.sleep(0.01)
+        assert ("directory/before-clear", "old-sess", 1) in calls, calls  # released, not left to its TTL
+        armed = [c for c in calls if c[0] == "directory/after-clear"]
+        assert armed and armed[0][1] == new_sid, calls
+        assert "old-sess" not in core._subscriptions._CACHE
+        assert core._subscriptions._CACHE[new_sid].leased_name == "after-clear"
+    finally:
+        core._subscriptions.reset_cache()
+        core._channel.unregister_active_waiter(new_sid)
 
 
 # ── valid marker: consumed + re-lease happens ────────────────────────────────

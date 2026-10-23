@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 from nexus.checkpoint import delete_checkpoint
-from nexus.corpus import ensure_collection_registered, index_model_for_collection
+from nexus.corpus import embedding_model_row_preferred, ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
 from nexus.embed_window import window_for_collection
 from nexus.retry import _vector_with_retry
@@ -1343,6 +1343,46 @@ def _resolve_write_db(t3: Any) -> Any:
 _NO_REGISTRAR = object()
 
 
+def _target_model(db: Any, collection_name: str) -> tuple[str, bool]:
+    """The model chunks written to *collection_name* through *db* are stamped with and
+    compared against for the unchanged-content skip (nexus-7jy5r), and whether the
+    catalog was read to decide it (nexus-s8r5o).
+
+    The catalog row's model, read through *db*'s own resolver, because the engine embeds
+    by the row: a legacy name's derivation guesses Voyage for a collection whose row says
+    bge. A row without a model, or no row, answers the calibrated name derivation, as
+    :func:`~nexus.corpus.embedding_model_row_preferred` does. A store with no resolver (an
+    in-memory double, a dry run's throwaway store) has no catalog, so the name decides,
+    as it always did there. A row read that FAILED answers the name too, flagged
+    ``False``: the skip must not judge a stored stamp against that guess
+    (:func:`_stored_model_is_current`).
+    """
+    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+
+    # Looked up on the type: a mock store answers any attribute.
+    if getattr(type(db), "_resolve_collection_row", None) is None:
+        return index_model_for_collection(collection_name), True
+    try:
+        row = db._resolve_collection_row(collection_name, strict=True)
+    except Exception:  # noqa: BLE001 — any failed read is "unreadable", never "no row"; the write goes on with the name's model
+        _log.warning("index_target_model_row_unreadable", collection=collection_name, exc_info=True)
+        return embedding_model_for_collection_calibrated(collection_name), False
+    model = (row or {}).get("embedding_model")
+    return (str(model) if model else embedding_model_for_collection_calibrated(collection_name)), True
+
+
+def _stored_model_is_current(stored_model: str, target_model: str, model_known: bool) -> bool:
+    """Whether a stored chunk's model stamp lets the unchanged-content skip skip.
+
+    The stamp must equal the target model, unless the target is the name's guess
+    because the catalog row could not be read (*model_known* False, nexus-s8r5o):
+    then the content hash alone decides, so a listing outage cannot re-index a file
+    whose stamp is the row's model, re-stamp it with the guess, and re-index it again
+    once the listing is back.
+    """
+    return stored_model == target_model or not model_known
+
+
 def _register_before_read(db: Any, collection_name: str) -> None:
     """Register *collection_name* exactly when *db*'s own write path would.
 
@@ -1750,13 +1790,15 @@ def _index_document(
     # forbids.
     _register_before_read(db, collection_name)
 
-    target_model = index_model_for_collection(collection_name)
+    model_known = True
     if local_target_model is not None:
         # Local-mode override: chunk metadata records the local model
         # name so re-indexes against unchanged content skip cleanly,
         # and a later upgrade to cloud mode triggers re-embed (the
         # cloud target_model differs from the locally-stored name).
         target_model = local_target_model
+    else:
+        target_model, model_known = _target_model(db, collection_name)
 
     # Incremental sync: skip if file is already indexed with the same hash AND model.
     # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
@@ -1804,7 +1846,7 @@ def _index_document(
         # miss fails open.
         if (
             stored_hash == content_hash
-            and stored_model == target_model
+            and _stored_model_is_current(stored_model, target_model, model_known)
             and _index_run_fresh(col, _doc_id_for_path(file_path), content_hash)
         ):
             return 0
@@ -2707,12 +2749,14 @@ def index_pdf(
     # incremental-sync READ below; see the matching comment in
     # _index_document. Same registrar the write path uses.
     _register_before_read(db, col_name)
-    target_model = index_model_for_collection(col_name)
+    model_known = True
     if local_target_model is not None:
         # See _index_document for rationale: keep the staleness check
         # + chunk metadata aligned with the local embedder's actual
         # model so repeat-indexes are no-ops.
         target_model = local_target_model
+    else:
+        target_model, model_known = _target_model(db, col_name)
 
     # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
     # the staleness check so a fresh index lands chunks with doc_id populated
@@ -2870,7 +2914,7 @@ def index_pdf(
         # manifest/verify call) closes that gap.
         if (
             stored_hash == content_hash
-            and stored_model == target_model
+            and _stored_model_is_current(stored_model, target_model, model_known)
             and _index_run_fresh(col, doc_id, content_hash)
         ):
             if return_metadata:

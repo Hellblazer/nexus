@@ -243,6 +243,34 @@ grep -qE 'exit[[:space:]]+1' <<<"$tally_body" && ok "a short tally exits 1" || b
 grep -qE '^DG_PASSES=2[[:space:]]*$' "$GATE" && ok "DG_PASSES is pinned at 2 (before and after the restart)" \
   || bad "DG_PASSES=2 not found"
 
+# The cloud_mode leg (nexus-8errq) runs after the tally and before the banner, demands exactly the
+# count the local-service gate deselects, and exits 1 on a short count.
+cm_line="$(line_of "$GATE" '^dg_run_cloud_mode_tests[[:space:]]*$')"
+[[ -n "$cm_line" ]] || fail_loud_and_exit "anchor for the cloud_mode leg matched nothing; this test needs updating, not a silent pass"
+[[ "$tally_line" -lt "$cm_line" && "$cm_line" -lt "$banner_line" ]] \
+  && ok "order: tally ($tally_line) < cloud_mode leg ($cm_line) < banner ($banner_line)" \
+  || bad "the cloud_mode leg is not between the tally and the banner: tally=$tally_line leg=$cm_line banner=$banner_line"
+dg_cm="$(sed -n 's/^DG_CLOUD_MODE_EXPECTED=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$GATE")"
+lsg_cm="$(sed -n 's/^CLOUD_MODE_EXPECTED=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$REPO_ROOT/tests/e2e/local-service-gate.sh")"
+[[ -n "$dg_cm" && "$dg_cm" == "$lsg_cm" ]] \
+  && ok "DG_CLOUD_MODE_EXPECTED ($dg_cm) equals local-service-gate.sh's CLOUD_MODE_EXPECTED" \
+  || bad "DG_CLOUD_MODE_EXPECTED='$dg_cm' and local-service-gate.sh CLOUD_MODE_EXPECTED='$lsg_cm' disagree"
+cm_body="$(code_of "$GATE" | sed -n '/^dg_run_cloud_mode_tests()[[:space:]]*{/,/^}/p')"
+[[ -n "$cm_body" ]] || fail_loud_and_exit "dg_run_cloud_mode_tests() body anchor matched nothing; this test needs updating"
+grep -qE -- '-m "integration and cloud_mode"' <<<"$cm_body" && grep -qE 'NX_EMBED_PROFILE=voyage' <<<"$cm_body" \
+  && grep -qE 'dg_with_key uv run pytest' <<<"$cm_body" && grep -qE 'exit[[:space:]]+1' <<<"$cm_body" \
+  && ok "the cloud_mode leg selects the marker with the key and the Voyage profile and exits 1 on a short count" \
+  || bad "the cloud_mode leg lost its marker selection, its key, its Voyage profile or its exit 1"
+# The count itself: both the passed and the total comparisons against the expected count.
+cm_compares() { grep -oE -- '-ne "\$DG_CLOUD_MODE_EXPECTED"' <<<"$1" | wc -l | tr -d ' '; }
+[[ "$(cm_compares "$cm_body")" -eq 2 ]] \
+  && ok "the cloud_mode leg compares both the passed and the total count with DG_CLOUD_MODE_EXPECTED" \
+  || bad "the cloud_mode leg compares $(cm_compares "$cm_body") of 2 counts with DG_CLOUD_MODE_EXPECTED"
+mut_body="$(sed 's/ || \[ "\$passed" -ne "\$DG_CLOUD_MODE_EXPECTED" \]//' <<<"$cm_body")"
+[[ "$(cm_compares "$mut_body")" -eq 1 ]] \
+  && ok "a leg with the passed-count comparison removed reads as 1 of 2 (positive control)" \
+  || bad "the count-comparison pin does not notice a removed comparison"
+
 # ── Behaviour: the checks fail when a family is missing (nexus-clvut) ────────
 echo "Test 5: the gate's checks against a canned engine"
 FNS="$WORKDIR/gate_checks.sh"

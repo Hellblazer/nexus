@@ -163,6 +163,14 @@ public final class QuarantineOrigin {
             && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(rowsOf(tenant, origin, null)));
     }
 
+    /**
+     * How many quarantine rows are {@code origin}'s: what {@link #deleteRowsOf} would remove. Read-only; the
+     * re-embed plan states it before a job deletes its source (RDR-210 Cutover). A quarantine name has none.
+     */
+    static int countRowsOf(DSLContext ctx, String tenant, String origin) {
+        return isQuarantineName(origin) ? 0 : ctx.fetchCount(CHUNKS, rowsOf(tenant, origin, null));
+    }
+
     /** The quarantine collections that hold at least one row of {@code origin}, by name. */
     private static List<String> siblingsHolding(DSLContext ctx, Condition rows) {
         return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS).where(rows)

@@ -328,8 +328,10 @@ class SiblingResolution:
       the origin when registered, then every other quarantine collection holding a chunk tagged with the origin).
     * ``"timed_out"``: the engine has the field but its read ran into its statement bound
       (``sibling_resolution: "timed_out"``). The list is unknown, and asking again by any scan would hit the same bound.
-    * ``"predates"``: the page was answered with neither key: an engine from before nexus-wbfpw.64 (v0.1.162 and
-      earlier), which ignored the field.
+    * ``"unanswered"``: the page was answered with neither key. Every supported engine (v0.1.163 and later, the
+      ``REQUIRED_ENGINE_VERSION`` floor) answers one of the two. A managed endpoint below the floor is refused before any request, but a local
+      engine not yet restarted after a client upgrade still answers this way, as does a defect in the engine or on
+      the wire. The sibling list is unknown, and no scan is run to find it.
     * ``"unknown"``: the first page committed but its answer was lost, so nothing can be said; it is asked again.
     """
 
@@ -342,7 +344,7 @@ class SiblingResolution:
     def read(self, result: Any) -> None:
         """Record the answer of a page that asked. Only a dict answer can carry either key."""
         if not isinstance(result, dict):
-            self.status = "predates"
+            self.status = "unanswered"
         elif result.get("committed_unknown_counts"):
             self.status = "unknown"
         elif isinstance(result.get("quarantine_collections"), list):
@@ -351,7 +353,7 @@ class SiblingResolution:
         elif result.get("sibling_resolution") == "timed_out":
             self.status = "timed_out"
         else:
-            self.status = "predates"
+            self.status = "unanswered"
 
 
 def _warn_resolution_timed_out(origin_name: str) -> None:
@@ -362,23 +364,34 @@ def _warn_resolution_timed_out(origin_name: str) -> None:
     )
 
 
+def _warn_resolution_unanswered(origin_name: str) -> None:
+    _log.warning(
+        "quarantine_sibling_resolution_unanswered",
+        collection=origin_name,
+        using="row-derived and reaper names only; the engine answered neither quarantine_collections nor "
+              "sibling_resolution (an engine below v0.1.163, such as a local one not restarted since a client "
+              "upgrade, or a defect), so a sibling stranded under another name is not reached",
+    )
+
+
 def siblings_after_first_page(
-    db: Any, origin_name: str, primary: str, resolution: SiblingResolution, *, probe_fallback: bool = False,
+    db: Any, origin_name: str, primary: str, resolution: SiblingResolution,
 ) -> list[str]:
     """The siblings to go on with once the first page (which was *primary*'s) has answered, *primary* first.
 
     ``resolved``: the engine's list, with no derived guess added (the engine knows whether the reaper's name is
-    registered). Anything else is the old behaviour exactly: the derived names, plus, only when *probe_fallback* and
-    the engine did not answer the field (an engine that predates it, or a lost answer), the dry-run probe of
-    :func:`resolve_quarantine_siblings`. A ``timed_out`` engine is never probed: the probe is the same scan, with no
-    bound of its own."""
+    registered). Anything else is the two derived names (:func:`resolve_quarantine_siblings`), with a warning for a
+    ``timed_out`` engine and for an ``unanswered`` one (a local engine below the floor, or a defect: see
+    :class:`SiblingResolution`). No other scan is run to find a sibling the engine did not name. A gc that goes on
+    with the derived names expires fewer chunks, never more: the row-derived name is always in a resolved list, and
+    ``quarantine-<origin>`` is in it whenever it is registered (unregistered, it holds no chunk)."""
     if resolution.status == "resolved":
         return list(dict.fromkeys([primary, *resolution.names]))
     if resolution.status == "timed_out":
         _warn_resolution_timed_out(origin_name)
-        return resolve_quarantine_siblings(db, origin_name, primary=primary)
-    probe = probe_fallback and resolution.status in ("predates", "unknown", "unasked")
-    return resolve_quarantine_siblings(db, origin_name, primary=primary, probe_engine=probe)
+    elif resolution.status == "unanswered":
+        _warn_resolution_unanswered(origin_name)
+    return resolve_quarantine_siblings(origin_name, primary=primary)
 
 
 #: Absolute ceiling on drain-loop iterations for BOTH bounded GC loops
@@ -652,101 +665,24 @@ def quarantine_orphans_bounded_serverside(
     return total_moved, sample
 
 
-#: The probe that asks the engine which quarantine siblings hold an origin's
-#: chunks (:func:`resolve_quarantine_siblings` with ``probe_engine=True``). A
-#: restore DRY-RUN over a ``quarantined_at`` window whose ``after_chash`` is the
-#: largest possible chash selects no row, so the engine resolves the sibling set
-#: (the reaper's own name for the origin plus every quarantine collection
-#: holding a chunk tagged ``origin_collection`` = the origin,
-#: ``PgVectorRepository.resolveQuarantineSiblings``) and answers it without
-#: moving, attaching or auditing anything. The client relies on exactly that
-#: (an empty-window dry-run still answers ``quarantine_collections`` and writes
-#: no ``gc_audit`` row), pinned by ``VectorHandlerQuarantineRestoreRouteTest``.
-#: nexus-wbfpw.64 moved the resolution into the engine's own expire and
-#: restore-rereferenced routes (:class:`SiblingResolution`); this probe now runs
-#: only against an engine that predates that (v0.1.162 and earlier), from
-#: ``nx t3 gc`` alone, and goes when no such engine is supported.
-_SIBLING_PROBE_SINCE = "1970-01-01T00:00:00Z"
-_SIBLING_PROBE_AFTER_CHASH = "f" * 64
+def resolve_quarantine_siblings(origin_name: str, *, primary: str | None = None) -> list[str]:
+    """The quarantine collections *origin_name*'s chunks may be in when the engine has not named them
+    (nexus-wbfpw.58, RDR-192 Phase 3 critique S3): *primary*, the row-derived sibling (or the name the caller
+    moves into), then ``quarantine-<origin name>``, the reaper's own name for the origin, deduplicated.
 
-#: Codes of a :class:`VectorServiceError` that mean the probe route cannot
-#: answer for this origin or engine (an engine that predates the sibling
-#: resolution, an origin the catalog does not register or does not hold live):
-#: expected, logged at info. Any other failure is logged as a warning. Either
-#: way the caller still has the name candidates and so never does nothing.
-_SIBLING_PROBE_EXPECTED_CODES = frozenset({400, 404, 422})
+    The client's move names its sibling from the origin's catalog ROW (:func:`quarantine_collection_name`), and
+    the row is mutable: catalog-044-3 rewrote ``owner_id`` on repo collections after chunks had been moved, so the
+    name derived today is not the name a chunk was moved into yesterday. A chunk the client moved carries no
+    ``quarantined_by`` tag either, so the engine's own expiry (vectors-026) skips it and nothing but the client
+    expires it. These two names reach the catalog-044 shape (the origin's name is the pre-rewrite name the chunks
+    were moved under); a sibling under a third name is reached only through what the engine resolves from the
+    chunks' ``origin_collection`` tag, which the expire and restore-rereferenced routes do on the first page of a
+    drain (``resolve_siblings``; :class:`SiblingResolution`, :func:`siblings_after_first_page`).
 
-
-def resolve_quarantine_siblings(
-    db: Any, origin_name: str, *, primary: str | None = None, probe_engine: bool = False,
-) -> list[str]:
-    """Every quarantine collection that may hold chunks of *origin_name*
-    (nexus-wbfpw.58, RDR-192 Phase 3 critique S3).
-
-    The client's move names its sibling from the origin's catalog ROW
-    (:func:`quarantine_collection_name`), and the row is mutable: catalog-044-3
-    rewrote ``owner_id`` on repo collections after chunks had been moved, so the
-    name derived today is not the name a chunk was moved into yesterday. A
-    chunk the client moved carries no ``quarantined_by`` tag either, so the
-    engine's own expiry (vectors-026) skips it and nothing but the client
-    expires it. Expiry and re-reference that look only in the row-derived
-    sibling therefore skip every such chunk, for good.
-
-    The set is the union of (in this order, deduplicated):
-
-    1. *primary*: the row-derived sibling (or the name the caller moves into),
-       so nothing the caller did before this change stops being reached;
-    2. ``quarantine-<origin name>``, the reaper's own name for the origin;
-    3. only with ``probe_engine=True``: what the ENGINE resolves, the set
-       ``nx t3 quarantine restore`` reaches, by asking the restore route for a
-       dry-run over an empty selection (see :data:`_SIBLING_PROBE_SINCE`). That
-       finds a sibling by the ``origin_collection`` tag the move wrote into the
-       chunks, which no rename of the origin or of its owner can disturb.
-
-    ``probe_engine`` defaults to ``False`` on purpose: the probe costs the
-    engine an unbounded EXISTS scan of every quarantine collection of the
-    tenant that is not named for the origin, plus one POST, so it does not
-    belong on ``nx index repo``'s hot path (per collection, every run). A new
-    caller must ask for it. nexus-wbfpw.64 resolves siblings inside the engine's
-    own expire and restore-rereferenced routes, under a statement bound
-    (:class:`SiblingResolution`, :func:`siblings_after_first_page`); this probe
-    is now only the fallback ``nx t3 gc`` takes against an engine that predates
-    that, where a chunk stranded under a third name is still reached by the
-    verb and, as before, by nothing on the index path.
-
-    Where the engine cannot answer (a ``db`` with no restore route, an engine
-    that predates sibling resolution, an origin the restore refuses) steps 1 and
-    2 stand alone, which covers the catalog-044 shape (the origin's name is the
-    pre-rewrite name the chunks were moved under). The reason is logged; this
-    never returns an empty list and never raises for an engine answer or a
-    transport failure (a local-mode timeout arrives as a bare ``OSError``).
-    """
+    This is the list a caller goes on with when that resolution did not give one: a lookup that ran into the
+    engine's bound, an answer that carried neither key, a handle with no bounded route to ask. It sends nothing."""
     names: list[str] = [primary if primary is not None else quarantine_collection_name(origin_name),
                         f"{QUARANTINE_PREFIX}-{origin_name}"]
-    probe = getattr(db, "gc_quarantine_restore", None) if probe_engine else None
-    if probe is not None:
-        from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
-
-        try:
-            page = probe(
-                origin_name, quarantined_since=_SIBLING_PROBE_SINCE,
-                after_chash=_SIBLING_PROBE_AFTER_CHASH, limit=1, dry_run=True, reattach=False,
-            )
-        # OSError too: without a managed endpoint the client re-raises a bare
-        # URLError / ConnectionError / TimeoutError (all OSError), and a timeout
-        # is the probe's likeliest failure (it is an unbounded scan).
-        except (VectorServiceError, OSError) as exc:
-            code = getattr(exc, "code", None)
-            emit = _log.info if code in _SIBLING_PROBE_EXPECTED_CODES else _log.warning
-            emit(
-                "quarantine_sibling_probe_unavailable",
-                collection=origin_name, code=code, error=str(exc),
-                using="row-derived and reaper names only",
-            )
-        else:
-            found = page.get("quarantine_collections") if isinstance(page, dict) else None
-            if isinstance(found, list):
-                names.extend(n for n in found if isinstance(n, str))
     return list(dict.fromkeys(names))
 
 
@@ -768,8 +704,8 @@ def restore_rereferenced_across_serverside(
     *siblings* are the names the caller derived, the first being the sibling it moves into. With *resolution*
     (nexus-wbfpw.64) the first sibling's first page asks the engine for the origin's siblings, and when the engine
     answers them they replace the derived names after the first (so the index path reaches a sibling stranded under a
-    name the catalog row no longer derives, without the dry-run probe). An engine that does not answer leaves the derived
-    names alone. A *resolution* already ``resolved`` (by an earlier call for the same collection) is used without asking
+    name the catalog row no longer derives, with no scan of its own). An engine that does not answer leaves the derived
+    names alone, with a warning when it answered neither key. A *resolution* already ``resolved`` (by an earlier call for the same collection) is used without asking
     again."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keeps this module import-light
 
@@ -802,6 +738,8 @@ def restore_rereferenced_across_serverside(
             queue = siblings_after_first_page(db, origin_name, queue[0], first_ask)
         elif first_ask is not None and first_ask.status == "timed_out":
             _warn_resolution_timed_out(origin_name)
+        elif first_ask is not None and first_ask.status == "unanswered":
+            _warn_resolution_unanswered(origin_name)
         i += 1
     return total
 
@@ -864,6 +802,8 @@ def expire_quarantine_across_serverside(
             queue = siblings_after_first_page(db, origin_name, queue[0], first_ask)
         elif first_ask is not None and first_ask.status == "timed_out":
             _warn_resolution_timed_out(origin_name)
+        elif first_ask is not None and first_ask.status == "unanswered":
+            _warn_resolution_unanswered(origin_name)
         i += 1
     return expired, refused
 

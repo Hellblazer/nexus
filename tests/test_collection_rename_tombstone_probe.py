@@ -14,7 +14,7 @@ directly:
     trashed documents first").
   - ``new`` absent-vs-tombstoned: a tombstoned target read as
     "not exists" (free to claim) — this rename path has no
-    ``cross_model`` escape valve, so claiming it would silently land
+    escape valve, so claiming it would silently land
     fresh/live data on top of dead rows sharing the same collection name.
 
 These tests exercise the fix with a REAL ``HttpVectorClient`` (only the

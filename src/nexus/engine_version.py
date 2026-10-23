@@ -673,7 +673,15 @@ from __future__ import annotations
 #: (IRREVERSIBLE). The
 #: store-put route answers 410 (nexus-nt76j, the one [not-additive] wire
 #: entry), so the engine deploys paired with this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 163)
+#:
+#: 7.85.0 pairs with engine-service-v0.1.164 (tagged 2026-10-23 on 80612cd9f,
+#: deployed and gated 10:32Z, before this client tag: every wire entry is
+#: [additive], nexus-avjrb on conexus's rename census). v0.1.164 carries the
+#: RDR-210 Phase 6 re-embed engine (job tables vectors-037, runner, control,
+#: plan and status routes, cutover), the engine plan/start refusing a target
+#: model it cannot serve (nexus-q6t89), the rename without the cross_model
+#: branch (nexus-avjrb) and memory-005-1 (a partial index on nexus.memory).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 164)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-210 Phase 6 Step 2 (nexus-f98bg): nexus.reembed_jobs and nexus.reembed_job_moves, the
+    durable record of a cross-model re-embed job and of each document it moved or skipped.
+
+    reembed_jobs: one row per job. state is one of the eight RDR-210 states. The lock is a partial
+    unique index on (tenant_id, source_collection) over the five lock states (planned, running,
+    paused, cutover, failed): two jobs never run against one source, and a failed job keeps its
+    source's lock until it is resumed or aborted. doc_cursor is the last document id the pass moved
+    (the RDR calls it "cursor", a PostgreSQL keyword). pass_number counts the passes a job makes
+    over the source (a client writing back during a pass leaves documents for the next). cutover_step
+    is the marker the cutover commits before each irreversible step, so a restart knows where it
+    stood and abort is refused once the delete has started. failure_reason is the closed reason of a
+    failed state; last_error is the engine's text. token_cap NULL means no cap (the local bge
+    embedder bills nothing). disposition is set when a job reaches done (or is revived later).
+
+    reembed_job_moves: one row per (job, document) the job moved or skipped, written in the same
+    transaction as the move. No foreign key to catalog_documents, so a purge after the move shows
+    up in the cutover's parity check instead of silently shrinking the record. The foreign key to
+    reembed_jobs cascades, so deleting a job deletes its record.
+
+    RLS: both tables ENABLE and FORCE with the tenant_isolation policy (the shape of
+    vectors-033-request-ledger.xml and tuples-001-baseline.xml). The nexus_svc DML grants come from
+    the runAlways grants-nexus-svc.xml loop, with no edit there; job_id is app-generated, so there is
+    no sequence to grant. nexus_diag gets NO grant (the collection columns hold collection names),
+    so neither table is on CatalogRepository.NEXUS_DIAG_READABLE_TABLES.
+
+    DDL only, no row DML, so this changeset needs no rehearsal seed.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-037-1" author="nexus-f98bg">
+        <comment>Create reembed_jobs and reembed_job_moves (RDR-210 P6.2 cross-model re-embed job record)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.reembed_jobs (
+    tenant_id          TEXT        NOT NULL,
+    job_id             UUID        NOT NULL,
+    source_collection  TEXT        NOT NULL,
+    target_collection  TEXT        NOT NULL,
+    state              TEXT        NOT NULL,
+    disposition        TEXT,
+    doc_cursor         TEXT        NOT NULL DEFAULT '',
+    pass_number        SMALLINT    NOT NULL DEFAULT 1,
+    cutover_step       TEXT,
+    documents_moved    BIGINT      NOT NULL DEFAULT 0,
+    documents_skipped  BIGINT      NOT NULL DEFAULT 0,
+    chunks_embedded    BIGINT      NOT NULL DEFAULT 0,
+    chunks_reused      BIGINT      NOT NULL DEFAULT 0,
+    tokens_billed      BIGINT      NOT NULL DEFAULT 0,
+    token_cap          BIGINT,
+    keep_source        BOOLEAN     NOT NULL DEFAULT false,
+    force_delete       BOOLEAN     NOT NULL DEFAULT false,
+    started_at         TIMESTAMPTZ NOT NULL,
+    updated_at         TIMESTAMPTZ NOT NULL,
+    finished_at        TIMESTAMPTZ,
+    failure_reason     TEXT,
+    last_error         TEXT,
+    CONSTRAINT reembed_jobs_pk PRIMARY KEY (tenant_id, job_id),
+    CONSTRAINT reembed_jobs_state_check CHECK (state IN
+        ('planned', 'running', 'paused', 'failed', 'aborted', 'cutover', 'done', 'done_with_skips')),
+    CONSTRAINT reembed_jobs_disposition_check CHECK (disposition IS NULL OR disposition IN
+        ('deleted', 'kept_by_flag', 'kept_tombstoned', 'kept_residue', 'revived')),
+    CONSTRAINT reembed_jobs_cutover_step_check CHECK (cutover_step IS NULL OR cutover_step IN
+        ('superseded', 'delete_started')),
+    CONSTRAINT reembed_jobs_failure_reason_check CHECK (failure_reason IS NULL OR failure_reason IN
+        ('batch_failed', 'profile_changed', 'token_cap', 'parity_mismatch'))
+);
+
+-- The source lock: one live-or-resumable job per (tenant, source collection).
+CREATE UNIQUE INDEX reembed_jobs_source_lock ON nexus.reembed_jobs (tenant_id, source_collection)
+    WHERE state IN ('planned', 'running', 'paused', 'cutover', 'failed');
+
+CREATE TABLE nexus.reembed_job_moves (
+    tenant_id    TEXT        NOT NULL,
+    job_id       UUID        NOT NULL,
+    doc_id       TEXT        NOT NULL,
+    outcome      TEXT        NOT NULL,
+    reason       TEXT,
+    pass_number  SMALLINT    NOT NULL,
+    at           TIMESTAMPTZ NOT NULL,
+    CONSTRAINT reembed_job_moves_pk PRIMARY KEY (tenant_id, job_id, doc_id),
+    CONSTRAINT reembed_job_moves_job_fk FOREIGN KEY (tenant_id, job_id)
+        REFERENCES nexus.reembed_jobs (tenant_id, job_id) ON DELETE CASCADE,
+    CONSTRAINT reembed_job_moves_outcome_check CHECK (outcome IN ('moved', 'skipped'))
+);
+        </sql>
+        <rollback>
+            DROP TABLE IF EXISTS nexus.reembed_job_moves CASCADE;
+            DROP TABLE IF EXISTS nexus.reembed_jobs CASCADE;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-037-2" author="nexus-f98bg">
+        <comment>RLS on reembed_jobs and reembed_job_moves</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.reembed_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.reembed_jobs FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.reembed_jobs
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.reembed_job_moves ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.reembed_job_moves FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.reembed_job_moves
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.reembed_job_moves;
+            ALTER TABLE nexus.reembed_job_moves NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.reembed_job_moves DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.reembed_jobs;
+            ALTER TABLE nexus.reembed_jobs NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.reembed_jobs DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

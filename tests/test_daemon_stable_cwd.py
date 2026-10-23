@@ -524,3 +524,51 @@ def test_the_supervisor_argv_is_absolute_when_path_holds_a_relative_entry(
     argv = daemon_cmd._resolve_nx_bin()
     assert len(argv) == 1 and Path(argv[0]).is_absolute()
     assert Path(argv[0]).resolve() == (tmp_path / "rel" / "bin" / "nx").resolve()
+
+
+def test_heal_deleted_cwd_leaves_an_existing_directory_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Claude Code MCP server keeps its project directory (nexus-x6qc7)."""
+    monkeypatch.chdir(tmp_path)
+    assert stable_cwd.heal_deleted_cwd() is False
+    assert os.getcwd() == str(tmp_path.resolve())
+
+
+def test_heal_deleted_cwd_moves_the_process_off_a_deleted_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude Desktop deletes a plugin's install directory on update while its MCP
+    servers run there (nexus-x6qc7, shakeout F19)."""
+    gone = tmp_path / "plugin_x.old.1"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    with pytest.raises(FileNotFoundError):
+        os.getcwd()
+    monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
+    assert stable_cwd.heal_deleted_cwd() is True
+    assert os.getcwd() == stable_cwd.stable_daemon_cwd()
+
+
+def test_heal_deleted_cwd_leaves_a_non_missing_getcwd_failure_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _eacces() -> str:
+        raise PermissionError(13, "Permission denied")
+
+    moved: list = []
+    setattr_in(monkeypatch, stable_cwd, "os.getcwd", _eacces)
+    setattr_in(monkeypatch, stable_cwd, "os.chdir", lambda p: moved.append(p))
+    assert stable_cwd.heal_deleted_cwd() is False
+    assert not moved
+
+
+def test_heal_deleted_cwd_rewrites_no_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", "relative/cfg")
+    monkeypatch.delenv(stable_cwd.REPO_ROOT_ENV, raising=False)
+    assert stable_cwd.heal_deleted_cwd() is True
+    assert os.environ["NEXUS_CONFIG_DIR"] == "relative/cfg"
+    assert stable_cwd.REPO_ROOT_ENV not in os.environ
+

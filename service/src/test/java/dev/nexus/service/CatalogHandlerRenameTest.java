@@ -156,8 +156,7 @@ class CatalogHandlerRenameTest {
 
     @Test
     void post_renameOntoExistingCollection_returns409() throws Exception {
-        // nexus-gaou3: a plain rename onto an already-registered collection is a collision —
-        // it must 409, not silently take the RDR-162 cross-model COPY branch (repoint-only).
+        // nexus-gaou3: a rename onto an already-registered collection is a collision — 409.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__c409-src");
@@ -170,9 +169,9 @@ class CatalogHandlerRenameTest {
     }
 
     @Test
-    void post_crossModelTrue_ontoExistingTarget_returns200Repoint() throws Exception {
-        // nexus-gaou3: cross_model:true opts into the RDR-162 repoint branch — target already
-        // exists (ETL populated it), only catalog_documents.physical_collection moves.
+    void post_aBodyStillCarryingCrossModel_ontoALiveTarget_is409AndMovesNothing() throws Exception {
+        // nexus-avjrb: the RDR-162 cross_model COPY repoint is gone. A body that still carries the
+        // flag is a plain rename onto a live target: the same 409, and the document stays put.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__xm-src");
@@ -187,15 +186,14 @@ class CatalogHandlerRenameTest {
         }
         var resp = post("/v1/catalog/collections/rename",
             "{\"old_name\":\"hren__xm-src\",\"new_name\":\"hren__xm-tgt\",\"cross_model\":true}");
-        assertThat(resp.statusCode()).isEqualTo(200);
-        var body = mapper.readValue(resp.body(), MAP_T);
-        @SuppressWarnings("unchecked")
-        Map<String, Object> renamed = (Map<String, Object>) body.get("renamed");
-        // cross-model COPY branch returns ONLY catalog_documents (repoint, not full re-home).
-        assertThat(((Number) renamed.get("catalog_documents")).intValue())
-            .as("the doc under the source repoints to the target").isEqualTo(1);
-        assertThat(renamed).as("no full re-home in the cross-model branch")
-            .doesNotContainKey("catalog_collections_inserted");
+        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.body()).contains("target collection already exists");
+        try (Connection su = pg.createConnection("")) {
+            assertThat(DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TUMBLER.eq("xm-doc-1"))
+                .fetchOne(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
+                .as("the document was not repointed").isEqualTo("hren__xm-src");
+        }
     }
 
     // ── POST /collections/supersede — the guards (nexus-g8z8n, nexus-cecqy) ─────
@@ -497,25 +495,6 @@ class CatalogHandlerRenameTest {
     }
 
     @Test
-    void post_crossModelOntoATOMBSTONE_409s() throws Exception {
-        // cross_model:true means the RDR-162 COPY branch: the target already exists AND IS
-        // LIVE (the ETL just populated it), and only catalog_documents is repointed.
-        // A tombstoned target is not that. The repo would treat it as non-live and take the
-        // canonical FULL-REHOME branch instead — a more destructive operation than the flag
-        // promises — so the mismatch must fail loud rather than silently do something else.
-        seedCollections("hren__xm-t-src", "hren__xm-t-tgt");
-        assertThat(post("/v1/catalog/collections/rename",
-            "{\"old_name\":\"hren__xm-t-tgt\",\"new_name\":\"hren__xm-t-retired\"}")
-            .statusCode()).isEqualTo(200);
-        assertThat(collectionRow("hren__xm-t-tgt").get("superseded_by")).isEqualTo("hren__xm-t-retired");
-
-        var resp = post("/v1/catalog/collections/rename",
-            "{\"old_name\":\"hren__xm-t-src\",\"new_name\":\"hren__xm-t-tgt\",\"cross_model\":true}");
-        assertThat(resp.statusCode()).isEqualTo(409);
-        assertThat(resp.body()).contains("retired");
-    }
-
-    @Test
     void post_renameOntoASupersedeMarkedCollection_409sAndPreservesTheChain() throws Exception {
         // nexus-v6za0 — THE REGRESSION 1232585d introduced. A tombstone has two provenances
         // and the widened guard reasoned about only one:
@@ -606,21 +585,6 @@ class CatalogHandlerRenameTest {
         assertThat(resp.body()).contains("retired");
         // The would-be born-dead row must not exist at all.
         assertThat(collectionRow("hren__c29-fresh")).isNull();
-    }
-
-    @Test
-    void post_crossModelOntoAnABSENTtarget_409s() throws Exception {
-        // nexus-tnx48. 1232585d's converse guard fired only when the target was retired AND
-        // present, so cross_model:true onto a target that does not exist at all skipped every
-        // guard and still ran the canonical FULL-REHOME — moving chunks, taxonomy and aspects
-        // under a flag whose contract is documents-only. The guard now keys on !live, which
-        // covers absent and retired alike.
-        seedCollections("hren__tnx-src");
-        var resp = post("/v1/catalog/collections/rename",
-            "{\"old_name\":\"hren__tnx-src\",\"new_name\":\"hren__tnx-absent\",\"cross_model\":true}");
-        assertThat(resp.statusCode()).isEqualTo(409);
-        assertThat(resp.body()).contains("does not exist");
-        assertThat(collectionRow("hren__tnx-absent")).isNull();
     }
 
     @Test

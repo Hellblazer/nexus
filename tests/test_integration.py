@@ -296,6 +296,20 @@ def test_nx_search_knowledge_corpus(runner):
 
 # ── Code search: voyage-code-3 ──────────────────────────────────────────────
 
+@pytest.fixture
+def keyed_local_voyage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The keyed local install the cloud_mode tests below describe (nexus-8errq): local
+    mode with a Voyage ``local.embed_model``, so the client mints voyage-* collections.
+    They run on the suite's own engine substrate (every ``integration`` test gets a
+    tenant on it), which must be keyed and on the Voyage profile: the substrate inherits
+    ``NX_VOYAGE_API_KEY`` and ``NX_EMBED_PROFILE=voyage`` from the environment, and
+    tests/e2e/dual-embedder-gate.sh runs them that way. Selected anywhere else
+    with a key present (a hand ``-m integration``), they run on the default bge
+    substrate and fail loud on the engine's profile refusal; deselect them with
+    ``not cloud_mode``."""
+    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-context-3")
+
+
 def _write_owned_note(collection: str, title: str, content: str, metadata: dict) -> str:
     """Write the single chunk for ``content`` TOGETHER with a live catalog owner.
 
@@ -337,7 +351,7 @@ def _write_owned_note(collection: str, title: str, content: str, metadata: dict)
 
 @pytest.mark.integration
 @pytest.mark.cloud_mode
-@requires_t3
+@pytest.mark.usefixtures("keyed_local_voyage")
 @requires_voyage_key
 def test_voyage_code3_index_and_query():
     from nexus.corpus import index_model_for_collection
@@ -383,7 +397,7 @@ def test_voyage_code3_index_and_query():
 
 @pytest.mark.integration
 @pytest.mark.cloud_mode
-@requires_t3
+@pytest.mark.usefixtures("keyed_local_voyage")
 @requires_voyage_key
 def test_cce_query_retrieves_cce_indexed_markdown():
     import tempfile
@@ -426,7 +440,7 @@ def test_cce_query_retrieves_cce_indexed_markdown():
 
 @pytest.mark.integration
 @pytest.mark.cloud_mode
-@requires_t3
+@pytest.mark.usefixtures("keyed_local_voyage")
 @requires_voyage_key
 def test_t3_put_embedding_model_in_search_metadata():
     from nexus.db import make_t3

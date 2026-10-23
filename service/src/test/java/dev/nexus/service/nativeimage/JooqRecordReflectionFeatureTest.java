@@ -274,7 +274,10 @@ class JooqRecordReflectionFeatureTest {
     // added nexus.gc_expire_quarantine_bounded, a RETURNS TABLE(expired, refused,
     // more, floor_refused) function, one generated Record type
     // (GcExpireQuarantineBoundedRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 115;
+    // 115 -> 117: nexus-f98bg (RDR-210 P6.2), vectors-037-reembed-jobs.xml added the tables
+    // nexus.reembed_jobs and nexus.reembed_job_moves, two generated Record types
+    // (ReembedJobsRecord, ReembedJobMovesRecord), +2.
+    private static final int EXPECTED_RECORD_TYPES = 117;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

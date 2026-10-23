@@ -107,6 +107,12 @@ MARK_PREFIX = "nx_ddl_mark: "
 START_LABEL = "start"
 READY_LABEL = "ready"
 END_LABEL = "end"
+#: Logged by the substrate before each engine attempt after the first (nexus-7lxn7). The engine
+#: migrates before it binds, so an attempt that lost its port race (nexus-kmfz6) already ran the
+#: whole migration; the next one only re-runs the runAlways changesets. The migration is ``start``
+#: to the first ``restart``, and ``restart`` to ``ready`` is boot, so a retried run counts what a
+#: run with no retry counts.
+RESTART_LABEL = "restart"
 
 #: Appended to the substrate's postgresql.conf. ``%d`` is the database name
 #: (empty for background processes, hence the ``db=`` anchor); the clock is UTC
@@ -303,7 +309,8 @@ def _parse_mark(msg: str) -> MarkStat:
 
 def parse_log(text: str, *, mark: str = READY_LABEL) -> ParsedLog:
     """Count the DDL in a PG log; entries before the first ``mark`` line are flagged ``before_mark``,
-    and, when the log has a ``start`` mark, entries before it are flagged ``boot``.
+    and, when the log has a ``start`` mark, entries before it are flagged ``boot``, as are entries
+    from the first ``restart`` mark to the ``mark`` line (an engine retry's rerun, see RESTART_LABEL).
 
     A log with no ``mark`` line is all ``before_mark`` (never reached ready). A logged
     statement whose first line is empty (``psql -c`` handed a leading newline) is
@@ -315,6 +322,7 @@ def parse_log(text: str, *, mark: str = READY_LABEL) -> ParsedLog:
     seen_mark = False
     has_start = _START_MARK.search(text) is not None
     seen_start = False
+    seen_restart = False
     lines = text.splitlines()
     for i, raw in enumerate(lines):
         m = _LINE.match(raw)
@@ -332,9 +340,10 @@ def parse_log(text: str, *, mark: str = READY_LABEL) -> ParsedLog:
             stats.append(stat)
             seen_mark = seen_mark or stat.label == mark
             seen_start = seen_start or stat.label == START_LABEL
+            seen_restart = seen_restart or (stat.label == RESTART_LABEL and not seen_mark)
             continue
         before = not seen_mark
-        boot = has_start and not seen_start
+        boot = (has_start and not seen_start) or (seen_restart and not seen_mark)
         if msg.startswith(EVENT_PREFIX):
             tag = msg[len(EVENT_PREFIX):].strip()
             if claim.pop(pid, False):
@@ -364,14 +373,18 @@ def parse_log(text: str, *, mark: str = READY_LABEL) -> ParsedLog:
 
 def wal_split(stats: Iterable[MarkStat]) -> dict[str, int | None]:
     """WAL bytes and database growth by phase, from the ``start``, ``ready`` and ``end`` marks (the
-    first of each, except ``end``, which is the last). A phase whose two marks are not both in the
-    log is None, never 0: an unmeasured phase must not read as a free one."""
+    first of each, except ``end``, which is the last); the migration ends at the first ``restart``
+    when the log has one (RESTART_LABEL). A phase whose two marks are not both in the log is None,
+    never 0: an unmeasured phase must not read as a free one."""
     first: dict[str, MarkStat] = {}
     last: dict[str, MarkStat] = {}
     for s in stats:
         first.setdefault(s.label, s)
         last[s.label] = s
     start, ready, end = first.get(START_LABEL), first.get(READY_LABEL), last.get(END_LABEL)
+    # nexus-7lxn7: the migration ends at the first restart when an engine attempt was retried.
+    restart = first.get(RESTART_LABEL)
+    migration_end = restart if restart is not None and ready is not None else ready
 
     def diff(b: MarkStat | None, a: MarkStat | None, field: str) -> int | None:
         if a is None or b is None:
@@ -380,7 +393,7 @@ def wal_split(stats: Iterable[MarkStat]) -> dict[str, int | None]:
         return None if x is None or y is None else y - x
 
     return {
-        "migration_bytes": diff(ready, start, "wal"),
+        "migration_bytes": diff(migration_end, start, "wal"),
         "tests_bytes": diff(end, ready, "wal"),
         "total_bytes": diff(end, start, "wal"),
         "dbsize_growth_bytes": diff(end, ready, "dbsize"),

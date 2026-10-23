@@ -94,6 +94,7 @@ import json
 import os
 import re
 import threading
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from dataclasses import dataclass
@@ -172,6 +173,15 @@ _HEADER_TOKEN_RE: re.Pattern[str] = re.compile(r"[\x21-\x7e]+")
 _drop_session_header: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "nexus_tuple_drop_session_header", default=False,
 )
+
+
+#: How long a rejected session token stays unsent (nexus-z1xox). After it, the
+#: token is offered once more: a 401 again re-arms the memo, a live token is
+#: stamped from then on.
+_REJECTED_SESSION_TTL_S: float = 300.0
+
+#: The memo's clock; a seam for tests.
+_monotonic = time.monotonic
 
 
 def _token_hash(token: str) -> str:
@@ -638,11 +648,22 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     # ── Session header (nexus-ztwp4, F3 step 2) ──────────────────────────────
 
-    #: SHA-256 of the last session token the engine rejected (a headered 401 whose
-    #: headerless retry succeeded), or None. That token is not sent again until
-    #: ``NX_T1_SESSION`` changes. Instance state, one writer path
-    #: (``_request_once``); the lock makes the first-rejection test atomic.
-    _rejected_session_hash: str | None = None
+    #: The session token the engine last rejected (a headered 401 whose headerless
+    #: retry succeeded), as ``(sha256, monotonic time)``, per ``(endpoint, data
+    #: token)``. That token is not sent again to that endpoint under that data
+    #: token until ``NX_T1_SESSION`` changes or :data:`_REJECTED_SESSION_TTL_S`
+    #: passes. PROCESS-wide, on the class (nexus-z1xox): the MCP channel waiter
+    #: and every MCP tool open a fresh ``T2Database`` (so a fresh store) per call
+    #: (``mcp_infra.t2_ctx``), and a memo held on the instance died with it,
+    #: re-sending the rejected token and logging ``tuple_session_header_dropped``
+    #: on every waiter tick. Keyed by endpoint and data token because the data
+    #: token names the tenant: one tenant's rejection (AuthFilter's
+    #: ``cross_tenant_session``) never suppresses another tenant's valid token. The
+    #: TTL bounds a rejection with another cause (a replica that has not seen the
+    #: token yet) to one re-probe per window. One writer path (``_request_once``,
+    #: via ``HttpTupleStore`` explicitly); the lock makes the first-rejection test
+    #: atomic. Hashes only, never a token.
+    _rejected_sessions: dict[tuple[str, str], tuple[str, float]] = {}
     _rejected_session_lock: threading.Lock = threading.Lock()
 
     def _auth_headers(self) -> dict[str, str]:
@@ -662,10 +683,22 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if (
             token
             and _HEADER_TOKEN_RE.fullmatch(token)
-            and _token_hash(token) != self._rejected_session_hash
+            and _token_hash(token) != self._current_rejected_hash()
         ):
             headers[_HEADER_T1_SESSION] = token
         return headers
+
+    def _rejected_memo_key(self) -> tuple[str, str]:
+        """The memo's scope: this store's endpoint and a hash of its data token."""
+        return (str(getattr(self, "_base_url", "") or ""), _token_hash(self._token or ""))
+
+    def _current_rejected_hash(self) -> str | None:
+        """The rejected session-token hash in force for this store, or None once
+        none was recorded or its :data:`_REJECTED_SESSION_TTL_S` window passed."""
+        entry = HttpTupleStore._rejected_sessions.get(self._rejected_memo_key())
+        if entry is None or _monotonic() - entry[1] >= _REJECTED_SESSION_TTL_S:
+            return None
+        return entry[0]
 
     def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:
         """One round trip. AuthFilter 401s any request whose session header is
@@ -695,13 +728,15 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             # is simply sent again next call).
             if exc.request.headers.get("Authorization") != f"Bearer {self._token}":
                 return result
-            with self._rejected_session_lock:
-                first = self._rejected_session_hash != rejected
-                self._rejected_session_hash = rejected
-            # Never the token or its hash; INFO once per token, DEBUG for a repeat
-            # (two in-flight calls that both sent it before either memoised it).
+            with HttpTupleStore._rejected_session_lock:
+                first = self._current_rejected_hash() != rejected
+                HttpTupleStore._rejected_sessions[self._rejected_memo_key()] = (rejected, _monotonic())
+            # Never the token or its hash; INFO once per token per memo window,
+            # DEBUG for a repeat (two in-flight calls that both sent it before
+            # either memoised it). pid names which process is logging.
             (_log.info if first else _log.debug)(
                 "tuple_session_header_dropped", method=method, path=path,
+                pid=os.getpid(),
             )
             return result
 

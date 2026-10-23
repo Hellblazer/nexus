@@ -30,6 +30,9 @@ pytestmark = pytest.mark.lint
 SRC = pathlib.Path(__file__).parent.parent / "src" / "nexus"
 
 #: Calls whose result is the stable-cwd kwargs (or contains them).
+#: `operators/dispatch.claude_dispatch` passes `cwd=` the caller's directory while it exists and
+#: `stable_daemon_cwd()` once it was deleted (nexus-x6qc7): its file-tool operators read the
+#: project relative to it, the one deliberate exception to the root rule (daemon/AGENTS.md).
 _CWD_HELPERS = frozenset({"detached_spawn_kwargs", "_supervisor_popen_kwargs", "stable_daemon_cwd"})
 #: Calls whose result is a detaching kwargs dict.
 _DETACH_HELPERS = frozenset({
@@ -44,9 +47,6 @@ _ALLOWED: dict[tuple[str, str], str] = {
     ("aspect_extractor.py", "_run_claude_isolated"): (
         "a `claude -p` extraction bounded by a timeout and group-killed on expiry; it runs inside "
         "the aspect worker, which has entered the stable cwd, so it inherits that"
-    ),
-    ("operators/dispatch.py", "claude_dispatch"): (
-        "a `claude -p` operator call bounded by a timeout and group-killed on expiry"
     ),
     ("daemon/storage_service_daemon.py", "_spawn_service"): (
         "the engine is a child of the supervisor, which entered the stable cwd at its --foreground "

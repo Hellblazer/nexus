@@ -1130,6 +1130,7 @@ class TestLexicalLeg:
         cols = _cols("code", _BGE, 2)
         data = {cols[0]: [("v-near", 0.1), ("both-far", 0.9)], cols[1]: [("v-mid", 0.3)]}
         engine = _FakeEngine(monkeypatch, data)
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "1")
         engine.lexical_rows = [
             # also a vector row, past the threshold: the lexical copy keeps it
             {"id": "both-far", "content": "t", "distance": 0.9, "collection": cols[0]},
@@ -1158,6 +1159,7 @@ class TestLexicalLeg:
         data = {cols[0]: [("v-near", 0.1), ("both-far", 0.9)], cols[1]: [("v-mid", 0.3)]}
         engine = _FakeEngine(monkeypatch, data)
         engine.serve_lexical = True
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "1")
         engine.lexical_rows = [
             {"id": "both-far", "content": "t", "distance": 0.9, "collection": cols[0]},
             {"id": "lex-only", "content": "t", "distance": 0.8, "collection": cols[1]},
@@ -1175,6 +1177,7 @@ class TestLexicalLeg:
         data = {cols[0]: _rows("v", 5, 0.1)}
         engine = _FakeEngine(monkeypatch, data)
         engine.serve_lexical = True
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "1")
         engine.lexical_rows = [{"id": "deep", "content": "t", "distance": 0.95, "collection": cols[0]}]
         _shrink_limit(monkeypatch, 2)
         results = _search(engine, cols, n=5, lexical=True)
@@ -1186,6 +1189,7 @@ class TestLexicalLeg:
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
         engine.serve_lexical = True
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "1")
         engine.lexical_errors[cols[1]] = (None, "lexical arm failed")
         with pytest.raises(LexicalLegUnavailableError, match="lexical arm failed"):
             _search(engine, cols, lexical=True)
@@ -1196,6 +1200,7 @@ class TestLexicalLeg:
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
         engine.serve_lexical = True
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "1")
         engine.lexical_errors[cols[1]] = (kind, "ran out of time")
         engine.lexical_rows = [
             {"id": "served", "content": "t", "distance": 0.9, "collection": cols[0]},
@@ -1213,6 +1218,7 @@ class TestLexicalLeg:
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
         engine.serve_lexical = True
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "1")
         engine.errors[cols[1]] = ("statement_timeout", "vector statement timed out")
         engine.lexical_rows = [{"id": "lex", "content": "t", "distance": 0.5, "collection": cols[1]}]
         results = _search(engine, cols, lexical=True)
@@ -1233,8 +1239,31 @@ class TestLexicalLeg:
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
         engine.serve_lexical = True
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "1")
         _search(engine, cols)
         assert "lexical" not in engine.route_calls()[0]
+
+    def test_a_lexical_search_does_not_send_the_field_unless_opted_in(self, monkeypatch):
+        """nexus-n51v1: the route's lexical arms cost the engine one ~280 ms statement per
+        collection, so --lexical keeps the batched /hybrid-search leg by default."""
+        monkeypatch.delenv(hvc.ROUTE_LEXICAL_ENV, raising=False)
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
+        engine.serve_lexical = True
+        engine.lexical_rows = [{"id": "lex-only", "content": "t", "distance": 0.8, "collection": cols[1]}]
+        results = _search(engine, cols, lexical=True)
+        assert "lexical" not in engine.route_calls()[0]
+        assert any(path == _HYBRID for path, _body in engine.calls), "the leg ran on /hybrid-search"
+        assert "lex-only" in [r.id for r in results], "the leg's rows come back"
+
+    @pytest.mark.parametrize(
+        ("value", "on"),
+        [("1", True), ("true", True), (" TRUE ", True), ("on", True), ("yes", True),
+         ("", False), ("0", False), ("off", False), ("2", False)],
+    )
+    def test_the_opt_in_reads_only_the_documented_values(self, monkeypatch, value, on):
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, value)
+        assert hvc.route_lexical_enabled() is on
 
 
 # ── nexus-079ly: raw and dropped are the engine's facts, kept is explicit ────

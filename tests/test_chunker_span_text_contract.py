@@ -404,7 +404,7 @@ def test_code_indexer_known_bad_span_is_flagged() -> None:
 # ── store_put note_pieces (excluded by construction, pinned here) ───────────
 
 
-def test_note_pieces_windowed_split_has_no_overlap_claim() -> None:
+def test_note_pieces_windowed_split_has_no_overlap_claim(monkeypatch: pytest.MonkeyPatch) -> None:
     """note_pieces' windowed-split regime (nexus-spujb/b2tld): pieces are
     non-overlapping by construction (``"".join(pieces) == content``), so
     every adjacent pair must abut — this pins that store_put's own writer
@@ -421,6 +421,9 @@ def test_note_pieces_windowed_split_has_no_overlap_claim() -> None:
     """
     from nexus.catalog.store_hook import note_pieces
 
+    # note_pieces reads the collection's catalog row first (nexus-z8mi2); no engine
+    # here, so no row, and the name's token decides.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: None)
     content = " ".join(f"note sentence {i:04d} carries unique wording." for i in range(200))
     pieces = note_pieces(content, "docs__test__model-ctx__v1")
     assert len(pieces) >= 2, "fixture must force a real split"

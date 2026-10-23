@@ -115,12 +115,16 @@ SELECT count(*) AS tenants FROM (
   UNION SELECT 'default') t;                                   -- the walk's own tenant set
 SELECT count(*) AS models FROM nexus.embedding_models WHERE dimension IN (384, 768, 1024);
 SHOW max_locks_per_transaction; SHOW max_connections; SHOW max_prepared_transactions;
+SHOW autovacuum_max_workers; SHOW max_worker_processes; SHOW max_wal_senders;
 ```
 
 The walk makes one leaf per (parent, model, tenant): `leaves = 2 x models x tenants`. The RDR measured 1,899 relation
 locks for 70 leaves, about 27 per leaf, in a test layout; all of them are held until the one commit. The shared lock
-table holds `max_locks_per_transaction x (max_connections + max_prepared_transactions)` slots (PostgreSQL
-documentation; the default 64 x 100 gives 6,400).
+table holds at least `max_locks_per_transaction x (MaxBackends + max_prepared_transactions)` slots, MaxBackends being
+`max_connections + autovacuum_max_workers + 1 + max_worker_processes + max_wal_senders` (PostgreSQL's own sizing; the
+defaults give 64 x 122 = 7,808). The engine's lock preflight computes the same figure and logs it as
+`lock_table_capacity=` on `walk_lock_preflight_passed` / `_refused` (nexus-vxmcl, nexus-xzit5); read it there when in
+doubt.
 
 - ABORT if `tenants` is greater than FORK_TENANT_COUNT (`.27:`): the fork's wall time, lock count and disk peak
   describe a smaller walk.

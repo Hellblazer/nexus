@@ -5420,3 +5420,119 @@ class TestJobHandleClosesOnEveryOutcome:
             f"job {job} closed {fake.closed_handles.count(job)} times on "
             f"timeout (want exactly 1) -- closed_handles={fake.closed_handles}"
         )
+
+
+# ── nexus-x6qc7: the claude -p child never inherits a deleted cwd ───────────
+
+class TestChildCwd:
+    """Shakeout F19: Claude Desktop deletes a plugin's install directory on update
+    while its MCP servers keep running there; a `claude -p` that inherited it
+    exited 1, "The current working directory was deleted"."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_heal_flag(self, monkeypatch):
+        from nexus.util import stable_cwd
+
+        monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
+
+    @staticmethod
+    async def _spawned_cwd() -> str | None:
+        from nexus.operators.dispatch import claude_dispatch
+
+        seen: dict = {}
+        proc = _make_proc()
+
+        async def intercept(*args, **kwargs):
+            seen.update(kwargs)
+            return proc
+
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        assert "cwd" in seen, "the spawn must name its cwd, never inherit it"
+        return seen["cwd"]
+
+    @pytest.mark.asyncio
+    async def test_an_existing_cwd_is_passed_through(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert await self._spawned_cwd() == str(tmp_path.resolve())
+
+    @pytest.mark.skipif(__import__("sys").platform == "win32", reason="Windows refuses to delete a process's cwd")
+    @pytest.mark.asyncio
+    async def test_a_deleted_cwd_is_replaced_by_the_stable_cwd(self, tmp_path, monkeypatch) -> None:
+        from nexus.util.stable_cwd import stable_daemon_cwd
+
+        gone = tmp_path / "plugin_x.old.1"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        assert await self._spawned_cwd() == stable_daemon_cwd()
+
+    @pytest.mark.skipif(__import__("sys").platform == "win32", reason="Windows refuses to delete a process's cwd")
+    @pytest.mark.asyncio
+    async def test_a_file_tool_operator_is_refused_when_its_cwd_was_deleted(self, tmp_path, monkeypatch) -> None:
+        """nx_enrich_beads / nx_plan_audit read the project relative to cwd; at the
+        filesystem root they would search the whole disk and judge real paths missing."""
+        from nexus.operators.dispatch import OperatorError, claude_dispatch
+
+        gone = tmp_path / "plugin_x.old.1"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        spawned: list = []
+
+        async def intercept(*args, **kwargs):
+            spawned.append(kwargs)
+            return _make_proc()
+
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
+            with pytest.raises(OperatorError, match="working directory was deleted"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, allowed_tools=["Read", "Grep", "Glob"])
+        assert not spawned, "a refused operator spawns nothing"
+
+    @pytest.mark.skipif(__import__("sys").platform == "win32", reason="Windows refuses to delete a process's cwd")
+    @pytest.mark.asyncio
+    async def test_a_file_tool_operator_is_refused_after_the_per_call_heal(self, tmp_path, monkeypatch) -> None:
+        """The MCP path: the tool-call wrap heals before the tool runs, so dispatch sees
+        the stable cwd, not a missing one, and must still refuse (confirmation pass)."""
+        from nexus.operators.dispatch import OperatorError, claude_dispatch
+        from nexus.util import stable_cwd
+
+        monkeypatch.setattr(stable_cwd, "_healed_from_deleted", False)
+        gone = tmp_path / "plugin_x.old.3"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        assert stable_cwd.heal_deleted_cwd() is True
+        spawned: list = []
+
+        async def intercept(*args, **kwargs):
+            spawned.append(kwargs)
+            return _make_proc()
+
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
+            with pytest.raises(OperatorError, match="working directory was deleted"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, allowed_tools=["Read", "Grep", "Glob"])
+        assert not spawned
+
+    @pytest.mark.skipif(__import__("sys").platform == "win32", reason="Windows refuses to delete a process's cwd")
+    @pytest.mark.asyncio
+    async def test_an_mcp_only_grant_still_runs_in_the_stable_cwd(self, tmp_path, monkeypatch) -> None:
+        from nexus.operators.dispatch import claude_dispatch
+        from nexus.util.stable_cwd import stable_daemon_cwd
+
+        gone = tmp_path / "plugin_x.old.2"
+        gone.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        seen: dict = {}
+
+        async def intercept(*args, **kwargs):
+            seen.update(kwargs)
+            return _make_proc()
+
+        # A tool grant mints the child a T1 session; that store is not the subject here.
+        import nexus.operators.dispatch as _dispatch
+        monkeypatch.setattr(_dispatch, "_build_dispatch_env", lambda **kw: dict(__import__("os").environ))
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=intercept):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, allowed_tools=["mcp__nexus__search"])
+        assert seen.get("cwd") == stable_daemon_cwd()

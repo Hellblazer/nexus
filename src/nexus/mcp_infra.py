@@ -1307,7 +1307,7 @@ def get_collection_counts(max_age: float | None = None) -> dict[str, int]:
         return _collections_cache[1]
 
 
-def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
+def get_collection_row(name: str, *, refresh: bool = True, strict: bool = False) -> dict | None:
     """Return the cached catalog attributes for T3 collection *name*, or
     ``None`` when no catalog row backs it.
 
@@ -1338,6 +1338,10 @@ def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
     attributes and getting ``None`` back should fail loud rather than
     fall back to parsing the name -- the engine 422s a direct read of an
     unregistered collection anyway.
+
+    ``strict=True`` (nexus-s8r5o) re-raises a listing that failed instead of answering
+    ``None``, for a caller that must not read "unreadable" as "no row": the indexers'
+    unchanged-content skip, which would otherwise judge a stored stamp against the name.
     """
     if refresh:
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
@@ -1348,6 +1352,8 @@ def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
             # nexus-5rs3i: this is the identity read of the write path, corpus resolution and
             # gc, which have always treated a listing that failed as "no row" and fallen back
             # (to the name, or to no cap). Only the names readers surface the failure.
+            if strict:
+                raise
             return None
     row = _collections_cache[2].get(name)
     if not row or "content_type" not in row:

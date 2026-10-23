@@ -106,7 +106,11 @@ def mock_store(env_creds):
     # T3Database. spec= it so a method missing from HttpVectorClient
     # (e.g. the gc/_dir class of bug) fails the mocked test too.
     db = _t3_double()
-    with patch("nexus.commands.store._t3", return_value=db):
+    # nexus-z8mi2: a note is split by the model its catalog row names, read through
+    # mcp_infra's own collections cache, a separate singleton from store._t3
+    # (tests/conftest.py's patched_mcp_infra_t3 docstring has the detail). Wire it to
+    # the same double so that read never builds a real client.
+    with patch("nexus.commands.store._t3", return_value=db), patched_mcp_infra_t3(db):
         yield db
 
 
@@ -171,7 +175,8 @@ def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
         db.__exit__ = MagicMock(return_value=False)
         db.put.return_value = "doc-id-1"
         mt3.return_value = db
-        result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "test"])
+        with patched_mcp_infra_t3(db):
+            result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "test"])
     assert result.exit_code == 0, result.output
 
 

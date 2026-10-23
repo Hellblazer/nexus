@@ -478,6 +478,9 @@ public final class PgContainerHelper {
      *       ({@link #startDedicated(String, long)}): they outgrow, or come within a few percent of, the
      *       default {@link #TMPFS_SIZE} tmpfs, and a full tmpfs on the shared cluster also blocks the teardown
      *       connection, so every later class in the fork errors at acquire.</li>
+     *   <li>{@code WalkLockPreflightIntegrationTest} -- starts a cluster with a lowered
+     *       {@code max_locks_per_transaction} and {@code max_connections} ({@link #startDedicated(List)}), postmaster
+     *       settings a running cluster cannot take, to walk the largest tenant count the lock preflight admits.</li>
      *   <li>{@code PlpgsqlCheckGateTest} (a different image) and {@code PgBouncerTenantIsolationTest}
      *       (network-attached) build their own container through {@link #newContainer}.</li>
      * </ul>
@@ -492,6 +495,21 @@ public final class PgContainerHelper {
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> startDedicated() {
         PostgreSQLContainer<?> c = newContainer();
+        c.start();
+        return c;
+    }
+
+    /**
+     * {@link #startDedicated()} with server settings the cluster must START with, appended after the recipe's own
+     * ({@code "-c", "name=value"} pairs). For a setting that needs a restart (a {@code postmaster} setting such as
+     * {@code max_locks_per_transaction}), which {@code ALTER SYSTEM} on a running tmpfs container cannot apply.
+     */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startDedicated(List<String> serverArgs) {
+        PostgreSQLContainer<?> c = newContainer();
+        List<String> command = new ArrayList<>(List.of(c.getCommandParts()));
+        command.addAll(serverArgs);
+        c.setCommand(command.toArray(new String[0]));
         c.start();
         return c;
     }

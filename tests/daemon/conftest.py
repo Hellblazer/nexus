@@ -57,3 +57,12 @@ def _no_walk_of_the_test_process_ancestry(monkeypatch: pytest.MonkeyPatch) -> No
         service_registry, "ancestor_pids",
         lambda pid, **kw: frozenset() if pid == os.getpid() else real(pid, **kw),
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_reembed_hint_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``nx daemon service start`` and the supervisor end with a courtesy catalog read for the re-embed hint
+    (RDR-210 Phase 6 Step 3, nexus-cnxjk). The tests here fake the lease and the engine, so the read would reach
+    storage from a thread no test provisions a tenant for; it is off by default. The hint's own tests
+    (``test_service_start_reembed_hint.py``) override this fixture by name."""
+    monkeypatch.setattr("nexus.reembed_job.off_profile_hint", lambda reader_factory=None: None)

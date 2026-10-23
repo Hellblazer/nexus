@@ -7,6 +7,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
+import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
@@ -4875,8 +4876,17 @@ public final class CatalogRepository {
      * RDR-210 Phase 6 Step 1, the internal parameter of the combined write that makes it a MOVE: the
      * collection the documents leave, and per document the manifest chashes (in position order) the
      * caller read. Engine-internal: no HTTP route builds one.
+     *
+     * <p>{@code jobId} is the re-embed job the move belongs to, or null for a move that belongs to none. With a
+     * job, each document's move transaction also records the move against the job
+     * ({@link ReembedJobRepository#recordMoveInTxn}), so a document and its record commit or roll back together.
      */
-    record DocumentMove(String sourceCollection, Map<String, List<String>> expectedChashes) {
+    record DocumentMove(String sourceCollection, Map<String, List<String>> expectedChashes, java.util.UUID jobId) {
+        /** A move that belongs to no job. */
+        DocumentMove(String sourceCollection, Map<String, List<String>> expectedChashes) {
+            this(sourceCollection, expectedChashes, null);
+        }
+
         DocumentMove {
             requireNonBlank(sourceCollection, "sourceCollection");
             if (expectedChashes == null) {
@@ -6066,6 +6076,11 @@ public final class CatalogRepository {
                                     requestWrittenChashes, newlyWrittenChashesHolder, docRaced);
                             if (move != null) {
                                 completeMove(ctx, tenant, docId, collection, move.sourceCollection(), moveSatelliteHolder);
+                                // The job's record of this move, in the same transaction. Lock order for a job's
+                                // move: the sweep gate (shared) and the index-run lock above, then the job row.
+                                if (move.jobId() != null) {
+                                    ReembedJobRepository.recordMoveInTxn(ctx, tenant, move.jobId(), docId);
+                                }
                                 java.util.function.Consumer<String> afterCompleted = afterMoveCompletedHookForTests;
                                 if (afterCompleted != null) afterCompleted.accept(docId);
                             }
@@ -8680,7 +8695,7 @@ public final class CatalogRepository {
      *       both {@code chunks} and {@code quarantine_chunks}.</li>
      * </ul>
      * Not closed here: update-metadata on a {@code quarantine-*} name is not guarded, and the
-     * RDR-162 cross-model COPY keeps the source's quarantine rows with the source.
+     * rename onto a live target is refused, so it never moves quarantine rows between models.
      */
     public Map<String, Integer> deleteCollection(String tenant, String name) {
         return deleteCollection(tenant, name, false);
@@ -9133,11 +9148,10 @@ public final class CatalogRepository {
      * Telemetry tables (search_telemetry, hook_failures) have no FK but ARE re-homed — a
      * rename is not a delete, audit rows follow the new name.
      *
-     * <p><b>Cross-model COPY branch (RDR-162, target already exists).</b> When Y is already
-     * registered (the bge-768 cross-model migrate registers the target via its chunk upsert),
-     * renaming the source registry row would collide on the (tenant_id, name) PK. In that case
-     * we repoint {@code catalog_documents.physical_collection} ONLY and leave both registry
-     * rows untouched — preserving pre-RDR-164 RDR-162 behavior.
+     * <p><b>A live target is refused</b> ({@link CollectionMergeRefused}): Y already registered
+     * and not retired is an occupied name. The RDR-162 cross-model COPY branch that repointed
+     * only {@code catalog_documents} onto a live target is gone (nexus-avjrb); no released client
+     * reaches it on a production path.
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName) {
         return renameCollection(tenant, oldName, newName, null);
@@ -9180,10 +9194,8 @@ public final class CatalogRepository {
         QuarantineOrigin.requireNotQuarantine("rename", newName);
         Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
             newContentType, newOwnerId);
-        // Post-commit (nexus-h8rf6 wave review): the canonical branch RETIRES the old
-        // registry row — evict it so a later same-named collection re-registers. The
-        // cross-model COPY branch leaves both registry rows untouched (no key in
-        // counts), so nothing is evicted there.
+        // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
+        // evict it so a later same-named collection re-registers.
         //
         // nexus-cecqy: the key is catalog_collections_superseded since the retire stopped
         // being a DELETE. The eviction is still right — the row survives, so the skipped
@@ -9331,14 +9343,16 @@ public final class CatalogRepository {
      * The collection-keyed tables that are deliberately NOT in {@link #COLLECTION_SCOPED_TABLES} (the
      * schema-parity gate's {@code _DOCUMENTED_EXCLUSIONS}), with their cross-model disposition: {@code
      * chunk_orphaned_at} goes with the source's chunks through the chunk foreign key's cascade,
-     * {@code pdf_pipeline} is a transient queue, {@code chash_remap} a permanent ledger (nexus-4nll0).
-     * The two job tables the RDR adds ({@code reembed_jobs}, {@code reembed_job_moves}, LEAVE) join this
-     * map with their changeset in Phase 6 Step 2.
+     * {@code pdf_pipeline} is a transient queue, {@code chash_remap} a permanent ledger (nexus-4nll0), and
+     * {@code reembed_jobs} (nexus-f98bg, Phase 6 Step 2) the job's own record of its source and target, kept
+     * after the source is deleted. {@code reembed_job_moves}, the RDR's second job table, is not here: it
+     * has no collection-named column, and {@code CrossModelDispositionParityTest} requires one.
      */
     static final Map<String, CrossModelDisposition> CROSS_MODEL_DISPOSITIONS_OUTSIDE_REGISTRY = Map.of(
         "chunk_orphaned_at", CrossModelDisposition.LEAVE,
         "pdf_pipeline",      CrossModelDisposition.LEAVE,
-        "chash_remap",       CrossModelDisposition.LEAVE);
+        "chash_remap",       CrossModelDisposition.LEAVE,
+        "reembed_jobs",      CrossModelDisposition.LEAVE);
 
     /**
      * The rename transaction refused to merge a populated retired target.
@@ -9360,6 +9374,63 @@ public final class CatalogRepository {
      */
     public static final class SourceUriCollision extends RuntimeException {
         public SourceUriCollision(String message) { super(message); }
+    }
+
+    /**
+     * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a rename, rehome or other name-rewriting verb touches a
+     * collection that a re-embed job holds as its source or its target. The message names the job, the collection and the way out. Mapped to 409 by the handler.
+     * Nothing has moved when it is thrown.
+     */
+    public static final class CollectionHeldByReembedJob extends RuntimeException {
+        private final java.util.UUID jobId;
+
+        public CollectionHeldByReembedJob(String message, java.util.UUID jobId) {
+            super(message);
+            this.jobId = jobId;
+        }
+
+        public java.util.UUID jobId() {
+            return jobId;
+        }
+    }
+
+    /** The advisory-lock key a re-embed job's start (exclusive) and every name-rewriting verb's guard (shared) take. */
+    static String reembedGuardKey(String tenant) {
+        return "reembedguard:" + tenant;
+    }
+
+    /**
+     * Refuse {@code verb} (a name-rewriting operation: {@code rename}, {@code rehome}, or a satellite table's
+     * rename) when a re-embed job in a lock state names {@code from} or {@code to} as its source or its target.
+     * Rewriting a name a job is moving documents out of or into desynchronises the job from the data it holds.
+     *
+     * <p>Call it inside the verb's own transaction, after the verb's other locks. It takes the per-tenant guard
+     * lock SHARED, the lock {@link ReembedJobRepository#start} takes exclusive, so a job cannot be started between
+     * this read and the verb's commit. Lock order: the verb's own locks (sweep gates), then this one; a job's start
+     * takes only this one and holds no job-row lock while it waits, and the runner's transactions never take it,
+     * so there is no cycle.
+     *
+     * @throws CollectionHeldByReembedJob naming the job, when one holds either name
+     */
+    public static void refuseUnderReembedJob(DSLContext ctx, String tenant, String verb, String from, String to) {
+        ctx.select(DSL.function("pg_advisory_xact_lock_shared", Object.class,
+                   DSL.function("hashtext", Integer.class, DSL.val(reembedGuardKey(tenant)))))
+           .fetch();
+        var held = ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE, REEMBED_JOBS.SOURCE_COLLECTION,
+                REEMBED_JOBS.TARGET_COLLECTION)
+            .from(REEMBED_JOBS)
+            .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
+            .and(REEMBED_JOBS.STATE.in(ReembedJobRepository.LOCK_STATES))
+            .and(REEMBED_JOBS.SOURCE_COLLECTION.in(from, to)
+                .or(REEMBED_JOBS.TARGET_COLLECTION.in(from, to)))
+            .orderBy(REEMBED_JOBS.STARTED_AT, REEMBED_JOBS.JOB_ID)
+            .limit(1)
+            .fetchOne();
+        if (held != null) {
+            throw new CollectionHeldByReembedJob("cannot " + verb + " " + from + " to " + to + ": re-embed job "
+                + held.value1() + " (" + held.value2() + ") is moving documents from " + held.value3() + " to "
+                + held.value4() + ". Abort or finish the job first.", held.value1());
+        }
     }
 
     /** RLS-scoped {@link #collectionIsEmpty(DSLContext, String)} for callers outside a txn. */
@@ -9526,15 +9597,14 @@ public final class CatalogRepository {
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
                                                         String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull) {
-        // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection (both branches), which fires
+        // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
         return manifestWriteTxn(tenant, "catalog.renameCollection " + oldName, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
-            // paths in this bead). Both branches below bulk-repoint
-            // catalog_document_chunks.collection (and the canonical branch
-            // additionally repoints chunks_<dim>.collection via
+            // paths in this bead). The rename below bulk-repoints
+            // catalog_document_chunks.collection (and chunks_<dim>.collection via
             // COLLECTION_SCOPED_TABLES) from oldName to newName -- the SAME
             // hazard class as a manifest INSERT: it can make a chash appear
             // referenced in newName's scope (or vanish from oldName's) while
@@ -9545,12 +9615,15 @@ public final class CatalogRepository {
             for (String c : java.util.stream.Stream.of(oldName, newName).sorted().distinct().toList()) {
                 acquireSweepGateShared(ctx, tenant, c);
             }
+            // RDR-210 Phase 6 Step 2 (bead nexus-f98bg, ruling 4): a name a re-embed job in a lock state is moving
+            // documents out of or into is not renamed underneath it. Read under the sweep gates above, in the
+            // rename's own transaction.
+            refuseUnderReembedJob(ctx, tenant, "rename", oldName, newName);
             // nexus-cecqy: LIVE target, not merely "a row exists". Since step 3 retires X
             // as a superseded tombstone instead of deleting it, a round-trip rename
             // (X->Y then Y->X) finds X's tombstone sitting at the target. A tombstone is
-            // a retired name, not an occupied one: routing it to the RDR-162 COPY branch
-            // would repoint documents only and strand the chunks, so it must take the
-            // canonical branch, where step 1's upsert REVIVES it.
+            // a retired name, not an occupied one, so it takes the canonical branch, where
+            // step 1's upsert REVIVES it. A LIVE target is refused below.
             // THIS IS THE AUTHORITATIVE BRANCH SELECTOR, and it now MEASURES the hazard
             // instead of inferring it. Two prior fixes inferred, and both were wrong:
             //   nexus-u4e20  guarded on "a row exists"  — could not see that a tombstone
@@ -9565,8 +9638,8 @@ public final class CatalogRepository {
             // The canonical branch's actual precondition is that the target holds NO DATA,
             // because step 1 revives the row and step 2 re-homes the source's children ON
             // TOP of whatever is already there. So ask that question, in this transaction's
-            // own snapshot. A populated non-live target takes NEITHER branch: the COPY
-            // branch would strand its chunks, the canonical branch would merge them.
+            // own snapshot. A populated non-live target is refused: the canonical branch would
+            // merge it.
             boolean targetRowExists = ctx.fetchExists(
                 ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName)));
             boolean liveTargetExists = ctx.fetchExists(
@@ -9630,50 +9703,11 @@ public final class CatalogRepository {
             }
 
             if (liveTargetExists) {
-                // RDR-162 cross-model COPY branch: repoint catalog_documents; leave
-                // both registry rows (renaming the source would collide on the name PK).
-                // TOMBSTONE-EXEMPT (nexus-mqd6t): deliberately NOT filtered on
-                // DELETED_AT.isNull() -- a rename must repoint ALL documents under
-                // the old physical_collection name, tombstoned or not, so a
-                // tombstoned document's physical_collection tracks the collection's
-                // CURRENT name. Filtering here would leave a later restore pointing
-                // at a retired collection name (found during TombstoneFilterGateTest
-                // authorship; undocumented before this). See
-                // TombstoneFilterGateTest.TOMBSTONE_EXEMPT.
-                counts.put("catalog_documents",
-                    ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName)
-                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
-                // nexus-x6kdz (critique HIGH): the manifest's denormalized
-                // collection must re-home HERE TOO — cross-model re-embeds
-                // preserve chunk text, hence chashes, so the target
-                // collection's chunk rows carry the same chashes and the
-                // combined-query join stays live under the new name. Leaving
-                // this out was the THIRD door back into the silent-empty
-                // state (docs pointed at the target, manifests at the source).
-                // RDR-225 (nexus-3wh8d.13): the manifest row's foreign key to chunks is on
-                // (tenant, collection, chash, embedding_model), and the target's chunk rows carry the
-                // TARGET's model, so a cross-model re-home sets the model together with the collection
-                // or the row would still name the source's model under the target's collection name.
-                // The model is read in the same statement from the target's registry row. Nothing else
-                // changes model here: the topic assignments and orphan stamps keep naming the source's
-                // chunks, which stay in the source collection, and the stamp triggers carry the model
-                // the manifest row they fire on had (vectors-030-1 step 7.8).
-                counts.put("catalog_document_chunks",
-                    ctx.update(CATALOG_DOCUMENT_CHUNKS)
-                       .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
-                       .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
-                            DSL.field(ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
-                                .from(CATALOG_COLLECTIONS)
-                                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
-                                .and(CATALOG_COLLECTIONS.NAME.eq(newName))))
-                       .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
-                // nexus-wbfpw.68/.71: NO quarantine retag here, deliberately. This branch is the RDR-162
-                // cross-model COPY: oldName stays registered and live, and its quarantine rows carry
-                // oldName-model vectors. They stay oldName's (a restore into oldName works, and oldName's own
-                // later delete takes them with an audit row). Retagging them to newName would make them
-                // restorable only into a different model's collection (a dim_conflict, or wrong-model vectors
-                // at equal width) and strand them past oldName's delete.
-                return counts;
+                // nexus-avjrb: a live target is an occupied name. The handler 409s it first; this
+                // refusal holds for any direct caller. (The RDR-162 cross-model COPY branch that
+                // repointed documents only onto a live target is gone: no released client reaches
+                // it on a production path.)
+                throw new CollectionMergeRefused("target collection already exists: " + newName);
             }
 
             // nexus-sis0m.3: the chroma://X/ -> chroma://Y/ source_uri rewrite below must not
@@ -9720,8 +9754,8 @@ public final class CatalogRepository {
 
             // 1. New registry row Y, copying X's metadata (so children can re-home onto it).
             //    UPSERT, not a bare INSERT (nexus-cecqy): the conflict that can reach here is
-            //    Y's own tombstone from an earlier rename Y->X, since a LIVE Y took the COPY
-            //    branch above. Renaming back onto that retired name REVIVES it — superseded_by/at
+            //    Y's own tombstone from an earlier rename Y->X, since a LIVE Y is refused
+            //    above. Renaming back onto that retired name REVIVES it — superseded_by/at
             //    cleared, metadata refreshed from X — which is exactly what the round trip means.
             //    A bare INSERT would collide on the (tenant_id, name) PK and abort the re-home.
             //
@@ -9873,8 +9907,9 @@ public final class CatalogRepository {
             // and mints a duplicate. Three columns hold such a URI (the enumeration is pinned
             // by CatalogRenameIdentityCascadeTest against information_schema, not by this
             // list). starts_with, not LIKE: collection names contain '_', a LIKE wildcard.
-            // Tombstoned documents are rewritten too, for the reason the COPY branch's
-            // physical_collection repoint gives (nexus-mqd6t). Scoped to rows the re-home loop
+            // TOMBSTONE-EXEMPT (nexus-mqd6t): tombstoned documents are rewritten too. A rename must follow ALL
+            // documents under the old name, tombstoned or not, or a later restore points at a
+            // retired collection name (see TombstoneFilterGateTest.TOMBSTONE_EXEMPT). Scoped to rows the re-home loop
             // above just moved to Y (the target held nothing before, per the emptiness check),
             // so a foreign row carrying a stale chroma://X/ URI is left alone.
             counts.put("catalog_documents_source_uri", ctx.update(CATALOG_DOCUMENTS)
@@ -9992,11 +10027,10 @@ public final class CatalogRepository {
      * branch requires the target absent or retired, and retiring a live target runs
      * into {@link #blockingTable} — for the real targets that guard names {@code
      * topics}, which is NOT an audit table, so the refusal is not merely "you would
-     * lose audit history". The RDR-162 cross-model COPY branch repoints {@code
-     * catalog_document_chunks} at a target holding no chunks, violating {@code
-     * fk_catalog_chunks_chunk}; that FK is DEFERRABLE INITIALLY IMMEDIATE, so the
-     * violation surfaces at COMMIT and the whole transaction unwinds after appearing
-     * to proceed.
+     * lose audit history". A live target is refused outright (nexus-avjrb; the RDR-162
+     * cross-model COPY branch that once repointed {@code catalog_document_chunks} there,
+     * and would have violated {@code fk_catalog_chunks_chunk} at COMMIT for a chunk-empty
+     * target, is gone).
      *
      * <p>THE MECHANISM IS THAT SAME FK. An UPDATE of {@code chunks.collection} carries
      * the manifest and the topic assignments atomically, with no intermediate
@@ -10066,6 +10100,10 @@ public final class CatalogRepository {
             for (String c : java.util.stream.Stream.of(source, target).sorted().distinct().toList()) {
                 acquireSweepGateShared(ctx, tenant, c);
             }
+            // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a re-home files the source's rows under the target, so it
+            // moves a collection a re-embed job is draining or filling out from under the job. Refused, 409 naming
+            // the job, whichever role the held name has (the source being moved out, the target being moved onto).
+            refuseUnderReembedJob(ctx, tenant, "rehome", source, target);
             requireLiveCollection(ctx, source, "source");
             requireLiveCollection(ctx, target, "target");
             // RDR-225 (nexus-3wh8d.13): the chunk UPDATE below files the source's chunk rows under the

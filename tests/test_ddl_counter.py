@@ -42,6 +42,51 @@ def test_the_golden_log_splits_boot_and_migration_from_tests_and_measures_the_wa
     assert ddl.wal_split(parsed.stats) == expected["wal"]
 
 
+def _retry_logs() -> tuple[str, str]:
+    """A run whose first engine attempt lost its port race, and the same run with no retry. The lost
+    attempt ran the whole migration (the engine migrates before it binds); the next one re-ran only
+    the runAlways grants, behind the restart mark (nexus-7lxn7)."""
+    head = (
+        "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  nx_ddl: CREATE TABLE\n"
+        "2026-10-19 05:00:00.200 UTC [7] db=x LOG:  nx_ddl_mark: start wal=100 dbsize=5\n"
+        "2026-10-19 05:00:00.300 UTC [8] db=x LOG:  nx_ddl: CREATE TABLE\n"
+        "2026-10-19 05:00:00.301 UTC [8] db=x LOG:  nx_ddl: CREATE TABLE\n"
+        "2026-10-19 05:00:00.302 UTC [8] db=x LOG:  nx_ddl: CREATE VIEW\n"
+        "2026-10-19 05:00:00.310 UTC [8] db=x LOG:  nx_ddl: GRANT\n"
+        "2026-10-19 05:00:00.311 UTC [8] db=x LOG:  nx_ddl: GRANT\n"
+    )
+    tail = (
+        "2026-10-19 05:00:00.700 UTC [9] db=x LOG:  nx_ddl: CREATE TABLE\n"
+        "2026-10-19 05:00:00.800 UTC [7] db=x LOG:  nx_ddl_mark: end wal=1300 dbsize=40\n"
+    )
+    retried = head + (
+        "2026-10-19 05:00:00.400 UTC [7] db=x LOG:  nx_ddl_mark: restart wal=1000 dbsize=30\n"
+        "2026-10-19 05:00:00.500 UTC [9] db=x LOG:  nx_ddl: CREATE VIEW\n"
+        "2026-10-19 05:00:00.510 UTC [9] db=x LOG:  nx_ddl: GRANT\n"
+        "2026-10-19 05:00:00.511 UTC [9] db=x LOG:  nx_ddl: GRANT\n"
+        "2026-10-19 05:00:00.600 UTC [7] db=x LOG:  nx_ddl_mark: ready wal=1100 dbsize=31\n"
+    ) + tail
+    clean = head + "2026-10-19 05:00:00.600 UTC [7] db=x LOG:  nx_ddl_mark: ready wal=1000 dbsize=31\n" + tail
+    return retried, clean
+
+
+def test_an_engine_retry_counts_the_same_migration_as_a_run_without_one() -> None:
+    """nexus-7lxn7: migration DDL and WAL equal the no-retry run's; the rerun is boot, the tests are untouched."""
+    retried, clean = (ddl.parse_log(log) for log in _retry_logs())
+
+    def migration(p: ddl.ParsedLog) -> dict:
+        return ddl.tally(e for e in p.entries if e.before_mark and not e.boot)
+
+    def tests(p: ddl.ParsedLog) -> dict:
+        return ddl.tally(e for e in p.entries if not e.before_mark)
+
+    assert migration(retried) == migration(clean)
+    assert migration(clean)["total"] == 5  # non-vacuity: the whole first attempt
+    assert tests(retried) == tests(clean)
+    assert ddl.wal_split(retried.stats)["migration_bytes"] == ddl.wal_split(clean.stats)["migration_bytes"] == 900
+    assert [e.tag for e in retried.entries if e.boot] == ["CREATE TABLE", "CREATE VIEW", "GRANT", "GRANT"]
+
+
 def test_a_phase_whose_marks_are_not_both_in_the_log_is_none_not_zero() -> None:
     log = (
         "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  nx_ddl_mark: start wal=100 dbsize=5\n"
@@ -607,7 +652,8 @@ def _ungated_counter_uses(source: str) -> tuple[list[int], int]:
 def test_the_substrate_uses_the_probe_and_marks_only_behind_the_switch() -> None:
     source = (REPO_ROOT / "tests" / "_engine_substrate.py").read_text()
     ungated, total = _ungated_counter_uses(source)
-    assert total == 3, f"expected PROBE_SQL once and mark_sql twice, found {total} uses"  # non-vacuity
+    # non-vacuity: the probe, the start mark, the restart mark before an engine retry (nexus-7lxn7), the ready mark
+    assert total == 4, f"expected PROBE_SQL once and mark_sql three times, found {total} uses"
     assert ungated == [], f"counter pieces used outside `if ddl_count_enabled():` at lines {ungated}"
     assert "log_conf()" in source and "LOG_CONF" not in source.replace("log_conf", "")  # the conf goes via the gated helper
 

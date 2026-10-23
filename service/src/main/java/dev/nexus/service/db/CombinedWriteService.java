@@ -288,8 +288,21 @@ public final class CombinedWriteService {
     public CombinedWriteResult moveDocsCombined(String tenant, String sourceCollection, String targetCollection,
             List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
             Map<String, List<String>> expectedChashes) {
+        return moveDocsCombined(tenant, sourceCollection, targetCollection, chunks, docs, expectedChashes, null);
+    }
+
+    /**
+     * {@link #moveDocsCombined(String, String, String, List, List, Map)} for a re-embed job: each document's
+     * move transaction also records the move against {@code jobId} ({@code reembed_job_moves}, the job's
+     * {@code documents_moved} and its cursor), so a document and its record commit together. A null
+     * {@code jobId} is the job-less move.
+     */
+    public CombinedWriteResult moveDocsCombined(String tenant, String sourceCollection, String targetCollection,
+            List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
+            Map<String, List<String>> expectedChashes, java.util.UUID jobId) {
         requireModelSiblings(tenant, sourceCollection, targetCollection);
-        CatalogRepository.DocumentMove move = new CatalogRepository.DocumentMove(sourceCollection, expectedChashes);
+        CatalogRepository.DocumentMove move =
+            new CatalogRepository.DocumentMove(sourceCollection, expectedChashes, jobId);
         // a caller bug is refused before anything is embedded or written
         move.requireRowsMatchExpected(docs);
         ResolvedBatch batch = resolveChunks(tenant, targetCollection, chunks, false, MetadataMode.REPLACE);

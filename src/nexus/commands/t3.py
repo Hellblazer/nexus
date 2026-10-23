@@ -316,12 +316,14 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     the catalog row no longer derives (catalog-044-3 rewrote ``owner_id``), carry no ``quarantined_by`` tag
     for the engine's reaper to expire. So this is the one caller that asks the engine which siblings hold
     the origin's chunks, and it asks in the expiry route's own first page (``resolve_siblings``, nexus-wbfpw.64:
-    the engine reads them under a 2 s bound and answers ``quarantine_collections``). Against an engine that predates
-    that field (v0.1.162 and earlier) the first page answers neither key, and this verb falls back to the dry-run
-    ``quarantine-restore`` probe it used before (``resolve_quarantine_siblings(..., probe_engine=True)``); an engine
-    whose read timed out is not probed (the probe is the same scan, unbounded) and the verb says so. Each sibling is
-    expired and reported on its own line, so one sibling's kept chunks and another's expiry are each stated as what
-    they are, never summed."""
+    the engine reads them under a 2 s bound and answers ``quarantine_collections``). There is no scan to fall back
+    to (nexus-6bk7i): the sibling probe this verb used against an engine from before that field is gone, because
+    every supported engine (v0.1.163 and later) has the field. A lookup that timed out is said so and the verb goes on
+    with the two derived names. A first page that answered neither key (a local engine not restarted since a client upgrade, or a defect), or committed
+    with its answer lost, also goes on with the derived names, so the verb expires everything it can reach, and then
+    exits 1 saying the sibling list is unknown: a gc that cannot say which siblings it left unvisited is not done.
+    Each sibling is expired and reported on its own line, so one sibling's kept chunks and another's expiry are each
+    stated as what they are, never summed."""
     import http.client  # noqa: PLC0415 — command-local import (http.client)
 
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
@@ -347,6 +349,7 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
     # which is also where a first-sibling failure stops (the others were never looked up).
     resolution = SiblingResolution()
     siblings = [qname]
+    unresolved = False  # the first page gave no sibling list (answered neither key, or its answer was lost)
     done: list[tuple[str, int]] = []  # (sibling, expired) for every sibling whose expiry completed
     index = 0
     while index < len(siblings):
@@ -364,7 +367,7 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
                 if done else ""
             )
             if first and resolution.status != "unasked":
-                siblings = siblings_after_first_page(t3_db, collection, qname, resolution)  # names only: no probe here
+                siblings = siblings_after_first_page(t3_db, collection, qname, resolution)  # names only
             if len(siblings) > 1:
                 order = f"Siblings are expired in this order: {', '.join(siblings)}; that one and any after it were not."
             elif resolution.status == "resolved":
@@ -379,9 +382,10 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
             )
             raise click.exceptions.Exit(1) from exc
         if first:
-            # The first page has answered: go on with what the engine named, or, against an engine that did not
-            # answer, with the derived names and the dry-run probe (nexus-wbfpw.64).
-            siblings = siblings_after_first_page(t3_db, collection, qname, resolution, probe_fallback=True)
+            # The first page has answered: go on with what the engine named, or, where it did not, with the two
+            # derived names (nexus-wbfpw.64, nexus-6bk7i: no scan).
+            siblings = siblings_after_first_page(t3_db, collection, qname, resolution)
+            unresolved = resolution.status in ("unanswered", "unknown")
             if resolution.status == "timed_out":
                 click.echo(
                     f"  The engine's lookup of {collection}'s quarantine siblings ran past its bound, so only "
@@ -404,6 +408,21 @@ def _expire_client_quarantine(t3_db, collection: str, qname: str, *, moved: int)
             f"  Client expiry of {sibling} (older than {quarantine_days()} day(s), rows the engine's "
             f"reaper tagged excluded): {expired_text} expired, {refused_text}{why}."
         )
+    if unresolved:
+        click.echo(
+            f"\nSummary: the client expiry reached {', '.join(siblings)} but the engine did not name {collection}'s "
+            "quarantine siblings"
+            + (
+                " (its first page answered neither quarantine_collections nor sibling_resolution, which every "
+                "engine at or above v0.1.163 does: a local engine not restarted since a client upgrade answers this "
+                "way, so run `nx doctor` and `nx daemon restart-stale`; on a managed endpoint check any proxy between)"
+                if resolution.status == "unanswered"
+                else " (its first page committed but the answer was lost)"
+            )
+            + ", so a sibling stranded under another name was not looked at. Re-run this verb to ask again.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
 
 
 def _expiry_failure_detail(exc: BaseException) -> str:

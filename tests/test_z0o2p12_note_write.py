@@ -76,6 +76,15 @@ def _no_retry_sleeps(monkeypatch):
     reset_brake()
 
 
+@pytest.fixture(autouse=True)
+def _no_row_without_an_engine(request, monkeypatch):
+    """A note's chunk metadata stamps the model its catalog row names (nexus-ldh33). A test
+    with no engine has no row to read, so it answers none and the name decides; a test on
+    the engine reads the real row."""
+    if "t2_service_env" not in request.fixturenames:
+        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: None)
+
+
 @pytest.fixture
 def vec(t2_service_env):
     import nexus.db.http_vector_client as hvc

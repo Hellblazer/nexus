@@ -76,7 +76,7 @@ def rename_collection_data_plane(
     #     ("nx catalog restore the trashed document(s) first"); say so instead
     #     (nexus-dkymw: the verb nexus-xavu7 found missing now exists).
     #   - new PRESENT or TOMBSTONED -> refuse. This rename path has no
-    #     cross_model escape valve, so
+    #     escape valve, so
     #     claiming a tombstoned name would silently land live/fresh data on
     #     top of dead rows sharing the same collection name.
     # No-op for any t3_db that is not literally an HttpVectorClient (T3Database

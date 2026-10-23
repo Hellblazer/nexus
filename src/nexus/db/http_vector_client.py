@@ -33,6 +33,7 @@ import gzip
 import json
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -1789,6 +1790,20 @@ _T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
     "/gc/quarantine-restore",
 )
 
+#: Write-shaped paths a bare suffix cannot name (RDR-210 Phase 6 Step 3, nexus-cnxjk): the re-embed job's start
+#: and its pause/resume/abort, which carry a job id before the verb. ``/reembed/plan`` and ``/reembed/status``
+#: only read. Kept apart from the suffix tuple, which other tripwires read as "chunk writes and sweeps".
+_T3_WRITE_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"/v1/vectors/reembed/jobs(?:/[^/]+/(?:pause|resume|abort))?$"),
+)
+
+
+def _is_t3_write_path(path: str) -> bool:
+    """Whether *path* mutates server state (the guard's test): a write suffix or a write pattern."""
+    return any(path.endswith(suffix) for suffix in _T3_WRITE_PATH_SUFFIXES) or any(
+        pattern.search(path) for pattern in _T3_WRITE_PATH_PATTERNS
+    )
+
 
 #: Socket timeout (seconds) for the two ``/v1/vectors/upsert-chunks`` call
 #: sites below. nexus-8hdg9 phase 2 critique remediation (T2
@@ -1865,7 +1880,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: float = 12
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
-    if any(path.endswith(suffix) for suffix in _T3_WRITE_PATH_SUFFIXES):
+    if _is_t3_write_path(path):
         from nexus.db.service_endpoint import guard_production_write  # noqa: PLC0415 — deferred: only on the write-shaped-path branch, no circular import (service_endpoint imports no nexus.* modules)
 
         base_url, _ = _resolve_endpoint()
@@ -3104,6 +3119,21 @@ def per_collection_route_enabled() -> bool:
     }
 
 
+#: nexus-n51v1: opt-in for the route's ``lexical`` field (nexus-xd2rc).
+ROUTE_LEXICAL_ENV = "NX_SEARCH_ROUTE_LEXICAL"
+
+
+def route_lexical_enabled() -> bool:
+    """True only when ``NX_SEARCH_ROUTE_LEXICAL`` is ``1``/``true``/``on``/``yes``.
+
+    Off by default (nexus-n51v1): with the field the engine runs one lexical arm per
+    collection, 0.3 to 0.65 s each, and a default ``--lexical`` search over 118
+    collections took 11.99 s against 6.90 s for the batched ``/hybrid-search`` leg
+    (engine-service-v0.1.163, 2026-10-22). Read on every search.
+    """
+    return os.environ.get(ROUTE_LEXICAL_ENV, "").strip().lower() in {"1", "true", "on", "yes"}
+
+
 #: The first engine release that serves ``/v1/vectors/search-per-collection``
 #: (engine-service-v0.1.147, 40ebdafce). A cloud client whose version probe
 #: read a release at or above it marks the route confirmed at construction,
@@ -3202,7 +3232,7 @@ class HttpVectorClient:
 
     # ── Catalog-row resolution (nexus-fryrd) ──────────────────────────────────
 
-    def _resolve_collection_row(self, collection: str) -> dict | None:
+    def _resolve_collection_row(self, collection: str, *, strict: bool = False) -> dict | None:
         """Return the catalog row for *collection*, through THIS client's
         own resolver -- never a different client's tenant.
 
@@ -3238,13 +3268,19 @@ class HttpVectorClient:
            and correctness over a stale read matters more than a saved
            round trip here); a caller needing a warm cache for a
            non-default tenant supplies its own ``_row_resolver``.
+
+        ``strict`` (nexus-s8r5o) makes cases 2 and 3 raise a failed listing instead
+        of answering ``None``. Case 1 calls the injected resolver as it is: whatever
+        it raises propagates, and a failure it swallows itself stays a ``None``.
         """
         if self._row_resolver is not None:
             return self._row_resolver(collection)
         if self._tenant == _process_default_tenant():
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-            return get_collection_row(collection)
-        for row in self.list_collections():
+            return get_collection_row(collection, strict=strict)
+        # The routing listing: the catalog attributes only, no per-collection
+        # chunk count (nexus-7jy5r: the indexers read a row per file).
+        for row in self.list_collections(routing=True, strict=strict):
             if row.get("name") == collection:
                 return row if "content_type" in row else None
         return None
@@ -4781,8 +4817,9 @@ class HttpVectorClient:
         ``resolve_siblings`` (nexus-wbfpw.64, additive) also asks the engine which quarantine
         collections may hold chunks of ``origin_collection``. An engine that has it adds
         ``"quarantine_collections": [str]`` to the answer (or ``"sibling_resolution": "timed_out"``
-        when its read ran into its bound); an engine that predates it answers neither, which is how a
-        caller tells the two apart, never by version. The field is sent only when asked.
+        when its read ran into its bound). Every engine at or above ``REQUIRED_ENGINE_VERSION`` has it;
+        an answer with neither key comes from an engine below that floor (a local one not restarted
+        since a client upgrade) or a defect. The field is sent only when asked.
         """
         body: dict = {
             "quarantine_collection": quarantine_collection,
@@ -5043,6 +5080,115 @@ class HttpVectorClient:
                     f"POST /v1/vectors/reapable returned a cursor that did not advance ({nxt})",
                 )
             after = nxt
+
+    # ── the cross-model re-embed job (RDR-210 Phase 6 Step 3, nexus-cnxjk) ─────
+    #
+    # Local engine only: an engine without the job (a managed one, or one started without the supervisor's
+    # NX_ENGINE_LOCAL) answers 503 naming local mode on every route, and one that predates the routes answers
+    # 404. The engine reads request bodies strictly (an unknown field is a 400), so each method sends
+    # exactly the fields its route takes and nothing else.
+
+    _REEMBED = "/v1/vectors/reembed"
+
+    def reembed_plan(self, source_collection: str, *, target_collection: str | None = None) -> dict:
+        """POST /v1/vectors/reembed/plan: what a job on ``source_collection`` would do, writing nothing.
+
+        ``target_collection`` is the conformant name the engine registers when no live sibling of the
+        source's ``(content_type, owner_id)`` carries the profile model; it is ignored when one does, and it
+        goes on the start request too. Returns the plan as the engine sends it (counts, token estimate,
+        target and what would happen to it); 409 raises :class:`VectorServiceError` with the engine's
+        reason, naming the holding job when a job holds the source.
+        """
+        body: dict[str, Any] = {"source_collection": source_collection}
+        if target_collection:
+            body["target_collection"] = target_collection
+        return _post(f"{self._REEMBED}/plan", body, tenant=self._tenant)
+
+    def reembed_start(
+        self,
+        source_collection: str,
+        *,
+        target_collection: str | None = None,
+        token_cap: int | None = None,
+        keep_source: bool = False,
+        force_delete: bool = False,
+    ) -> dict:
+        """POST /v1/vectors/reembed/jobs: start the job (201, the job row).
+
+        ``keep_source``, ``force_delete`` and ``token_cap`` are stored on the job row, so the runner and a
+        later re-entry honour them with no client. ``token_cap`` is omitted when ``None`` (no cap). A resent
+        start finds the source's lock and answers 409 naming the existing job.
+        """
+        body: dict[str, Any] = {
+            "source_collection": source_collection,
+            "keep_source": bool(keep_source),
+            "force_delete": bool(force_delete),
+        }
+        if target_collection:
+            body["target_collection"] = target_collection
+        if token_cap is not None:
+            body["token_cap"] = int(token_cap)
+        return _post(f"{self._REEMBED}/jobs", body, tenant=self._tenant)
+
+    def reembed_reenter(self, source_collection: str) -> dict:
+        """POST /v1/vectors/reembed/jobs for a ``kept_tombstoned`` source: re-enter the job that kept it (201, its row).
+
+        The body is ``source_collection`` alone: the re-entered job keeps its own target, token cap, ``keep_source``
+        and ``force_delete`` (the engine answers 400 to any other field on this path). The row carries
+        ``target_action: "reentered"`` and ``reentry`` (``running`` when a live document is in the source,
+        ``cutover`` when no tombstone is left); 409 names the job that holds the source, or says trash remains.
+        """
+        return _post(f"{self._REEMBED}/jobs", {"source_collection": source_collection}, tenant=self._tenant)
+
+    def reembed_status(self, *, counts: bool = False) -> list[dict]:
+        """GET /v1/vectors/reembed/status: every job row of the tenant, newest first.
+
+        ``counts=True`` asks for each row's ``delete_counts`` (the quarantine rows, cross-collection topic
+        assignments, topic links and unmatched satellite rows the source's delete takes; ``None`` for a job with no
+        delete ahead of it). An engine that predates the parameter ignores it and sends rows without the key. Off
+        by default: the engine reads the source's tables for them, and ``--wait`` polls this route.
+        """
+        suffix = "?counts=true" if counts else ""
+        result = _get(f"{self._REEMBED}/status{suffix}", tenant=self._tenant)
+        jobs = result.get("jobs") if isinstance(result, dict) else None
+        if not isinstance(jobs, list):
+            raise VectorServiceError(f"GET {self._REEMBED}/status answered a body with no jobs list: {result!r}")
+        return jobs
+
+    def reembed_pause(self, job_id: str) -> dict:
+        """POST /v1/vectors/reembed/jobs/{id}/pause: the job row; ``"unchanged": true`` when already paused."""
+        return _post(f"{self._REEMBED}/jobs/{job_id}/pause", {}, tenant=self._tenant)
+
+    def reembed_resume(self, job_id: str, *, token_cap: int | None = None) -> dict:
+        """POST /v1/vectors/reembed/jobs/{id}/resume; ``token_cap`` may only raise the job's cap."""
+        body: dict[str, Any] = {}
+        if token_cap is not None:
+            body["token_cap"] = int(token_cap)
+        return _post(f"{self._REEMBED}/jobs/{job_id}/resume", body, tenant=self._tenant)
+
+    def reembed_abort(self, job_id: str) -> dict:
+        """POST /v1/vectors/reembed/jobs/{id}/abort: moved documents stay moved."""
+        return _post(f"{self._REEMBED}/jobs/{job_id}/abort", {}, tenant=self._tenant)
+
+    def served_embedding_models(self) -> list[str] | None:
+        """``GET /version``'s ``embedding_models``: the model tokens the engine can embed with now.
+
+        ``None`` when the engine does not report the field (an older engine) or cannot be read: "cannot
+        tell" is never "served" and never "missing". The plan reads this before it starts a job into a
+        family a degraded boot left unserved (nexus-q6t89).
+        """
+        try:
+            body = _get("/version", tenant=self._tenant, timeout=10.0)
+        except Exception as exc:  # noqa: BLE001 — advisory read, see below
+            # Nothing else checks that the engine can embed with the target model: neither the plan nor the start route
+            # does. When this read fails the client proceeds, the start registers the (empty) target sibling, and the job
+            # fails at its first batch with the engine's embed error; the registered empty target stays.
+            _log.debug("served_embedding_models_unread", error=str(exc))
+            return None
+        models = body.get("embedding_models") if isinstance(body, dict) else None
+        if isinstance(models, list) and all(isinstance(m, str) for m in models):
+            return list(models)
+        return None
 
     #: Catalog attribute keys the RDR-204 Phase 2 engine joins into
     #: ``/v1/vectors/stats`` rows (``PgVectorRepository`` joins

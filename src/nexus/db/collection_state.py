@@ -14,8 +14,7 @@ nexus-70r3c.13):
   rename of a tombstoned ``old`` with "not found" hides the real remedy
   (``nx catalog restore`` the trashed document(s) first, nexus-dkymw); and
   treating a tombstoned ``new``
-  as free-to-claim would let a plain rename (no ``cross_model`` escape
-  valve) silently land live data on top of dead rows under one name.
+  as free-to-claim would let a plain rename silently land live data on top of dead rows under one name.
 - ``commands/catalog_cmds/collections.py``'s ``rename_collection_cmd`` --
   the same two guards, CLI-verb flavored.
 - ``indexer.py``'s RDR-103 legacy-to-conformant migration probe and

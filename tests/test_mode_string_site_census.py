@@ -32,6 +32,7 @@ REVIEWED: dict[str, tuple[int, str]] = {
     "errors.py": (1, "serving_mode is a diagnostic in the profile-mismatch error; the remedy is chosen by the collection's family"),
     "health.py": (3, "the Embedding family doctor row (nexus-wypwq): voyage mode only suppresses the client-profile fallback (the engine serves Voyage whatever the client intends); dual and onnx-local are read against the profile, and the 'voyage' compare is the profile (bge or voyage), not an engine mode; display and warning only"),
     "mcp_infra.py": (3, "a warm-up probe step named embedding_mode; no decision"),
+    "reembed_job.py": (2, "both compare a target MODEL's family (model_family(...) == 'voyage': the billed cap and the plan's cost lines), never the engine's embedding_mode; a dual engine reaches them by the target model it was asked for"),
     "search_engine.py": (3, "the threshold gate is embedding_mode() in _THRESHOLD_ENGINE_MODES (voyage and dual; P1.5, nexus-hf29s); _engine_is_dual reads the same embedding_mode() so a model-less name gets no threshold on a dual engine (nexus-ndr0t S3); the rest is the serving_mode diagnostic"),
 }
 

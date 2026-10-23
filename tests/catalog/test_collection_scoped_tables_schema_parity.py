@@ -150,6 +150,18 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "CASCADE_CARRIED_TABLES reasoning). Registering it would add nothing the chunks "
         "entry does not already give."
     ),
+    ("reembed_jobs", "source_collection"): (
+        "RDR-210 P6.2 (nexus-f98bg, vectors-037): the job's own record of the collection it "
+        "re-embedded FROM. Cross-model disposition LEAVE: it is kept after the job deletes the "
+        "source, so a rename or delete of the collection must not rewrite or block on it. The "
+        "source-lock partial unique index is keyed on it, which is a second reason re-homing "
+        "it could collide."
+    ),
+    ("reembed_jobs", "target_collection"): (
+        "Same record and same disposition (LEAVE) as source_collection above: the job's "
+        "own record of the collection it re-embedded INTO, kept after the source is deleted. "
+        "reembed_job_moves has no collection-named column, so this gate does not see it."
+    ),
     ("chash_remap", "target_collection"): (
         "Same ledger and same ruling as source_collection above; the target leg is "
         "historical fact about a completed migration, not a live pointer. See "

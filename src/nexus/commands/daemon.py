@@ -1032,11 +1032,27 @@ def service_start_cmd(
                 }
             )
         )
+        # RDR-210 Phase 6 Step 3: stdout stays the one JSON object above, so the hint goes to stderr.
+        _echo_reembed_hint(err=True)
     else:
         click.echo(
             f"Storage service running on {ep.get('host')}:{ep.get('port')} "
             f"(pid={ep.get('pid')}, generation={existing.generation})."
         )
+        _echo_reembed_hint(err=False)
+
+
+def _echo_reembed_hint(*, err: bool) -> None:
+    """Name ``nx collection re-embed --all`` when a live collection is off the engine's profile.
+
+    The doctor's off-profile rule, read once from the catalog now that the engine is up; any failure or a slow
+    engine is no hint (``nexus.reembed_job.off_profile_hint`` bounds the read). Printed after the running line.
+    """
+    from nexus.reembed_job import off_profile_hint  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+
+    hint = off_profile_hint()
+    if hint:
+        click.echo(hint, err=err)
 
 
 # The recovery-playbook URL lives in

@@ -102,7 +102,7 @@ from nexus._locking import lock_file, unlock_file
 from nexus._winsec import grant_user_tree_access
 from nexus.util.process_group import KILL_SIGNAL, safe_killpg
 from tests._child_process import kill_group, pid_alive, popen_in_group, stop_group
-from tests._ddl_counter import PROBE_SQL, READY_LABEL, START_LABEL, log_conf, mark_sql
+from tests._ddl_counter import PROBE_SQL, READY_LABEL, RESTART_LABEL, START_LABEL, log_conf, mark_sql
 from tests._ddl_counter import enabled as ddl_count_enabled
 from tests._pg_ctl import pg_ctl_start
 from tests.db._service_fixture import (
@@ -2349,6 +2349,16 @@ def _boot() -> dict:
             engine_log_dir.mkdir(mode=0o700, exist_ok=True)
             svc_log_path = str(engine_log_dir / "engine.log")
     for engine_attempt in range(1, _PORT_RACE_ATTEMPTS + 1):
+        # nexus-7lxn7: the attempt that lost its port had already run the whole migration (the
+        # engine migrates before it binds), and this one re-runs the runAlways changesets. The
+        # restart mark makes that rerun boot, so the migration counted is the first attempt's, as
+        # on a run with no retry. Best effort, as above.
+        if ddl_count_enabled():
+            if engine_attempt > 1:
+                try:
+                    _psql_command(bin_dir, pg_port, pg_user, mark_sql(RESTART_LABEL))
+                except RuntimeError as exc:
+                    warnings.warn(f"nexus test substrate: DDL restart mark failed: {exc}", stacklevel=2)
         svc_port = _free_port()
         spawn_env = {**env, "NX_SERVICE_PORT": str(svc_port)}
         # "wb" truncates, so the log below holds only THIS attempt's JVM.

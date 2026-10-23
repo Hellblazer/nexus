@@ -120,3 +120,46 @@ def enter_stable_daemon_cwd(*, project_root: str | os.PathLike[str] | None = Non
     except OSError:
         return ""
     return target
+
+
+#: Set once :func:`heal_deleted_cwd` has moved this process off a deleted directory.
+#: The process then sits in the stable cwd, which is not a project: a caller that
+#: needs the project directory reads :func:`cwd_was_healed` instead of trusting
+#: ``os.getcwd()`` (nexus-x6qc7).
+_healed_from_deleted = False
+
+
+def cwd_was_healed() -> bool:
+    """``True`` once this process was moved off a deleted working directory."""
+    return _healed_from_deleted
+
+
+def heal_deleted_cwd() -> bool:
+    """Move a long-lived process off a working directory that was deleted under it.
+
+    For a process that cannot start in the stable cwd because its host chose the
+    directory: Claude Desktop starts its MCP servers in the plugin's install
+    directory and deletes that directory when it updates the plugin, while the
+    servers keep running (nexus-x6qc7, shakeout F19: every ``claude -p`` the
+    server spawned then exited 1, "The current working directory was deleted").
+    A directory that still exists is left alone, so a Claude Code server keeps
+    its project directory, and so does one whose ``getcwd`` fails for any reason
+    other than the directory being gone (``EACCES``). Unlike
+    :func:`enter_stable_daemon_cwd` it rewrites no environment: with the old
+    directory gone, a relative ``NEXUS_CONFIG_DIR`` has no referent to pin.
+    Returns ``True`` when it moved the process.
+    """
+    try:
+        os.getcwd()
+        return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    global _healed_from_deleted
+    try:
+        os.chdir(stable_daemon_cwd())
+    except OSError:
+        return False
+    _healed_from_deleted = True
+    return True

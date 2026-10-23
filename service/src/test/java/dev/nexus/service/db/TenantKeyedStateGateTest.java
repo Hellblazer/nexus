@@ -574,6 +574,10 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("TenantCreationBusyException.tenant", "payload of an exception thrown to one caller");
             notKeyed.put("UnregisteredCollectionException.tenant", "payload of an exception thrown to one caller");
             notKeyed.put("CollectionSupersededException.tenant", "payload of an exception thrown to one caller (nexus-mp8ys)");
+            notKeyed.put("ReembedRunner.tenantSource", "a supplier of the tenant list, re-read from service_tokens at "
+                + "the start of every runner pass; the runner keeps nothing per tenant between passes");
+            notKeyed.put("ReembedHandler.servedModels", "a supplier of the models the embedder router serves, an "
+                + "install-wide fact read on each plan and start (the list GET /version reports); it keeps no copy");
             notKeyed.put("ChunkReaper.tenants", "a supplier of the tenant list, re-read from service_tokens on "
                 + "every pass; the reaper keeps no copy");
             notKeyed.put("Rdr192BackfillGate.emptyTenant", "a predicate that reads PG on each call; it caches nothing");
@@ -660,6 +664,9 @@ public class TenantKeyedStateGateTest {
                 "CatalogRepository.afterMoveCompletedHookForTests",
                 "CatalogRepository.afterMovePreconditionHookForTests",
                 "CatalogRepository.beforeReadHookForTests",
+                "ReembedJobRepository.lockRetryHookForTests",
+                "ReembedRunner.phaseHookForTests",
+                "NexusService.reembedServedModelsForTests",
                 "ChunkReaper.testOnlyAfterNoteTimeout",
                 "CombinedWriteService.afterExistencePartitionHookForTests",
                 "CombinedWriteService.afterNeedEmbedResolvedHookForTests",
@@ -745,6 +752,7 @@ public class TenantKeyedStateGateTest {
                 "PgVectorRepository.QuarantineRestoreOutcome.quarantineCollections",
                 "PgVectorRepository.QuarantineRestoreOutcome.rows",
                 "PgVectorRepository.Tokened.skippedCollections",
+                "ReembedJobRepository.BatchResult.skips",
                 "SchemaMigrator.WalkChangesetCounts.duplicateChangesetIds",
                 "TaxonomyRepository.OwnPassOutcome.unmatched",
                 "TelemetryRepository.StepInput.bundledSteps",
@@ -801,6 +809,7 @@ public class TenantKeyedStateGateTest {
             // PRINCIPAL (7)
             for (String f : List.of(
                 "NexusService.TupleTenantCursor.tenantId",
+                "ReembedRunner.Turn.tenant",
                 "RequestContext.Principal.tenant",
                 "RequestLedger.RetentionPass.tenant",
                 "SessionPrincipal.tenantId",

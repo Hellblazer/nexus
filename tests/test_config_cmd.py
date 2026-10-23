@@ -620,3 +620,80 @@ def test_config_set_non_secret_on_argv_gets_no_hint(runner, fake_home) -> None:
     result = runner.invoke(main, ["config", "set", "pdf.extractor", "mineru"])
     assert result.exit_code == 0, result.output
     assert "--stdin" not in result.output
+
+
+# ── the re-embed hint (RDR-210 Phase 6 Step 3, nexus-cnxjk) ──────────────────
+#
+# When a change to one of the two profile inputs flips ``local_embed_profile()``'s answer, ``nx config set``
+# and ``nx config unset`` print a second line naming ``nx collection re-embed --all``. A change that leaves
+# the answer alone prints nothing: no collection became stale. Model tokens are inert; only the prefix counts.
+
+from nexus.reembed_job import REEMBED_HINT  # noqa: E402
+
+
+def _unset(runner: CliRunner, key: str) -> str:
+    result = runner.invoke(main, ["config", "unset", key])
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+def test_reembed_hint_is_one_line_naming_the_verb() -> None:
+    assert "nx collection re-embed --all" in REEMBED_HINT
+    assert "\n" not in REEMBED_HINT
+
+
+def test_set_choice_from_bge_to_a_voyage_model_prints_the_reembed_hint(runner, fake_home) -> None:
+    out = _set(runner, "local.embed_model", "voyage-model-a")
+    assert SERVICE_RESTART_HINT in out
+    assert REEMBED_HINT in out
+    assert out.index(SERVICE_RESTART_HINT) < out.index(REEMBED_HINT), "the second line follows the restart line"
+
+
+def test_set_choice_from_voyage_to_bge_prints_the_reembed_hint(runner, fake_home) -> None:
+    _write_config(fake_home, {"local": {"embed_model": "voyage-model-a"}})
+    assert REEMBED_HINT in _set(runner, "local.embed_model", "bge-base-en-v15-768")
+
+
+def test_set_choice_that_leaves_the_profile_alone_prints_no_reembed_hint(runner, fake_home) -> None:
+    _write_config(fake_home, {"local": {"embed_model": "voyage-model-a"}})
+    out = _set(runner, "local.embed_model", "voyage-model-b")
+    assert SERVICE_RESTART_HINT in out
+    assert REEMBED_HINT not in out
+
+
+def test_set_choice_bge_when_already_bge_prints_no_reembed_hint(runner, fake_home) -> None:
+    out = _set(runner, "local.embed_model", "bge-base-en-v15-768")
+    assert SERVICE_RESTART_HINT in out
+    assert REEMBED_HINT not in out
+
+
+def test_set_voyage_key_with_no_choice_recorded_flips_the_profile_and_prints_the_hint(runner, fake_home) -> None:
+    assert REEMBED_HINT in _set(runner, "voyage_api_key", "pa-test-key")
+
+
+def test_set_voyage_key_beside_a_recorded_bge_choice_prints_no_reembed_hint(runner, fake_home) -> None:
+    _write_config(fake_home, {"local": {"embed_model": "bge-base-en-v15-768"}})
+    out = _set(runner, "voyage_api_key", "pa-test-key")
+    assert SERVICE_RESTART_HINT in out
+    assert REEMBED_HINT not in out
+
+
+def test_unset_voyage_key_with_no_choice_recorded_prints_the_hint(runner, fake_home) -> None:
+    _write_config(fake_home, {"credentials": {"voyage_api_key": "pa-test-key"}})
+    out = _unset(runner, "voyage_api_key")
+    assert SERVICE_RESTART_HINT in out
+    assert REEMBED_HINT in out
+
+
+def test_unset_voyage_key_with_a_choice_recorded_prints_no_reembed_hint(runner, fake_home) -> None:
+    _write_config(fake_home, {
+        "local": {"embed_model": "voyage-model-a"}, "credentials": {"voyage_api_key": "pa-test-key"},
+    })
+    out = _unset(runner, "voyage_api_key")
+    assert SERVICE_RESTART_HINT in out
+    assert REEMBED_HINT not in out
+
+
+def test_unset_of_a_key_that_was_not_saved_prints_no_hint(runner, fake_home) -> None:
+    out = _unset(runner, "voyage_api_key")
+    assert REEMBED_HINT not in out and SERVICE_RESTART_HINT not in out

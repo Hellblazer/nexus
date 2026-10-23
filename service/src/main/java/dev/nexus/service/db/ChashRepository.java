@@ -243,6 +243,9 @@ public final class ChashRepository {
             for (String c : java.util.stream.Stream.of(oldCollection, newCollection).sorted().distinct().toList()) {
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, c);
             }
+            // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a name a re-embed job is moving documents out of or into
+            // is not re-homed underneath it; 409 naming the job (HttpUtil.sendTypedDbError).
+            CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldCollection, newCollection);
             // nexus-i15oc: plain registration check on purpose. A rename onto an EMPTY tombstone revives it
             // (renaming B back onto A, the round trip that undoes a rename, lands on A's tombstone), so the
             // target may be superseded. The source needs no check, it is only read.
@@ -314,10 +317,9 @@ public final class ChashRepository {
                .execute();
             // nexus-wbfpw.68: quarantine rows tagged for oldCollection now name a collection that is gone;
             // retag them to newCollection (an audit row per sibling). The chunk count returned stays the
-            // origin's own rows. NOT when oldCollection is still a live registered collection: this route
-            // also serves the RDR-162 cross-model cascade, where the source stays registered and live and its
-            // quarantine rows (source-model vectors) stay with it, exactly as the catalog's COPY branch
-            // leaves them. A canonical rename retires the source row first, so this call is then a no-op.
+            // origin's own rows. NOT when oldCollection is still a live registered collection: then its
+            // quarantine rows (source-model vectors) stay with it. A catalog rename retires the source row
+            // first, so this guard then passes.
             if (!QuarantineOrigin.isLiveRegistered(ctx, tenant, oldCollection)) {
                 QuarantineOrigin.retagRowsOf(ctx, tenant, oldCollection, newCollection);
             }

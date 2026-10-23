@@ -506,7 +506,7 @@ public final class VoyageEmbedder implements Embedder {
      * floored at 1 for any non-empty text so an all-tiny-text batch still accumulates a
      * budget instead of appearing free. See {@link #PROVISIONAL_BYTES_PER_TOKEN}'s javadoc
      * for why exactness here is not load-bearing. */
-    static long estimateTokens(String text) {
+    public static long estimateTokens(String text) {
         if (text == null || text.isEmpty()) return 0L;
         long byteLen = text.getBytes(StandardCharsets.UTF_8).length;
         return Math.max(byteLen / PROVISIONAL_BYTES_PER_TOKEN, 1L);

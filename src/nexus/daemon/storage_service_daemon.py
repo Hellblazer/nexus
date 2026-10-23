@@ -1539,6 +1539,12 @@ class StorageServiceSupervisor:
         # dead supervisor never leaves an orphaned-but-serving service. NX_SERVICE_BIND
         # (container bind override, default loopback) passes through via env inheritance.
         env["NX_SERVICE_PARENT_DEATH_EXIT"] = "1"
+        # RDR-210 Phase 6 Step 2 (nexus-f98bg): this supervisor spawns the LOCAL engine, the only one that
+        # runs the cross-model re-embed job runner and answers its control routes. The managed (cloud) engine
+        # is not started here and never sees the variable, so it has no runner. Forced, not setdefault: an
+        # operator's inherited value must not turn a local engine's runner off by accident or a managed
+        # one's on. The engine reads the value 1, ignoring surrounding whitespace.
+        env["NX_ENGINE_LOCAL"] = "1"
         # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the engine treats an UNSET
         # NX_OWNERLESS_WRITE_MODE as log-only (the first production deploy must not refuse
         # anything until the would-refuse log has been read). A LOCAL install has no such
@@ -3465,6 +3471,22 @@ def run_storage_supervisor(
         uninstall_session_end()
 
 
+def _announce_reembed_hint() -> None:
+    """Print the re-embed hint to stderr when a live collection is off the engine's profile (RDR-210).
+
+    A courtesy: ``off_profile_hint`` swallows every failure and bounds its own read, and so does this.
+    """
+    try:
+        from nexus.reembed_job import off_profile_hint  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+
+        hint = off_profile_hint()
+        if hint:
+            sys.stderr.write(hint + "\n")
+            sys.stderr.flush()
+    except Exception as exc:  # noqa: BLE001 — a hint must never reach the supervisor loop
+        _log.debug("reembed_hint_failed", error=str(exc))
+
+
 def _supervise_until_stopped(
     sup: StorageServiceSupervisor,
     stop_requested: threading.Event,
@@ -3517,6 +3539,13 @@ def _supervise_until_stopped(
         event="storage_service_already_running_healthy",
     ):
         return 0
+
+    # RDR-210 Phase 6 Step 3: the engine is up and this process owns it. `--foreground` prints no running
+    # line, so the re-embed hint comes from here, on stderr. On its own thread: the catalog read behind it is
+    # bounded but must not delay the first heartbeat of the lease this process now holds.
+    threading.Thread(
+        target=_announce_reembed_hint, name="reembed-hint-announce", daemon=True,
+    ).start()
 
     # nexus-cd1k0.18: the loop body is wrapped in try/finally so the
     # breadcrumb -> flush -> sup.stop() tail ALWAYS runs, exception

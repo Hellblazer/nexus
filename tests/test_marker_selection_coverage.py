@@ -281,10 +281,6 @@ _ACKNOWLEDGED_DARK: dict[str, str] = {
         "39 tests need a lived-in install; local-service-gate deliberately "
         "runs -m 'integration and not lived_in'. Runner decision: nexus-699ot"
     ),
-    "cloud_mode": (
-        "3 tests need a cloud-mode box; absence acknowledged in "
-        "local-service-gate.sh. Runner decision: nexus-699ot"
-    ),
 }
 
 

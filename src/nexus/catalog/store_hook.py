@@ -186,11 +186,10 @@ def note_pieces(content: str, collection: str) -> list[str]:
     The byte quota is :func:`raise_if_oversized`'s, unchanged.
     """
     from nexus.chunker import split_text_to_char_cap, split_text_to_token_window  # noqa: PLC0415 — deferred, heavy import graph
-    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — deferred to avoid import cycle
 
-    # Calibrated: the plain resolver reads a legacy two-segment local
-    # collection as Voyage (nexus-mc1l1), which would leave it unsplit.
-    window = window_for_model(embedding_model_for_collection_calibrated(collection))
+    from nexus.corpus import embedding_model_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle
+
+    window = window_for_model(embedding_model_row_preferred(collection))
     if window is None:
         # No window to fit: split for retrieval granularity instead.
         if len(content) <= NOTE_SPLIT_CHARS:

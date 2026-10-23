@@ -257,6 +257,9 @@ def rename_collection_cmd(
       - old name must be in the collections projection
       - old name must not already be superseded
       - new name must not already exist in T3
+      - new name's model token must match the old collection's catalog-row
+        embedding_model (rename never re-embeds; for a mis-modelled row,
+        ``nx collection rename --force-prefix-change`` carries the override)
 
     \b
     Examples:
@@ -267,7 +270,11 @@ def rename_collection_cmd(
     from nexus.commands.collection import (  # noqa: PLC0415  — command-local import (nexus.commands.collection)
         rename_collection_data_plane,
     )
-    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — command-local import (nexus.corpus)
+    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+        embedding_model_for_collection_name,
+        is_conformant_collection_name,
+        rename_model_conflict,
+    )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -329,6 +336,57 @@ def rename_collection_cmd(
         raise click.ClickException(
             f"new name {new!r} already exists in T3. "
             f"Refusing to rename {old!r} on top of an existing collection."
+        )
+
+    # nexus-7f4o4: the engine rename keeps the SOURCE row's embedding_model,
+    # so a conformant `new` whose model token disagrees with that row would
+    # register a name claiming a model the vectors are not in. The model is
+    # read from `old_row`, the engine row this verb already fetched above,
+    # not from the stats-view cache: a failed listing there would silently
+    # fall to the name and let a mismatch through. A non-conformant `new`
+    # (--allow-legacy) carries no token to compare. A source row with no
+    # model, or a legacy source with no row, has nothing to compare (the
+    # name fallback answers only from a conformant token), so this verb's
+    # long-accepted legacy -> conformant rename stays accepted.
+    #
+    # A `disputed` source (hygiene-002: its bytes disagree with its row)
+    # has a row model that is itself in doubt, so the comparison is skipped
+    # with a warning. The single-row read carries no lifecycle_state, so
+    # that one field comes from the stats cache; a failed read there only
+    # means the comparison runs against the engine row.
+    lifecycle = old_row.get("lifecycle_state")
+    if lifecycle is None:
+        try:
+            from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — command-local import (nexus.mcp_infra)
+
+            cached = get_collection_row(old)
+        except Exception:  # noqa: BLE001 — the lifecycle hint is advisory; a failed cache read must not block or fail-open the model comparison
+            cached = None
+        lifecycle = (cached or {}).get("lifecycle_state")
+    if lifecycle == "disputed":
+        click.echo(
+            f"warning: {old!r} is a disputed collection (its bytes disagree "
+            f"with its catalog row), so its row model is not trusted and "
+            f"{new!r}'s model token was not compared with it.",
+            err=True,
+        )
+        conflict = None
+    else:
+        conflict = rename_model_conflict(
+            old, new, name_fallback=embedding_model_for_collection_name,
+            row_resolver=lambda _name: old_row,
+        )
+    if conflict is not None:
+        source_model, token_model, correct_name = conflict
+        raise click.ClickException(
+            f"embedding-model mismatch: {old!r} holds {source_model!r} "
+            f"vectors (its catalog row) but {new!r} names {token_model!r}. "
+            f"rename never re-embeds -- the vectors would stay "
+            f"{source_model!r} under a name claiming {token_model!r}. "
+            f"Rename to {correct_name!r} instead; if the row is the wrong "
+            f"one and the vectors really are {token_model!r}, "
+            f"'nx collection rename {old} {new} --force-prefix-change' "
+            f"carries the override."
         )
 
     if dry_run:

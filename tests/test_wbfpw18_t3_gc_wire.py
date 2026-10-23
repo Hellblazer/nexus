@@ -30,8 +30,8 @@ _COLL = "knowledge__nexus-1-1__voyage-context-3__v1"
 _QUARANTINE = "quarantine-knowledge__nexus-1-1__voyage-context-3__v1"
 _MOVE = "/v1/vectors/gc/quarantine-orphans"
 _EXPIRE = "/v1/vectors/gc/expire-quarantine"
-#: nexus-wbfpw.58: the sibling probe the client falls back to against an engine that does not resolve siblings itself
-#: (nexus-wbfpw.64: it asks the expire route's first page, so the probe now follows that page instead of preceding it).
+#: The dry-run sibling probe (nexus-wbfpw.58) the verb used against an engine from before nexus-wbfpw.64. It is gone
+#: (nexus-6bk7i); the fake engine has no handler for it, so a call to it fails the test, and these assertions say so.
 _PROBE = "/v1/vectors/gc/quarantine-restore"
 _BUCKETS = ("superseded", "legacy-unmanifested", "dead-owner", "no-owner", "unclassified")
 
@@ -69,22 +69,21 @@ class _Engine:
                  unclassified: int = 0, unclassified_on_recheck: int | None = None,
                  batches: list[int] | None = None, omit_scope: bool = False,
                  move_script: list | None = None, stuck: dict | None = None,
-                 expire: dict | Exception | None = None, siblings: list[str] | None = None,
+                 expire: dict | Exception | None = None,
                  floor_echo: bool = False, floor_refuse: tuple[int, int] | None = None,
-                 resolves: list[str] | str | None = None) -> None:
+                 resolves: list[str] | tuple | str | None = ()) -> None:
         # move_script: results (dict) or exceptions the move route answers with, in order; stuck: a
         # result the route answers with forever once the script is exhausted.
         # floor_echo: the engine honours the route's floor fields (nexus-wbfpw.52) and echoes them;
         # floor_refuse=(reapable, total): that engine judges the floor and refuses the move over it
         # (unless the request carries force). Neither: an older engine that ignores the fields.
-        # resolves: an engine with nexus-wbfpw.64 answers a ``resolve_siblings`` expire request with the origin's
-        # siblings (a list) or, when its read ran into its bound, ``"timed_out"``. None: an engine that predates it,
-        # which ignores the field and answers neither key.
-        self.resolves = resolves
+        # resolves: what the engine answers to a ``resolve_siblings`` expire request: the origin's siblings (a list;
+        # the default, none), or, when its read ran into its bound, ``"timed_out"``. None: neither key, which no
+        # supported engine does (v0.1.163 and later answer one of the two): a defect on the wire or in the engine.
+        self.resolves = list(resolves) if isinstance(resolves, (list, tuple)) else resolves
         self.floor_echo = floor_echo or floor_refuse is not None
         self.floor_refuse = floor_refuse
         self.omit_scope = omit_scope
-        self.siblings = list(siblings) if siblings is not None else []
         self.expire = {"expired": 0, "refused": 0} if expire is None else expire
         self.move_script = list(move_script) if move_script is not None else None
         self.stuck = stuck
@@ -163,13 +162,6 @@ class _Engine:
             elif body.get("resolve_siblings") and self.resolves == "timed_out":
                 answer["sibling_resolution"] = "timed_out"
             return answer
-        if path == "/v1/vectors/gc/quarantine-restore":
-            # The client's sibling probe (nexus-wbfpw.58): a dry-run over an empty selection that asks the
-            # engine which quarantine collections hold the origin's chunks. It must change nothing.
-            assert body.get("dry_run") is True and body.get("limit") == 1, body
-            return {"origin_collection": body["origin_collection"], "dry_run": True, "rows": [],
-                    "quarantine_collection": self.siblings[0] if self.siblings else None,
-                    "quarantine_collections": list(self.siblings)}
         if path == "/v1/vectors/gc/expire-quarantine":
             if isinstance(self.expire, Exception):
                 raise self.expire
@@ -261,9 +253,7 @@ def test_act_moves_through_the_engine_route_and_never_deletes_by_id(runner, real
     # The census gate comes first, then the move, then the client expiry of the sibling it filled,
     # and no hard delete by id anywhere.
     assert paths[0] == "/v1/vectors/manifest-less-census"
-    # (an engine that does not resolve siblings itself: the first expire page asks, gets no answer, and the
-    # dry-run probe follows it; nexus-wbfpw.64)
-    assert paths[-3:] == [_MOVE, _EXPIRE, _PROBE]
+    assert paths[-2:] == [_MOVE, _EXPIRE]
     assert "/v1/vectors/store-delete" not in paths
     assert "/v1/vectors/get" not in paths
     move = engine.moves()[-1]
@@ -312,35 +302,24 @@ def test_nothing_reapable_moves_nothing_but_still_expires_an_earlier_quarantine(
     assert "4 expired, 0 refused" in result.output
 
 
-def test_the_client_expiry_runs_over_every_sibling_the_engine_resolves(runner, real_client):
-    """nexus-wbfpw.58: chunks a client moved under an earlier name of the origin (the catalog row's owner_id
-    was rewritten since, catalog-044-3) sit in a sibling the row no longer derives, and carry no
-    quarantined_by tag for the reaper to expire. The verb expires from that sibling too."""
-    legacy = _QUARANTINE.replace("__nexus-1-1__", "__legacy-owner__")
-    engine = _Engine(total=10, reapable=[], expire={"expired": 2, "refused": 0}, siblings=[_QUARANTINE, legacy])
-    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert [c["quarantine_collection"] for c in engine.expiries()] == [_QUARANTINE, legacy]
-    assert {c["origin_collection"] for c in engine.expiries()} == {_COLL}
-    # One line per sibling, each with its own count: nothing is summed.
-    lines = [ln for ln in result.output.splitlines() if ln.startswith("  Client expiry of")]
-    assert [ln.split()[3] for ln in lines] == [_QUARANTINE, legacy]
-    assert all("2 expired, 0 refused" in ln for ln in lines), lines
-
-
 def test_the_verb_takes_the_siblings_from_the_expire_answer_and_sends_no_probe(runner, real_client):
-    """nexus-wbfpw.64: against an engine that resolves siblings in its expire route the verb asks in the first
-    page (``resolve_siblings``), expires from each sibling the engine names, and never sends the dry-run probe."""
+    """nexus-wbfpw.64, nexus-wbfpw.58: chunks a client moved under an earlier name of the origin (the catalog row's
+    owner_id was rewritten since, catalog-044-3) sit in a sibling the row no longer derives and carry no
+    quarantined_by tag for the reaper to expire. The verb asks in the first page (``resolve_siblings``), expires
+    from each sibling the engine names, and never sends the dry-run probe."""
     legacy = _QUARANTINE.replace("__nexus-1-1__", "__legacy-owner__")
     engine = _Engine(total=10, reapable=[], expire={"expired": 2, "refused": 0}, resolves=[_QUARANTINE, legacy])
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
     assert _PROBE not in engine.paths(), engine.paths()
     assert [c["quarantine_collection"] for c in engine.expiries()] == [_QUARANTINE, legacy]
+    assert {c["origin_collection"] for c in engine.expiries()} == {_COLL}
     asked = [c.get("resolve_siblings") for c in engine.expiries()]
     assert asked == [True, None], "only the FIRST page of the first sibling asks"
+    # One line per sibling, each with its own count: nothing is summed.
     lines = [ln for ln in result.output.splitlines() if ln.startswith("  Client expiry of")]
     assert [ln.split()[3] for ln in lines] == [_QUARANTINE, legacy]
+    assert all("2 expired, 0 refused" in ln for ln in lines), lines
 
 
 def test_an_engine_that_names_no_other_sibling_expires_the_one_and_sends_no_probe(runner, real_client):
@@ -353,8 +332,8 @@ def test_an_engine_that_names_no_other_sibling_expires_the_one_and_sends_no_prob
 
 
 def test_an_engine_whose_lookup_timed_out_is_not_probed_and_the_verb_says_so(runner, real_client):
-    """A timed-out lookup means the scan is too slow here: the dry-run probe is the same scan with no bound, so it
-    is not sent; the verb expires the derived siblings and says that another one may wait."""
+    """A timed-out lookup means the scan is too slow here, and nothing else scans (nexus-6bk7i); the verb expires the
+    derived siblings, exits 0 as before (the engine did answer), and says that another one may wait."""
     engine = _Engine(total=10, reapable=[], expire={"expired": 4, "refused": 0}, resolves="timed_out")
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
@@ -381,38 +360,32 @@ def test_an_index_path_prune_asks_the_engine_once_and_reaches_every_sibling_it_n
     assert all("resolve_siblings" not in c for c in engine.expiries()), "the expiry reuses the restore's answer"
 
 
-def test_an_index_path_prune_sends_no_sibling_probe(real_client):
-    """nexus-wbfpw.58 round 2: ``nx index repo`` runs this prune per collection on every index, so it uses the
-    two derived names (the row-derived one and the reaper's) and never sends the engine probe, whose resolution
-    is an unbounded scan engine-side. nexus-wbfpw.64: against an engine that resolves siblings in its own routes it
-    asks there instead (see the engine-resolved tests below); against one that does not, as here, it keeps the two
-    names and still sends no probe. ``nx t3 gc`` is the one caller of the probe."""
+def test_an_index_path_prune_against_an_engine_that_names_no_siblings_keeps_the_two_derived_names(real_client):
+    """nexus-wbfpw.58 round 2, nexus-6bk7i: ``nx index repo`` runs this prune per collection on every index. Against
+    an engine that names no siblings (a defect: every supported engine answers one of the two keys) it keeps the two
+    derived names (the row-derived one and the reaper's) and sends no probe, which no longer exists."""
     from nexus.indexer import _prune_collection_serverside
 
     row_derived = _QUARANTINE.replace("__nexus-1-1__", "__rewritten-1-9__")
-    engine = _Engine(total=10, reapable=[], expire={"expired": 1, "refused": 0},
-                     siblings=[_QUARANTINE.replace("__nexus-1-1__", "__legacy__")])
+    engine = _Engine(total=10, reapable=[], expire={"expired": 1, "refused": 0}, resolves=None)
     with patch("nexus.db.http_vector_client._post", engine.post):
         assert _prune_collection_serverside(real_client, _COLL, row_derived, "2026-01-01T00:00:00Z") is True
     assert _PROBE not in engine.paths(), engine.paths()
     assert [c["quarantine_collection"] for c in engine.expiries()] == [row_derived, _QUARANTINE]
 
 
-def test_a_failed_probe_still_expires_the_row_derived_sibling(runner, real_client):
-    """An engine that cannot answer the sibling probe must not cost the verb its expiry."""
-    engine = _Engine(total=10, reapable=[], expire={"expired": 4, "refused": 0})
-    real_post = engine.post
-
-    def post(path, body, **kw):
-        if path == _PROBE:
-            raise VectorServiceError("no such route", code=404)
-        return real_post(path, body, **kw)
-
-    engine.post = post
+def test_an_engine_that_names_neither_key_expires_the_derived_sibling_and_exits_1(runner, real_client):
+    """nexus-6bk7i: the first expire page answers neither ``quarantine_collections`` nor ``sibling_resolution``. No
+    supported engine does that, so it is a defect, not an old engine, and there is no probe to fall back to. The verb
+    still expires the derived sibling (fewer chunks than a resolved list would reach, never more), then exits 1 saying
+    the siblings were not named so it is not read as a complete run."""
+    engine = _Engine(total=10, reapable=[], expire={"expired": 4, "refused": 0}, resolves=None)
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
+    assert _PROBE not in engine.paths(), engine.paths()
     (call,) = engine.expiries()
     assert call["quarantine_collection"] == _QUARANTINE and "4 expired" in result.output
+    assert "did not name" in result.output and "neither quarantine_collections nor sibling_resolution" in result.output
 
 
 def test_nothing_reapable_on_a_dry_run_expires_nothing(runner, real_client):
@@ -512,7 +485,7 @@ def test_the_verb_keeps_no_listing_based_floor_check(runner, real_client, monkey
     engine = _Engine(total=400, reapable=list(range(1, 121)), floor_echo=True)
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-3:] == [_MOVE, _EXPIRE, _PROBE]
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
     assert "REFUSING" not in result.output
     first = engine.moves()[0]
     assert (first["floor_fraction"], first["floor_min_chunks"], first["force"]) == (0.25, 100, False)
@@ -525,7 +498,7 @@ def test_nx_gc_force_overrides_the_floor(runner, real_client, monkeypatch):
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
     assert engine.moves()[-1]["force"] is True
-    assert engine.paths()[-3:] == [_MOVE, _EXPIRE, _PROBE]
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 def test_a_dry_run_over_the_floor_does_not_foresee_the_engine_refusal(runner, real_client, monkeypatch):
@@ -654,7 +627,7 @@ def test_the_incomplete_state_override_lets_the_move_run(runner, real_client):
                      ["--no-dry-run", "--yes", "--allow-incomplete-index-state"],
                      documents=[_indexing_doc()])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-3:] == [_MOVE, _EXPIRE, _PROBE]
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 # ── the collection-name guards are unchanged ──────────────────────────────────
@@ -686,7 +659,7 @@ def test_the_override_on_an_unknown_collection_says_so_out_loud(runner, real_cli
                      ["--no-dry-run", "--yes", "--allow-empty-manifest-set"], catalog_knows=False)
     assert result.exit_code == 0, result.output
     assert "WARNING: the catalog does not know a collection named" in result.output
-    assert engine.paths()[-3:] == [_MOVE, _EXPIRE, _PROBE]
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 def test_a_collection_whose_manifest_names_none_of_its_chunks_refuses(runner, real_client):
@@ -703,7 +676,7 @@ def test_the_empty_manifest_override_lets_the_move_run(runner, real_client):
     engine = _Engine(total=10, reapable=[1, 2], no_owner=10)
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes", "--allow-empty-manifest-set"])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-3:] == [_MOVE, _EXPIRE, _PROBE]
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 # ── (RDR-192 side-table critique 28255 issue 1) census, bounded form, permanent floor ───────────
@@ -891,7 +864,7 @@ def test_the_floor_denominator_is_every_stored_chunk_not_just_the_owned_ones(run
     engine = _Engine(total=1000, no_owner=700, reapable=list(range(1, 101)))
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
     assert result.exit_code == 0, result.output
-    assert engine.paths()[-3:] == [_MOVE, _EXPIRE, _PROBE]
+    assert engine.paths()[-2:] == [_MOVE, _EXPIRE]
 
 
 # ---- (round 3) the verb runs the client expiry after its own move -----------------------------

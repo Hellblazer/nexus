@@ -566,6 +566,17 @@ public final class HttpUtil {
                 + "}");
             return true;
         }
+        // RDR-210 Phase 6 Step 2 (bead nexus-f98bg): a name-rewriting verb (a rename of the chash, taxonomy,
+        // telemetry or aspect rows, a rehome) named a collection a re-embed job in a lock state holds as its
+        // source or target. Raised by the repository before any row changes (no SQLSTATE); a 409 naming the job.
+        var heldByReembed = collectionHeldByReembedJob(e);
+        if (heldByReembed != null) {
+            log.warn("event={}_collection_held_by_reembed_job {} job_id={}", event, context, heldByReembed.jobId());
+            send(exchange, 409,
+                "{\"error\":" + jsonString(heldByReembed.getMessage())
+                + ",\"job_id\":" + jsonString(heldByReembed.jobId().toString()) + "}");
+            return true;
+        }
         // RDR-225 (nexus-3wh8d.13): the partitioned-chunks refusals, all ahead of the generic class-23
         // walk. Each is raised by the repository before its statement runs (no SQLSTATE) except the
         // PostgreSQL no-partition error, which IS a 23514 and must be told apart from a CHECK violation.
@@ -787,6 +798,16 @@ public final class HttpUtil {
         for (Throwable c = t; c != null; c = c.getCause()) {
             if (c instanceof dev.nexus.service.db.CollectionSupersededException s) {
                 return s;
+            }
+        }
+        return null;
+    }
+
+    /** The {@link dev.nexus.service.db.CatalogRepository.CollectionHeldByReembedJob} in {@code t}'s cause chain, or null. */
+    static dev.nexus.service.db.CatalogRepository.CollectionHeldByReembedJob collectionHeldByReembedJob(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof dev.nexus.service.db.CatalogRepository.CollectionHeldByReembedJob h) {
+                return h;
             }
         }
         return null;
