@@ -2189,6 +2189,28 @@ def test_index_pdf_skip_compares_against_the_row_model(
     assert result == expected_result
 
 
+@pytest.mark.t2_tenant
+@pytest.mark.parametrize("stored_model,skipped", [(_BGE, True), ("voyage-context-3", False)])
+def test_index_markdown_skip_compares_against_the_row_model(
+    stored_model, skipped, sample_md, monkeypatch, cloud_mode,
+):
+    """The markdown half of nexus-7jy5r (``_index_document``): the same row-model comparison."""
+    set_credentials(monkeypatch)
+    _registered_before(sample_md, "test", "prose")
+    content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
+    mock_col = MagicMock()
+    stored = {"ids": ["existing"], "metadatas": [{"content_hash": content_hash, "embedding_model": stored_model}]}
+    if skipped:
+        mock_col.get.return_value = stored
+    else:
+        mock_col.get.side_effect = [stored, {"ids": ["existing"]}]
+    store = _RowStore()
+    store.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=store):
+        result = index_markdown(sample_md, corpus="test", t3=store)
+    assert (result == 0) is skipped
+
+
 def test_target_model_reads_the_row_through_the_store(monkeypatch, cloud_mode):
     from nexus.doc_indexer import _target_model
 

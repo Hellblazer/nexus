@@ -3274,7 +3274,9 @@ class HttpVectorClient:
         if self._tenant == _process_default_tenant():
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
             return get_collection_row(collection)
-        for row in self.list_collections():
+        # The routing listing: the catalog attributes only, no per-collection
+        # chunk count (nexus-7jy5r: the indexers read a row per file).
+        for row in self.list_collections(routing=True):
             if row.get("name") == collection:
                 return row if "content_type" in row else None
         return None

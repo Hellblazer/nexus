@@ -1082,6 +1082,7 @@ def embedding_model_row_preferred(
         row_resolver=row_resolver,
     ) or embedding_model_for_collection_calibrated(collection)
 
+
 def voyage_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model for a T3 collection (index and query).
 

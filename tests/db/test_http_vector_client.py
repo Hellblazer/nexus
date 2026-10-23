@@ -1215,7 +1215,7 @@ class TestResolveCollectionRowTenantScoping:
         client = HttpVectorClient(tenant="tenant-a")
         row = client._resolve_collection_row("knowledge__x__model-ctx__v1")
         assert row == {"name": "knowledge__x__model-ctx__v1", "count": 2, "stored_count": 2, "content_type": "knowledge"}
-        assert get_calls == [("/v1/vectors/stats", "tenant-a")]
+        assert get_calls == [("/v1/vectors/stats?fields=routing", "tenant-a")]
 
     def test_two_clients_of_different_tenants_resolve_through_their_own_tenant(self, monkeypatch):
         """The concrete defect this closes: two live clients, two tenants,
@@ -1278,7 +1278,7 @@ class TestResolveCollectionRowTenantScoping:
         client = HttpVectorClient(tenant="tenant-a")
         client.upsert_chunks("code__proj__model-code__v1", ["id1"], ["text1"])
 
-        assert get_calls == [("/v1/vectors/stats", "tenant-a")]
+        assert get_calls == [("/v1/vectors/stats?fields=routing", "tenant-a")]
 
     def test_process_default_tenant_helper_drives_both_the_singleton_and_the_identity_check(
         self, monkeypatch,
