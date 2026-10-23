@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._tmp_root import child_env_with_tmpdir
+
 SERVICE = Path(__file__).resolve().parent.parent / "service"
 SMOKE = SERVICE / "native-smoke.sh"
 
@@ -70,9 +72,9 @@ def _run(tmp_path: Path, *, mode: str, run_rc: int = 0, ready_rc: int = 0) -> tu
     scratch = tmp_path / "tmp"
     scratch.mkdir()
     log, pids = tmp_path / "docker.log", tmp_path / "bin.pids"
-    env = {k: v for k, v in os.environ.items() if not k.startswith("NX_DB_")}
+    env = child_env_with_tmpdir({k: v for k, v in os.environ.items() if not k.startswith("NX_DB_")}, scratch)
     env.update(
-        PATH=f"{stubs}{os.pathsep}{env.get('PATH', '')}", BIN=str(fake), TMPDIR=str(scratch),
+        PATH=f"{stubs}{os.pathsep}{env.get('PATH', '')}", BIN=str(fake),
         DOCKER_LOG=str(log), DOCKER_RUN_RC=str(run_rc), PG_READY_RC=str(ready_rc),
         FAKE_BIN_MODE=mode, FAKE_BIN_PIDS=str(pids), NX_NO_TELEMETRY="1",
     )
