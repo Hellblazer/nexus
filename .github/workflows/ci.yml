@@ -18,20 +18,25 @@ on:
     branches: [main, develop]
 
 concurrency:
-  # One run at a time on develop, the newest push waiting (Sam, 2026-10-18,
-  # labrun RDR-001 F15, nexus-1wf1s). The 2026-10-17 goal stands: every
-  # develop commit is covered by a finished run. develop is linear, so the
-  # run of the newest pending push tests every commit before it; a running
-  # develop run is never cancelled, and a newer push replaces only the one
-  # pending run. Replayed over 69 develop pushes this kept one develop run
-  # (6 shards) in flight instead of 4-6 that queued against the 10-shard
-  # cap, at 72-81% of the run-minutes. Trade-off: a red run can cover
-  # several commits, so finding the culprit may take a rerun of an earlier
-  # one. Do not return to cancelling on develop: under continuous pushes it
-  # livelocked (verdict p90 45-52 min). On PRs and every other ref the
-  # 2026-07-06 CI-cost rule holds: a newer push cancels the run it
-  # supersedes. main is not a push trigger, and tags run another workflow.
-  group: ci-${{ github.ref }}
+  # Two develop runs at a time, each slot with the newest push waiting
+  # (nexus-cvtxu, 2026-10-23; replaces the 2026-10-18 one-at-a-time rule,
+  # labrun RDR-001 F15, nexus-1wf1s). One run in flight put develop's
+  # push-to-verdict p90 at 41 min on 10-21, mostly waiting behind the run
+  # ahead. A develop run lands in slot 0 or slot 1 by the parity of its run
+  # number (Actions expressions have no arithmetic, so the last digit is
+  # tested with endsWith); within a slot the 10-18 rule holds: a running run
+  # is never cancelled and a newer push replaces only that slot's pending
+  # run. So at most two develop runs (12 shards against the 10-runner
+  # lab-6c18g pool; the second run's last shards wait) and two pending. The
+  # run number counts PR runs too, so consecutive develop pushes can share a
+  # slot while the other is idle: the bound is the point, not the balance.
+  # Every develop commit is still covered by a finished run: the newest push
+  # is never replaced except by a newer one, whose run covers it. Do not go
+  # back to cancelling on develop (it livelocked, verdict p90 45-52 min) or
+  # to a per-commit group (4-6 runs piled onto the pool). On PRs and every
+  # other ref the 2026-07-06 CI-cost rule holds: a newer push cancels the run
+  # it supersedes. main is not a push trigger, and tags run another workflow.
+  group: ci-${{ github.ref }}${{ github.ref == 'refs/heads/develop' && ((endsWith(format('{0}', github.run_number), '0') || endsWith(format('{0}', github.run_number), '2') || endsWith(format('{0}', github.run_number), '4') || endsWith(format('{0}', github.run_number), '6') || endsWith(format('{0}', github.run_number), '8')) && '-slot0' || '-slot1') || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
 
 jobs:
