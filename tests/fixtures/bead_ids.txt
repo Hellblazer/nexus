@@ -6022,6 +6022,7 @@ nexus-qkbo7.1
 nexus-qke1e
 nexus-qke1e.1
 nexus-ql1wf
+nexus-ql5m5
 nexus-qlfa
 nexus-qlm2
 nexus-qlveu
@@ -6180,6 +6181,7 @@ nexus-rbhci.1
 nexus-rbyl
 nexus-rc45
 nexus-rc45.1
+nexus-rc4pz
 nexus-rch5
 nexus-rcl9
 nexus-rcoze
