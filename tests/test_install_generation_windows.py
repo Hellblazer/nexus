@@ -47,6 +47,7 @@ class FakeUv:
         self, *, scripts=("nx", "nx-mcp"), home="C:\\py\\cpython-3.12", cfg_version="",
         fail_install: str | None = None, tool_dir: Path | None = None,
         uv_bin: Path | None = None, ships_constraints: bool = True,
+        fail_constrained: str | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self.scripts = scripts
@@ -58,6 +59,9 @@ class FakeUv:
         # nexus-2k66t.4.1: whether the installed package ships
         # nexus/_install/constraints.txt (a release that predates it does not).
         self.ships_constraints = ships_constraints
+        # Fail ONLY the install that carries --constraints (the second step of a
+        # pinned build); the --no-deps fetch before it succeeds.
+        self.fail_constrained = fail_constrained
 
     def __call__(self, argv, **_kw):
         self.calls.append(list(argv))
@@ -81,6 +85,8 @@ class FakeUv:
         if argv[:3] == ["uv", "pip", "install"]:
             if self.fail_install is not None:
                 return subprocess.CompletedProcess(argv, 1, "", self.fail_install)
+            if self.fail_constrained is not None and "--constraints" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", self.fail_constrained)
             python = Path(argv[argv.index("--python") + 1])
             scripts = python.parent
             if "--no-deps" in argv and self.ships_constraints:
@@ -93,6 +99,12 @@ class FakeUv:
                 (scripts / f"{name}.exe").write_bytes(f"#!{python}\nlauncher:{name}".encode())
             return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(f"unexpected command {argv}")
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_unpinned_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator's NX_INSTALL_UNPINNED must not turn a pinned-build test unpinned."""
+    monkeypatch.delenv("NX_INSTALL_UNPINNED", raising=False)
 
 
 @pytest.fixture
@@ -168,6 +180,28 @@ class TestBuildGeneration:
         assert "--no-deps" not in install
         assert "UNCONSTRAINED" not in capsys.readouterr().err
 
+    def test_install_unpinned_skips_the_constraints_step_and_says_so(
+        self, tools: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_INSTALL_UNPINNED", "1")
+        uv = FakeUv()
+        _build(tools, uv)
+        installs = [c for c in uv.calls if c[:3] == ["uv", "pip", "install"]]
+        assert len(installs) == 1, installs
+        assert "--constraints" not in installs[0] and "--no-deps" not in installs[0]
+        err = capsys.readouterr().err
+        assert "install_generation: WARNING: NX_INSTALL_UNPINNED=1" in err and "not pinned" in err
+
+    def test_install_unpinned_does_not_override_an_explicit_constraints_file(
+        self, tools: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_INSTALL_UNPINNED", "1")
+        pins = tools / "pins.txt"
+        pins.write_text("x==1\n")
+        uv = FakeUv()
+        _build(tools, uv, constraints=str(pins))
+        assert uv.calls[-1][uv.calls[-1].index("--constraints") + 1] == str(pins)
+
     def test_a_package_without_the_file_installs_unconstrained_and_says_so(
         self, tools: Path, capsys: pytest.CaptureFixture[str],
     ) -> None:
@@ -177,6 +211,7 @@ class TestBuildGeneration:
         assert "--constraints" not in install
         err = capsys.readouterr().err
         assert "UNCONSTRAINED" in err and "constraints.txt" in err
+        assert "was found in the installed" in err and "ships no" not in err
 
     def test_a_windows_build_fills_a_launcher_dir_with_copies_of_its_own_launchers(self, tools: Path) -> None:
         """<gen>\\bin holds a byte copy of each owned Scripts launcher, so each
@@ -264,6 +299,22 @@ class TestBuildGeneration:
         with pytest.raises(gen_core.GenerationError, match="No solution found"):
             _build(tools, FakeUv(fail_install="x No solution found when resolving"))
         assert list(tools.iterdir()) == []
+
+    def test_a_failed_constrained_install_raises_and_leaves_no_tree_and_no_current(
+        self, tools: Path,
+    ) -> None:
+        """nexus-2k66t.4.1 made the build two installs. Failing only the SECOND
+        (the one carrying --constraints) must leave neither a generation directory
+        nor a `current` link: the fetch succeeded, so a build that kept its tree
+        here would be left half-made. fail_install fails the fetch and never
+        reaches this step."""
+        uv = FakeUv(fail_constrained="x No solution found when resolving")
+        with pytest.raises(gen_core.GenerationError, match="No solution found"):
+            _build(tools, uv)
+        installs = [c for c in uv.calls if c[:3] == ["uv", "pip", "install"]]
+        assert len(installs) == 2 and "--constraints" in installs[1], installs
+        assert list(tools.iterdir()) == []
+        assert not (tools / "current").exists()
 
     def test_a_missing_uv_says_so_and_leaves_no_tree(self, tools: Path) -> None:
         def no_uv(argv, **_kw):

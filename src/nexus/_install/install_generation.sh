@@ -209,7 +209,14 @@ fi
 #     the install runs again with the dependencies under it. The file cannot
 #     come from the nexus running THIS script: on an upgrade that is the OLD
 #     release, and its lock would pin the new release to old versions.
-if [ -z "$CONSTRAINTS" ]; then
+#
+# NX_INSTALL_UNPINNED=1 skips the packaged-file step: the install resolves fresh
+# from the index, which is how an operator takes a transitive security fix ahead
+# of a release. An explicit --constraints FILE is a caller's choice and still
+# wins over it. The notice is a WARNING line so `nx self install` re-echoes it.
+if [ -z "$CONSTRAINTS" ] && [ "${NX_INSTALL_UNPINNED:-}" = "1" ]; then
+    echo "install_generation: WARNING: NX_INSTALL_UNPINNED=1 is set; this install is not pinned to the release's uv.lock, its dependencies resolve fresh from the package index" >&2
+elif [ -z "$CONSTRAINTS" ]; then
     uv pip install --python "$GEN/bin/python" --no-deps "$SPEC" >&2
     touch "$GEN/$NX_BUILDING_MARKER_NAME"
     # A glob, not a probe of the venv's interpreter: the layout is fixed
@@ -221,9 +228,11 @@ if [ -z "$CONSTRAINTS" ]; then
     done
     if [ -z "$CONSTRAINTS" ]; then
         # A release that predates the file (a deliberate rollback via
-        # --version). Installing still beats refusing, but it must not look
-        # pinned: say so where the operator will read it.
-        echo "install_generation: WARNING: ${SPEC} ships no nexus/_install/constraints.txt; its dependencies are resolved UNCONSTRAINED from the package index, so versions may differ from the release's uv.lock" >&2
+        # --version), or a venv layout the glob did not expect. Installing still
+        # beats refusing, but it must not look pinned: say so where the operator
+        # will read it. The wording claims only what was observed: no file at
+        # the expected place in what was installed.
+        echo "install_generation: WARNING: no nexus/_install/constraints.txt was found in the installed ${SPEC} package (a release that predates it, or an unexpected venv layout); its dependencies are resolved UNCONSTRAINED from the package index, so versions may differ from the release's uv.lock" >&2
     fi
 fi
 if [ -n "$CONSTRAINTS" ]; then

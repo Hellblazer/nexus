@@ -445,7 +445,12 @@ fi
 # ── Stage 6: the generation the upgrade builds holds the wheel's lock ────────
 #    (nexus-2k66t.4.1). Stage 4 moved the package with a bare `uv pip install`,
 #    which no product code controls; what the PRODUCT does on an upgrade is
-#    `nx self install`, i.e. install_generation.sh from the new package. Run that
+#    `nx self install`, i.e. install_generation.sh. NOTE the scope: in the field the
+#    running nx supplies that script, so the upgrade INTO the release that adds the
+#    pin is built by the OLDER installer and is unpinned; only later upgrades run
+#    this release's. This leg runs the NEW package's installer ON PURPOSE (it
+#    proves that installer pins; it does not prove the first upgrade across the
+#    change is pinned). Run that
 #    same builder here, from the upgraded package, on the upgrade-target wheel,
 #    into a scratch generation root, and compare what it installed with the
 #    constraints.txt the wheel ships (tests/e2e/lib/lock_check.py, staged into

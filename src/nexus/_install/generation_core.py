@@ -536,7 +536,17 @@ def build_generation(
         )
         (gen / layout.BUILDING_MARKER_NAME).touch()  # each phase gets the full claim window
         python = str(layout.venv_python(gen, platform=platform))
-        if not constraints:
+        if not constraints and os.environ.get("NX_INSTALL_UNPINNED") == "1":
+            # The opt-out (the twin of install_generation.sh's): resolve fresh,
+            # which is how an operator takes a transitive security fix ahead of
+            # a release. An explicit *constraints* file still wins. A WARNING
+            # line so `nx self install` and the console show it.
+            _emit([
+                "install_generation: WARNING: NX_INSTALL_UNPINNED=1 is set; this install is "
+                "not pinned to the release's uv.lock, its dependencies resolve fresh from "
+                "the package index"
+            ])
+        elif not constraints:
             # nexus-2k66t.4.1, the twin of install_generation.sh: the constraints
             # belong to the package being INSTALLED. Fetch it alone, read the
             # constraints.txt it ships out of the new venv, then install with
@@ -549,9 +559,10 @@ def build_generation(
                 constraints = str(shipped)
             else:
                 _emit([
-                    f"install_generation: WARNING: {spec} ships no nexus/_install/constraints.txt; "
-                    "its dependencies are resolved UNCONSTRAINED from the package index, so "
-                    "versions may differ from the release's uv.lock"
+                    f"install_generation: WARNING: no nexus/_install/constraints.txt was found in the "
+                    f"installed {spec} package (a release that predates it, or an unexpected venv "
+                    "layout); its dependencies are resolved UNCONSTRAINED from the package index, "
+                    "so versions may differ from the release's uv.lock"
                 ])
         install = ["uv", "pip", "install", "--python", python, "--overrides", str(overrides)]
         if constraints:

@@ -6,7 +6,7 @@
 - **[uv](https://docs.astral.sh/uv/)** — Python package manager. Route one under [Install](#install) installs it for you; route two needs it first.
 - **git**
 
-- **Hardware** — an Apple Silicon Mac (arm64), Linux on x86-64 or arm64, or
+- **Hardware** — an Apple Silicon Mac (arm64) on **macOS 14 or later**, Linux on x86-64 or arm64, or
   Windows 11 on x64.
   Nexus ships its own PostgreSQL and **never** uses a host install: there is
   no fallback leg (`_NO_HOST_FALLBACK`, `nexus.db.pg_provision`), because the
@@ -15,6 +15,9 @@
   is built for those four targets only, so an **Intel Mac** or **Windows on
   ARM** cannot run a local install: `nx init` stops with an error naming how to
   get a bundle, rather than falling back to anything.
+  macOS 14 is the floor because onnxruntime, the embedder runtime, ships only
+  macOS 14 wheels from version 1.24 on, and Apple patches only recent releases;
+  on macOS 13 or earlier the install fails resolving with a platform-tag error.
   Native Windows x64 works through the same two steps as the other platforms,
   `uv tool install conexus` and `nx init --service`, using the published
   windows-x64 engine and PostgreSQL bundle. It passed a test from PyPI on a
@@ -302,7 +305,10 @@ uv-tool layout. If it reports 3.14, rebuild the uv environment:
 
 ```bash
 uv tool install conexus --force --python 3.12   # use "conexus[local]" here if you rely on the bge-768 embedder
+nx self install                                 # moves onto a generation, installed at the versions the release's uv.lock resolved
 ```
+
+A bare `uv tool install` resolves the dependencies afresh, unpinned; the `nx self install` after it is what pins them.
 
 Note: `uv tool upgrade` reuses the existing environment's Python — it won't
 switch from 3.14 to 3.12 automatically, which is why this one case wants
@@ -316,7 +322,7 @@ interpreter is already supported.
 
 **`nx index repo .` fails with a service-auth error** — In managed-cloud mode, indexing requires a reachable service and a valid `NX_SERVICE_TOKEN`. Export the token (`export NX_SERVICE_TOKEN=…`) and confirm the endpoint with `nx doctor`, or use local mode (run `nx daemon service start`, no token needed).
 
-**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14, so this is the same uv-tool-layout case as *Crash on startup* above and takes the same fix: `uv tool install conexus --force --python 3.12` (re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
+**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14, so this is the same uv-tool-layout case as *Crash on startup* above and takes the same fix: `uv tool install conexus --force --python 3.12` (re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras), then run `nx self install` so the install is a generation pinned to the release's lock.
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 
@@ -370,7 +376,8 @@ on the older uv-tool layout and step 1 is `uv tool upgrade conexus`. `nx doctor`
 Do not upgrade with `uv tool install conexus` or `--force`. That resets the
 environment and drops `[local]`, which downgrades the embedder from 768 to 384
 dimensions and makes search over existing collections return nothing. On a
-uv-tool box recover with `uv tool install --reinstall "conexus[local]"`; on a
+uv-tool box recover with `uv tool install --reinstall "conexus[local]"` and then run
+`nx self install` so the install is pinned to the release's lock; on a
 generation box `nx self install` rewrites the shims. Never `uv tool uninstall
 conexus` on a generation box.
 

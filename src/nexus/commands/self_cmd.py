@@ -950,6 +950,63 @@ def index_failure_hint(
     return "\n".join(lines)
 
 
+_BUILD_WARNING_PREFIX = "install_generation: WARNING:"
+
+
+def _echo_build_warnings(stderr: str) -> None:
+    """Re-echo the builder's WARNING lines from a SUCCESSFUL build's *stderr*.
+
+    The rest of the captured stderr is uv's progress and is discarded on success.
+    The WARNING lines are not: one says the install resolved UNCONSTRAINED because
+    the package predates constraints.txt, another that ``NX_INSTALL_UNPINNED=1``
+    switched the lock off (nexus-2k66t.4.1). An operator who asked for a rollback
+    or an opt-out needs to read them. Every POSIX path that runs a builder script
+    and captures its stderr (``_build_flip_shims``, ``_converge_legacy_install``)
+    calls this; Windows builds in-process, so ``generation_core`` writes the same
+    lines straight to the console.
+    """
+    for line in stderr.splitlines():
+        if line.startswith(_BUILD_WARNING_PREFIX):
+            click.echo(line, err=True)
+
+
+#: uv's wording when a pinned wheel has no build for this platform tag, e.g.
+#: "onnxruntime==1.24.2 has no wheels with a matching platform tag (e.g.,
+#: `macosx_13_0_arm64`)". Matched only on macOS (see platform_failure_hint).
+_PLATFORM_TAG_FAILURE_RE = re.compile(
+    r"matching platform tag|current platform|macosx_\d+_\d+_\w+", re.IGNORECASE,
+)
+
+
+def _host_system() -> str:
+    """``sys.platform``, behind a seam so a test can pose as macOS without patching ``sys``."""
+    return sys.platform
+
+
+def platform_failure_hint(stderr: str, *, system: str | None = None) -> str | None:
+    """Name the macOS floor when a build died resolving a platform tag, or ``None``.
+
+    The pinned dependency set includes onnxruntime (the embedder runtime), which
+    ships only macOS 14 wheels from 1.24 on, so a macOS 13 or Intel Mac fails the
+    resolve with a platform-tag message that reads like a nexus fault. *system*
+    is injectable for tests; it defaults to ``sys.platform``. Stdlib only.
+    """
+    plat = _host_system() if system is None else system
+    if plat != "darwin" or not _PLATFORM_TAG_FAILURE_RE.search(stderr):
+        return None
+    return (
+        "nexus requires macOS 14 or later on Apple Silicon: the embedder runtime "
+        "(onnxruntime) ships only macOS 14 wheels from 1.24 on, so this Mac cannot "
+        "install it. Upgrade macOS, or use a Linux or Windows host."
+    )
+
+
+def _with_platform_hint(detail: str) -> str:
+    """*detail* with the macOS-floor hint above it when it applies."""
+    hint = platform_failure_hint(detail)
+    return f"{hint}\n\nuv output:\n{detail}" if hint else detail
+
+
 def _build_flip_shims(
     build, *, install_dir: Path, tools: Path, bin_dir: Path, bootstrap: bool = False,
 ) -> Path:
@@ -972,19 +1029,17 @@ def _build_flip_shims(
     )
     if built.returncode != 0:
         detail = built.stderr.strip()
-        hint = index_failure_hint(detail, bootstrap=bootstrap)
-        if hint is None:
+        hint = "\n".join(
+            h for h in (
+                index_failure_hint(detail, bootstrap=bootstrap), platform_failure_hint(detail),
+            ) if h
+        )
+        if not hint:
             raise click.ClickException(f"generation build failed:\n{detail}")
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         )
-    # The build's stderr is uv's progress, discarded on success. Its WARNING
-    # lines are not: one says the install resolved UNCONSTRAINED because the
-    # package predates constraints.txt (nexus-2k66t.4.1), and an operator who
-    # asked for a rollback needs to read that.
-    for line in built.stderr.splitlines():
-        if line.startswith("install_generation: WARNING:"):
-            click.echo(line, err=True)
+    _echo_build_warnings(built.stderr)
     generation = Path(built.stdout.strip().splitlines()[-1])
     _flip_and_shim(generation, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
     return generation
@@ -1311,8 +1366,9 @@ def _converge_legacy_install(
     )
     if r.returncode != 0:
         raise click.ClickException(
-            f"legacy migration failed:\n{r.stderr.strip()}"
+            f"legacy migration failed:\n{_with_platform_hint(r.stderr.strip())}"
         )
+    _echo_build_warnings(r.stderr)
 
     out = r.stdout.strip()
     if not out:

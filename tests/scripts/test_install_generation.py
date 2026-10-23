@@ -45,7 +45,9 @@ def _make_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _stub_uv(bin_dir: Path, *, argv_log: Path, fail_install: bool = False) -> None:
+def _stub_uv(
+    bin_dir: Path, *, argv_log: Path, fail_install: bool = False, fail_constrained: bool = False,
+) -> None:
     """A fake ``uv`` that fabricates a venv and records every invocation.
 
     ``uv venv <dir>`` creates the shape the builder inspects: ``bin/python``
@@ -63,6 +65,13 @@ def _stub_uv(bin_dir: Path, *, argv_log: Path, fail_install: bool = False) -> No
     box tolerated it). Every build in this file therefore pins the flag.
     """
     fail = "exit 1" if fail_install else "exit 0"
+    # fail_constrained fails ONLY the install that carries --constraints: the
+    # second, dependency-bearing step of the pinned build (nexus-2k66t.4.1).
+    # The first --no-deps fetch succeeds, so a build that leaves a half-made
+    # tree after the fetch is caught where fail_install (which fails the fetch)
+    # cannot reach.
+    if fail_constrained:
+        fail = 'if [[ " $* " == *" --constraints "* ]]; then exit 1; fi; exit 0'
     _make_executable(
         bin_dir / "uv",
         f"""#!/bin/bash
@@ -481,15 +490,19 @@ def test_stamp_exhaustion_fails_loudly(env) -> None:
 
 # ── --constraints (nexus-jd8fi drift) ─────────────────────────────────────────
 
-def _run_builder(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess, Path]:
+def _run_builder(
+    tmp_path: Path, *extra: str, env_extra: dict[str, str] | None = None, fail_constrained: bool = False,
+) -> tuple[subprocess.CompletedProcess, Path]:
     bin_dir = tmp_path / "bin"
     argv_log = tmp_path / "uv-argv.log"
-    _stub_uv(bin_dir, argv_log=argv_log)
+    _stub_uv(bin_dir, argv_log=argv_log, fail_constrained=fail_constrained)
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "NX_TOOLS_DIR": str(tmp_path / "tools"),
     }
+    env.pop("NX_INSTALL_UNPINNED", None)  # an operator's opt-out must not leak into a pinned-build test
+    env.update(env_extra or {})
     (tmp_path / "tools").mkdir(exist_ok=True)
     proc = subprocess.run(
         ["bash", str(_INSTALLER), "--source", "conexus", *extra],
@@ -550,6 +563,47 @@ def test_a_package_without_the_file_installs_unconstrained_and_says_so(tmp_path:
     assert "--constraints" not in _final_install(argv_log)
     assert "UNCONSTRAINED" in proc.stderr
     assert "constraints.txt" in proc.stderr
+    # The text claims only what was observed: the file was not found in the
+    # installed package, not that the package "ships none".
+    assert "was found in the installed" in proc.stderr
+    assert "ships no" not in proc.stderr
+
+
+def test_a_failed_constrained_install_leaves_no_generation(tmp_path: Path) -> None:
+    """nexus-2k66t.4.1 made the build two installs. Failing only the SECOND (the
+    one carrying --constraints) must leave no receipt, so no enumerator counts the
+    half-built tree and nothing flips onto it. fail_install fails the first
+    --no-deps fetch and never reaches this step."""
+    proc, argv_log = _run_builder(tmp_path, fail_constrained=True)
+    assert proc.returncode != 0
+    installs = _installs(argv_log)
+    assert len(installs) == 2 and "--constraints" in installs[1], installs
+    tools = tmp_path / "tools"
+    assert [d for d in tools.glob("gen-*") if (d / "nexus-install.json").exists()] == []
+    assert not (tools / "current").exists() and not (tools / "current").is_symlink()
+
+
+def test_install_unpinned_skips_the_constraints_step_and_says_so(tmp_path: Path) -> None:
+    """NX_INSTALL_UNPINNED=1 (the way to take a transitive security fix ahead of
+    a release): one unconstrained install, no fetch step, a WARNING line."""
+    proc, argv_log = _run_builder(tmp_path, env_extra={"NX_INSTALL_UNPINNED": "1"})
+    assert proc.returncode == 0, proc.stderr
+    installs = _installs(argv_log)
+    assert len(installs) == 1, installs
+    assert "--constraints" not in installs[0] and "--no-deps" not in installs[0]
+    assert "install_generation: WARNING: NX_INSTALL_UNPINNED=1" in proc.stderr
+    assert "not pinned" in proc.stderr
+
+
+def test_install_unpinned_does_not_override_an_explicit_constraints_file(tmp_path: Path) -> None:
+    constraints = tmp_path / "c.txt"
+    constraints.write_text("mineru==3.1.11\n")
+    proc, argv_log = _run_builder(
+        tmp_path, "--constraints", str(constraints), env_extra={"NX_INSTALL_UNPINNED": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"--constraints {constraints}" in _final_install(argv_log)
+    assert "NX_INSTALL_UNPINNED" not in proc.stderr
 
 
 # nexus-heykz: the packaged overrides file reaches uv on every build.

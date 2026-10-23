@@ -93,7 +93,7 @@ if [[ "$1" == "pip" && "$2" == "install" ]]; then
             *) shift ;;
         esac
     done
-    if [[ -n "$py" && "$no_deps" -eq 1 ]]; then
+    if [[ -n "$py" && "$no_deps" -eq 1 && ! -e "{bin_dir}/no-packaged-constraints" ]]; then
         # nexus-2k66t.4.1: the fetch step; the wheel ships its constraints.
         site="$(dirname "$(dirname "$py")")/lib/python3.12/site-packages/nexus/_install"
         mkdir -p "$site"
@@ -218,6 +218,24 @@ requirements = [
     assert shipped.is_file()
     assert "--no-deps" in installs[0] and "--constraints" not in installs[0]
     assert f"--constraints {shipped}" in installs[1] and "--no-deps" not in installs[1]
+
+
+def test_a_package_without_the_file_warns_in_the_line_self_install_re_echoes(scaffold) -> None:
+    """The real migrate_legacy.sh, a package that ships no constraints.txt: the
+    UNCONSTRAINED warning is on its stderr and starts with the prefix
+    ``self_cmd._echo_build_warnings`` re-echoes. Pins the two halves together; the
+    other half (self install printing it on success) is in test_self_install.py."""
+    from nexus.commands.self_cmd import _BUILD_WARNING_PREFIX
+
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    (stub_bin / "no-packaged-constraints").write_text("")
+    legacy = _legacy_tree(tmp_path, receipt="[tool]\nrequirements = [ { name = \"conexus\" } ]\n")
+    result = _run(env(), "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy))
+    assert result.returncode == 0, result.stderr
+    warnings = [ln for ln in result.stderr.splitlines() if ln.startswith(_BUILD_WARNING_PREFIX)]
+    assert len(warnings) == 1 and "UNCONSTRAINED" in warnings[0], result.stderr
+    installs = [ln for ln in argv_log.read_text().splitlines() if ln.startswith("pip install")]
+    assert "--constraints" not in installs[-1]
 
 
 def test_mineru_is_dropped_from_the_bridge(scaffold) -> None:

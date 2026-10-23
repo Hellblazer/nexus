@@ -350,3 +350,43 @@ class TestTheBootstrapVariant:
         assert _BOOTSTRAP_RERUN in message
         assert "not changed" not in message and "nx self install" not in message
         assert message.index(_BOOTSTRAP_RERUN) < message.index("uv output:")
+
+
+_MACOS_TAG_FAILURE = (
+    "  x No solution found when resolving dependencies:\n"
+    "  ╰─▶ onnxruntime==1.24.2 has no wheels with a matching platform tag "
+    "(e.g., `macosx_13_0_arm64`)\n"
+)
+
+
+class TestTheMacosFloorHint:
+    """The pinned dependency set includes onnxruntime 1.24.2, which ships only
+    macOS 14 wheels; a macOS 13 or Intel Mac fails the resolve with a platform-tag
+    message that reads like a nexus fault (nexus-2k66t.4.1, Sam 2026-10-23)."""
+
+    def test_a_platform_tag_failure_on_darwin_names_the_floor(self):
+        hint = self_cmd.platform_failure_hint(_MACOS_TAG_FAILURE, system="darwin")
+        assert hint is not None and "macOS 14 or later on Apple Silicon" in hint
+        assert "onnxruntime" in hint
+
+    def test_the_same_failure_elsewhere_gets_no_macos_advice(self):
+        assert self_cmd.platform_failure_hint(_MACOS_TAG_FAILURE, system="linux") is None
+        assert self_cmd.platform_failure_hint(_MACOS_TAG_FAILURE, system="win32") is None
+
+    def test_an_unrelated_darwin_failure_gets_none(self):
+        assert self_cmd.platform_failure_hint(_RESOLVER_FAILURE, system="darwin") is None
+
+    def test_the_build_failure_message_carries_it_above_uvs_output(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(self_cmd, "_host_system", lambda: "darwin")
+        script = tmp_path / "fake_install_generation.sh"
+        script.write_text(f"#!/usr/bin/env bash\ncat >&2 <<'EOF'\n{_MACOS_TAG_FAILURE}EOF\nexit 1\n")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        with pytest.raises(click.ClickException) as exc:
+            self_cmd._build_flip_shims(
+                [_usable_bash(), str(script)], install_dir=tmp_path, tools=tmp_path / "tools",
+                bin_dir=tmp_path / "bin",
+            )
+        message = exc.value.message
+        assert message.startswith("generation build failed:")
+        assert message.index("macOS 14 or later") < message.index("uv output:")
+        assert "macosx_13_0_arm64" in message

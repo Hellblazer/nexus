@@ -4374,15 +4374,34 @@ platform markers kept), and the builder reads it out of the package it is about 
 install: it fetches the package alone (`uv pip install --no-deps`), then installs it
 with the dependencies under `--constraints`. The file comes from the package being
 installed, not from the `nx` running the command, so an upgrade is held to the NEW
-release's lock. A package that predates the file (a rollback with `--version`)
-still installs, with a warning on stderr that its dependencies were resolved
-unconstrained. The same rule covers `--bootstrap`, the legacy-tree convergence and,
+release's lock. That holds once the running `nx` carries this installer: an
+install of this release, and every upgrade after it, is pinned, but the upgrade
+INTO this release from an older `nx` is built by the older, unpinned installer.
+A package that predates the file (a rollback with `--version`) still installs,
+with a warning on stderr that no `constraints.txt` was found in it and its
+dependencies were resolved unconstrained. The same rule covers `--bootstrap`, the legacy-tree convergence and,
 on Windows, the Python builder. `scripts/reinstall-tool.sh` from a checkout exports
 the checkout's own `uv.lock` instead, so a lock edit not yet regenerated into the
 shipped file is still what a developer's install runs. A local `uv tool install
 conexus` or `pip install conexus` is not an `nx` install path and is not pinned;
 converge it with `nx self install`. A GPU build of torch on Linux
-(`NX_TORCH_BACKEND=auto`) still resolves: the pins carry no `+cpu` local label.
+(`NX_TORCH_BACKEND=auto`) still resolves from the shipped file, which carries no
+`+cpu` local label; `scripts/reinstall-tool.sh`'s checkout flow exports the raw
+lock with its `+cpu` labels, so it cannot pick a CUDA build.
+
+**Taking a dependency fix ahead of a release: `NX_INSTALL_UNPINNED=1`.** Set it
+on the command (`NX_INSTALL_UNPINNED=1 nx self install`) and the builder skips the
+pin: one install that resolves every dependency fresh from the package index,
+and a warning that the install is not pinned to the release's lock. Use it when a
+transitive dependency has a security fix the release's lock does not yet carry.
+An explicit `--constraints` file (the checkout flow) still wins. The next plain
+`nx self install` pins again.
+
+**macOS 14 or later on Apple Silicon.** The pinned dependency set includes
+onnxruntime (the embedder runtime), which ships only macOS 14 wheels from 1.24 on,
+and Apple patches only recent releases. On macOS 13 or earlier, or an Intel Mac,
+the install fails resolving with a platform-tag error, and `nx self install` says
+macOS 14 or later is required.
 
 **First install from nothing: `--bootstrap` (RDR-228, nexus-sv2wx.14).** The
 plain command refuses a program that is not a generation or a packaged

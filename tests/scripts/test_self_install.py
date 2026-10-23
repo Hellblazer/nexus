@@ -511,6 +511,49 @@ def test_converge_failure_surfaces_stderr(bed, monkeypatch, tmp_path) -> None:
     assert "uv not resolvable" in str(exc.value)
 
 
+def test_converge_re_echoes_the_builders_warning_on_success(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    """nexus-2k66t.4.1 review blocker: the legacy path captured migrate_legacy.sh's
+    stderr and printed it only on failure, so the UNCONSTRAINED warning (a package
+    that ships no constraints.txt) vanished on a SUCCESSFUL convergence. The
+    WARNING lines surface; uv's progress noise does not."""
+    tools, _, _ = bed
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    warning = (
+        "install_generation: WARNING: no nexus/_install/constraints.txt was found in the "
+        "installed conexus==7.0.0 package; its dependencies are resolved UNCONSTRAINED"
+    )
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 0, stdout=f"{tools}/gen-20260827T000000Z\n",
+            stderr=f"Resolved 12 packages in 3ms\n{warning}\nInstalled 12 packages\n"),
+    )
+    assert _run_self_install() is not None
+    err = capsys.readouterr().err
+    assert warning in err
+    assert "Resolved 12 packages" not in err
+
+
+def test_converge_failure_on_macos_names_the_floor(bed, monkeypatch, tmp_path) -> None:
+    """A platform-tag resolve failure on darwin reads like a nexus fault; the
+    message says macOS 14+ on Apple Silicon is required."""
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    monkeypatch.setattr("nexus.commands.self_cmd._host_system", lambda: "darwin")
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 1, stdout="", stderr=(
+                "error: onnxruntime==1.24.2 has no wheels with a matching platform tag "
+                "(e.g., `macosx_13_0_arm64`)")),
+    )
+    with pytest.raises(click.ClickException) as exc:
+        _run_self_install()
+    assert "macOS 14 or later on Apple Silicon" in str(exc.value)
+    assert "macosx_13_0_arm64" in str(exc.value)  # uv's own words stay
+
+
 def test_converge_dry_run_builds_no_generation(bed, monkeypatch, tmp_path) -> None:
     _not_a_generation(tmp_path, monkeypatch)
     _set_site_kind(monkeypatch, packaged=True)
