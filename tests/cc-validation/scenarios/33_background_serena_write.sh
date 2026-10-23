@@ -26,6 +26,7 @@ _33_start_auto() {
     _tmux clear-history -t "$TMUX_SESSION" 2>/dev/null || true
     _preseed_trust 2>/dev/null || true
     local _extra; _extra="$(_prepare_mcp_args 2>/dev/null || true)"
+    [[ -n "${CC_DEBUG_FILE:-}" ]] && _extra="${_extra} --debug-file ${CC_DEBUG_FILE}"
     send_keys "bash '$CLAUDE_FD_EXEC' --permission-mode=auto ${_extra}" Enter
     sleep 8
     local deadline=$(( $(date +%s) + 60 )) _trust_done=0 pane
@@ -48,6 +49,9 @@ _33_leg() {
     local id="$1" mode="$2"
     scenario "$id background_serena_write ($mode): a background agent's unallowed Serena write"
     : > "$STUB_LOG"
+    # The debug log records whether the stub's MCP connection came up; kept with the evidence.
+    export CC_DEBUG_FILE="$TEST_HOME/claude-debug-$id.log"
+    : > "$CC_DEBUG_FILE"
     cat > "$TEST_HOME/.claude/settings.json" <<SETTINGS_EOF
 {
   "skipDangerousModePermissionPrompt": true,
@@ -84,6 +88,7 @@ MCP_EOF
         sleep 2
     done
     cc_save_pane 120
+    cc_keep_evidence "$id"
 
     if ! cc_wait_stub_log '"tool": "find_symbol"' 60; then
         fail "$id: find_symbol never reached the stub: the server did not connect or the agent never ran; no verdict"
@@ -105,6 +110,7 @@ MCP_EOF
     fi
     cc_dismiss_permission_prompt
     claude_exit
+    unset CC_DEBUG_FILE
     scenario_end
 }
 
