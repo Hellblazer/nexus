@@ -51,7 +51,7 @@
 #          requires hits from each.
 #      Pass 2 also requires the engine's process_start_time to differ from pass 1.
 #   5. A tally refuses unless each of the four searches ran once per pass.
-#   6. Runs the three cloud_mode tests in tests/test_integration.py with the key and
+#   6. Runs the three keyed_voyage tests in tests/test_integration.py with the key and
 #      the Voyage profile in their environment, on the suite's own keyed engine
 #      substrate (nexus-8errq); exactly three must pass. Then prints the pass banner.
 #   7. Tears everything down (engine, PG, scratch), even on failure.
@@ -234,7 +234,7 @@ fi
 
 # ── Engine start, stop and lease ─────────────────────────────────────────────
 # dg_with_key CMD...: run CMD with the key in its environment. The key is an exported variable in this
-# subshell, not an argument, so `ps` never shows it. The supervisor and the cloud_mode pytest run both
+# subshell, not an argument, so `ps` never shows it. The supervisor and the keyed_voyage pytest run both
 # get it here and nowhere else: NX_VOYAGE_API_KEY for an engine, VOYAGE_API_KEY for the client's
 # credential lookup (nexus.config.get_credential).
 dg_with_key() {
@@ -559,7 +559,7 @@ dg_seed_voyage_collection() {
   dg_set_embed_choice bge-base-en-v15-768
 }
 
-# dg_run_cloud_mode_tests: the three tests tests/test_integration.py marks cloud_mode (nexus-8errq):
+# dg_run_keyed_voyage_tests: the three tests tests/test_integration.py marks keyed_voyage (nexus-8errq):
 # voyage-code-3 index and query, a voyage-context-3 markdown index through index_markdown, and a
 # voyage-context-3 note write (their embedding_model asserts echo client-side metadata; what they prove is
 # that the engine embeds and serves those collections). local-service-gate.sh runs keyless and deselects them, so this is
@@ -573,24 +573,24 @@ dg_seed_voyage_collection() {
 # wait the substrate refused at once and the leg went red with no verdict (7.85.0 battery, 2026-10-23).
 # EXACTLY three must pass: a test that did not run (no key reaching pytest, a deselect, a collection
 # error) is a short count and a FAIL.
-DG_CLOUD_MODE_EXPECTED=3
-dg_run_cloud_mode_tests() {
-  local xml="$SCRATCH/cloud_mode.xml" rc=0 counts passed total
-  echo "[dual-gate] ── cloud_mode tests: -m 'integration and cloud_mode' on a keyed Voyage-profile substrate ──"
+DG_KEYED_VOYAGE_EXPECTED=3
+dg_run_keyed_voyage_tests() {
+  local xml="$SCRATCH/keyed_voyage.xml" rc=0 counts passed total
+  echo "[dual-gate] ── keyed_voyage tests: -m 'integration and keyed_voyage' on a keyed Voyage-profile substrate ──"
   NX_EMBED_PROFILE=voyage NX_SUITE_LEASE_WAIT=1 NX_BUILD_LEASE_WAIT="${NX_BUILD_LEASE_WAIT:-3600}" \
-    dg_with_key uv run pytest tests/test_integration.py -o addopts="" -m "integration and cloud_mode" \
+    dg_with_key uv run pytest tests/test_integration.py -o addopts="" -m "integration and keyed_voyage" \
     -q --color=no -p no:xdist --junit-xml="$xml" || rc=$?
   # A passed case has no failure, error or other outcome element under it.
   counts="$("$E2E_PYTHON" -c "import sys, xml.etree.ElementTree as ET
 cases = list(ET.parse(sys.argv[1]).getroot().iter('testcase'))
 print(sum(all(k.tag in ('system-out', 'system-err', 'properties') for k in c) for c in cases), len(cases))" "$xml" 2>/dev/null || echo "0 0")"
   read -r passed total <<<"$counts"
-  if [ "$rc" -ne 0 ] || [ "$passed" -ne "$DG_CLOUD_MODE_EXPECTED" ] || [ "$total" -ne "$DG_CLOUD_MODE_EXPECTED" ]; then
-    echo "[dual-gate] CHECK FAILED: cloud_mode tests: pytest rc=$rc, $passed of $total passed, expected exactly $DG_CLOUD_MODE_EXPECTED" >&2
+  if [ "$rc" -ne 0 ] || [ "$passed" -ne "$DG_KEYED_VOYAGE_EXPECTED" ] || [ "$total" -ne "$DG_KEYED_VOYAGE_EXPECTED" ]; then
+    echo "[dual-gate] CHECK FAILED: keyed_voyage tests: pytest rc=$rc, $passed of $total passed, expected exactly $DG_KEYED_VOYAGE_EXPECTED" >&2
     exit 1
   fi
   DG_PASSED=$((DG_PASSED + 1))
-  echo "[dual-gate] ok ($DG_PASSED): cloud_mode tests: $passed of $DG_CLOUD_MODE_EXPECTED passed on the keyed substrate"
+  echo "[dual-gate] ok ($DG_PASSED): keyed_voyage tests: $passed of $DG_KEYED_VOYAGE_EXPECTED passed on the keyed substrate"
 }
 
 # ── 3-5. Seed the Voyage collection, boot the bge-profile keyed engine, then run both passes around a restart ──
@@ -603,5 +603,5 @@ dg_run_pass 1
 dg_restart_engine
 dg_run_pass 2
 dg_require_tally
-dg_run_cloud_mode_tests
+dg_run_keyed_voyage_tests
 echo "[dual-gate] DUAL-EMBEDDER GATE PASSED"

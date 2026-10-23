@@ -12,7 +12,7 @@ and fails when:
 
 A selection that collects zero tests is reported and passes. That happens
 when the selected files carry only carved-out marks (``lived_in``,
-``cloud_mode``, ``mandatory_regression_pin``), which run in other gates.
+``keyed_voyage``, ``mandatory_regression_pin``), which run in other gates.
 
 Stdlib only.
 """

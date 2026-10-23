@@ -1486,7 +1486,7 @@ jobs:
       NX_T2_SUBSTRATE_EXPECTED: "1"
       # Must equal LSG_PYTEST_MARK_EXPR in tests/e2e/lib/mandatory_pins.sh
       # (pinned by tests/scripts/test_select_affected_integration_tests.py).
-      INTEGRATION_MARK_EXPR: "integration and not lived_in and not cloud_mode and not mandatory_regression_pin"
+      INTEGRATION_MARK_EXPR: "integration and not lived_in and not keyed_voyage and not mandatory_regression_pin"
       INTEGRATION_FILES: ${{ needs.changes.outputs.integration_files }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5

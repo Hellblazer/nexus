@@ -17,13 +17,13 @@
 # zero budget. Do not pass a token into the fence and do not raise the budget for the gate.
 
 # The gate's pytest marker expression. `not mandatory_regression_pin` is the point of this file.
-LSG_PYTEST_MARK_EXPR="integration and not lived_in and not cloud_mode and not mandatory_regression_pin"
+LSG_PYTEST_MARK_EXPR="integration and not lived_in and not keyed_voyage and not mandatory_regression_pin"
 
 # What the pins' own run selects.
 MANDATORY_PIN_MARK_EXPR="integration and mandatory_regression_pin"
 
 # Exact count of `mandatory_regression_pin` tests, the same discipline as the lived_in and
-# cloud_mode carve-outs in local-service-gate.sh: a new pin must bump this consciously, because
+# keyed_voyage carve-outs in local-service-gate.sh: a new pin must bump this consciously, because
 # the gate's selection no longer runs it and the pins gate asserts it ran this many.
 # 2026-10-01: 4 = three CI-evidence pins (tests/scripts/test_check_release_ci_evidence.py) and the
 # release-floor source-ancestry pin (tests/scripts/test_check_engine_release_floor.py).

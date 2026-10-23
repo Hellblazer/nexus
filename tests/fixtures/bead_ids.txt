@@ -563,6 +563,8 @@ nexus-2k66t.1
 nexus-2k66t.2
 nexus-2k66t.3
 nexus-2k66t.4
+nexus-2k66t.4.1
+nexus-2k66t.4.2
 nexus-2k66t.5
 nexus-2k66t.6
 nexus-2k8wi
@@ -6921,6 +6923,7 @@ nexus-ub4ge
 nexus-ubmed
 nexus-ubnwk
 nexus-ubnwk.1
+nexus-uca6q
 nexus-ucagi
 nexus-ucfky
 nexus-ue6g7

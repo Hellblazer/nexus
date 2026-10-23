@@ -20,7 +20,7 @@ export NX_ALLOW_PROD_WRITE="local-service-gate: self-provisioned throwaway servi
 # provisions its own PG + service and auto-rebuilds a stale dev jar. Two
 # markers carve tests out, each with an exact-count guard below: `lived_in`
 # (dispatches real `claude -p` or needs seeded lived-in corpora) and
-# `cloud_mode`. A vacuity guard asserts passed/skipped stay within the pinned
+# `keyed_voyage`. A vacuity guard asserts passed/skipped stay within the pinned
 # FLOOR/BUDGET. A guard trip means real regression, not ambient drift.
 #
 # TWO SEPARATE PROOFS, RE-SCOPED HONESTLY (nexus-x81ks, 2026-08-02, decision
@@ -67,10 +67,10 @@ export NX_ALLOW_PROD_WRITE="local-service-gate: self-provisioned throwaway servi
 # key to a local engine only under the nexus-r5f3c rule until the Phase 3
 # client release (nexus-wypwq), so an installed local service is still one
 # posture today. Tests that need the SERVICE to embed voyage-* collections
-# are cloud-mode tests, marked `cloud_mode` and deselected here; the gate
+# are cloud-mode tests, marked `keyed_voyage` and deselected here; the gate
 # needs no Voyage key for its own corpus. The keyed local engine has its own
 # gate, tests/e2e/dual-embedder-gate.sh (release battery and by hand), which
-# also runs the cloud_mode tests (nexus-8errq).
+# also runs the keyed_voyage tests (nexus-8errq).
 #
 # It used to carry those tests and pass, because it was never actually running
 # local: the CHROMA_* secrets made is_local_mode() answer False, `nx init
@@ -631,7 +631,7 @@ echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
 # stamped binary, real daemon machinery) actually boots and serves: health,
 # version identity, catalog read/write, the RUNFENCE index-run fence, and one
 # vector round trip. Exact-count non-vacuity, same discipline as
-# LIVED_IN_EXPECTED / CLOUD_MODE_EXPECTED below: every assertion increments
+# LIVED_IN_EXPECTED / KEYED_VOYAGE_EXPECTED below: every assertion increments
 # SMOKE_PASSED, and a mismatch against SMOKE_EXPECTED FAILS the gate — an
 # unreachable service or a malformed response fails loud, never skips.
 SMOKE_EXPECTED=14  # 9 pre-vector checks + 5 vector-leg checks (collections/upsert, write_many, owned upsert-chunks re-post, ownerless upsert-chunks refused, search); NEXUS_GATE_NO_VECTOR_SMOKE drops the 5
@@ -961,7 +961,7 @@ if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   exit 1
 fi
 
-# The cloud_mode carve-out (nexus-w6h2m, 2026-07-28). Same exact-count
+# The keyed_voyage carve-out (nexus-w6h2m, 2026-07-28). Same exact-count
 # discipline as lived_in above, and for the same reason.
 #
 # WHY IT EXISTS: this gate's corpus spanned TWO embedding modes while the
@@ -988,11 +988,11 @@ fi
 # reason travels with the test. Their home is tests/e2e/dual-embedder-gate.sh
 # (nexus-8errq), which runs them against a keyed, Voyage-profile local engine
 # and demands exactly this count; its guard test pins the two counts equal.
-CLOUD_MODE_EXPECTED=3
-CLOUD_MODE_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and cloud_mode" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
-if [ "$CLOUD_MODE_COUNT" -ne "$CLOUD_MODE_EXPECTED" ]; then
-  echo "[gate] VACUITY GUARD TRIPPED: cloud_mode carve-out is $CLOUD_MODE_COUNT tests, expected exactly $CLOUD_MODE_EXPECTED" >&2
-  echo "[gate] (a new cloud_mode mark must bump CLOUD_MODE_EXPECTED here, consciously —" >&2
+KEYED_VOYAGE_EXPECTED=3
+KEYED_VOYAGE_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and keyed_voyage" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+if [ "$KEYED_VOYAGE_COUNT" -ne "$KEYED_VOYAGE_EXPECTED" ]; then
+  echo "[gate] VACUITY GUARD TRIPPED: keyed_voyage carve-out is $KEYED_VOYAGE_COUNT tests, expected exactly $KEYED_VOYAGE_EXPECTED" >&2
+  echo "[gate] (a new keyed_voyage mark must bump KEYED_VOYAGE_EXPECTED here, consciously —" >&2
   echo "[gate]  the marker must never become a place to park a red test)" >&2
   exit 1
 fi
