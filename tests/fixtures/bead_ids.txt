@@ -953,6 +953,7 @@ nexus-473mx
 nexus-47ubt
 nexus-47ubt.1
 nexus-480wm
+nexus-48f3l
 nexus-4901f
 nexus-4922x
 nexus-4922x.1
@@ -6380,6 +6381,7 @@ nexus-s88vq.1
 nexus-s89ia
 nexus-s8na3
 nexus-s8na3.1
+nexus-s8r5o
 nexus-s8yz
 nexus-s8yz.1
 nexus-s9hxc
@@ -6918,6 +6920,7 @@ nexus-ub4ge
 nexus-ubmed
 nexus-ubnwk
 nexus-ubnwk.1
+nexus-ucagi
 nexus-ucfky
 nexus-ue6g7
 nexus-ue6g7.1
