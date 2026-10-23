@@ -282,3 +282,34 @@ def test_window_and_stamp_share_one_listing(asked, monkeypatch, t3):
     assert asked == [BGE]
     assert stamped == [BGE, BGE]
     assert t3.listings == 1
+
+
+def test_a_row_without_a_model_stamps_the_profile_model(monkeypatch, t3):
+    _profile(monkeypatch, BGE)
+    row = _row(LEGACY, VOYAGE)
+    del row["embedding_model"]
+    t3.rows = [row]
+
+    assert _stamped(LEGACY) == [BGE, BGE]
+
+
+def test_a_listing_that_cannot_be_fetched_stamps_the_profile_model(monkeypatch, t3):
+    from nexus.mcp_infra import ServiceNotReadyError
+
+    _profile(monkeypatch, BGE)
+    t3.error = ServiceNotReadyError("engine is starting")
+
+    assert _stamped(LEGACY) == [BGE, BGE]
+
+
+@pytest.mark.parametrize("prefix", ["knowledge", "docs", "rdr"])
+@pytest.mark.parametrize("model", [BGE, VOYAGE])
+def test_the_no_row_stamp_is_the_model_a_first_write_registers(monkeypatch, prefix, model):
+    # With no row, the first write registers the collection: the stamp must name the
+    # model that registration gives the row, or the first note is stamped wrong.
+    monkeypatch.setattr(corpus, "effective_embedding_model_for_writes", lambda content_type: model)
+    _profile(monkeypatch, model)
+    name = f"{prefix}__legacy-subject"
+
+    assert (corpus.embedding_model_for_collection_calibrated(name)
+            == corpus.collection_registration_kwargs(name)["embedding_model"] == model)
