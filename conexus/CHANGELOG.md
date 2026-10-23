@@ -1,5 +1,11 @@
 # Changelog
 
+## [7.85.0] - 2026-10-23
+
+Plugin version aligned with conexus 7.85.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included):
+
+- **The mailbox and peer-messaging skills say a session's name is armed automatically** (nexus-u839f). `skills/mailbox/SKILL.md` and `skills/peer-messaging/SKILL.md`: the MCP server arms the name from Claude Code's session registry at start and after `/clear` and re-reads it about once a minute, so a `/rename` is followed; `tuple_subscribe("mailbox/<name>")` is the explicit form, for a host without the registry or when peers cannot reach the session by name. Live with the client half in this release.
+
 ## [7.84.0] - 2026-10-22
 
 Plugin version aligned with conexus 7.84.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included):
