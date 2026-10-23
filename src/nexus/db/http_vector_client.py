@@ -3269,8 +3269,9 @@ class HttpVectorClient:
            round trip here); a caller needing a warm cache for a
            non-default tenant supplies its own ``_row_resolver``.
 
-        ``strict`` (nexus-s8r5o) makes case 2 raise a failed listing instead of
-        answering ``None``; cases 1 and 3 already raise whatever their read raises.
+        ``strict`` (nexus-s8r5o) makes cases 2 and 3 raise a failed listing instead
+        of answering ``None``. Case 1 calls the injected resolver as it is: whatever
+        it raises propagates, and a failure it swallows itself stays a ``None``.
         """
         if self._row_resolver is not None:
             return self._row_resolver(collection)
@@ -3279,7 +3280,7 @@ class HttpVectorClient:
             return get_collection_row(collection, strict=strict)
         # The routing listing: the catalog attributes only, no per-collection
         # chunk count (nexus-7jy5r: the indexers read a row per file).
-        for row in self.list_collections(routing=True):
+        for row in self.list_collections(routing=True, strict=strict):
             if row.get("name") == collection:
                 return row if "content_type" in row else None
         return None

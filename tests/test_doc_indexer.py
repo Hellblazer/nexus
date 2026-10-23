@@ -2165,18 +2165,20 @@ class _UnreadableRowStore(MagicMock):
 
 
 @pytest.mark.t2_tenant
-def test_index_pdf_skip_compares_against_the_row_model(sample_pdf, monkeypatch, cloud_mode):
-    """nexus-7jy5r: the unchanged-content skip compares the stored stamp with the model the
-    collection's row names, not the one its name derives (Voyage here): a bge row with bge
-    chunks skips, where the name's guess would re-index. One case only: the
-    provisioned-tenant ceiling is at its limit, and this is the case the name derivation fails."""
+def test_index_pdf_skips_unchanged_content_when_the_row_is_unreadable(sample_pdf, monkeypatch, cloud_mode):
+    """nexus-s8r5o, at the index_pdf skip site: the row cannot be read, so the target is the
+    name's guess (Voyage); chunks stamped with the row's model (bge) and an unchanged hash
+    skip instead of re-indexing to the guess. It also pins that the site takes its model from
+    ``_target_model`` (nexus-7jy5r): the name derivation reports the guess as known and would
+    re-index. The row-read path itself is pinned by the ``_target_model`` unit tests. One
+    tenant case per site: the provisioned-tenant ceiling is at its limit."""
     set_credentials(monkeypatch)
     _registered_before(sample_pdf, "mybook", "paper")
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_chunk, mock_extract = _make_pdf_mocks()
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": ["old_id"], "metadatas": [{"content_hash": content_hash, "embedding_model": _BGE}]}
-    store = _RowStore()
+    store = _UnreadableRowStore()
     store.get_or_create_collection.return_value = mock_col
     with patch("nexus.doc_indexer.make_t3", return_value=store), \
          patch("nexus.doc_indexer.PDFExtractor") as ext_cls, \
@@ -2188,15 +2190,14 @@ def test_index_pdf_skip_compares_against_the_row_model(sample_pdf, monkeypatch, 
 
 
 @pytest.mark.t2_tenant
-def test_index_markdown_skip_compares_against_the_row_model(sample_md, monkeypatch, cloud_mode):
-    """The markdown half of nexus-7jy5r (``_index_document``): the same row-model comparison,
-    the same one case."""
+def test_index_markdown_skips_unchanged_content_when_the_row_is_unreadable(sample_md, monkeypatch, cloud_mode):
+    """The ``_index_document`` site of nexus-s8r5o and nexus-7jy5r: the same one case."""
     set_credentials(monkeypatch)
     _registered_before(sample_md, "test", "prose")
     content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": ["existing"], "metadatas": [{"content_hash": content_hash, "embedding_model": _BGE}]}
-    store = _RowStore()
+    store = _UnreadableRowStore()
     store.get_or_create_collection.return_value = mock_col
     with patch("nexus.doc_indexer.make_t3", return_value=store):
         result = index_markdown(sample_md, corpus="test", t3=store)
