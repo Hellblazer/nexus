@@ -40,6 +40,13 @@ keyed on ``rdr__*``). Other prefixes (``docs__``, ``code__``, etc.)
 return ``None`` from ``extract_aspects``; the calling hook should
 no-op on ``None``.
 
+LLM backend (nexus-2k66t.3 P2): when ``llm.backend`` / the PATH select an API
+backend (``anthropic``, ``openai_compat``), ``_invoke_once`` and
+``_invoke_once_batch`` route the prompt through ``llm_backend.run_text_sync``
+instead of the ``claude -p`` ``Popen`` described below, which stays the path
+whenever the CLI is the backend. The retry policy below is the ONLY retry layer:
+the API backend's own transport retries are off for this caller.
+
 Invocation: ``["claude", "-p", "--output-format", "json",
 "--strict-mcp-config", "--tools", "", "--setting-sources", ""]`` (default
 argv, see ``_run_claude_isolated``), prompt fed via stdin, ``timeout=180``. ``--strict-mcp-config`` (RDR-196
@@ -1768,51 +1775,55 @@ def _invoke_once_batch(prompt: str, *, timeout: int, model: str | None = None) -
     is hardcoded at 180 s; batch scales up). Prompt is stdin-fed
     for the same reason as the single-paper path.
     """
-    try:
-        result = _run_claude_isolated(prompt, timeout=timeout, model=model)
-    except subprocess.TimeoutExpired as exc:
-        raise _TransientFailure(f"timeout after {timeout}s: {exc}") from exc
-    except OSError as exc:
-        # ENOMEM and similar boundary errors — non-retriable at this
-        # prompt size. Caller may fall back to per-paper. (E2BIG is
-        # no longer reachable now that prompts go via stdin.)
-        raise _HardFailure(f"subprocess exec failed: {exc}") from exc
+    api_backend = _selected_api_backend()
+    if api_backend is not None:
+        inner_text = _api_inner_text(prompt, api_backend, timeout=timeout, model=model)
+    else:
+        try:
+            result = _run_claude_isolated(prompt, timeout=timeout, model=model)
+        except subprocess.TimeoutExpired as exc:
+            raise _TransientFailure(f"timeout after {timeout}s: {exc}") from exc
+        except OSError as exc:
+            # ENOMEM and similar boundary errors — non-retriable at this
+            # prompt size. Caller may fall back to per-paper. (E2BIG is
+            # no longer reachable now that prompts go via stdin.)
+            raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
-    if result.returncode != 0:
-        # The CLI reports a rate limit or overload in the stdout envelope,
-        # not stderr, so the transient check reads both (nexus-4vsx8).
-        stdout_excerpt = _stdout_excerpt_for_hard_failure(result.stdout)
-        seen_lc = f"{result.stderr or ''}\n{stdout_excerpt}".lower()
-        if any(p in seen_lc for p in _TRANSIENT_STDERR_PATTERNS):
-            raise _TransientFailure(
+        if result.returncode != 0:
+            # The CLI reports a rate limit or overload in the stdout envelope,
+            # not stderr, so the transient check reads both (nexus-4vsx8).
+            stdout_excerpt = _stdout_excerpt_for_hard_failure(result.stdout)
+            seen_lc = f"{result.stderr or ''}\n{stdout_excerpt}".lower()
+            if any(p in seen_lc for p in _TRANSIENT_STDERR_PATTERNS):
+                raise _TransientFailure(
+                    _redact_tokens(
+                        f"transient failure (rc={result.returncode}): "
+                        f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
+                    ),
+                )
+            raise _HardFailure(
                 _redact_tokens(
-                    f"transient failure (rc={result.returncode}): "
+                    f"non-zero exit (rc={result.returncode}): "
                     f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
                 ),
             )
-        raise _HardFailure(
-            _redact_tokens(
-                f"non-zero exit (rc={result.returncode}): "
-                f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
-            ),
-        )
 
-    try:
-        outer = json.loads(result.stdout)
-    except (ValueError, TypeError) as exc:
-        raise _TransientFailure(f"outer json parse failure: {exc}") from exc
-    if isinstance(outer, dict):
-        _log_usage(outer, model)  # a malformed envelope still cost money
-    if not isinstance(outer, dict) or "result" not in outer:
-        raise _HardFailure(
-            "claude --output-format json wrapper missing 'result' key"
-        )
+        try:
+            outer = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise _TransientFailure(f"outer json parse failure: {exc}") from exc
+        if isinstance(outer, dict):
+            _log_usage(outer, model)  # a malformed envelope still cost money
+        if not isinstance(outer, dict) or "result" not in outer:
+            raise _HardFailure(
+                "claude --output-format json wrapper missing 'result' key"
+            )
 
-    inner_text = outer["result"]
-    if not isinstance(inner_text, str):
-        raise _HardFailure(
-            f"wrapper 'result' is not a string (got {type(inner_text).__name__})",
-        )
+        inner_text = outer["result"]
+        if not isinstance(inner_text, str):
+            raise _HardFailure(
+                f"wrapper 'result' is not a string (got {type(inner_text).__name__})",
+            )
     cleaned = _strip_code_fence(inner_text.strip())
     try:
         parsed = json.loads(cleaned)
@@ -2131,6 +2142,59 @@ def _log_usage(outer: dict, requested_model: str | None) -> None:
     )
 
 
+def _selected_api_backend() -> str | None:
+    """The direct API backend (``anthropic`` / ``openai_compat``) this extraction
+    runs on, or ``None`` for the ``claude -p`` path below (nexus-2k66t.3 P2).
+
+    ``None`` also covers "no backend at all": the CLI path then fails the way it
+    always has (``FileNotFoundError`` from the spawn), so a box with neither
+    ``claude`` nor a key behaves as before. The CLI path keeps its own
+    supervised ``Popen`` (process-group kill, ``PR_SET_PDEATHSIG``); only a
+    selected API backend is routed through ``llm_backend``.
+    """
+    from nexus.operators.llm_backend import selected_api_backend  # noqa: PLC0415 - deferred: keeps the extractor import light
+    from nexus.operators.llm_types import OperatorError  # noqa: PLC0415 - deferred, as above
+
+    try:
+        return selected_api_backend()
+    except OperatorError as exc:  # an explicit backend that is not usable (no key): a hard failure, logged by the retry loop
+        raise _HardFailure(_redact_tokens(str(exc))) from exc
+
+
+def _api_inner_text(prompt: str, backend_name: str, *, timeout: float, model: str | None) -> str:
+    """One extraction call on an API backend; the model's response text.
+
+    The backend's own transport retries are OFF (``run_text_sync``): this
+    module's 3-attempt loop (:func:`_retry_subprocess`) is the one retry layer,
+    so a 429 costs at most 3 requests, not 3 x 3. A transient provider error
+    (429, 529, 5xx, a lost connection) or a timeout raises ``_TransientFailure``
+    and takes that loop's 2 s / 5 s / 12 s backoff; every other backend error
+    (a bad key, a bad request, a cut-off or refused answer) is hard.
+    """
+    from nexus.operators.llm_backend import run_text_sync  # noqa: PLC0415 - deferred: keeps the extractor import light
+    from nexus.operators.llm_types import OperatorAPIError, OperatorError, OperatorTimeoutError  # noqa: PLC0415 - deferred, as above
+
+    try:
+        result = run_text_sync(backend_name, prompt, model=model, timeout=timeout, operator="aspect_extractor")
+    except OperatorTimeoutError as exc:
+        raise _TransientFailure(f"timeout after {timeout}s: {_redact_tokens(str(exc))[:200]}") from exc
+    except OperatorAPIError as exc:
+        text = _redact_tokens(str(exc))
+        raise (_TransientFailure if exc.transient else _HardFailure)(text) from exc
+    except OperatorError as exc:
+        raise _HardFailure(_redact_tokens(str(exc))) from exc
+    usage = result.usage
+    _log.info(
+        "aspect_extractor_usage",
+        requested_model=model,
+        models=[usage.model] if usage is not None and usage.model else [],
+        cost_usd=usage.cost_usd if usage is not None else None,
+        duration_ms=usage.duration_ms if usage is not None else None,
+        backend=backend_name,
+    )
+    return result.text or ""
+
+
 def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
     """Single subprocess invocation. Raises ``_TransientFailure`` on
     retriable failure, ``_HardFailure`` on non-retriable. Returns the
@@ -2141,51 +2205,55 @@ def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
     multi-page papers as argv tripped macOS ARG_MAX (errno 7) for
     14-page documents in production. Stdin has no such limit.
     """
-    try:
-        result = _run_claude_isolated(prompt, timeout=180, model=model)
-    except subprocess.TimeoutExpired as exc:
-        raise _TransientFailure(f"timeout after 180s: {exc}") from exc
-    except OSError as exc:
-        raise _HardFailure(f"subprocess exec failed: {exc}") from exc
+    api_backend = _selected_api_backend()
+    if api_backend is not None:
+        inner_text = _api_inner_text(prompt, api_backend, timeout=180, model=model)
+    else:
+        try:
+            result = _run_claude_isolated(prompt, timeout=180, model=model)
+        except subprocess.TimeoutExpired as exc:
+            raise _TransientFailure(f"timeout after 180s: {exc}") from exc
+        except OSError as exc:
+            raise _HardFailure(f"subprocess exec failed: {exc}") from exc
 
-    if result.returncode != 0:
-        # The CLI reports a rate limit or overload in the stdout envelope,
-        # not stderr, so the transient check reads both (nexus-4vsx8).
-        stdout_excerpt = _stdout_excerpt_for_hard_failure(result.stdout)
-        seen_lc = f"{result.stderr or ''}\n{stdout_excerpt}".lower()
-        if any(p in seen_lc for p in _TRANSIENT_STDERR_PATTERNS):
-            raise _TransientFailure(
+        if result.returncode != 0:
+            # The CLI reports a rate limit or overload in the stdout envelope,
+            # not stderr, so the transient check reads both (nexus-4vsx8).
+            stdout_excerpt = _stdout_excerpt_for_hard_failure(result.stdout)
+            seen_lc = f"{result.stderr or ''}\n{stdout_excerpt}".lower()
+            if any(p in seen_lc for p in _TRANSIENT_STDERR_PATTERNS):
+                raise _TransientFailure(
+                    _redact_tokens(
+                        f"transient failure (rc={result.returncode}): "
+                        f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
+                    ),
+                )
+            raise _HardFailure(
                 _redact_tokens(
-                    f"transient failure (rc={result.returncode}): "
+                    f"non-zero exit (rc={result.returncode}): "
                     f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
                 ),
             )
-        raise _HardFailure(
-            _redact_tokens(
-                f"non-zero exit (rc={result.returncode}): "
-                f"{(result.stderr or '')[:200]} | stdout: {stdout_excerpt}",
-            ),
-        )
 
-    # Outer parse: --output-format json returns a session-metadata
-    # wrapper of shape {"result": "<text>", "session_id": ..., ...}.
-    try:
-        outer = json.loads(result.stdout)
-    except (ValueError, TypeError) as exc:
-        raise _TransientFailure(f"outer json parse failure: {exc}") from exc
-    if isinstance(outer, dict):
-        _log_usage(outer, model)  # a malformed envelope still cost money
-    if not isinstance(outer, dict) or "result" not in outer:
-        raise _HardFailure(
-            "claude --output-format json wrapper missing 'result' key "
-            f"(got keys: {list(outer.keys()) if isinstance(outer, dict) else type(outer).__name__})",
-        )
+        # Outer parse: --output-format json returns a session-metadata
+        # wrapper of shape {"result": "<text>", "session_id": ..., ...}.
+        try:
+            outer = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise _TransientFailure(f"outer json parse failure: {exc}") from exc
+        if isinstance(outer, dict):
+            _log_usage(outer, model)  # a malformed envelope still cost money
+        if not isinstance(outer, dict) or "result" not in outer:
+            raise _HardFailure(
+                "claude --output-format json wrapper missing 'result' key "
+                f"(got keys: {list(outer.keys()) if isinstance(outer, dict) else type(outer).__name__})",
+            )
 
-    inner_text = outer["result"]
-    if not isinstance(inner_text, str):
-        raise _HardFailure(
-            f"wrapper 'result' is not a string (got {type(inner_text).__name__})",
-        )
+        inner_text = outer["result"]
+        if not isinstance(inner_text, str):
+            raise _HardFailure(
+                f"wrapper 'result' is not a string (got {type(inner_text).__name__})",
+            )
 
     # Inner parse: the model's response text. Strip markdown
     # code fences defensively — the prompt asks for raw JSON but

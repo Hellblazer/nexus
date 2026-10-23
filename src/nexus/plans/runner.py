@@ -211,7 +211,8 @@ class PlanRunOperatorUnavailableError(RuntimeError):
         self.reason = reason
         super().__init__(
             f"operator_{operator}: unavailable — {reason}. "
-            "Run `claude auth login` or set ANTHROPIC_API_KEY to enable "
+            "Run `claude auth login` (Claude Code) or `nx config set anthropic_api_key <key>` "
+            "(a direct Anthropic API key; `nx doctor` names the backend in use) to enable "
             "operator-backed plan steps; retrieval-only plans still work."
         )
 

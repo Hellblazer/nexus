@@ -1,6 +1,6 @@
 # Nexus
 
-**Permanent memory and search by meaning for Claude.** Nexus runs on your computer. You need no API key, no account, and no separate database install. What Claude learns in one session is there in the next.
+**Permanent memory and search by meaning for Claude.** Nexus runs on your computer. Search and storage need no API key, no account, and no separate database install. What Claude learns in one session is there in the next. The steps that call a language model (the `nx_answer` operators, aspect extraction, topic labels) use the Claude Code CLI when it is installed, and otherwise an Anthropic API key you set with `nx config set anthropic_api_key`.
 
 [![CI](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/conexus)](https://pypi.org/project/conexus/)

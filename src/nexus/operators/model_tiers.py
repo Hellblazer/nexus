@@ -231,3 +231,33 @@ def resolve_model_for_default_path(operator: str) -> str:
     if operator in FLIPPED_OPERATORS:
         return resolve_model_for_tier("cheap")
     return STRONG_DEFAULT_ALIAS
+
+
+#: nexus-2k66t.3 P2: CLI alias -> Messages API model id, for the direct
+#: ``anthropic`` backend (``claude -p --model <alias>`` resolves an alias
+#: server-side; a raw API call needs the id). Ids are the current ones on the
+#: published models page (Context7 ``/websites/platform_claude_en``,
+#: 2026-10-23). NOT probe-verified against what ``claude -p --model <alias>``
+#: reports as ``canonicalModel`` today (the 2026-08-21 probes recorded above
+#: saw ``claude-opus-5`` for ``opus``): the RDR-196 tier measurements carry
+#: across backends only if the two agree, so run the probe before relying on
+#: one backend's numbers for the other. Re-point HERE and update
+#: ``llm_models.PRICES`` in the same change.
+_API_MODEL_IDS: Final[dict[str, str]] = {
+    "haiku": "claude-haiku-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5",
+    "fable": "claude-fable-5-1",
+}
+
+
+def resolve_api_model(model: str | None) -> str:
+    """The Messages API model id for a dispatch ``model`` value.
+
+    ``None`` or blank is the default strong model, :data:`STRONG_DEFAULT_ALIAS`
+    (the same model ``_pin_default_model`` gives the CLI path). A CLI alias maps
+    through :data:`_API_MODEL_IDS`; anything else is already a full id (the
+    aspect config pins ``claude-haiku-4-5-20251001``) and passes through
+    unchanged."""
+    name = (model or "").strip() or STRONG_DEFAULT_ALIAS
+    return _API_MODEL_IDS.get(name.lower(), name)

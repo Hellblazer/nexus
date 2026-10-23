@@ -53,7 +53,8 @@ The local service sends your chunk text and query strings to Voyage AI's API for
 - **The managed nexus-service** — chunk text + embeddings are stored in the managed service's Postgres for retrieval, under that service operator's policy. Your data leaves your machine for whoever hosts the service.
 - **Voyage AI** — in managed-cloud mode the service embeds chunk text and query strings with Voyage's API server-side. See https://www.voyageai.com/privacy.
 - **Semantic Scholar** (only when you run `nx enrich bib`) — bibliographic metadata lookups for PDFs you ask Conexus to enrich. See https://www.semanticscholar.org/about/privacy.
-- **Anthropic Claude** (only when an MCP operator tool fires) — chunks passed to `claude -p` subprocesses run by `operator_*` / `nx_answer` / `nx_tidy` are sent to Anthropic's API per Anthropic's standard data policy.
+- **Anthropic Claude** (only when an MCP operator tool, aspect extraction or topic labelling fires) — chunks passed to `claude -p` subprocesses, or sent directly to `api.anthropic.com` when the LLM backend is `anthropic` (an `anthropic_api_key` and no `claude` on PATH, or `llm.backend: anthropic`), by `operator_*` / `nx_answer` / `nx_tidy` / aspect extraction / topic labelling are sent to Anthropic's API per Anthropic's standard data policy. The direct path sends the API key in the `x-api-key` header and nowhere else.
+- **An `openai_compat` endpoint you configure** (only when `llm.backend` is `openai_compat`) — the same prompts go to the server you named in `llm.openai_compat.base_url` (Ollama or vLLM on your network, or a hosted router such as OpenRouter), under that operator's policy. The endpoint is read from your global config or environment only, never from a repository's `.nexus.yml`.
 
 You control which (if any) of the above are reachable by deciding whether to set the corresponding credentials.
 

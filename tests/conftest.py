@@ -3143,6 +3143,16 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         # (NX_LLM_BACKEND=anthropic) would make every claude_dispatch in the
         # suite raise or reroute. Tests that want it setenv it themselves.
         "NX_LLM_BACKEND",
+        # nexus-2k66t.3 P2: every other input of backend selection and of the
+        # direct backends. An exported ANTHROPIC_API_KEY would make a box with no
+        # claude on PATH "have a backend" and flip every availability probe; the
+        # openai_compat endpoint and the two limits would redirect or reshape calls.
+        "ANTHROPIC_API_KEY",
+        "NX_LLM_OPENAI_API_KEY",
+        "NX_LLM_OPENAI_BASE_URL",
+        "NX_LLM_OPENAI_MODEL",
+        "NX_LLM_MAX_TOKENS",
+        "NX_LLM_MAX_CONCURRENCY",
     ):
         monkeypatch.delenv(var, raising=False)
 

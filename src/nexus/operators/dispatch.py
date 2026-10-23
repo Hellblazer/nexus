@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Async claude -p subprocess dispatch for operator tools.
+"""Async LLM dispatch for operator tools: ``claude_dispatch`` and the ``cli`` backend.
 
-Single responsibility: spawn `claude -p` as a truly async subprocess,
-deliver a prompt via stdin, parse JSON output, surface typed errors.
+``claude_dispatch`` is a thin front over an ``LLMBackend`` (``llm_backend``);
+``CliBackend`` here is the ``claude -p`` backend: spawn it as a truly async
+subprocess, deliver a prompt via stdin, parse JSON output, surface typed errors.
+The ``anthropic`` and ``openai_compat`` backends live in ``llm_anthropic`` and
+``llm_openai`` (nexus-2k66t.3); the exceptions and ``DispatchUsage`` they share
+live in ``llm_types`` and are re-exported here.
 
 No worker pool. No auth check. No session management.
 claude -p inherits Claude Code auth; if it fails, the subprocess error
@@ -15,10 +19,10 @@ import contextvars
 import json
 import math
 import os
+import shutil
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 from uuid import uuid4
@@ -29,8 +33,28 @@ from nexus.operators.llm_backend import (
     BackendStatus,
     DispatchRequest,
     DispatchResult,
+    NoBackendAvailableError,
+    build_api_backend,
     cli_status,
     resolve_backend_name,
+)
+
+# nexus-2k66t.3 P2: the exceptions, DispatchUsage and the ambient usage sink live
+# in llm_types (below both this module and the API backends). Re-exported here so
+# every existing import and patch of these names on ``dispatch`` keeps working.
+from nexus.operators.llm_types import (  # noqa: F401 - re-exports
+    DispatchUsage,
+    ModelUsage,
+    OperatorAPIError,
+    OperatorBudgetExceededError,
+    OperatorError,
+    OperatorOutputError,
+    OperatorTimeoutError,
+    _ambient_usage_sink,
+    ambient_usage_sink,
+    model_family_matches,
+    record_usage,
+    warn_on_family_drift,
 )
 from nexus.util.nx_argv import argv_off_cwd
 
@@ -67,52 +91,6 @@ def rolled_up_dispatch_failures() -> Iterator[None]:
     finally:
         _ROLLED_UP.reset(token)
 
-
-#: RDR-196 .p1b Gap 1 (nexus-nyry9.8 coordinator addendum, 2026-08-20): an
-#: AMBIENT usage sink, parallel to ``_ROLLED_UP`` above. The explicit
-#: ``usage_sink`` kwarg on ``claude_dispatch`` only helps a caller that
-#: invokes ``claude_dispatch`` directly (``plans/bundle.py``'s
-#: ``dispatch_bundle`` is the only one inside this package) — it does
-#: NOT reach a caller further up the stack, such as ``plans/runner.py``'s
-#: isolated-step dispatch, which goes through the ``ToolDispatcher``
-#: protocol into one of 10 separate ``operator_*`` MCP-tool functions in
-#: ``mcp/core.py`` (extract/rank/compare/summarize/generate/filter/
-#: check/verify/groupby/aggregate), each of which owns ITS OWN internal
-#: ``claude_dispatch`` call. Threading an explicit ``usage_sink`` kwarg
-#: through all 10 signatures would be a much larger, separately-scoped
-#: change; the ambient sink closes that gap without touching any of
-#: them. ``None`` (the default) is a complete no-op — byte-identical to
-#: every dispatch before this addendum. asyncio Tasks copy the current
-#: ``contextvars.Context`` at creation time, so a sink set here survives
-#: any ``asyncio.create_task`` an operator issues internally (proven by
-#: ``test_ambient_usage_sink_survives_child_task`` in
-#: tests/test_operator_dispatch.py) — no special handling needed.
-_ambient_usage_sink: contextvars.ContextVar[list[DispatchUsage] | None] = (
-    contextvars.ContextVar("dispatch_ambient_usage_sink", default=None)
-)
-
-
-@contextmanager
-def ambient_usage_sink(sink: list[DispatchUsage]) -> Iterator[None]:
-    """Scope *sink* as the ambient usage-capture target for every
-    ``claude_dispatch`` call made within this context — IN ADDITION to
-    whatever explicit ``usage_sink`` (if any) an individual call also
-    passes; both receive the SAME ``DispatchUsage`` instance (parsed
-    once), never two independently-parsed copies.
-
-    ``plans/runner.py`` wraps each isolated / bundle-fallback step
-    dispatch in this context manager so a ``StepRecord`` can be built
-    from real usage even though the dispatch reaches ``claude_dispatch``
-    through an ``operator_*`` MCP-tool function this module never calls
-    directly. Nested/overlapping scopes are NOT a supported use case —
-    the inner scope's ``reset`` restores exactly the value the token
-    captured, same discipline as ``rolled_up_dispatch_failures`` above.
-    """
-    token = _ambient_usage_sink.set(sink)
-    try:
-        yield
-    finally:
-        _ambient_usage_sink.reset(token)
 
 #: Per-stream cap on what the failure log records, in characters.
 #: Sized against the handler's real budget, not picked for feel: the log
@@ -156,6 +134,7 @@ __all__ = [
     "OperatorOutputError",
     "OperatorTimeoutError",
     "OperatorBudgetExceededError",
+    "OperatorAPIError",
     "NX_DISPATCH_MAX_BUDGET_USD_ENV",
 ]
 
@@ -167,86 +146,6 @@ __all__ = [
 #: rather than being silently ignored (see ``claude_dispatch``'s env
 #: resolution).
 NX_DISPATCH_MAX_BUDGET_USD_ENV: str = "NX_DISPATCH_MAX_BUDGET_USD"
-
-
-class OperatorError(Exception):
-    """Raised when claude -p exits non-zero."""
-
-
-class OperatorTimeoutError(OperatorError):
-    """Raised when claude -p exceeds the timeout.
-
-    nexus-h33x8.6 critic (T2 substantive-critique-h33x8.6-a3-a1-2026-08-19,
-    a4 precondition): carries the RECONSTRUCTED partial content as
-    structured attributes, not merely baked into the message string --
-    a4 (hard budget + partial results) needs to consume the partial
-    programmatically, without re-parsing the message text or re-reading
-    the timeout log file back off disk. All three default to empty/None
-    so existing bare ``OperatorTimeoutError("message")`` construction
-    (test doubles, callers that synthesize a timeout without going
-    through the real dispatch path) keeps working unchanged.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        partial_text: str = "",
-        event_count: int = 0,
-        log_path: Path | None = None,
-    ) -> None:
-        super().__init__(message)
-        #: Assistant/structured-output text reconstructed from whatever
-        #: stream-json NDJSON events arrived before the kill (see
-        #: ``_parse_stream_json_output``). Empty when nothing parsed.
-        self.partial_text = partial_text
-        #: Number of NDJSON lines that parsed as JSON before the kill.
-        self.event_count = event_count
-        #: Path to the persisted timeout log, or ``None`` when the log
-        #: write itself failed (``_persist_timeout_log``'s own best-effort
-        #: fallback) or this exception was constructed outside the real
-        #: timeout path.
-        self.log_path = log_path
-
-
-class OperatorBudgetExceededError(OperatorError):
-    """Raised when a per-dispatch ``--max-budget-usd`` ceiling aborts
-    ``claude -p`` mid-turn (nexus-2g8y7).
-
-    Only ever raised when the caller (or ``NX_DISPATCH_MAX_BUDGET_USD``)
-    actually set a ceiling for THIS dispatch -- opt-in follows the flag,
-    never fires for a dispatch that never asked for one. Detection is
-    keyword-based on the captured stdout/stderr (see
-    ``_looks_like_budget_exceeded_signal``): the CLI docs do not define a
-    distinct wire signal for a budget abort beyond a bare non-zero exit,
-    and the ambient monthly spend limit currently blocks every
-    ``claude -p`` invocation in dev environments, so the exact shape
-    could not be empirically probed before this bead shipped (see
-    ``scripts/probe_budget_abort.sh``).
-
-    Carries the same partial-output fields as ``OperatorTimeoutError``
-    for the same reason: a budget abort, like a timeout kill, loses
-    whatever tail the subprocess had not yet flushed, so the caller
-    needs the reconstructed partial content programmatically rather
-    than re-parsing the message text or re-reading the log file.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        partial_text: str = "",
-        event_count: int = 0,
-        log_path: Path | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.partial_text = partial_text
-        self.event_count = event_count
-        self.log_path = log_path
-
-
-class OperatorOutputError(OperatorError):
-    """Raised when stdout cannot be parsed as JSON."""
 
 
 def _build_dispatch_env(
@@ -661,104 +560,6 @@ def _parse_stream_json_output(raw: str) -> tuple[dict[str, Any] | None, str, int
     return final_result, "".join(partial_text_parts), event_count
 
 
-@dataclass(frozen=True)
-class ModelUsage:
-    """Per-model usage/cost breakdown from a stream-json result event's
-    ``modelUsage`` map (RDR-196 196-R1). The wire payload's field names
-    are camelCase (``inputTokens``, ``costUSD``, ``canonicalModel``, ...);
-    attributes here are the snake_case translation.
-    """
-
-    canonical_model: str
-    input_tokens: int | None
-    output_tokens: int | None
-    cache_read_input_tokens: int | None
-    cache_creation_input_tokens: int | None
-    cost_usd: float | None
-
-
-@dataclass(frozen=True)
-class DispatchUsage:
-    """Cost/usage telemetry parsed from a ``claude -p --output-format
-    stream-json`` terminal result event (RDR-196 Gap 1 / 196-R1,
-    nexus-nyry9.7).
-
-    Field names are FIXTURE-VERIFIED against
-    ``tests/fixtures/claude_dispatch_stream_json_sample.ndjson`` -- not
-    the RDR-196 Technical Design section's illustrative sketch, which
-    used ``elapsed_ms`` for what the wire payload actually calls
-    ``duration_ms``. Correction recorded in
-    ``docs/rdr/rdr-196-cost-aware-nx-answer.md``'s Technical Design section
-    (2026-08-20, nexus-nyry9.7). A field is
-    ``None`` -- never ``0.0`` -- when the result event does not carry it:
-    ``0.0`` reads as "this call was free", which is exactly the
-    measurement bug RDR-196 exists to fix (see ``_parse_dispatch_usage``).
-    """
-
-    model: str | None
-    """Canonical model id. Taken from the sole ``modelUsage`` entry's
-    ``canonicalModel`` field when there is exactly one; when there are
-    two or more, taken from the entry with the HIGHEST ``costUSD`` (ties
-    broken by the highest ``outputTokens``, then by the first key in
-    ``modelUsage``'s own iteration order) -- see ``_parse_dispatch_
-    usage``. ``None`` when ``modelUsage`` is absent/empty, OR when it is
-    non-empty but every entry in it fails the dict-shape check (a
-    malformed payload; nothing survives to rank -- code-review-expert
-    finding on the nexus-xepsr fix round, which corrected an earlier
-    version of this code that called ``max()`` on an empty dict there and
-    raised, breaking this module's documented never-raise-on-a-malformed-
-    payload contract).
-
-    An earlier rule -- pinned only in this dataclass's own docstring and
-    its accompanying unit test, never written into RDR-196's body text --
-    said: leave this ``None`` whenever ``modelUsage`` carried more than
-    one entry, never make a silent pick. That rule is REVERSED here per
-    Sam's decision (nexus-xepsr, 2026-09-14; recorded in RDR-196's
-    Technical Design section as a CORRECTION block dated 2026-09-14,
-    placed beside the 2026-08-20/nexus-nyry9.7 block that first pinned
-    this field's wire semantics -- NOT "196-R3", which is the RDR's
-    ``--strict-mcp-config`` spike and citing it for this rule was itself a
-    mistake in an earlier version of this docstring). Every ``claude -p``
-    dispatch now reports a second, near-zero-cost ``modelUsage`` entry for
-    a side call the CLI makes itself (measured: claude-haiku-4-5 alongside
-    the answering model, ~$0.001), so ">1 entry" stopped meaning
-    "ambiguous bundle" and started meaning "the common case". The
-    answering call's own cost is ordinarily far higher -- it carries the
-    CLI's cached system prompt, measured at ~7,000 cache-creation
-    tokens -- so it reliably outranks the side call, EXCEPT when the
-    answering model is itself haiku-priced; in that case both entries
-    already belong to the requested family, so the nexus-ek8tr drift
-    tripwire below reaches the same (no-drift) verdict regardless of which
-    one wins the pick. Leaving ``model`` permanently ``None`` broke the
-    live-usage cost test (``TestClaudeDispatchLiveUsage::test_live_
-    dispatch_records_nonzero_cost``) and made that tripwire vacuous (an
-    absent canonical id trivially "matches" any request, per
-    ``model_family_matches``'s own vacuous-true rule). Callers needing
-    full per-model detail still read ``model_usage`` directly, which this
-    reversal leaves untouched -- every entry survives."""
-
-    cost_usd: float | None  # total_cost_usd
-    input_tokens: int | None  # usage.input_tokens
-    output_tokens: int | None  # usage.output_tokens
-    cache_creation_input_tokens: int | None  # usage.cache_creation_input_tokens
-    cache_read_input_tokens: int | None  # usage.cache_read_input_tokens
-    duration_ms: int | None
-    duration_api_ms: int | None
-    num_turns: int | None
-    model_usage: dict[str, ModelUsage] = field(default_factory=dict)
-    """Keyed by the ``modelUsage`` map's own key(s) -- usually the
-    canonical model id, but the key itself is not assumed canonical
-    (``ModelUsage.canonical_model`` is the verified field)."""
-
-    # ``frozen=True`` with the default ``eq=True`` would otherwise
-    # auto-generate a ``__hash__`` that raises ``TypeError: unhashable
-    # type: 'dict'`` lazily, only when something actually calls
-    # ``hash()`` on an instance (``model_usage`` is a dict). No current
-    # caller hashes a DispatchUsage, but leaving that landmine armed is
-    # worse than declaring the type honestly unhashable up front.
-    __hash__ = None  # type: ignore[assignment]
-
-
 def _parse_dispatch_usage(final_result: dict[str, Any] | None) -> DispatchUsage:
     """Parse cost/usage telemetry from *final_result* -- the terminal
     ``{"type": "result", ...}`` stream-json event from
@@ -1072,31 +873,14 @@ def _close_dispatch_session(session_id: str | None, session_token: str | None) -
         )
 
 
-def model_family_matches(requested: str | None, canonical: str | None) -> bool:
-    """nexus-ek8tr drift tripwire: does the RECORDED canonical id belong to
-    the REQUESTED model's family? ``requested`` may be an alias ("fable",
-    "haiku") or a full id ("claude-haiku-4-5"); the check is that some
-    alphabetic token of the request appears in the canonical id. Vacuously
-    true when either side is unknown (no basis to warn)."""
-    if not requested or not canonical:
-        return True
-    tokens = [t for t in requested.lower().replace("claude-", "").split("-") if t.isalpha()]
-    canon = canonical.lower()
-    return any(t in canon for t in tokens) if tokens else True
-
 
 def _warn_on_family_drift(requested: str | None, usage: "DispatchUsage | None",
                           operator: str | None) -> None:
     """Emit the nexus-ek8tr drift warning when the recorded canonical id
-    falls outside the requested model's family. Never raises."""
-    canonical = usage.model if usage is not None else None
-    if not model_family_matches(requested, canonical):
-        _log.warning(
-            "model_family_drift",
-            requested_model=requested,
-            canonical_model=canonical,
-            operator=operator,
-        )
+    falls outside the requested model's family. Never raises. Delegates to
+    :func:`nexus.operators.llm_types.warn_on_family_drift` with this module's
+    logger, so patching ``dispatch._log`` still sees the event."""
+    warn_on_family_drift(requested, usage, operator, _log)
 
 
 async def claude_dispatch(
@@ -1343,11 +1127,26 @@ async def claude_dispatch(
 
 
 def _backend_for(req: DispatchRequest) -> "LLMBackend":
-    """The backend instance that :func:`resolve_backend_name` names for *req*."""
-    name = resolve_backend_name(req)
+    """The backend instance that :func:`resolve_backend_name` names for *req*.
+
+    ``auto`` with no ``claude`` and no key resolves to a :class:`CliBackend`
+    carrying the "no LLM backend is available" message, which it raises when the
+    spawn finds no binary: same outcome for the caller as raising here, and a
+    mocked spawn (the unit tests') is unaffected."""
+    try:
+        name = resolve_backend_name(req)
+    except NoBackendAvailableError as exc:
+        return CliBackend(missing_hint=str(exc))
     if name == "cli":
-        return CliBackend()
-    raise OperatorError(f"LLM backend {name!r} has no implementation")  # selection raises first for a name with no backend yet
+        if req.grants_tool_access:
+            hint = (
+                f"{req.operator or 'this operator'} needs the Claude Code CLI (it explores files and nx "
+                "tools through it) but `claude` is not on PATH; an API key cannot serve it"
+            )
+        else:
+            hint = "LLM backend 'cli' is selected (NX_LLM_BACKEND or config llm.backend) but `claude` is not on PATH"
+        return CliBackend(missing_hint=hint)
+    return build_api_backend(name)
 
 
 class CliBackend:
@@ -1359,8 +1158,15 @@ class CliBackend:
 
     name = "cli"
 
-    def __init__(self, which: "Callable[[str], str | None] | None" = None) -> None:
+    def __init__(
+        self,
+        which: "Callable[[str], str | None] | None" = None,
+        missing_hint: str | None = None,
+    ) -> None:
         self._which = which
+        #: What to raise, as an ``OperatorError``, when the spawn finds no
+        #: ``claude`` binary (nexus-2k66t.3 P2): the reason it was chosen.
+        self._missing_hint = missing_hint
 
     def available(self) -> BackendStatus:
         return cli_status(self._which)
@@ -1596,15 +1402,20 @@ class CliBackend:
             from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
             prompt_path = _write_prompt_file(prompt)
-            proc = await _spawn_with_prompt_file(
-                argv,
-                prompt_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                cwd=child_cwd,
-                **isolation_popen_kwargs(),
-            )
+            try:
+                proc = await _spawn_with_prompt_file(
+                    argv,
+                    prompt_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                    cwd=child_cwd,
+                    **isolation_popen_kwargs(),
+                )
+            except FileNotFoundError as exc:
+                if self._missing_hint and (self._which or shutil.which)("claude") is None:
+                    raise OperatorError(self._missing_hint) from exc
+                raise
             _dispatch_spawn_at = time.monotonic()
             # nexus-6y4e0: Windows job-object containment, assigned right after
             # spawn. No-op (None) on POSIX -- start_new_session=True above
@@ -1936,44 +1747,25 @@ class CliBackend:
             # subprocess/test double that emits a bare JSON blob rather than
             # real stream-json (the format this repo's own test doubles use).
             final_result, _partial_text, event_count = _parse_stream_json_output(raw)
-            _ambient_sink = _ambient_usage_sink.get()
-            # nexus-ek8tr drift tripwire — OUTSIDE the sink guard (review fix,
-            # T2 [23232] Important #2): the planner's own dispatch runs with
-            # no sink at all, and a pinned dispatch must be drift-checked on
-            # EVERY path, not only telemetry-wrapped ones. Only fires when a
-            # result parsed (final_result present); a failed dispatch has no
-            # canonical id to check.
+            # nexus-ek8tr drift tripwire + RDR-196 .p1a/.p1b usage sinks, now one
+            # helper shared with the API backends (nexus-2k66t.3 P2). The drift
+            # check fires on every path where a result parsed, sink or not; the
+            # sinks get ONE DispatchUsage instance, appended BEFORE the fallback
+            # parse below can raise (the "Appended, then STILL RAISES" list in
+            # claude_dispatch's docstring). With no result event the recorded
+            # value is the all-None usage + warning from _parse_dispatch_usage,
+            # built only when a sink is active, as before.
             _drift_usage = (
                 _parse_dispatch_usage(final_result) if final_result is not None else None
             )
-            if model is not None and _drift_usage is not None:
-                _warn_on_family_drift(model, _drift_usage, operator)
-            if usage_sink is not None or _ambient_sink is not None:
-                # RDR-196 .p1a (nexus-nyry9.7) + .p1b Gap-1 addendum
-                # (nexus-nyry9.8, 2026-08-20): capture cost/usage telemetry
-                # for a dispatch that reached a parsed result -- the raw JSON
-                # fallback below (final_result is None) still parses to an
-                # all-None DispatchUsage + warning via _parse_dispatch_usage,
-                # never a silently-omitted record. This append is BEFORE the
-                # fallback's own possible raise (see the docstring's "Appended,
-                # then STILL RAISES" list) -- the diagnostic enrichment below
-                # (nexus-nyry9.4 review-fix, taxonomy id=99) only changes the
-                # exception's MESSAGE, never this ordering or the exception
-                # type, so that contract and its test
-                # (TestUsageSinkAppendsBeforeSubsequentRaises::
-                # test_invalid_json_fallback_still_appends_all_none_usage_
-                # then_raises) both stay true unchanged. Parsed ONCE; the
-                # SAME DispatchUsage instance is appended to both sinks when
-                # both are active, never two independently-parsed copies.
-                # Reuse the drift-check parse when it ran (review r2 suggestion:
-                # a second _parse_dispatch_usage here could double any parse
-                # warning); the fallback covers final_result None, where the
-                # parse itself emits the all-None-usage warning path.
-                _usage = _drift_usage if _drift_usage is not None else _parse_dispatch_usage(final_result)
-                if usage_sink is not None:
-                    usage_sink.append(_usage)
-                if _ambient_sink is not None:
-                    _ambient_sink.append(_usage)
+            record_usage(
+                _drift_usage,
+                usage_sink=usage_sink,
+                requested_model=model,
+                operator=operator,
+                absent=lambda: _parse_dispatch_usage(final_result),
+                warn_drift=_warn_on_family_drift,
+            )
             if final_result is not None:
                 parsed = final_result
             else:

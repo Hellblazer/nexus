@@ -3527,6 +3527,82 @@ def _check_credential_persistence() -> list[HealthResult]:
     ]
 
 
+def _check_llm_backend() -> list[HealthResult]:
+    """nexus-2k66t.3 P2: which backend runs the LLM steps (operators, aspect
+    extraction, taxonomy labels), and why. Never prints a key.
+
+    * A usable backend: a pass naming it and the reason (``claude is on PATH``,
+      ``claude is not on PATH; the anthropic API is used``, ...).
+    * ``auto`` with no ``claude`` and no key: not applicable, a pass. A box with
+      search and storage only is a supported state, not a fault.
+    * A setting that cannot be served (``llm.backend: anthropic`` with no key, an
+      unknown value, an ``openai_compat`` with no base_url): a soft warning that
+      carries the reason.
+    """
+    from nexus.operators.llm_backend import NO_BACKEND_MESSAGE, backend_status  # noqa: PLC0415 - deferred: keeps doctor startup light
+
+    label = "LLM backend"
+    try:
+        status = backend_status()
+    except Exception as exc:  # noqa: BLE001 - a doctor row must not crash `nx doctor`
+        return [HealthResult(label=label, ok=False, warn=True, detail=f"could not determine: {exc}")]
+    if status.available:
+        detail = f"{status.name}: {status.reason}"
+        if status.name != "cli" and shutil.which("claude") is None:
+            detail += "; nx_enrich_beads and nx_plan_audit need the Claude Code CLI (they use tools)"
+        return [HealthResult(label=label, ok=True, detail=detail)]
+    if status.reason == NO_BACKEND_MESSAGE:
+        return [HealthResult(
+            label=label,
+            ok=True,
+            detail="none (not applicable): no claude CLI and no anthropic_api_key; "
+                   "operator steps, aspect extraction and taxonomy labels are off, search and storage work",
+        )]
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=status.reason,
+        fix_suggestions=["nx config set anthropic_api_key <key>", "or set llm.backend in ~/.config/nexus/config.yml"],
+    )]
+
+
+def _check_llm_key_persistence() -> list[HealthResult]:
+    """nexus-2k66t.3 P2: warn when the LLM key in use lives in shell env only.
+
+    A GUI-spawned ``nx-mcp`` (Claude Desktop) does not see the interactive
+    shell's exports, so a key exported in ``.zshrc`` that was never persisted
+    with ``nx config set`` is absent there. Only fires when the env key is the one
+    the chosen backend would use (no ``claude`` on PATH, or ``llm.backend``
+    forces the API), so a Claude Code user who exports ``ANTHROPIC_API_KEY`` for
+    other reasons is not nagged. Never prints a value."""
+    from nexus.config import CREDENTIALS, get_global_config_section  # noqa: PLC0415 - deferred to avoid circular import
+    from nexus.operators.llm_backend import backend_status  # noqa: PLC0415 - deferred: keeps doctor startup light
+
+    try:
+        status = backend_status()
+        stored = get_global_config_section("credentials")
+    except Exception:  # noqa: BLE001 - best-effort row
+        return []
+    wanted = {"anthropic": "anthropic_api_key", "openai_compat": "openai_compat_api_key"}.get(status.name)
+    if not status.available or wanted is None:
+        return []
+    env_name = CREDENTIALS[wanted]
+    if not os.environ.get(env_name, "").strip() or str(stored.get(wanted, "")).strip():
+        return []
+    return [HealthResult(
+        label="LLM key persistence (GUI spawn)",
+        ok=False,
+        warn=True,
+        detail=f"{wanted} is set in shell env ({env_name}) only. GUI-spawned consumers "
+               "(Claude Desktop, Cowork) cannot see shell env vars, so LLM steps there have no key.",
+        fix_suggestions=[
+            f'nx config set {wanted} "${env_name}"',
+            "Then quit and relaunch Claude Desktop so the next nx-mcp spawn reads ~/.config/nexus/config.yml.",
+        ],
+    )]
+
+
 def _check_mint_token() -> list[HealthResult]:
     """RDR-005 2a self-minting credential (nexus-wrwb7).
 
@@ -11603,6 +11679,8 @@ def run_health_checks(
     results.extend(_check_plugin_name())
     results.extend(_check_worktree_developer_agent())
     results.extend(_check_credential_persistence())
+    results.extend(_check_llm_backend())  # nexus-2k66t.3 P2
+    results.extend(_check_llm_key_persistence())  # nexus-2k66t.3 P2
     results.extend(_check_mint_token())
     results.extend(_check_static_service_token())  # nexus-xzeml
 

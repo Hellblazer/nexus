@@ -2,22 +2,29 @@
 """LLM backend protocol, request/result types and backend selection (nexus-2k66t.3).
 
 ``claude_dispatch`` (``nexus.operators.dispatch``) is a thin front over an
-``LLMBackend``. Phase 1 has one backend, ``cli`` (``dispatch.CliBackend``, the
-former body of ``claude_dispatch``, moved without change). ``anthropic`` and
-``openai_compat`` are named here so the setting can be validated, but selecting
-either raises until the phase that implements it.
+``LLMBackend``. Three backends exist: ``cli`` (``dispatch.CliBackend``, the
+``claude -p`` subprocess), ``anthropic`` (``llm_anthropic``, the Messages API on
+raw ``httpx``) and ``openai_compat`` (``llm_openai``, Chat Completions for
+Ollama, vLLM, OpenRouter).
 
 Design of record: T2 ``nexus/design-direct-llm-provider-2026-10-23``.
 
-Where the setting is read: ``NX_LLM_BACKEND`` in the environment, then
-``llm.backend`` in the GLOBAL ``~/.config/nexus/config.yml`` (the mtime-cached
-reader ``get_credential`` uses). Never the per-repo ``.nexus.yml``: a cloned
-repository must not be able to pick the backend, and in a later phase an
-endpoint or key. ``load_config()`` merges the per-repo file, so it is not used
-here.
+Selection (:func:`select_backend`, pure): the setting is ``NX_LLM_BACKEND``,
+then ``llm.backend`` in the GLOBAL ``~/.config/nexus/config.yml``, then ``auto``.
+``auto`` is ``cli`` when ``claude`` is on PATH (today's behaviour and
+subscription billing), else ``anthropic`` when an ``anthropic_api_key``
+resolves, else no backend (:class:`NoBackendAvailableError`). A call that grants
+tools always goes to ``cli``. An explicit ``anthropic`` or ``openai_compat``
+forces that backend for every tool-free call.
 
-This module imports nothing from ``nexus.operators.dispatch`` at load time
-(``dispatch`` imports it); the exception types are loaded when raised.
+Where settings are read: the environment and the GLOBAL config only (the
+mtime-cached reader ``get_credential`` uses), never the per-repo ``.nexus.yml``:
+a cloned repository must not be able to pick the backend, redirect prompts to an
+endpoint of its choosing, or change which account is billed. ``load_config()``
+merges the per-repo file, so it is not used here.
+
+This module imports nothing from ``nexus.operators.dispatch`` and nothing from
+the API backends at load time (both import it); the backends are built lazily.
 """
 from __future__ import annotations
 
@@ -25,12 +32,12 @@ import os
 import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 import structlog
 
-if TYPE_CHECKING:
-    from nexus.operators.dispatch import DispatchUsage
+from nexus.operators.llm_types import DispatchUsage, OperatorError
 
 _log = structlog.get_logger(__name__)
 
@@ -42,14 +49,33 @@ BACKEND_SETTINGS: tuple[str, ...] = ("auto", "cli", "anthropic", "openai_compat"
 
 #: Backends this release implements. ``select_backend`` and ``backend_status``
 #: both decide from this one constant; they raise / report unavailable for the rest.
-IMPLEMENTED_BACKENDS: frozenset[str] = frozenset({"cli"})
+IMPLEMENTED_BACKENDS: frozenset[str] = frozenset({"cli", "anthropic", "openai_compat"})
+
+#: Credential names (``config.CREDENTIALS`` keys) the selection looks for.
+ANTHROPIC_KEY: str = "anthropic_api_key"
+OPENAI_KEY: str = "openai_compat_api_key"
+
+#: Environment overrides for the ``openai_compat`` endpoint and model. They win
+#: over ``llm.openai_compat.base_url`` / ``.model`` in the global config.
+NX_LLM_OPENAI_BASE_URL_ENV: str = "NX_LLM_OPENAI_BASE_URL"
+NX_LLM_OPENAI_MODEL_ENV: str = "NX_LLM_OPENAI_MODEL"
+
+#: ``(credential name) -> is a non-empty value available``. The real one reads
+#: the environment then the global config; the pure default reads an env mapping.
+KeyPresent = Callable[[str], bool]
+
+NO_BACKEND_MESSAGE: str = (
+    "no LLM backend is available: the claude CLI is not on PATH and no anthropic_api_key is set. "
+    "Install Claude Code, or run `nx config set anthropic_api_key <key>` (or export ANTHROPIC_API_KEY), "
+    "or set llm.backend to openai_compat with a base_url and model in ~/.config/nexus/config.yml. "
+    "Search and storage work without one."
+)
 
 
-def _concrete(setting: str) -> str:
-    """The backend a setting names once ``auto`` is resolved. Phase 1: ``auto``
-    is ``cli`` unconditionally (a missing ``claude`` stays the spawn error);
-    phase 2 changes this to cli-if-on-PATH else anthropic-if-key."""
-    return "cli" if setting == "auto" else setting
+class NoBackendAvailableError(OperatorError):
+    """``auto`` found neither a ``claude`` on PATH nor an Anthropic key.
+    A subclass of ``OperatorError``, so the runner's unavailable handling and
+    every ``except OperatorError`` still catch it."""
 
 
 @dataclass(frozen=True)
@@ -73,6 +99,10 @@ class DispatchRequest:
     allowed_tools: list[str] | None = None
     mcp_servers: dict[str, Any] | None = None
     isolated: bool = True
+    #: Transport retries an API backend may make on 429/529/5xx/connection
+    #: failures. ``None`` is the backend default (2). A caller with its own
+    #: retry loop (the aspect extractor) passes 0 so the two do not multiply.
+    transport_retries: int | None = None
     usage_sink: "list[DispatchUsage] | None" = field(default=None, compare=False)
 
     @property
@@ -125,8 +155,6 @@ def configured_backend(config: Mapping[str, Any] | None, env: Mapping[str, str])
         return "auto"
     setting = raw.lower()
     if setting not in BACKEND_SETTINGS:
-        from nexus.operators.dispatch import OperatorError  # noqa: PLC0415 - dispatch imports this module at load
-
         raise OperatorError(
             f"{source}={raw!r} is not a known LLM backend; use one of: "
             f"{', '.join(BACKEND_SETTINGS)}"
@@ -134,48 +162,143 @@ def configured_backend(config: Mapping[str, Any] | None, env: Mapping[str, str])
     return setting
 
 
+@dataclass(frozen=True)
+class _Decision:
+    """What the setting, the PATH and the credentials add up to for a
+    tool-free request."""
+
+    backend: str  # cli | anthropic | openai_compat | none
+    reason: str
+    problem: str | None = None  # why it cannot serve; None when it can
+    nothing_available: bool = False  # auto found no backend at all
+
+
+def _env_key_present(env: Mapping[str, str]) -> KeyPresent:
+    """The pure default for *key_present*: a credential counts when its
+    environment variable is non-empty in *env*."""
+    from nexus.config import CREDENTIALS  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
+
+    return lambda name: bool((env.get(CREDENTIALS[name], "") or "").strip())
+
+
+def real_key_present(name: str) -> bool:
+    """Whether credential *name* resolves from the real environment or the
+    global config. A config that cannot be read counts as absent (and warns)."""
+    try:
+        from nexus.config import get_credential  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
+
+        return bool((get_credential(name) or "").strip())
+    except Exception as exc:  # noqa: BLE001 - a broken config.yml must not turn a probe into a crash
+        _log.warning("llm_backend_credential_unreadable", credential=name, error=str(exc))
+        return False
+
+
+def openai_compat_settings(config: Mapping[str, Any] | None, env: Mapping[str, str]) -> tuple[str, str]:
+    """``(base_url, model)`` for the ``openai_compat`` backend: the
+    ``NX_LLM_OPENAI_BASE_URL`` / ``NX_LLM_OPENAI_MODEL`` environment, then
+    ``llm.openai_compat.base_url`` / ``.model`` in the GLOBAL config. Either is
+    ``""`` when unset. Never read from a per-repo file."""
+    section = (config or {}).get("llm")
+    sub = section.get("openai_compat") if isinstance(section, Mapping) else None
+    sub = sub if isinstance(sub, Mapping) else {}
+    base = (env.get(NX_LLM_OPENAI_BASE_URL_ENV) or str(sub.get("base_url") or "")).strip()
+    model = (env.get(NX_LLM_OPENAI_MODEL_ENV) or str(sub.get("model") or "")).strip()
+    return base, model
+
+
+def _openai_compat_problem(config: Mapping[str, Any] | None, env: Mapping[str, str]) -> str | None:
+    base, model = openai_compat_settings(config, env)
+    missing = [n for n, v in (("base_url", base), ("model", model)) if not v]
+    if missing:
+        return (
+            f"LLM backend 'openai_compat' is selected but llm.openai_compat.{' and '.join(missing)} "
+            f"is not set (global ~/.config/nexus/config.yml, or {NX_LLM_OPENAI_BASE_URL_ENV} / "
+            f"{NX_LLM_OPENAI_MODEL_ENV}; a per-repo .nexus.yml is ignored)"
+        )
+    parts = urlsplit(base)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return f"llm.openai_compat.base_url must be an http(s) URL with a host; got {parts.scheme or 'no'} scheme"
+    if parts.username or parts.password:
+        return "llm.openai_compat.base_url must not carry user:password@; set openai_compat_api_key instead"
+    return None
+
+
+def _decide(
+    setting: str,
+    config: Mapping[str, Any] | None,
+    env: Mapping[str, str],
+    which: Callable[[str], str | None],
+    key_present: KeyPresent,
+) -> _Decision:
+    """The one decision :func:`select_backend`, :func:`backend_status` and
+    :func:`llm_backend_available` all read, so they cannot disagree."""
+    has_cli = bool(which("claude"))
+    has_key = key_present(ANTHROPIC_KEY)
+    if setting == "auto":
+        if has_cli:
+            return _Decision("cli", "claude is on PATH")
+        if has_key:
+            return _Decision("anthropic", "claude is not on PATH; the anthropic API is used (anthropic_api_key is set)")
+        return _Decision("none", NO_BACKEND_MESSAGE, problem=NO_BACKEND_MESSAGE, nothing_available=True)
+    if setting == "cli":
+        if has_cli:
+            return _Decision("cli", "claude is on PATH (llm.backend is cli)")
+        return _Decision("cli", "the claude CLI is not on PATH", problem="the claude CLI is not on PATH (llm.backend is cli)")
+    if setting == "anthropic":
+        if has_key:
+            return _Decision("anthropic", "llm.backend is anthropic and anthropic_api_key is set")
+        msg = (
+            "LLM backend 'anthropic' is selected but no anthropic_api_key is set: run "
+            "`nx config set anthropic_api_key <key>` or export ANTHROPIC_API_KEY"
+        )
+        return _Decision("anthropic", msg, problem=msg)
+    # openai_compat
+    problem = _openai_compat_problem(config, env)
+    if problem:
+        return _Decision("openai_compat", problem, problem=problem)
+    base, model = openai_compat_settings(config, env)
+    return _Decision("openai_compat", f"llm.backend is openai_compat ({urlsplit(base).netloc}, model {model})")
+
+
 def select_backend(
     config: Mapping[str, Any] | None,
     env: Mapping[str, str],
     which: Callable[[str], str | None],
     req: DispatchRequest,
+    key_present: KeyPresent | None = None,
 ) -> str:
     """Pick the backend name for *req*. Pure: reads only its arguments.
 
     * The setting is ``NX_LLM_BACKEND`` over ``llm.backend`` over ``auto``.
-    * A request that grants tools always routes to ``cli``.
-    * Phase 1 implements ``cli`` only: ``auto`` resolves to it exactly as
-      dispatch did before (a missing ``claude`` surfaces as the spawn error,
-      not a new one); ``anthropic`` and ``openai_compat`` raise
-      ``OperatorError`` saying the backend lands in a later phase.
+    * A request that grants tools always routes to ``cli`` (a missing
+      ``claude`` then surfaces when it is spawned, with a message that says so).
+    * ``auto``: ``cli`` when ``which("claude")``, else ``anthropic`` when
+      ``key_present("anthropic_api_key")``, else :class:`NoBackendAvailableError`.
+    * An explicit ``cli`` returns ``cli`` whatever is on PATH (the spawn then
+      fails with a clear message); an explicit ``anthropic`` without a key, or
+      ``openai_compat`` without a base_url and model, raises ``OperatorError``.
 
-    *which* is the PATH lookup (``shutil.which``); phase 1 does not consult it
-    for the choice, phase 2's ``auto`` does.
+    *which* is the PATH lookup (``shutil.which``). *key_present* defaults to a
+    check of the ``env`` mapping alone; the real callers pass
+    :func:`real_key_present`, which also reads the global config.
     """
     setting = configured_backend(config, env)
     if req.grants_tool_access:
         return "cli"
-    backend = _concrete(setting)
-    if backend in IMPLEMENTED_BACKENDS:
-        return backend
-    _raise_not_implemented(setting)
-
-
-def _raise_not_implemented(setting: str) -> NoReturn:
-    from nexus.operators.dispatch import OperatorError  # noqa: PLC0415 - dispatch imports this module at load
-
-    raise OperatorError(
-        f"LLM backend {setting!r} is selected (NX_LLM_BACKEND or config llm.backend) "
-        "but is not available in this release; it lands in a later phase. "
-        "Unset the setting or use 'auto' or 'cli'."
-    )
+    decision = _decide(setting, config, env, which, key_present or _env_key_present(env))
+    if decision.backend == "cli":
+        return "cli"
+    if decision.problem:
+        raise (NoBackendAvailableError if decision.nothing_available else OperatorError)(decision.problem)
+    return decision.backend
 
 
 def resolve_backend_name(req: DispatchRequest) -> str:
     """:func:`select_backend` over the process's real inputs: ``os.environ``,
-    the global config (always passed, even when ``NX_LLM_BACKEND`` is set: a
-    later phase reads its key from it) and ``shutil.which``."""
-    return select_backend(_load_llm_config(), os.environ, shutil.which, req)
+    the global config (always passed, even when ``NX_LLM_BACKEND`` is set: the
+    ``openai_compat`` endpoint lives in it), ``shutil.which`` and the real
+    credential lookup."""
+    return select_backend(_load_llm_config(), os.environ, shutil.which, req, real_key_present)
 
 
 def cli_status(which: Callable[[str], str | None] | None = None) -> BackendStatus:
@@ -190,21 +313,24 @@ def backend_status(
     config: Mapping[str, Any] | None = None,
     env: Mapping[str, str] | None = None,
     which: Callable[[str], str | None] | None = None,
+    key_present: KeyPresent | None = None,
 ) -> BackendStatus:
-    """Status of the backend a tool-free request would use. Never raises: an
-    unknown or unimplemented setting is reported as unavailable with the reason.
-    With no *config* the global config is read, as :func:`llm_backend_available` does."""
-    env = os.environ if env is None else env
+    """Status of the backend a tool-free request would use. Never raises: a bad
+    setting or a missing key is reported as unavailable with the reason, and no
+    reason ever contains a key. With no *config* the global config is read; with
+    no *env* the process environment and the real credential lookup are used, so
+    an Anthropic key in ``config.yml`` counts."""
+    real = env is None
+    env = os.environ if real else env
     config = _load_llm_config() if config is None else config
+    if key_present is None:
+        key_present = real_key_present if real else _env_key_present(env)
     try:
         setting = configured_backend(config, env)
     except Exception as exc:  # noqa: BLE001 - OperatorError for a bad setting; report, never raise from a probe
         return BackendStatus("none", False, str(exc))
-    if _concrete(setting) in IMPLEMENTED_BACKENDS:
-        return cli_status(which)  # phase 1: the only implemented backend is cli
-    return BackendStatus(
-        setting, False, f"LLM backend {setting!r} is not available in this release"
-    )
+    decision = _decide(setting, config, env, which or shutil.which, key_present)
+    return BackendStatus(decision.backend, decision.problem is None, decision.problem or decision.reason)
 
 
 def _load_llm_config() -> Mapping[str, Any]:
@@ -226,15 +352,79 @@ def llm_backend_available(
     config: Mapping[str, Any] | None = None,
     env: Mapping[str, str] | None = None,
     which: Callable[[str], str | None] | None = None,
+    key_present: KeyPresent | None = None,
 ) -> bool:
     """Whether some LLM backend can serve a tool-free request. Replaces the
-    per-module ``_claude_available`` probes. Phase 1's answer: true exactly when
-    ``claude`` is on PATH and the setting is ``auto`` or ``cli``. Phase 2 widens
-    it (an API key makes a backend available).
+    per-module ``_claude_available`` probes. True when ``backend_status`` says
+    the chosen backend can serve: ``claude`` on PATH, or (``auto`` with no CLI)
+    an ``anthropic_api_key``, or a configured ``openai_compat``, per the setting.
 
     *config* defaults to the global config's ``llm`` section, read even when
     ``NX_LLM_BACKEND`` is set."""
-    env = os.environ if env is None else env
-    if config is None:
+    return backend_status(config, env, which, key_present).available
+
+
+def build_api_backend(name: str) -> LLMBackend:
+    """The API backend named *name* (``anthropic`` or ``openai_compat``), built
+    from the real credentials and global config. The key is read here, held by
+    the backend, and goes nowhere else: not into ``os.environ``, not into a log
+    line, not into a child process."""
+    from nexus.config import get_credential  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
+
+    if name == "anthropic":
+        from nexus.operators.llm_anthropic import AnthropicBackend  # noqa: PLC0415 - deferred: httpx stays off the CLI-only path
+
+        return AnthropicBackend(api_key=(get_credential(ANTHROPIC_KEY) or "").strip() or None)
+    if name == "openai_compat":
+        from nexus.operators.llm_openai import OpenAICompatBackend  # noqa: PLC0415 - deferred, as above
+
         config = _load_llm_config()
-    return backend_status(config, env, which).available
+        problem = _openai_compat_problem(config, os.environ)
+        if problem:
+            raise OperatorError(problem)
+        base, model = openai_compat_settings(config, os.environ)
+        return OpenAICompatBackend(
+            base_url=base, model=model, api_key=(get_credential(OPENAI_KEY) or "").strip() or None,
+        )
+    raise OperatorError(f"LLM backend {name!r} has no API implementation")
+
+
+def selected_api_backend() -> str | None:
+    """The API backend (``anthropic`` / ``openai_compat``) a tool-free call would
+    use right now, or ``None`` when it would use the ``claude`` CLI or no backend
+    is available (the caller's CLI path then surfaces that). A misconfiguration
+    (an explicit ``anthropic`` with no key) raises ``OperatorError``."""
+    try:
+        name = resolve_backend_name(DispatchRequest(prompt="", json_schema=None))
+    except NoBackendAvailableError:
+        return None
+    return None if name == "cli" else name
+
+
+def run_text_sync(
+    backend_name: str, prompt: str, *, model: str | None, timeout: float, operator: str | None = None,
+) -> DispatchResult:
+    """Run one text-mode call (no schema) on the API backend *backend_name* from
+    synchronous code, with transport retries off: the caller (the aspect
+    extractor) has its own retry loop, and the two must not multiply. Returns the
+    :class:`DispatchResult` (``.text``, ``.usage``).
+
+    Works whether or not the calling thread already runs an event loop: with one
+    running, the call is made on a fresh loop in a helper thread."""
+    import asyncio  # noqa: PLC0415 - only the sync entry needs it
+    import concurrent.futures  # noqa: PLC0415 - as above
+
+    req = DispatchRequest(
+        prompt=prompt, json_schema=None, timeout=timeout, model=model, operator=operator, transport_retries=0,
+    )
+    backend = build_api_backend(backend_name)
+
+    def _run() -> DispatchResult:
+        return asyncio.run(backend.run(req))
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _run()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_run).result()

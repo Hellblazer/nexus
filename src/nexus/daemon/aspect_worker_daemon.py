@@ -612,18 +612,21 @@ class AspectWorkerDaemon:
 def _claude_available() -> bool:
     """Whether an LLM backend can serve the daemon's extraction: the one
     precondition the spawner can check before it forks. Delegates to
-    :func:`nexus.operators.llm_backend.llm_backend_available` (nexus-2k66t.3),
-    which in this release is true exactly when ``claude`` is on ``PATH`` and the
-    backend setting allows the CLI. The name stays so the spawner, the daemon
-    entrypoint and ``nx doctor`` keep one seam. The PATH lookup is this module's
-    own ``shutil.which``, so a test that fakes it here still moves the answer."""
+    :func:`nexus.operators.llm_backend.llm_backend_available` (nexus-2k66t.3):
+    true when ``claude`` is on ``PATH`` (setting ``auto`` or ``cli``), or, with no
+    CLI, when an ``anthropic_api_key`` resolves (``auto`` / ``anthropic``) or an
+    ``openai_compat`` endpoint is configured. The name stays so the spawner, the
+    daemon entrypoint and ``nx doctor`` keep one seam. The PATH lookup is this
+    module's own ``shutil.which``, so a test that fakes it here still moves the
+    answer."""
     from nexus.operators.llm_backend import llm_backend_available  # noqa: PLC0415 - deferred: keeps daemon/CLI startup light
 
     return llm_backend_available(which=shutil.which)
 
 
 def _require_extraction_credentials() -> None:
-    """Fail LOUD at entrypoint if the ``claude`` binary is not on ``PATH``.
+    """Fail LOUD at entrypoint if no LLM backend is available (no ``claude`` on
+    ``PATH`` and no Anthropic key).
 
     The backstop. The spawner (:func:`ensure_aspect_worker_daemon`) checks the
     same precondition first and does not fork a child that would only refuse;
@@ -638,8 +641,9 @@ def _require_extraction_credentials() -> None:
     """
     if not _claude_available():
         msg = (
-            "aspect-worker daemon: the `claude` binary is not on PATH — `claude -p` "
-            "extraction would silently fail every row. The daemon must be spawned as a "
+            "aspect-worker daemon: no LLM backend is available (the `claude` binary is not on "
+            "PATH and no anthropic_api_key is set) — extraction would silently fail every row. "
+            "The daemon must be spawned as a "
             "child of a credential-bearing process (RDR-173 credential model); refusing "
             "to start a daemon that would heartbeat healthy but extract nothing."
         )
@@ -758,9 +762,9 @@ def ensure_aspect_worker_daemon(
                 _log.debug(
                     "aspect_worker_daemon.spawn_skipped_claude_absent",
                     tenant=tenant,
-                    hint="aspect extraction is off: the `claude` binary is not on PATH. "
-                         "Enqueued rows wait in the queue until a worker runs on a box "
-                         "that has it.",
+                    hint="aspect extraction is off: no LLM backend (the `claude` binary is "
+                         "not on PATH and no anthropic_api_key is set). Enqueued rows wait "
+                         "in the queue until a worker runs on a box that has one.",
                 )
             return False
         _recent_spawn[tenant] = _clock() + _SPAWN_SUPPRESS_WINDOW

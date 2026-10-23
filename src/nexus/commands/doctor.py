@@ -1132,8 +1132,9 @@ def _report_aspect_queue_service() -> None:
 
         if not _claude_available():
             click.echo(
-                f"  WARN: aspect extraction is idle: {pending} pending, `claude` not on PATH. "
-                "Install Claude Code or put `claude` on PATH; pending rows are "
+                f"  WARN: aspect extraction is idle: {pending} pending, `claude` not on PATH "
+                "and no anthropic_api_key is set. Install Claude Code, or run "
+                "`nx config set anthropic_api_key <key>`; pending rows are "
                 "extracted once a worker can run.",
                 err=True,
             )

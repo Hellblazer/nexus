@@ -281,7 +281,7 @@ This means `nx catalog search` and `nx catalog links` work immediately after ind
 > automatic cross-collection projection pass — they are not yet ported to the
 > service backend and refuse cleanly there.
 
-After indexing completes, `nx index repo` automatically runs topic discovery on the new or updated collections. HDBSCAN clusters the collection's embeddings to find natural topic groupings, and each cluster first takes its top three c-TF-IDF terms as a label, which a short descriptive phrase then replaces: the phrase comes from the `claude` CLI through the same dispatch every nexus LLM step uses (no Anthropic API key; without the CLI the term label stays). The results are stored in T2 and surfaced by `nx search` as topic filters.
+After indexing completes, `nx index repo` automatically runs topic discovery on the new or updated collections. HDBSCAN clusters the collection's embeddings to find natural topic groupings, and each cluster first takes its top three c-TF-IDF terms as a label, which a short descriptive phrase then replaces: the phrase comes from the LLM backend every nexus LLM step uses: the `claude` CLI when it is on PATH, otherwise an Anthropic API key (`nx config set anthropic_api_key`), see [Configuration](configuration.md#llm-backend). With neither, the term label stays. The results are stored in T2 and surfaced by `nx search` as topic filters.
 
 To skip this step, pass `--no-taxonomy`. This is useful for fast incremental updates or in CI pipelines where the additional API calls are not wanted.
 

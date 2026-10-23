@@ -2603,7 +2603,10 @@ def relabel_topics(
 def label_cmd(collection: str, relabel_all: bool) -> None:
     """Generate human-readable topic labels using Claude."""
     if not _claude_available():
-        click.echo("claude CLI not found. Install Claude Code to use LLM labeling.")
+        click.echo(
+            "No LLM backend is available. Install Claude Code, or run "
+            "`nx config set anthropic_api_key <key>`, to use LLM labeling."
+        )
         return
 
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:
