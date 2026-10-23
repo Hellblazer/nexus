@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,8 @@ esac
 # The fake engine: "exit" dies at once; "health" answers 200 {} to every GET, so the script
 # gets past its health wait and fails at its first real assertion (no migration in /version).
 _BIN = """#!/usr/bin/env python3
-import http.server, os, sys
+import http.server, os, signal, sys
+signal.alarm(120)  # never outlive a run whose bash was killed before its EXIT trap ran
 with open(os.environ["FAKE_BIN_PIDS"], "a") as f:
     f.write(f"{os.getpid()}\\n")
 if os.environ["FAKE_BIN_MODE"] == "exit":
@@ -58,7 +60,8 @@ http.server.HTTPServer(("127.0.0.1", int(os.environ["NX_SERVICE_PORT"])), H).ser
 def _run(tmp_path: Path, *, mode: str, run_rc: int = 0, ready_rc: int = 0) -> tuple[subprocess.CompletedProcess[str], list[str], list[int]]:
     stubs = tmp_path / "stubs"
     stubs.mkdir(parents=True)
-    for name, body in (("docker", _DOCKER), ("sleep", "#!/bin/sh\nexit 0\n")):
+    # A 50 ms sleep, not none: the script's waits stay short but keep room for the fake engine to start.
+    for name, body in (("docker", _DOCKER), ("sleep", "#!/bin/sh\nexec /bin/sleep 0.05\n")):
         (stubs / name).write_text(body)
         (stubs / name).chmod(0o755)
     fake = tmp_path / "nexus-service"
@@ -86,6 +89,16 @@ def _container(calls: list[str]) -> str:
     assert m, runs[0]
     assert re.search(r" -p 127\.0\.0\.1:\d+:5432 ", runs[0]), f"published beyond loopback: {runs[0]}"
     return m.group(1)
+
+
+def _gone(pid: int, within: float = 2.0) -> bool:
+    """True once ``pid`` has exited; the cleanup trap's kill is asynchronous."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _alive(pid)
 
 
 def _alive(pid: int) -> bool:
@@ -118,7 +131,7 @@ def test_a_binary_that_answers_health_is_killed_and_its_container_removed(tmp_pa
         assert "FAIL: migration did not apply" in out, "past the health wait, at the first real assertion"
         name = _container(calls)
         assert calls[-1] == f"rm -f {name}", calls
-        assert len(started) == 1 and not _alive(started[0]), "the cleanup trap killed the engine"
+        assert len(started) == 1 and _gone(started[0]), "the cleanup trap killed the engine"
     finally:
         for pid in started:
             if _alive(pid):
