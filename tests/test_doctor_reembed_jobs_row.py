@@ -167,21 +167,27 @@ def test_many_failed_jobs_are_capped_in_the_detail_and_the_fixes_but_counted(loc
 # ── registration ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.t2_tenant
-def test_the_real_sweep_carries_the_row_once(tmp_path, monkeypatch) -> None:
-    """One call of the real ``run_health_checks`` (no engine, so every other row degrades): the label is in its
-    result exactly once and carries the job table's state. Unregistering the call, or wrapping it in a condition
-    that is false here, fails this; a source-text count did not."""
-    config = tmp_path / "config"
-    config.mkdir()
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-    monkeypatch.setattr("nexus.reembed_job.local_jobs", lambda: [_job("jsweep", "failed", reason="batch_failed")])
-    results, _local = health.run_health_checks()
-    assert len(results) > 20, "premise: this is the whole sweep, not a stub"
-    (row,) = [r for r in results if r.label == _LABEL]
-    assert row.warn is True and "jsweep" in row.detail
+def test_the_sweep_calls_the_row_unconditionally_and_once() -> None:
+    """``run_health_checks`` extends its results with ``_check_reembed_jobs()`` as a top-level statement of the
+    function body: not under an ``if``, ``try`` or loop (a wrapper that is false on a box would hide the row), and
+    exactly once. Read from the AST, because running the whole sweep provisions a tenant and the row is already
+    covered by calling it directly above."""
+    import ast  # noqa: PLC0415 — local to the one test that reads the source tree
+    import inspect  # noqa: PLC0415 — local to the one test that reads the source tree
+
+    tree = ast.parse(inspect.getsource(health.run_health_checks))
+    func = tree.body[0]
+    assert isinstance(func, ast.FunctionDef)
+
+    def calls_row(node: ast.AST) -> int:
+        return sum(
+            1 for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_check_reembed_jobs"
+        )
+
+    assert calls_row(func) == 1, "the row is registered exactly once"
+    top_level = [st for st in func.body if isinstance(st, ast.Expr) and calls_row(st) == 1]
+    assert len(top_level) == 1, "and the call is a top-level statement of the function body, not conditional"
 
 
 def test_a_virgin_box_with_no_engine_is_not_applicable(monkeypatch) -> None:
