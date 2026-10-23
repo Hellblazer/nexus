@@ -709,16 +709,25 @@ LLM editor. The answer is the review loop: targeted proposals, each accepted
 by the author, never a delegated rewrite. Phase 2 tests whether that is
 enough.
 
+Amendment A1 lets an editor briefed to cut also add words. The two do not
+conflict: a cut removes what repeats, a lengthening edit restores what a reader
+needs to parse the sentence, and the reason prefix says which one an edit is.
+The editor runs on a model of the kind Discovery 14 measures; the seeded bar in
+Phase 1a tests whether it finds the features anyway.
+
 ### Assumption Verification
 
 Readable in Typora is verified. Memory helps is measured in Phase 1 (nexus-ger02.16:
 the rate at which a rejected fix is shown again, against a threshold fixed before the
 runs; the counts are in `tests/prose_edit/acceptance/README.md`); Worth accepting and
-Voice kept in Phase 2.
+Voice kept in Phase 2. Unpacking is accepted (Amendment A1) is tested by the
+Phase 1a acceptance runs, against a bar fixed before them, and then by the
+post-merge tally (`nexus_rdr/221-research-28` records the source).
 
 ### Scope Verification
 
-Phase 2 is in scope and decides whether Phase 3 happens.
+Phase 2 is in scope and decides whether Phase 3 happens. Phase 1a is in scope;
+its out-of-scope list is in the Amendment A1 paragraph of the Technical Design.
 
 ### Cross-Cutting Concerns
 
@@ -733,7 +742,8 @@ Phase 2 is in scope and decides whether Phase 3 happens.
 ### Proportionality
 
 Sized to one editor, its memory and a review loop. Anything larger waits for
-Phase 2.
+Phase 2. Amendment A1 changes three texts and adds one fixture and one scorer
+kind; it adds no lint, store or pass.
 
 ## References
 
