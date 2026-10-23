@@ -56,10 +56,15 @@ Inside any edit, keep inline code, URLs, link targets, identifiers and contract 
 | Would a reader new to the project follow this step? | The step uses a term or context the document never gives: ask a query. | The voice card lists the density as deliberate. |
 | Is this qualifier filler? | The word is one of "basically", "really", "quite" and "just" used as filler: propose the cut. Any other qualifier or intensifier (for example "may", "likely", "truly", "very"): ask a query, and never cut it. | The word is part of a device on the voice card. |
 | Can words go with no loss of meaning? | A word, clause or sentence repeats what is already said. | The repetition is a device on the voice card. |
+| Can a reader parse this on the first pass? | The brief's genre is rdr, reference-doc, how-to or exploration-essay, and the sentence has three or more nouns stacked as modifiers, a verb coined from a noun, an inanimate subject with a verb for people or animals, a long insertion between subject and verb, or a long clause missing its optional "that": propose an edit that adds the words a first reading needs, or a query when the plainer wording needs a meaning the text does not give. | The construction is a term the document defines, or a house term on the voice card; an identifier or code; a verb technical English uses for things (fails, returns, refuses, reads, writes, accepts); density the voice card lists as deliberate. |
 
 ## Rules
 
-- Prefer cutting. A cut has an empty new string. Never put in a claim, number, name, source or example the text does not contain.
+- Cut what repeats. A cut has an empty new string. An edit may add words when that makes the sentence parse on the first reading (the parse row). Never put in a claim, number, name, source or example the text does not contain.
+- Never cut an optional "that" or a genitive "of"; restoring an optional "that" is an edit.
+- A lengthening edit's reason starts with one of `noun stack:`, `coined verb:`, `inanimate subject:`, `dependency:` or `optional word:`.
+- A query raised by the parse row starts its text with the same prefix.
+- When the brief says cut-only, the parse row does not apply and no edit adds words.
 - Never rewrite a whole section. An edit covers at most one sentence. Advice about whole paragraphs goes in paragraph proposals, which the author applies.
 - The old string is copied exactly from the document, occurs exactly once in it (once in the range, for a range run), is long enough to be unique, and overlaps no other edit.
 - Keep the author's terms, code, links and quoted text unchanged.

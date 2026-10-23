@@ -1,6 +1,6 @@
 ---
 name: prose-edit
-description: Use when the author asks to line-edit, tighten or cut a document (an RDR, reference doc, essay, CHANGELOG entry, web page, or text pasted in for a commit message), to list or remove a document's stored rejections, or to add an exemplar passage to a genre. Invoked as /prose-edit.
+description: Use when the author asks to line-edit, tighten, cut or unpack a document (an RDR, reference doc, essay, CHANGELOG entry, web page, or text pasted in for a commit message), to list or remove a document's stored rejections, or to add an exemplar passage to a genre. Invoked as /prose-edit.
 disable-model-invocation: true
 ---
 
