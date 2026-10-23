@@ -690,13 +690,12 @@ def test_the_agent_rules_allow_a_lengthening_edit_and_keep_the_guard_against_inv
 def test_no_agent_line_outside_the_cut_only_rule_forbids_adding_words() -> None:
     lines = [line for line in AGENT.read_text(encoding="utf-8").lower().splitlines()
              if not line.startswith("- when the brief says cut-only")]
-    body = "\n".join(lines)
+    # the two licences are removed from their lines, not the lines skipped, so a ban added beside one is still seen
+    lines = [line.replace("may add words", "").replace("adds the words a first reading needs", "") for line in lines]
     for phrase in ("prefer cutting", "add words", "adds words", "add no words", "only remove", "only shorten",
-                   "only cut", "never lengthen", "never make a sentence longer", "no longer than"):
-        hits = [line for line in lines if phrase in line and "may add words" not in line
-                and "adds the words a first reading needs" not in line]
+                   "only cut", "never lengthen", "never make a sentence longer", "no longer than", "should only"):
+        hits = [line for line in lines if phrase in line]
         assert not hits, (phrase, hits)
-    assert body
 
 
 def test_the_voice_card_names_house_terms_for_the_parse_rows_exception() -> None:

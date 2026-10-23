@@ -104,11 +104,11 @@ Reply with exactly one fenced json block and nothing else, before or after it.
   ],
   "edits": [
     {"n": 1, "old": "It should be noted that the queue drains in order.", "new": "The queue drains in order.", "reason": "The filler opener hedges a fact the text states."},
-    {"n": 2, "old": "the report the worker writes at exit", "new": "the report that the worker writes at exit", "reason": "optional word: the restored \"that\" marks where the clause starts."}
+    {"n": 2, "old": "the report the worker writes to the session directory when it exits", "new": "the report that the worker writes to the session directory when it exits", "reason": "optional word: the restored \"that\" marks where the clause starts."}
   ],
   "queries": [
     {"n": 1, "anchor": "studies show", "text": "Which study? The text should name it."},
-    {"n": 2, "anchor": "session record write path", "text": "noun stack: is this the path that writes session records, or the path where they are written?"}
+    {"n": 2, "anchor": "session record write path", "text": "noun stack: what does this path do with session records?"}
   ]
 }
 ```
