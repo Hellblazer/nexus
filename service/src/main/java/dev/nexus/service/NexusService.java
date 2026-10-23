@@ -246,6 +246,12 @@ public final class NexusService {
      */
     private final dev.nexus.service.reembed.ReembedRunner reembedRunner;
 
+    /**
+     * Test-only: when set, the re-embed routes read the served models from here instead of the embedder router
+     * (nexus-q6t89), so a route test can serve more models than one fake embedder can, or fewer. Null in production.
+     */
+    private volatile java.util.function.Supplier<java.util.List<String>> reembedServedModelsForTests;
+
     /** The single-thread executor the runner runs on, or null when no runner was wired. Shut down by {@link #stop()}. */
     private final ScheduledExecutorService reembedExecutor;
 
@@ -956,7 +962,13 @@ public final class NexusService {
                 : "re-embed jobs need an embedder and this engine has none";
         var reembedCtx = server.createContext(dev.nexus.service.http.ReembedHandler.PATH,
                 new dev.nexus.service.http.ReembedHandler(reembedJobs, catalogRepo, reembedReader,
-                        reembedUnavailable, this::kickReembed));
+                        reembedUnavailable, this::kickReembed, () -> {
+                            var override = reembedServedModelsForTests;
+                            if (override != null) {
+                                return override.get();
+                            }
+                            return docEmbedderRouter == null ? null : docEmbedderRouter.availableModels();
+                        }));
         reembedCtx.getFilters().addAll(authFilter);
 
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
@@ -1032,6 +1044,11 @@ public final class NexusService {
      */
     Runnable reaperScheduledTask() {
         return reaperScheduledTask;
+    }
+
+    /** Test seam for the re-embed routes' served-models read (nexus-q6t89); null restores the router. */
+    void setReembedServedModelsForTests(java.util.function.Supplier<java.util.List<String>> served) {
+        this.reembedServedModelsForTests = served;
     }
 
     /** The re-embed job runner, or null when none was wired (not the local engine, or no embedder). Package-private. */

@@ -6,7 +6,9 @@ prefix, and a real model name in a test body trips the RDR-109 mode-declaration 
 """
 from __future__ import annotations
 
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -93,6 +95,45 @@ class TestMissingPiece:
 
     def test_empty_served_list_says_no_model(self):
         assert "no model" in (rj.missing_piece(BGE, []) or "")
+
+
+class TestEngineRefusalParity:
+    """nexus-q6t89: the engine's plan/start refusal (``ReembedHandler.missingPiece``) says what ``missing_piece`` says.
+
+    The Java source is read as text: both halves are one commit, and a reworded client sentence that left the
+    engine's behind would tell a caller who read ``/version`` first one thing and one who did not another.
+    """
+
+    HANDLER = Path(__file__).resolve().parents[1] / (
+        "service/src/main/java/dev/nexus/service/http/ReembedHandler.java"
+    )
+
+    @staticmethod
+    def _java() -> str:
+        src = TestEngineRefusalParity.HANDLER.read_text()
+        restart = re.search(r'RESTART_COMMAND = "([^"]+)"', src)
+        assert restart, "ReembedHandler.RESTART_COMMAND is gone"
+        from nexus.corpus import _SERVICE_RESTART_COMMAND
+
+        assert restart.group(1) == _SERVICE_RESTART_COMMAND
+        src = src.replace('" + RESTART_COMMAND + "', restart.group(1))
+        # Java adjacent-literal concatenation: "a" + "b" and "a"\n + "b" are the string "ab".
+        return re.sub(r'"\s*\+\s*"', "", src)
+
+    def test_the_voyage_and_bge_remedies_are_the_clients_words(self):
+        java = self._java()
+        for model in (VA, BGE):
+            text = rj.missing_piece(model, [])
+            assert text is not None
+            piece = text.split("): ", 1)[1]
+            assert piece in java, f"the engine's remedy for {model} drifted from the client's: {piece!r}"
+
+    def test_the_sentence_frame_is_the_clients(self):
+        java = self._java()
+        assert '"the engine does not serve " + model + " (it serves " + listed + "): " + piece' in java
+        assert '"no model"' in java and "no model" in (rj.missing_piece(BGE, []) or "")
+        assert "is not a model it can load" in java
+        assert "is not a model it can load" in (rj.missing_piece("acme-embed-9", [BGE]) or "")
 
 
 class TestStaleRows:

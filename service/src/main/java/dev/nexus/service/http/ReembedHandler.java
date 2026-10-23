@@ -43,6 +43,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 /**
  * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): the control routes of the cross-model re-embed job, on
@@ -131,20 +132,26 @@ public final class ReembedHandler implements HttpHandler {
     private final ReembedSourceReader reader;
     private final String unavailable;
     private final Runnable wakeRunner;
+    private final Supplier<List<String>> servedModels;
 
     /**
-     * @param reader      counts the plan states ({@link ReembedSourceReader#planCounts})
-     * @param unavailable null when a runner exists; else the message of the 503 every route answers
-     * @param wakeRunner  asks the runner to run now ({@code NexusService#kickReembed}); called after a start or a
-     *                    resume has committed
+     * @param reader       counts the plan states ({@link ReembedSourceReader#planCounts})
+     * @param unavailable  null when a runner exists; else the message of the 503 every route answers
+     * @param wakeRunner   asks the runner to run now ({@code NexusService#kickReembed}); called after a start or a
+     *                     resume has committed
+     * @param servedModels the model tokens the engine's embedder router can embed for, the list {@code GET /version}
+     *                     reports as {@code embedding_models}. Null, or a supplier that returns null or throws, is a
+     *                     router that cannot answer: the plan and the start REFUSE (fail closed, see {@link
+     *                     #requireServed}) rather than read it as serving every model
      */
     public ReembedHandler(ReembedJobRepository jobs, CatalogRepository catalog, ReembedSourceReader reader,
-                          String unavailable, Runnable wakeRunner) {
+                          String unavailable, Runnable wakeRunner, Supplier<List<String>> servedModels) {
         this.jobs = jobs;
         this.catalog = catalog;
         this.reader = reader;
         this.unavailable = unavailable;
         this.wakeRunner = wakeRunner;
+        this.servedModels = servedModels;
     }
 
     /** A complete response, thrown to stop a request where a refusal is decided. No stack: it is control flow. */
@@ -345,6 +352,11 @@ public final class ReembedHandler implements HttpHandler {
             throw new Reply(409, error("source collection " + source + " already holds the profile model "
                 + profileModel + " for content type " + contentType + "; nothing to re-embed"));
         }
+
+        // Before the target is looked at, let alone registered: a model the router cannot embed for would leave a
+        // registered, empty sibling and a job that fails at its first batch (nexus-q6t89, S-R2-4). The plan runs this
+        // too, so it refuses what the start would.
+        requireServed(profileModel);
 
         Result found = TargetSelection.select(rows(tenant, contentType), contentType, owner, profileModel);
         String candidate = switch (found) {
@@ -583,6 +595,50 @@ public final class ReembedHandler implements HttpHandler {
      */
     private static boolean isLocalModel(String model) {
         return model != null && (model.startsWith("bge-") || model.startsWith("minilm-"));
+    }
+
+    /**
+     * Refuse with 409 when the engine's embedder router cannot embed for {@code model} (a degraded boot, RDR-210
+     * Technical Design 2, serves one family and answers 422 for the other). The text is the client's {@code
+     * reembed_job.missing_piece} word for word, so a caller that read {@code /version} first and one that did not
+     * are told the same thing; {@code tests/test_reembed_job.py} pins the two against each other.
+     *
+     * <p>A router that cannot answer (no supplier, a null list, a throw) is NOT read as "serves everything": that
+     * reading is how a job gets started into a family that cannot embed. It is refused, naming the cause.
+     */
+    private void requireServed(String model) {
+        List<String> served = null;
+        try {
+            served = servedModels == null ? null : servedModels.get();
+        } catch (RuntimeException e) {
+            log.warn("event=reembed_served_models_unreadable error={}", e.toString());
+        }
+        if (served == null) {
+            throw new Reply(409, error("the engine cannot tell which embedding models it serves, so it cannot "
+                + "check that it can serve " + model + "; restart the service: " + RESTART_COMMAND));
+        }
+        if (!served.contains(model)) {
+            throw new Reply(409, error(missingPiece(model, served)));
+        }
+    }
+
+    /** {@code corpus._SERVICE_RESTART_COMMAND}; pinned against it by {@code tests/test_reembed_job.py}. */
+    static final String RESTART_COMMAND = "nx daemon service stop && nx daemon service start";
+
+    /** The sentence naming what the engine lacks for {@code model}: {@code reembed_job.missing_piece}'s text. */
+    static String missingPiece(String model, List<String> served) {
+        String listed = served.isEmpty() ? "no model" : String.join(", ", served);
+        String piece;
+        if (model.startsWith("voyage")) {
+            piece = "it has no Voyage key. Persist one with `nx config set voyage_api_key --stdin` (or export "
+                + "VOYAGE_API_KEY), then restart the service: `" + RESTART_COMMAND + "`";
+        } else if (model.startsWith("bge")) {
+            piece = "it found no bge model files. Run `nx init --service` to provision them, then restart the "
+                + "service: `" + RESTART_COMMAND + "`";
+        } else {
+            piece = "'" + model + "' is not a model it can load";
+        }
+        return "the engine does not serve " + model + " (it serves " + listed + "): " + piece;
     }
 
     private static String needOf(String contentType, String owner, String profileModel) {

@@ -65,6 +65,8 @@ class ReembedRoutesTest {
     private static final String MINI = "minilm-l6-v2-384";
     private static final String TYPE = "knowledge";
     private static final String BASE = "/v1/vectors/reembed";
+    private static final java.util.function.Supplier<List<String>> ALL_SERVED =
+        () -> List.of(BGE, MINI, "voyage-context-3", "voyage-code-3");
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() { };
@@ -170,6 +172,9 @@ class ReembedRoutesTest {
             new EmbedderRouter(new Fake(MINI, 384), "document"), null, null, null, null, null,
             name -> name.equals("NX_ENGINE_LOCAL") ? "1" : null, () -> false, executor, null);
         service.start();
+        // One fake embedder serves one model; the routes read the served models from here so a test can serve the
+        // three the other tests use. The real router is exercised by theRealRouterIsWhatTheRoutesReadByDefault.
+        service.setReembedServedModelsForTests(ALL_SERVED);
         http = TestHttp.client();
     }
 
@@ -1292,5 +1297,124 @@ class ReembedRoutesTest {
         assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
         assertThat(json(r)).containsEntry("job_id", draining.jobId().toString());
         assertThat(job(t, first).state()).as("the refused re-entry changed nothing").isEqualTo("done");
+    }
+
+    // ── the engine can serve the target model (nexus-q6t89, S-R2-4) ──────────
+
+    private static final String NO_VOYAGE_KEY = "the engine does not serve voyage-context-3 (it serves "
+        + "minilm-l6-v2-384): it has no Voyage key. Persist one with `nx config set voyage_api_key --stdin` (or "
+        + "export VOYAGE_API_KEY), then restart the service: `nx daemon service stop && nx daemon service start`";
+
+    /** Run {@code body} with the routes' served models set to {@code served}, then restore the default. */
+    private void serving(java.util.function.Supplier<List<String>> served, ThrowingRunnable body) throws Exception {
+        service.setReembedServedModelsForTests(served);
+        try {
+            body.run();
+        } finally {
+            service.setReembedServedModelsForTests(ALL_SERVED);
+        }
+    }
+
+    @FunctionalInterface
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    private Tn voyageProfileNoSibling(String tag) {
+        Tn t = tenant(tag);
+        setProfile(t.tenant(), VOYAGE, 1024);
+        return t;
+    }
+
+    @Test
+    void planAndStartRefuseIdenticallyWhenTheEngineCannotServeTheTargetModel_andRegisterNothing() throws Exception {
+        Tn t = voyageProfileNoSibling("unserved");
+        String wanted = name(t, VOYAGE, 1);
+        String body = "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + wanted + "\"}";
+        serving(() -> List.of(MINI), () -> {
+            var plan = post(t, "/plan", body);
+            var start = post(t, "/jobs", body);
+
+            assertThat(plan.statusCode()).as(plan.body()).isEqualTo(409);
+            assertThat(start.statusCode()).as(start.body()).isEqualTo(409);
+            assertThat(start.body()).as("plan and start refuse in the same words").isEqualTo(plan.body());
+            assertThat(json(plan).get("error")).isEqualTo(NO_VOYAGE_KEY);
+            assertThat(catalog.getCollection(t.tenant(), wanted)).as("refused BEFORE the target is registered")
+                .isNull();
+            assertThat(jobs.listAll(t.tenant())).isEmpty();
+        });
+    }
+
+    @Test
+    void aLiveSiblingOfAnUnservedModelIsRefusedToo_andTheBgeRemedyNamesTheModelFiles() throws Exception {
+        Tn voyage = tenantWithProfile("unservedlive", VOYAGE, 1024);
+        serving(() -> List.of(MINI), () -> {
+            assertThat(post(voyage, "/plan", planBody(voyage.src())).statusCode()).isEqualTo(409);
+            var start = post(voyage, "/jobs", startBody(voyage.src()));
+            assertThat(start.statusCode()).isEqualTo(409);
+            assertThat(json(start).get("error")).isEqualTo(NO_VOYAGE_KEY);
+            assertThat(jobs.listAll(voyage.tenant())).isEmpty();
+        });
+
+        // The minilm source, the profile on bge: a Voyage-only engine lacks the bge files.
+        Tn bge = tenant("unservedbge");
+        setProfile(bge.tenant(), BGE, 768);
+        serving(() -> List.of("voyage-code-3", "voyage-context-3"), () -> {
+            var plan = post(bge, "/plan", planBody(bge.tgt()));
+            var start = post(bge, "/jobs", startBody(bge.tgt()));
+            assertThat(plan.statusCode()).as(plan.body()).isEqualTo(409);
+            assertThat(start.body()).isEqualTo(plan.body());
+            assertThat(json(start).get("error")).isEqualTo("the engine does not serve " + BGE
+                + " (it serves voyage-code-3, voyage-context-3): it found no bge model files. Run `nx init "
+                + "--service` to provision them, then restart the service: `nx daemon service stop && nx daemon "
+                + "service start`");
+            assertThat(jobs.listAll(bge.tenant())).isEmpty();
+        });
+    }
+
+    @Test
+    void aModelTheEngineServesIsNotRefused() throws Exception {
+        Tn t = tenantWithProfile("served", VOYAGE, 1024);
+        serving(() -> List.of(MINI, VOYAGE), () -> {
+            assertThat(post(t, "/plan", planBody(t.src())).statusCode()).isEqualTo(200);
+            var start = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"token_cap\":5000}");
+            assertThat(start.statusCode()).as(start.body()).isEqualTo(201);
+        });
+    }
+
+    @Test
+    void aRouterThatCannotAnswerIsRefused_notReadAsServingEverything() throws Exception {
+        Tn t = tenant("noanswer");
+        for (java.util.function.Supplier<List<String>> broken : List.<java.util.function.Supplier<List<String>>>of(
+                () -> null, () -> { throw new IllegalStateException("router gone"); })) {
+            serving(broken, () -> {
+                for (String path : List.of("/plan", "/jobs")) {
+                    var r = post(t, path, startBody(t.src()));
+                    assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(409);
+                    assertThat(json(r).get("error").toString()).contains("cannot tell which embedding models it serves")
+                        .contains(MINI);
+                }
+                assertThat(jobs.listAll(t.tenant())).isEmpty();
+            });
+        }
+    }
+
+    @Test
+    void theRealRouterIsWhatTheRoutesReadByDefault() throws Exception {
+        // No override: this engine's router holds one fake embedder, minilm. A minilm target is served, a bge one not.
+        service.setReembedServedModelsForTests(null);
+        try {
+            Tn mini = tenant("realmini");
+            assertThat(post(mini, "/plan", planBody(mini.src())).statusCode()).isEqualTo(200);
+
+            Tn bge = tenant("realbge");
+            setProfile(bge.tenant(), BGE, 768);
+            var refused = post(bge, "/plan", planBody(bge.tgt()));
+            assertThat(refused.statusCode()).as(refused.body()).isEqualTo(409);
+            assertThat(json(refused).get("error").toString()).startsWith("the engine does not serve " + BGE
+                + " (it serves " + MINI + "):");
+        } finally {
+            service.setReembedServedModelsForTests(ALL_SERVED);
+        }
     }
 }
