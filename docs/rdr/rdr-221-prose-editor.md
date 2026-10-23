@@ -177,6 +177,25 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
     prints the primary's `.git` from the primary and from every worktree (the
     form without the flag prints a relative `.git` in the primary), while each
     worktree's own directory name differs per session.
+14. **Documented (Amendment A1).** Frontier models, Claude Opus 5, Opus 5.5,
+    Sonnet 5 and Fable 5 among them, use features that make text harder to
+    parse more often than a round-trip paraphrase of their own text and more
+    often than human baselines do. The features are stacked nouns, verbs
+    coined from nouns, inanimate subjects with verbs for people or animals,
+    object relatives without "that", word pairs no reference corpus has, and
+    longer dependencies (Clark, Martin and Mahowald, arXiv:2610.29162, catalog
+    1.12.241). The effects are larger in long multi-turn sessions than in
+    single-prompt essays. The paper's proposed cause is post-training that
+    rewards short text: a small model trained with a per-token length penalty
+    came to prefer the shorter member of an alternation ("the book the
+    professor wrote" over "the book that the professor wrote"), and the
+    preference carried over to "that" contexts it was never trained on ("so
+    that", "sure that"). Of the four held-out alternations further from
+    training, only the genitive ("the house's roof" over "the roof of the
+    house") shifted, and only without KL regularisation (Appendix C, Table 3). The detector counts "it", "this" and code spans as
+    inanimate subjects (Appendix B.1), so a check for that feature misfires on
+    ordinary technical English ("the route refuses", "it returns") unless it
+    states those exceptions.
 
 ### Critical Assumptions
 
@@ -201,6 +220,11 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
 - [x] **Readable in Typora.** Typora renders inline `<del>` and `<ins>` in a
   Markdown file, and Sam finds the marked-up copy workable. — **Status**:
   Verified — **Method**: Spike (2026-09-28)
+- [ ] **Unpacking is accepted (Amendment A1).** The editor finds the
+  compression features in a seeded document without touching the decoys, and
+  on Sam's published docs, for each reason prefix, at least as many of its
+  lengthening edits are accepted as are rejected. — **Status**: Unverified —
+  **Method**: Phase 1a acceptance runs, then the post-merge tally
 
 ## Proposed Solution
 
@@ -224,7 +248,8 @@ Its brief for each run:
 - the "not a defect" entries from past rejections, and this document's own
   stored rejections;
 - a change budget;
-- an instruction to prefer cutting.
+- an instruction to prefer cutting (Amendment A1 replaces it with "cut
+  redundancy, unpack compression", below).
 
 Guidance is written as diagnostic questions with the exception stated, for
 example: "Does this nominalisation hide who acts? Leave it if it names a
@@ -248,6 +273,57 @@ Output, in this order:
 The editor never rewrites a whole section and changes nothing until the
 author accepts; the one exception is cut-only mode (Step 3.1), whose cuts the
 `site-page` gate reviews.
+
+**Amendment A1: unpack compression (nexus-r9ze7).** The editor also proposes
+edits that make a sentence longer when the longer form parses on the first
+reading (Discovery 14). Sam approved the design on 2026-10-22 (T2
+`nexus/design-prose-edit-compression.md`): it applies to the documents the
+author runs `/prose-edit` on, and it changes the line editor itself, not only
+the style sheet, with no separate parse pass. Three texts change.
+
+Brief section 6 (`brief.py`), now headed "Prefer cutting", becomes "Cut
+redundancy, unpack compression":
+
+> Cut what repeats: when a word, clause or sentence repeats what the text
+> already says, propose the cut (an empty new string). Cut only filler words;
+> every other qualifier or intensifier is a query. An edit may add words when
+> that makes a sentence parse on the first reading; its reason starts with the
+> feature it fixes. When the plainer wording needs a meaning the text does not
+> give, ask a query instead. Never cut a voice-card device, however this
+> section or a diagnostic reads. Never put in content or claims.
+
+`line-editor.md` gains a diagnostic row, "Can a reader parse this on the first
+pass?".
+
+- Propose when the sentence has:
+  1. three or more nouns stacked as modifiers;
+  2. a verb coined from a noun;
+  3. an inanimate subject with a verb for people or animals;
+  4. a long insertion between subject and verb;
+  5. a long clause missing its optional "that".
+- Leave it when the construction is:
+  - a term the document defines, or a house term on the voice card;
+  - an identifier or code;
+  - a verb technical English uses for things (fails, returns, refuses, reads,
+    writes, accepts);
+  - density the voice card lists as deliberate.
+
+`line-editor.md` rules change in two places. The standing rule "Prefer
+cutting. A cut has an empty new string." is rewritten to match section 6: cut
+what repeats, a cut has an empty new string, and an edit may add words when
+that makes the sentence parse on the first reading. No other line in the file
+may forbid adding words. Two rules are added:
+
+- Never cut an optional "that" or a genitive "of"; restoring one is an edit.
+- A lengthening edit's reason starts with one of `noun stack:`,
+  `coined verb:`, `inanimate subject:`, `dependency:` or `optional word:`.
+
+Out of scope: prose written at generation time (messages, commits, beads), any
+lint or mechanical check, any sweep of existing documents, and a separate parse
+pass. A feature whose edits are rejected more often than accepted is demoted to
+query-only by a repo or document style-sheet entry that Sam approves (Phase
+1a, Step 1a.4). The `site-page` section 3 query-only list is not that
+mechanism: it is keyed on section 3 bullets.
 
 **Review loop.** The skill writes a marked-up copy of the document outside
 the repo (so it cannot be committed by accident): each proposed sentence edit
@@ -432,6 +508,12 @@ using; a project skill iterates faster and carries no release work.
   marked-up copy; a fix the brief held back does not (see the limits above), and
   the key's missing position can drop a stored cut of a word where the author
   would have accepted it.
+- **Risk** (Amendment A1): the line editor runs on a model of the kind
+  Discovery 14 measures, so it may miss the features it is asked to find, or
+  propose a lengthening edit that changes the meaning. **Mitigation**: the
+  seeded acceptance bar in Phase 1a, fixed before the runs; a plainer wording
+  that needs a meaning the text does not give becomes a query; the author
+  accepts each edit.
 
 ### Failure Modes
 
@@ -484,6 +566,48 @@ number, exact-match apply, session record, the offer to add a correction to
 the style sheet.
 
 **Exit**: the Test Plan scenarios below pass.
+
+### Phase 1a: Unpack compression (Amendment A1, nexus-r9ze7)
+
+Implementation starts only after this amendment passes its gate and Sam says
+go.
+
+#### Step 1a.1: Text and unit pins
+
+Failing pins first, in `tests/prose_edit/test_brief.py` and
+`tests/prose_edit/test_brief_review.py`: the new section 6 heading and text,
+the parse row, the five reason prefixes, the optional-word rule, and the
+absence of the old "Prefer cutting." rule. Then the text in `brief.py` and
+`line-editor.md`.
+
+#### Step 1a.2: Acceptance fixture
+
+`tests/prose_edit/fixtures/compression.md`, in the `reference-doc` genre,
+seeds 10 sentences, two for each feature, some taken from the paper's examples
+(its Table 2). It also holds decoys: an identifier, a term the document
+defines, three of the computing verbs, and one passage the voice card should
+name as deliberately dense. A `compression` kind is added to `verdicts.py`
+(scorer pins first), to `run-scenario.sh` and to the README's kind table. The
+scenario runs with `--budget 12`, because the default budget of 10 equals the
+seeded count.
+
+#### Step 1a.3: Acceptance runs
+
+Three fresh runs, one runner at a time, no retry. The bar, fixed before the
+runs: in each run, at least 7 of the 10 seeded sentences get a lengthening edit
+or a query whose reason starts with the right prefix, and no decoy is touched.
+Then rerun the canaries and the `xanadu` and `refrain` scenarios on the changed
+tree; they pass as they did before the amendment.
+
+#### Step 1a.4: Tally after merge
+
+Over Sam's next five `/prose-edit` runs on published docs, count accepted and
+rejected lengthening edits for each reason prefix from the session log. A
+prefix rejected more often than accepted is demoted to query-only by a repo or
+document style-sheet entry Sam approves. If the brief cannot yet carry such an
+entry for a line-editor row, the entry's mechanism is added test-first.
+
+**Exit**: Step 1a.3's bar holds in all three runs, and the regression runs pass.
 
 ### Phase 2: Validate on real work
 
@@ -562,6 +686,7 @@ None.
 - **Scenario**: Cut-only mode with a voice card and word budget. — **Verify**: only word-removing proposals, returned without a marked-up copy.
 - **Scenario**: Document path with no genre mapping. — **Verify**: the skill asks.
 - **Scenario**: Marked-up copy location. — **Verify**: outside the repo; `git status` unchanged.
+- **Scenario** (Amendment A1): `tests/prose_edit/fixtures/compression.md`, run as kind `compression` with `--budget 12`. — **Verify**: at least 7 of the 10 seeded sentences get a lengthening edit or a query whose reason starts with the right prefix; no decoy is touched.
 
 ## Validation
 
@@ -623,6 +748,7 @@ Phase 2.
 - Delegated editing: https://arxiv.org/abs/2604.15597
 - Self-preference: https://arxiv.org/abs/2404.13076
 - Homogenization: https://www.nature.com/articles/s41562-026-02550-0 ; https://arxiv.org/abs/2508.01491
+- Compression in AI-generated text (Amendment A1): https://arxiv.org/abs/2610.29162
 
 ## Revision History
 
@@ -634,3 +760,4 @@ Phase 2.
   - The genre map for a path lives in `memory.py`'s default map (`_default_genre`), not in the repo style sheet that Step 1.3 item 3 names. The repo style sheet can still carry `genre_map` entries.
   - Additions the accepted text does not describe: the stdin channel (flags on the first line, the text after it, written to the work directory); `--hold` and `--reject` on apply, so only a named `--reject` stores a rejection; a mandatory dry run before a real apply, enforced by `dryrun.json` hashes; a flat-text marked-up copy for an HTML page; and the brief as a file (`WORK/brief.md`, whose last line is an id the editor echoes as `brief_sha`; the id is in no prompt).
   - Sam's three decisions of 2026-10-03 on the Phase 1 review (nexus-ger02.5, nexus-ger02.6; T2 `nexus_rdr/221-decision-phase1-review-2026-10-03`): precedence labels (every style-sheet bullet in the brief carries its layer and the brief states that the narrower layer wins; a document's own record can also ignore or make query-only a site-page section 3 rule), a stored voice card (an author-approved card kept in `doc/<path>`, offered after a run and used as the anchor for later runs), and the promote filter plus dry-run gate (the filter drops edits matching a promoted not-a-defect entry, and a real promote needs a matching dry run first).
+- 2026-10-22: Amendment A1 drafted (nexus-rrkm7, epic nexus-r9ze7): brief section 6 becomes "Cut redundancy, unpack compression", the line editor gains a parse row, two rules and a rewrite of its "Prefer cutting" rule, with Discovery 14, the "Unpacking is accepted" assumption, a risk, Phase 1a with its pre-registered bar, and a Test Plan scenario. To be gated (nexus-c7fim); any lifecycle move is Sam's. Design: T2 `nexus/design-prose-edit-compression.md`.
