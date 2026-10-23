@@ -43,8 +43,9 @@ RUNNER = CCV / "runner.sh"
 #: bead's commit (grep installed_plugins / enabledPlugins / plugin install /
 #: marketplace over every scenario). The census count is the non-vacuity floor.
 CENSUS = {"12", "13", "14", "18", "32"}
-#: Scenarios in tests/cc-validation/scenarios when the census was taken.
-SCENARIO_COUNT = 30
+#: Scenarios in tests/cc-validation/scenarios when the census was taken (31 since nexus-xhisb added
+#: 33, which installs nothing: its sn hook is wired from settings.json, as 29's is).
+SCENARIO_COUNT = 31
 
 #: What marks a scenario as plugin-dependent: it installs one through the helper,
 #: or carries any of the hand-written install's markers.

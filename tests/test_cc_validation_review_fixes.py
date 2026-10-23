@@ -484,7 +484,8 @@ def test_version_answers_resolves_every_row_of_the_shipped_table_as_nexus_tables
     assert not disagreements, disagreements
     # non-vacuity: the whole product was examined and every row of the table was reached
     table = load_table(TABLE)
-    assert examined == 16, examined
+    # scenarios 4 x versions 2 x answer_06 2 x answer_07 2 x answer_33a 3 x answer_33b 3 (16 before 33, nexus-xhisb)
+    assert examined == 288, examined
     assert reached == {r.id for r in table.rows}, sorted({r.id for r in table.rows} - reached)
     # a version the table does not list reads as "unrecorded" in the harness, as its domain value does in nexus
     va = _version_answers_module()

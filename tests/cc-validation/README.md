@@ -508,8 +508,8 @@ scenario part: an install replaces all plugin state.
 Evidence (plugin list/install output, debug log, settings, registry, transcripts)
 goes to `$CC_VAL_EVIDENCE_DIR/<scenario>` when the container mounted one.
 
-Census (2026-10-17, 30 scenarios): plugin-dependent were 12, 13b, 14b, 18 and 32;
-the other 25 install nothing. The container carries what a loaded plugin needs:
+Census (2026-10-17, 30 scenarios; 31 with 33, nexus-xhisb): plugin-dependent were 12, 13b, 14b, 18 and 32;
+the other 26 install nothing. The container carries what a loaded plugin needs:
 the Nexus CLI built from the staged source tree, not fetched from PyPI by version
 (`nx-mcp`, `nx-hook`; without it the plugin loads and then its `mcp_tool` hooks
 fail with "Nexus is not installed"),
