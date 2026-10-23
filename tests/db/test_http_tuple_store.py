@@ -74,6 +74,13 @@ from nexus.db.t2.http_tuple_store import (
 from nexus.db.t2.records import Announce, ParkStats, TupleRow, WaitResult, WaitSpec
 
 
+@pytest.fixture(autouse=True)
+def _clean_rejected_session_memo(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The rejected-session-token memo is process-wide (nexus-z1xox); keep one
+    # test's rejection out of the next test in the same worker.
+    monkeypatch.setattr(HttpTupleStore, "_rejected_sessions", {})
+
+
 def _uniq(label: str) -> str:
     return f"{label}-{uuid.uuid4().hex[:10]}"
 
