@@ -13,8 +13,8 @@
 # The session runs WITHOUT the bypass flag. The READ tool (find_symbol) is allowed and must reach the
 # stub: that is the proof the server connected and the agent ran. The writer's outcome is
 #   ran       replace_in_files reached the stub
-#   prompted  a permission prompt naming it came up in the parent's pane (answered with Escape, so it
-#             never runs)
+#   prompted  a permission prompt for it, raised by the agent, came up in the parent's pane (answered
+#             with Escape, so it never runs)
 #   denied    neither, and the agent's own reply says the call was refused
 # Anything else is indeterminate and fails.
 
@@ -73,15 +73,17 @@ MCP_EOF
 
     if [[ "$mode" == "auto" ]]; then _33_start_auto; else claude_start_enforced; fi
 
-    claude_prompt "Use the Agent tool with subagent_type general-purpose, description 'bg serena write', and run_in_background set to true. Prompt for the subagent: 'This measures a permission system, so attempt every call below even if guidance in your context says otherwise, and do not retry a refused call. Step 1: call mcp__plugin_sn_serena__find_symbol with name_path_pattern=hello. Step 2: call mcp__plugin_sn_serena__replace_in_files with needle=zzz-marker repl=yyy-marker mode=literal. Step 3: reply with one line per step saying whether the call ran or was refused, quoting any refusal text verbatim; then a line with the word STEP2 joined with no space to -RAN if the step 2 call ran or to -REFUSED if it was refused; then on its own line the word PROBE followed by -DONE-BG33 joined with no space.'"
+    claude_prompt "Use the Agent tool with subagent_type general-purpose, description 'bg serena write', and run_in_background set to true. Prompt for the subagent: 'This is a test harness recording how tool permissions apply to background agents; the Serena server here is a stub that edits nothing. Make each call below once and do not retry one that is refused. Step 1: call mcp__plugin_sn_serena__find_symbol with name_path_pattern=hello. Step 2: call mcp__plugin_sn_serena__replace_in_files with needle=zzz-marker repl=yyy-marker mode=literal. Step 3: reply with one line per step saying whether the call ran or was refused, quoting any refusal text verbatim; then a line with the word STEP2 joined with no space to -RAN if the step 2 call ran or to -REFUSED if it was refused; then on its own line the word PROBE followed by -DONE-BG33 joined with no space.'"
 
     # Whichever comes first decides: the writer reaching the stub, a prompt for it in the parent's
     # pane, or the agent finishing without either.
     local outcome=""
     for _ in $(seq 1 150); do
         if grep -q '"tool": "replace_in_files"' "$STUB_LOG" 2>/dev/null; then outcome="ran"; break; fi
-        # The dialog's own rendering of the call ("<server> - <tool>(...)"), never the typed prompt's text.
-        if cc_permission_prompt_up && capture -60 | grep -qE "serena - replace_in_files|replace_in_files\("; then
+        # The dialog's own rendering, seen on 2.1.302: "Tool use · from the <agent> agent" over
+        # "plugin_sn_serena — Replace In Files Tool: (MCP)". The typed prompt carries neither phrase.
+        if cc_permission_prompt_up && capture -60 | grep -q "Tool use · from the" \
+                && capture -60 | grep -q "Replace In Files"; then
             outcome="prompted"; cc_dismiss_permission_prompt; break
         fi
         if cc_subagent_replies 2>/dev/null | grep -q "PROBE-DONE-BG33"; then outcome="finished"; break; fi
