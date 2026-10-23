@@ -227,13 +227,13 @@ at self-provisioned substrates the suite manages itself; `NX_SERVICE_HOST`/
 
 The gate runs the local service **keyless** since nexus-w6h2m (2026-07-28): no
 `NX_VOYAGE_API_KEY` reaches it, so it embeds every collection with bge-768 and
-`cloud_mode` tests are deselected — the gate needs no `VOYAGE_API_KEY` for its
+`keyed_voyage` tests are deselected — the gate needs no `VOYAGE_API_KEY` for its
 own corpus. This is a posture choice, not the engine's ceiling: a keyed local
 service embeds with Voyage instead (nexus-umm29 carve-out), but nothing in this
 gate, or anywhere else in the release battery, boots the local service keyed —
 that combination is untested by any gate. Two markers carve tests out, each
 with an exact-count guard: `lived_in` (excludes tests that dispatch real
-`claude -p` or need seeded lived-in corpora) and `cloud_mode`. A guard trip or
+`claude -p` or need seeded lived-in corpora) and `keyed_voyage`. A guard trip or
 any new hard failure is real signal — compensate with live validation of the
 release's changed paths (the v6.3.5/v6.3.6 pattern: exercise the advertised
 claims against the real deployment).

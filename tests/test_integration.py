@@ -315,10 +315,11 @@ def _assert_engine_embedded_with(db, collection: str, model: str) -> None:
     does not serve) and the chunks it holds are 1024-dim, the Voyage width (bge is 768).
     A test whose assertions only read back its own ``embedding_model`` metadata stays
     green on any substrate; this one does not."""
-    rows = [r for r in db.list_collections() if r.get("name") == collection]
-    assert rows, f"the engine lists no row for {collection!r}"
-    assert rows[0].get("embedding_model") == model, rows[0]
-    assert rows[0].get("dim") == 1024, rows[0]
+    # The raw stats rows, one per (collection, dim) the engine physically holds, each
+    # joined to the catalog row; list_collections merges them and drops ``dim``.
+    rows = [r for r in db.collection_stats() if r.get("name") == collection]
+    assert rows, f"the engine reports no stored chunks for {collection!r}"
+    assert {(r.get("embedding_model"), r.get("dim")) for r in rows} == {(model, 1024)}, rows
 
 
 def _write_owned_note(collection: str, title: str, content: str, metadata: dict) -> str:

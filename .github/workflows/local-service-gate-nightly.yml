@@ -198,7 +198,7 @@ jobs:
           # conditional tests must bump these consciously, in the same
           # change that adds them.
           #
-          # 455 -> 452 (nexus-w6h2m, 2026-07-28): the cloud_mode (now keyed_voyage) carve-out
+          # 455 -> 452 (nexus-w6h2m, 2026-07-28): the keyed_voyage carve-out (then named cloud_mode)
           # DESELECTS 3 tests that were passing when this floor was pinned —
           # back when the gate ran in cloud mode and the service embedded
           # voyage. They cannot pass against a bge-768 local service, which is

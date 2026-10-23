@@ -63,7 +63,7 @@ def test_count_mismatch_fails(tmp_path: pathlib.Path) -> None:
 
 
 def test_zero_collected_is_not_a_failure(tmp_path: pathlib.Path) -> None:
-    # The selected files carry only carved-out marks (lived_in, cloud_mode):
+    # The selected files carry only carved-out marks (lived_in, keyed_voyage):
     # the expression collects nothing, and the job says so instead of failing.
     j = _junit(tmp_path, [])
     assert chk.check(j, ["tests/test_a.py"], collected=0) == []

@@ -3817,7 +3817,7 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # AuthenticationError). Their mode declaration is the requires-key
     # gating plus the `keyed_local_voyage` fixture (local mode, a Voyage
     # local.embed_model). Since nexus-8errq the local-service gate deselects
-    # them (`cloud_mode` marker) and tests/e2e/dual-embedder-gate.sh runs
+    # them (`keyed_voyage` marker) and tests/e2e/dual-embedder-gate.sh runs
     # them on a keyed, Voyage-profile engine substrate. A documented,
     # permanent floor, not a burn-down target.
     "tests/test_integration.py::test_voyage_code3_index_and_query",
