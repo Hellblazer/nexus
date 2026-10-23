@@ -192,8 +192,10 @@ def backend_status(
     which: Callable[[str], str | None] | None = None,
 ) -> BackendStatus:
     """Status of the backend a tool-free request would use. Never raises: an
-    unknown or unimplemented setting is reported as unavailable with the reason."""
+    unknown or unimplemented setting is reported as unavailable with the reason.
+    With no *config* the global config is read, as :func:`llm_backend_available` does."""
     env = os.environ if env is None else env
+    config = _load_llm_config() if config is None else config
     try:
         setting = configured_backend(config, env)
     except Exception as exc:  # noqa: BLE001 - OperatorError for a bad setting; report, never raise from a probe
@@ -214,7 +216,9 @@ def _load_llm_config() -> Mapping[str, Any]:
 
         return {"llm": get_global_config_section("llm")}
     except Exception as exc:  # noqa: BLE001 - a broken config.yml must not turn a probe into a crash
-        _log.debug("llm_backend_config_unreadable", error=str(exc))
+        # Warning, not debug: a typo in config.yml must not silently move a
+        # user who set llm.backend back to the default.
+        _log.warning("llm_backend_config_unreadable", error=str(exc))
         return {}
 
 

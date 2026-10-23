@@ -2585,6 +2585,10 @@ class TestNxAnswerLatencyProxy:
             patch("asyncio.sleep", new=AsyncMock()) as mock_async_sleep,
             patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec") as mock_subproc,
         ):
+            # A spawn that is reached fails at once instead of handing back a
+            # mock whose stdout never ends (the read loop would grow without
+            # bound; nexus-2k66t.3 P1 review).
+            mock_subproc.side_effect = AssertionError("claude spawn reached; plan_run is mocked")
             from nexus.mcp.core import nx_answer
             await nx_answer("fast question")
 

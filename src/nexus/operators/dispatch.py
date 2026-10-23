@@ -1347,7 +1347,7 @@ def _backend_for(req: DispatchRequest) -> "LLMBackend":
     name = resolve_backend_name(req)
     if name == "cli":
         return CliBackend()
-    raise OperatorError(f"LLM backend {name!r} has no implementation")  # unreachable in P1: selection raises first
+    raise OperatorError(f"LLM backend {name!r} has no implementation")  # selection raises first for a name with no backend yet
 
 
 class CliBackend:
