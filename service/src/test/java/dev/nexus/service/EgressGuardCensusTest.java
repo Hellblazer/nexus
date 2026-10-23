@@ -43,7 +43,7 @@ class EgressGuardCensusTest {
     }
 
     private static final Map<String, EgressGuardCensus.Allow> ONE_VOYAGE = Map.of(
-        VOYAGE, new EgressGuardCensus.Allow(Set.of("HttpClient.newBuilder"), 1, "fixture"));
+        VOYAGE, new EgressGuardCensus.Allow(Set.of("HttpClient.newBuilder", "http(s) URL literal"), 2, "fixture"));
 
     // ---- the live census ---------------------------------------------------------------------------
 
@@ -72,6 +72,21 @@ class EgressGuardCensusTest {
         assertThat(EgressGuardCensus.liquibaseProblems(pom, config)).isEmpty();
     }
 
+    @Test
+    void liveClasspath_theResolvedLiquibaseIsOlderThanItsAnalyticsBeacon_orHasAnalyticsOff() throws IOException {
+        String resolved = liquibase.util.LiquibaseUtil.getBuildVersion();
+        String pom = Files.readString(Path.of("pom.xml"));
+        String config = EgressGuardCensus.configText(Path.of("pom.xml"), Path.of("src", "main"));
+        System.out.println("EGRESS_LIQUIBASE resolved=" + resolved);
+        assertThat(resolved).as("non-vacuity: the jar reports a version").isNotBlank().matches("\\d+\\.\\d+.*");
+        assertThat(EgressGuardCensus.liquibaseResolvedProblems(resolved, pom, config)).isEmpty();
+    }
+
+    @Test
+    void liveMain_noFileSetsTheAnalyticsSwitchAfterItsFirstLiquibaseUse() throws IOException {
+        assertThat(EgressGuardCensus.analyticsOrderProblems(MAIN)).isEmpty();
+    }
+
     // ---- negative fixtures: the census itself is not vacuous --------------------------------------
 
     @Test
@@ -79,7 +94,7 @@ class EgressGuardCensusTest {
         plant(VOYAGE, GOOD_VOYAGE_CLASS);
         EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, ONE_VOYAGE, List.of(VOYAGE));
         assertThat(r.problems()).isEmpty();
-        assertThat(r.sitesFound()).isEqualTo(1);
+        assertThat(r.sitesFound()).as("the builder and the URL constant").isEqualTo(2);
     }
 
     @Test
@@ -103,21 +118,112 @@ class EgressGuardCensusTest {
             .anyMatch(p -> p.contains("Rogue.java"));
     }
 
+    /**
+     * One planted spelling per construct, keyed by the construct's name. The set of keys must equal
+     * {@link EgressGuardCensus#CONSTRUCTS}, so a construct added to the census without a positive control
+     * fails {@link #fixture_everyListedConstructHasAPositiveControl_andTheDetectorFiresOnIt}.
+     */
+    private static final Map<String, String> SPELLINGS = spellings();
+
+    private static Map<String, String> spellings() {
+        Map<String, String> m = new java.util.LinkedHashMap<>();
+        m.put("HttpClient.newBuilder", "Object o = HttpClient.newBuilder();");
+        m.put("HttpClient.newHttpClient", "Object o = HttpClient.newHttpClient" + "();");
+        m.put("openConnection(", "Object o = u.openConnection();");
+        m.put("openStream(", "Object o = u.openStream();");
+        m.put("new Socket(", "Object o = new Socket(h, 1);");
+        m.put("ServerSocket", "Object o = new ServerSocket(0);");
+        m.put("SocketChannel.open", "Object o = SocketChannel.open();");
+        m.put("DriverManager.getConnection", "Object o = DriverManager.getConnection(u);");
+        m.put("ProcessBuilder", "Object o = new ProcessBuilder(a);");
+        m.put("Runtime.getRuntime().exec", "Object o = Runtime.getRuntime().exec(a);");
+        m.put("DatagramSocket/DatagramChannel", "Object o = new DatagramSocket();");
+        m.put("InetAddress.getBy*", "Object o = InetAddress.getByName(h);");
+        m.put("new URL(", "Object o = new URL(u);");
+        m.put("toURL(", "Object o = uri.toURL();");
+        m.put("URL.of(", "Object o = URL.of(uri, null);");
+        m.put("URL.getContent", "Object o = new URL(u).getContent();");
+        m.put("SocketFactory/createSocket", "Object o = SocketFactory.getDefault();");
+        m.put("Runtime assigned to a variable", "Object o = null; o = Runtime.getRuntime();");
+        m.put("x.exec(", "Object o = rt.exec(a);");
+        m.put("static import of an outbound member", "import static java.net.http.HttpClient.newBuilder; class Q {}");
+        m.put("ProxySelector.of/setDefault/getDefault", "Object o = ProxySelector.of(a);");
+        m.put("http(s) URL literal", "Object o = \"https://rogue.example/x\";");
+        return java.util.Collections.unmodifiableMap(m);
+    }
+
+    /** The planted file for a spelling: a class body, or the spelling alone when it is a whole declaration. */
+    private static String planted(String spelling) {
+        return spelling.startsWith("import ") ? spelling : "class Rogue { void m() { " + spelling + " } }";
+    }
+
     @Test
-    void fixture_everyListedConstructIsSeen() throws IOException {
-        String[] spellings = {
-            "HttpClient.newBuilder()", "HttpClient.newHttpClient" + "()", "u.openConnection()", "u.openStream()",
-            "new Socket(h, 1)", "new ServerSocket(0)", "SocketChannel.open()", "ServerSocketChannel.open()",
-            "DriverManager.getConnection(u)", "new ProcessBuilder(a)", "Runtime.getRuntime().exec(a)"};
+    void fixture_everyListedConstructHasAPositiveControl_andTheDetectorFiresOnIt() throws IOException {
+        assertThat(SPELLINGS.keySet()).as("every construct in the census has a planted spelling, and no spelling is orphaned")
+            .containsExactlyInAnyOrderElementsOf(EgressGuardCensus.CONSTRUCTS.keySet());
         int i = 0;
-        for (String spelling : spellings) {
+        for (Map.Entry<String, String> e : SPELLINGS.entrySet()) {
             Path sub = dir.resolve("case" + i++);
             Files.createDirectories(sub);
-            Files.writeString(sub.resolve("Rogue.java"), "class Rogue { void m() { Object o = " + spelling + "; } }");
+            Files.writeString(sub.resolve("Rogue.java"), planted(e.getValue()));
             EgressGuardCensus.Report r = EgressGuardCensus.scan(sub, Map.of(), List.of());
-            assertThat(r.sitesFound()).as("the census sees %s", spelling).isGreaterThanOrEqualTo(1);
-            assertThat(r.problems()).as("and rejects %s", spelling).isNotEmpty();
+            assertThat(r.sitesByConstruct().getOrDefault("Rogue.java", Map.of()))
+                .as("the census sees %s in %s, under that name", e.getKey(), e.getValue())
+                .containsKey(e.getKey());
+            assertThat(r.problems()).as("and rejects %s", e.getKey()).isNotEmpty();
         }
+    }
+
+    /** Each control spelled the way the first review said the old list missed it. */
+    @Test
+    void fixture_theSpellingsTheFirstReviewNamedAreSeen() throws IOException {
+        String[][] cases = {
+            {"DatagramChannel.open()", "DatagramSocket/DatagramChannel"},
+            {"new MulticastSocket(1)", "DatagramSocket/DatagramChannel"},
+            {"java.net.InetAddress.getAllByName(h)", "InetAddress.getBy*"},
+            {"InetAddress\n .getByAddress(b)", "InetAddress.getBy*"},
+            {"((URL) o).getContent()", "URL.getContent"},
+            {"javax.net.ssl.SSLSocketFactory.getDefault().createSocket(h, 1)", "SocketFactory/createSocket"},
+            {"sf.createSocket(h, 1)", "SocketFactory/createSocket"},
+            {"this.rt.exec(a)", "x.exec("},
+            {"p . exec ( a )", "x.exec("},
+            {"java.net.ProxySelector.setDefault(null)", "ProxySelector.of/setDefault/getDefault"},
+            {"\"http://rogue.example\" + x", "http(s) URL literal"},
+            {"\" https://rogue.example\"", "http(s) URL literal"},
+        };
+        int i = 0;
+        for (String[] c : cases) {
+            Path sub = dir.resolve("named" + i++);
+            Files.createDirectories(sub);
+            Files.writeString(sub.resolve("Rogue.java"), "class Rogue { void m() { Object o = " + c[0] + "; } }");
+            assertThat(EgressGuardCensus.scan(sub, Map.of(), List.of()).sitesByConstruct()
+                .getOrDefault("Rogue.java", Map.of())).as(c[0]).containsKey(c[1]);
+        }
+        // A Runtime held in a variable, then exec'd: both halves are seen.
+        Path sub = dir.resolve("runtimeVar");
+        Files.createDirectories(sub);
+        Files.writeString(sub.resolve("Rogue.java"),
+            "class Rogue { void m() throws Exception { Runtime rt = Runtime.getRuntime(); rt.exec(\"x\"); } }");
+        assertThat(EgressGuardCensus.scan(sub, Map.of(), List.of()).sitesByConstruct().get("Rogue.java"))
+            .containsKeys("Runtime assigned to a variable", "x.exec(")
+            .doesNotContainKey("Runtime.getRuntime().exec");
+    }
+
+    @Test
+    void fixture_theNewPatternsDoNotFireOnTheEnginesOrdinaryRuntimeAndPathUses() throws IOException {
+        plant("A.java", """
+            class A {
+                int n = Runtime.getRuntime().availableProcessors();
+                void halt() { Runtime.getRuntime().halt(1); Runtime.getRuntime().addShutdownHook(null); }
+                Object r(Rec rec) { return rec.getContent(); }
+                String s = "see https://example.com in docs";
+                java.util.concurrent.ExecutorService e;
+                void run() { e.execute(null); }
+            }
+            """);
+        EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, Map.of(), List.of());
+        assertThat(r.sitesByConstruct()).as("ordinary uses are not sites").isEmpty();
+        assertThat(r.problems()).isEmpty();
     }
 
     @Test
@@ -127,7 +233,7 @@ class EgressGuardCensusTest {
             class A {
                 // HttpClient .newHttpClient()
                 /* DriverManager.getConnection(x) */
-                String s = "https://example.com/not-a-site";
+                // "https://example.com/in-a-comment"
             }
             """);
         EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, Map.of(), List.of());
@@ -164,8 +270,8 @@ class EgressGuardCensusTest {
         plant(VOYAGE, GOOD_VOYAGE_CLASS.replace("HttpClient c()",
             "HttpClient d() { return HttpClient.newBuilder().build(); }\n    HttpClient c()"));
         EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, ONE_VOYAGE, List.of(VOYAGE));
-        assertThat(r.sitesFound()).isEqualTo(2);
-        assertThat(r.problems()).anyMatch(p -> p.contains("exactly 1") && p.contains("shows 2"));
+        assertThat(r.sitesFound()).isEqualTo(3);
+        assertThat(r.problems()).anyMatch(p -> p.contains("exactly 2") && p.contains("shows 3"));
 
         String reaper = "dev/nexus/service/db/BackendReaper.java";
         Map<String, EgressGuardCensus.Allow> one = Map.of(
@@ -190,7 +296,7 @@ class EgressGuardCensusTest {
     void fixture_anAllowlistEntryWithoutAReasonFails() throws IOException {
         plant(VOYAGE, GOOD_VOYAGE_CLASS);
         Map<String, EgressGuardCensus.Allow> noReason = Map.of(
-            VOYAGE, new EgressGuardCensus.Allow(Set.of("HttpClient.newBuilder"), 1, " "));
+            VOYAGE, new EgressGuardCensus.Allow(Set.of("HttpClient.newBuilder", "http(s) URL literal"), 2, " "));
         assertThat(EgressGuardCensus.scan(dir, noReason, List.of(VOYAGE)).problems())
             .anyMatch(p -> p.contains("without a reason"));
     }
@@ -282,5 +388,41 @@ class EgressGuardCensusTest {
     @Test
     void fixture_aPomWithNoLiquibaseVersionFails() {
         assertThat(EgressGuardCensus.liquibaseProblems("<project/>", "")).hasSize(1);
+    }
+
+    @Test
+    void fixture_aResolvedLiquibaseAt430OrLaterFailsWithoutAnalyticsOff_whateverThePomProperty() {
+        String pomOld = "<liquibase.version>4.29.0</liquibase.version>";
+        assertThat(EgressGuardCensus.liquibaseResolvedProblems("4.29.2", pomOld, pomOld)).isEmpty();
+        // The pom says 4.29 but a BOM or transitive upgrade put 4.32 on the classpath: two problems.
+        assertThat(EgressGuardCensus.liquibaseResolvedProblems("4.32.0", pomOld, pomOld))
+            .hasSize(2).anyMatch(p -> p.contains("overrides the property")).anyMatch(p -> p.contains("analytics"));
+        // A matching version with the switch off passes; a SNAPSHOT or a patch suffix still parses.
+        String pom = "<liquibase.version>4.30.0</liquibase.version>";
+        assertThat(EgressGuardCensus.liquibaseResolvedProblems("4.30.0", pom, pom + "\nliquibase.analytics.enabled=false"))
+            .isEmpty();
+        assertThat(EgressGuardCensus.liquibaseResolvedProblems("5.0.1-SNAPSHOT", "<project/>", "")).hasSize(1);
+        assertThat(EgressGuardCensus.liquibaseResolvedProblems("unknown", pom, pom)).hasSize(1);
+        assertThat(EgressGuardCensus.liquibaseResolvedProblems(null, pom, pom)).hasSize(1);
+    }
+
+    @Test
+    void fixture_theAnalyticsSwitchSetAfterTheFirstLiquibaseUseFails() throws IOException {
+        String late = EgressGuardCensus.stripComments("""
+            class Main { void main() {
+                SchemaMigrator.migrate(ds);
+                System.setProperty("liquibase.analytics.enabled", "false");
+            } }
+            """);
+        assertThat(EgressGuardCensus.analyticsOrderProblems("Main.java", late)).hasSize(1).first().asString()
+            .contains("too late");
+        String early = late.replace("SchemaMigrator.migrate(ds);", "").replace("} }",
+            "SchemaMigrator.migrate(ds);\n} }");
+        assertThat(EgressGuardCensus.analyticsOrderProblems("Main.java", early)).isEmpty();
+        assertThat(EgressGuardCensus.analyticsOrderProblems("A.java", "class A { void m() { new Liquibase(a); } }"))
+            .as("no switch in the file, nothing to order").isEmpty();
+
+        plant("dev/Late.java", "class Late { void m() { new Liquibase(a, b); System.setProperty(\"liquibase.analytics.enabled\", \"false\"); } }");
+        assertThat(EgressGuardCensus.analyticsOrderProblems(dir)).as("the directory walk finds it").hasSize(1);
     }
 }

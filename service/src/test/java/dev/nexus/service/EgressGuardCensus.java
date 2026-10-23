@@ -25,12 +25,14 @@ import java.util.stream.Stream;
  * hosts live in them), then every outbound construct in {@link #CONSTRUCTS} must sit in a file on
  * {@link #ALLOWLIST}, with that construct named on the entry and a reason beside it.
  *
- * <p>This is a text scan of {@code service/src/main/java} for ten named constructs, and nothing more. It
- * does not see any dependency's code: {@code java.net.http} used inside a library, raw sockets, DNS or JNI
- * inside a library (DJL's Rust tokenizers library does network I/O that no Java-level check can see), or
- * the behavior of the GraalVM native image the engine ships as. It also misses an outbound call spelled
- * through reflection, a static import of a construct, or {@code java.net.http} reached by a type this list
- * does not name. No test in this repository covers those gaps; {@code EgressRuntimeWitnessTest} is a
+ * <p>This is a text scan of {@code service/src/main/java} for the constructs in {@link #CONSTRUCTS}, and
+ * nothing more. It does not see any dependency's code: {@code java.net.http} used inside a library, raw
+ * sockets, DNS or JNI inside a library (DJL's Rust tokenizers library does network I/O that no Java-level
+ * check can see), or the behavior of the GraalVM native image the engine ships as. It also misses an
+ * outbound call spelled through reflection, or reached by a type this list does not name; a static import
+ * of a listed member is caught, and so are datagram sockets, DNS lookups, URL objects, socket factories, a
+ * Runtime held in a variable, a ProxySelector and an http(s) string literal (nexus-3va7p). JDBC beyond
+ * {@code DriverManager} (the Hikari pools, {@code ds.getConnection()}) is not checked at all. No test in this repository covers those gaps; {@code EgressRuntimeWitnessTest} is a
  * separate, narrower check and does not close them. Each allowlist entry pins an exact site count for its
  * file, so a second site in an allowlisted file fails; a file whose count falls short is stale and fails.
  * Non-vacuity: {@link #scan} reports the sites it found, and the caller asserts the count is at least the
@@ -60,6 +62,36 @@ final class EgressGuardCensus {
         m.put("ProcessBuilder", Pattern.compile("\\bProcessBuilder\\b"));
         m.put("Runtime.getRuntime().exec",
             Pattern.compile("Runtime\\s*\\.\\s*getRuntime\\s*\\(\\s*\\)\\s*\\.\\s*exec\\b"));
+        // nexus-3va7p: the gaps the first review named (RDR-210 research 10). Each has a positive control in
+        // EgressGuardCensusTest, and that test fails if a construct is added here without one.
+        m.put("DatagramSocket/DatagramChannel",
+            Pattern.compile("\\b(?:DatagramSocket|DatagramChannel|MulticastSocket|DatagramSocketImpl)\\b"));
+        m.put("InetAddress.getBy*",
+            Pattern.compile("\\bInetAddress\\s*\\.\\s*(?:getBy\\w+|getAllByName)\\b"));
+        m.put("new URL(", Pattern.compile("\\bnew\\s+(?:java\\s*\\.\\s*net\\s*\\.\\s*)?URL\\s*\\("));
+        m.put("toURL(", Pattern.compile("\\.\\s*toURL\\s*\\(\\s*\\)"));
+        m.put("URL.of(", Pattern.compile("\\bURL\\s*\\.\\s*of\\s*\\("));
+        // A statement that names URL and ends in .getContent(: the chained and the cast spellings.
+        m.put("URL.getContent", Pattern.compile("\\bURL\\b[^;{}]*\\.\\s*getContent\\s*\\("));
+        m.put("SocketFactory/createSocket",
+            Pattern.compile("\\b(?:SSL|ServerSocket)?SocketFactory\\b|\\bcreateSocket\\s*\\("));
+        // A Runtime held in a variable, and any x.exec( call: Runtime.getRuntime().exec( is caught above, but
+        // `Runtime rt = Runtime.getRuntime(); rt.exec(...)` is not. getRuntime() followed by exec is excluded
+        // from the second pattern (the char before the dot is ')'), so no site is counted twice.
+        m.put("Runtime assigned to a variable",
+            Pattern.compile("=\\s*(?:java\\s*\\.\\s*lang\\s*\\.\\s*)?Runtime\\s*\\.\\s*getRuntime\\s*\\(\\s*\\)\\s*;"));
+        m.put("x.exec(", Pattern.compile("\\b\\w+\\s*\\.\\s*exec\\s*\\("));
+        // A static import of an outbound member lets the call site drop the qualifier the patterns above read.
+        m.put("static import of an outbound member", Pattern.compile(
+            "\\bimport\\s+static\\s+(?:java\\.net\\.http\\.HttpClient|java\\.sql\\.DriverManager|java\\.net\\.InetAddress"
+            + "|java\\.net\\.URL|java\\.net\\.ProxySelector|java\\.lang\\.Runtime|java\\.lang\\.ProcessBuilder"
+            + "|java\\.nio\\.channels\\.(?:SocketChannel|DatagramChannel)|javax\\.net\\.(?:ssl\\.SSL)?SocketFactory)\\s*\\."));
+        // A selector reroutes where a client connects; the engine's own is EgressProxy's.
+        m.put("ProxySelector.of/setDefault/getDefault",
+            Pattern.compile("\\bProxySelector\\s*\\.\\s*(?:of|setDefault|getDefault)\\b|\\bnew\\s+ProxySelector\\b|\\bextends\\s+ProxySelector\\b"));
+        // A string literal that begins with http:// or https://. The Voyage host pin below reads the three Voyage
+        // classes' literals; this puts every other one on the allowlist too.
+        m.put("http(s) URL literal", Pattern.compile("\"\\s*https?://"));
         return java.util.Collections.unmodifiableMap(m);
     }
 
@@ -75,18 +107,21 @@ final class EgressGuardCensus {
 
     static final String VOYAGE_HOST = "api.voyageai.com";
 
+    /** What each Voyage class shows: its one client builder and its one URL constant. */
+    private static final Set<String> VOYAGE_CONSTRUCTS = Set.of("HttpClient.newBuilder", "http(s) URL literal");
+
     /** Path under the scanned root to its entry. The reason is the review record: say why, not what. */
     static final Map<String, Allow> ALLOWLIST = allowlist();
 
     private static Map<String, Allow> allowlist() {
         Map<String, Allow> m = new TreeMap<>();
         m.put("dev/nexus/service/vectors/VoyageEmbedder.java", new Allow(
-            Set.of("HttpClient.newBuilder"), 1, "Voyage embed call to api.voyageai.com." + VOYAGE_REASON_TAIL));
+            VOYAGE_CONSTRUCTS, 2, "Voyage embed call to api.voyageai.com." + VOYAGE_REASON_TAIL));
         m.put("dev/nexus/service/vectors/CceEmbedder.java", new Allow(
-            Set.of("HttpClient.newBuilder"), 1,
+            VOYAGE_CONSTRUCTS, 2,
             "Voyage contextualized-embed call to api.voyageai.com." + VOYAGE_REASON_TAIL));
         m.put("dev/nexus/service/vectors/VoyageReranker.java", new Allow(
-            Set.of("HttpClient.newBuilder"), 1, "Voyage rerank call to api.voyageai.com." + VOYAGE_REASON_TAIL));
+            VOYAGE_CONSTRUCTS, 2, "Voyage rerank call to api.voyageai.com." + VOYAGE_REASON_TAIL));
         m.put("dev/nexus/service/vectors/PciBuilderSession.java", new Allow(
             Set.of("DriverManager.getConnection"), 1,
             "JDBC to the engine's own database (NX_DB_URL): the index builder's dedicated session."));
@@ -99,6 +134,13 @@ final class EgressGuardCensus {
         m.put("dev/nexus/service/db/BackendReaper.java", new Allow(
             Set.of("DriverManager.getConnection"), 1,
             "JDBC to the engine's own database (NX_DB_URL): the stale-backend reaper."));
+        m.put("dev/nexus/service/vectors/EgressProxy.java", new Allow(
+            Set.of("ProxySelector.of/setDefault/getDefault", "http(s) URL literal"), 2,
+            "The operator's egress proxy selector for the Voyage clients, read from NX_HTTPS_PROXY / HTTPS_PROXY. "
+            + "The literal is the scheme prefixed to a bare proxy host, not a destination."));
+        m.put("dev/nexus/service/db/SchemaMigrator.java", new Allow(
+            Set.of("http(s) URL literal"), 1,
+            "A documentation link inside an error message (the migration runbook); nothing connects to it."));
         return java.util.Collections.unmodifiableMap(m);
     }
 
@@ -107,7 +149,7 @@ final class EgressGuardCensus {
 
     /** What a scan saw, and what is wrong with it. */
     record Report(int filesScanned, int sitesFound, int allowlistSites, Map<String, Integer> sitesByFile,
-                  List<String> problems) {
+                  Map<String, Map<String, Integer>> sitesByConstruct, List<String> problems) {
     }
 
     // ---- comment stripping -------------------------------------------------------------------------
@@ -228,7 +270,7 @@ final class EgressGuardCensus {
             }
             problems.addAll(voyageHostProblems(voyage, stripComments(Files.readString(file))));
         }
-        return new Report(files, sites, allowlistSites, sitesByFile, problems);
+        return new Report(files, sites, allowlistSites, sitesByFile, byConstruct, problems);
     }
 
     private static final Pattern URL_CONSTANT = Pattern.compile(
@@ -293,6 +335,7 @@ final class EgressGuardCensus {
     /**
      * Liquibase 4.30 added an anonymous analytics beacon on by default. A version of 4.30 or later is
      * accepted only when the pom or the main sources set {@code liquibase.analytics.enabled} to false.
+     * This reads the pom property only; {@link #liquibaseResolvedProblems} reads what the classpath resolved.
      *
      * @param pomText    the text of {@code service/pom.xml}
      * @param configText the pom and the main sources (java and resources) joined, where the switch may live
@@ -302,14 +345,77 @@ final class EgressGuardCensus {
         if (!m.find()) {
             return List.of("pom.xml has no <liquibase.version> property: the analytics check has nothing to read");
         }
-        int major = Integer.parseInt(m.group(1));
-        int minor = Integer.parseInt(m.group(2));
+        return beaconProblems("liquibase.version " + m.group(1) + "." + m.group(2),
+            Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)), configText);
+    }
+
+    private static final Pattern VERSION_PREFIX = Pattern.compile("^(\\d+)\\.(\\d+)(?:\\.(\\d+))?");
+
+    /**
+     * The same check against the version Maven actually resolved onto the classpath (nexus-3va7p). The pom
+     * property is a hardcoded number that a BOM, a second declaration or a transitive upgrade can override;
+     * the jar's own {@code LiquibaseUtil.getBuildVersion()} cannot be. A resolved version that is not the
+     * pom's is itself a problem: the property no longer says what runs.
+     *
+     * @param resolvedVersion {@code liquibase.util.LiquibaseUtil.getBuildVersion()} on the test classpath
+     */
+    static List<String> liquibaseResolvedProblems(String resolvedVersion, String pomText, String configText) {
+        Matcher r = resolvedVersion == null ? null : VERSION_PREFIX.matcher(resolvedVersion.trim());
+        if (r == null || !r.find()) {
+            return List.of("the resolved Liquibase version \"" + resolvedVersion + "\" is not major.minor[.patch]: "
+                + "the analytics check has nothing to read");
+        }
+        List<String> problems = new ArrayList<>();
+        Matcher pom = LIQUIBASE_VERSION.matcher(stripConfigComments("pom.xml", pomText));
+        if (pom.find() && !(pom.group(1).equals(r.group(1)) && pom.group(2).equals(r.group(2)))) {
+            problems.add("the classpath resolved Liquibase " + resolvedVersion + " but <liquibase.version> says "
+                + pom.group(1) + "." + pom.group(2) + ": something overrides the property, so the analytics check "
+                + "on the property reads the wrong number");
+        }
+        problems.addAll(beaconProblems("resolved Liquibase " + resolvedVersion,
+            Integer.parseInt(r.group(1)), Integer.parseInt(r.group(2)), configText));
+        return problems;
+    }
+
+    private static List<String> beaconProblems(String what, int major, int minor, String configText) {
         boolean beacon = major > 4 || (major == 4 && minor >= 30);
         if (beacon && !ANALYTICS_OFF.matcher(configText).find()) {
-            return List.of("liquibase.version " + major + "." + minor + " is 4.30 or later, which sends usage "
-                + "analytics unless liquibase.analytics.enabled=false is configured; none is");
+            return List.of(what + " is 4.30 or later, which sends usage analytics unless "
+                + "liquibase.analytics.enabled=false is configured; none is");
         }
         return List.of();
+    }
+
+    private static final Pattern ANALYTICS_SET_PROPERTY = Pattern.compile(
+        "System\\s*\\.\\s*setProperty\\s*\\(\\s*\"liquibase\\.analytics\\.enabled\"");
+    private static final Pattern LIQUIBASE_FIRST_USE = Pattern.compile(
+        "\\bSchemaMigrator\\s*\\.\\s*migrate\\s*\\(|\\bnew\\s+Liquibase\\s*\\(|\\bScope\\s*\\.\\s*(?:child|getCurrentScope)\\b");
+
+    /**
+     * Liquibase reads its analytics switch when its scope first initializes, so a {@code System.setProperty}
+     * that comes after the first Liquibase use in the same file is too late. Takes comment-stripped Java.
+     * A file that sets no such property, or uses no Liquibase, has no ordering to get wrong.
+     */
+    static List<String> analyticsOrderProblems(String name, String strippedJava) {
+        Matcher set = ANALYTICS_SET_PROPERTY.matcher(strippedJava);
+        Matcher use = LIQUIBASE_FIRST_USE.matcher(strippedJava);
+        if (set.find() && use.find() && use.start() < set.start()) {
+            return List.of(name + " sets liquibase.analytics.enabled after its first Liquibase use ("
+                + "offset " + use.start() + " before " + set.start() + "): the switch is read too late");
+        }
+        return List.of();
+    }
+
+    /** {@link #analyticsOrderProblems} over every main source file. */
+    static List<String> analyticsOrderProblems(Path mainJavaRoot) throws IOException {
+        List<String> problems = new ArrayList<>();
+        try (Stream<Path> walk = Files.walk(mainJavaRoot)) {
+            for (Path f : (Iterable<Path>) walk.filter(x -> x.toString().endsWith(".java"))::iterator) {
+                problems.addAll(analyticsOrderProblems(mainJavaRoot.relativize(f).toString(),
+                    stripComments(Files.readString(f))));
+            }
+        }
+        return problems;
     }
 
     private static final Pattern XML_COMMENT = Pattern.compile("<!--.*?-->", Pattern.DOTALL);
