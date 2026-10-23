@@ -8974,6 +8974,7 @@ _DISPUTED_LABEL = "Collections disputed"
 _DORMANT_LABEL = "Collections dormant"
 _QUARANTINED_LABEL = "Collections quarantined"
 _MAX_NAMED_COLLECTIONS = 10
+_MAX_FAILED_JOB_FIXES = 5
 
 
 def _name_list(names: list[str]) -> str:
@@ -9128,21 +9129,54 @@ def _check_embedding_profile() -> list[HealthResult]:
     # nexus-n6mh0: the hint and ``re-embed --all`` decide "off-profile" in the same function, so after
     # ``re-embed --keep-source`` this row clears with the hint (a superseded source is not drift, except one a
     # restore put a live document back in).
-    from nexus.reembed_job import off_profile_collections  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: patched in tests at the module attribute
+    from nexus.reembed_job import is_superseded, judge_off_profile_collections  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     profile_model = {str(ct): str(prow["embedding_model"]) for ct, prow in by_ct.items()}
-    off_profile = sorted(
-        f"{r.get('name')} ({r.get('embedding_model')} vs profile {profile_model.get(str(r.get('content_type')))})"
-        for r in off_profile_collections(reader, rows=rows, profile=profile_model)
+    verdict = judge_off_profile_collections(reader, rows=rows, profile=profile_model)
+
+    def _off(r: dict) -> str:
+        return f"{r.get('name')} ({r.get('embedding_model')} vs profile {profile_model.get(str(r.get('content_type')))})"
+
+    # A superseded row here is a kept_tombstoned source a restore put a live document back in. The routing listing
+    # leaves a superseded source out, so "reads still route by the row's own model" is false for it, and a reindex
+    # is not its remedy: only the job's re-entry (``re-embed --all``) moves that document (RDR-210 :1173-1180).
+    stale = sorted(_off(r) for r in verdict.rows if not is_superseded(r))
+    restored = sorted(_off(r) for r in verdict.rows if is_superseded(r))
+    # nexus-s08oe: with the job table (or the counts) unread the superseded rows were not judged. Say so rather
+    # than let a clean 'none' stand over rows nobody looked at.
+    not_judged = (
+        f"superseded sources not judged (job table unread): {len(verdict.unjudged)} superseded collection(s) skipped"
+        if verdict.unjudged else ""
     )
-    if off_profile:
+    if stale or restored:
+        parts: list[str] = []
+        fixes: list[str] = []
+        if stale:
+            parts.append(
+                f"{len(stale)} live collection(s) under a model other than the "
+                f"profile's (reads still route by the row's own model): {_name_list(stale)}"
+            )
+            fixes.append(
+                "re-embed under the current profile (a dry run plans first): nx collection re-embed --all"
+                if is_local_mode() else
+                "re-embed under the current profile: nx collection reindex <name>"
+            )
+        if restored:
+            parts.append(
+                f"{len(restored)} superseded source(s) that hold a live document again (nothing serves it "
+                f"until a re-embed moves it): {_name_list(restored)}"
+            )
+            fixes.append("move the restored document(s) with the kept job's re-entry: nx collection re-embed --all")
+        if not_judged:
+            parts.append(not_judged)
         results.append(HealthResult(
             label=_OFF_PROFILE_LABEL, ok=False, warn=True,
-            detail=(
-                f"{len(off_profile)} live collection(s) under a model other than the "
-                f"profile's (reads still route by the row's own model): {_name_list(off_profile)}"
-            ),
-            fix_suggestions=["re-embed under the current profile: nx collection reindex <name>"],
+            detail="; ".join(parts), fix_suggestions=list(dict.fromkeys(fixes)),
+        ))
+    elif not_judged:
+        results.append(HealthResult(
+            label=_OFF_PROFILE_LABEL, ok=True, detail=f"no judged collection is off-profile; {not_judged}",
         ))
     else:
         results.append(HealthResult(label=_OFF_PROFILE_LABEL, ok=True, detail="none"))
@@ -9186,6 +9220,106 @@ def _check_embedding_profile() -> list[HealthResult]:
         ) if quarantined else HealthResult(label=_QUARANTINED_LABEL, ok=True, detail="none")
     )
     return results
+
+
+_REEMBED_JOBS_LABEL = "Re-embed jobs"
+_REEMBED_IN_PROGRESS_STATES = ("running", "planned", "cutover", "paused")
+_REEMBED_STATUS_COMMAND = "nx collection re-embed --status"
+
+
+def _reembed_job_summary(job: dict) -> str:
+    return (
+        f"{job.get('job_id')} {job.get('source_collection')} -> {job.get('target_collection')} "
+        f"(moved {job.get('documents_moved', 0)}, skipped {job.get('documents_skipped', 0)})"
+    )
+
+
+def _reembed_failed_fixes(job: dict) -> list[str]:
+    job_id, source = job.get("job_id"), job.get("source_collection")
+    release = f"nx collection re-embed --abort {job_id}  (releases {source}; moved documents stay moved)"
+    reason = job.get("failure_reason")
+    if reason == "profile_changed":
+        # The runner re-checks the profile on every entry into running, so a resume would fail the same way.
+        return [
+            f"nx collection re-embed --abort {job_id}, then nx collection re-embed --all "
+            f"(plans by the new profile; moved documents stay moved)"
+        ]
+    if reason == "token_cap":
+        return [
+            f"nx collection re-embed --resume {job_id} --token-cap <higher cap>  (the cap may only be raised)",
+            release,
+        ]
+    return [
+        f"nx collection re-embed --resume {job_id}  (after the cause in the job's last error is fixed)",
+        release,
+    ]
+
+
+def _check_reembed_jobs() -> list[HealthResult]:
+    """nexus-s08oe (RDR-210 Phase 6 Step 5, Monitored): the tenant's re-embed jobs, in flight and failed.
+
+    Reads the engine's job table through ``nexus.reembed_job.local_jobs`` (``GET /v1/vectors/reembed/status``).
+    Not applicable and green: outside local mode (the job runs on the local engine only), when the table cannot
+    be read (an unreachable engine is the storage-service check's red; an engine below the route is the
+    upgrade check's), when it is empty, and when nothing in it is running or failed. Green with the counts: jobs in
+    ``running``, ``planned``, ``cutover`` or ``paused``. A soft warning (never fatal, never red): a ``failed`` job
+    (it holds its source's lock until resumed or aborted, so ``--all`` names it instead of planning the source)
+    and a job parked in a blocked ``cutover``, each with the command that moves it on. This never raises.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: patched in tests at the module attribute
+    from nexus import reembed_job  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    label = _REEMBED_JOBS_LABEL
+
+    def _na(why: str) -> list[HealthResult]:
+        return [HealthResult(label=label, ok=True, detail=f"not applicable: {why}")]
+
+    if not is_local_mode():
+        return _na("the re-embed job runs on the local engine only")
+    try:
+        jobs = [j for j in reembed_job.local_jobs() if isinstance(j, dict)]
+    except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+        _log.debug("doctor_reembed_jobs_unread", error=str(exc))
+        return _na(f"job table unread ({type(exc).__name__})")
+    if not jobs:
+        return _na("no re-embed jobs")
+
+    failed = [j for j in jobs if j.get("state") == "failed"]
+    blocked = [j for j in jobs if reembed_job.is_blocked(j)]
+    in_flight = [j for j in jobs if j.get("state") in _REEMBED_IN_PROGRESS_STATES and j not in blocked]
+    if not (failed or blocked or in_flight):
+        return _na(f"no job is running or failed ({len(jobs)} finished)")
+
+    parts: list[str] = []
+    fixes: list[str] = []
+    if failed:
+        lines = [
+            f"{_reembed_job_summary(j)}: {j.get('failure_reason') or 'no reason recorded'}"
+            + (f" ({j['last_error']})" if j.get("last_error") else "")
+            for j in failed
+        ]
+        parts.append(f"{len(failed)} failed job(s) hold their source's lock: {_name_list(lines)}")
+        for j in failed[:_MAX_FAILED_JOB_FIXES]:
+            fixes.extend(_reembed_failed_fixes(j))
+    if blocked:
+        lines = [f"{_reembed_job_summary(j)}: {j.get('last_error')}" for j in blocked]
+        parts.append(f"{len(blocked)} job(s) blocked in cutover, waiting for a person: {_name_list(lines)}")
+        fixes.extend(
+            f"nx collection re-embed --abort {j.get('job_id')}  (the job's last error says why it waits)"
+            for j in blocked[:_MAX_FAILED_JOB_FIXES]
+        )
+    if in_flight:
+        counts = ", ".join(
+            f"{s} {n}" for s in _REEMBED_IN_PROGRESS_STATES if (n := sum(1 for j in in_flight if j.get("state") == s))
+        )
+        parts.append(
+            f"{len(in_flight)} re-embed job(s) in progress ({counts}): "
+            f"{_name_list([_reembed_job_summary(j) for j in in_flight])}; {_REEMBED_STATUS_COMMAND}"
+        )
+    return [HealthResult(
+        label=label, ok=not (failed or blocked), warn=bool(failed or blocked),
+        detail="; ".join(parts), fix_suggestions=fixes,
+    )]
 
 
 # RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15: manifest_orphan_report,
@@ -11477,6 +11611,8 @@ def run_health_checks(
     # client's intent against it, and the collection population by
     # lifecycle state. Both modes; degrades internally.
     results.extend(_check_embedding_profile())
+    # nexus-s08oe (RDR-210 Phase 6 Step 5): re-embed jobs in flight or failed. Local mode only; degrades internally.
+    results.extend(_check_reembed_jobs())
     # _check_dangling_manifests (nexus-5xn3k AC5) RETIRED here (RDR-191
     # Phase 6, nexus-o8dil.33) — the manifest-chunk FK makes the dangling
     # state it detected (a POPULATED manifest whose chashes no longer

@@ -1082,6 +1082,11 @@ def test_embedding_profile_off_profile_row_by_disposition_of_a_superseded_source
     r = _by_label(health._check_embedding_profile(), "Collections off-profile")
     if named:
         assert r.ok is False and r.warn is True and _SRC in r.detail
+        # nexus-s08oe: the routing listing leaves a superseded source out, so "reads still route by the row's own
+        # model" is false for it; the remedy is the job's own re-entry, in any mode, never a reindex.
+        assert "reads still route" not in r.detail and "hold a live document again" in r.detail
+        assert any("nx collection re-embed --all" in s for s in r.fix_suggestions)
+        assert not any("reindex" in s for s in r.fix_suggestions)
     else:
         assert r.ok is True and r.detail == "none"
 
@@ -1100,6 +1105,62 @@ def test_embedding_profile_off_profile_row_ignores_a_superseded_source_when_jobs
     monkeypatch.setattr("nexus.reembed_job.local_jobs", unreadable)
     r = _by_label(health._check_embedding_profile(), "Collections off-profile")
     assert r.warn is True and "bge-other" in r.detail and _SRC not in r.detail
+    assert "superseded sources not judged (job table unread)" in r.detail
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_off_profile_row_never_reads_a_clean_none_over_unjudged_superseded_sources(monkeypatch) -> None:
+    """nexus-s08oe: the job table is unread and nothing else is off-profile. 'none' would be a claim about rows
+    nobody looked at; the row stays green (a down engine is the storage check's red) but says what it skipped."""
+    reader = _FakeReader(_VOYAGE_PROFILE, [
+        _coll(_SRC, "code", _BGE, superseded_by=_TGT),
+        _coll(_TGT, "code", "voyage-code-3"),
+    ])
+    health = _patch_profile_check(monkeypatch, reader)
+
+    def unreadable() -> list:
+        raise RuntimeError("engine down")
+
+    monkeypatch.setattr("nexus.reembed_job.local_jobs", unreadable)
+    r = _by_label(health._check_embedding_profile(), "Collections off-profile")
+    assert r.ok is True and r.detail != "none"
+    assert "superseded sources not judged (job table unread)" in r.detail
+    assert "1 superseded" in r.detail
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_off_profile_row_unreadable_doc_counts_say_the_same(monkeypatch) -> None:
+    class _NoCounts(_FakeReader):
+        def collection_doc_counts(self, *, include_deleted: bool = False):
+            raise RuntimeError("counts down")
+
+    reader = _NoCounts(_VOYAGE_PROFILE, [
+        _coll(_SRC, "code", _BGE, superseded_by=_TGT),
+        _coll(_TGT, "code", "voyage-code-3"),
+    ])
+    health = _patch_profile_check(monkeypatch, reader)
+    monkeypatch.setattr("nexus.reembed_job.local_jobs", lambda: [_kept_job("kept_tombstoned")])
+    r = _by_label(health._check_embedding_profile(), "Collections off-profile")
+    assert r.ok is True and "superseded sources not judged (job table unread)" in r.detail
+
+
+@pytest.mark.usefixtures("cloud_mode")
+def test_embedding_profile_off_profile_remedy_in_cloud_mode_is_reindex(monkeypatch) -> None:
+    """The re-embed job runs on the local engine only, so a managed install's stale collection is re-indexed."""
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [_coll(_SRC, "code", _BGE)]))
+    r = _by_label(health._check_embedding_profile(), "Collections off-profile")
+    assert any(f"nx collection reindex {_SRC}" in s or "nx collection reindex <name>" in s for s in r.fix_suggestions)
+    assert not any("nx collection re-embed" in s for s in r.fix_suggestions)
+
+
+def test_embedding_profile_off_profile_remedy_in_local_mode_is_the_reembed_job(monkeypatch) -> None:
+    """nexus-s08oe, RDR-210 Monitored: in local mode the row suggests ``re-embed --all`` (dry run plans first)."""
+    health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [_coll(_SRC, "code", _BGE)]))
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    r = _by_label(health._check_embedding_profile(), "Collections off-profile")
+    assert r.warn is True and _SRC in r.detail and "reads still route" in r.detail
+    assert any("nx collection re-embed --all" in s for s in r.fix_suggestions)
+    assert not any("reindex" in s for s in r.fix_suggestions)
 
 
 @pytest.mark.usefixtures("cloud_mode")

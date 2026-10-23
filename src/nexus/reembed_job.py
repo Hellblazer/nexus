@@ -327,6 +327,19 @@ def profile_models(reader: Any) -> dict[str, str]:
     return {str(r["content_type"]): str(r["embedding_model"]) for r in reader.embedding_profile()}
 
 
+@dataclass(frozen=True)
+class OffProfile:
+    """The off-profile predicate's answer: the rows owed a re-embed, and the superseded rows it could not judge.
+
+    ``unjudged`` is empty unless the job table or the document counts could not be read, in which case it holds
+    every superseded row (each is a kept source whose live-document check needs both). The hint ignores it; the
+    doctor says it, so "nothing is off-profile" is never printed over rows nobody looked at.
+    """
+
+    rows: list[dict] = field(default_factory=list)
+    unjudged: list[dict] = field(default_factory=list)
+
+
 def off_profile_rows(
     rows: Iterable[dict],
     profile: dict[str, str],
@@ -334,6 +347,17 @@ def off_profile_rows(
     live_docs: Callable[[str], int],
     all_docs: Callable[[str], int],
 ) -> list[dict]:
+    """:func:`judge_off_profile_rows`' rows, for a caller that does not report what it could not judge."""
+    return judge_off_profile_rows(rows, profile, jobs, live_docs, all_docs).rows
+
+
+def judge_off_profile_rows(
+    rows: Iterable[dict],
+    profile: dict[str, str],
+    jobs: Callable[[], Iterable[dict]],
+    live_docs: Callable[[str], int],
+    all_docs: Callable[[str], int],
+) -> OffProfile:
     """THE off-profile predicate (nexus-n6mh0, RDR-210 Phase 6 Step 5, S-R2-5): the rows still owed a re-embed.
 
     The doctor's off-profile row, the daemon-start and config hints, and ``--all`` all answer "is anything off
@@ -351,19 +375,21 @@ def off_profile_rows(
     therefore not drift: its successor carries the documents.
 
     ``jobs`` is a thunk and is read only when some row is superseded, the one case that needs it. An unreadable
-    job table leaves the superseded rows out (the hint and the doctor are best effort) and keeps the rest.
+    job table (or unreadable document counts) leaves the superseded rows out (the hint and the doctor are best
+    effort), keeps the rest, and returns those superseded rows as ``unjudged``.
     """
     rows = list(rows)
     if not any(is_superseded(r) for r in rows):
-        return stale_rows(rows, profile)
+        return OffProfile(stale_rows(rows, profile))
     try:
         found = candidates(rows, profile, list(jobs()), live_docs, all_docs)
     except Exception as exc:  # noqa: BLE001 — boundary: the exception needs the job table and counts; without them only the rows speak
         _log.debug("off_profile_exception_unread", error=str(exc))
-        return stale_rows(rows, profile)
+        unjudged = sorted((r for r in rows if is_superseded(r)), key=lambda r: str(r.get("name", "")))
+        return OffProfile(stale_rows(rows, profile), unjudged)
     out = list(found.stale) + [row for row, _job in found.held]
     out += [r.source_row for r in found.reentries if r.kind == "running"]
-    return sorted(out, key=lambda r: str(r.get("name", "")))
+    return OffProfile(sorted(out, key=lambda r: str(r.get("name", ""))))
 
 
 def local_jobs() -> list[dict]:
@@ -388,7 +414,18 @@ def off_profile_collections(
     profile: dict[str, str] | None = None,
     jobs: Callable[[], Iterable[dict]] | None = None,
 ) -> list[dict]:
-    """:func:`off_profile_rows` over a catalog reader: what the hint and the doctor row call.
+    """:func:`judge_off_profile_collections`' rows: what the hint calls."""
+    return judge_off_profile_collections(reader, rows=rows, profile=profile, jobs=jobs).rows
+
+
+def judge_off_profile_collections(
+    reader: Any,
+    *,
+    rows: Iterable[dict] | None = None,
+    profile: dict[str, str] | None = None,
+    jobs: Callable[[], Iterable[dict]] | None = None,
+) -> OffProfile:
+    """:func:`judge_off_profile_rows` over a catalog reader: what the doctor row calls.
 
     ``rows`` and ``profile`` are taken when the caller has already read them (the doctor has). The document
     counts the re-entry check needs are read once each, and only if a job makes a superseded row a candidate.
@@ -396,7 +433,7 @@ def off_profile_collections(
     if profile is None:
         profile = profile_models(reader)
     if not profile:
-        return []
+        return OffProfile()
     rows = list(reader.list_collections()) if rows is None else list(rows)
     counts: dict[bool, dict[str, int]] = {}
 
@@ -407,7 +444,7 @@ def off_profile_collections(
             return counts[deleted].get(name, 0)
         return count
 
-    return off_profile_rows(rows, profile, jobs or local_jobs, doc_count(False), doc_count(True))
+    return judge_off_profile_rows(rows, profile, jobs or local_jobs, doc_count(False), doc_count(True))
 
 
 def has_off_profile_collection(reader: Any, jobs: Callable[[], Iterable[dict]] | None = None) -> bool:

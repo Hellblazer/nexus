@@ -164,3 +164,53 @@ def test_unreadable_doc_counts_leave_the_superseded_rows_out_and_keep_the_stale_
     got = rj.off_profile_rows(rows, PROFILE, lambda: jobs, boom, boom)
     assert _names(got) == ["docs__a"]
 
+
+# nexus-s08oe: the judgement also says which superseded rows it could not judge, so the doctor can tell
+# "nothing is off-profile" from "the superseded sources were not looked at".
+
+
+def test_the_judgement_names_the_superseded_rows_it_could_not_judge_when_the_job_table_is_unread():
+    rows = [_source(), _target(), _row("docs__a")]
+
+    def boom():
+        raise RuntimeError("engine down")
+
+    verdict = rj.judge_off_profile_rows(rows, PROFILE, boom, lambda n: 1, lambda n: 1)
+    assert _names(verdict.rows) == ["docs__a"]
+    assert _names(verdict.unjudged) == ["docs__s"]
+
+
+def test_the_judgement_names_them_when_the_doc_counts_are_unread_too():
+    rows = [_source(), _target()]
+
+    def boom(name):
+        raise RuntimeError("engine down")
+
+    verdict = rj.judge_off_profile_rows(rows, PROFILE, lambda: [_job("docs__s", disposition=KT)], boom, boom)
+    assert verdict.rows == [] and _names(verdict.unjudged) == ["docs__s"]
+
+
+def test_a_judged_catalog_has_nothing_unjudged():
+    rows = [_source(), _target()]
+    verdict = rj.judge_off_profile_rows(rows, PROFILE, lambda: [_job("docs__s", disposition="kept_by_flag")],
+                                        lambda n: 0, lambda n: 0)
+    assert verdict.rows == [] and verdict.unjudged == []
+
+    def no_jobs():
+        raise AssertionError("jobs were read with no superseded row in the catalog")
+
+    # No superseded row: no job read, nothing to judge.
+    assert rj.judge_off_profile_rows([_row("docs__a")], PROFILE, no_jobs, lambda n: 0, lambda n: 0).unjudged == []
+
+
+def test_the_collections_form_carries_the_unjudged_rows():
+    reader = _Reader([_source(), _target()], live={"docs__s": 1})
+
+    def boom():
+        raise RuntimeError("engine down")
+
+    verdict = rj.judge_off_profile_collections(reader, rows=reader.list_collections(), profile=PROFILE, jobs=boom)
+    assert _names(verdict.unjudged) == ["docs__s"]
+    # The list form the hint reads is unchanged.
+    assert rj.off_profile_collections(reader, rows=reader.list_collections(), profile=PROFILE, jobs=boom) == []
+
