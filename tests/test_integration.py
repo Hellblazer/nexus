@@ -303,7 +303,10 @@ def keyed_local_voyage(monkeypatch: pytest.MonkeyPatch) -> None:
     They run on the suite's own engine substrate (every ``integration`` test gets a
     tenant on it), which must be keyed and on the Voyage profile: the substrate inherits
     ``NX_VOYAGE_API_KEY`` and ``NX_EMBED_PROFILE=voyage`` from the environment, and
-    tests/e2e/dual-embedder-gate.sh runs them that way."""
+    tests/e2e/dual-embedder-gate.sh runs them that way. Selected anywhere else
+    with a key present (a hand ``-m integration``), they run on the default bge
+    substrate and fail loud on the engine's profile refusal; deselect them with
+    ``not cloud_mode``."""
     monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-context-3")
 
 

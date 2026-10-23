@@ -261,6 +261,15 @@ grep -qE -- '-m "integration and cloud_mode"' <<<"$cm_body" && grep -qE 'NX_EMBE
   && grep -qE 'dg_with_key uv run pytest' <<<"$cm_body" && grep -qE 'exit[[:space:]]+1' <<<"$cm_body" \
   && ok "the cloud_mode leg selects the marker with the key and the Voyage profile and exits 1 on a short count" \
   || bad "the cloud_mode leg lost its marker selection, its key, its Voyage profile or its exit 1"
+# The count itself: both the passed and the total comparisons against the expected count.
+cm_compares() { grep -oE -- '-ne "\$DG_CLOUD_MODE_EXPECTED"' <<<"$1" | wc -l | tr -d ' '; }
+[[ "$(cm_compares "$cm_body")" -eq 2 ]] \
+  && ok "the cloud_mode leg compares both the passed and the total count with DG_CLOUD_MODE_EXPECTED" \
+  || bad "the cloud_mode leg compares $(cm_compares "$cm_body") of 2 counts with DG_CLOUD_MODE_EXPECTED"
+mut_body="$(sed 's/ || \[ "\$passed" -ne "\$DG_CLOUD_MODE_EXPECTED" \]//' <<<"$cm_body")"
+[[ "$(cm_compares "$mut_body")" -eq 1 ]] \
+  && ok "a leg with the passed-count comparison removed reads as 1 of 2 (positive control)" \
+  || bad "the count-comparison pin does not notice a removed comparison"
 
 # ── Behaviour: the checks fail when a family is missing (nexus-clvut) ────────
 echo "Test 5: the gate's checks against a canned engine"

@@ -3811,16 +3811,15 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # `_MODE_LINT_EXCLUDE_NODEIDS_CEILING` changelog.
     #
     # REAL keyed integration tests (-m integration, @requires_voyage_key):
-    # these derive cloud mode from GENUINE credentials — the cloud_mode
-    # fixture would OVERWRITE the real VOYAGE_API_KEY with the "vk_test"
-    # fake and break them against the live API (caught by the local-service
-    # gate during the 6.10.1 release: voyageai AuthenticationError; the
-    # default-marker full suite deselects -m integration, so only the gate
-    # runs these). Their mode declaration IS the requires-key gating itself
-    # — the credential gate is the explicit opt-in this lint otherwise
-    # requires via the `cloud_mode` fixture, just expressed through a
-    # different mechanism (a real key, not a fake one), so this is a
-    # documented, permanent floor, not a burn-down target.
+    # these need GENUINE credentials — the cloud_mode fixture would
+    # OVERWRITE the real VOYAGE_API_KEY with the "vk_test" fake and turn
+    # is_local_mode False (caught during the 6.10.1 release: voyageai
+    # AuthenticationError). Their mode declaration is the requires-key
+    # gating plus the `keyed_local_voyage` fixture (local mode, a Voyage
+    # local.embed_model). Since nexus-8errq the local-service gate deselects
+    # them (`cloud_mode` marker) and tests/e2e/dual-embedder-gate.sh runs
+    # them on a keyed, Voyage-profile engine substrate. A documented,
+    # permanent floor, not a burn-down target.
     "tests/test_integration.py::test_voyage_code3_index_and_query",
     "tests/test_integration.py::test_cce_query_retrieves_cce_indexed_markdown",
     "tests/test_integration.py::test_t3_put_embedding_model_in_search_metadata",

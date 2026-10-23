@@ -560,8 +560,9 @@ dg_seed_voyage_collection() {
 }
 
 # dg_run_cloud_mode_tests: the three tests tests/test_integration.py marks cloud_mode (nexus-8errq):
-# voyage-code-3 index and query, a voyage-context-3 markdown index through index_markdown, and the
-# embedding_model a search hit carries. local-service-gate.sh runs keyless and deselects them, so this is
+# voyage-code-3 index and query, a voyage-context-3 markdown index through index_markdown, and a
+# voyage-context-3 note write (their embedding_model asserts echo client-side metadata; what they prove is
+# that the engine embeds and serves those collections). local-service-gate.sh runs keyless and deselects them, so this is
 # their only gate. They are a keyed local install: their keyed_local_voyage fixture gives the client a
 # Voyage local.embed_model, and, like every integration test, they run on the suite's own engine
 # substrate (built from this tree's jar), which inherits the key and NX_EMBED_PROFILE=voyage from this

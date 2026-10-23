@@ -293,6 +293,8 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 1
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).
+# Note, nexus-8errq (2026-10-23, count unchanged): the three now run only in
+# tests/e2e/dual-embedder-gate.sh, with the keyed_local_voyage fixture.
 # 46 -> 55 (RDR-185 P4 harvest): +9 ladder tests, reason
 # "string-literal-as-name" — each builds a conformant RDR-103 collection name
 # (or a classification carrying the name's model SEGMENT) and asserts on
