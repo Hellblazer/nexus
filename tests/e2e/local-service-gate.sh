@@ -68,9 +68,9 @@ export NX_ALLOW_PROD_WRITE="local-service-gate: self-provisioned throwaway servi
 # client release (nexus-wypwq), so an installed local service is still one
 # posture today. Tests that need the SERVICE to embed voyage-* collections
 # are cloud-mode tests, marked `cloud_mode` and deselected here; the gate
-# needs no Voyage key for its own corpus.
-# COVERAGE GAP: no gate in this repo boots the local service keyed, dual
-# or not, so a keyed local engine is untested end-to-end.
+# needs no Voyage key for its own corpus. The keyed local engine has its own
+# gate, tests/e2e/dual-embedder-gate.sh (release battery and by hand), which
+# also runs the cloud_mode tests (nexus-8errq).
 #
 # It used to carry those tests and pass, because it was never actually running
 # local: the CHROMA_* secrets made is_local_mode() answer False, `nx init
@@ -985,10 +985,9 @@ fi
 # split corpus.
 #
 # So the three go, and they go by MARKER rather than by -k pattern so the
-# reason travels with the test. They still need a cloud-mode home — see
-# tests/e2e/cloud-client-path-gate.sh and nexus-w6h2m; until they have one the
-# voyage/CCE embedding path has NO gate, and that is a known, recorded gap
-# rather than an accident.
+# reason travels with the test. Their home is tests/e2e/dual-embedder-gate.sh
+# (nexus-8errq), which runs them against a keyed, Voyage-profile local engine
+# and demands exactly this count; its guard test pins the two counts equal.
 CLOUD_MODE_EXPECTED=3
 CLOUD_MODE_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and cloud_mode" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$CLOUD_MODE_COUNT" -ne "$CLOUD_MODE_EXPECTED" ]; then
