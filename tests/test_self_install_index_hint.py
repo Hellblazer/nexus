@@ -376,6 +376,20 @@ class TestTheMacosFloorHint:
     def test_an_unrelated_darwin_failure_gets_none(self):
         assert self_cmd.platform_failure_hint(_RESOLVER_FAILURE, system="darwin") is None
 
+    @pytest.mark.parametrize("stderr", [
+        # A network failure on a supported Mac prints the macOS 14 wheel's URL.
+        "error: Failed to download `onnxruntime==1.24.2`\n  Caused by: Request failed after 3 retries\n"
+        "  Caused by: https://files.pythonhosted.org/packages/ab/cd/"
+        "onnxruntime-1.24.2-cp312-cp312-macosx_14_0_arm64.whl: operation timed out\n",
+        # Another package with no wheel for this platform is not the macOS floor.
+        "error: Distribution `somepkg==1.0` can't be installed because it doesn't have a "
+        "source distribution or wheel for the current platform\n",
+        # A platform-tag failure that names a supported macOS is not the floor either.
+        "error: `foo==2.0` has no wheels with a matching platform tag (e.g. `macosx_15_0_arm64`)\n",
+    ])
+    def test_a_darwin_failure_that_is_not_the_floor_gets_none(self, stderr):
+        assert self_cmd.platform_failure_hint(stderr, system="darwin") is None
+
     def test_the_build_failure_message_carries_it_above_uvs_output(self, tmp_path, monkeypatch):
         monkeypatch.setattr(self_cmd, "_host_system", lambda: "darwin")
         script = tmp_path / "fake_install_generation.sh"

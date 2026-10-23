@@ -580,6 +580,7 @@ def test_a_failed_constrained_install_leaves_no_generation(tmp_path: Path) -> No
     assert len(installs) == 2 and "--constraints" in installs[1], installs
     tools = tmp_path / "tools"
     assert [d for d in tools.glob("gen-*") if (d / "nexus-install.json").exists()] == []
+    assert list(tools.glob("gen-*")) == [], "the half-built tree is removed, not left behind"
     assert not (tools / "current").exists() and not (tools / "current").is_symlink()
 
 

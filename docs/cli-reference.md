@@ -4390,7 +4390,9 @@ converge it with `nx self install`. A GPU build of torch on Linux
 lock with its `+cpu` labels, so it cannot pick a CUDA build.
 
 **Taking a dependency fix ahead of a release: `NX_INSTALL_UNPINNED=1`.** Set it
-on the command (`NX_INSTALL_UNPINNED=1 nx self install`) and the builder skips the
+on the command (`NX_INSTALL_UNPINNED=1 nx self install`), never exported in a shell
+profile (the session hook's background upgrades would inherit it and install
+unpinned, with the warning only in `<config>/logs/upgrade-auto-child.log`), and the builder skips the
 pin: one install that resolves every dependency fresh from the package index,
 and a warning that the install is not pinned to the release's lock. Use it when a
 transitive dependency has a security fix the release's lock does not yet carry.

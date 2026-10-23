@@ -973,8 +973,12 @@ def _echo_build_warnings(stderr: str) -> None:
 #: uv's wording when a pinned wheel has no build for this platform tag, e.g.
 #: "onnxruntime==1.24.2 has no wheels with a matching platform tag (e.g.,
 #: `macosx_13_0_arm64`)". Matched only on macOS (see platform_failure_hint).
+# uv's resolver failure for a wheel with no tag for this macOS: "... has no wheels
+# with a matching platform tag (e.g. `macosx_13_0_arm64`)". Only that phrase, and
+# only with a macOS below 14 named, carries the floor; a wheel URL in a network
+# failure or another package's "current platform" error does not.
 _PLATFORM_TAG_FAILURE_RE = re.compile(
-    r"matching platform tag|current platform|macosx_\d+_\d+_\w+", re.IGNORECASE,
+    r"matching platform tag.{0,40}?macosx_(?:1[0-3]|[1-9])_\d+_", re.IGNORECASE | re.DOTALL,
 )
 
 
