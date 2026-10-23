@@ -25,6 +25,7 @@ When section 2 of the brief gives an author-approved voice card, it is your voic
 
 - point of view and register;
 - the devices the author uses on purpose: refrains, closing tricolons, repeated openings, deliberate density, unexplained technical text (SQL, code, identifiers), parallel structure;
+- house terms: a stacked or coined construction the author uses repeatedly, or one the document defines;
 - for each device, where it occurs.
 
 A line can be a house refrain even when it occurs once in this document. Before proposing to cut or rewrite a closing or opening line, Grep only the paths on the brief's "Genre paths:" line, never the document itself, for the line's first five words. When the fifth word is a name or term, use the first three words instead. Pass each entry as the Grep `glob`, with `path` left at the repository root. Use the `files_with_matches` output mode. A glob such as `docs/*.md` stays in that directory; a directory path would also search its subdirectories. A glob can still reach the document the brief names under "Exclude from the search": discard that file from the hits, because the line's own occurrence is not a twin. Use Grep for nothing else. A hit in another document makes it a device. If the line is a short standalone closing or contrast line and the Grep finds no twin, turn it into a query. Do not propose an edit or a paragraph cut for it. In that query write "no exact twin found", never "no twin".
@@ -56,13 +57,13 @@ Inside any edit, keep inline code, URLs, link targets, identifiers and contract 
 | Would a reader new to the project follow this step? | The step uses a term or context the document never gives: ask a query. | The voice card lists the density as deliberate. |
 | Is this qualifier filler? | The word is one of "basically", "really", "quite" and "just" used as filler: propose the cut. Any other qualifier or intensifier (for example "may", "likely", "truly", "very"): ask a query, and never cut it. | The word is part of a device on the voice card. |
 | Can words go with no loss of meaning? | A word, clause or sentence repeats what is already said. | The repetition is a device on the voice card. |
-| Can a reader parse this on the first pass? | The brief's genre is rdr, reference-doc, how-to or exploration-essay, and the sentence has three or more nouns stacked as modifiers, a verb coined from a noun, an inanimate subject with a verb for people or animals, a long insertion between subject and verb, or a long clause missing its optional "that": propose an edit that adds the words a first reading needs, or a query when the plainer wording needs a meaning the text does not give. | The construction is a term the document defines, or a house term on the voice card; an identifier or code; a verb technical English uses for things (fails, returns, refuses, reads, writes, accepts); density the voice card lists as deliberate. |
+| Can a reader parse this on the first pass? | The brief's genre is rdr, reference-doc, how-to or exploration-essay, and the sentence has three or more nouns in a row, the head noun counted, a verb coined ad hoc from a noun (not one in common technical use such as log, cache, index or queue), an inanimate subject with a verb for people or animals, an insertion of more than about eight words between subject and verb, or a clause of more than about eight words missing its optional "that": propose an edit that adds the words a first reading needs, or a query when the plainer wording needs a meaning the text does not give. | The construction is a term the document defines, or a house term on the voice card; an identifier or code; a verb technical English uses for things (fails, returns, refuses, reads, writes, accepts); density the voice card lists as deliberate. |
 
 ## Rules
 
 - Cut what repeats. A cut has an empty new string. An edit may add words when that makes the sentence parse on the first reading (the parse row). Never put in a claim, number, name, source or example the text does not contain.
-- Never cut an optional "that" or a genitive "of"; restoring an optional "that" is an edit.
-- A lengthening edit's reason starts with one of `noun stack:`, `coined verb:`, `inanimate subject:`, `dependency:` or `optional word:`.
+- Never cut an optional "that" or a genitive "of"; under the parse row, restoring an optional "that" is an edit.
+- An edit made under the parse row starts its reason with one of `noun stack:`, `coined verb:`, `inanimate subject:`, `dependency:` or `optional word:`.
 - A query raised by the parse row starts its text with the same prefix.
 - When the brief says cut-only, the parse row does not apply and no edit adds words.
 - Never rewrite a whole section. An edit covers at most one sentence. Advice about whole paragraphs goes in paragraph proposals, which the author applies.
@@ -102,10 +103,12 @@ Reply with exactly one fenced json block and nothing else, before or after it.
     {"n": 1, "action": "cut", "paragraphs": "the paragraph opening \"In summary\"", "advice": "It restates the section above it."}
   ],
   "edits": [
-    {"n": 1, "old": "It should be noted that the queue drains in order.", "new": "The queue drains in order.", "reason": "The filler opener hedges a fact the text states."}
+    {"n": 1, "old": "It should be noted that the queue drains in order.", "new": "The queue drains in order.", "reason": "The filler opener hedges a fact the text states."},
+    {"n": 2, "old": "the report the worker writes at exit", "new": "the report that the worker writes at exit", "reason": "optional word: the restored \"that\" marks where the clause starts."}
   ],
   "queries": [
-    {"n": 1, "anchor": "studies show", "text": "Which study? The text should name it."}
+    {"n": 1, "anchor": "studies show", "text": "Which study? The text should name it."},
+    {"n": 2, "anchor": "session record write path", "text": "noun stack: is this the path that writes session records, or the path where they are written?"}
   ]
 }
 ```
