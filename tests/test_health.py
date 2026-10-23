@@ -1189,6 +1189,7 @@ def test_embedding_profile_off_profile_remedy_in_local_mode_is_the_reembed_job(m
     """nexus-s08oe, RDR-210 Monitored: in local mode the row suggests ``re-embed --all`` (dry run plans first)."""
     health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [_coll(_SRC, "code", _BGE)]))
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.reembed_job.local_jobs", lambda *a, **k: [])
     r = _by_label(health._check_embedding_profile(), "Collections off-profile")
     assert r.warn is True and _SRC in r.detail and "reads still route" in r.detail
     assert any("nx collection re-embed --all" in s for s in r.fix_suggestions)
