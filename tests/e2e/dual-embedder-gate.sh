@@ -568,13 +568,16 @@ dg_seed_voyage_collection() {
 # substrate (built from this tree's jar), which inherits the key and NX_EMBED_PROFILE=voyage from this
 # environment; under the bge profile the engine refuses a new Voyage collection. NX_SUITE_LEASE_WAIT=1
 # queues behind another substrate run on the box instead of refusing (the first live run met one).
+# NX_BUILD_LEASE_WAIT does the same for the build lease: the release battery runs this leg beside
+# local-service-gate.sh, which holds that lease while it stamps release.properties, and without the
+# wait the substrate refused at once and the leg went red with no verdict (7.85.0 battery, 2026-10-23).
 # EXACTLY three must pass: a test that did not run (no key reaching pytest, a deselect, a collection
 # error) is a short count and a FAIL.
 DG_CLOUD_MODE_EXPECTED=3
 dg_run_cloud_mode_tests() {
   local xml="$SCRATCH/cloud_mode.xml" rc=0 counts passed total
   echo "[dual-gate] ── cloud_mode tests: -m 'integration and cloud_mode' on a keyed Voyage-profile substrate ──"
-  NX_EMBED_PROFILE=voyage NX_SUITE_LEASE_WAIT=1 \
+  NX_EMBED_PROFILE=voyage NX_SUITE_LEASE_WAIT=1 NX_BUILD_LEASE_WAIT="${NX_BUILD_LEASE_WAIT:-3600}" \
     dg_with_key uv run pytest tests/test_integration.py -o addopts="" -m "integration and cloud_mode" \
     -q --color=no -p no:xdist --junit-xml="$xml" || rc=$?
   # A passed case has no failure, error or other outcome element under it.

@@ -437,6 +437,13 @@ expect_fail "a 503 that never clears fails" "CHECK FAILED: GET /health (code=503
   && ok "a 503 is retried to five tries in all" || bad "a 503 was sent $(( $(grep -c 'GET /health' "$REQS") - health_before )) times, not 5"
 rm -f "$SCEN/GET_health.code"
 
+# The cloud_mode pytest run waits for the build lease (the release battery runs this gate beside
+# local-service-gate.sh, which holds it while it stamps release.properties; 7.85.0 battery).
+cloud_call="$(grep -A1 'NX_BUILD_LEASE_WAIT="\${NX_BUILD_LEASE_WAIT:-' "$GATE" || true)"
+[[ "$cloud_call" =~ NX_BUILD_LEASE_WAIT=\"\$\{NX_BUILD_LEASE_WAIT:-[0-9]+\}\" && "$cloud_call" == *"pytest tests/test_integration.py"* ]] \
+  && ok "the cloud_mode pytest run waits for the build lease" \
+  || bad "the cloud_mode pytest run does not set NX_BUILD_LEASE_WAIT, so a parallel lease holder makes it refuse"
+
 echo
 echo "dual_embedder_gate_guard_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
