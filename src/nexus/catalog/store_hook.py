@@ -159,10 +159,11 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
 NOTE_SPLIT_CHARS = 1689
 
 
-def _note_window_model(collection: str) -> str:
-    """The embedding model whose token window a note in *collection* is split to
-    (nexus-z8mi2): the catalog row's ``embedding_model`` when a row backs the name,
-    else the model the name derives.
+def note_embedding_model(collection: str) -> str:
+    """The embedding model a note in *collection* is embedded with: the catalog row's
+    ``embedding_model`` when a row backs the name, else the model the name derives.
+    It picks the token window the note is split to (nexus-z8mi2) and the
+    ``embedding_model`` stamped on each chunk's metadata (nexus-ldh33), from one read.
 
     The row first because the engine embeds by the row. A legacy name carries no model
     token, so the derivation answers what the install embeds legacy names with NOW: a
@@ -225,7 +226,7 @@ def note_pieces(content: str, collection: str) -> list[str]:
     """
     from nexus.chunker import split_text_to_char_cap, split_text_to_token_window  # noqa: PLC0415 — deferred, heavy import graph
 
-    window = window_for_model(_note_window_model(collection))
+    window = window_for_model(note_embedding_model(collection))
     if window is None:
         # No window to fit: split for retrieval granularity instead.
         if len(content) <= NOTE_SPLIT_CHARS:

@@ -8153,6 +8153,7 @@ nexus-z0yd2
 nexus-z0ylb
 nexus-z1mu
 nexus-z1p8
+nexus-z1xox
 nexus-z1y0v
 nexus-z2k
 nexus-z2rop

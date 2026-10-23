@@ -254,10 +254,12 @@ def _chunk_payload(
     ``make_chunk_metadata`` factory, ``catalog_doc_id`` included), so a note reads back exactly as
     one written the old way. Identical pieces collapse to one chunk, as identical text always did.
     """
-    from nexus.corpus import index_model_for_collection  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+    from nexus.catalog.store_hook import note_embedding_model  # noqa: PLC0415 — deferred: circular-dep avoidance
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — deferred: circular-dep avoidance
 
-    model = index_model_for_collection(collection)
+    # The row's model, as the engine embeds by it (nexus-ldh33); the same cached read
+    # note_pieces chose the window from.
+    model = note_embedding_model(collection)
     now_iso = datetime.now(UTC).isoformat()
     out: list[dict] = []
     seen: set[str] = set()

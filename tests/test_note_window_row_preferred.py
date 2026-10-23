@@ -224,3 +224,61 @@ def test_a_row_wins_over_the_token_in_the_name(asked, monkeypatch, t3):
     store_hook.note_pieces(NOTE, name)
 
     assert asked == [VOYAGE]
+
+
+# nexus-ldh33: each chunk's metadata stamps the model the row names, the same one the
+# window came from, read from the same cached row (no second request).
+
+
+def _stamped(collection: str) -> list[str]:
+    from nexus.catalog.note_write import _chunk_payload
+
+    pieces = ["first piece", "second piece"]
+    rows = [{"chash": f"{i:064x}"} for i in range(len(pieces))]
+    chunks = _chunk_payload(
+        collection, pieces, rows, title="t", tags="", category="", session_id="",
+        source_agent="", ttl_days=None, catalog_doc_id="1.1.1", content_type="prose",
+    )
+    return [c["metadata"]["embedding_model"] for c in chunks]
+
+
+def test_a_legacy_bge_row_on_a_voyage_profile_stamps_bge(monkeypatch, t3):
+    _profile(monkeypatch, VOYAGE)
+    t3.rows = [_row(LEGACY, BGE)]
+
+    assert _stamped(LEGACY) == [BGE, BGE]
+
+
+def test_a_legacy_voyage_row_on_a_bge_profile_stamps_voyage(monkeypatch, t3):
+    _profile(monkeypatch, BGE)
+    t3.rows = [_row(LEGACY, VOYAGE)]
+
+    assert _stamped(LEGACY) == [VOYAGE, VOYAGE]
+
+
+def test_the_stamp_follows_the_row_over_the_token_in_the_name(monkeypatch, t3):
+    _profile(monkeypatch, BGE)
+    name = f"knowledge__legacy-subject__{BGE}__v1"
+    t3.rows = [_row(name, VOYAGE)]
+
+    assert _stamped(name) == [VOYAGE, VOYAGE]
+
+
+def test_a_legacy_name_with_no_row_stamps_the_profile_model(monkeypatch, t3):
+    # The name fallback is the calibrated one the window uses: the plain derivation
+    # stamped voyage-context-3 on a bge-profile install.
+    _profile(monkeypatch, BGE)
+
+    assert _stamped(LEGACY) == [BGE, BGE]
+
+
+def test_window_and_stamp_share_one_listing(asked, monkeypatch, t3):
+    _profile(monkeypatch, VOYAGE)
+    t3.rows = [_row(LEGACY, BGE)]
+
+    store_hook.note_pieces(NOTE, LEGACY)
+    stamped = _stamped(LEGACY)
+
+    assert asked == [BGE]
+    assert stamped == [BGE, BGE]
+    assert t3.listings == 1
