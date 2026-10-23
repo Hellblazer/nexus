@@ -152,7 +152,7 @@ dependencies = [
     # protect it) — an unbounded floor shipped 4 days of dead MCP servers to
     # every fresh install (nexus-l2ku5). Raise only with a deliberate 2.0
     # API migration, gated by the MVV's installed-venv handshake probe.
-    "mcp>=1.0,<2",
+    "mcp>=1.0,<3",
     "fastapi>=0.115,<1.0",
     # nexus-l2ku5 sibling (2026-08-14, gap 3 of T2
     # nexus/release-protocol-gap-audit-2026-08-14 [22511]): was fully
