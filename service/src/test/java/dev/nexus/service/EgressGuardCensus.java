@@ -19,31 +19,55 @@ import java.util.stream.Stream;
 /**
  * RDR-210 Technical Design 7 (nexus-qfy01): the source half of the egress guard.
  *
- * <p>The local engine connects only to the Voyage API ({@code api.voyageai.com}) from the three Voyage
- * classes, and only when keyed, and to its database at {@code NX_DB_URL} over JDBC. This scan holds that
- * by text over the main sources: comments are stripped (string literals are kept, because the Voyage
- * hosts live in them), then every outbound construct in {@link #CONSTRUCTS} must sit in a file on
- * {@link #ALLOWLIST}, with that construct named on the entry and a reason beside it.
+ * <p>The intent: the local engine connects only to the Voyage API ({@code api.voyageai.com}) from the three
+ * Voyage classes, and only when keyed, and to its database at {@code NX_DB_URL} over JDBC. This scan checks
+ * part of that by text over the main sources. Comments are stripped (string literals are kept, because the
+ * Voyage hosts live in them). Then every outbound construct in {@link #CONSTRUCTS} must sit in a file on
+ * {@link #ALLOWLIST}, with that construct named on the entry and a reason beside it. It does not check that
+ * the database URL comes from {@code NX_DB_URL}; see "Not checked".
  *
- * <p>This is a text scan of {@code service/src/main/java} for the constructs in {@link #CONSTRUCTS}, and
- * nothing more. It does not see any dependency's code: {@code java.net.http} used inside a library, raw
- * sockets, DNS or JNI inside a library (DJL's Rust tokenizers library does network I/O that no Java-level
- * check can see), or the behavior of the GraalVM native image the engine ships as. It also misses an
- * outbound call spelled through reflection, or reached by a type this list does not name; a static import
- * of a listed member is caught, and so are datagram sockets, DNS lookups, URL objects, socket factories, a
- * Runtime held in a variable, a ProxySelector and an http(s) string literal (nexus-3va7p). JDBC beyond
- * {@code DriverManager} (the Hikari pools, {@code ds.getConnection()}) is not checked at all. No test in this repository covers those gaps; {@code EgressRuntimeWitnessTest} is a
- * separate, narrower check and does not close them. Each allowlist entry pins an exact site count for its
- * file, so a second site in an allowlisted file fails; a file whose count falls short is stale and fails.
+ * <p>What it checks: the constructs in {@link #CONSTRUCTS}, including static imports of a listed member,
+ * datagram sockets, DNS lookups, URL objects, socket factories, a Runtime held in a variable, a
+ * ProxySelector and an http(s) string literal (nexus-3va7p). Each allowlist entry pins an exact site count
+ * for its file and, for the live entries, an exact count per construct, so a second site fails, a construct
+ * swapped for another at the same total fails, and a file whose count falls short is stale and fails.
  * Non-vacuity: {@link #scan} reports the sites it found, and the caller asserts the count is at least the
  * number the allowlist names.
+ *
+ * <p>Not checked, by this class or by any other test in the repository:
+ * <ul>
+ *   <li>JDBC beyond {@code DriverManager}: the Hikari pools and the roughly dozen {@code ds.getConnection()}
+ *       call sites, and that any URL comes from {@code NX_DB_URL};</li>
+ *   <li>any dependency's code, such as {@code java.net.http}, raw sockets or DNS used inside a library;</li>
+ *   <li>the GraalVM native image the engine ships as (the witnesses run on a JVM);</li>
+ *   <li>DJL's Rust tokenizers library, whose network I/O is JNI that no Java-level check sees;</li>
+ *   <li>{@code Main.goOffline()}, which the witness child does not run ({@code LocalTokenizers.build}
+ *       re-applies it), and an outbound call spelled through reflection or reached by a type this list does
+ *       not name.</li>
+ * </ul>
+ * {@code EgressRuntimeWitnessTest} and {@code EgressVoyageClientWitnessTest} are separate, narrower runtime
+ * checks and do not close these.
  *
  * <p>The scan takes its roots as arguments so a test can run it against a planted tree.
  */
 final class EgressGuardCensus {
 
-    /** One allowlist entry: the constructs the file may use, the exact number of sites it shows, and why. */
-    record Allow(Set<String> constructs, int sites, String reason) {
+    /**
+     * One allowlist entry: the constructs the file may use, the exact number of sites it shows, and why.
+     * {@code perConstruct}, when not empty, pins the exact count of each construct too, so swapping one
+     * construct for another at the same total fails (nexus-3va7p).
+     */
+    record Allow(Set<String> constructs, int sites, String reason, Map<String, Integer> perConstruct) {
+
+        Allow(Set<String> constructs, int sites, String reason) {
+            this(constructs, sites, reason, Map.of());
+        }
+
+        /** An entry that pins each construct's exact count; the construct set and the total follow from it. */
+        static Allow pinned(Map<String, Integer> perConstruct, String reason) {
+            return new Allow(Set.copyOf(perConstruct.keySet()),
+                perConstruct.values().stream().mapToInt(Integer::intValue).sum(), reason, perConstruct);
+        }
     }
 
     /** The outbound constructs, by name, with the pattern that finds each one in comment-stripped source. */
@@ -107,39 +131,36 @@ final class EgressGuardCensus {
 
     static final String VOYAGE_HOST = "api.voyageai.com";
 
-    /** What each Voyage class shows: its one client builder and its one URL constant. */
-    private static final Set<String> VOYAGE_CONSTRUCTS = Set.of("HttpClient.newBuilder", "http(s) URL literal");
+    /** What each Voyage class shows: exactly one client builder and exactly one URL constant. */
+    private static final Map<String, Integer> VOYAGE_SITES =
+        Map.of("HttpClient.newBuilder", 1, "http(s) URL literal", 1);
+
+    private static final Map<String, Integer> JDBC_SITE = Map.of("DriverManager.getConnection", 1);
 
     /** Path under the scanned root to its entry. The reason is the review record: say why, not what. */
     static final Map<String, Allow> ALLOWLIST = allowlist();
 
     private static Map<String, Allow> allowlist() {
         Map<String, Allow> m = new TreeMap<>();
-        m.put("dev/nexus/service/vectors/VoyageEmbedder.java", new Allow(
-            VOYAGE_CONSTRUCTS, 2, "Voyage embed call to api.voyageai.com." + VOYAGE_REASON_TAIL));
-        m.put("dev/nexus/service/vectors/CceEmbedder.java", new Allow(
-            VOYAGE_CONSTRUCTS, 2,
+        m.put("dev/nexus/service/vectors/VoyageEmbedder.java", Allow.pinned(VOYAGE_SITES,
+            "Voyage embed call to api.voyageai.com." + VOYAGE_REASON_TAIL));
+        m.put("dev/nexus/service/vectors/CceEmbedder.java", Allow.pinned(VOYAGE_SITES,
             "Voyage contextualized-embed call to api.voyageai.com." + VOYAGE_REASON_TAIL));
-        m.put("dev/nexus/service/vectors/VoyageReranker.java", new Allow(
-            VOYAGE_CONSTRUCTS, 2, "Voyage rerank call to api.voyageai.com." + VOYAGE_REASON_TAIL));
-        m.put("dev/nexus/service/vectors/PciBuilderSession.java", new Allow(
-            Set.of("DriverManager.getConnection"), 1,
+        m.put("dev/nexus/service/vectors/VoyageReranker.java", Allow.pinned(VOYAGE_SITES,
+            "Voyage rerank call to api.voyageai.com." + VOYAGE_REASON_TAIL));
+        m.put("dev/nexus/service/vectors/PciBuilderSession.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the index builder's dedicated session."));
-        m.put("dev/nexus/service/db/PoolerModeCheck.java", new Allow(
-            Set.of("DriverManager.getConnection"), 1,
+        m.put("dev/nexus/service/db/PoolerModeCheck.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the pooler-mode probe."));
-        m.put("dev/nexus/service/db/EngineSingletonLock.java", new Allow(
-            Set.of("DriverManager.getConnection"), 1,
+        m.put("dev/nexus/service/db/EngineSingletonLock.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the one-engine-per-database lock connection, outside the pool."));
-        m.put("dev/nexus/service/db/BackendReaper.java", new Allow(
-            Set.of("DriverManager.getConnection"), 1,
+        m.put("dev/nexus/service/db/BackendReaper.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the stale-backend reaper."));
-        m.put("dev/nexus/service/vectors/EgressProxy.java", new Allow(
-            Set.of("ProxySelector.of/setDefault/getDefault", "http(s) URL literal"), 2,
+        m.put("dev/nexus/service/vectors/EgressProxy.java", Allow.pinned(
+            Map.of("ProxySelector.of/setDefault/getDefault", 1, "http(s) URL literal", 1),
             "The operator's egress proxy selector for the Voyage clients, read from NX_HTTPS_PROXY / HTTPS_PROXY. "
             + "The literal is the scheme prefixed to a bare proxy host, not a destination."));
-        m.put("dev/nexus/service/db/SchemaMigrator.java", new Allow(
-            Set.of("http(s) URL literal"), 1,
+        m.put("dev/nexus/service/db/SchemaMigrator.java", Allow.pinned(Map.of("http(s) URL literal", 1),
             "A documentation link inside an error message (the migration runbook); nothing connects to it."));
         return java.util.Collections.unmodifiableMap(m);
     }
@@ -247,6 +268,13 @@ final class EgressGuardCensus {
             allowlistSites += e.getValue().sites();
             if (e.getValue().reason() == null || e.getValue().reason().isBlank()) {
                 problems.add(e.getKey() + " is on the allowlist without a reason");
+            }
+            Map<String, Integer> seenByConstruct = byConstruct.getOrDefault(e.getKey(), Map.of());
+            if (!e.getValue().perConstruct().isEmpty()
+                && !new TreeMap<>(e.getValue().perConstruct()).equals(new TreeMap<>(seenByConstruct))) {
+                problems.add(e.getKey() + " is allowlisted per construct as " + new TreeMap<>(e.getValue().perConstruct())
+                    + " but shows " + new TreeMap<>(seenByConstruct)
+                    + ": a construct swapped for another at the same total needs a reviewed entry");
             }
             int seen = sitesByFile.getOrDefault(e.getKey(), 0);
             if (seen < e.getValue().sites()) {
@@ -395,6 +423,11 @@ final class EgressGuardCensus {
      * Liquibase reads its analytics switch when its scope first initializes, so a {@code System.setProperty}
      * that comes after the first Liquibase use in the same file is too late. Takes comment-stripped Java.
      * A file that sets no such property, or uses no Liquibase, has no ordering to get wrong.
+     *
+     * <p>Vacuous on the live tree today, on purpose and in the open: liquibase is 4.29, no main file sets the
+     * property, and {@link #analyticsSetPropertySites} counts that zero so a test can assert it. The logic is
+     * proven only by the planted fixtures. The order is per file and textual, not a control-flow or
+     * cross-file ordering: a switch set in one file and Liquibase used first in another is not seen.
      */
     static List<String> analyticsOrderProblems(String name, String strippedJava) {
         Matcher set = ANALYTICS_SET_PROPERTY.matcher(strippedJava);
@@ -404,6 +437,20 @@ final class EgressGuardCensus {
                 + "offset " + use.start() + " before " + set.start() + "): the switch is read too late");
         }
         return List.of();
+    }
+
+    /** The number of {@code System.setProperty("liquibase.analytics.enabled"...)} sites in the main sources. */
+    static int analyticsSetPropertySites(Path mainJavaRoot) throws IOException {
+        int n = 0;
+        try (Stream<Path> walk = Files.walk(mainJavaRoot)) {
+            for (Path f : (Iterable<Path>) walk.filter(x -> x.toString().endsWith(".java"))::iterator) {
+                Matcher m = ANALYTICS_SET_PROPERTY.matcher(stripComments(Files.readString(f)));
+                while (m.find()) {
+                    n++;
+                }
+            }
+        }
+        return n;
     }
 
     /** {@link #analyticsOrderProblems} over every main source file. */

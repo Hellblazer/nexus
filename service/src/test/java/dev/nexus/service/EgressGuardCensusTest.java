@@ -84,7 +84,39 @@ class EgressGuardCensusTest {
 
     @Test
     void liveMain_noFileSetsTheAnalyticsSwitchAfterItsFirstLiquibaseUse() throws IOException {
+        int sites = EgressGuardCensus.analyticsSetPropertySites(MAIN);
+        System.out.println("EGRESS_ANALYTICS_ORDER setPropertySitesExamined=" + sites);
         assertThat(EgressGuardCensus.analyticsOrderProblems(MAIN)).isEmpty();
+        // Vacuous on purpose and stated: liquibase is 4.29 and nothing sets the switch, so there is no order
+        // to check on the live tree. The planted fixtures below prove the logic. When a setProperty site
+        // appears (a 4.30+ upgrade), this assertion fails and forces the live ordering to be looked at.
+        assertThat(sites).as("non-vacuity, inverted: the live scan found no setProperty site, so the ordering "
+            + "check examined nothing; the fixture proves the logic").isZero();
+    }
+
+    @Test
+    void fixture_aConstructSwappedForAnotherAtTheSameTotalFailsThePerConstructPin() throws IOException {
+        Map<String, EgressGuardCensus.Allow> pinned = Map.of(VOYAGE, EgressGuardCensus.Allow.pinned(
+            Map.of("HttpClient.newBuilder", 1, "http(s) URL literal", 1), "fixture"));
+        plant(VOYAGE, GOOD_VOYAGE_CLASS);
+        assertThat(EgressGuardCensus.scan(dir, pinned, List.of()).problems()).isEmpty();
+
+        // The URL literal swapped for a second builder: still two sites, still only constructs the entry names.
+        plant(VOYAGE, GOOD_VOYAGE_CLASS.replace("\"https://api.voyageai.com/v1/embeddings\"", "null")
+            .replace("HttpClient c()", "HttpClient d() { return HttpClient.newBuilder().build(); }\n    HttpClient c()"));
+        EgressGuardCensus.Report r = EgressGuardCensus.scan(dir, pinned, List.of());
+        assertThat(r.sitesFound()).as("same total as the clean class").isEqualTo(2);
+        assertThat(r.problems()).as("the total-only pin would have passed this").anyMatch(p -> p.contains("swapped"));
+    }
+
+    @Test
+    void liveAllowlist_everyEntryPinsItsConstructsOneByOne() {
+        assertThat(EgressGuardCensus.ALLOWLIST).allSatisfy((file, allow) -> {
+            assertThat(allow.perConstruct()).as(file).isNotEmpty();
+            assertThat(allow.perConstruct().keySet()).as(file).isEqualTo(allow.constructs());
+            assertThat(allow.perConstruct().values().stream().mapToInt(Integer::intValue).sum()).as(file)
+                .isEqualTo(allow.sites());
+        });
     }
 
     // ---- negative fixtures: the census itself is not vacuous --------------------------------------

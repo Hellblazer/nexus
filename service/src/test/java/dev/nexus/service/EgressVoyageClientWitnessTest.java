@@ -38,12 +38,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * public default constructor in a child JVM whose {@code NX_HTTPS_PROXY} names a recording proxy on port 0,
  * makes one request, and reads the {@code CONNECT host:port} line the JDK client sends to the proxy: that line
  * is the host the shipped constructor actually dials, and the recording proxy refuses it, so nothing leaves the
- * machine. The same child JVM is the "keyless boot" check: with no key, the router and the reranker plan build
- * no Voyage client, which shows as no {@code HttpClient-*-SelectorManager} thread (the JDK starts one the
- * moment an {@code HttpClient} is built), with a keyed positive control proving the detector sees one.
+ * machine. Only the FIRST dial of each client is judged: the child is killed once the proxy has recorded one
+ * request, so a later retry or a second request to another host is not seen.
  *
- * <p>It does not cover Main itself (the wiring order is pinned by {@code MainEmbedProfileWiringTest}), a
- * dependency's own network use, or the GraalVM native image.
+ * <p>The same child JVM carries the keyless check, and its reach is narrow. The router is hand-built here
+ * ({@code new EmbedderRouter(localFake, key, ...)} for nine key and profile shapes) and the reranker plan is
+ * hand-built from {@code BootPlan.decide} with a supplier that is handed a null key. Nothing here runs Main:
+ * Main's derivation of {@code voyagePresent} and {@code routerKey} from {@code NX_VOYAGE_API_KEY}, and that its
+ * reranker supplier is the plan's, are covered only by the {@code indexOf} order pins in
+ * {@code MainEmbedProfileWiringTest}. What this test does show is that those constructors, given no key, start
+ * no {@code HttpClient}: the JDK starts an {@code HttpClient-N-SelectorManager} thread the moment a client is
+ * built, so no such thread is a client never built. A keyed run is the positive control for the router and for
+ * the Voyage reranker, each of which must raise the thread count.
+ *
+ * <p>It does not cover Main itself, a dependency's own network use, or the GraalVM native image.
  */
 class EgressVoyageClientWitnessTest {
 
@@ -111,7 +119,7 @@ class EgressVoyageClientWitnessTest {
             }
             for (EmbeddingProfile profile : EmbeddingProfile.values()) {
                 BootPlan plan = BootPlan.decide(presence(false), profile);
-                // Main's supplier, verbatim: it must never run without a key.
+                // The shape of Main's supplier, handed a null key here; it must never run without a key.
                 Reranker built = plan.buildReranker(
                     () -> new VoyageReranker(null, VoyageReranker.DEFAULT_MODEL), Child::fakeReranker,
                     new LocalOnnxAdmission(1, 1000));
@@ -120,11 +128,17 @@ class EgressVoyageClientWitnessTest {
             System.out.println("HTTP_CLIENT_THREADS " + httpClientThreads());
         }
 
-        /** The positive control: a keyed router does build Voyage clients, and the detector sees them. */
+        /** The positive control: a keyed router and a keyed Voyage reranker do build clients, and the detector sees them. */
         private static void keyed() {
             System.out.println("BASELINE " + httpClientThreads());
             EmbedderRouter r = new EmbedderRouter(localFake(), "witness-key", "document", EmbeddingProfile.VOYAGE);
             System.out.println("ROUTER mode=" + r.modeName() + " models=" + r.availableModels());
+            System.out.println("THREADS_AFTER_ROUTER " + httpClientThreads());
+            BootPlan plan = BootPlan.decide(presence(true), EmbeddingProfile.VOYAGE);
+            Reranker built = plan.buildReranker(
+                () -> new VoyageReranker("witness-key", VoyageReranker.DEFAULT_MODEL), Child::fakeReranker,
+                new LocalOnnxAdmission(1, 1000));
+            System.out.println("RERANKER token=" + built.modelToken());
             System.out.println("HTTP_CLIENT_THREADS " + httpClientThreads());
         }
     }
@@ -140,6 +154,7 @@ class EgressVoyageClientWitnessTest {
             acceptor = new Thread(() -> {
                 while (!server.isClosed()) {
                     try (Socket s = server.accept()) {
+                        s.setSoTimeout(10_000);
                         BufferedReader in = new BufferedReader(
                             new InputStreamReader(s.getInputStream(), StandardCharsets.US_ASCII));
                         String line = in.readLine();
@@ -250,8 +265,11 @@ class EgressVoyageClientWitnessTest {
             List<String> keyed = runChild("keyed", proxy, false);
             long keyedThreads = threadsLine(keyed);
             long keyedBase = baseline(keyed);
-            assertThat(keyedThreads).as("positive control: a keyed router builds Voyage HttpClients, and the "
-                + "detector sees their selector threads (%s)", keyed).isGreaterThan(keyedBase);
+            assertThat(threadsAfterRouter(keyed)).as("positive control: a keyed router builds Voyage HttpClients, "
+                + "and the detector sees their selector threads (%s)", keyed).isGreaterThan(keyedBase);
+            assertThat(keyedThreads).as("positive control: a keyed Voyage reranker builds one more (%s)", keyed)
+                .isGreaterThan(threadsAfterRouter(keyed));
+            assertThat(keyed).as("the keyed reranker was the Voyage one").contains("RERANKER token=rerank-2.5");
 
             List<String> keyless = runChild("keyless", proxy, false);
             assertThat(keyless).as("non-vacuity: all nine router shapes and both reranker plans ran")
@@ -268,6 +286,11 @@ class EgressVoyageClientWitnessTest {
     private static long threadsLine(List<String> lines) {
         return lines.stream().filter(l -> l.startsWith("HTTP_CLIENT_THREADS ")).mapToLong(l -> Long.parseLong(l.split(" ")[1]))
             .findFirst().orElseThrow(() -> new AssertionError("no HTTP_CLIENT_THREADS line in " + lines));
+    }
+
+    private static long threadsAfterRouter(List<String> lines) {
+        return lines.stream().filter(l -> l.startsWith("THREADS_AFTER_ROUTER ")).mapToLong(l -> Long.parseLong(l.split(" ")[1]))
+            .findFirst().orElseThrow(() -> new AssertionError("no THREADS_AFTER_ROUTER line in " + lines));
     }
 
     private static long baseline(List<String> lines) {

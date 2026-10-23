@@ -172,7 +172,7 @@ class EgressRuntimeWitnessTest {
     @Test
     @Order(1)
     void theBgeEmbedderAndTheCrossEncoderOpenNothingOutboundThroughAnEmbedAndARerank() throws Exception {
-        String[] paths = requireModelsOrSkip();
+        String[] paths = requireModelsOrSkip(System::getenv, defaultModelPaths(), () -> modelLegSkipped = true);
         List<String> lines = run("models", paths);
         assertThat(lines).as("non-vacuity: one embed and one rerank ran").contains("EMBED 768", "RERANK 2");
         assertNoOutboundOpen(lines);
@@ -236,21 +236,24 @@ class EgressRuntimeWitnessTest {
 
     /**
      * The four model paths, or a skip. A skip means nothing is provisioned; a partial provision fails, and so
-     * does {@value #REQUIRE_ENV}=1 with the files absent.
+     * does a required leg (see {@link #modelsRequired}) with the files absent. Takes the environment, the paths
+     * and the skip hook so a fixture drives the real decision path: the model leg passes {@code System::getenv}
+     * and records the skip, the fixture passes a map and a no-op.
      */
-    private static String[] requireModelsOrSkip() {
-        String[] paths = defaultModelPaths();
-        LegVerdict verdict = legVerdict(paths, MIN_BGE_BYTES, modelsRequired(System::getenv));
+    static String[] requireModelsOrSkip(java.util.function.Function<String, String> env, String[] paths,
+                                        Runnable onSkip) {
+        LegVerdict verdict = legVerdict(paths, MIN_BGE_BYTES, modelsRequired(env));
         String why = "bge or cross-encoder model files not complete under " + Path.of(paths[0]).getParent().getParent();
         switch (verdict) {
             case RUN -> {
                 return paths;
             }
-            case FAIL_REQUIRED -> fail("%s=1 but %s; provision them with `nx init --service`", REQUIRE_ENV, why);
+            case FAIL_REQUIRED -> fail("the model leg is required (%s=1 or GITHUB_ACTIONS=true) but %s; "
+                + "provision them with `nx init --service`", REQUIRE_ENV, why);
             case FAIL_PARTIAL -> fail("a model directory exists but is incomplete (%s): "
                 + "a half provision must not skip this witness", why);
             case SKIP -> {
-                modelLegSkipped = true;
+                onSkip.run();
                 Assumptions.assumeTrue(false, "SKIPPED (not passed): " + why
                     + ". The tokenizer leg and the fixtures still ran.");
             }
@@ -300,6 +303,24 @@ class EgressRuntimeWitnessTest {
         assertThat(modelsRequired(of.apply(Map.of(REQUIRE_ENV, "1")))).as("asked").isTrue();
         assertThat(modelsRequired(of.apply(Map.of("GITHUB_ACTIONS", "true")))).as("GitHub Actions").isTrue();
         assertThat(modelsRequired(of.apply(Map.of(REQUIRE_ENV, "0", "GITHUB_ACTIONS", "false")))).as("both off").isFalse();
+    }
+
+    @Test
+    void fixture_theModelLegDecisionPathFailsOnGithubActionsAndSkipsOnALaptopWhenNothingIsProvisioned() {
+        String[] none = {dir.resolve("m/bge/model.onnx").toString(), dir.resolve("m/bge/tokenizer.json").toString(),
+                         dir.resolve("m/ce/model.onnx").toString(), dir.resolve("m/ce/tokenizer.json").toString()};
+        java.util.concurrent.atomic.AtomicInteger skips = new java.util.concurrent.atomic.AtomicInteger();
+
+        assertThatThrownBy(() -> requireModelsOrSkip(Map.of("GITHUB_ACTIONS", "true")::get, none, skips::incrementAndGet))
+            .as("CI with no models is a failure, not a skip").isInstanceOf(AssertionError.class)
+            .isNotInstanceOf(org.opentest4j.TestAbortedException.class);
+        assertThatThrownBy(() -> requireModelsOrSkip(Map.of(REQUIRE_ENV, "1")::get, none, skips::incrementAndGet))
+            .isInstanceOf(AssertionError.class).isNotInstanceOf(org.opentest4j.TestAbortedException.class);
+        assertThat(skips).as("neither required run counted a skip").hasValue(0);
+
+        assertThatThrownBy(() -> requireModelsOrSkip(Map.<String, String>of()::get, none, skips::incrementAndGet))
+            .as("a laptop with nothing provisioned skips").isInstanceOf(org.opentest4j.TestAbortedException.class);
+        assertThat(skips).hasValue(1);
     }
 
     private static long size(String path) {
