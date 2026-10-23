@@ -46,6 +46,16 @@ cd "$SCRIPT_DIR" || exit 2
 
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WINLIKE=1 ;; *) WINLIKE=0 ;; esac
 
+# nexus-s5lfh: bounded docker calls, as native-smoke.sh bounds its own (nexus-ub4ge). GNU timeout on
+# Linux runners; gtimeout from Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call
+# runs unbounded as before.
+_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  else "$@"; fi
+}
+
 SHAPES_TMP=$(mktemp -d "${TMPDIR:-/tmp}/native-boot-shapes.XXXXXX") \
   || { echo "FAIL: cannot create scratch dir under ${TMPDIR:-/tmp}"; exit 2; }
 
@@ -59,7 +69,7 @@ leg_ok=0
 cleanup() {
   local rc=$?
   [ -n "$BOOT_PID" ] && kill -9 "$BOOT_PID" 2>/dev/null
-  [ "$OWN_PG" = "1" ] && docker rm -f "$PGC" >/dev/null 2>&1
+  [ "$OWN_PG" = "1" ] && _bounded 60 docker rm -f "$PGC" >/dev/null 2>&1
   if [ "$rc" = "0" ]; then
     rm -rf "$SHAPES_TMP"
   else
@@ -86,12 +96,12 @@ if [ -z "$PGC" ]; then
   OWN_PG=1
   PGC="nx-bootshapes-pg-$$"
   PGP=$(free_port)
-  docker rm -f "$PGC" >/dev/null 2>&1 || true
-  docker run -d --name "$PGC" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
+  _bounded 60 docker rm -f "$PGC" >/dev/null 2>&1 || true
+  _bounded 600 docker run -d --name "$PGC" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
     -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGP}:5432" pgvector/pgvector:pg17 >/dev/null \
     || { echo "FAIL: cannot start the throwaway pgvector container"; exit 2; }
-  for _ in $(seq 1 60); do docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
-  docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector never became ready"; exit 2; }
+  for _ in $(seq 1 60); do _bounded 10 docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
+  _bounded 10 docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector never became ready"; exit 2; }
   sleep 2
 fi
 [ -n "$PGP" ] || { echo "FAIL: BOOT_SHAPES_PG_CONTAINER set without BOOT_SHAPES_PG_PORT"; exit 2; }
@@ -107,8 +117,8 @@ boot_prepare() {
   BOOT_MODELS="$BOOT_DIR/onnx_models"
   BOOT_DB="bootshape_$(echo "$name" | tr -c 'a-zA-Z0-9' '_')"
   mkdir -p "$BOOT_DIR/jtmp" "$BOOT_DIR/home" "$BOOT_ORT" "$BOOT_MODELS"
-  docker exec "$PGC" psql -U nexus -d nexus -c "DROP DATABASE IF EXISTS $BOOT_DB;" >/dev/null 2>&1
-  docker exec "$PGC" psql -U nexus -d nexus -c "CREATE DATABASE $BOOT_DB;" >/dev/null 2>&1 \
+  _bounded 60 docker exec "$PGC" psql -U nexus -d nexus -c "DROP DATABASE IF EXISTS $BOOT_DB;" >/dev/null 2>&1
+  _bounded 60 docker exec "$PGC" psql -U nexus -d nexus -c "CREATE DATABASE $BOOT_DB;" >/dev/null 2>&1 \
     || { echo "FAIL: cannot create database $BOOT_DB in $PGC"; return 1; }
   BOOT_PORT=$(free_port)
 }

@@ -56,7 +56,7 @@ if [ -z "${NX_DB_URL:-}" ]; then
     _bounded 10 docker exec "$PGNAME" pg_isready -U nexus >/dev/null 2>&1 && { PG_UP=1; break; }
     sleep 1
   done
-  [ "$PG_UP" = "1" ] || { echo "FAIL: throwaway pgvector $PGNAME not ready after 90 s"; docker rm -f "$PGNAME" >/dev/null 2>&1; exit 2; }
+  [ "$PG_UP" = "1" ] || { echo "FAIL: throwaway pgvector $PGNAME not ready after 90 s"; _bounded 60 docker rm -f "$PGNAME" >/dev/null 2>&1; exit 2; }
   sleep 2
   export NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/nexus"
   export NX_DB_USER=nexus NX_DB_PASS=nexus
