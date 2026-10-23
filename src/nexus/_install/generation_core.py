@@ -429,6 +429,25 @@ def _run(argv: list[str], run, what: str) -> str:
     return done.stdout or ""
 
 
+#: Where a wheel's ``nexus/_install/constraints.txt`` lands in a venv:
+#: ``Lib/site-packages`` on Windows, ``lib/pythonX.Y/site-packages`` elsewhere.
+_SHIPPED_CONSTRAINTS_GLOBS = (
+    "Lib/site-packages/nexus/_install/constraints.txt",
+    "lib/python*/site-packages/nexus/_install/constraints.txt",
+)
+
+
+def _shipped_constraints(gen: Path) -> Path | None:
+    """The constraints file the package just installed into *gen* ships, or None
+    when it predates the file. Globbed, not asked of the venv's interpreter: the
+    layout is fixed and this must work before anything in the venv can run."""
+    for pattern in _SHIPPED_CONSTRAINTS_GLOBS:
+        for hit in sorted(gen.glob(pattern)):
+            if hit.is_file():
+                return hit
+    return None
+
+
 def _pyvenv_value(text: str, key: str) -> str:
     """The first ``key = value`` line of a ``pyvenv.cfg``, as ``sed -n 's/^key *= *//p'``."""
     for line in text.splitlines():
@@ -516,10 +535,25 @@ def build_generation(
             run, "uv venv",
         )
         (gen / layout.BUILDING_MARKER_NAME).touch()  # each phase gets the full claim window
-        install = [
-            "uv", "pip", "install", "--python", str(layout.venv_python(gen, platform=platform)),
-            "--overrides", str(overrides),
-        ]
+        python = str(layout.venv_python(gen, platform=platform))
+        if not constraints:
+            # nexus-2k66t.4.1, the twin of install_generation.sh: the constraints
+            # belong to the package being INSTALLED. Fetch it alone, read the
+            # constraints.txt it ships out of the new venv, then install with
+            # the dependencies under it. The file cannot come from the nexus
+            # running this code: on an upgrade that is the OLD release.
+            _run(["uv", "pip", "install", "--python", python, "--no-deps", spec], run, "uv pip install")
+            (gen / layout.BUILDING_MARKER_NAME).touch()
+            shipped = _shipped_constraints(gen)
+            if shipped is not None:
+                constraints = str(shipped)
+            else:
+                _emit([
+                    f"install_generation: WARNING: {spec} ships no nexus/_install/constraints.txt; "
+                    "its dependencies are resolved UNCONSTRAINED from the package index, so "
+                    "versions may differ from the release's uv.lock"
+                ])
+        install = ["uv", "pip", "install", "--python", python, "--overrides", str(overrides)]
         if constraints:
             install += ["--constraints", constraints]
         _run([*install, spec], run, "uv pip install")

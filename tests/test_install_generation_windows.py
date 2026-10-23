@@ -46,7 +46,7 @@ class FakeUv:
     def __init__(
         self, *, scripts=("nx", "nx-mcp"), home="C:\\py\\cpython-3.12", cfg_version="",
         fail_install: str | None = None, tool_dir: Path | None = None,
-        uv_bin: Path | None = None,
+        uv_bin: Path | None = None, ships_constraints: bool = True,
     ) -> None:
         self.calls: list[list[str]] = []
         self.scripts = scripts
@@ -55,6 +55,9 @@ class FakeUv:
         self.fail_install = fail_install
         self.tool_dir = tool_dir
         self.uv_bin = uv_bin
+        # nexus-2k66t.4.1: whether the installed package ships
+        # nexus/_install/constraints.txt (a release that predates it does not).
+        self.ships_constraints = ships_constraints
 
     def __call__(self, argv, **_kw):
         self.calls.append(list(argv))
@@ -80,6 +83,10 @@ class FakeUv:
                 return subprocess.CompletedProcess(argv, 1, "", self.fail_install)
             python = Path(argv[argv.index("--python") + 1])
             scripts = python.parent
+            if "--no-deps" in argv and self.ships_constraints:
+                shipped = scripts.parent / "Lib" / "site-packages" / "nexus" / "_install"
+                shipped.mkdir(parents=True, exist_ok=True)
+                (shipped / "constraints.txt").write_text("mcp==1.2.3\n")
             python.write_text("#!/bin/sh\nprintf '%s\\n' " + " ".join(self.scripts) + "\n")
             python.chmod(python.stat().st_mode | stat.S_IXUSR)
             for name in self.scripts:
@@ -123,8 +130,9 @@ class TestBuildGeneration:
     def test_the_commands_name_the_windows_interpreter_and_the_packaged_overrides(self, tools: Path) -> None:
         uv = FakeUv()
         gen = _build(tools, uv, python_version="3.12")
-        venv, install = uv.calls
+        venv, fetch, install = uv.calls
         assert venv == ["uv", "venv", "--allow-existing", "--python", "3.12", str(gen)]
+        assert fetch[:3] == ["uv", "pip", "install"] and "--no-deps" in fetch
         assert install[:3] == ["uv", "pip", "install"]
         assert install[install.index("--python") + 1] == str(gen / "Scripts" / "python.exe")
         overrides = Path(install[install.index("--overrides") + 1])
@@ -137,8 +145,38 @@ class TestBuildGeneration:
         pins.write_text("x==1\n")
         uv = FakeUv()
         _build(tools, uv, constraints=str(pins))
+        # An explicit file is the whole answer: one install, no fetch step.
+        assert len(uv.calls) == 2
         install = uv.calls[1]
         assert install[install.index("--constraints") + 1] == str(pins)
+        assert "--no-deps" not in install
+
+    def test_the_constraints_the_package_ships_are_used_when_none_is_given(
+        self, tools: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """nexus-2k66t.4.1, the Windows twin of install_generation.sh: fetch the
+        package alone, read ITS constraints.txt out of the new venv, install with
+        the dependencies under it. The running nexus's own file would pin an
+        upgrade to the old release's lock."""
+        uv = FakeUv()
+        gen = _build(tools, uv)
+        _venv, fetch, install = uv.calls
+        assert "--no-deps" in fetch and "--constraints" not in fetch
+        shipped = gen / "Lib" / "site-packages" / "nexus" / "_install" / "constraints.txt"
+        assert shipped.is_file()
+        assert install[install.index("--constraints") + 1] == str(shipped)
+        assert "--no-deps" not in install
+        assert "UNCONSTRAINED" not in capsys.readouterr().err
+
+    def test_a_package_without_the_file_installs_unconstrained_and_says_so(
+        self, tools: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        uv = FakeUv(ships_constraints=False)
+        _build(tools, uv)
+        install = uv.calls[-1]
+        assert "--constraints" not in install
+        err = capsys.readouterr().err
+        assert "UNCONSTRAINED" in err and "constraints.txt" in err
 
     def test_a_windows_build_fills_a_launcher_dir_with_copies_of_its_own_launchers(self, tools: Path) -> None:
         """<gen>\\bin holds a byte copy of each owned Scripts launcher, so each

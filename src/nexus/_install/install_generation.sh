@@ -14,7 +14,11 @@
 #
 # Usage:
 #   install_generation.sh --source <path-or-name> [--version X.Y.Z]
-#                         [--extras a,b] [--python 3.12]
+#                         [--extras a,b] [--python 3.12] [--constraints FILE]
+#
+# --constraints FILE overrides the constraints the installed package ships
+# (the checkout flow exports its live uv.lock); see "install the versions the
+# release's uv.lock resolved" below.
 #
 # Prints the generation directory it built on stdout. The caller (.3's flip)
 # consumes that rather than re-deriving the stamp, because re-deriving would
@@ -189,6 +193,38 @@ OVERRIDES="$_here/overrides.txt"
 TORCH_ARGS=()
 if [ "$(uname -s)" = "Linux" ]; then
     TORCH_ARGS=(--torch-backend "${NX_TORCH_BACKEND:-cpu}")
+fi
+# nexus-2k66t.4.1: install the versions the release's uv.lock resolved, not a
+# fresh PyPI resolution. Measured 2026-10-23: an installed generation ran
+# onnxruntime 1.31.0, opencv 5.0 and pymupdf 1.28.2 against a lock of 1.24.2,
+# 4.13 and 1.27.1, because nothing passed a constraints file (nexus-l2ku5 was
+# this class: mcp 2.0.0 resolved off PyPI killed both MCP servers for 4 days).
+#
+# Two sources, one rule: the constraints belong to the package being INSTALLED.
+#   * --constraints FILE (the checkout flow: reinstall-tool.sh exports the live
+#     uv.lock) is used as given, in one install.
+#   * Otherwise the package is fetched ALONE (--no-deps) and the constraints.txt
+#     it ships (src/nexus/_install/constraints.txt, generated from uv.lock by
+#     scripts/regen-install-constraints.sh) is read out of the new venv, then
+#     the install runs again with the dependencies under it. The file cannot
+#     come from the nexus running THIS script: on an upgrade that is the OLD
+#     release, and its lock would pin the new release to old versions.
+if [ -z "$CONSTRAINTS" ]; then
+    uv pip install --python "$GEN/bin/python" --no-deps "$SPEC" >&2
+    touch "$GEN/$NX_BUILDING_MARKER_NAME"
+    # A glob, not a probe of the venv's interpreter: the layout is fixed
+    # (lib/pythonX.Y/site-packages) and a stub or half-built venv cannot run
+    # code. nullglob is not set, so an unmatched pattern stays literal and
+    # fails the -f test below.
+    for _candidate in "$GEN"/lib/python*/site-packages/nexus/_install/constraints.txt; do
+        if [ -f "$_candidate" ]; then CONSTRAINTS="$_candidate"; break; fi
+    done
+    if [ -z "$CONSTRAINTS" ]; then
+        # A release that predates the file (a deliberate rollback via
+        # --version). Installing still beats refusing, but it must not look
+        # pinned: say so where the operator will read it.
+        echo "install_generation: WARNING: ${SPEC} ships no nexus/_install/constraints.txt; its dependencies are resolved UNCONSTRAINED from the package index, so versions may differ from the release's uv.lock" >&2
+    fi
 fi
 if [ -n "$CONSTRAINTS" ]; then
     uv pip install --python "$GEN/bin/python" ${TORCH_ARGS[@]+"${TORCH_ARGS[@]}"} --overrides "$OVERRIDES" --constraints "$CONSTRAINTS" "$SPEC" >&2

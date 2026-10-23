@@ -4366,6 +4366,24 @@ keep the old `nx` until restarted. A legacy `uv tool install` tree is migrated
 on the first run and its old launchers are removed by `nx self gc` once
 nothing runs them. The installer runs in Python there, never through `bash`.
 
+**Dependency versions follow the release's `uv.lock` (nexus-2k66t.4.1).** Every
+generation build installs the versions the release locked, not a fresh package-index
+resolution. The wheel ships `nexus/_install/constraints.txt`, generated from
+`uv.lock` by `scripts/regen-install-constraints.sh` (runtime set plus every extra,
+platform markers kept), and the builder reads it out of the package it is about to
+install: it fetches the package alone (`uv pip install --no-deps`), then installs it
+with the dependencies under `--constraints`. The file comes from the package being
+installed, not from the `nx` running the command, so an upgrade is held to the NEW
+release's lock. A package that predates the file (a rollback with `--version`)
+still installs, with a warning on stderr that its dependencies were resolved
+unconstrained. The same rule covers `--bootstrap`, the legacy-tree convergence and,
+on Windows, the Python builder. `scripts/reinstall-tool.sh` from a checkout exports
+the checkout's own `uv.lock` instead, so a lock edit not yet regenerated into the
+shipped file is still what a developer's install runs. A local `uv tool install
+conexus` or `pip install conexus` is not an `nx` install path and is not pinned;
+converge it with `nx self install`. A GPU build of torch on Linux
+(`NX_TORCH_BACKEND=auto`) still resolves: the pins carry no `+cpu` local label.
+
 **First install from nothing: `--bootstrap` (RDR-228, nexus-sv2wx.14).** The
 plain command refuses a program that is not a generation or a packaged
 install, which includes the throwaway `uv` environment that

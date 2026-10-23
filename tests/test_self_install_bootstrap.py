@@ -74,17 +74,24 @@ def _running_version() -> str:
     return importlib.metadata.version("conexus")
 
 
-def _write_standin_wheel(index: Path, version: str) -> None:
+def _write_standin_wheel(
+    index: Path, version: str, *, requires: tuple[str, ...] = (), constraints: str | None = None,
+) -> None:
     """A minimal ``conexus`` wheel declaring the ``nx`` and ``nx-mcp`` scripts.
 
     Built with ``zipfile``: no build backend, no network. The RECORD lists every
     file so ``uv`` can install and later uninstall it.
+
+    *requires* adds ``Requires-Dist`` lines; *constraints* is shipped as the
+    wheel's ``nexus/_install/constraints.txt`` (nexus-2k66t.4.1), the file the
+    real wheel carries and the installer reads back out of the new venv.
     """
     dist_info = f"conexus-{version}.dist-info"
     files = {
         "conexus_stub/__init__.py": f"def main():\n    print('stand-in nx {version}')\n",
         f"{dist_info}/METADATA": (
             f"Metadata-Version: 2.1\nName: conexus\nVersion: {version}\n"
+            + "".join(f"Requires-Dist: {req}\n" for req in requires)
         ),
         f"{dist_info}/WHEEL": (
             "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
@@ -93,6 +100,8 @@ def _write_standin_wheel(index: Path, version: str) -> None:
             "[console_scripts]\nnx = conexus_stub:main\nnx-mcp = conexus_stub:main\n"
         ),
     }
+    if constraints is not None:
+        files["nexus/_install/constraints.txt"] = constraints
     record = [
         f"{name},sha256={hashlib.sha256(body.encode()).hexdigest()},{len(body.encode())}"
         for name, body in files.items()
@@ -107,9 +116,35 @@ def _write_standin_wheel(index: Path, version: str) -> None:
     _write_index_page(index)
 
 
-def _write_index_page(index: Path) -> None:
-    """The PEP 503 page for ``conexus``: one link per wheel now in the directory."""
-    project = index / "conexus"
+def _write_standin_dependency(index: Path, name: str, version: str) -> None:
+    """A dependency of the stand-in ``conexus``: a wheel with one module, and its
+    PEP 503 page, in the same local index."""
+    module = name.replace("-", "_")
+    dist_info = f"{module}-{version}.dist-info"
+    files = {
+        f"{module}/__init__.py": f"VERSION = '{version}'\n",
+        f"{dist_info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+    }
+    record = [
+        f"{n},sha256={hashlib.sha256(b.encode()).hexdigest()},{len(b.encode())}"
+        for n, b in files.items()
+    ]
+    record.append(f"{dist_info}/RECORD,,")
+    files[f"{dist_info}/RECORD"] = "\n".join(record) + "\n"
+    project = index / name
+    project.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(project / f"{module}-{version}-py3-none-any.whl", "w") as wheel:
+        for n, body in files.items():
+            wheel.writestr(n, body)
+    _write_index_page(index, name)
+
+
+def _write_index_page(index: Path, name: str = "conexus") -> None:
+    """The PEP 503 page for *name*: one link per wheel now in the directory."""
+    project = index / name
     links = "".join(
         f'<a href="{wheel.name}">{wheel.name}</a><br>\n' for wheel in sorted(project.glob("*.whl"))
     )
@@ -208,7 +243,9 @@ class World:
         return seen
 
 
-def _make_world(root: Path) -> World:
+def _make_world(
+    root: Path, *, requires: tuple[str, ...] = (), constraints: str | None = None,
+) -> World:
     world = World(
         root=root, index=root / "index", tools=root / "tools", bin=root / "bin",
         uv_cache=root / "uvcache", uv_tools=root / "uvtools",
@@ -217,7 +254,7 @@ def _make_world(root: Path) -> World:
     (root / "home").mkdir(parents=True)
     for directory in (world.tools, world.bin, world.uv_cache, world.uv_tools, world.path_store.parent):
         directory.mkdir(parents=True)
-    _write_standin_wheel(world.index, _running_version())
+    _write_standin_wheel(world.index, _running_version(), requires=requires, constraints=constraints)
     _write_standin_wheel(world.index, HIGHER)
     venv.EnvBuilder(with_pip=False, symlinks=not ON_WINDOWS).create(world.throwaway)
     _let_the_throwaway_import_this_checkout(world)
@@ -1346,3 +1383,47 @@ class TestTheLockstepMarker:
         assert result.exit_code == 0, result.output
         assert "lockstep marker" in result.output
         assert "installed gen-" in result.output
+
+
+class TestTheBuildInstallsTheVersionsThePackageShips:
+    """nexus-2k66t.4.1: the first install resolves a dependency to the version the
+    package's own ``nexus/_install/constraints.txt`` names, not to the newest the
+    index offers. Real ``uv`` against the local index, on every platform: POSIX
+    runs ``install_generation.sh``, Windows runs ``generation_core``.
+
+    The index holds ``standin-dep`` 1.0.0 and 2.0.0 and the stand-in ``conexus``
+    requires it. Only a build that read the constraints out of the package it
+    just fetched can land on 1.0.0."""
+
+    @staticmethod
+    def _dep_version(world: World) -> str:
+        generation = _generations(world)[0]
+        out = subprocess.run(  # noqa: S603 — fixed argv
+            [str(lc.venv_python(generation)), "-c",
+             "import importlib.metadata as m; print(m.version('standin-dep'))"],
+            capture_output=True, text=True, check=True, timeout=60,
+        )
+        return out.stdout.strip()
+
+    @staticmethod
+    def _world(root: Path, *, constraints: str | None) -> World:
+        world = _make_world(root, requires=("standin-dep",), constraints=constraints)
+        _write_standin_dependency(world.index, "standin-dep", "1.0.0")
+        _write_standin_dependency(world.index, "standin-dep", "2.0.0")
+        return world
+
+    def test_a_dependency_is_held_to_the_shipped_pin(self, tmp_path: Path) -> None:
+        world = self._world(tmp_path / "w", constraints="standin-dep==1.0.0\n")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._dep_version(world) == "1.0.0"
+        assert "UNCONSTRAINED" not in result.stdout + result.stderr
+
+    def test_without_the_file_the_dependency_floats_and_the_build_says_so(self, tmp_path: Path) -> None:
+        """The control: the same world, no shipped file. If this installed 1.0.0
+        the test above would prove nothing about the constraints."""
+        world = self._world(tmp_path / "w", constraints=None)
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._dep_version(world) == "2.0.0"
+        assert "UNCONSTRAINED" in result.stdout + result.stderr

@@ -84,13 +84,21 @@ PYEOF
 fi
 if [[ "$1" == "pip" && "$2" == "install" ]]; then
     py=""
+    no_deps=0
     shift 2
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --python) py="$2"; shift 2 ;;
+            --no-deps) no_deps=1; shift ;;
             *) shift ;;
         esac
     done
+    if [[ -n "$py" && "$no_deps" -eq 1 ]]; then
+        # nexus-2k66t.4.1: the fetch step; the wheel ships its constraints.
+        site="$(dirname "$(dirname "$py")")/lib/python3.12/site-packages/nexus/_install"
+        mkdir -p "$site"
+        printf 'mcp==1.2.3\\n' > "$site/constraints.txt"
+    fi
     if [[ -n "$py" ]]; then
         gen_bin="$(dirname "$py")"
         for name in {script_loop}; do
@@ -186,6 +194,30 @@ requirements = [
     payload = json.loads((gen / "nexus-install.json").read_text())
     assert payload["extras"] == ["local"], "the [local] extra did not survive the bridge"
     assert payload["spec"] == "conexus[local]==7.18.0"
+
+
+def test_the_bridge_build_is_constrained_to_the_lock_the_package_ships(scaffold) -> None:
+    """nexus-2k66t.4.1: the legacy convergence is an install path too. It goes
+    through install_generation.sh, so its dependencies must be held to the
+    constraints the fetched package ships, exactly as `nx self install` does."""
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    legacy = _legacy_tree(tmp_path, receipt="""
+[tool]
+requirements = [
+    { name = "conexus" },
+]
+""")
+    result = _run(
+        env(), "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy),
+    )
+    assert result.returncode == 0, result.stderr
+    gen = Path(result.stdout.strip().splitlines()[-1])
+    installs = [ln for ln in argv_log.read_text().splitlines() if ln.startswith("pip install")]
+    assert len(installs) == 2, installs
+    shipped = gen / "lib" / "python3.12" / "site-packages" / "nexus" / "_install" / "constraints.txt"
+    assert shipped.is_file()
+    assert "--no-deps" in installs[0] and "--constraints" not in installs[0]
+    assert f"--constraints {shipped}" in installs[1] and "--no-deps" not in installs[1]
 
 
 def test_mineru_is_dropped_from_the_bridge(scaffold) -> None:

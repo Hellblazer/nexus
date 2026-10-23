@@ -978,6 +978,13 @@ def _build_flip_shims(
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         )
+    # The build's stderr is uv's progress, discarded on success. Its WARNING
+    # lines are not: one says the install resolved UNCONSTRAINED because the
+    # package predates constraints.txt (nexus-2k66t.4.1), and an operator who
+    # asked for a rollback needs to read that.
+    for line in built.stderr.splitlines():
+        if line.startswith("install_generation: WARNING:"):
+            click.echo(line, err=True)
     generation = Path(built.stdout.strip().splitlines()[-1])
     _flip_and_shim(generation, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
     return generation

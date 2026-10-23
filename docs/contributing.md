@@ -352,6 +352,11 @@ Every step below is **required**. Missing any one of them has caused problems in
    nx --version   # must print X.Y.Z before proceeding
    ```
    `uv.lock` **must** be committed — the release pipeline pins exact versions from it.
+   So does `src/nexus/_install/constraints.txt`, the lock's resolved set that ships in the
+   wheel and that every install path hands to `uv pip install --constraints`. After ANY change
+   to `uv.lock` (a dependency bump as much as this step), run `scripts/regen-install-constraints.sh`
+   and commit the result; `tests/test_install_constraints_pin.py` fails the default suite while the
+   two disagree. A version bump alone does not change it (the project itself is not constrained).
 
 5. **Update `CHANGELOG.md`**
    - Move everything under `## [Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD` section

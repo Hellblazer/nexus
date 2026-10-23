@@ -38,6 +38,7 @@ silently (nexus-utpuw.10).
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -46,6 +47,8 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from lock_check import LOCK_WITNESSES, lock_verdict  # sibling module: the probe is run as a script from tests/e2e/lib
 
 FAILURES: list[str] = []
 
@@ -257,7 +260,7 @@ def main() -> int:
     # a packaging regression reads as a packaging regression rather than as a
     # confusing bash error from a missing file.
     for name in ("install_generation.sh", "flip.sh", "shims.sh", "layout.sh",
-                 "layout_core.py", "overrides.txt"):
+                 "layout_core.py", "overrides.txt", "constraints.txt"):
         if not check(
             (install_dir / name).is_file(),
             f"packaged installer ships {name}",
@@ -422,6 +425,44 @@ def main() -> int:
         f"({bound_lines or bound.stderr.strip()[:200]!r}) -- the packaged "
         "overrides file did not reach the generation's own `uv pip install`; "
         "mineru's PageChars loses __iter__ on pdftext>=0.7 (GH #1533)",
+    )
+
+    # (9) nexus-2k66t.4.1: the generation holds the versions the wheel's lock
+    # names. The constraints file is read out of the GENERATION (the copy its
+    # own wheel shipped, the one install_generation.sh used), and every pin
+    # whose marker holds here is compared with what is installed.
+    shipped = next(generation.glob("lib/python*/site-packages/nexus/_install/constraints.txt"), None)
+    if shipped is None:
+        shipped = next(generation.glob("Lib/site-packages/nexus/_install/constraints.txt"), None)
+    if not check(shipped is not None, "the generation holds the wheel's constraints.txt",
+                 "the generation has no nexus/_install/constraints.txt: the installer had "
+                 "nothing to constrain the install with (nexus-2k66t.4.1)"):
+        print("\ngeneration install path: assertions failed")
+        return 1
+    lock = subprocess.run(
+        [str(generation / "bin" / "python"), str(Path(__file__).with_name("lock_check.py")),
+         str(shipped), *LOCK_WITNESSES],
+        capture_output=True, text=True, timeout=300, env=env,
+    )
+    try:
+        lock_report = json.loads(lock.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        lock_report = None
+    if not check(lock_report is not None, "the lock check ran in the generation",
+                 f"the lock check did not produce a report: {(lock.stdout + lock.stderr).strip()[-400:]!r}"):
+        print("\ngeneration install path: assertions failed")
+        return 1
+    problems = lock_verdict(lock_report)
+    for name, (have, locked) in sorted(lock_report["witness"].items()):
+        print(f"     {name}: installed {have}, lock {locked}")
+    print(f"     pins examined {lock_report['examined']}, matched {lock_report['matched']}, "
+          f"not installed {len(lock_report['absent'])} {sorted(lock_report['absent'])}, "
+          f"marker-skipped {lock_report['marker_skipped']}")
+    check(
+        not problems,
+        f"the generation matches the shipped lock ({lock_report['matched']} pins, "
+        f"witnesses {', '.join(LOCK_WITNESSES)})",
+        "the generation does NOT match the lock its wheel shipped: " + "; ".join(problems[:6]),
     )
 
     if FAILURES:

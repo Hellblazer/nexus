@@ -339,6 +339,20 @@ uv sync
 
 The lock file MUST be committed. CI also checks this.
 
+Then regenerate the constraints the wheel ships (nexus-2k66t.4.1) and commit them
+with the lock:
+
+```bash
+scripts/regen-install-constraints.sh   # rewrites src/nexus/_install/constraints.txt
+```
+
+Every install path hands `src/nexus/_install/constraints.txt` to `uv pip install
+--constraints`, so a stale file means users install versions the release did not
+lock. A bare version bump leaves it unchanged (the project itself is not
+constrained); a dependency change in the cycle does not.
+`tests/test_install_constraints_pin.py` fails the default suite, and so the
+release battery, while the file and `uv.lock` disagree.
+
 ### 6d. Migration-release branch (CONDITIONAL — this release ships a data migration)
 
 Trigger: this release carries a schema or data migration — a new `upgrade_ladder` rung (`src/nexus/upgrade_ladder/registry.py`), or any client-side change to a shape data already has to conform to (T2 [22511] gap 9). Skip this step entirely when the release carries no such change.
