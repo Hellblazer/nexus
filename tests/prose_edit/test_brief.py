@@ -294,7 +294,7 @@ def test_the_live_style_sheet_treatments_all_match_the_real_site_page_skill() ->
 # ---------------------------------------------------------------------------
 
 ORDER = ["## 1. Exemplars", "## 2. Voice card", "## 3. Style sheet", "## 4. Not a defect",
-         "## 5. Budget", "## 6. Prefer cutting"]
+         "## 5. Budget", "## 6. Cut redundancy, unpack compression"]
 
 
 def test_the_brief_carries_each_layer_in_the_rdr_order_with_the_later_layer_winning(
@@ -322,7 +322,7 @@ def test_the_brief_carries_each_layer_in_the_rdr_order_with_the_later_layer_winn
     assert "genre_map" not in sheet and "notes/=how-to" not in sheet  # routing data, not guidance
     assert "OLD-REJECTED" in text[positions[3]:positions[4]]
     assert "7" in text[positions[4]:positions[5]]
-    assert "Prefer cutting to rewriting" in text[positions[5]:]
+    assert "Cut what repeats:" in text[positions[5]:]
     assert "voice_card" in text[positions[1]:positions[2]]
 
 
@@ -639,8 +639,57 @@ def test_the_agent_body_carries_the_diagnostic_questions_and_the_protections() -
     body = AGENT.read_text(encoding="utf-8").lower()
     for needle in ("open with its claim", "actor", "end on what matters", "reader new to the project",
                    "qualifier", "voice card", "refrain", "tricolon", "never rewrite a whole section",
-                   "budget", "prefer cutting"):
+                   "budget", "cut what repeats"):
         assert needle in body, needle
+
+
+PARSE_ROW = "| Can a reader parse this on the first pass? |"
+PARSE_TRIGGERS = ("three or more nouns stacked as modifiers", "a verb coined from a noun",
+                  "an inanimate subject with a verb for people or animals",
+                  "a long insertion between subject and verb", 'a long clause missing its optional "that"')
+PARSE_EXCEPTIONS = ("a term the document defines, or a house term on the voice card", "an identifier or code",
+                    "a verb technical English uses for things (fails, returns, refuses, reads, writes, accepts)",
+                    "density the voice card lists as deliberate")
+PREFIXES = ("`noun stack:`", "`coined verb:`", "`inanimate subject:`", "`dependency:`", "`optional word:`")
+
+
+def _row(body: str, opening: str) -> str:
+    rows = [line for line in body.splitlines() if line.startswith(opening)]
+    assert len(rows) == 1, opening
+    return rows[0]
+
+
+def test_the_agent_carries_the_parse_row_with_its_triggers_genres_and_exceptions() -> None:
+    row = _row(AGENT.read_text(encoding="utf-8"), PARSE_ROW)
+    propose, leave = row.split(" | ")[1:3]
+    assert "The brief's genre is rdr, reference-doc, how-to or exploration-essay" in propose
+    for trigger in PARSE_TRIGGERS:
+        assert trigger in propose, trigger
+    for exception in PARSE_EXCEPTIONS:
+        assert exception.lower() in leave.lower(), exception
+
+
+def test_the_agent_rules_allow_a_lengthening_edit_and_keep_the_guard_against_invented_content() -> None:
+    body = AGENT.read_text(encoding="utf-8")
+    assert "- Prefer cutting. A cut has an empty new string." not in body
+    assert ("- Cut what repeats. A cut has an empty new string. An edit may add words when that makes the "
+            "sentence parse on the first reading (the parse row). Never put in a claim, number, name, source or "
+            "example the text does not contain.") in body
+    assert '- Never cut an optional "that" or a genitive "of"; restoring an optional "that" is an edit.' in body
+    assert ("- A lengthening edit's reason starts with one of " + ", ".join(PREFIXES[:4]) + " or "
+            + PREFIXES[4] + ".") in body
+    assert "- A query raised by the parse row starts its text with the same prefix." in body
+    assert "- When the brief says cut-only, the parse row does not apply and no edit adds words." in body
+
+
+def test_no_agent_line_forbids_adding_words() -> None:
+    body = AGENT.read_text(encoding="utf-8").lower()
+    for phrase in ("prefer cutting", "never add words", "only remove words", "never lengthen"):
+        assert phrase not in body, phrase
+
+
+def test_the_skill_description_names_unpacking() -> None:
+    assert "unpack" in _frontmatter(SKILL)["description"]
 
 
 def test_the_skill_has_frontmatter_and_names_only_real_helper_verbs() -> None:

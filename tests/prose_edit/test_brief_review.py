@@ -367,7 +367,8 @@ def test_new_prose_for_the_changelog_adds_the_unreleased_section(prose: Prose, r
 def test_section_six_carries_the_device_exception(prose: Prose) -> None:
     text = brief_ok(prose, "build", "docs/x.md")
     six = text[text.index(ORDER[5]):]
-    assert "Prefer cutting to rewriting" in six
+    assert ("Cut what repeats: when a word, clause or sentence repeats what the text already says, propose the "
+            "cut (an empty new string).") in six
     assert "Never cut a voice-card device, however this section or a diagnostic reads." in six
 
 
@@ -611,11 +612,36 @@ def test_section_six_says_only_filler_is_cut_and_the_agent_finds_near_twins() ->
     read = {"genre": "reference-doc", "path": "docs/x.md", "range": None, "merged": {"scalars": {}, "lists": {}},
             "genre_record": None}
     six = mod.render_brief(read, 10, None)
-    six = six[six.index("## 6. Prefer cutting"):]
+    six = six[six.index(ORDER[5]):]
     assert "Cut only filler words; every other qualifier or intensifier is a query." in six
     agent = _agent()
     assert "When the fifth word is a name or term, use the first three words instead." in agent
     assert 'write "no exact twin found", never "no twin"' in agent
+
+
+LENGTHEN = ("An edit may add words when that makes a sentence parse on the first reading; its reason starts "
+            "with the feature it fixes.")
+ASK = "When the plainer wording needs a meaning the text does not give, ask a query instead."
+
+
+@pytest.mark.parametrize("genre", ["rdr", "reference-doc", "how-to", "exploration-essay"])
+def test_section_six_lets_a_published_doc_genre_add_words_to_unpack_compression(genre: str) -> None:
+    read = {"genre": genre, "path": "docs/x.md", "range": None, "merged": {"scalars": {}, "lists": {}},
+            "genre_record": None}
+    six = _module().render_brief(read, 10, None)
+    six = six[six.index(ORDER[5]):]
+    assert LENGTHEN in six and ASK in six
+    assert "Never put in content or claims." in six
+
+
+@pytest.mark.parametrize("genre", ["changelog", "commit-message"])
+def test_section_six_keeps_a_length_genre_to_cutting(genre: str) -> None:
+    read = {"genre": genre, "path": "CHANGELOG.md", "range": None, "merged": {"scalars": {}, "lists": {}},
+            "genre_record": None}
+    six = _module().render_brief(read, 10, None)
+    six = six[six.index(ORDER[5]):]
+    assert "Cut what repeats:" in six
+    assert LENGTHEN not in six and "add words" not in six
 
 
 # ---------------------------------------------------------------------------
