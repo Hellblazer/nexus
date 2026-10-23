@@ -26,6 +26,8 @@ final class DdlLogParser {
     static final String START_LABEL = "start";
     static final String READY_LABEL = "ready";
     static final String END_LABEL = "end";
+    /** Logged before an engine retry (nexus-7lxn7); {@code restart} to {@code ready} is boot. Mirrors RESTART_LABEL. */
+    static final String RESTART_LABEL = "restart";
     static final List<String> KINDS = List.of("create_table", "create_index", "drop", "alter", "other");
 
     /**
@@ -165,24 +167,29 @@ final class DdlLogParser {
 
     /**
      * WAL bytes and database growth by phase, from the {@code start}, {@code ready} and {@code end} marks
-     * (the first of each, except {@code end}, which is the last). A phase whose two marks are not both in
-     * the log is null, never 0: an unmeasured phase must not read as a free one. Mirrors wal_split.
+     * (the first of each, except {@code end}, which is the last); the migration ends at the first
+     * {@code restart} when the log has one. A phase whose two marks are not both in the log is null,
+     * never 0: an unmeasured phase must not read as a free one. Mirrors wal_split.
      */
     static Map<String, Long> walSplit(List<MarkStat> stats) {
         MarkStat start = null;
         MarkStat ready = null;
         MarkStat end = null;
+        MarkStat restart = null;
         for (MarkStat s : stats) {
             if (s.label().equals(START_LABEL) && start == null) {
                 start = s;
             } else if (s.label().equals(READY_LABEL) && ready == null) {
                 ready = s;
+            } else if (s.label().equals(RESTART_LABEL) && restart == null) {
+                restart = s;
             } else if (s.label().equals(END_LABEL)) {
                 end = s;
             }
         }
         Map<String, Long> out = new LinkedHashMap<>();
-        out.put("migration_bytes", minus(ready, start, true));
+        // nexus-7lxn7: the migration ends at the first restart when an engine attempt was retried.
+        out.put("migration_bytes", minus(restart != null && ready != null ? restart : ready, start, true));
         out.put("tests_bytes", minus(end, ready, true));
         out.put("total_bytes", minus(end, start, true));
         out.put("dbsize_growth_bytes", minus(end, ready, false));
@@ -197,6 +204,7 @@ final class DdlLogParser {
         boolean seenMark = false;
         boolean hasStart = START_MARK.matcher(log).find();
         boolean seenStart = false;
+        boolean seenRestart = false;
         String[] lines = log.split("\\R", -1);
         for (int i = 0; i < lines.length; i++) {
             Matcher m = LINE.matcher(lines[i]);
@@ -220,10 +228,11 @@ final class DdlLogParser {
                 stats.add(stat);
                 seenMark = seenMark || stat.label().equals(READY_LABEL);
                 seenStart = seenStart || stat.label().equals(START_LABEL);
+                seenRestart = seenRestart || (stat.label().equals(RESTART_LABEL) && !seenMark);
                 continue;
             }
             boolean before = !seenMark;
-            boolean boot = hasStart && !seenStart;
+            boolean boot = (hasStart && !seenStart) || (seenRestart && !seenMark);
             if (msg.startsWith(EVENT_PREFIX)) {
                 String tag = msg.substring(EVENT_PREFIX.length()).strip();
                 if (claim.remove(pid) != null) {

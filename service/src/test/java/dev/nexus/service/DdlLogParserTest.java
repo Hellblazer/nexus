@@ -62,6 +62,46 @@ class DdlLogParserTest {
         assertThat(wal.get("dbsize_growth_bytes")).isNull();
     }
 
+    /** nexus-7lxn7: a run whose first engine attempt lost its port race counts the migration DDL and WAL of
+     *  the same run with no retry; the lost attempt ran the whole migration, the next only the runAlways
+     *  rerun, behind the restart mark. Mirrors the Python test. */
+    @Test
+    void an_engine_retry_counts_the_same_migration_as_a_run_without_one() {
+        String table = "CREATE" + " TABLE";
+        String view = "CREATE" + " VIEW";
+        String grant = "GR" + "ANT";
+        String head = event("00.100", 7, table)
+            + "2026-10-19 05:00:00.200 UTC [7] db=x LOG:  nx_ddl_mark: start wal=100 dbsize=5\n"
+            + event("00.300", 8, table) + event("00.301", 8, table) + event("00.302", 8, view)
+            + event("00.310", 8, grant) + event("00.311", 8, grant);
+        String tail = event("00.700", 9, table)
+            + "2026-10-19 05:00:00.800 UTC [7] db=x LOG:  nx_ddl_mark: end wal=1300 dbsize=40\n";
+        String retried = head
+            + "2026-10-19 05:00:00.400 UTC [7] db=x LOG:  nx_ddl_mark: restart wal=1000 dbsize=30\n"
+            + event("00.500", 9, view) + event("00.510", 9, grant) + event("00.511", 9, grant)
+            + "2026-10-19 05:00:00.600 UTC [7] db=x LOG:  nx_ddl_mark: ready wal=1100 dbsize=31\n" + tail;
+        String clean = head + "2026-10-19 05:00:00.600 UTC [7] db=x LOG:  nx_ddl_mark: ready wal=1000 dbsize=31\n"
+            + tail;
+        DdlLogParser.Parsed r = DdlLogParser.parse(retried);
+        DdlLogParser.Parsed c = DdlLogParser.parse(clean);
+        assertThat(asJson(migration(r))).isEqualTo(asJson(migration(c)));
+        assertThat(migration(c).get("total")).isEqualTo(5L); // non-vacuity: the whole first attempt
+        assertThat(asJson(DdlLogParser.tally(r.entries().stream().filter(e -> !e.beforeMark()).toList())))
+            .isEqualTo(asJson(DdlLogParser.tally(c.entries().stream().filter(e -> !e.beforeMark()).toList())));
+        assertThat(DdlLogParser.walSplit(r.stats()).get("migration_bytes"))
+            .isEqualTo(DdlLogParser.walSplit(c.stats()).get("migration_bytes")).isEqualTo(900L);
+        assertThat(r.entries().stream().filter(DdlLogParser.Entry::boot).map(DdlLogParser.Entry::tag).toList())
+            .containsExactly(table, view, grant, grant);
+    }
+
+    private static java.util.Map<String, Object> migration(DdlLogParser.Parsed p) {
+        return DdlLogParser.tally(p.entries().stream().filter(e -> e.beforeMark() && !e.boot()).toList());
+    }
+
+    private static String event(String seconds, int pid, String tag) {
+        return "2026-10-19 05:00:" + seconds + " UTC [" + pid + "] db=x LOG:  nx_ddl: " + tag + "\n";
+    }
+
     private static String markedLog(String endDbsize) {
         return "2026-10-19 05:00:00.100 UTC [7] db=x LOG:  nx_ddl_mark: start wal=100 dbsize=5\n"
             + "2026-10-19 05:00:00.200 UTC [7] db=x LOG:  nx_ddl_mark: ready wal=250 dbsize=10\n"
