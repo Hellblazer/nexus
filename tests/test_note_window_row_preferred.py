@@ -266,7 +266,7 @@ def test_the_stamp_follows_the_row_over_the_token_in_the_name(monkeypatch, t3):
 
 def test_a_legacy_name_with_no_row_stamps_the_profile_model(monkeypatch, t3):
     # The name fallback is the calibrated one the window uses: the plain derivation
-    # stamped voyage-context-3 on a bge-profile install.
+    # stamped Voyage on a bge-profile install.
     _profile(monkeypatch, BGE)
 
     assert _stamped(LEGACY) == [BGE, BGE]
