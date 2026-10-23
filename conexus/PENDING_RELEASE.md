@@ -30,23 +30,5 @@ mechanize, it matters enough to ship.
 cut_plugin_release.py`) refuses when a ledger entry's bead also touches wheel
 content (`src/`, `conexus/plans/`, `conexus/daemon/`, `mcpb/`, `dt/`) the
 wholesale import cannot hold back on a per-entry basis. The only fix is moving
-that entry under `## Deferred to the next client release` below: the cut then
-holds the entry's channel path(s) back from itself too (restored to the base
-branch's own content) so the whole bead ships together, in one piece, at the
-next client release. A deferred entry is exempt from the release-window
-"ledger must be empty" rule above -- still declared there is correct, not
-stale -- and stays exactly where it is until moved back deliberately.
+that entry under `## Deferred to the next client release
 
----
-
-
-
-## Awaiting the next release or plugin cut (pinned: v7.84.0)
-
-ONE PATH PER BULLET, on the bullet's FIRST line.
-
-
-## Deferred to the next client release
-
-- `conexus/skills/mailbox/SKILL.md` (nexus-u839f): the session's name is armed automatically from Claude Code's session registry (server start, after `/clear`, re-read about once a minute); `tuple_subscribe` is the explicit form, for after a `/rename` or when peers cannot reach you by name. Needs the client release that carries the arm.
-- `conexus/skills/peer-messaging/SKILL.md` (nexus-u839f): a peer holds its name because its MCP server arms it from the registry; `tuple_subscribe` is the explicit form. Needs the client release that carries the arm.
