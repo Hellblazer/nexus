@@ -1302,8 +1302,10 @@ def test_every_scenario_claude_prompt_probe_is_either_linted_or_a_side_effect_ch
             if any(tok in pr for pr in prompts):
                 unlinted.append((path.name, tok))
     # known and checked by hand: the marker is a file the prompted command writes (32), a payload
-    # compared in the stub's own log (11's PARENT-CALL-PROBE, 29/30 tool names), not a pane reply
+    # compared in the stub's own log (11's PARENT-CALL-PROBE, 29/30 tool names), or a tool name read
+    # from the agent's tool_use records, which only Claude Code writes (33), not a pane reply
     allowed = {("11_agent_inline_mcpservers.sh", "PARENT-CALL-PROBE"), ("29_sn_worktree_guard.sh", "replace_in_files"),
+               ("33_background_serena_write.sh", "mcp__plugin_sn_serena__replace_in_files"),
                ("29_sn_worktree_guard.sh", "zzz-marker"), ("32_pretooluse_no_blanket_allow.sh", "scenario32-nexus-452oy-marker")}
     assert set(unlinted) <= allowed, f"a scenario greps for a token its own prompt contains: {sorted(set(unlinted) - allowed)}"
 

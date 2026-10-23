@@ -28,7 +28,9 @@
 #            defaultMode acceptEdits (33a) and auto (33b)
 #              ran       the call reached the server
 #              prompted  a permission prompt for it came up in the parent's pane
-#              denied    neither; the agent was told the call was refused
+#              denied    neither; the agent attempted the call and was told it was refused
+#            33b samples the auto-mode classifier's judgement of one prompt, not a rule: a
+#            changed answer there means re-read the evidence, not a regression.
 # observed   the day the recorded row was measured (a recorded row only)
 
 [table]
@@ -86,10 +88,16 @@ guard = { version = "unrecorded", answer_07 = ["preempts", "fires-regardless"] }
 emit = { verdict = "unrecorded", since = "", observed = "" }
 
 [[row]]
-id = "33a::2.1.302::unmeasured"
+id = "33a::2.1.302::prompted"
 match = { scenario = "33a" }
-guard = { version = "2.1.302", answer_33a = ["ran", "prompted", "denied"] }
-emit = { verdict = "unrecorded", since = "", observed = "" }
+guard = { version = "2.1.302", answer_33a = "prompted" }
+emit = { verdict = "agrees", since = "2.1.302", observed = "2026-10-23" }
+
+[[row]]
+id = "33a::2.1.302::other"
+match = { scenario = "33a" }
+guard = { version = "2.1.302", answer_33a = ["ran", "denied"] }
+emit = { verdict = "changed", since = "2.1.302", observed = "2026-10-23" }
 
 [[row]]
 id = "33a::unrecorded"
@@ -98,10 +106,16 @@ guard = { version = "unrecorded", answer_33a = ["ran", "prompted", "denied"] }
 emit = { verdict = "unrecorded", since = "", observed = "" }
 
 [[row]]
-id = "33b::2.1.302::unmeasured"
+id = "33b::2.1.302::ran"
 match = { scenario = "33b" }
-guard = { version = "2.1.302", answer_33b = ["ran", "prompted", "denied"] }
-emit = { verdict = "unrecorded", since = "", observed = "" }
+guard = { version = "2.1.302", answer_33b = "ran" }
+emit = { verdict = "agrees", since = "2.1.302", observed = "2026-10-23" }
+
+[[row]]
+id = "33b::2.1.302::other"
+match = { scenario = "33b" }
+guard = { version = "2.1.302", answer_33b = ["prompted", "denied"] }
+emit = { verdict = "changed", since = "2.1.302", observed = "2026-10-23" }
 
 [[row]]
 id = "33b::unrecorded"

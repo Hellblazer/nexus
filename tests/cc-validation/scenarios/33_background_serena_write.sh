@@ -48,6 +48,10 @@ _33_start_auto() {
 _33_leg() {
     local id="$1" mode="$2"
     scenario "$id background_serena_write ($mode): a background agent's unallowed Serena write"
+    # One file, two legs: runner.sh resets state once per file, so each leg clears the transcripts
+    # (cc_subagent_replies reads every agent-*.jsonl) and the saved pane before it starts.
+    cc_reset_transcripts
+    rm -f "$TEST_HOME/pane-tail.txt"
     : > "$STUB_LOG"
     # The debug log records whether the stub's MCP connection came up; kept with the evidence.
     export CC_DEBUG_FILE="$TEST_HOME/claude-debug-$id.log"
@@ -84,21 +88,33 @@ MCP_EOF
         # "plugin_sn_serena — Replace In Files Tool: (MCP)". The typed prompt carries neither phrase.
         if cc_permission_prompt_up && capture -60 | grep -q "Tool use · from the" \
                 && capture -60 | grep -q "Replace In Files"; then
-            outcome="prompted"; cc_dismiss_permission_prompt; break
+            outcome="prompted"; cc_save_pane 120; cc_dismiss_permission_prompt; sleep 3; break
         fi
         if cc_subagent_replies 2>/dev/null | grep -q "PROBE-DONE-BG33"; then outcome="finished"; break; fi
         sleep 2
     done
-    cc_save_pane 120
+    [[ "$outcome" == "prompted" ]] || cc_save_pane 120  # a prompt's pane was saved before it was answered
     cc_keep_evidence "$id"
 
     if ! cc_wait_stub_log '"tool": "find_symbol"' 60; then
         fail "$id: find_symbol never reached the stub: the server did not connect or the agent never ran; no verdict"
+        outcome=""
+    elif ! grep -q "Hook PreToolUse:mcp__plugin_sn_serena__replace_in_files (PreToolUse)" "$CC_DEBUG_FILE"; then
+        fail "$id: sn's PreToolUse script never ran for the writer (debug log): the outcome would not be the one the plugin's wiring gives; no verdict"
+        outcome=""
+    elif [[ "$mode" == "auto" ]] && ! grep -q "bypasses classifier" "$CC_DEBUG_FILE"; then
+        fail "$id: no sign the auto-mode classifier was in force (the debug log names the Agent allow rule it bypasses only in auto mode); no verdict"
+        outcome=""
+    elif [[ "$outcome" == "prompted" ]] && grep -q '"tool": "replace_in_files"' "$STUB_LOG"; then
+        fail "$id: a prompt came up, yet the write reached the stub after Escape: indeterminate"
+        outcome=""
     elif [[ "$outcome" == "finished" ]]; then
-        if cc_subagent_replies | grep -q "STEP2-REFUSED"; then
+        # The agent's word is not enough: it must have attempted the call (its own transcript).
+        if cc_subagent_replies | grep -q "STEP2-REFUSED" \
+                && cc_subagent_tool_uses | grep -q "mcp__plugin_sn_serena__replace_in_files"; then
             outcome="denied"
         else
-            fail "$id: the agent finished, the write never reached the stub and no prompt came up, but it did not report step 2 refused: indeterminate"
+            fail "$id: the agent finished without the write reaching the stub or a prompt, and did not both attempt the call and report it refused: indeterminate"
             cc_subagent_replies | tail -8 | sed 's/^/    | /'
             outcome=""
         fi

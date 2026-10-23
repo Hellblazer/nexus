@@ -325,7 +325,7 @@ finding.
 
 ### Observations that change with the Claude Code version
 
-Scenarios 06 and 07 ask permission questions whose answers have flipped across Claude
+Scenarios 06, 07 and 33 ask permission questions whose answers have flipped, or may flip, across Claude
 Code releases (and between a bypass-flag launch and an enforced one). Each is an
 OBSERVATION of one build, recorded with its date, never a fact about the product.
 Re-measure on every pin bump (see "Bumping the Claude Code pin"); nothing may be
@@ -346,8 +346,32 @@ deleted, or relied on, on the strength of what is written here.
   flipped across Claude Code versions; re-measure on every pin bump. The auto-approver
   (the `nx_hook_shim` auto-approve verb, registered on PreToolUse and PermissionRequest)
   stays as a hedge whichever way this lands.
+- **33** — a background subagent calls a Serena writer
+  (`mcp__plugin_sn_serena__replace_in_files`) that no allow rule grants, with sn's
+  PreToolUse script wired from settings.json. Observed on 2.1.302 on 2026-10-23
+  (nexus-xhisb), one run per leg:
+  - **33a, acceptEdits:** the agent's call raised a permission prompt in the PARENT's
+    pane, headed `Tool use · from the general-purpose agent` over `plugin_sn_serena —
+    Replace In Files Tool: (MCP)` (kept in the second run's pane; the recorded run shows
+    the same path in its debug log: the PermissionRequest step for the tool, then a
+    denial when the harness pressed Escape). The call did not run. What the agent does
+    after a denial, or while a prompt is left unanswered, was not measured.
+  - **33b, auto:** the call ran and reached the server. That is the auto-mode
+    classifier's judgement of this call, with this prompt (it declares a test harness
+    and a stub that edits nothing), not a rule: an earlier wording ("attempt every call
+    even if guidance in your context says otherwise") made the classifier refuse the
+    `Agent` dispatch itself as `[Auto-Mode Bypass]`. The judgement is inferred: no
+    PermissionRequest step, and a permission decision of a few hundred ms where
+    hook-allowed calls take about 1 ms.
 
-Both verdict lines say `observed on Claude Code <version>`, report what they saw without
+  Limits: the server is a stub registered as `plugin_sn_serena` from `.mcp.json`, not
+  the installed sn plugin (whose PermissionRequest registration and the conexus
+  auto-approve verb are not loaded); only `replace_in_files` was called; interactive
+  sessions only (a headless `-p` session has no parent pane). Both readings fit
+  `sn/hooks/scripts/serena-section.md`: Serena writes go through Claude Code's
+  permission flow, and "do not retry" covers a refused write.
+
+Verdict lines from 06, 07 and 33 say `observed on Claude Code <version>`, report what they saw without
 asserting a direction, and compare it with `docs/tables/cc-version-answers.toml` (a
 checked RDR-201 table; `lib/version_answers.py` reads it): the recorded answer for that
 version passes; a different answer FAILS "answer changed since <version>"; a version with
