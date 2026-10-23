@@ -9,7 +9,7 @@ run-canaries.sh also work-dirs-before.txt and work-dirs-after.txt. A run's kind 
 without a trailing -N. Exit 1 when any run fails; exit 3 when none failed but a run was
 NOT-MEASURABLE (it proves nothing, so it is never a pass); 0 only when every run passed.
 
-The kinds that edit a document (xanadu, linda, refrain, qa, qb, qc, protected, budget, range) are scored on
+The kinds that edit a document (xanadu, linda, refrain, qa, qb, qc, protected, budget, range, compression) are scored on
 the post-filter proposal: the last `brief.py filter` output in the transcript, which is what the author sees.
 Nothing here borrows the filter's own code (a verdict that reused it could not fail when it is wrong): the
 oracles are stated in this file, from the fixtures. The Verify line of the RDR's Test Plan, per kind, with the
@@ -24,6 +24,18 @@ NOT-MEASURABLE):
              other qualifier or intensifier is a query. qa: "basically" is cut; "may" is not cut and is queried.
              qb: "may" is not cut and is queried. qc: "likely" and "truly" are not cut and each is queried. A word
              that is neither cut nor queried fails the run (nothing proposed fails too)
+  compression
+             (RDR-221 Amendment A1) at least 7 of the 10 seeded sentences of fixtures/compression.md hit, and no
+             decoy touched. Hit: an edit whose old string overlaps the sentence, whose new string is longer and whose
+             reason starts with that sentence's prefix (noun stack:, coined verb:, inanimate subject:, dependency:,
+             optional word:), or a query anchored inside the sentence whose text starts with that prefix; the right
+             sentence under another prefix does not count. Touched decoy: an edit overlapping it, or a query anchored
+             in it whose text starts with any of the five prefixes. The decoys are COMPRESSION_DECOYS (always scored)
+             and COMPRESSION_DENSE (scored only when the editor's reply voice_card names it, like CARD_DEVICES). The
+             oracle is the COMPRESSION_* tables below, checked against the fixture first: a sentence not in the
+             document exactly once makes the run NOT-MEASURABLE. The note reports hit or miss per sentence, whether
+             the dense passage was scored, and "possible invention" (words an edit on a noun-stack or coined-verb
+             sentence inserts beyond the expected relation words and function words); it never fails on invention.
   xanadu, linda, refrain
              no edit overlaps a device, and no paragraph proposal cuts, merges or splits a paragraph that holds one.
              Two groups. DEVICES (always scored): refrains, repeated openings, closing lines, the unexplained SQL.
@@ -84,7 +96,7 @@ DOCS: dict[str, str | None] = {
     "xanadu": "docs/exploration/xanadu-in-nexus.md", "linda": "docs/exploration/linda-in-nexus.md",
     "refrain": FX + "refrain-no-twin.md", "qa": FX + "qualifiers-a.md", "qb": FX + "qualifiers-b.md",
     "qc": FX + "qualifiers-c.md", "protected": FX + "protected.md", "budget": FX + "protected.md",
-    "range": FX + "range-notes.md",
+    "range": FX + "range-notes.md", "compression": FX + "compression.md",
 }
 _JSON_BLOCK = re.compile(r"^[ \t]*```json[ \t]*\n(.*?)\n[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
 PASS, FAIL, NOT_MEASURABLE = "PASS", "FAIL", "NOT-MEASURABLE"
@@ -151,6 +163,60 @@ _PROTECTED_FIXTURE = (
     (13, 17, "```python", "```", "code block"), (19, 22, "| Column", "| owner", "table"),
 )
 FIXTURE_PROTECTED = {"protected": _PROTECTED_FIXTURE, "budget": _PROTECTED_FIXTURE}
+
+
+# The compression kind (RDR-221 Amendment A1, nexus-x7o5e). The oracle, read off tests/prose_edit/fixtures/compression.md
+# by hand and checked against it before every use (a sentence not in the document exactly once is NOT-MEASURABLE).
+# Each seeded sentence shows exactly one of the five parse-row features and carries the reason prefix the line-editor
+# must start its edit's reason, or its query's text, with: (id, prefix, the sentence, relation words). The relation words
+# are what a noun stack or a coined verb is unpacked into; an edit on those two kinds that inserts a word that is
+# neither a function word, a relation word, nor an inflection of a word it replaces is reported as a possible invention.
+COMPRESSION_PREFIXES = ("noun stack:", "coined verb:", "inanimate subject:", "dependency:", "optional word:")
+COMPRESSION_PASS_AT = 7
+COMPRESSION_SEEDED: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("N1", "noun stack:", "The lease renewal failure retry count resets after a successful renewal.",
+     ("retries", "retry", "failed", "failure", "fails", "count", "number", "attempts", "times")),
+    ("N2", "noun stack:", "The worker crash recovery path replays every unfinished claim.",
+     ("recovers", "recover", "crashed", "crashes", "crash", "after", "from")),
+    ("C1", "coined verb:", "The dashboard badges each stale lease in red.",
+     ("marks", "mark", "shows", "displays", "draws", "colours", "colors", "paints", "puts", "shades", "label", "labels")),
+    ("C2", "coined verb:", "The audit job spreadsheets each day's skipped claims.",
+     ("writes", "write", "lists", "list", "puts", "exports", "saves", "rows", "row", "table", "into")),
+    ("I1", "inanimate subject:", "The retry policy wants every job to finish within two attempts.", ()),
+    ("I2", "inanimate subject:", "The module docstring promises a stable order for claims.", ()),
+    ("D1", "dependency:", "A claim that sits in the table for hours because its worker crashed holds the job back.", ()),
+    ("D2", "dependency:",
+     "The retry counter, which the worker resets after every successful renewal of its lease, drives the backoff delay.", ()),
+    ("O1", "optional word:",
+     "Operators confirm the first worker held the lease when the second worker started the job.", ()),
+    ("O2", "optional word:", "The on-call engineer learns the sweep has not run in the last ten minutes.", ()),
+)
+# Always scored: touching one fails the run (label, the sentence). An identifier in backticks; a term the document
+# defines (the definition and the stacked use); the exception verbs of the parse row with inanimate subjects; and the
+# over-firing decoys: an established denominal verb, a thing-verb outside the six, a two-modifier compound.
+COMPRESSION_DECOYS: tuple[tuple[str, str], ...] = (
+    ("identifier: backticked name",
+     "The scheduler passes the deadline to `acquire_lease_with_retry_budget` unchanged."),
+    ("defined term: the definition", "The lease sweep interval is the time between two sweeps."),
+    ("defined term: the stacked use", "An operator sets the lease sweep interval in the store configuration."),
+    ("exception verb: fails", "The parser fails when a record has no owner field."),
+    ("exception verb: returns", "The lookup returns the newest row for a claim."),
+    ("exception verb: refuses", "The gateway refuses a request that carries no token."),
+    ("denominal verb: indexes", "The store indexes each record by its owner."),
+    ("denominal verb: logs", "The proxy logs each rejected call to the audit file."),
+    ("thing verb: handles", "The router handles one request at a time."),
+    ("thing verb: checks", "The validator checks each field against the schema."),
+    ("two-modifier compound: session scratch", "The session scratch holds notes for the length of one session."),
+)
+# Scored only when the editor's reply voice_card names it (any marker, case and quotes ignored), like CARD_DEVICES: a
+# deliberately dense passage is a device only if the card says so.
+COMPRESSION_DENSE: tuple[str, tuple[str, ...]] = (
+    "Queue depth alarm threshold breach, lease age alarm threshold breach, sweep lag alarm threshold breach.",
+    ("pager message", "queue depth alarm", "dense on purpose"),
+)
+_FUNCTION_WORDS = frozenset((
+    "a an the of for to in on at by with from into after before when while that which who where is are was were be been "
+    "it its each every per as and or than then has have had so because if this these those their they does do").split())
 
 
 def load_events(path: Path) -> list[Obj]:
@@ -571,6 +637,82 @@ def _semicolon_queries(queries: list[Obj]) -> int:
     return sum(1 for q in queries if ";" in str(q.get("anchor", "")) or "semicolon" in str(q.get("text", "")).lower())
 
 
+def _prefix_of(text: object) -> str | None:
+    """The compression prefix a reason or a query text starts with (leading space and case ignored), or None."""
+    head = str(text or "").lstrip().lower()
+    return next((p for p in COMPRESSION_PREFIXES if head.startswith(p)), None)
+
+
+def _beyond_relation(old: str, new: str, relation: tuple[str, ...]) -> list[str]:
+    """The words `new` inserts that are neither function words, the sentence's relation words, nor an inflection of a
+    word of `old` (a shared first four letters): what an unpacking adds that the text did not say."""
+    old_words = [w for w in words(old) if len(w) >= 4]
+    return [w for w in inserted_words(old, new)
+            if w not in _FUNCTION_WORDS and w not in relation
+            and not (len(w) >= 4 and any(o[:4] == w[:4] for o in old_words))]
+
+
+def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
+                        card: str) -> tuple[str | None, list[str], str]:
+    """(a reason the oracle tables no longer fit the document or None, what fails the run, the note) for a compression
+    run. Hits and decoys are read from the post-filter edits and queries by plain span arithmetic on the document."""
+    table: list[tuple[str, str, tuple[int, int]]] = []
+    everything = [(e[0], e[2]) for e in COMPRESSION_SEEDED] + list(COMPRESSION_DECOYS) + [("dense passage", COMPRESSION_DENSE[0])]
+    for label, text in everything:
+        found = _spans(doc_text, text)
+        if len(found) != 1:
+            return (f"the fixture changed: {label} {text[:50]!r} is in the document {len(found)} times; "
+                    "the oracle table no longer matches it"), [], ""
+        table.append((label, text, found[0]))
+    seeded_at = {e[0]: table[i][2] for i, e in enumerate(COMPRESSION_SEEDED)}
+    decoy_at = table[len(COMPRESSION_SEEDED):-1]
+    dense_scored = _on_card(card, COMPRESSION_DENSE[1])
+    scored = [*decoy_at, *([table[-1]] if dense_scored else [])]
+    applicable = _unique_edits(doc_text, edits)
+    problems: list[str] = []
+    for e in edits:
+        for label, text, span in scored:
+            if any(_overlaps(o, span) for o in _spans(doc_text, str(e.get("old", "")))):
+                problems.append(f"edit {e.get('n')} touches a decoy ({label}: {text[:40]!r})")
+    for q in queries:
+        prefix = _prefix_of(q.get("text"))
+        anchors = _spans(doc_text, str(q.get("anchor", "")))
+        for label, text, span in scored:
+            if prefix and any(_overlaps(a, span) for a in anchors):
+                problems.append(f"query {q.get('n')} is anchored on a decoy ({label}: {text[:40]!r}) and starts "
+                                f"with the compression prefix {prefix!r}")
+    hit: dict[str, bool] = {}
+    for sid, prefix, _, _ in COMPRESSION_SEEDED:
+        span = seeded_at[sid]
+        by_edit = any(
+            _prefix_of(e.get("reason")) == prefix and len(str(e.get("new", ""))) > len(str(e.get("old", "")))
+            and any(_overlaps(o, span) for o in _spans(doc_text, str(e["old"]))) for e in applicable)
+        by_query = any(
+            _prefix_of(q.get("text")) == prefix
+            and any(span[0] <= a[0] and a[1] <= span[1] for a in _spans(doc_text, str(q.get("anchor", ""))))
+            for q in queries)
+        hit[sid] = by_edit or by_query
+    count = sum(hit.values())
+    if count < COMPRESSION_PASS_AT:
+        problems.append(f"only {count} of {len(COMPRESSION_SEEDED)} seeded sentences hit (needs {COMPRESSION_PASS_AT})")
+    invention: list[str] = []
+    for sid, _, sentence, relation in COMPRESSION_SEEDED:
+        if sid[0] not in "NC":
+            continue
+        for e in edits:
+            if any(_overlaps(o, seeded_at[sid]) for o in _spans(doc_text, str(e.get("old", "")))):
+                extra = _beyond_relation(str(e.get("old", "")), str(e.get("new", "")), relation)
+                if extra:
+                    invention.append(f"{sid} edit {e.get('n')} {extra}")
+    always = len(decoy_at)
+    note = (f"{count} of {len(COMPRESSION_SEEDED)} seeded sentences hit ["
+            + " ".join(f"{sid}:{'hit' if hit[sid] else 'miss'}" for sid, _, _, _ in COMPRESSION_SEEDED) + "]; "
+            + f"dense passage scored: {'yes (the voice card names it)' if dense_scored else 'no (the voice card does not name it)'}; "
+            + f"decoys scored: {len(scored)} of {always + 1}; "
+            + f"possible invention: {'; '.join(invention) if invention else 'none'}")
+    return None, problems, note
+
+
 def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> tuple[str, str]:
     """PASS, FAIL or NOT-MEASURABLE for a document-editing run, from the post-filter proposal."""
     reply = editor_reply(events)
@@ -608,7 +750,14 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
         return NOT_MEASURABLE, f"edits {stale} are not in the document: it is not the one the run edited"
     reply_edits = [e for e in reply.get("edits") or [] if isinstance(e, dict)]
     extra = ""
+    card_note = ""
     problems += _nonunique_problems(doc_text, edits)
+    if kind == "compression":
+        card = str(reply.get("voice_card") or proposal.get("voice_card") or "")
+        stale_table, found_c, card_note = _compression_scored(doc_text, edits, queries, card)
+        if stale_table:
+            return NOT_MEASURABLE, stale_table
+        problems += found_c
     found, stale_fixture = _protected_problems(kind, doc_text, edits)
     if stale_fixture:
         return NOT_MEASURABLE, stale_fixture
@@ -642,7 +791,6 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
     filler = FILLER_CUT.get(kind)
     if filler and not any(_cuts(e, filler) for e in edits):
         problems.append(f"the filler word {filler!r} was not cut (a filler word is cut, not queried or left)")
-    card_note = ""
     if kind in DEVICE_KINDS:
         card = str(reply.get("voice_card") or proposal.get("voice_card") or "")
         found, stale_list, card_note = _device_problems(kind, doc_text, edits, paragraphs, card)

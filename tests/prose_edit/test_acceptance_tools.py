@@ -6,6 +6,7 @@ import ast
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -968,3 +969,294 @@ def test_the_readme_says_what_a_pass_means_for_devices_and_what_each_kind_scores
     assert "dropped by the filter" in text and "fixture" in text
     row = next(ln for ln in text.splitlines() if ln.startswith("| `qb` |"))
     assert "queried" in row and "passes" not in row  # the no-proposal-passes class is gone
+
+
+# ---------------------------------------------------------------------------
+# The compression kind (RDR-221 Amendment A1, nexus-x7o5e): ten seeded sentences, two per feature, and decoys
+# ---------------------------------------------------------------------------
+
+COMPRESSION_PATH = "tests/prose_edit/fixtures/compression.md"
+COMPRESSION_README_RUN = "/prose-edit tests/prose_edit/fixtures/compression.md --genre reference-doc --budget 12"
+INTRO = "The reservation store holds one record for each job a worker has claimed."
+
+
+def _comp_doc() -> str:
+    return _doc(COMPRESSION_PATH)
+
+
+def _cedit(n: int, old: str, new: str, reason: str) -> dict:
+    return {"n": n, "old": old, "new": new, "reason": reason}
+
+
+def _unpack(old: str) -> str:
+    """A longer string that adds one function word only: what a planted right-prefix hit carries."""
+    assert old.endswith(".")
+    return old[:-1] + " then."
+
+
+def _hit(n: int, entry: tuple, prefix: str | None = None) -> dict:
+    """An edit on the seeded sentence `entry` that adds words, with its own reason prefix unless one is given."""
+    _, own, sentence, _ = entry
+    return _cedit(n, sentence, _unpack(sentence), f"{prefix or own} the reader needs the relation spelled out.")
+
+
+def _hits(entries: Any, start: int = 1) -> list[dict]:
+    return [_hit(start + i, e) for i, e in enumerate(entries)]
+
+
+def _cquery(n: int, text_in: str, text: str) -> dict:
+    """A query anchored in the middle of `text_in` (the anchor is a unique slice of it)."""
+    return {"n": n, "anchor": text_in[4:28], "text": text}
+
+
+def _comp(edits: list[dict], queries: list[dict] | None = None, *, card: str | None = None, doc: str | None = None,
+          budget: int = 12) -> tuple[str, str]:
+    """The verdict of a compression run whose editor replied with `edits`, `queries` and `card`, all kept by the filter."""
+    reply: dict = {"edits": edits, "queries": queries or []}
+    if card is not None:
+        reply["voice_card"] = card
+    events = _run(reply, {"edits": edits, "queries": queries or []}, target=COMPRESSION_PATH, budget=budget)
+    return _verdict("compression", events, _comp_doc() if doc is None else doc)
+
+
+def test_compression_passes_at_seven_of_ten_right_prefix_hits_and_fails_at_six() -> None:
+    seeded = _verdicts().COMPRESSION_SEEDED
+    assert len(seeded) == 10
+    for chosen, expected in ((seeded, "PASS"), (seeded[:7], "PASS"), (seeded[3:], "PASS"),
+                             (seeded[:6], "FAIL"), (seeded[4:], "FAIL"), ((), "FAIL")):
+        verdict, note = _comp(_hits(chosen))
+        assert verdict == expected, (len(chosen), note)
+        assert f"{len(chosen)} of 10 seeded sentences hit" in note, note
+    # the budget in the filter command still binds: seven hits against a budget of five
+    assert _comp(_hits(seeded[:7]), budget=5)[0] == "FAIL"
+
+
+def test_compression_right_sentence_with_the_wrong_prefix_or_no_added_words_does_not_count() -> None:
+    v = _verdicts()
+    seeded = v.COMPRESSION_SEEDED
+
+    def wrong(entry: tuple) -> str:
+        return next(p for p in v.COMPRESSION_PREFIXES if p != entry[1])
+
+    every_wrong = [_hit(i + 1, e, wrong(e)) for i, e in enumerate(seeded)]
+    verdict, note = _comp(every_wrong)
+    assert verdict == "FAIL" and "0 of 10 seeded sentences hit" in note, note
+    # seven right and three wrong passes; six right and four wrong fails: the wrong ones add nothing
+    assert _comp([*_hits(seeded[:7]), *[_hit(8 + i, e, wrong(e)) for i, e in enumerate(seeded[7:])]])[0] == "PASS"
+    verdict, note = _comp([*_hits(seeded[:6]), *[_hit(7 + i, e, wrong(e)) for i, e in enumerate(seeded[6:])]])
+    assert verdict == "FAIL" and "6 of 10 seeded sentences hit" in note, note
+    # the prefix opens the reason: one that only mentions it later does not count
+    late = [_hit(1, seeded[0], "Cut for clarity; " + seeded[0][1])]
+    assert "0 of 10" in _comp(late)[1]
+    # a cut with the right prefix removes words, so it is not an unpacking
+    cut = [_cedit(i + 1, e[2], e[2].rsplit(" ", 1)[0] + ".", f"{e[1]} trimmed") for i, e in enumerate(seeded[6:])]
+    assert "0 of 10" in _comp(cut)[1]
+    assert _comp([*_hits(seeded[:6]), *cut])[0] == "FAIL"
+    # an edit whose old string occurs more than once cannot be applied: it is flagged and earns no credit
+    verdict, note = _comp([*_hits(seeded[:6]), _cedit(7, "job", "job then", seeded[6][1] + " x")])
+    assert _comp_doc().count("job") > 1 and "job" in seeded[6][2]
+    assert verdict == "FAIL" and "occurs" in note and "6 of 10" in note and "D1:miss" in note, note
+    # an edit whose old string covers part of the sentence overlaps it, so it counts
+    spans = [_cedit(1, seeded[0][2][4:], seeded[0][2][4:-1] + " then.", f"{seeded[0][1]} spelled out")]
+    assert "1 of 10 seeded sentences hit" in _comp(spans)[1]
+
+
+def test_compression_a_query_anchored_in_the_sentence_with_the_prefix_counts_and_nothing_else_does() -> None:
+    v = _verdicts()
+    seeded = v.COMPRESSION_SEEDED
+    edits, seventh = _hits(seeded[:6]), seeded[6]
+    ask = _cquery(1, seventh[2], f"{seventh[1]} what does this path do with a crashed worker?")
+    verdict, note = _comp(edits, [ask])
+    assert verdict == "PASS" and "7 of 10 seeded sentences hit" in note, note
+    wrong = next(p for p in v.COMPRESSION_PREFIXES if p != seventh[1])
+    for bad in (_cquery(1, seventh[2], f"{wrong} what does it do?"),            # the wrong prefix
+                _cquery(1, seventh[2], "What does this path do with a crashed worker?"),  # no prefix
+                _cquery(1, seventh[2], f"Is it so? {seventh[1]} what does it do?"),      # prefix later in the text
+                _cquery(1, INTRO, f"{seventh[1]} what does it do?"),                      # anchored in clean prose
+                _cquery(1, seeded[0][2], f"{seventh[1]} what does it do?")):              # anchored in another sentence
+        verdict, note = _comp(edits, [bad])
+        assert verdict == "FAIL" and "6 of 10 seeded sentences hit" in note, (bad, note)
+    # an anchor that runs past the end of the sentence into the next one does not lie in it
+    first = seeded[0]
+    tail = first[2][-12:] + " " + _comp_doc().split(first[2] + " ", 1)[1][:12]
+    assert _comp_doc().count(tail) == 1
+    straddle = {"n": 1, "anchor": tail, "text": f"{first[1]} what does it do?"}
+    assert "6 of 10 seeded sentences hit" in _comp(_hits(seeded[1:7]), [straddle])[1]
+    # the same sentence hit by an edit and a query counts once
+    both = _comp([*edits, _hit(7, seventh)], [ask])
+    assert "7 of 10 seeded sentences hit" in both[1]
+
+
+def test_compression_any_edit_on_an_always_scored_decoy_fails_even_with_ten_hits() -> None:
+    v = _verdicts()
+    seeded, decoys = v.COMPRESSION_SEEDED, v.COMPRESSION_DECOYS
+    doc = _comp_doc()
+    assert {label.split(":")[0] for label, _ in decoys} == {
+        "identifier", "defined term", "exception verb", "denominal verb", "thing verb", "two-modifier compound"}
+    for label, text in decoys:
+        for chosen in (seeded, seeded[:7]):
+            verdict, note = _comp([*_hits(chosen), _cedit(11, text, text[:-1] + " then.", "a filler cut")])
+            assert verdict == "FAIL" and "decoy" in note and label in note, (label, note)
+        # a slice of the decoy is enough: the edit overlaps it
+        piece = next(text[4:4 + w] for w in range(20, len(text) - 4) if doc.count(text[4:4 + w]) == 1)
+        assert _comp([*_hits(seeded), _cedit(11, piece, "x", "r")])[0] == "FAIL", label
+    # ten hits and no decoy touched is the control: it passes
+    assert _comp(_hits(seeded))[0] == "PASS"
+
+
+def test_compression_a_query_with_a_compression_prefix_anchored_on_a_decoy_fails_a_plain_question_does_not() -> None:
+    v = _verdicts()
+    seeded, decoys = v.COMPRESSION_SEEDED, v.COMPRESSION_DECOYS
+    doc = _comp_doc()
+    edits = _hits(seeded)
+    for label, text in decoys:
+        assert doc.count(text[4:28]) == 1, label
+        for prefix in v.COMPRESSION_PREFIXES:
+            verdict, note = _comp(edits, [_cquery(1, text, f"{prefix} what does this mean?")])
+            assert verdict == "FAIL" and "decoy" in note and label in note, (label, prefix, note)
+        assert _comp(edits, [_cquery(1, text, "Which schema does this check against?")])[0] == "PASS", label
+
+
+def test_compression_the_dense_passage_is_scored_only_when_the_voice_card_names_it_and_the_note_says_which() -> None:
+    v = _verdicts()
+    seeded = v.COMPRESSION_SEEDED
+    dense, markers = v.COMPRESSION_DENSE
+    assert all(dense != text for _, text in v.COMPRESSION_DECOYS)
+    base = _hits(seeded)
+    touch = [_cedit(11, dense, dense[:-1] + " then.", "noun stack: the pager reader needs the relation")]
+    asked = [_cquery(1, dense, "noun stack: what does each line mean?")]
+    named = f"Plain register. Deliberate density: {markers[0]}, the reader scans it at a glance."
+    for card in (None, "", "Plain register. No devices.", "Deliberate density: the lease table."):
+        verdict, note = _comp(base + touch, card=card)
+        assert verdict == "PASS" and "dense passage scored: no" in note, (card, note)
+        verdict, note = _comp(base, asked, card=card)
+        assert verdict == "PASS" and "dense passage scored: no" in note, (card, note)
+    for marker in markers:
+        card = f"Voice: second person. Device: {marker.upper()}."  # case ignored
+        verdict, note = _comp(base + touch, card=card)
+        assert verdict == "FAIL" and "dense passage scored: yes" in note and "decoy" in note, (marker, note)
+        verdict, note = _comp(base, asked, card=card)
+        assert verdict == "FAIL" and "dense passage scored: yes" in note, (marker, note)
+    # named and untouched passes, and says it was scored
+    verdict, note = _comp(base, card=named)
+    assert verdict == "PASS" and "dense passage scored: yes" in note, note
+    # the note counts what was scored: the always-scored decoys, and the dense passage when the card names it
+    always = len(v.COMPRESSION_DECOYS)
+    assert f"decoys scored: {always} of {always + 1}" in _comp(base)[1]
+    assert f"decoys scored: {always + 1} of {always + 1}" in _comp(base, card=named)[1]
+
+
+def test_compression_a_fixture_that_no_longer_matches_the_oracle_is_not_measurable() -> None:
+    v = _verdicts()
+    doc = _comp_doc()
+    plain = [_cedit(1, INTRO, INTRO[:-1] + " then.", "a filler cut")]
+    assert INTRO in doc
+    assert _comp(plain)[0] == "FAIL"  # control: the unchanged fixture is measured (zero hits)
+    phrases = [("seeded", e[2]) for e in v.COMPRESSION_SEEDED] + [("decoy", t) for _, t in v.COMPRESSION_DECOYS] \
+        + [("dense", v.COMPRESSION_DENSE[0])]
+    assert len(phrases) == 10 + len(v.COMPRESSION_DECOYS) + 1
+    for what, text in phrases:
+        assert doc.count(text) == 1, (what, text)
+        missing = doc.replace(text, text.replace(" ", "  ", 1))  # one space doubled: no longer there exactly
+        verdict, note = _comp(plain, doc=missing)
+        assert verdict == "NOT-MEASURABLE" and "fixture" in note and text[:30] in note, (what, text, note)
+        twice = doc + "\n\n" + text + "\n"
+        verdict, note = _comp(plain, doc=twice)
+        assert verdict == "NOT-MEASURABLE" and "2 times" in note, (what, text, note)
+
+
+def test_compression_adds_to_the_note_the_per_sentence_table_and_names_a_possible_invention_without_failing() -> None:
+    v = _verdicts()
+    seeded = v.COMPRESSION_SEEDED
+    by_id = {e[0]: e for e in seeded}
+    others = [e for e in seeded if e[0] not in ("N1", "I1")]
+    n1 = by_id["N1"]
+    verdict, note = _comp(_hits(others[:6]))
+    assert verdict == "FAIL" and "N1:miss" in note and "N2:hit" in note, note
+    assert "possible invention: none" in note and "dense passage scored: no" in note, note
+    # the expected relation (a stack unpacked with its relation words and function words) is not invention
+    ok = _cedit(1, n1[2], "The count of retries after a failed lease renewal resets after a successful renewal.",
+                "noun stack: the count is of retries after a failed renewal.")
+    verdict, note = _comp([ok, *_hits(others[:6], start=2)])
+    assert verdict == "PASS" and "N1:hit" in note and "possible invention: none" in note, note
+    # words that go beyond it are noted, never failed
+    invented = _cedit(1, n1[2], "The count of retries after an automatically scheduled lease renewal failure resets "
+                      "after a successful renewal.", "noun stack: the count is of retries.")
+    verdict, note = _comp([invented, *_hits(others[:6], start=2)])
+    assert verdict == "PASS" and "possible invention" in note and "N1" in note, note
+    assert "automatically" in note and "scheduled" in note and "possible invention: none" not in note, note
+    # the coined-verb sentences are checked the same way
+    c1 = by_id["C1"]
+    swap = _cedit(1, c1[2], "The dashboard marks each stale lease with a red badge.", "coined verb: badge is a noun.")
+    assert "possible invention: none" in _comp([swap, *_hits(others[:6], start=2)])[1]
+    swap = _cedit(1, c1[2], "The dashboard colours each stale lease with a red badge for the finance team.",
+                  "coined verb: badge is a noun.")
+    assert "C1" in _comp([swap, *_hits(others[:6], start=2)])[1].split("possible invention")[1]
+    # only noun-stack and coined-verb sentences are checked: an added claim in another sentence is not noted here
+    i2 = by_id["I2"]
+    claim = _cedit(1, i2[2], "The module docstring promises a stable order for claims in every release since 2019.",
+                   "inanimate subject: the module does not promise.")
+    assert "possible invention: none" in _comp([claim, *_hits(others[:6], start=2)])[1]
+
+
+def test_compression_fixture_is_ten_seeded_sentences_two_per_feature_each_once_and_kept_clean() -> None:
+    v = _verdicts()
+    assert v.DOCS["compression"] == COMPRESSION_PATH and (REPO_ROOT / COMPRESSION_PATH).is_file()
+    doc = _comp_doc()
+    seeded = v.COMPRESSION_SEEDED
+    assert len({e[0] for e in seeded}) == 10 and len({e[1] for e in seeded}) == 5
+    assert set(v.COMPRESSION_PREFIXES) == {"noun stack:", "coined verb:", "inanimate subject:", "dependency:",
+                                           "optional word:"}
+    for prefix in v.COMPRESSION_PREFIXES:
+        assert sum(1 for e in seeded if e[1] == prefix) == 2, prefix
+    for sid, prefix, sentence, relation in seeded:
+        assert doc.count(sentence) == 1, sid
+        assert sentence.endswith(".") and ". " not in sentence, f"{sid} is not one sentence"
+        assert (sid[0] in "NC") == bool(relation), f"{sid}: relation words belong to noun-stack and coined-verb sentences only"
+        if prefix == "optional word:":
+            assert not re.search(r"\bthat\b", sentence), f"{sid} must lack the optional word"
+    # nothing else in the fixture is a protected region or a mark the editor would act on without a feature
+    assert not doc.startswith("---") and "```" not in doc and "—" not in doc and "–" not in doc
+    assert ";" not in doc and "|" not in doc and not any(ln.startswith(">") for ln in doc.splitlines())
+    for _, text in v.COMPRESSION_DECOYS:
+        assert doc.count(text) == 1 and text not in [e[2] for e in seeded]
+    assert doc.count(v.COMPRESSION_DENSE[0]) == 1
+
+
+def test_compression_still_fails_on_scope_violations_and_a_missing_brief_read_and_main_exits_by_the_verdict(
+        tmp_path: Path) -> None:
+    v = _verdicts()
+    seeded = v.COMPRESSION_SEEDED
+    edits = _hits(seeded)
+    good = _run({"edits": edits, "queries": []}, {"edits": edits}, target=COMPRESSION_PATH, budget=12)
+    assert _verdict("compression", good, _comp_doc())[0] == "PASS"
+    verdict, note = _verdict("compression", [*good, _use("g", "Grep", {"pattern": "x"}, sub="ag")], _comp_doc())
+    assert verdict == "FAIL" and "scope" in note
+    unread = _run({"edits": edits, "queries": []}, {"edits": edits}, target=COMPRESSION_PATH, budget=12, read=[])
+    assert _verdict("compression", unread, _comp_doc())[0] == "FAIL"
+    assert _verdict("compression", _run(None, {"edits": edits}), _comp_doc())[0] == "FAIL"
+    # the kind comes from the run name compression-N, and the document is read from --root
+    root = tmp_path / "root"
+    (root / "tests" / "prose_edit" / "fixtures").mkdir(parents=True)
+    (root / COMPRESSION_PATH).write_text(_comp_doc(), encoding="utf-8")
+
+    def write(name: str, events: list[dict]) -> None:
+        (tmp_path / f"{name}.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+        (tmp_path / f"{name}.rc").write_text("rc=0\n", encoding="utf-8")
+
+    write("compression-1", good)
+    assert v.main([str(tmp_path), "--root", str(root)]) == 0
+    six = _run({"edits": edits[:6], "queries": []}, {"edits": edits[:6]}, target=COMPRESSION_PATH, budget=12)
+    write("compression-2", six)
+    assert v.main([str(tmp_path), "--root", str(root)]) == 1
+
+
+def test_compression_is_in_the_readme_with_its_invocation_and_run_name_and_run_scenario_needs_no_registry() -> None:
+    text = (ACC / "README.md").read_text(encoding="utf-8")
+    row = next((ln for ln in text.splitlines() if ln.startswith("| `compression` |")), "")
+    assert row, "no per-kind row for compression"
+    assert "7" in row and "10" in row and "decoy" in row and "voice_card" in row, row
+    assert "`compression-N`" in text and COMPRESSION_README_RUN in text
+    # the kind comes from the run name and the budget from the prompt: the runner holds no kind table
+    runner = (ACC / "run-scenario.sh").read_text(encoding="utf-8")
+    assert "compression" not in runner and "qa)" not in runner and "case " not in runner
