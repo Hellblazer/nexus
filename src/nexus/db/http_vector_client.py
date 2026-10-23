@@ -3232,7 +3232,7 @@ class HttpVectorClient:
 
     # ── Catalog-row resolution (nexus-fryrd) ──────────────────────────────────
 
-    def _resolve_collection_row(self, collection: str) -> dict | None:
+    def _resolve_collection_row(self, collection: str, *, strict: bool = False) -> dict | None:
         """Return the catalog row for *collection*, through THIS client's
         own resolver -- never a different client's tenant.
 
@@ -3268,12 +3268,15 @@ class HttpVectorClient:
            and correctness over a stale read matters more than a saved
            round trip here); a caller needing a warm cache for a
            non-default tenant supplies its own ``_row_resolver``.
+
+        ``strict`` (nexus-s8r5o) makes case 2 raise a failed listing instead of
+        answering ``None``; cases 1 and 3 already raise whatever their read raises.
         """
         if self._row_resolver is not None:
             return self._row_resolver(collection)
         if self._tenant == _process_default_tenant():
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-            return get_collection_row(collection)
+            return get_collection_row(collection, strict=strict)
         # The routing listing: the catalog attributes only, no per-collection
         # chunk count (nexus-7jy5r: the indexers read a row per file).
         for row in self.list_collections(routing=True):

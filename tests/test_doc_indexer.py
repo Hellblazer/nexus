@@ -2153,8 +2153,15 @@ class _RowStore(MagicMock):
     """A T3 double whose catalog row for every collection names *bge*, read through its own
     resolver as ``HttpVectorClient._resolve_collection_row`` is."""
 
-    def _resolve_collection_row(self, name: str) -> dict:
+    def _resolve_collection_row(self, name: str, **_kw) -> dict:
         return {"name": name, "content_type": "docs", "embedding_model": _BGE}
+
+
+class _UnreadableRowStore(MagicMock):
+    """A T3 double whose catalog listing fails."""
+
+    def _resolve_collection_row(self, name: str, **_kw) -> dict:
+        raise ConnectionError("listing unreachable")
 
 
 @pytest.mark.t2_tenant
@@ -2198,12 +2205,41 @@ def test_index_markdown_skip_compares_against_the_row_model(sample_md, monkeypat
 
 def test_target_model_reads_the_row_through_the_store(monkeypatch, cloud_mode):
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: pytest.fail("read the shared cache"))
-    assert _target_model(_RowStore(), "docs__mybook__voyage-context-3__v1") == _BGE
+    assert _target_model(_RowStore(), "docs__mybook__voyage-context-3__v1") == (_BGE, True)
 
 
 @pytest.mark.parametrize("store", [MagicMock(), object()], ids=["mock", "no-resolver"])
 def test_target_model_without_a_resolver_follows_the_name(store, cloud_mode):
-    assert _target_model(store, "docs__mybook__voyage-context-3__v1") == "voyage-context-3"
+    assert _target_model(store, "docs__mybook__voyage-context-3__v1") == ("voyage-context-3", True)
+
+
+def test_target_model_asks_for_a_strict_row_read(cloud_mode):
+    # The process-default client answers a failed listing with None unless asked strictly.
+    asked: list[dict] = []
+
+    class _Recording(MagicMock):
+        def _resolve_collection_row(self, name: str, **kw) -> None:
+            asked.append(kw)
+
+    _target_model(_Recording(), "docs__mybook__voyage-context-3__v1")
+    assert asked == [{"strict": True}]
+
+
+def test_target_model_flags_an_unreadable_row(cloud_mode):
+    # nexus-s8r5o: a failed row read answers the name's model, flagged as a guess.
+    assert _target_model(_UnreadableRowStore(), "docs__mybook__voyage-context-3__v1") == ("voyage-context-3", False)
+
+
+@pytest.mark.parametrize("stored,target,known,current", [
+    (_BGE, _BGE, True, True),
+    (_BGE, "voyage-context-3", True, False),
+    (_BGE, "voyage-context-3", False, True),
+    ("", "voyage-context-3", False, True),
+])
+def test_stored_model_is_current(stored, target, known, current, cloud_mode):
+    from nexus.doc_indexer import _stored_model_is_current
+
+    assert _stored_model_is_current(stored, target, known) is current
 
 
 @pytest.mark.parametrize("kind", ["pdf", "markdown"])

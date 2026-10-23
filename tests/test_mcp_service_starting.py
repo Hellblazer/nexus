@@ -315,6 +315,19 @@ def test_a_failed_listing_is_no_row_for_a_write_path_caller(engine, status):
     assert mcp_infra.get_collection_row(_ROW_NAME) is None
 
 
+def test_a_strict_read_of_a_failed_listing_raises(engine):
+    """nexus-s8r5o: a caller that must not read "unreadable" as "no row" (the indexers'
+    unchanged-content skip) asks with ``strict=True`` and gets the failure."""
+    from nexus.db.http_vector_client import VectorServiceError
+
+    engine.stats_status = 503
+    client = mcp_infra.get_t3()
+    with pytest.raises((mcp_infra.ServiceNotReadyError, VectorServiceError)):
+        client._resolve_collection_row(_ROW_NAME, strict=True)
+    with pytest.raises((mcp_infra.ServiceNotReadyError, VectorServiceError)):
+        mcp_infra.get_collection_row(_ROW_NAME, strict=True)
+
+
 def test_a_refused_listing_is_no_row_for_get_collection_row(monkeypatch):
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
