@@ -1366,6 +1366,8 @@ class CliBackend:
         return cli_status(self._which)
 
     async def run(self, req: DispatchRequest) -> DispatchResult:
+        # Pinned by test_cli_backend_refuses_text_mode_before_spawning: phase 2's
+        # text mode routes json_schema=None to the API backend, never here.
         if req.json_schema is None:
             raise OperatorError("the cli backend needs a json_schema; text mode is not implemented")
         prompt = req.prompt

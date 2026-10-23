@@ -9,6 +9,13 @@ either raises until the phase that implements it.
 
 Design of record: T2 ``nexus/design-direct-llm-provider-2026-10-23``.
 
+Where the setting is read: ``NX_LLM_BACKEND`` in the environment, then
+``llm.backend`` in the GLOBAL ``~/.config/nexus/config.yml`` (the mtime-cached
+reader ``get_credential`` uses). Never the per-repo ``.nexus.yml``: a cloned
+repository must not be able to pick the backend, and in a later phase an
+endpoint or key. ``load_config()`` merges the per-repo file, so it is not used
+here.
+
 This module imports nothing from ``nexus.operators.dispatch`` at load time
 (``dispatch`` imports it); the exception types are loaded when raised.
 """
@@ -33,8 +40,16 @@ NX_LLM_BACKEND_ENV: str = "NX_LLM_BACKEND"
 #: Every value the setting accepts.
 BACKEND_SETTINGS: tuple[str, ...] = ("auto", "cli", "anthropic", "openai_compat")
 
-#: Backends this release implements. ``select_backend`` raises for the rest.
+#: Backends this release implements. ``select_backend`` and ``backend_status``
+#: both decide from this one constant; they raise / report unavailable for the rest.
 IMPLEMENTED_BACKENDS: frozenset[str] = frozenset({"cli"})
+
+
+def _concrete(setting: str) -> str:
+    """The backend a setting names once ``auto`` is resolved. Phase 1: ``auto``
+    is ``cli`` unconditionally (a missing ``claude`` stays the spawn error);
+    phase 2 changes this to cli-if-on-PATH else anthropic-if-key."""
+    return "cli" if setting == "auto" else setting
 
 
 @dataclass(frozen=True)
@@ -140,8 +155,9 @@ def select_backend(
     setting = configured_backend(config, env)
     if req.grants_tool_access:
         return "cli"
-    if setting in ("auto", "cli"):
-        return "cli"
+    backend = _concrete(setting)
+    if backend in IMPLEMENTED_BACKENDS:
+        return backend
     _raise_not_implemented(setting)
 
 
@@ -157,10 +173,9 @@ def _raise_not_implemented(setting: str) -> NoReturn:
 
 def resolve_backend_name(req: DispatchRequest) -> str:
     """:func:`select_backend` over the process's real inputs: ``os.environ``,
-    the loaded config (read only when ``NX_LLM_BACKEND`` is unset) and
-    ``shutil.which``."""
-    config = None if (os.environ.get(NX_LLM_BACKEND_ENV) or "").strip() else _load_llm_config()
-    return select_backend(config, os.environ, shutil.which, req)
+    the global config (always passed, even when ``NX_LLM_BACKEND`` is set: a
+    later phase reads its key from it) and ``shutil.which``."""
+    return select_backend(_load_llm_config(), os.environ, shutil.which, req)
 
 
 def cli_status(which: Callable[[str], str | None] | None = None) -> BackendStatus:
@@ -183,20 +198,21 @@ def backend_status(
         setting = configured_backend(config, env)
     except Exception as exc:  # noqa: BLE001 - OperatorError for a bad setting; report, never raise from a probe
         return BackendStatus("none", False, str(exc))
-    if setting in ("auto", "cli"):
-        return cli_status(which)
+    if _concrete(setting) in IMPLEMENTED_BACKENDS:
+        return cli_status(which)  # phase 1: the only implemented backend is cli
     return BackendStatus(
         setting, False, f"LLM backend {setting!r} is not available in this release"
     )
 
 
 def _load_llm_config() -> Mapping[str, Any]:
-    """Config for the setting lookup. Failure to read config is not a reason to
-    fail a probe: ``auto`` applies."""
+    """``{"llm": <section>}`` from the GLOBAL config only, never the per-repo
+    ``.nexus.yml``. A missing, unreadable or malformed global config is not a
+    reason to fail a probe or a dispatch: ``auto`` applies."""
     try:
-        from nexus.config import load_config  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
+        from nexus.config import get_global_config_section  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
 
-        return load_config()
+        return {"llm": get_global_config_section("llm")}
     except Exception as exc:  # noqa: BLE001 - a broken config.yml must not turn a probe into a crash
         _log.debug("llm_backend_config_unreadable", error=str(exc))
         return {}
@@ -208,9 +224,13 @@ def llm_backend_available(
     which: Callable[[str], str | None] | None = None,
 ) -> bool:
     """Whether some LLM backend can serve a tool-free request. Replaces the
-    per-module ``_claude_available`` probes. Phase 1: true exactly when
-    ``claude`` is on PATH and the setting is ``auto`` or ``cli``."""
+    per-module ``_claude_available`` probes. Phase 1's answer: true exactly when
+    ``claude`` is on PATH and the setting is ``auto`` or ``cli``. Phase 2 widens
+    it (an API key makes a backend available).
+
+    *config* defaults to the global config's ``llm`` section, read even when
+    ``NX_LLM_BACKEND`` is set."""
     env = os.environ if env is None else env
-    if config is None and not (env.get(NX_LLM_BACKEND_ENV) or "").strip():
+    if config is None:
         config = _load_llm_config()
     return backend_status(config, env, which).available

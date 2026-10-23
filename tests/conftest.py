@@ -3139,6 +3139,10 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         # own monkeypatch, which (per the ordering contract documented
         # above) lands after this delenv and wins.
         "NX_MINT_TOKEN",
+        # nexus-2k66t.3: the LLM backend override. An exported shell value
+        # (NX_LLM_BACKEND=anthropic) would make every claude_dispatch in the
+        # suite raise or reroute. Tests that want it setenv it themselves.
+        "NX_LLM_BACKEND",
     ):
         monkeypatch.delenv(var, raising=False)
 

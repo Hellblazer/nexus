@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import os
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -37,6 +38,7 @@ from nexus.operators.llm_backend import (
     backend_status,
     configured_backend,
     llm_backend_available,
+    resolve_backend_name,
     select_backend,
 )
 
@@ -53,6 +55,32 @@ def _off_path(name: str) -> str | None:
 
 def _req(**kw) -> DispatchRequest:
     return DispatchRequest(prompt="p", json_schema=_SCHEMA, **kw)
+
+
+class _SpawnReached(Exception):
+    """Raised by the fake spawn: the code under test got as far as starting ``claude``."""
+
+
+def _spawn_raises():
+    """Patch the dispatch module's subprocess spawn with a fake that raises.
+
+    A bare ``patch`` here makes ``proc`` a MagicMock whose ``stdout.read`` returns
+    a truthy mock forever, and the drain loop appends it without bound (a pytest
+    process grew to ~40 GB when a mutant let a test reach the spawn). A raising
+    fake turns "the code reached the spawn" into an immediate, bounded failure.
+    """
+
+    async def spawn(*_a, **_k):
+        raise _SpawnReached
+
+    return patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=spawn)
+
+
+def _write_global_config(text: str) -> None:
+    """Write the (per-test, conftest-isolated) global ``config.yml``."""
+    cfg_dir = Path(os.environ["NEXUS_CONFIG_DIR"])
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.yml").write_text(text, encoding="utf-8")
 
 
 class FakeBackend:
@@ -149,6 +177,7 @@ class TestSelectBackend:
 
         select_backend(config, env, which, _req())
         assert env == {"NX_LLM_BACKEND": "cli"} and config == {"llm": {"backend": "cli"}}
+        assert calls == []  # phase 1 never consults PATH for the choice
 
     @pytest.mark.parametrize("bad", [None, "x", 3, []])
     def test_malformed_llm_section_is_auto(self, bad) -> None:
@@ -179,19 +208,27 @@ class TestAvailability:
         status = backend_status(None, {"NX_LLM_BACKEND": "gemini"}, _on_path)
         assert status.available is False and "gemini" in status.reason
 
-    def test_config_is_read_when_the_env_is_silent(self) -> None:
-        with patch("nexus.config.load_config", return_value={"llm": {"backend": "anthropic"}}):
-            assert llm_backend_available(env={}, which=_on_path) is False
-        with patch("nexus.config.load_config", return_value={}):
-            assert llm_backend_available(env={}, which=_on_path) is True
+    def test_global_config_is_read_when_no_config_is_passed(self) -> None:
+        _write_global_config("llm:\n  backend: anthropic\n")
+        assert llm_backend_available(env={}, which=_on_path) is False
+        _write_global_config("llm:\n  backend: cli\n")
+        assert llm_backend_available(env={}, which=_on_path) is True
 
     def test_unreadable_config_means_auto(self) -> None:
-        with patch("nexus.config.load_config", side_effect=OSError("boom")):
+        with patch("nexus.config.get_global_config_section", side_effect=OSError("boom")):
             assert llm_backend_available(env={}, which=_on_path) is True
 
     def test_cli_backend_reports_its_own_status(self) -> None:
         assert CliBackend(_on_path).available() == BackendStatus("cli", True, "claude is on PATH")
         assert CliBackend(_off_path).available().available is False
+
+    def test_cli_backend_refuses_text_mode_before_spawning(self) -> None:
+        # Pins the json_schema=None guard: a later phase routes text mode to the
+        # API backend, and until then the cli backend must not spawn claude with
+        # a schema of "null" (what the pre-P1 code would have sent).
+        with _spawn_raises():
+            with pytest.raises(OperatorError, match="json_schema"):
+                asyncio.run(CliBackend().run(DispatchRequest(prompt="p", json_schema=None)))
 
     def test_backends_satisfy_the_protocol(self) -> None:
         assert isinstance(CliBackend(), LLMBackend)
@@ -265,10 +302,9 @@ class TestClaudeDispatchFront:
 
     def test_unimplemented_backend_setting_fails_before_spawning(self, monkeypatch) -> None:
         monkeypatch.setenv("NX_LLM_BACKEND", "anthropic")
-        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec") as spawn:
+        with _spawn_raises():
             with pytest.raises(OperatorError, match="later phase"):
                 asyncio.run(claude_dispatch("p", _SCHEMA))
-        spawn.assert_not_called()
 
     def test_tool_grant_still_spawns_the_cli_under_an_api_setting(self, monkeypatch) -> None:
         monkeypatch.setenv("NX_LLM_BACKEND", "anthropic")
@@ -288,6 +324,68 @@ class TestClaudeDispatchFront:
         ):
             with pytest.raises(Sentinel):
                 asyncio.run(claude_dispatch("p", _SCHEMA, allowed_tools=["Read"]))
+
+
+# ── where the setting is read (global config + env, never per-repo) ────────
+
+
+class TestWhereTheSettingIsRead:
+    """Ship-blocker pins: ``llm.backend`` comes from the env and the GLOBAL
+    config. The mutants these kill: global config never read; per-repo
+    ``.nexus.yml`` merged into the lookup; env not winning over config."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_setting(self, monkeypatch) -> None:
+        monkeypatch.delenv("NX_LLM_BACKEND", raising=False)
+
+    def test_global_config_anthropic_makes_claude_dispatch_raise_the_later_phase_error(self) -> None:
+        _write_global_config("llm:\n  backend: anthropic\n")
+        with _spawn_raises():
+            with pytest.raises(OperatorError, match="later phase") as ei:
+                asyncio.run(claude_dispatch("p", _SCHEMA))
+        assert "anthropic" in str(ei.value)
+
+    def test_env_cli_overrides_a_config_value_of_anthropic(self, monkeypatch) -> None:
+        _write_global_config("llm:\n  backend: anthropic\n")
+        with pytest.raises(OperatorError, match="later phase"):
+            resolve_backend_name(_req())  # config alone: raises
+        monkeypatch.setenv("NX_LLM_BACKEND", "cli")
+        assert resolve_backend_name(_req()) == "cli"  # env wins
+
+    def test_a_per_repo_nexus_yml_cannot_pick_the_backend(self, tmp_path, monkeypatch) -> None:
+        from nexus.config import load_config
+
+        repo = tmp_path / "cloned-repo"
+        repo.mkdir()
+        (repo / ".nexus.yml").write_text("llm:\n  backend: anthropic\n", encoding="utf-8")
+        monkeypatch.delenv("NEXUS_REPO_ROOT", raising=False)
+        monkeypatch.chdir(repo)
+        # Non-vacuity: the merged loader DOES see the per-repo setting here.
+        assert load_config()["llm"]["backend"] == "anthropic"
+        assert resolve_backend_name(_req()) == "cli"
+        assert llm_backend_available(env={}, which=_on_path) is True
+        # And a per-repo file cannot override a global one either.
+        _write_global_config("llm:\n  backend: cli\n")
+        assert resolve_backend_name(_req()) == "cli"
+
+    @pytest.mark.parametrize("broken", ["llm: [unterminated\n", ":\n  - : :\n\t bad", "- just\n- a list\n", "llm: 3\n"])
+    def test_a_broken_global_config_is_auto(self, broken) -> None:
+        _write_global_config(broken)
+        assert resolve_backend_name(_req()) == "cli"
+        assert llm_backend_available(env={}, which=_on_path) is True
+
+    def test_the_config_is_passed_even_when_the_env_is_set(self, monkeypatch) -> None:
+        monkeypatch.setenv("NX_LLM_BACKEND", "cli")
+        _write_global_config("llm:\n  backend: anthropic\n")
+        seen = {}
+
+        def spy(config, env, which, req):
+            seen["config"] = config
+            return "cli"
+
+        with patch("nexus.operators.llm_backend.select_backend", side_effect=spy):
+            resolve_backend_name(_req())
+        assert seen["config"] == {"llm": {"backend": "anthropic"}}  # a later phase reads its key from it
 
 
 # ── the five probe sites ────────────────────────────────────────────────────
