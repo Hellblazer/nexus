@@ -264,10 +264,14 @@ class TestRenameCLI:
         }
         runner = CliRunner()
         args = [old, new] + (["--force-prefix-change"] if force else [])
+        # nexus-7f4o4: a conformant target now reads the SOURCE's catalog
+        # row; this gate-only test has no engine, so no row backs `old`.
         with patch(
             "nexus.commands.collection.rename_collection_data_plane",
             return_value=fake_counts,
-        ) as mock_cascade:
+        ) as mock_cascade, patch(
+            "nexus.mcp_infra.get_collection_row", return_value=None,
+        ):
             result = runner.invoke(rename_cmd, args)
         if expect_reject:
             assert result.exit_code != 0, result.output

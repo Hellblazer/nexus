@@ -1157,6 +1157,67 @@ def embedding_model_for_collection(collection_name: str) -> str:
     return voyage_model_for_collection(collection_name)
 
 
+def rename_model_conflict(
+    old: str, new: str,
+    *, name_fallback: "Callable[[str], str | None] | None" = None,
+    row_resolver: "Callable[[str], dict | None] | None" = None,
+) -> "tuple[str, str, str] | None":
+    """Return ``(source_model, name_token, correct_name)`` when renaming
+    *old* to the conformant name *new* would leave a model token that
+    disagrees with the source collection's embedding model, else ``None``.
+
+    nexus-7f4o4: a rename is an O(1) identity re-home. The engine keeps the
+    SOURCE catalog row's ``embedding_model`` (the client sends only
+    content_type and owner_id), so the vectors stay in the source's model
+    space whatever token the new name carries. The source model is therefore
+    the ROW's (:func:`resolve_row_preferred`, name derivation as the
+    fallback when no row backs *old* -- a legacy never-registered
+    collection), never a model read from the OLD NAME: a legacy bge-row
+    collection called ``docs__foo`` reads as voyage-context-3 by name.
+
+    *name_fallback* answers the source model when no row backs *old*
+    (default :func:`embedding_model_for_collection`, which guesses voyage
+    for a legacy two-segment name -- ``nx collection rename``'s long-standing
+    comparison). A caller that must not refuse on that guess passes
+    :func:`embedding_model_for_collection_name`, which answers only from a
+    conformant name's own token and ``None`` otherwise (no basis, no
+    refusal).
+
+    *row_resolver* is passed through to :func:`resolve_row_preferred`: a
+    caller that already holds the source's engine row (``nx catalog
+    rename-collection`` reads it with ``get_collection``) hands it in
+    rather than letting this read the stats-view cache, whose listing can
+    fail and would then silently fall to the name.
+
+    ``None`` also when *new* is not conformant (it carries no model token to
+    compare; the caller's own non-conformant gate decides) or when the
+    source model cannot be determined (a row lacking the field, or holding
+    an empty one).
+
+    ``correct_name`` is *new* with the model token replaced by the source's
+    own, so a refusal can name the rename that would be accepted.
+    """
+    # The permissive conformant regex, matched here rather than through
+    # parse_conformant_collection_name: that function's direct callers are a
+    # frozen allowlist (tests/test_parse_conformant_collection_name_caller_census.py)
+    # and this reads the name's segments only to rebuild it with another token.
+    match = _CONFORMANT_COLLECTION_RE.match(new)
+    if match is None:
+        return None
+    seg = match.groupdict()
+    token = seg["model"]
+    source_model = resolve_row_preferred(
+        old, "embedding_model", name_fallback or embedding_model_for_collection,
+        row_resolver=row_resolver,
+    )
+    # An empty string is a row that never recorded a model (a legacy
+    # grandfathered registration): no basis to refuse on, same as None.
+    if not source_model or source_model == token:
+        return None
+    correct = f"{seg['ct']}__{seg['owner']}__{source_model}__v{seg['ver']}"
+    return source_model, token, correct
+
+
 # index_model_for_collection is semantically the same (same model for index + query).
 index_model_for_collection = embedding_model_for_collection
 

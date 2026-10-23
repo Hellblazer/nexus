@@ -1595,6 +1595,7 @@ Validation gates fire BEFORE any side effect:
 - old name must be in the collections projection
 - old name must not already be superseded
 - new name must not already exist in T3
+- the new name's `__<model>__` token must match the old collection's catalog-row `embedding_model` (nexus-7f4o4): the engine rename keeps the row's model, so a token that disagrees would name a model the vectors are not in. The model is read from the engine row the verb has already fetched, not from the stats-view cache, so a failed listing cannot let a mismatch through. A mismatch is refused, naming both models and the name that would be accepted. A legacy old name with no row, or a row with no model, has nothing to compare and is accepted; a `disputed` source (its bytes disagree with its row) is not compared and prints a warning. `nx collection rename --force-prefix-change` gets past the same guard; it renames and never changes the row. This verb has no override of its own.
 
 Default is report-only; both `--no-dry-run` AND `--yes` are required to actually rename.
 
@@ -2780,6 +2781,8 @@ takes ~25–70 minutes against the pgvector service. Maintenance-window operatio
 | Flag | Description |
 |------|-------------|
 | `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`) OR a same-prefix rename whose embedding-model segment differs (6.3.1, nexus-tcvpn). Rename never re-embeds, so either change leaves the vectors in the OLD model space under a name claiming the new one — use only when you know the vectors already match the target name (cross-model moves belong to the ladder's substrate rung, the RDR-162 vector ETL — `nx upgrade`) |
+
+**Model-token guard (nexus-7f4o4).** The engine keeps the source collection's catalog-row `embedding_model` across a rename. When the new name is conformant, its `__<model>__` token is therefore compared with the SOURCE ROW's model, not with a model read from the old name; the old name of a legacy collection says nothing reliable (a bge-row `docs__foo` reads as voyage). A mismatch is refused with a message naming both models and the name that would be accepted, and `--force-prefix-change` overrides it. The flag only renames: the row keeps its model, so it is for a rename the operator knows is right, not a repair of the row. A `disputed` source (its bytes disagree with its row) is not compared and prints a warning. With no row behind the old name the comparison falls back to the models the two names derive, as before; a non-conformant new name carries no token and keeps the name-to-name comparison.
 
 Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through every collection-scoped engine table — chunks, taxonomy (assignments, topics, meta, centroids), aspects, highlights, telemetry, and the catalog documents/collection registration (service-backed Postgres; `chash_index` is retired, RDR-187). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
 

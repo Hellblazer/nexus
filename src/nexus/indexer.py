@@ -672,10 +672,21 @@ def _migrate_legacy_collections(
     will perform the migration.
 
     Pinned decision #1: the conformant target is computed using the
-    indexer's CURRENT canonical model (via
-    :meth:`Catalog.collection_for`), NOT parsed from the legacy
-    collection name. Sidesteps unknown legacy models like ``voyage-3``
-    that pre-date :data:`CANONICAL_EMBEDDING_MODELS`.
+    indexer's CURRENT write model (via :meth:`Catalog.collection_for`),
+    NOT parsed from the legacy collection name. Sidesteps unknown legacy
+    models like ``voyage-3`` that pre-date
+    :data:`CANONICAL_EMBEDDING_MODELS`.
+
+    Exception (nexus-7f4o4): the engine rename keeps the legacy catalog
+    row's ``embedding_model``. A legacy collection whose row names a model
+    OTHER than that write model is therefore not renamed: ``result[ct]``
+    stays the legacy name on every run, and each run logs one warning per
+    such collection naming both models and the exit (``nx collection rename
+    --force-prefix-change``, or a re-embed). Renaming it to the write
+    model's token would claim vectors it does not hold; renaming it to the
+    row's token would strand it, because later runs mint from the write
+    model. A legacy collection with no row, or a row that agrees, migrates
+    as in cases 1 to 4.
     """
     # nexus-8g79.10 (V5): import from peer module instead of reaching
     # up into commands/. The CLI wrapper in commands/collection.py
@@ -684,7 +695,7 @@ def _migrate_legacy_collections(
     from nexus.collection_rename import (  # noqa: PLC0415  — circular-dep avoidance (nexus.collection_rename)
         rename_collection_data_plane,
     )
-    from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.corpus import resolve_row_preferred, resolve_write_embedding_model  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
     from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — circular-dep avoidance (nexus.db.collection_state)
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
@@ -798,6 +809,54 @@ def _migrate_legacy_collections(
         conformant_exists = conformant_state is CollectionState.PRESENT
 
         if legacy_exists and not conformant_exists:
+            # nexus-7f4o4: the engine rename keeps the SOURCE row's
+            # embedding_model, so renaming a legacy collection whose row
+            # model differs from the write model would put the legacy
+            # model's vectors under a token claiming the write model.
+            # Minting the token from the row instead is unstable: every
+            # later run mints from the write model (the steady-state path
+            # above), so run 2 would write into a fresh empty sibling and
+            # strand the migrated data. A disagreeing row is therefore NOT
+            # migrated: the legacy name is kept on every run and the
+            # warning names the exit. The row is read from the catalog this
+            # function already holds; a failed read keeps the legacy name
+            # rather than renaming blind. Only this case renames, so the
+            # partial state (case 3) keeps its own answer.
+            reader = getattr(cat_obj, "get_collection", None)
+            if reader is not None:
+                try:
+                    legacy_row = reader(legacy)
+                except Exception as exc:  # noqa: BLE001 — fail closed: no rename without the row
+                    _log.warning(
+                        "phase4_migration_row_read_failed",
+                        repo=str(repo), ct=ct, legacy=legacy, error=str(exc),
+                        reason="kept under its legacy name this run; the next run retries",
+                    )
+                    result[ct] = legacy
+                    continue
+                row_model = (legacy_row or {}).get("embedding_model") or None
+            else:
+                row_model = resolve_row_preferred(
+                    legacy, "embedding_model", lambda _name: None,
+                )
+            if row_model and row_model != conformant_name.embedding_model:
+                _log.warning(
+                    "phase4_migration_row_model_differs_from_write_model",
+                    repo=str(repo), ct=ct, legacy=legacy,
+                    row_model=row_model,
+                    write_model=conformant_name.embedding_model,
+                    reason=(
+                        "the legacy collection's catalog row names a "
+                        "different embedding model than the one the indexer "
+                        "writes; rename never re-embeds, so it is kept under "
+                        "its legacy name and indexed there. To move it, "
+                        "re-embed it to the write model (nx re-embed), or "
+                        "rename it to a name carrying its row's own model "
+                        "token, which the indexer does not then write to."
+                    ),
+                )
+                result[ct] = legacy
+                continue
             # Decision tree case 1: rename legacy → conformant.
             #
             # The data-plane rename (T3 native modify) is the load-bearing

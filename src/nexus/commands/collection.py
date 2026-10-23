@@ -889,7 +889,11 @@ def rename_collection_data_plane(
         "Allow a cross-prefix rename (e.g. code__foo → docs__foo). "
         "Embedding-model spaces differ across prefixes, so the renamed "
         "collection is query-incompatible with its old clients. Use only "
-        "when you've deleted every downstream reader of the old name."
+        "when you've deleted every downstream reader of the old name. Also "
+        "overrides the model-token guard: a conformant new name whose "
+        "model token differs from the source collection's catalog-row "
+        "embedding_model is refused without it (rename never re-embeds), "
+        "so pass it only when the vectors really are in the token's model."
     ),
 )
 def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
@@ -902,6 +906,12 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     Cross-prefix renames (e.g. ``code__`` ↔ ``docs__``) change the
     embedding-model space and are rejected unless ``--force-prefix-change``
     is set; otherwise search hits would be garbage.
+
+    A conformant new name is also checked against the source collection's
+    catalog-row ``embedding_model`` (nexus-7f4o4): the engine keeps the
+    row's model across a rename, so a ``__<model>__`` token that differs
+    from it is refused, naming both models and the name that would be
+    accepted, unless ``--force-prefix-change`` is set.
     """
     # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `new` is the RENAME
     # TARGET -- it does not exist yet (rename is what creates it), so it
@@ -927,19 +937,59 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     # search corruption, no Voyage call ever fires). Cross-model moves are
     # the RDR-210 re-embed job's concern (a per-document move into the model
     # sibling), not rename's.
-    old_model = embedding_model_for_collection(old)
-    new_model = embedding_model_for_collection(new)
-    if old_model != new_model and not force_prefix_change:
-        raise click.ClickException(
-            f"embedding-model mismatch: {old!r} encodes {old_model!r} but "
-            f"{new!r} encodes {new_model!r}. rename never re-embeds — the "
-            f"vectors would silently stay {old_model!r} under a name claiming "
-            f"{new_model!r}. Cross-model moves re-index from source into the "
-            f"{new_model!r}-named collection (nx index repo / nx index pdf — "
-            f"the RDR-162 vector-ETL pipeline retired at RDR-155 P4b). "
-            f"Pass --force-prefix-change ONLY if you know the vectors are "
-            f"already {new_model!r}."
-        )
+    #
+    # nexus-7f4o4: for a CONFORMANT target the comparison is the new name's
+    # model token against the SOURCE ROW's embedding_model (the engine keeps
+    # the row's model across a rename), not against a model read from the old
+    # NAME -- a legacy bge-row collection reads as voyage by name, so the
+    # name-vs-name guard passed the wrong rename and refused the right one.
+    # A non-conformant target keeps the name-vs-name comparison.
+    from nexus.corpus import is_conformant_collection_name, rename_model_conflict  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if is_conformant_collection_name(new):
+        # A `disputed` source (hygiene-002: its bytes disagree with its row)
+        # has a row model that is itself in doubt: warn, do not compare.
+        try:
+            from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            source_row = get_collection_row(old)
+        except Exception:  # noqa: BLE001 — advisory read; a failed cache read falls to the comparison below
+            source_row = None
+        if (source_row or {}).get("lifecycle_state") == "disputed":
+            click.echo(
+                f"warning: {old!r} is a disputed collection (its bytes "
+                f"disagree with its catalog row), so its row model is not "
+                f"trusted and {new!r}'s model token was not compared with it.",
+                err=True,
+            )
+            conflict = None
+        else:
+            conflict = rename_model_conflict(old, new)
+        if conflict is not None and not force_prefix_change:
+            source_model, token_model, correct_name = conflict
+            raise click.ClickException(
+                f"embedding-model mismatch: {old!r} holds {source_model!r} "
+                f"vectors (its catalog row) but {new!r} names {token_model!r}. "
+                f"rename never re-embeds -- the vectors would silently stay "
+                f"{source_model!r} under a name claiming {token_model!r}. "
+                f"Rename to {correct_name!r} instead, or pass "
+                f"--force-prefix-change ONLY if you know the vectors are "
+                f"already {token_model!r}."
+            )
+    else:
+        old_model = embedding_model_for_collection(old)
+        new_model = embedding_model_for_collection(new)
+        if old_model != new_model and not force_prefix_change:
+            raise click.ClickException(
+                f"embedding-model mismatch: {old!r} encodes {old_model!r} but "
+                f"{new!r} encodes {new_model!r}. rename never re-embeds — the "
+                f"vectors would silently stay {old_model!r} under a name claiming "
+                f"{new_model!r}. Cross-model moves re-index from source into the "
+                f"{new_model!r}-named collection (nx index repo / nx index pdf — "
+                f"the RDR-162 vector-ETL pipeline retired at RDR-155 P4b). "
+                f"Pass --force-prefix-change ONLY if you know the vectors are "
+                f"already {new_model!r}."
+            )
 
     counts = rename_collection_data_plane(old, new)
 
