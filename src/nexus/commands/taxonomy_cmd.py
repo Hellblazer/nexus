@@ -1647,10 +1647,11 @@ def links_cmd(collection: str, refresh: bool) -> None:
 
 
 def _claude_available() -> bool:
-    """Check if claude CLI is on PATH."""
-    import shutil  # noqa: PLC0415 - branch-local; deferred to call time
+    """Whether an LLM backend can label topics: delegates to
+    :func:`nexus.operators.llm_backend.llm_backend_available` (nexus-2k66t.3)."""
+    from nexus.operators.llm_backend import llm_backend_available  # noqa: PLC0415 - deferred: keeps CLI startup light
 
-    return shutil.which("claude") is not None
+    return llm_backend_available()
 
 
 _LABEL_SCHEMA: dict = {

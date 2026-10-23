@@ -20,12 +20,22 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterator
 from uuid import uuid4
 
 import structlog
 
+from nexus.operators.llm_backend import (
+    BackendStatus,
+    DispatchRequest,
+    DispatchResult,
+    cli_status,
+    resolve_backend_name,
+)
 from nexus.util.nx_argv import argv_off_cwd
+
+if TYPE_CHECKING:
+    from nexus.operators.llm_backend import LLMBackend
 
 _log = structlog.get_logger()
 
@@ -1102,6 +1112,7 @@ async def claude_dispatch(
     max_budget_usd: float | None = None,
     isolated: bool = True,
     deadline: float | None = None,
+    backend: "LLMBackend | None" = None,
 ) -> dict[str, Any]:
     """Dispatch a single operator call to claude -p, fully async.
 
@@ -1270,7 +1281,6 @@ async def claude_dispatch(
         ValueError: ``NX_DISPATCH_MAX_BUDGET_USD`` is set but is not a
             valid float.
     """
-    schema_json = json.dumps(json_schema)
     # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert [23032]
     # Important #2): normalize model="" / whitespace-only to None ONCE
     # here, so the argv-append (`if model:`) and the error-clause gate
@@ -1309,699 +1319,760 @@ async def claude_dispatch(
             f"max_budget_usd={effective_max_budget_usd!r} must be a "
             f"finite positive dollar amount"
         )
-    # Search review I-6: start in a new process group so we can reach
-    # any child processes ``claude -p`` spawns (nested claude calls, tool
-    # subprocesses). Same killpg idiom as T1 chroma + MinerU cleanup
-    # (PR #198). Without this, ``proc.kill()`` on timeout only kills the
-    # claude leader and orphans the children.
-    #
-    # nexus-4lkmz decision 1 / nexus-bjltu blast-radius fix: the subprocess
-    # inherits a freshly minted, OWN T1 session (NX_T1_SESSION /
-    # NX_T1_SESSION_ID) rather than the retired NX_T1_ISOLATED=1 in-process
-    # leg -- but ONLY when this call actually grants the subprocess tool
-    # access (mcp_servers or allowed_tools set) that could reach T1. The
-    # stateless tool-free default (the common case -- extract/filter/rank/
-    # summarize/etc.) spawns a subprocess with NO MCP tool access, so it
-    # cannot reach T1 at all; minting for it would be dead weight and a
-    # storage-service hiccup must never kill a dispatch that never touches
-    # T1 (see ``_build_dispatch_env``'s ephemeral-mode docstring).
-    #
-    # NX_SESSION_ID=<parent-uuid> tells the subprocess's SessionStart hook
-    # that it is a NESTED session — its own conversation UUID arrives via
-    # the stdin payload, but it should preserve the parent's
-    # ``current_session`` flat-file pointer instead of stomping it. Without
-    # this, the subprocess's hook would write its own UUID into
-    # ``current_session``, the file would point at no on-disk record (skip-
-    # T1 wrote none), and the parent's shell-side ``nx scratch`` would fall
-    # back to EphemeralClient for the rest of the parent conversation.
-    # nexus-d8yul: the parent's UUID is the process's own NX_SESSION_ID, then
-    # CLAUDE_CODE_SESSION_ID (the real session; the flat file is whichever
-    # Claude session wrote it last, so concurrent windows would inject each
-    # other's id), then the file. The raw file read stays as the last tier on
-    # purpose and is NOT the gated ``resolve_active_session_id``: a non-Claude
-    # host that got ``None`` here would inject nothing, and the child's
-    # SessionStart hook would then overwrite ``current_session``. A
-    # long-lived Claude-spawned MCP server keeps its spawn-time
-    # CLAUDE_CODE_SESSION_ID across /clear and /resume (nexus-ggvi0), so after
-    # one the injected id is the pre-clear session, where the file was current;
-    # the child only labels with it, and _record_tier_write is stale the same
-    # way.
-    from nexus.session import read_claude_session_id  # noqa: PLC0415 - deferred to avoid circular import at module load
-    parent_session_id = (
-        os.environ.get("NX_SESSION_ID", "").strip()
-        or os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
-        or read_claude_session_id()
+    # nexus-2k66t.3 P1: the request is built here and a backend does the work.
+    # The checks that do not depend on the backend (model and budget
+    # normalisation, the ValueErrors) stay in front so they fire before any
+    # backend is chosen or any process spawned, as they always did.
+    req = DispatchRequest(
+        prompt=prompt,
+        json_schema=json_schema,
+        timeout=timeout,
+        deadline=deadline,
+        model=model,
+        operator=operator,
+        max_budget_usd=effective_max_budget_usd,
+        allowed_tools=allowed_tools,
+        mcp_servers=mcp_servers,
+        isolated=isolated,
+        usage_sink=usage_sink,
     )
-    from nexus.util.stable_cwd import current_project_root, cwd_was_healed, stable_daemon_cwd  # noqa: PLC0415 - deferred, stdlib-only
+    if backend is None:
+        backend = _backend_for(req)
+    result = await backend.run(req)
+    return result.structured
 
-    # nexus-x6qc7 (shakeout F19): the child gets an explicit cwd. It is the
-    # caller's directory while that exists, deliberately not the stable cwd
-    # the detached-process rule (nexus-x3m8e) gives a daemon: the operators
-    # granted Read/Grep/Glob (nx_enrich_beads, nx_plan_audit) explore the
-    # project's files relative to it, the Claude Code server's project
-    # directory. When the host deleted it (Claude Desktop removes a plugin's
-    # install directory on update while its MCP servers keep running there),
-    # an operator with no file tools runs in the stable cwd, since `claude`
-    # exits 1 before starting in a deleted directory; one with file tools is
-    # refused rather than left to search the filesystem root.
-    # A server the per-call heal (mcp/_tool_call_log) already moved off its deleted
-    # directory sits in the stable cwd, which is no project either.
-    child_cwd = current_project_root()
-    if child_cwd is not None and cwd_was_healed() and child_cwd == stable_daemon_cwd():
-        child_cwd = None
-    if child_cwd is None:
-        if set(allowed_tools or ()) & {"Read", "Grep", "Glob"}:
-            raise OperatorError(
-                f"operator {operator or 'claude -p'} reads the project's files, but this server's "
-                "working directory was deleted (Claude Desktop removes a plugin's install directory "
-                "when it updates the plugin), so it has no project to read; run it from a Claude "
-                "Code session in the project, or restart the host"
-            )
-        child_cwd = stable_daemon_cwd()
-        _log.warning("operator_dispatch_cwd_deleted", operator=operator, cwd=child_cwd)
 
-    # RDR-105 P2.5 (nexus-4gby): build the subprocess env via the
-    # three-mode helper. The operator-dispatch caller is the
-    # canonical stateless one-shot, so default to ``ephemeral=True``.
-    # nexus-4lkmz / nexus-bjltu: the helper mints the subprocess its own
-    # PG-backed T1 session (NX_T1_SESSION / NX_T1_SESSION_ID) rather than
-    # the retired NX_T1_ISOLATED=1 in-process leg -- gated on
-    # ``grants_tool_access`` so a tool-free dispatch never pays for (or
-    # depends on) a mint it cannot use.
-    env = _build_dispatch_env(
-        ephemeral=True,
-        parent_session_id=parent_session_id,
-        grants_tool_access=bool(mcp_servers or allowed_tools),
-    )
-    # nexus-bjltu Significant #1: track whether THIS dispatch minted its
-    # own T1 session so it can be closed after the subprocess exits,
-    # rather than relying entirely on the passive 24h TTL sweep backstop
-    # (operator dispatch is the high-volume default path -- real
-    # session-row accretion otherwise). Only ever set when
-    # ``_build_dispatch_env`` actually minted (grants_tool_access=True AND
-    # the mint succeeded); absent for tool-free dispatches and for a
-    # failed mint (nothing to close in either case).
-    _minted_session_id = env.get("NX_T1_SESSION_ID")
-    _minted_session_token = env.get("NX_T1_SESSION")
-    # Base argv is the stateless, tool-free default. Opt-in tool access
-    # (nexus-mawqw) appends --mcp-config / --allowedTools only when the
-    # caller explicitly requests it, preserving the stateless-operator
-    # contract for extract/filter/rank/etc.
-    argv: list[str] = [
-        "claude", "-p",
-        # nexus-h33x8.6 a3: stream-json (NOT plain json) so the subprocess
-        # writes each event to stdout as it happens, rather than buffering
-        # the whole response and writing nothing until the turn completes.
-        # --verbose is REQUIRED by the claude CLI for stream-json (it
-        # refuses to start otherwise: "requires --verbose").
-        # --include-partial-messages adds content_block_delta events
-        # (text_delta / input_json_delta) so a killed-mid-turn subprocess
-        # leaves reconstructable partial content, not just envelope noise
-        # -- see _parse_stream_json_output.
-        "--output-format", "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--json-schema", schema_json,
-        "--no-session-persistence",
-        # RDR-196 Gap 4 (measured by session nexus-0d, 2026-08-19): without
-        # this flag the child loads the user's ENTIRE ambient MCP server set
-        # (.mcp.json / settings) even on the tool-free default path that has
-        # no tools to call them with -- ~92K context tokens and ~2x the
-        # dollars per operator call vs ~45K with a strict empty config.
-        # With --strict-mcp-config and no --mcp-config the child loads zero
-        # servers; with an opt-in --mcp-config below it loads ONLY those.
-        "--strict-mcp-config",
-    ]
-    # nexus-jh86x, measured 2026-09-02: --strict-mcp-config stops the child
-    # loading ambient MCP SERVERS, but it does NOT stop it running the
-    # user's SessionStart HOOKS. A probe on this box counted EIGHT
-    # hook_started events in a tool-free child, injecting the conexus
-    # skills preamble, the beads workflow context, a bead list, an RDR
-    # indexing notice and the Serena/Context7 blurb -- into a dispatch with
-    # no tools to act on any of it.
-    #
-    # For the per-commit reviewer this is a CORRECTNESS break, not just
-    # cost: that reviewer's value depends on judging a diff with NO
-    # visibility into the decision record. A child that boots with the
-    # bead board in its context is not that reviewer.
-    #
-    # DEFAULT ON since nexus-11nm2 (2026-09-02). It shipped opt-in for one
-    # reason: ``--setting-sources ""`` also drops settings-supplied auth, so
-    # a box authenticating via an ``apiKeyHelper`` in a settings file would
-    # lose auth on EVERY operator call -- a loud total failure, not a
-    # degradation. That risk was closed by measurement rather than argued
-    # away:
-    #   * no ``apiKeyHelper`` in any settings file on this box, and
-    #     ``settings.env`` carries no auth-shaped key (conexus-77);
-    #   * the conexus cloud estate cannot dispatch at all -- no claude
-    #     binary on the engine host or in its container, and the private
-    #     subnet has no general outbound path, so a dispatch could not
-    #     reach the API even if one were installed (conexus-77, SSM probe);
-    #   * ``deploy/`` and ``.github/workflows/`` never invoke claude;
-    #   * this laptop is the sole nx operator (Sam, 2026-09-02) -- the last
-    #     gate, and not answerable from any machine, so it was asked rather
-    #     than assumed.
-    # Pass ``isolated=False`` explicitly for a child that genuinely needs
-    # the caller's settings, and expect to justify it.
-    if isolated:
-        argv += ["--setting-sources", ""]
-    # RDR-196 .p2b (nexus-nyry9.15): ability only -- appended ONLY when the
-    # caller passes an explicit model. Tier resolution to this string (if
-    # any) happens in the CALLER, e.g. via
-    # ``nexus.operators.model_tiers.resolve_model_for_tier`` -- claude_dispatch
-    # never imports or consults the tier table itself. ``model=None`` (the
-    # default, and every one of the 18 pre-.p2b call sites) leaves argv
-    # byte-identical to before this bead.
-    if model:
-        argv += ["--model", model]
-    if effective_max_budget_usd is not None:
-        # nexus-2g8y7: fixed-point formatting (never scientific notation,
-        # which `str()` would emit for very small values like 1e-06) so
-        # the CLI always sees an unambiguous decimal literal.
-        argv += ["--max-budget-usd", f"{effective_max_budget_usd:f}"]
-    if mcp_servers:
-        argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
-    if allowed_tools:
-        argv += ["--allowedTools", ",".join(allowed_tools)]
-    else:
-        # Tool-free means TOOL-FREE. Without this the child still gets the
-        # CLI's built-in Read/Grep/Bash set and wanders the repo instead of
-        # answering: measured 2026-09-04, 22 commit-review dispatches hit
-        # the $0.25 cap mid-grep and recorded nothing. ``--tools ""`` is the
-        # CLI's documented "disable all tools" form; --allowedTools is a
-        # permission allowlist and never removes a tool from the set.
-        argv += ["--tools", ""]
-    # nexus-bjltu (round 2, code-reviewer + critic independently): the
-    # minted-session close (below) must run regardless of how the dispatch
-    # finishes -- successful subprocess completion, harness failure,
-    # timeout-kill, or even subprocess CREATION itself raising -- so the
-    # try/finally starts BEFORE ``create_subprocess_exec``, not after it.
-    # A mint immediately followed by a spawn failure (fork/exec error,
-    # resource exhaustion) previously leaked both the scratch rows and the
-    # session token with nothing to close.
-    # nexus-vzy2v: write the prompt to disk BEFORE spawning, in a variable
-    # the outer `finally` below can always see -- including when the spawn
-    # attempt itself raises (fork/exec error, resource exhaustion). This is
-    # what makes stdin delivery race-free: the data is on disk, and the
-    # child's stdin is redirected from that file at exec time, not written
-    # into a pipe afterward.
-    prompt_path: Path | None = None
-    # nexus-tx5hd critic point 4 (T2 [24197]): declared here, BEFORE the
-    # try, so the universal `finally:` below can always read them --
-    # including on a spawn failure, where the try body never reaches the
-    # point that would otherwise set them. Both stay ``None`` on that
-    # path, which the finally's own latency log already treats as "no
-    # measurement" rather than raising.
-    _dispatch_spawn_at: float | None = None
-    _first_event_at: float | None = None
-    # nexus-6y4e0 review (CRITICAL): pre-declared for the same reason as
-    # the two above -- the outer ``finally`` must always be able to
-    # release it, including on a spawn failure where ``contain()`` is
-    # never reached and this stays None.
-    _dispatch_job: int | None = None
-    try:
-        from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
+def _backend_for(req: DispatchRequest) -> "LLMBackend":
+    """The backend instance that :func:`resolve_backend_name` names for *req*."""
+    name = resolve_backend_name(req)
+    if name == "cli":
+        return CliBackend()
+    raise OperatorError(f"LLM backend {name!r} has no implementation")  # unreachable in P1: selection raises first
 
-        prompt_path = _write_prompt_file(prompt)
-        proc = await _spawn_with_prompt_file(
-            argv,
-            prompt_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=child_cwd,
-            **isolation_popen_kwargs(),
+
+class CliBackend:
+    """The ``claude -p`` subprocess backend: the former body of
+    :func:`claude_dispatch`, moved without change (nexus-2k66t.3 P1). Argv, env,
+    tool grant, cwd, stream parsing, timeout persistence, usage sinks and
+    exceptions are as they were; ``tests/test_llm_backend_cli_identity.py``
+    pins argv/env/cwd/stdin/return against a recording of the pre-move code."""
+
+    name = "cli"
+
+    def __init__(self, which: "Callable[[str], str | None] | None" = None) -> None:
+        self._which = which
+
+    def available(self) -> BackendStatus:
+        return cli_status(self._which)
+
+    async def run(self, req: DispatchRequest) -> DispatchResult:
+        if req.json_schema is None:
+            raise OperatorError("the cli backend needs a json_schema; text mode is not implemented")
+        prompt = req.prompt
+        json_schema = req.json_schema
+        timeout = req.timeout
+        deadline = req.deadline
+        model = req.model
+        operator = req.operator
+        allowed_tools = req.allowed_tools
+        mcp_servers = req.mcp_servers
+        usage_sink = req.usage_sink
+        isolated = req.isolated
+        effective_max_budget_usd = req.max_budget_usd
+        schema_json = json.dumps(json_schema)
+        # Search review I-6: start in a new process group so we can reach
+        # any child processes ``claude -p`` spawns (nested claude calls, tool
+        # subprocesses). Same killpg idiom as T1 chroma + MinerU cleanup
+        # (PR #198). Without this, ``proc.kill()`` on timeout only kills the
+        # claude leader and orphans the children.
+        #
+        # nexus-4lkmz decision 1 / nexus-bjltu blast-radius fix: the subprocess
+        # inherits a freshly minted, OWN T1 session (NX_T1_SESSION /
+        # NX_T1_SESSION_ID) rather than the retired NX_T1_ISOLATED=1 in-process
+        # leg -- but ONLY when this call actually grants the subprocess tool
+        # access (mcp_servers or allowed_tools set) that could reach T1. The
+        # stateless tool-free default (the common case -- extract/filter/rank/
+        # summarize/etc.) spawns a subprocess with NO MCP tool access, so it
+        # cannot reach T1 at all; minting for it would be dead weight and a
+        # storage-service hiccup must never kill a dispatch that never touches
+        # T1 (see ``_build_dispatch_env``'s ephemeral-mode docstring).
+        #
+        # NX_SESSION_ID=<parent-uuid> tells the subprocess's SessionStart hook
+        # that it is a NESTED session — its own conversation UUID arrives via
+        # the stdin payload, but it should preserve the parent's
+        # ``current_session`` flat-file pointer instead of stomping it. Without
+        # this, the subprocess's hook would write its own UUID into
+        # ``current_session``, the file would point at no on-disk record (skip-
+        # T1 wrote none), and the parent's shell-side ``nx scratch`` would fall
+        # back to EphemeralClient for the rest of the parent conversation.
+        # nexus-d8yul: the parent's UUID is the process's own NX_SESSION_ID, then
+        # CLAUDE_CODE_SESSION_ID (the real session; the flat file is whichever
+        # Claude session wrote it last, so concurrent windows would inject each
+        # other's id), then the file. The raw file read stays as the last tier on
+        # purpose and is NOT the gated ``resolve_active_session_id``: a non-Claude
+        # host that got ``None`` here would inject nothing, and the child's
+        # SessionStart hook would then overwrite ``current_session``. A
+        # long-lived Claude-spawned MCP server keeps its spawn-time
+        # CLAUDE_CODE_SESSION_ID across /clear and /resume (nexus-ggvi0), so after
+        # one the injected id is the pre-clear session, where the file was current;
+        # the child only labels with it, and _record_tier_write is stale the same
+        # way.
+        from nexus.session import read_claude_session_id  # noqa: PLC0415 - deferred to avoid circular import at module load
+        parent_session_id = (
+            os.environ.get("NX_SESSION_ID", "").strip()
+            or os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+            or read_claude_session_id()
         )
-        _dispatch_spawn_at = time.monotonic()
-        # nexus-6y4e0: Windows job-object containment, assigned right after
-        # spawn. No-op (None) on POSIX -- start_new_session=True above
-        # already makes the child a killable group.
-        _dispatch_job = contain(proc)
+        from nexus.util.stable_cwd import current_project_root, cwd_was_healed, stable_daemon_cwd  # noqa: PLC0415 - deferred, stdlib-only
 
-        # nexus-h33x8.6 a3: NOT proc.communicate(). See _drain_stream's
-        # docstring for why -- communicate()'s internal read(-1) loop
-        # discards already-read bytes when asyncio.wait_for cancels it on
-        # timeout, which made the nexus-1at5 partial-output drain below
-        # structurally empty regardless of output format. stdout_chunks /
-        # stderr_chunks are owned by THIS frame, so a cancellation here
-        # leaves whatever was appended intact.
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        first_byte = asyncio.Event()
+        # nexus-x6qc7 (shakeout F19): the child gets an explicit cwd. It is the
+        # caller's directory while that exists, deliberately not the stable cwd
+        # the detached-process rule (nexus-x3m8e) gives a daemon: the operators
+        # granted Read/Grep/Glob (nx_enrich_beads, nx_plan_audit) explore the
+        # project's files relative to it, the Claude Code server's project
+        # directory. When the host deleted it (Claude Desktop removes a plugin's
+        # install directory on update while its MCP servers keep running there),
+        # an operator with no file tools runs in the stable cwd, since `claude`
+        # exits 1 before starting in a deleted directory; one with file tools is
+        # refused rather than left to search the filesystem root.
+        # A server the per-call heal (mcp/_tool_call_log) already moved off its deleted
+        # directory sits in the stable cwd, which is no project either.
+        child_cwd = current_project_root()
+        if child_cwd is not None and cwd_was_healed() and child_cwd == stable_daemon_cwd():
+            child_cwd = None
+        if child_cwd is None:
+            if set(allowed_tools or ()) & {"Read", "Grep", "Glob"}:
+                raise OperatorError(
+                    f"operator {operator or 'claude -p'} reads the project's files, but this server's "
+                    "working directory was deleted (Claude Desktop removes a plugin's install directory "
+                    "when it updates the plugin), so it has no project to read; run it from a Claude "
+                    "Code session in the project, or restart the host"
+                )
+            child_cwd = stable_daemon_cwd()
+            _log.warning("operator_dispatch_cwd_deleted", operator=operator, cwd=child_cwd)
 
-        async def _drain_stdout_and_signal() -> None:
-            # nexus-tx5hd critic point 1 (T2 [24197], SHIP-BLOCKER): this
-            # is now a PERSISTENT background task, started immediately
-            # after spawn alongside stderr's own drain task below --
-            # NOT a phase-scoped, stdout-only reader. The earlier draft
-            # read only proc.stdout during phase 1; a real child with
-            # ``--verbose`` (required for stream-json) that writes more
-            # than one pipe buffer (~64KiB) of stderr before its first
-            # stdout byte would then block on write() with nobody
-            # reading stderr -- phase 1 timed out UNCONDITIONALLY
-            # regardless of the timeout value, a deadlock the OLD
-            # single-phase concurrent ``asyncio.gather(stdout, stderr)``
-            # drain never had. Draining both pipes continuously from
-            # spawn onward removes the trigger entirely.
-            #
-            # ``first_byte`` fires on the FIRST REAL chunk (the "first
-            # model event" signal phase 1 gates on) -- and, via the
-            # ``finally:`` below, also on plain EOF with nothing at all
-            # (a child that dies before writing anything) or on this
-            # task being cancelled, so phase 1 never waits out its full
-            # budget for a stdout that was simply never going to have
-            # anything.
-            nonlocal _first_event_at
-            try:
-                while True:
-                    chunk = await proc.stdout.read(65536)
-                    if not chunk:
-                        return
-                    stdout_chunks.append(chunk)
-                    if _first_event_at is None:
-                        _first_event_at = time.monotonic()
-                    first_byte.set()
-            finally:
-                first_byte.set()
-
-        # Both pipes drained from spawn onward, for the ENTIRE dispatch
-        # lifetime -- not phase-scoped. nexus-vzy2v: stdin is no longer
-        # fed here -- the prompt was already written to disk and
-        # redirected into the child's stdin at spawn time
-        # (_spawn_with_prompt_file), so there is no writer left to run
-        # concurrently with these drains.
-        stdout_task: "asyncio.Task[None]" = asyncio.ensure_future(_drain_stdout_and_signal())
-        stderr_task: "asyncio.Task[None]" = asyncio.ensure_future(_drain_stream(proc.stderr, stderr_chunks))
-
-        async def _finish_io() -> None:
-            # nexus-h33x8.6 review round 2 (code-review on dca12e1e3):
-            # proc.wait() MUST be inside this wait_for-guarded coroutine,
-            # not after it -- mirrors CPython's own Process.communicate()
-            # shape, which calls self.wait() from INSIDE the coroutine
-            # tree it awaits, not after returning from it. Both streams
-            # reaching EOF does not guarantee the child has actually
-            # exited: a process can close its stdout/stderr fds before
-            # its own exit completes. A proc.wait() left outside the
-            # timeout guard would then hang forever with no kill ever
-            # firing -- a real deadlock, not merely a slow path (verified:
-            # a fake proc whose streams EOF immediately but whose wait()
-            # never returns hung the caller indefinitely pre-fix).
-            await asyncio.gather(stdout_task, stderr_task)
-            await proc.wait()
-
+        # RDR-105 P2.5 (nexus-4gby): build the subprocess env via the
+        # three-mode helper. The operator-dispatch caller is the
+        # canonical stateless one-shot, so default to ``ephemeral=True``.
+        # nexus-4lkmz / nexus-bjltu: the helper mints the subprocess its own
+        # PG-backed T1 session (NX_T1_SESSION / NX_T1_SESSION_ID) rather than
+        # the retired NX_T1_ISOLATED=1 in-process leg -- gated on
+        # ``grants_tool_access`` so a tool-free dispatch never pays for (or
+        # depends on) a mint it cannot use.
+        env = _build_dispatch_env(
+            ephemeral=True,
+            parent_session_id=parent_session_id,
+            grants_tool_access=bool(mcp_servers or allowed_tools),
+        )
+        # nexus-bjltu Significant #1: track whether THIS dispatch minted its
+        # own T1 session so it can be closed after the subprocess exits,
+        # rather than relying entirely on the passive 24h TTL sweep backstop
+        # (operator dispatch is the high-volume default path -- real
+        # session-row accretion otherwise). Only ever set when
+        # ``_build_dispatch_env`` actually minted (grants_tool_access=True AND
+        # the mint succeeded); absent for tool-free dispatches and for a
+        # failed mint (nothing to close in either case).
+        _minted_session_id = env.get("NX_T1_SESSION_ID")
+        _minted_session_token = env.get("NX_T1_SESSION")
+        # Base argv is the stateless, tool-free default. Opt-in tool access
+        # (nexus-mawqw) appends --mcp-config / --allowedTools only when the
+        # caller explicitly requests it, preserving the stateless-operator
+        # contract for extract/filter/rank/etc.
+        argv: list[str] = [
+            "claude", "-p",
+            # nexus-h33x8.6 a3: stream-json (NOT plain json) so the subprocess
+            # writes each event to stdout as it happens, rather than buffering
+            # the whole response and writing nothing until the turn completes.
+            # --verbose is REQUIRED by the claude CLI for stream-json (it
+            # refuses to start otherwise: "requires --verbose").
+            # --include-partial-messages adds content_block_delta events
+            # (text_delta / input_json_delta) so a killed-mid-turn subprocess
+            # leaves reconstructable partial content, not just envelope noise
+            # -- see _parse_stream_json_output.
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--json-schema", schema_json,
+            "--no-session-persistence",
+            # RDR-196 Gap 4 (measured by session nexus-0d, 2026-08-19): without
+            # this flag the child loads the user's ENTIRE ambient MCP server set
+            # (.mcp.json / settings) even on the tool-free default path that has
+            # no tools to call them with -- ~92K context tokens and ~2x the
+            # dollars per operator call vs ~45K with a strict empty config.
+            # With --strict-mcp-config and no --mcp-config the child loads zero
+            # servers; with an opt-in --mcp-config below it loads ONLY those.
+            "--strict-mcp-config",
+        ]
+        # nexus-jh86x, measured 2026-09-02: --strict-mcp-config stops the child
+        # loading ambient MCP SERVERS, but it does NOT stop it running the
+        # user's SessionStart HOOKS. A probe on this box counted EIGHT
+        # hook_started events in a tool-free child, injecting the conexus
+        # skills preamble, the beads workflow context, a bead list, an RDR
+        # indexing notice and the Serena/Context7 blurb -- into a dispatch with
+        # no tools to act on any of it.
+        #
+        # For the per-commit reviewer this is a CORRECTNESS break, not just
+        # cost: that reviewer's value depends on judging a diff with NO
+        # visibility into the decision record. A child that boots with the
+        # bead board in its context is not that reviewer.
+        #
+        # DEFAULT ON since nexus-11nm2 (2026-09-02). It shipped opt-in for one
+        # reason: ``--setting-sources ""`` also drops settings-supplied auth, so
+        # a box authenticating via an ``apiKeyHelper`` in a settings file would
+        # lose auth on EVERY operator call -- a loud total failure, not a
+        # degradation. That risk was closed by measurement rather than argued
+        # away:
+        #   * no ``apiKeyHelper`` in any settings file on this box, and
+        #     ``settings.env`` carries no auth-shaped key (conexus-77);
+        #   * the conexus cloud estate cannot dispatch at all -- no claude
+        #     binary on the engine host or in its container, and the private
+        #     subnet has no general outbound path, so a dispatch could not
+        #     reach the API even if one were installed (conexus-77, SSM probe);
+        #   * ``deploy/`` and ``.github/workflows/`` never invoke claude;
+        #   * this laptop is the sole nx operator (Sam, 2026-09-02) -- the last
+        #     gate, and not answerable from any machine, so it was asked rather
+        #     than assumed.
+        # Pass ``isolated=False`` explicitly for a child that genuinely needs
+        # the caller's settings, and expect to justify it.
+        if isolated:
+            argv += ["--setting-sources", ""]
+        # RDR-196 .p2b (nexus-nyry9.15): ability only -- appended ONLY when the
+        # caller passes an explicit model. Tier resolution to this string (if
+        # any) happens in the CALLER, e.g. via
+        # ``nexus.operators.model_tiers.resolve_model_for_tier`` -- claude_dispatch
+        # never imports or consults the tier table itself. ``model=None`` (the
+        # default, and every one of the 18 pre-.p2b call sites) leaves argv
+        # byte-identical to before this bead.
+        if model:
+            argv += ["--model", model]
+        if effective_max_budget_usd is not None:
+            # nexus-2g8y7: fixed-point formatting (never scientific notation,
+            # which `str()` would emit for very small values like 1e-06) so
+            # the CLI always sees an unambiguous decimal literal.
+            argv += ["--max-budget-usd", f"{effective_max_budget_usd:f}"]
+        if mcp_servers:
+            argv += ["--mcp-config", json.dumps({"mcpServers": mcp_servers})]
+        if allowed_tools:
+            argv += ["--allowedTools", ",".join(allowed_tools)]
+        else:
+            # Tool-free means TOOL-FREE. Without this the child still gets the
+            # CLI's built-in Read/Grep/Bash set and wanders the repo instead of
+            # answering: measured 2026-09-04, 22 commit-review dispatches hit
+            # the $0.25 cap mid-grep and recorded nothing. ``--tools ""`` is the
+            # CLI's documented "disable all tools" form; --allowedTools is a
+            # permission allowlist and never removes a tool from the set.
+            argv += ["--tools", ""]
+        # nexus-bjltu (round 2, code-reviewer + critic independently): the
+        # minted-session close (below) must run regardless of how the dispatch
+        # finishes -- successful subprocess completion, harness failure,
+        # timeout-kill, or even subprocess CREATION itself raising -- so the
+        # try/finally starts BEFORE ``create_subprocess_exec``, not after it.
+        # A mint immediately followed by a spawn failure (fork/exec error,
+        # resource exhaustion) previously leaked both the scratch rows and the
+        # session token with nothing to close.
+        # nexus-vzy2v: write the prompt to disk BEFORE spawning, in a variable
+        # the outer `finally` below can always see -- including when the spawn
+        # attempt itself raises (fork/exec error, resource exhaustion). This is
+        # what makes stdin delivery race-free: the data is on disk, and the
+        # child's stdin is redirected from that file at exec time, not written
+        # into a pipe afterward.
+        prompt_path: Path | None = None
+        # nexus-tx5hd critic point 4 (T2 [24197]): declared here, BEFORE the
+        # try, so the universal `finally:` below can always read them --
+        # including on a spawn failure, where the try body never reaches the
+        # point that would otherwise set them. Both stay ``None`` on that
+        # path, which the finally's own latency log already treats as "no
+        # measurement" rather than raising.
+        _dispatch_spawn_at: float | None = None
+        _first_event_at: float | None = None
+        # nexus-6y4e0 review (CRITICAL): pre-declared for the same reason as
+        # the two above -- the outer ``finally`` must always be able to
+        # release it, including on a spawn failure where ``contain()`` is
+        # never reached and this stays None.
+        _dispatch_job: int | None = None
         try:
-            # nexus-tx5hd: two sequential budgets inside the SAME try --
-            # a TimeoutError from EITHER phase falls into the one
-            # except-block below (kill + drain + reconstruct + raise),
-            # so nothing is duplicated. PHASE 1 bounds time-to-first-
-            # byte; PHASE 2 gets a FRESH budget from that point for the
-            # rest of the turn. Worst-case total wall time is therefore
-            # up to 2x *timeout* for a child that stalls right up to the
-            # phase-1 edge and then also takes the full phase-2 budget
-            # (bounded to the *deadline*, when the caller passed one --
-            # see ``_effective_phase_timeout``) -- an accepted trade
-            # against a cold start no longer being able to consume the
-            # turn's own processing budget before a single model event
-            # streams.
-            await asyncio.wait_for(
-                first_byte.wait(), timeout=_effective_phase_timeout(timeout, deadline),
+            from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+            prompt_path = _write_prompt_file(prompt)
+            proc = await _spawn_with_prompt_file(
+                argv,
+                prompt_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=child_cwd,
+                **isolation_popen_kwargs(),
             )
-            await asyncio.wait_for(
-                _finish_io(), timeout=_effective_phase_timeout(timeout, deadline),
-            )
-        except asyncio.TimeoutError:
-            # Search review I-6: reach the whole process tree so any claude
-            # children (nested planners, tool subprocesses) get reaped too.
-            # POSIX: the process group. Windows: the job object nexus-6y4e0
-            # assigned at spawn (_dispatch_job), when containment succeeded
-            # there; otherwise only the direct child is killed and its
-            # descendants survive, exactly as before this bead.
-            # kill_tree guards on isinstance(proc.pid, int) so mocked-
-            # subprocess tests deterministically fall through to proc.kill()
-            # — the pgid=1 deadlock on GitHub ubuntu-latest is covered by
-            # tests/test_process_group_safety.py.
-            from nexus.util.process_group import kill_tree  # noqa: PLC0415 - deferred to avoid circular import at module load
+            _dispatch_spawn_at = time.monotonic()
+            # nexus-6y4e0: Windows job-object containment, assigned right after
+            # spawn. No-op (None) on POSIX -- start_new_session=True above
+            # already makes the child a killable group.
+            _dispatch_job = contain(proc)
 
-            if not kill_tree(proc, _dispatch_job):
+            # nexus-h33x8.6 a3: NOT proc.communicate(). See _drain_stream's
+            # docstring for why -- communicate()'s internal read(-1) loop
+            # discards already-read bytes when asyncio.wait_for cancels it on
+            # timeout, which made the nexus-1at5 partial-output drain below
+            # structurally empty regardless of output format. stdout_chunks /
+            # stderr_chunks are owned by THIS frame, so a cancellation here
+            # leaves whatever was appended intact.
+            stdout_chunks: list[bytes] = []
+            stderr_chunks: list[bytes] = []
+            first_byte = asyncio.Event()
+
+            async def _drain_stdout_and_signal() -> None:
+                # nexus-tx5hd critic point 1 (T2 [24197], SHIP-BLOCKER): this
+                # is now a PERSISTENT background task, started immediately
+                # after spawn alongside stderr's own drain task below --
+                # NOT a phase-scoped, stdout-only reader. The earlier draft
+                # read only proc.stdout during phase 1; a real child with
+                # ``--verbose`` (required for stream-json) that writes more
+                # than one pipe buffer (~64KiB) of stderr before its first
+                # stdout byte would then block on write() with nobody
+                # reading stderr -- phase 1 timed out UNCONDITIONALLY
+                # regardless of the timeout value, a deadlock the OLD
+                # single-phase concurrent ``asyncio.gather(stdout, stderr)``
+                # drain never had. Draining both pipes continuously from
+                # spawn onward removes the trigger entirely.
+                #
+                # ``first_byte`` fires on the FIRST REAL chunk (the "first
+                # model event" signal phase 1 gates on) -- and, via the
+                # ``finally:`` below, also on plain EOF with nothing at all
+                # (a child that dies before writing anything) or on this
+                # task being cancelled, so phase 1 never waits out its full
+                # budget for a stdout that was simply never going to have
+                # anything.
+                nonlocal _first_event_at
                 try:
-                    proc.kill()
-                except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal
-                    pass
-            # Already closed (or its close was already attempted) above --
-            # the outer finally must never touch it again.
-            _dispatch_job = None
+                    while True:
+                        chunk = await proc.stdout.read(65536)
+                        if not chunk:
+                            return
+                        stdout_chunks.append(chunk)
+                        if _first_event_at is None:
+                            _first_event_at = time.monotonic()
+                        first_byte.set()
+                finally:
+                    first_byte.set()
 
-            async def _post_kill_cleanup() -> None:
-                # Reap the leader so the asyncio transport closes cleanly,
-                # then let the SAME two persistent drain tasks finish on
-                # their own -- NOT a fresh independent read from this
-                # frame, which would race a still-running task reading
-                # the SAME StreamReader concurrently (asyncio explicitly
-                # forbids two readers on one StreamReader at once).
-                # Whatever each task already appended before stopping is
-                # preserved regardless (accumulator survives
-                # cancellation, same property the pre-existing drain
-                # already relies on).
-                try:
-                    await proc.wait()
-                except Exception:  # noqa: BLE001 - best-effort cancel cleanup before drain-and-raise; non-fatal
-                    pass
-                await _reap_drain_task(stdout_task)
-                await _reap_drain_task(stderr_task)
+            # Both pipes drained from spawn onward, for the ENTIRE dispatch
+            # lifetime -- not phase-scoped. nexus-vzy2v: stdin is no longer
+            # fed here -- the prompt was already written to disk and
+            # redirected into the child's stdin at spawn time
+            # (_spawn_with_prompt_file), so there is no writer left to run
+            # concurrently with these drains.
+            stdout_task: "asyncio.Task[None]" = asyncio.ensure_future(_drain_stdout_and_signal())
+            stderr_task: "asyncio.Task[None]" = asyncio.ensure_future(_drain_stream(proc.stderr, stderr_chunks))
 
-            # nexus-tx5hd code-review round (SHIP-BLOCKER): a real child
-            # SIGKILL'd while blocked deep in a write() to an undrained
-            # pipe can leave asyncio's subprocess transport waiting on a
-            # pipe-EOF notification the platform never delivers promptly
-            # -- reproduced live at 40s+ even though the process was
-            # already dead. Bound the WHOLE cleanup so this exception
-            # path always returns in fixed, small time regardless of
-            # that platform quirk, rather than hanging on
-            # ``proc.wait()``/task-reap indefinitely.
+            async def _finish_io() -> None:
+                # nexus-h33x8.6 review round 2 (code-review on dca12e1e3):
+                # proc.wait() MUST be inside this wait_for-guarded coroutine,
+                # not after it -- mirrors CPython's own Process.communicate()
+                # shape, which calls self.wait() from INSIDE the coroutine
+                # tree it awaits, not after returning from it. Both streams
+                # reaching EOF does not guarantee the child has actually
+                # exited: a process can close its stdout/stderr fds before
+                # its own exit completes. A proc.wait() left outside the
+                # timeout guard would then hang forever with no kill ever
+                # firing -- a real deadlock, not merely a slow path (verified:
+                # a fake proc whose streams EOF immediately but whose wait()
+                # never returns hung the caller indefinitely pre-fix).
+                await asyncio.gather(stdout_task, stderr_task)
+                await proc.wait()
+
             try:
+                # nexus-tx5hd: two sequential budgets inside the SAME try --
+                # a TimeoutError from EITHER phase falls into the one
+                # except-block below (kill + drain + reconstruct + raise),
+                # so nothing is duplicated. PHASE 1 bounds time-to-first-
+                # byte; PHASE 2 gets a FRESH budget from that point for the
+                # rest of the turn. Worst-case total wall time is therefore
+                # up to 2x *timeout* for a child that stalls right up to the
+                # phase-1 edge and then also takes the full phase-2 budget
+                # (bounded to the *deadline*, when the caller passed one --
+                # see ``_effective_phase_timeout``) -- an accepted trade
+                # against a cold start no longer being able to consume the
+                # turn's own processing budget before a single model event
+                # streams.
                 await asyncio.wait_for(
-                    _post_kill_cleanup(), timeout=_TIMEOUT_CLEANUP_GRACE_SECONDS,
+                    first_byte.wait(), timeout=_effective_phase_timeout(timeout, deadline),
+                )
+                await asyncio.wait_for(
+                    _finish_io(), timeout=_effective_phase_timeout(timeout, deadline),
                 )
             except asyncio.TimeoutError:
-                _log.warning(
-                    "operator_dispatch_kill_cleanup_grace_exceeded",
-                    grace_seconds=_TIMEOUT_CLEANUP_GRACE_SECONDS,
+                # Search review I-6: reach the whole process tree so any claude
+                # children (nested planners, tool subprocesses) get reaped too.
+                # POSIX: the process group. Windows: the job object nexus-6y4e0
+                # assigned at spawn (_dispatch_job), when containment succeeded
+                # there; otherwise only the direct child is killed and its
+                # descendants survive, exactly as before this bead.
+                # kill_tree guards on isinstance(proc.pid, int) so mocked-
+                # subprocess tests deterministically fall through to proc.kill()
+                # — the pgid=1 deadlock on GitHub ubuntu-latest is covered by
+                # tests/test_process_group_safety.py.
+                from nexus.util.process_group import kill_tree  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+                if not kill_tree(proc, _dispatch_job):
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001 - best-effort process reap during cleanup; non-fatal
+                        pass
+                # Already closed (or its close was already attempted) above --
+                # the outer finally must never touch it again.
+                _dispatch_job = None
+
+                async def _post_kill_cleanup() -> None:
+                    # Reap the leader so the asyncio transport closes cleanly,
+                    # then let the SAME two persistent drain tasks finish on
+                    # their own -- NOT a fresh independent read from this
+                    # frame, which would race a still-running task reading
+                    # the SAME StreamReader concurrently (asyncio explicitly
+                    # forbids two readers on one StreamReader at once).
+                    # Whatever each task already appended before stopping is
+                    # preserved regardless (accumulator survives
+                    # cancellation, same property the pre-existing drain
+                    # already relies on).
+                    try:
+                        await proc.wait()
+                    except Exception:  # noqa: BLE001 - best-effort cancel cleanup before drain-and-raise; non-fatal
+                        pass
+                    await _reap_drain_task(stdout_task)
+                    await _reap_drain_task(stderr_task)
+
+                # nexus-tx5hd code-review round (SHIP-BLOCKER): a real child
+                # SIGKILL'd while blocked deep in a write() to an undrained
+                # pipe can leave asyncio's subprocess transport waiting on a
+                # pipe-EOF notification the platform never delivers promptly
+                # -- reproduced live at 40s+ even though the process was
+                # already dead. Bound the WHOLE cleanup so this exception
+                # path always returns in fixed, small time regardless of
+                # that platform quirk, rather than hanging on
+                # ``proc.wait()``/task-reap indefinitely.
+                try:
+                    await asyncio.wait_for(
+                        _post_kill_cleanup(), timeout=_TIMEOUT_CLEANUP_GRACE_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    _log.warning(
+                        "operator_dispatch_kill_cleanup_grace_exceeded",
+                        grace_seconds=_TIMEOUT_CLEANUP_GRACE_SECONDS,
+                    )
+                    for _t in (stdout_task, stderr_task):
+                        if not _t.done():
+                            _t.cancel()
+                partial_stdout = b"".join(stdout_chunks)
+                partial_stderr = b"".join(stderr_chunks)
+                # Reconstruct readable partial content from the NDJSON so far,
+                # rather than persisting the raw wire bytes (mostly envelope/
+                # system JSON, not what a debugging session wants) -- otherwise
+                # a 5-minute timeout discards 5 minutes of analytical output
+                # and the next debugging session starts from zero.
+                _final_result, partial_text, event_count = _parse_stream_json_output(
+                    partial_stdout.decode(errors="replace")
                 )
-                for _t in (stdout_task, stderr_task):
-                    if not _t.done():
-                        _t.cancel()
-            partial_stdout = b"".join(stdout_chunks)
-            partial_stderr = b"".join(stderr_chunks)
-            # Reconstruct readable partial content from the NDJSON so far,
-            # rather than persisting the raw wire bytes (mostly envelope/
-            # system JSON, not what a debugging session wants) -- otherwise
-            # a 5-minute timeout discards 5 minutes of analytical output
-            # and the next debugging session starts from zero.
-            _final_result, partial_text, event_count = _parse_stream_json_output(
-                partial_stdout.decode(errors="replace")
-            )
-            log_path_str = _persist_timeout_log(timeout, partial_text, partial_stderr, event_count)
-            raise OperatorTimeoutError(
-                f"claude -p timed out after {timeout}s; partial output "
-                f"({len(partial_text)} chars reconstructed from {event_count} "
-                f"stream-json events, {len(partial_stdout)}B raw stdout, "
-                f"{len(partial_stderr)}B stderr) logged to {log_path_str}",
-                partial_text=partial_text,
-                event_count=event_count,
-                # _persist_timeout_log's own best-effort write can fail (its
-                # sentinel string, not an exception -- the timeout signal
-                # must surface regardless); a4 gets None rather than a path
-                # that doesn't exist on disk.
-                log_path=Path(log_path_str) if log_path_str != "(log write failed)" else None,
-            )
-
-        stdout = b"".join(stdout_chunks)
-        stderr = b"".join(stderr_chunks)
-
-        if proc.returncode != 0:
-            # GH #1414: `claude -p --output-format json` reports its errors on
-            # STDOUT, so a stderr-only message rendered as the bare, useless
-            # "claude -p exited 1:" — twice, for nx_plan_audit, with nothing in
-            # mcp.log either. Report whichever stream spoke.
-            #
-            # nexus-h33x8.6 review round 2 (code-review on dca12e1e3): a3
-            # switched stdout to NDJSON (stream-json), but this branch kept
-            # reading the RAW joined bytes for the snippet/detail/durable-log
-            # fields -- mostly system/assistant envelope JSON now, not
-            # claude's own error text, which is exactly the opacity #1414
-            # fixed, reintroduced one layer down. Parse first; prefer the
-            # terminal result event's own `result` field (labelling whether
-            # it carried `is_error`); fall back to the raw bytes only when no
-            # result line parsed at all (process died before ever emitting
-            # one -- crash before the first event, non-JSON output, etc).
-            final_result, _partial_text, _event_count = _parse_stream_json_output(
-                stdout.decode(errors="replace")
-            )
-            if final_result is not None and isinstance(final_result.get("result"), str):
-                stdout_text = final_result["result"].strip()
-                out_label = (
-                    "stdout(claude-error)" if final_result.get("is_error")
-                    else "stdout(claude-result)"
+                log_path_str = _persist_timeout_log(timeout, partial_text, partial_stderr, event_count)
+                raise OperatorTimeoutError(
+                    f"claude -p timed out after {timeout}s; partial output "
+                    f"({len(partial_text)} chars reconstructed from {event_count} "
+                    f"stream-json events, {len(partial_stdout)}B raw stdout, "
+                    f"{len(partial_stderr)}B stderr) logged to {log_path_str}",
+                    partial_text=partial_text,
+                    event_count=event_count,
+                    # _persist_timeout_log's own best-effort write can fail (its
+                    # sentinel string, not an exception -- the timeout signal
+                    # must surface regardless); a4 gets None rather than a path
+                    # that doesn't exist on disk.
+                    log_path=Path(log_path_str) if log_path_str != "(log write failed)" else None,
                 )
-            else:
-                stdout_text = stdout.decode(errors="replace").strip()
-                out_label = "stdout"
-            err_snippet = stderr.decode(errors="replace").strip()[:300]
-            out_snippet = stdout_text[:300]
-            parts = [
-                f"{label}: {text}"
-                for label, text in (("stderr", err_snippet), (out_label, out_snippet))
-                if text
-            ]
-            # Silence must READ as silence: a bare trailing colon is
-            # indistinguishable from "we dropped the output", which is the
-            # ambiguity that cost GH #1414 a hand investigation.
-            detail = " | ".join(parts) if parts else "no output on stdout or stderr"
-            # The DURABLE half. The exception above is visible for exactly one
-            # turn, in whatever renders the tool error; nothing writes it down.
-            # GH #1414 searched a May-July mcp.log and found nothing, because
-            # FastMCP's handler returns str(e) to the client without logging —
-            # and of the 17 call sites, 13 propagate bare on at least one real
-            # invocation path, three of them (nx_plan_audit, nx_tidy,
-            # nx_enrich_beads) with no covered path at all. This is the one
-            # choke point every caller passes through, including call site 18
-            # that nobody has written yet, so the record belongs here rather
-            # than at N call sites that must each remember to opt in.
-            #
-            # Deliberately NOT capped at the exception's 300 chars: that cap
-            # buys a readable message, and a durable record that inherits it
-            # loses the same diagnostic tail all over again (nexus-1at5's
-            # actual lesson was durability independent of the exception text,
-            # which the first cut of this fix claimed but did not deliver).
-            #
-            # SCOPE, precisely: this fires for all 17 call sites, but DURABILITY
-            # is a property of the calling process's logging mode, not of this
-            # choke point. mode="mcp" gets the rotating file handler, so the 15
-            # server-side sites get a record on disk. `nx taxonomy discover` and
-            # `review --auto` (taxonomy_cmd.py:1537,:1653) run under
-            # mode="cli", which logging_setup returns from before any file
-            # handler is attached — stderr only. Those two go from 100% silent
-            # to one stderr line per failure during the run, which is an
-            # improvement and is NOT "something to grep afterward".
-            emit = _log.info if _ROLLED_UP.get() else _log.warning
-            emit(
-                "operator_dispatch_failed",
-                returncode=proc.returncode,
-                stdout=_capped_text(stdout_text),
-                stderr=_capped(stderr),
-                # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert
-                # [23032] Important #1): the DURABLE record must carry the
-                # same model/operator label the transient exception text
-                # gets a few lines below -- the exception is visible for
-                # exactly one turn; this structlog emit is what a later
-                # investigation actually greps.
-                model=model,
-                operator=operator,
-            )
-            # nexus-ri56e: (a) origin unambiguity — a populated message now
-            # reads like an ordinary application error, but this is the
-            # DISPATCH HARNESS failing (the claude -p CLI exited non-zero);
-            # whoever hits it must not mistake the relayed error text for a
-            # model-level answer. (b) addressability — the timeout branch has
-            # always named its artifact in the exception; name ours too, or
-            # honestly say there is none (plain CLI mode).
-            from nexus.logging_setup import active_log_file  # noqa: PLC0415 — deferred: logging_setup is heavier than this hot-free error path needs at import time
 
-            log_file = active_log_file()
-            where = (
-                f"durable record: operator_dispatch_failed in {log_file}"
-                if log_file is not None
-                else "no log file attached (plain CLI mode) — this message is "
-                     "the only record"
-            )
-            # RDR-196 .p2b DO 4: a rejected --model must name both the
-            # model and the operator that asked for it -- only when
-            # *model* was actually set, so the default (model=None)
-            # error text is untouched.
-            model_operator_clause = (
-                f" [model={model!r} operator={operator!r}]"
-                if model is not None else ""
-            )
-            # nexus-2g8y7: only engaged when THIS dispatch actually opted
-            # into a budget ceiling -- a dispatch that never set
-            # max_budget_usd/NX_DISPATCH_MAX_BUDGET_USD cannot have its
-            # ordinary failures reclassified, so the generic OperatorError
-            # path below is byte-identical to before this bead for every
-            # existing (non-opted-in) call site.
-            if effective_max_budget_usd is not None and _looks_like_budget_exceeded_signal(
-                stdout_text, stderr.decode(errors="replace")
-            ):
-                budget_log_path_str = _persist_budget_log(
-                    effective_max_budget_usd, _partial_text, stderr, _event_count,
+            stdout = b"".join(stdout_chunks)
+            stderr = b"".join(stderr_chunks)
+
+            if proc.returncode != 0:
+                # GH #1414: `claude -p --output-format json` reports its errors on
+                # STDOUT, so a stderr-only message rendered as the bare, useless
+                # "claude -p exited 1:" — twice, for nx_plan_audit, with nothing in
+                # mcp.log either. Report whichever stream spoke.
+                #
+                # nexus-h33x8.6 review round 2 (code-review on dca12e1e3): a3
+                # switched stdout to NDJSON (stream-json), but this branch kept
+                # reading the RAW joined bytes for the snippet/detail/durable-log
+                # fields -- mostly system/assistant envelope JSON now, not
+                # claude's own error text, which is exactly the opacity #1414
+                # fixed, reintroduced one layer down. Parse first; prefer the
+                # terminal result event's own `result` field (labelling whether
+                # it carried `is_error`); fall back to the raw bytes only when no
+                # result line parsed at all (process died before ever emitting
+                # one -- crash before the first event, non-JSON output, etc).
+                final_result, _partial_text, _event_count = _parse_stream_json_output(
+                    stdout.decode(errors="replace")
                 )
-                raise OperatorBudgetExceededError(
-                    f"claude -p aborted: --max-budget-usd "
-                    f"{effective_max_budget_usd:f} exceeded (dispatch-harness "
-                    f"abort, not a model answer): {detail} [{where}]",
-                    partial_text=_partial_text,
-                    event_count=_event_count,
-                    log_path=(
-                        Path(budget_log_path_str)
-                        if budget_log_path_str != "(log write failed)" else None
-                    ),
+                if final_result is not None and isinstance(final_result.get("result"), str):
+                    stdout_text = final_result["result"].strip()
+                    out_label = (
+                        "stdout(claude-error)" if final_result.get("is_error")
+                        else "stdout(claude-result)"
+                    )
+                else:
+                    stdout_text = stdout.decode(errors="replace").strip()
+                    out_label = "stdout"
+                err_snippet = stderr.decode(errors="replace").strip()[:300]
+                out_snippet = stdout_text[:300]
+                parts = [
+                    f"{label}: {text}"
+                    for label, text in (("stderr", err_snippet), (out_label, out_snippet))
+                    if text
+                ]
+                # Silence must READ as silence: a bare trailing colon is
+                # indistinguishable from "we dropped the output", which is the
+                # ambiguity that cost GH #1414 a hand investigation.
+                detail = " | ".join(parts) if parts else "no output on stdout or stderr"
+                # The DURABLE half. The exception above is visible for exactly one
+                # turn, in whatever renders the tool error; nothing writes it down.
+                # GH #1414 searched a May-July mcp.log and found nothing, because
+                # FastMCP's handler returns str(e) to the client without logging —
+                # and of the 17 call sites, 13 propagate bare on at least one real
+                # invocation path, three of them (nx_plan_audit, nx_tidy,
+                # nx_enrich_beads) with no covered path at all. This is the one
+                # choke point every caller passes through, including call site 18
+                # that nobody has written yet, so the record belongs here rather
+                # than at N call sites that must each remember to opt in.
+                #
+                # Deliberately NOT capped at the exception's 300 chars: that cap
+                # buys a readable message, and a durable record that inherits it
+                # loses the same diagnostic tail all over again (nexus-1at5's
+                # actual lesson was durability independent of the exception text,
+                # which the first cut of this fix claimed but did not deliver).
+                #
+                # SCOPE, precisely: this fires for all 17 call sites, but DURABILITY
+                # is a property of the calling process's logging mode, not of this
+                # choke point. mode="mcp" gets the rotating file handler, so the 15
+                # server-side sites get a record on disk. `nx taxonomy discover` and
+                # `review --auto` (taxonomy_cmd.py:1537,:1653) run under
+                # mode="cli", which logging_setup returns from before any file
+                # handler is attached — stderr only. Those two go from 100% silent
+                # to one stderr line per failure during the run, which is an
+                # improvement and is NOT "something to grep afterward".
+                emit = _log.info if _ROLLED_UP.get() else _log.warning
+                emit(
+                    "operator_dispatch_failed",
+                    returncode=proc.returncode,
+                    stdout=_capped_text(stdout_text),
+                    stderr=_capped(stderr),
+                    # RDR-196 .p2b review fix (nexus-nyry9.15, code-review-expert
+                    # [23032] Important #1): the DURABLE record must carry the
+                    # same model/operator label the transient exception text
+                    # gets a few lines below -- the exception is visible for
+                    # exactly one turn; this structlog emit is what a later
+                    # investigation actually greps.
+                    model=model,
+                    operator=operator,
                 )
-            raise OperatorError(
-                f"claude -p exited {proc.returncode} (dispatch-harness "
-                f"failure, not a model answer): {detail} [{where}]"
-                f"{model_operator_clause}"
-            )
+                # nexus-ri56e: (a) origin unambiguity — a populated message now
+                # reads like an ordinary application error, but this is the
+                # DISPATCH HARNESS failing (the claude -p CLI exited non-zero);
+                # whoever hits it must not mistake the relayed error text for a
+                # model-level answer. (b) addressability — the timeout branch has
+                # always named its artifact in the exception; name ours too, or
+                # honestly say there is none (plain CLI mode).
+                from nexus.logging_setup import active_log_file  # noqa: PLC0415 — deferred: logging_setup is heavier than this hot-free error path needs at import time
 
-        raw = stdout.decode(errors="replace").strip()
-        if not raw:
-            raise OperatorOutputError("claude -p produced empty stdout")
-
-        # nexus-h33x8.6 a3: stdout is now NDJSON (stream-json). The
-        # terminal "result" event is byte-identical in shape to what
-        # --output-format json used to return as the whole payload, so
-        # extract that line first. Fall back to parsing the whole blob as
-        # a single JSON object when no such line is found -- covers a
-        # subprocess/test double that emits a bare JSON blob rather than
-        # real stream-json (the format this repo's own test doubles use).
-        final_result, _partial_text, event_count = _parse_stream_json_output(raw)
-        _ambient_sink = _ambient_usage_sink.get()
-        # nexus-ek8tr drift tripwire — OUTSIDE the sink guard (review fix,
-        # T2 [23232] Important #2): the planner's own dispatch runs with
-        # no sink at all, and a pinned dispatch must be drift-checked on
-        # EVERY path, not only telemetry-wrapped ones. Only fires when a
-        # result parsed (final_result present); a failed dispatch has no
-        # canonical id to check.
-        _drift_usage = (
-            _parse_dispatch_usage(final_result) if final_result is not None else None
-        )
-        if model is not None and _drift_usage is not None:
-            _warn_on_family_drift(model, _drift_usage, operator)
-        if usage_sink is not None or _ambient_sink is not None:
-            # RDR-196 .p1a (nexus-nyry9.7) + .p1b Gap-1 addendum
-            # (nexus-nyry9.8, 2026-08-20): capture cost/usage telemetry
-            # for a dispatch that reached a parsed result -- the raw JSON
-            # fallback below (final_result is None) still parses to an
-            # all-None DispatchUsage + warning via _parse_dispatch_usage,
-            # never a silently-omitted record. This append is BEFORE the
-            # fallback's own possible raise (see the docstring's "Appended,
-            # then STILL RAISES" list) -- the diagnostic enrichment below
-            # (nexus-nyry9.4 review-fix, taxonomy id=99) only changes the
-            # exception's MESSAGE, never this ordering or the exception
-            # type, so that contract and its test
-            # (TestUsageSinkAppendsBeforeSubsequentRaises::
-            # test_invalid_json_fallback_still_appends_all_none_usage_
-            # then_raises) both stay true unchanged. Parsed ONCE; the
-            # SAME DispatchUsage instance is appended to both sinks when
-            # both are active, never two independently-parsed copies.
-            # Reuse the drift-check parse when it ran (review r2 suggestion:
-            # a second _parse_dispatch_usage here could double any parse
-            # warning); the fallback covers final_result None, where the
-            # parse itself emits the all-None-usage warning path.
-            _usage = _drift_usage if _drift_usage is not None else _parse_dispatch_usage(final_result)
-            if usage_sink is not None:
-                usage_sink.append(_usage)
-            if _ambient_sink is not None:
-                _ambient_sink.append(_usage)
-        if final_result is not None:
-            parsed = final_result
-        else:
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                # nexus-nyry9.4 review-fix (RDR-196 .r4 residual, taxonomy
-                # id=99): the old ``raw[:200]`` preview showed only the
-                # OPENING bytes of the whole blob, which for a real
-                # multi-line NDJSON stream is rarely where the parse
-                # actually failed -- useless when the interesting content
-                # is past byte 200. Locate the specific line ``json.loads``
-                # choked on via the exception's own ``lineno`` and preview
-                # THAT, plus how many lines parsed as objects at all (0
-                # means the child never spoke NDJSON; >0 means a real
-                # stream was seen but never reached a terminal "result"
-                # event) -- "no terminal 'result' event seen" is always
-                # true in this branch (we are here BECAUSE final_result is
-                # None) but stated explicitly rather than left implicit.
-                _raw_lines = raw.splitlines()
-                _offending_line = (
-                    _raw_lines[exc.lineno - 1]
-                    if 0 < exc.lineno <= len(_raw_lines)
-                    else raw
+                log_file = active_log_file()
+                where = (
+                    f"durable record: operator_dispatch_failed in {log_file}"
+                    if log_file is not None
+                    else "no log file attached (plain CLI mode) — this message is "
+                         "the only record"
                 )
-                raise OperatorOutputError(
-                    f"claude -p output is not valid JSON: {exc} — "
-                    f"{event_count} NDJSON line(s) parsed as objects, "
-                    f"no terminal 'result' event seen — "
-                    f"offending line (first 200 chars): {_offending_line[:200]!r}"
-                ) from exc
-
-        # `claude -p --output-format json` returns a wrapper:
-        # {"type":"result", "is_error":bool, "result":str, "structured_output":dict, ...}
-        # Callers supplied a `json_schema`, so they expect the schema-conforming
-        # dict, not the wrapper.  Surface errors explicitly, unwrap otherwise.
-        if isinstance(parsed, dict) and "structured_output" in parsed:
-            if parsed.get("is_error"):
+                # RDR-196 .p2b DO 4: a rejected --model must name both the
+                # model and the operator that asked for it -- only when
+                # *model* was actually set, so the default (model=None)
+                # error text is untouched.
+                model_operator_clause = (
+                    f" [model={model!r} operator={operator!r}]"
+                    if model is not None else ""
+                )
+                # nexus-2g8y7: only engaged when THIS dispatch actually opted
+                # into a budget ceiling -- a dispatch that never set
+                # max_budget_usd/NX_DISPATCH_MAX_BUDGET_USD cannot have its
+                # ordinary failures reclassified, so the generic OperatorError
+                # path below is byte-identical to before this bead for every
+                # existing (non-opted-in) call site.
+                if effective_max_budget_usd is not None and _looks_like_budget_exceeded_signal(
+                    stdout_text, stderr.decode(errors="replace")
+                ):
+                    budget_log_path_str = _persist_budget_log(
+                        effective_max_budget_usd, _partial_text, stderr, _event_count,
+                    )
+                    raise OperatorBudgetExceededError(
+                        f"claude -p aborted: --max-budget-usd "
+                        f"{effective_max_budget_usd:f} exceeded (dispatch-harness "
+                        f"abort, not a model answer): {detail} [{where}]",
+                        partial_text=_partial_text,
+                        event_count=_event_count,
+                        log_path=(
+                            Path(budget_log_path_str)
+                            if budget_log_path_str != "(log write failed)" else None
+                        ),
+                    )
                 raise OperatorError(
-                    f"claude -p reported error: {parsed.get('result', '')[:300]}"
+                    f"claude -p exited {proc.returncode} (dispatch-harness "
+                    f"failure, not a model answer): {detail} [{where}]"
+                    f"{model_operator_clause}"
                 )
-            structured = parsed.get("structured_output")
-            if structured is None:
-                raise OperatorOutputError(
-                    f"claude -p returned null structured_output; "
-                    f"result={parsed.get('result', '')[:200]!r}"
-                )
-            return structured
-        return parsed
-    finally:
-        # nexus-6y4e0 review (CRITICAL): the job handle must close on
-        # EVERY outcome, not only the except-asyncio.TimeoutError branch
-        # above -- success and a non-zero return (neither raises it) never
-        # touched it and leaked it every time. A no-op when the job is
-        # None: POSIX, a spawn failure, or the timeout path (already
-        # released and cleared above). Deferred import for the same
-        # reason as the except branch's own kill_tree import.
-        from nexus.util.process_group import release  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-        release(_dispatch_job)
-        # nexus-tx5hd critic point 4 (T2 [24197]): cheap instrumentation
-        # for "measure child time-to-first-model-event vs timeout" --
-        # the bead's own open question. This is the ONE choke point that
-        # already runs on every dispatch outcome (success, harness
-        # failure, timeout, even a spawn failure that never got this
-        # far), so a single debug-level line here covers every path
-        # rather than duplicating the field across several conditional
-        # warning lines elsewhere in this function, none of which fire
-        # unconditionally. ``None`` when spawn itself failed (no process
-        # to time) or when the child never wrote a single byte before
-        # the dispatch ended (killed at the phase-1 edge with nothing
-        # ever received). This commit only wires the number through --
-        # a live measurement run against real gate-wave conditions is
-        # deferred to the next gate run, per the coordinator's explicit
-        # "cheap one" framing.
-        _first_event_latency_s = (
-            (_first_event_at - _dispatch_spawn_at)
-            if (_first_event_at is not None and _dispatch_spawn_at is not None)
-            else None
-        )
-        _log.debug(
-            "operator_dispatch_first_event_latency",
-            first_event_latency_s=_first_event_latency_s,
-            operator=operator,
-            model=model,
-        )
-        # nexus-bjltu Significant #1: close the minted session (if any)
-        # now that the subprocess that owned it is gone. No-op when this
-        # dispatch never minted (tool-free, or a failed mint).
-        _close_dispatch_session(_minted_session_id, _minted_session_token)
-        # nexus-vzy2v: delete the temp prompt file on every path -- success,
-        # harness failure, timeout-kill, or a spawn failure that raised
-        # before any of the above ran. Best-effort: an already-completed
-        # (or already-failed) dispatch must not additionally fail because
-        # its scratch file could not be removed.
-        if prompt_path is not None:
-            try:
-                prompt_path.unlink(missing_ok=True)
-            except OSError as exc:
-                _log.warning(
-                    "operator_dispatch_prompt_file_cleanup_failed",
-                    path=str(prompt_path),
-                    error=str(exc),
-                )
+            raw = stdout.decode(errors="replace").strip()
+            if not raw:
+                raise OperatorOutputError("claude -p produced empty stdout")
+
+            # nexus-h33x8.6 a3: stdout is now NDJSON (stream-json). The
+            # terminal "result" event is byte-identical in shape to what
+            # --output-format json used to return as the whole payload, so
+            # extract that line first. Fall back to parsing the whole blob as
+            # a single JSON object when no such line is found -- covers a
+            # subprocess/test double that emits a bare JSON blob rather than
+            # real stream-json (the format this repo's own test doubles use).
+            final_result, _partial_text, event_count = _parse_stream_json_output(raw)
+            _ambient_sink = _ambient_usage_sink.get()
+            # nexus-ek8tr drift tripwire — OUTSIDE the sink guard (review fix,
+            # T2 [23232] Important #2): the planner's own dispatch runs with
+            # no sink at all, and a pinned dispatch must be drift-checked on
+            # EVERY path, not only telemetry-wrapped ones. Only fires when a
+            # result parsed (final_result present); a failed dispatch has no
+            # canonical id to check.
+            _drift_usage = (
+                _parse_dispatch_usage(final_result) if final_result is not None else None
+            )
+            if model is not None and _drift_usage is not None:
+                _warn_on_family_drift(model, _drift_usage, operator)
+            if usage_sink is not None or _ambient_sink is not None:
+                # RDR-196 .p1a (nexus-nyry9.7) + .p1b Gap-1 addendum
+                # (nexus-nyry9.8, 2026-08-20): capture cost/usage telemetry
+                # for a dispatch that reached a parsed result -- the raw JSON
+                # fallback below (final_result is None) still parses to an
+                # all-None DispatchUsage + warning via _parse_dispatch_usage,
+                # never a silently-omitted record. This append is BEFORE the
+                # fallback's own possible raise (see the docstring's "Appended,
+                # then STILL RAISES" list) -- the diagnostic enrichment below
+                # (nexus-nyry9.4 review-fix, taxonomy id=99) only changes the
+                # exception's MESSAGE, never this ordering or the exception
+                # type, so that contract and its test
+                # (TestUsageSinkAppendsBeforeSubsequentRaises::
+                # test_invalid_json_fallback_still_appends_all_none_usage_
+                # then_raises) both stay true unchanged. Parsed ONCE; the
+                # SAME DispatchUsage instance is appended to both sinks when
+                # both are active, never two independently-parsed copies.
+                # Reuse the drift-check parse when it ran (review r2 suggestion:
+                # a second _parse_dispatch_usage here could double any parse
+                # warning); the fallback covers final_result None, where the
+                # parse itself emits the all-None-usage warning path.
+                _usage = _drift_usage if _drift_usage is not None else _parse_dispatch_usage(final_result)
+                if usage_sink is not None:
+                    usage_sink.append(_usage)
+                if _ambient_sink is not None:
+                    _ambient_sink.append(_usage)
+            if final_result is not None:
+                parsed = final_result
+            else:
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    # nexus-nyry9.4 review-fix (RDR-196 .r4 residual, taxonomy
+                    # id=99): the old ``raw[:200]`` preview showed only the
+                    # OPENING bytes of the whole blob, which for a real
+                    # multi-line NDJSON stream is rarely where the parse
+                    # actually failed -- useless when the interesting content
+                    # is past byte 200. Locate the specific line ``json.loads``
+                    # choked on via the exception's own ``lineno`` and preview
+                    # THAT, plus how many lines parsed as objects at all (0
+                    # means the child never spoke NDJSON; >0 means a real
+                    # stream was seen but never reached a terminal "result"
+                    # event) -- "no terminal 'result' event seen" is always
+                    # true in this branch (we are here BECAUSE final_result is
+                    # None) but stated explicitly rather than left implicit.
+                    _raw_lines = raw.splitlines()
+                    _offending_line = (
+                        _raw_lines[exc.lineno - 1]
+                        if 0 < exc.lineno <= len(_raw_lines)
+                        else raw
+                    )
+                    raise OperatorOutputError(
+                        f"claude -p output is not valid JSON: {exc} — "
+                        f"{event_count} NDJSON line(s) parsed as objects, "
+                        f"no terminal 'result' event seen — "
+                        f"offending line (first 200 chars): {_offending_line[:200]!r}"
+                    ) from exc
+
+            # `claude -p --output-format json` returns a wrapper:
+            # {"type":"result", "is_error":bool, "result":str, "structured_output":dict, ...}
+            # Callers supplied a `json_schema`, so they expect the schema-conforming
+            # dict, not the wrapper.  Surface errors explicitly, unwrap otherwise.
+            if isinstance(parsed, dict) and "structured_output" in parsed:
+                if parsed.get("is_error"):
+                    raise OperatorError(
+                        f"claude -p reported error: {parsed.get('result', '')[:300]}"
+                    )
+                structured = parsed.get("structured_output")
+                if structured is None:
+                    raise OperatorOutputError(
+                        f"claude -p returned null structured_output; "
+                        f"result={parsed.get('result', '')[:200]!r}"
+                    )
+                return DispatchResult(structured=structured, usage=_drift_usage)
+            return DispatchResult(structured=parsed, usage=_drift_usage)
+        finally:
+            # nexus-6y4e0 review (CRITICAL): the job handle must close on
+            # EVERY outcome, not only the except-asyncio.TimeoutError branch
+            # above -- success and a non-zero return (neither raises it) never
+            # touched it and leaked it every time. A no-op when the job is
+            # None: POSIX, a spawn failure, or the timeout path (already
+            # released and cleared above). Deferred import for the same
+            # reason as the except branch's own kill_tree import.
+            from nexus.util.process_group import release  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+            release(_dispatch_job)
+            # nexus-tx5hd critic point 4 (T2 [24197]): cheap instrumentation
+            # for "measure child time-to-first-model-event vs timeout" --
+            # the bead's own open question. This is the ONE choke point that
+            # already runs on every dispatch outcome (success, harness
+            # failure, timeout, even a spawn failure that never got this
+            # far), so a single debug-level line here covers every path
+            # rather than duplicating the field across several conditional
+            # warning lines elsewhere in this function, none of which fire
+            # unconditionally. ``None`` when spawn itself failed (no process
+            # to time) or when the child never wrote a single byte before
+            # the dispatch ended (killed at the phase-1 edge with nothing
+            # ever received). This commit only wires the number through --
+            # a live measurement run against real gate-wave conditions is
+            # deferred to the next gate run, per the coordinator's explicit
+            # "cheap one" framing.
+            _first_event_latency_s = (
+                (_first_event_at - _dispatch_spawn_at)
+                if (_first_event_at is not None and _dispatch_spawn_at is not None)
+                else None
+            )
+            _log.debug(
+                "operator_dispatch_first_event_latency",
+                first_event_latency_s=_first_event_latency_s,
+                operator=operator,
+                model=model,
+            )
+            # nexus-bjltu Significant #1: close the minted session (if any)
+            # now that the subprocess that owned it is gone. No-op when this
+            # dispatch never minted (tool-free, or a failed mint).
+            _close_dispatch_session(_minted_session_id, _minted_session_token)
+            # nexus-vzy2v: delete the temp prompt file on every path -- success,
+            # harness failure, timeout-kill, or a spawn failure that raised
+            # before any of the above ran. Best-effort: an already-completed
+            # (or already-failed) dispatch must not additionally fail because
+            # its scratch file could not be removed.
+            if prompt_path is not None:
+                try:
+                    prompt_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    _log.warning(
+                        "operator_dispatch_prompt_file_cleanup_failed",
+                        path=str(prompt_path),
+                        error=str(exc),
+                    )

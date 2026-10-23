@@ -610,9 +610,16 @@ class AspectWorkerDaemon:
 
 
 def _claude_available() -> bool:
-    """Whether the ``claude`` binary is on ``PATH``: the one precondition the
-    daemon's extraction needs and the spawner can check before it forks."""
-    return shutil.which("claude") is not None
+    """Whether an LLM backend can serve the daemon's extraction: the one
+    precondition the spawner can check before it forks. Delegates to
+    :func:`nexus.operators.llm_backend.llm_backend_available` (nexus-2k66t.3),
+    which in this release is true exactly when ``claude`` is on ``PATH`` and the
+    backend setting allows the CLI. The name stays so the spawner, the daemon
+    entrypoint and ``nx doctor`` keep one seam. The PATH lookup is this module's
+    own ``shutil.which``, so a test that fakes it here still moves the answer."""
+    from nexus.operators.llm_backend import llm_backend_available  # noqa: PLC0415 - deferred: keeps daemon/CLI startup light
+
+    return llm_backend_available(which=shutil.which)
 
 
 def _require_extraction_credentials() -> None:
