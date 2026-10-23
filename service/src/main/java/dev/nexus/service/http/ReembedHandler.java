@@ -549,6 +549,9 @@ public final class ReembedHandler implements HttpHandler {
                     + "; the source is not re-entered",
                 "job_id", earlier.jobId().toString(), "state", earlier.state())));
         }
+        // A re-entry moves documents into the target again: the engine must be able to embed for its model, as a
+        // start requires (nexus-6zchp; this path never ran through resolve).
+        requireServed(String.valueOf(targetRow.get("embedding_model")));
         final Event event;
         final State next;
         if (reader.anyCandidate(tenant, source)) {
@@ -739,6 +742,14 @@ public final class ReembedHandler implements HttpHandler {
                             throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
                                 "error", "token_cap can only be raised: the job's cap is " + job.tokenCap(),
                                 "job_id", job.jobId().toString(), "state", job.state())));
+                        }
+                    }
+                    if (event == Event.RESUME) {
+                        // Refuse up front a resume into a family the engine cannot embed for (nexus-6zchp). A target
+                        // that is gone needs no check here: the runner fails the job loud for it.
+                        Map<String, Object> targetRow = catalog.getCollection(tenant, job.targetCollection());
+                        if (targetRow != null) {
+                            requireServed(String.valueOf(targetRow.get("embedding_model")));
                         }
                     }
                     Optional<Job> updated = jobs.applyTransition(tenant, jobId, from.wire(), job.cutoverStep(),

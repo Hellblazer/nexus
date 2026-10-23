@@ -9,6 +9,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - **Installer pages (published to the site 2026-10-25, ahead of the next client release):** `install.sh --slim` and `install.ps1 -slim` now print that PDF support was left out and how to add it (`nx self install --extras pdf`, or it installs on the first PDF you index), and both `--help` texts state the macOS 14 on Apple Silicon floor (nexus-h6wwq).
 
+### Fixed
+
+- **A re-embed resume, and the `kept_tombstoned` re-entry, are refused with the missing piece named when the engine cannot embed for the target's model** (nexus-6zchp, follow-up to nexus-q6t89; engine change, local engine only). A start already refused this; a resume with the target present, and the re-entry, skipped the check and ran into another failed batch. A resume whose target is gone is unchanged.
+
 ## [7.86.1] - 2026-10-25
 
 Pairs with engine-service-v0.1.164 (`REQUIRED_ENGINE_VERSION` unchanged from 7.86.0), already deployed; no engine changesets. Fixes from the 7.86.0 post-release shakeout on macOS, Linux and Windows, and corrections to the 7.86.0 entries.
