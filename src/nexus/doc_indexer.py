@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 from nexus.checkpoint import delete_checkpoint
-from nexus.corpus import ensure_collection_registered, index_model_for_collection
+from nexus.corpus import embedding_model_row_preferred, ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
 from nexus.embed_window import window_for_collection
 from nexus.retry import _vector_with_retry
@@ -1343,6 +1343,21 @@ def _resolve_write_db(t3: Any) -> Any:
 _NO_REGISTRAR = object()
 
 
+def _target_model(db: Any, collection_name: str) -> str:
+    """The model chunks written to *collection_name* through *db* are stamped with and
+    compared against for the unchanged-content skip (nexus-7jy5r).
+
+    The catalog row's model, read through *db*'s own resolver, because the engine embeds
+    by the row: a legacy name's derivation guesses Voyage for a collection whose row says
+    bge. A store with no resolver (an in-memory double, a dry run's throwaway store) has
+    no catalog, so the name decides, as it always did there.
+    """
+    # Looked up on the type: a mock store answers any attribute.
+    if getattr(type(db), "_resolve_collection_row", None) is None:
+        return index_model_for_collection(collection_name)
+    return embedding_model_row_preferred(collection_name, row_resolver=db._resolve_collection_row)
+
+
 def _register_before_read(db: Any, collection_name: str) -> None:
     """Register *collection_name* exactly when *db*'s own write path would.
 
@@ -1750,13 +1765,14 @@ def _index_document(
     # forbids.
     _register_before_read(db, collection_name)
 
-    target_model = index_model_for_collection(collection_name)
     if local_target_model is not None:
         # Local-mode override: chunk metadata records the local model
         # name so re-indexes against unchanged content skip cleanly,
         # and a later upgrade to cloud mode triggers re-embed (the
         # cloud target_model differs from the locally-stored name).
         target_model = local_target_model
+    else:
+        target_model = _target_model(db, collection_name)
 
     # Incremental sync: skip if file is already indexed with the same hash AND model.
     # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
@@ -2707,12 +2723,13 @@ def index_pdf(
     # incremental-sync READ below; see the matching comment in
     # _index_document. Same registrar the write path uses.
     _register_before_read(db, col_name)
-    target_model = index_model_for_collection(col_name)
     if local_target_model is not None:
         # See _index_document for rationale: keep the staleness check
         # + chunk metadata aligned with the local embedder's actual
         # model so repeat-indexes are no-ops.
         target_model = local_target_model
+    else:
+        target_model = _target_model(db, col_name)
 
     # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
     # the staleness check so a fresh index lands chunks with doc_id populated

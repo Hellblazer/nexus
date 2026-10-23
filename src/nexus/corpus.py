@@ -1041,6 +1041,47 @@ def resolve_row_preferred(
     return name_fallback(name)
 
 
+def embedding_model_row_preferred(
+    collection: str, *, row_resolver: "Callable[[str], dict | None] | None" = None,
+) -> str:
+    """The embedding model a write into *collection* is embedded with: the catalog row's
+    ``embedding_model`` when a row backs the name, else the calibrated name derivation.
+    It picks a note's split window (nexus-z8mi2), the ``embedding_model`` stamped on a
+    note's chunks (nexus-ldh33), and the model ``nx index md``/``pdf`` stamp and compare
+    for the unchanged-content skip (nexus-7jy5r).
+
+    The row first because the engine embeds by the row. A legacy name carries no model
+    token, so the derivation answers what the install embeds legacy names with NOW: a
+    collection whose row says ``voyage-context-3`` on a bge-profile engine was split
+    to bge's 512-token window instead of Voyage's none. A conformant name's token can
+    disagree with its row too: a rename keeps the source row's model under the new
+    name. The same row-preferred rule search uses (nexus-noayy, nexus-ml9vu), through
+    :func:`nexus.corpus.resolve_row_preferred`.
+
+    The row comes from the shared collections cache (``mcp_infra.get_collection_row``),
+    which fills itself on a cold or stale cache with one catalog-only (routing)
+    listing: a fresh ``nx store put`` process pays one, then every later read in the
+    TTL window is the cached one. A write that invalidates the cache (MCP
+    ``store_put`` does, after each committed note) makes the next note's read a
+    refill. A listing that cannot be fetched, a collection with no row, and a row
+    with no ``embedding_model`` all fall to the name derivation, which is the
+    behaviour before this read existed. The listing omits a registered collection
+    that holds no chunk yet, so the first note into an empty legacy collection still
+    follows the name. A failed listing never fails the write but can delay it: the
+    client's gateway retries, or its 30 s read timeout per attempt for an error the
+    cache does not remember.
+
+    *row_resolver* reads the row through a given client instead of the shared cache
+    (:func:`resolve_row_preferred`); the indexers pass their own store's, so a client
+    for another tenant never reads the process default's catalog.
+    """
+    # Calibrated: the plain resolver reads a legacy two-segment local
+    # collection as Voyage (nexus-mc1l1), which would leave it unsplit.
+    return resolve_row_preferred(
+        collection, "embedding_model", embedding_model_for_collection_calibrated,
+        row_resolver=row_resolver,
+    ) or embedding_model_for_collection_calibrated(collection)
+
 def voyage_model_for_collection(collection_name: str) -> str:
     """Return the Voyage AI model for a T3 collection (index and query).
 

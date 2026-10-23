@@ -1552,6 +1552,7 @@ nexus-6z17u
 nexus-6z43q
 nexus-6z43q.1
 nexus-6z4yy
+nexus-6zchp
 nexus-6zekl
 nexus-6zekl.1
 nexus-6zx
@@ -1679,6 +1680,7 @@ nexus-7hzb2
 nexus-7i31i
 nexus-7ibsd
 nexus-7jvlv
+nexus-7jy5r
 nexus-7kf7
 nexus-7kj9
 nexus-7kl32

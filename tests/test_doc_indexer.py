@@ -2146,6 +2146,63 @@ def test_index_pdf_hash_match_model_check(stored_model, expected_result, sample_
     assert result == expected_result
 
 
+_BGE = "bge-base-en-v15-768"
+
+
+class _RowStore(MagicMock):
+    """A T3 double whose catalog row for every collection names *bge*, read through its own
+    resolver as ``HttpVectorClient._resolve_collection_row`` is."""
+
+    def _resolve_collection_row(self, name: str) -> dict:
+        return {"name": name, "content_type": "docs", "embedding_model": _BGE}
+
+
+@pytest.mark.t2_tenant
+@pytest.mark.parametrize("stored_model,expected_result", [
+    (_BGE, 0),
+    ("voyage-context-3", 2),
+])
+def test_index_pdf_skip_compares_against_the_row_model(
+    stored_model, expected_result, sample_pdf, monkeypatch, cloud_mode,
+):
+    """nexus-7jy5r: the unchanged-content skip compares the stored stamp with the model the
+    collection's row names, not the one its name derives (Voyage here). A bge row with bge
+    chunks skips; chunks stamped with the name's guess are re-indexed once, to the row's."""
+    set_credentials(monkeypatch)
+    _registered_before(sample_pdf, "mybook", "paper")
+    content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
+    mock_chunk, mock_extract = _make_pdf_mocks()
+    mock_col = MagicMock()
+    stored = {"ids": ["old_id"], "metadatas": [{"content_hash": content_hash, "embedding_model": stored_model}]}
+    if expected_result > 0:
+        mock_col.get.side_effect = [stored, {"ids": ["old_id"]}]
+    else:
+        mock_col.get.return_value = stored
+    store = _RowStore()
+    store.get_or_create_collection.return_value = mock_col
+    with patch("nexus.doc_indexer.make_t3", return_value=store), \
+         patch("nexus.doc_indexer.PDFExtractor") as ext_cls, \
+         patch("nexus.doc_indexer.PDFChunker") as chk_cls:
+        ext_cls.return_value.extract.return_value = mock_extract
+        chk_cls.return_value.chunk.return_value = [mock_chunk, mock_chunk]
+        result = index_pdf(sample_pdf, corpus="mybook", t3=store)
+    assert result == expected_result
+
+
+def test_target_model_reads_the_row_through_the_store(monkeypatch, cloud_mode):
+    from nexus.doc_indexer import _target_model
+
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: pytest.fail("read the shared cache"))
+    assert _target_model(_RowStore(), "docs__mybook__voyage-context-3__v1") == _BGE
+
+
+@pytest.mark.parametrize("store", [MagicMock(), object()], ids=["mock", "no-resolver"])
+def test_target_model_without_a_resolver_follows_the_name(store, cloud_mode):
+    from nexus.doc_indexer import _target_model
+
+    assert _target_model(store, "docs__mybook__voyage-context-3__v1") == "voyage-context-3"
+
+
 @pytest.mark.parametrize("kind", ["pdf", "markdown"])
 def test_batch_index_returns_status_dict(kind, tmp_path):
     batch_fn, idx_name, ext, is_bytes = _BATCH_FNS[kind]
