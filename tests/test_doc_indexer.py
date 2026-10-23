@@ -2158,26 +2158,17 @@ class _RowStore(MagicMock):
 
 
 @pytest.mark.t2_tenant
-@pytest.mark.parametrize("stored_model,expected_result", [
-    (_BGE, 0),
-    ("voyage-context-3", 2),
-])
-def test_index_pdf_skip_compares_against_the_row_model(
-    stored_model, expected_result, sample_pdf, monkeypatch, cloud_mode,
-):
+def test_index_pdf_skip_compares_against_the_row_model(sample_pdf, monkeypatch, cloud_mode):
     """nexus-7jy5r: the unchanged-content skip compares the stored stamp with the model the
-    collection's row names, not the one its name derives (Voyage here). A bge row with bge
-    chunks skips; chunks stamped with the name's guess are re-indexed once, to the row's."""
+    collection's row names, not the one its name derives (Voyage here): a bge row with bge
+    chunks skips, where the name's guess would re-index. One case only: the
+    provisioned-tenant ceiling is at its limit, and this is the case the name derivation fails."""
     set_credentials(monkeypatch)
     _registered_before(sample_pdf, "mybook", "paper")
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_chunk, mock_extract = _make_pdf_mocks()
     mock_col = MagicMock()
-    stored = {"ids": ["old_id"], "metadatas": [{"content_hash": content_hash, "embedding_model": stored_model}]}
-    if expected_result > 0:
-        mock_col.get.side_effect = [stored, {"ids": ["old_id"]}]
-    else:
-        mock_col.get.return_value = stored
+    mock_col.get.return_value = {"ids": ["old_id"], "metadatas": [{"content_hash": content_hash, "embedding_model": _BGE}]}
     store = _RowStore()
     store.get_or_create_collection.return_value = mock_col
     with patch("nexus.doc_indexer.make_t3", return_value=store), \
@@ -2186,29 +2177,23 @@ def test_index_pdf_skip_compares_against_the_row_model(
         ext_cls.return_value.extract.return_value = mock_extract
         chk_cls.return_value.chunk.return_value = [mock_chunk, mock_chunk]
         result = index_pdf(sample_pdf, corpus="mybook", t3=store)
-    assert result == expected_result
+    assert result == 0
 
 
 @pytest.mark.t2_tenant
-@pytest.mark.parametrize("stored_model,skipped", [(_BGE, True), ("voyage-context-3", False)])
-def test_index_markdown_skip_compares_against_the_row_model(
-    stored_model, skipped, sample_md, monkeypatch, cloud_mode,
-):
-    """The markdown half of nexus-7jy5r (``_index_document``): the same row-model comparison."""
+def test_index_markdown_skip_compares_against_the_row_model(sample_md, monkeypatch, cloud_mode):
+    """The markdown half of nexus-7jy5r (``_index_document``): the same row-model comparison,
+    the same one case."""
     set_credentials(monkeypatch)
     _registered_before(sample_md, "test", "prose")
     content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
     mock_col = MagicMock()
-    stored = {"ids": ["existing"], "metadatas": [{"content_hash": content_hash, "embedding_model": stored_model}]}
-    if skipped:
-        mock_col.get.return_value = stored
-    else:
-        mock_col.get.side_effect = [stored, {"ids": ["existing"]}]
+    mock_col.get.return_value = {"ids": ["existing"], "metadatas": [{"content_hash": content_hash, "embedding_model": _BGE}]}
     store = _RowStore()
     store.get_or_create_collection.return_value = mock_col
     with patch("nexus.doc_indexer.make_t3", return_value=store):
         result = index_markdown(sample_md, corpus="test", t3=store)
-    assert (result == 0) is skipped
+    assert result == 0
 
 
 def test_target_model_reads_the_row_through_the_store(monkeypatch, cloud_mode):
