@@ -14,7 +14,7 @@ from voyageai.object.contextualized_embeddings import (
 
 from nexus.doc_indexer import (
     _identity_where,
-    _lookup_existing_doc_id, _markdown_chunks,
+    _lookup_existing_doc_id, _markdown_chunks, _target_model,
     batch_index_markdowns, batch_index_pdfs, index_markdown, index_pdf,
 )
 from tests._catalog_fixture_ops import (
@@ -2197,16 +2197,12 @@ def test_index_markdown_skip_compares_against_the_row_model(sample_md, monkeypat
 
 
 def test_target_model_reads_the_row_through_the_store(monkeypatch, cloud_mode):
-    from nexus.doc_indexer import _target_model
-
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: pytest.fail("read the shared cache"))
     assert _target_model(_RowStore(), "docs__mybook__voyage-context-3__v1") == _BGE
 
 
 @pytest.mark.parametrize("store", [MagicMock(), object()], ids=["mock", "no-resolver"])
 def test_target_model_without_a_resolver_follows_the_name(store, cloud_mode):
-    from nexus.doc_indexer import _target_model
-
     assert _target_model(store, "docs__mybook__voyage-context-3__v1") == "voyage-context-3"
 
 
