@@ -95,6 +95,14 @@ _IN_SCOPE_EXTRAS: dict[str, str] = {
         'resolved by the documented `uv tool install "conexus[local]"` path '
         "and carried into every generation by `nx self install --extras local`"
     ),
+    # nexus-2k66t.4.2: the PDF stack (docling-slim, mineru, torch, torchvision,
+    # pdftext) left the default dependencies. Every PDF index installs it fresh
+    # through `nx self install --extras pdf`, so its floors and caps reach a
+    # real install exactly as the default dependencies' did.
+    "pdf": (
+        "installed on first PDF use by `nx self install --extras pdf` "
+        "(nexus.pdf_stack) and carried by the receipt into every later generation"
+    ),
 }
 
 
@@ -360,8 +368,10 @@ def _locked_version(name: str) -> str:
 def test_shape_sensitive_dependency_confines_to_the_locked_minor(name: str) -> None:
     from packaging.version import Version
 
-    specs = {Requirement(d).name: Requirement(d).specifier for d in _load_runtime_dependencies()}
-    assert name in specs, f"{name} is in _SHAPE_SENSITIVE but not a runtime dependency"
+    # nexus-2k66t.4.2: both of these live in the `pdf` extra now.
+    declared = [*_load_runtime_dependencies(), *_load_optional_dependencies().get("pdf", [])]
+    specs = {Requirement(d).name: Requirement(d).specifier for d in declared}
+    assert name in specs, f"{name} is in _SHAPE_SENSITIVE but not a runtime or pdf-extra dependency"
     locked = Version(_locked_version(name))
     spec = specs[name]
     assert locked in spec, f"{name}: uv.lock has {locked}, outside pyproject specifier {spec}"

@@ -102,6 +102,56 @@ dependencies = [
     # (PG bundle, engine, models) failed CERTIFICATE_VERIFY_FAILED on a new
     # machine (measured on a clean Win11 guest). Activated in nexus/__init__.py.
     "truststore>=0.10,<0.11; sys_platform == 'win32'",
+    "httpx>=0.27,<1.0",
+    # RDR-161: pure-Python keyless-signature verification for
+    # `nx daemon service install-binary`. Replaces a ~130MB/platform cosign
+    # binary; verifies the new protobuf .sigstore.json bundle offline. 4.x and
+    # 3.x both expose Verifier.production(offline=...) + verify_artifact.
+    "sigstore>=3.0,<5",
+    # nexus-zw44w: sigstore reaches TUF through python-tuf, and tuf 7.0.0
+    # symlinks root.json on every Updater start. An unprivileged Windows
+    # account may not create symlinks (WinError 1314), so engine and PG bundle
+    # verification failed closed there (the win-release runner's ghwin, 2026-10-06).
+    # tuf 7.0.1 falls back to a hard link (python-tuf #2980 / PR #2981).
+    "tuf>=7.0.1,<8",
+    # <2 is load-bearing: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp,
+    # and the uv TOOL venv re-resolves fresh at install (uv.lock does not
+    # protect it) — an unbounded floor shipped 4 days of dead MCP servers to
+    # every fresh install (nexus-l2ku5). Raise only with a deliberate 2.0
+    # API migration, gated by the MVV's installed-venv handshake probe.
+    "mcp>=1.0,<2",
+    "fastapi>=0.115,<1.0",
+    # nexus-l2ku5 sibling (2026-08-14, gap 3 of T2
+    # nexus/release-protocol-gap-audit-2026-08-14 [22511]): was fully
+    # unconstrained, a second open door to the same "unbounded floor
+    # resolves fresh off PyPI" class that killed mcp for 4 days. Floor
+    # taken from uv.lock's resolved 0.41.0; capped at the next major.
+    # Bare, not [standard] (nexus-jpsn1): the extra's watchfiles / httptools
+    # / uvloop / websockets serve nothing here and watchfiles alone cost
+    # 115 ms on every MCP server spawn.
+    "uvicorn>=0.41,<1.0",
+]
+[project.optional-dependencies]
+# nexus-oqh4s (7.45.0 pre-release audit, the nexus-l2ku5 class in the
+# extras table): was unbounded; a fresh resolve of conexus[local] landed on
+# fastembed 0.8.0 (2026-03-23), untested here, while uv.lock stayed on
+# 0.7.4. 0.x under semver licenses a minor bump to break, so the cap sits
+# at the next minor, not the next major -- see
+# tests/test_dependency_bounds_lint.py's extras gate.
+local = ["fastembed>=0.7.0,<0.8"]
+# nexus-2k66t.4.2 (Sam, 2026-10-23): the PDF stack is an extra, fetched on demand.
+# docling, mineru, torch, torchvision and pdftext were 57-65% of the download and
+# 49% of the installed size (T2 nexus/install-weight-measurement-2026-10-23), and
+# search and store never import them. A fresh install goes without them; the first
+# `nx index pdf` (or a PDF met by `nx index repo` / `nx dt index`) builds a new
+# generation with this extra, through nexus.pdf_stack. An EXISTING install carries
+# the stack forward on its first post-split upgrade (receipt installer_schema < 2).
+# pymupdf stays in the core dependencies: the formula screen and the doc indexer
+# use it. The dev dependency group includes this extra, so `uv sync`, CI and the
+# unit suite keep the stack. The comments below are the ones the same lines carried
+# as direct dependencies; nexus-2fyb's "default-on" reasoning is superseded by the
+# on-demand install, which refuses or installs and never degrades silently.
+pdf = [
     # Same discipline as mineru: docling is the formula screen and the fallback
     # extractor for every PDF; its output shape is gated, so the cap sits at the
     # locked minor.
@@ -135,34 +185,6 @@ dependencies = [
     "torchvision>=0.23,<0.24; sys_platform == 'linux'",
     "torchvision>=0.23,<0.24; sys_platform != 'linux' and python_version < '3.13'",
     "torchvision>=0.25,<0.26; sys_platform != 'linux' and python_version >= '3.13'",
-    "httpx>=0.27,<1.0",
-    # RDR-161: pure-Python keyless-signature verification for
-    # `nx daemon service install-binary`. Replaces a ~130MB/platform cosign
-    # binary; verifies the new protobuf .sigstore.json bundle offline. 4.x and
-    # 3.x both expose Verifier.production(offline=...) + verify_artifact.
-    "sigstore>=3.0,<5",
-    # nexus-zw44w: sigstore reaches TUF through python-tuf, and tuf 7.0.0
-    # symlinks root.json on every Updater start. An unprivileged Windows
-    # account may not create symlinks (WinError 1314), so engine and PG bundle
-    # verification failed closed there (the win-release runner's ghwin, 2026-10-06).
-    # tuf 7.0.1 falls back to a hard link (python-tuf #2980 / PR #2981).
-    "tuf>=7.0.1,<8",
-    # <2 is load-bearing: mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp,
-    # and the uv TOOL venv re-resolves fresh at install (uv.lock does not
-    # protect it) — an unbounded floor shipped 4 days of dead MCP servers to
-    # every fresh install (nexus-l2ku5). Raise only with a deliberate 2.0
-    # API migration, gated by the MVV's installed-venv handshake probe.
-    "mcp>=1.0,<2",
-    "fastapi>=0.115,<1.0",
-    # nexus-l2ku5 sibling (2026-08-14, gap 3 of T2
-    # nexus/release-protocol-gap-audit-2026-08-14 [22511]): was fully
-    # unconstrained, a second open door to the same "unbounded floor
-    # resolves fresh off PyPI" class that killed mcp for 4 days. Floor
-    # taken from uv.lock's resolved 0.41.0; capped at the next major.
-    # Bare, not [standard] (nexus-jpsn1): the extra's watchfiles / httptools
-    # / uvloop / websockets serve nothing here and watchfiles alone cost
-    # 115 ms on every MCP server spawn.
-    "uvicorn>=0.41,<1.0",
     # nexus-2fyb: MinerU is the formula-aware PDF extractor required by
     # auto-mode whenever a PDF contains math. Previously gated behind a
     # [mineru] extra; the extras game produced silent formula loss for
@@ -222,15 +244,6 @@ dependencies = [
     # with tests/test_dependency_bounds_lint.py.
     "pdftext>=0.6.3,<0.7",
 ]
-
-[project.optional-dependencies]
-# nexus-oqh4s (7.45.0 pre-release audit, the nexus-l2ku5 class in the
-# extras table): was unbounded; a fresh resolve of conexus[local] landed on
-# fastembed 0.8.0 (2026-03-23), untested here, while uv.lock stayed on
-# 0.7.4. 0.x under semver licenses a minor bump to break, so the cap sits
-# at the next minor, not the next major -- see
-# tests/test_dependency_bounds_lint.py's extras gate.
-local = ["fastembed>=0.7.0,<0.8"]
 
 [project.urls]
 Homepage = "https://hellblazer.github.io/nexus/"
@@ -337,6 +350,9 @@ markers = [
 
 [dependency-groups]
 dev = [
+    # nexus-2k66t.4.2: the PDF stack is an extra now (see [project.optional-
+    # dependencies] pdf); the suite, CI and `uv sync` keep it.
+    "conexus[pdf]",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.0.0",

@@ -46,12 +46,12 @@ In Claude Desktop, install `uv`, open Customize → Plugins, add the marketplace
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down on macOS, 0.9 GB on Linux; 2.4 to 3.1 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.45 GB down on macOS, 0.6 GB on Linux; 2.1 to 2.3 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.45 GB down on macOS, 0.6 GB on Linux; 2.1 to 2.3 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.55 GB down; 1.6 to 2.3 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.2 GB down; 1.3 to 1.5 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.2 GB down; 1.3 to 1.5 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
+None of these sizes includes PDF support (docling, MinerU and torch), which a new install leaves out. The first time you index a PDF, `nx` installs it: about 240 MB down on macOS and 370 MB on Linux, 0.8 GB on disk, and it is kept by later upgrades. The model weights follow on first use, about 0.5 GB, plus 1.2 GB for the first PDF with formulas. To fetch it ahead of time, for instance before going offline, run `nx self install --extras pdf`. An install that already had PDF support keeps it. The sizes on disk are the install itself, from the 7.81.0 measurement on macOS, Linux and Windows less the PDF stack (Windows is the high end); the figures after the split are derived from the 2026-10-23 lock walk and the first release-candidate rehearsal replaces them with measurements. `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
 
 ## Install by hand
 

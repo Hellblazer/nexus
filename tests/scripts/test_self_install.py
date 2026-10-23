@@ -172,7 +172,9 @@ def test_extras_flag_adds_to_an_existing_install(bed, monkeypatch) -> None:
     new = (tools / "current").resolve()
     receipt = json.loads((new / "nexus-install.json").read_text())
     # The builder normalizes receipt order; BOTH surviving is the contract.
-    assert sorted(receipt["extras"]) == ["dt", "local"], receipt["extras"]
+    # nexus-2k66t.4.2: this fixture's receipt is installer_schema 1, written before
+    # `pdf` became an extra, so the rebuild also carries the PDF stack forward.
+    assert sorted(receipt["extras"]) == ["dt", "local", "pdf"], receipt["extras"]
 
 
 def test_extras_flag_dry_run_shows_the_merged_set(bed, monkeypatch, capsys) -> None:

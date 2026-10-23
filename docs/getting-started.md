@@ -120,6 +120,10 @@ The sizes on disk are the install itself, measured from nothing with conexus 7.8
 
 Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document — pre-PG installs need a **two-hop** upgrade via `conexus==6.18.1` (the last migration-capable release); a direct jump to current migrates nothing.
 
+### PDF support installs on first use
+
+A new install leaves out PDF support (docling, MinerU and torch). The first time you index a PDF, `nx` installs it into a new generation and re-runs your command there; you see one line on stderr naming the size (about 240 MB on macOS, 370 MB on Linux, 0.8 GB on disk) and uv's progress. It is kept by every later upgrade, and an install that already had it keeps it. To install it ahead of time, for instance before going offline, run `nx self install --extras pdf`. If the install cannot run, the PDF command stops before writing anything: exit 69 with the command to run (the install was refused, or this is a source checkout, where `uv sync` carries it), 75 when the network failed (retry), 70 when the installer failed. A background run, such as the post-commit hook, never starts the download: it indexes code and prose, names the PDFs it held back, and exits 69; `nx doctor` counts them under "PDF support".
+
 ## Use it (no API keys needed)
 
 Everything below works immediately — no accounts, no network.

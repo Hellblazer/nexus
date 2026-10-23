@@ -1089,6 +1089,14 @@ def index_cmd(
             click.echo(f"  {uuid}\t{path}")
         return
 
+    # nexus-2k66t.4.2: a PDF record needs the PDF stack. Settled once, before
+    # the first record is touched: installed (and this command re-run in the new
+    # generation) or stopped with exit 69/75/70 and the command to run.
+    if any(Path(p).suffix.lower() == ".pdf" for _uuid, p in records):
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+        pdf_stack.ensure_or_exit("nx dt index")
+
     indexed = 0
     unchanged = 0
     skipped = 0

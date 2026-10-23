@@ -32,7 +32,9 @@ was not measured, it says so.
   points its own Python modules (PDF extraction, local embedding) at those
   copies when the system has none (nexus-lqjll). A cloud-mode install, which
   never downloads the local engine, still needs the redistributable for PDF
-  extraction.
+  extraction: the first PDF index checks for it before downloading the PDF
+  stack (nexus-2k66t.4.2) and stops with exit 69 and the download link if it
+  is missing.
 - **The binaries are unsigned** (signing is deferred, nexus-dj01b). See
   [Signing and SmartScreen](#signing-and-smartscreen).
 

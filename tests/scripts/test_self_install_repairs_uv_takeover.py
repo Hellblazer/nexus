@@ -198,7 +198,10 @@ def test_a_newer_uv_tree_means_the_user_meant_to_upgrade(bed) -> None:
     assert new_current != current.resolve(), "no generation was built for the newer version"
     receipt = install_layout.read_receipt(new_current)
     assert receipt.version == "7.21.0", receipt
-    assert receipt.extras == ["local"], "the extras came from uv's rebuilt receipt, not current's"
+    # nexus-2k66t.4.2: current's receipt is installer_schema 1 (pre-split), so the
+    # rebuild also carries `pdf`; the point of the assertion is unchanged: no
+    # extra came from uv's rebuilt receipt.
+    assert receipt.extras == ["local", "pdf"], "the extras came from uv's rebuilt receipt, not current's"
     assert _shims_are_nexus_owned(bin_dir, tools)
     assert os.readlink(install_layout.legacy_generation_link(tools=tools)) == str(legacy)
     assert any("newer than current" in line for line in lines), lines
@@ -254,7 +257,7 @@ def test_self_install_from_uvs_tree_repairs_instead_of_migrating(bed, monkeypatc
     assert result is None, "the repair path returns None; the build path returns the generation"
     new_current = (tools / "current").resolve()
     assert new_current != current.resolve()
-    assert install_layout.read_receipt(new_current).extras == ["local"], (
+    assert install_layout.read_receipt(new_current).extras == ["local", "pdf"], (
         "extras were bridged from uv's rebuilt receipt -- the exact way [local] is lost"
     )
     assert _shims_are_nexus_owned(bin_dir, tools)

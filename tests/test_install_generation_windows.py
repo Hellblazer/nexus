@@ -945,7 +945,8 @@ class TestMigrateLegacy:
     ) -> None:
         legacy = self._legacy(tmp_path)
         gen, store, paths = self._migrate(tools, tmp_path, legacy)
-        assert gen is not None and lc.read_receipt(gen).extras == ["local"]
+        # nexus-2k66t.4.2: a legacy uv tree predates the PDF split, so the move carries it.
+        assert gen is not None and lc.read_receipt(gen).extras == ["local", "pdf"]
         assert os.readlink(tools / "current") == str(gen)
         assert sorted(p.name for p in gen_core.launcher_dir(gen).iterdir()) == ["nx-mcp.exe", "nx.exe"]
         entry = str(tools / "current" / "bin")

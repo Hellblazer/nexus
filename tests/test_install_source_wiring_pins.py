@@ -177,14 +177,22 @@ def test_the_pdftext_bound_travels_as_a_project_dependency() -> None:
     additionally live as an ordinary `[project.dependencies]` entry (the
     torch declared-but-unimported precedent, pyproject.toml ~:110) so it
     ships in every wheel's Requires-Dist, not just the checkout/generation
-    override paths."""
+    override paths.
+
+    nexus-2k66t.4.2: the PDF stack is the ``pdf`` extra now, so the entry
+    lives in ``[project.optional-dependencies] pdf`` (Requires-Dist with
+    ``extra == 'pdf'``): it binds every install that fetches the stack (the
+    on-demand install, ``nx self install --extras pdf``, a bare
+    ``uv tool install "conexus[pdf]"``). The core dependencies must NOT carry
+    it, or the slim install is not slim."""
     data = tomllib.loads(_text("pyproject.toml"))
-    deps = data["project"]["dependencies"]
+    assert not [d for d in data["project"]["dependencies"] if Requirement(d).name == "pdftext"]
+    deps = data["project"]["optional-dependencies"]["pdf"]
     pdftext_entries = [d for d in deps if Requirement(d).name == "pdftext"]
     assert len(pdftext_entries) == 1, (
-        "pyproject.toml [project.dependencies] carries no direct `pdftext` "
-        "entry -- the GH #1533 bound does not travel with the wheel to a "
-        "bare `uv tool install conexus`"
+        "pyproject.toml [project.optional-dependencies] pdf carries no direct "
+        "`pdftext` entry -- the GH #1533 bound does not travel with the wheel "
+        "to a `conexus[pdf]` install"
     )
     specifier = Requirement(pdftext_entries[0]).specifier
     assert specifier.contains("0.6.3"), specifier

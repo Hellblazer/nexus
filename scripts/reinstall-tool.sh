@@ -189,16 +189,33 @@ EXTRAS=""
 if [ -n "$CURRENT_GEN" ]; then
     _receipt="$(nx_receipt_path "$CURRENT_GEN")"
     if [ -f "$_receipt" ]; then
+        # nexus-2k66t.4.2: the receipt stores extras as a JSON list (a string is
+        # tolerated), and a receipt whose installer_schema is below 2 predates
+        # the PDF split: that box has had the stack in every generation, so an
+        # existing install carries `pdf` forward (Sam, 2026-10-23). Only a box
+        # with no receipt at all (a fresh install) goes without it.
         EXTRAS="$(NX_RECEIPT="$_receipt" python3 -c '
 import json, os
 try:
-    raw = json.load(open(os.environ["NX_RECEIPT"])).get("extras", "") or ""
+    doc = json.load(open(os.environ["NX_RECEIPT"]))
+    raw = doc.get("extras", "") or ""
+    old = int(doc.get("installer_schema", 1)) < 2
 except Exception:
-    raw = ""
-keep = [e for e in (p.strip() for p in raw.split(",")) if e and e != "mineru"]
-print(",".join(keep))
+    raw, old = "", False
+if isinstance(raw, str):
+    raw = raw.split(",")
+keep = [e for e in (str(p).strip() for p in raw) if e and e != "mineru"]
+if old and "pdf" not in keep:
+    keep.append("pdf")
+print(",".join(sorted(set(keep))))
 ' 2>/dev/null || true)"
     fi
+fi
+# NX_REINSTALL_EXTRAS=pdf adds extras to the rebuilt generation (the way a
+# directory-source install gets the PDF stack: `nx self install --extras` does
+# not apply to one).
+if [ -n "${NX_REINSTALL_EXTRAS:-}" ]; then
+    EXTRAS="$(printf '%s,%s' "$EXTRAS" "$NX_REINSTALL_EXTRAS" | tr ',' '\n' | sed '/^$/d' | sort -u | paste -sd, -)"
 fi
 [ -n "$EXTRAS" ] && echo "Preserving extras: [$EXTRAS]"
 

@@ -481,7 +481,18 @@ RECEIPT_SCHEMA = 1
 
 #: Provenance of the installer that wrote the receipt. Recorded, not gated:
 #: it describes who wrote the file, while ``schema`` describes the format.
-INSTALLER_SCHEMA = 1
+#:
+#: 2 (nexus-2k66t.4.2): the installer knows the PDF stack is the ``pdf`` extra,
+#: not a default dependency. A receipt BELOW this was written by an installer
+#: that built the stack into every generation, so its box has used the stack and
+#: carries it forward on its first post-split upgrade
+#: (:func:`receipt_predates_pdf_split`). An absent field reads as 1: the field
+#: has been written since the receipt began, and a receipt without it was
+#: hand-made or truncated, never made by this installer.
+INSTALLER_SCHEMA = 2
+
+#: The installer_schema at which ``pdf`` became an extra. See INSTALLER_SCHEMA.
+PDF_SPLIT_INSTALLER_SCHEMA = 2
 
 #: Where an install came from. A closed set, checked at construction.
 SOURCE_KINDS = ("directory", "registry")
@@ -956,8 +967,20 @@ class Receipt:
             created_at=str(payload["created_at"]),
             extras=[str(extra) for extra in extras],
             schema=int(payload["schema"]),
-            installer_schema=int(payload.get("installer_schema", INSTALLER_SCHEMA)),
+            installer_schema=int(payload.get("installer_schema", 1)),
         )
+
+
+def receipt_predates_pdf_split(receipt: Receipt) -> bool:
+    """True when *receipt* was written before ``pdf`` became an extra.
+
+    Such a generation was built with docling, MinerU and torch in every
+    install, so the box it describes has had the PDF stack. The upgrade rule
+    (Sam, 2026-10-23) is that an existing install ALWAYS carries the stack
+    forward; only a fresh install goes without it. This is the one place the
+    "existing" half of that rule is decided.
+    """
+    return receipt.installer_schema < PDF_SPLIT_INSTALLER_SCHEMA
 
 
 def render_shim(command: str, *, tools: Path | None = None) -> str:

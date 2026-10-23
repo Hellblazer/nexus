@@ -195,7 +195,19 @@ Most PDFs work fine with the default (`auto`). You only need to think about this
 - Large PDFs are automatically split into 5-page batches, each processed in
   an isolated subprocess to prevent OOM on formula-dense documents
 
-**MinerU is included by default** since nexus-2fyb. Previously gated behind a `[mineru]` extra; the extras gate produced silent formula loss because fresh installs never picked it up. First use of `auto` or `mineru` modes downloads MinerU's models, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23). If MinerU is missing at runtime, your install is corrupt — reinstall with [`nx self install`](#nx-self-install) (from a dev checkout, `scripts/reinstall-tool.sh`). The runtime error prints the command for the layout it finds, so a box still on the legacy uv tree is told the uv form instead.
+**PDF support is the `pdf` extra, installed on demand** (nexus-2k66t.4.2). docling, MinerU, torch, torchvision and pdftext are 57 to 65% of the download and 49% of the installed size, and search and store never import them, so a fresh install leaves them out. The first PDF index installs them: [`nx index pdf`](#nx-index), `nx dt index` of a PDF record, `nx index repo` when its walk finds a PDF, and `nx mineru start` check first, before any catalog or T3 write, and either install the stack or stop. An install builds a new generation with the `pdf` extra at the version already running (never an upgrade) through the generation builder's own arguments: CPU torch on Linux, the packaged overrides, the constraints shipped in the wheel. The command then re-runs inside that generation, so it needs no second invocation. The receipt records the extra, so every later `nx self install` keeps it. MinerU's models download on its first use, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23).
+
+A PDF index never degrades quietly (nexus-2fyb: an opt-in extra once produced silent formula loss). When the stack is missing and cannot be installed, the command exits before writing anything:
+
+| Exit | Meaning |
+|---|---|
+| 69 | The stack is absent or broken and the install was refused: `NX_PDF_STACK=refuse` (or `pdf_stack.auto_install: false`), an install the auto path does not rebuild (a checkout, a directory-source generation, a legacy `uv tool` tree), or Windows without the Visual C++ redistributable. The message names the command to run. |
+| 75 | The fetch failed on the network or TLS. Retry, or run `nx self install --extras pdf` ahead of time. |
+| 70 | The installer failed for another reason, or the stack is still absent after a reported success. The message carries the tail of uv's output. |
+
+`NX_PDF_STACK=install` (the default, on a terminal and off one) installs; `NX_PDF_STACK=refuse` never starts a download. The post-commit hook's background run exports `refuse`: `nx index repo` then indexes code and prose, does NOT register or index the PDFs, logs an ERROR line naming each, and exits 69; `nx doctor`'s "PDF support" row counts them. Hooks written before this change are rewritten by `nx upgrade`. `nx doctor` shows "PDF support" as informational (not red) when the stack is absent, and `nx doctor --check-mineru` reports N/A.
+
+**An existing install keeps the stack.** The first upgrade after the split carries `pdf` forward unconditionally: a receipt written before the split (`installer_schema` below 2) is treated as having it, `nx upgrade` builds the generation that adds it, and a legacy `uv tool` tree converging onto generations gets it too. Only a fresh install goes without. A failed carry-forward (offline) leaves the install working and is retried by the next `nx upgrade`; the automatic run waits six hours between attempts. If MinerU is missing at runtime on an install that has the stack, the install is corrupt: reinstall with [`nx self install`](#nx-self-install) (from a dev checkout, `scripts/reinstall-tool.sh`; `NX_REINSTALL_EXTRAS=pdf` adds the extra to a checkout-built install).
 
 **Setting a default backend (sticky config):**
 
@@ -4398,6 +4410,8 @@ converge it with `nx self install`. A GPU build of torch on Linux
 `+cpu` local label; `scripts/reinstall-tool.sh`'s checkout flow exports the raw
 lock with its `+cpu` labels, so it cannot pick a CUDA build.
 
+**`--extras pdf` installs PDF support now (nexus-2k66t.4.2).** The extra merges with the receipt's, like any other. The on-demand install in `nx index pdf` is this command with `--extras pdf --version <running version>`, run for you. Use it directly to fetch the stack before going offline. Not available on a directory-source generation (use `NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh`), a legacy uv tree (run `nx self install` first) or a dev checkout (`uv sync`, whose dev group carries the stack).
+
 **Taking a dependency fix ahead of a release: `NX_INSTALL_UNPINNED=1`.** Set it
 on the command (`NX_INSTALL_UNPINNED=1 nx self install`), never exported in a shell
 profile (the session hook's background upgrades would inherit it and install
@@ -4880,7 +4894,7 @@ The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The
 
 ## nx mineru
 
-MinerU server lifecycle management for PDF extraction. MinerU is a default dependency since nexus-2fyb.
+MinerU server lifecycle management for PDF extraction. MinerU ships with PDF support, the `pdf` extra (nexus-2k66t.4.2): `nx mineru start` installs it on first use like any PDF command (exit 69/75/70 when it cannot); `stop` and `status` need no stack.
 
 MinerU also **auto-starts on demand** (nexus-1qdb9): when the PDF pipeline
 routes a document to MinerU and no server is running, it spawns one

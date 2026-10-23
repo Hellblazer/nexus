@@ -2822,6 +2822,48 @@ def _check_docling_importable(
     )]
 
 
+def _check_pdf_support() -> list[HealthResult]:
+    """nexus-2k66t.4.2: the PDF stack is the ``pdf`` extra, installed on first
+    use. One row says where this box stands.
+
+    * present (every module resolves, every version is on its pin): a pass,
+      followed by the docling pipeline-module row, which is only meaningful
+      once the stack is here.
+    * not installed: informational, never red. A fresh install has no PDF
+      stack by design; the first PDF index installs it. The row names the
+      command that installs it now. When a refusing background run (the
+      post-commit hook) left PDFs un-indexed, the row counts them.
+    * broken (part of it missing, a version off its pin, or a receipt that
+      lists ``pdf`` over an empty tree): red, with the repair command.
+    """
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    st = pdf_stack.state()
+    if st.present:
+        return [
+            HealthResult(label="PDF support", ok=True, detail=st.detail),
+            *_check_docling_importable(),
+        ]
+    plan = pdf_stack.install_plan()
+    held = pdf_stack.skipped_count()
+    held_note = (
+        f"; {held} PDF(s) a background run could not index are waiting for it" if held else ""
+    )
+    if st.status == "absent":
+        return [HealthResult(
+            label="PDF support", ok=True,
+            detail=(
+                "not installed; indexing a PDF installs it on first use "
+                f"(to install now: {plan.command}){held_note}"
+            ),
+        )]
+    return [HealthResult(
+        label="PDF support", ok=False,
+        detail=f"broken: {st.detail}{held_note}",
+        fix_suggestions=[f"Repair: {plan.command}"] + ([plan.why] if plan.why else []),
+    )]
+
+
 def _check_mineru_server() -> list[HealthResult]:
     """nexus-far1c: report whether math PDFs will GET a MinerU server —
     not whether one happens to be running at this instant.
@@ -2844,6 +2886,13 @@ def _check_mineru_server() -> list[HealthResult]:
     permitted and equipped to perform. Only when NEITHER holds is the
     fallback claim true, and only then is this a failure.
     """
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    # nexus-2k66t.4.2: no PDF stack, no MinerU: not applicable, no row. The
+    # "PDF support" row above says why and how to install it.
+    if not pdf_stack.state().present:
+        return []
+
     from nexus.config import get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — heavy/optional dependency deferred to call time
     import httpx as _httpx  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
@@ -11772,7 +11821,7 @@ def run_health_checks(
     results.extend(_check_garbage())
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
-    results.extend(_check_docling_importable())
+    results.extend(_check_pdf_support())
     results.extend(_check_mineru_server())
     results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())

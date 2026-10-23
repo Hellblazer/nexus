@@ -103,6 +103,13 @@ mkdir -p "$TOOLS_DIR" || exit 1
 
 # ── 1. extras bridge, one last time ──────────────────────────────────────
 EXTRAS="$(nx_legacy_extras "$LEGACY")" || exit $?
+# nexus-2k66t.4.2 (Sam, 2026-10-23): an existing install carries the PDF stack
+# forward. A legacy uv tree predates the split by definition (docling, MinerU and
+# torch were default dependencies in every one), so its generation gets `pdf`.
+case ",$EXTRAS," in
+    *,pdf,*) ;;
+    *) EXTRAS="${EXTRAS:+$EXTRAS,}pdf" ;;
+esac
 
 _build_args=(--source "$SOURCE")
 [ -n "$VERSION" ] && _build_args+=(--version "$VERSION")

@@ -94,3 +94,4 @@ sites = ["tests/_engine_substrate.py::_boot::pg_ctl_start"]
 "tests/e2e/local-service-gate.sh::sh_nx_init" = 1
 "tests/e2e/migration-rehearsal/rehearse_acquire.sh::sh_nx_init" = 1
 "tests/e2e/migration-rehearsal/rehearse_package_upgrade.sh::sh_nx_init" = 2
+"tests/e2e/pdf-on-demand-rehearsal.sh::sh_nx_init" = 1

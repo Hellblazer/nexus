@@ -1211,8 +1211,14 @@ def _catalog_hook(
     complete_doc_hashes: dict[str, str] | None = None,
     needs_fence: dict[str, tuple[str, str]] | None = None,
     unregistered: dict[Path, str] | None = None,
+    housekeeping_keep: list[Path] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
+
+    ``housekeeping_keep`` (nexus-2k66t.4.2) names files that exist but were
+    deliberately not offered for registration this run (PDFs held back because
+    the PDF stack is missing). They count as present for the orphan sweep, so a
+    refused run never ages their existing catalog rows toward deletion.
 
     ``unregistered`` (nexus-z0o2p.20, RDR-223 P2.10) is an optional OUT-param:
     ``abs_path -> cause`` for every file this call could NOT resolve to a
@@ -2053,7 +2059,7 @@ def _catalog_hook(
         _maybe_run_housekeeping(
             cat, owner, indexed_files, repo,
             writer=writer, skip_housekeeping=skip_housekeeping,
-            progress=_progress,
+            progress=_progress, keep=housekeeping_keep,
         )
         _stage_s["housekeeping"] = time.monotonic() - _stage_mark
 
@@ -2229,8 +2235,14 @@ def _maybe_run_housekeeping(
     writer,
     skip_housekeeping: bool,
     progress: "Callable[[str], object]" = lambda _s: None,
+    keep: "list[Path] | None" = None,
 ) -> None:
     """The nexus-fltb4 mass-delete gate, as a behavioral seam (nexus-4kh95).
+
+    ``keep`` (nexus-2k66t.4.2): files that exist but were deliberately not
+    offered this run (PDFs held back while the PDF stack is missing). They
+    count as present, so a refused run does not age their catalog rows toward
+    the two-miss delete.
 
     Housekeeping's miss-count sweep interprets "not in this run's indexed
     set" as "gone" — run against a PARTIAL (delta-filtered) walk it marks
@@ -2245,6 +2257,8 @@ def _maybe_run_housekeeping(
         return
     progress("  Catalog: housekeeping…\r")
     indexed_set = _indexed_relpaths(indexed_files, repo)
+    if keep:
+        indexed_set |= _indexed_relpaths([(p, "", "") for p in keep], repo)
     _run_housekeeping(cat, owner, indexed_set, writer=writer)
 
 
@@ -2562,6 +2576,9 @@ def index_repository(
                     + stats.get("chunk_flush_throttled_files", 0)
                     + stats.get("transient_upsert_deferred_files", 0)
                     + stats.get("identity_less_dropped_files", 0)
+                    # nexus-2k66t.4.2: a held PDF was not offered this run; the
+                    # next --since-head diff must still contain it.
+                    + stats.get("pdf_stack_held", 0)
                 )
                 if _deferred_or_failed_files:
                     _log.warning(
@@ -2879,6 +2896,41 @@ def _record_transient_upsert_deferred(n: int = 1, *, path: str | None = None) ->
         _transient_upsert_deferred_count += n
         if path is not None:
             _transient_upsert_deferred_paths.append(path)
+
+
+def _hold_pdfs_without_stack(
+    pdf_paths: list[Path], repo: Path, *, on_phase: Callable[[str], None] | None = None,
+) -> list[Path]:
+    """The repo walk found PDFs: make sure the PDF stack is here before any of
+    them is registered or written (nexus-2k66t.4.2).
+
+    Returns ``[]`` when the stack is present or was just installed (an install
+    raises ``pdf_stack.RerunRequired``, caught by ``nx index repo`` after the
+    index lock is released). Returns every PDF when the policy REFUSES the
+    install (the post-commit hook sets ``NX_PDF_STACK=refuse``): they are not
+    registered, not indexed and not stamped, so the next run retries them; each
+    is named in an ERROR line and the CLI exits 69 once code and prose are
+    indexed. The same containment shape as ``_contain_extraction_quality_gate``:
+    the PDF fails, the run's other files do not. A network or installer failure
+    exits at once, before anything is written.
+    """
+    from nexus import pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
+
+    if pdf_stack.ensure_or_exit("nx index repo", hold_on_refuse=True, defer_rerun=True):
+        pdf_stack.record_skipped([], repo=repo)
+        return []
+    for path in pdf_paths:
+        _log.error(
+            "pdf_not_indexed_stack_missing", path=str(path), repo=str(repo),
+            remedy=pdf_stack.INSTALL_COMMAND,
+        )
+    pdf_stack.record_skipped(pdf_paths, repo=repo)
+    if on_phase is not None:
+        on_phase(
+            f"PDF support is not installed and installing it is refused here: {len(pdf_paths)} "
+            f"PDF(s) NOT indexed this run (code and prose proceed). Run: {pdf_stack.INSTALL_COMMAND}"
+        )
+    return list(pdf_paths)
 
 
 def _contain_extraction_quality_gate(
@@ -5287,6 +5339,17 @@ def _run_index(
     prose_files.sort(key=lambda x: x[0], reverse=True)
     pdf_files.sort(key=lambda x: x[0], reverse=True)
 
+    # nexus-2k66t.4.2: the PDF stack is the `pdf` extra. Settled BEFORE the
+    # catalog registration below, so a refused PDF leaves no row and no chunk.
+    # The held PDFs stay in `_pdf_held` so the catalog's orphan housekeeping
+    # (which counts a file absent from the walk as missing and deletes it after
+    # two runs) still sees them as present.
+    _pdf_held: list[Path] = []
+    if pdf_files:
+        _pdf_held = _hold_pdfs_without_stack([f for _, f in pdf_files], repo, on_phase=on_phase)
+        if _pdf_held:
+            pdf_files = []
+
     # GH #371 + #436: surface the oversize-skip set so the operator
     # knows what got dropped. Single structured log + on_phase line
     # so it's visible in non-TTY runs (CI, hooks, nohup).
@@ -5696,6 +5759,7 @@ def _run_index(
         complete_doc_hashes=_complete_doc_hashes,
         needs_fence=_needs_fence,
         unregistered=_unregistered_causes,
+        housekeeping_keep=_pdf_held,
     )
     if on_phase is not None:
         on_phase(
@@ -7269,6 +7333,9 @@ def _run_index(
         # index_repo_cmd uses this to drive a non-zero exit after
         # post-processing completes.
         "pdf_quality_gate_failed": len(_quality_gate_failed),
+        # nexus-2k66t.4.2: PDFs held back because the PDF stack is missing and
+        # the install was refused. index_repo_cmd exits 69 over a non-zero count.
+        "pdf_stack_held": len(_pdf_held),
         # nexus-4s1ww / GH #1432: count of files whose chunk-batch flush
         # was REJECTED this run (ChunkBatcher.failed_files minus the throttled
         # ones — what is left after the bisect-retry, see chunk_batcher.py).

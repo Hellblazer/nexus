@@ -348,7 +348,7 @@ Every step below is **required**. Missing any one of them has caused problems in
 4. **Regenerate `uv.lock` and reinstall the local tool**
    ```bash
    uv sync
-   scripts/reinstall-tool.sh   # preserves [local] and other extras (mineru is now a default dep)
+   scripts/reinstall-tool.sh   # preserves [local] and other extras; an existing install also keeps `pdf` (the PDF stack is an extra, nexus-2k66t.4.2; NX_REINSTALL_EXTRAS=pdf adds it)
    nx --version   # must print X.Y.Z before proceeding
    ```
    `uv.lock` **must** be committed — the release pipeline pins exact versions from it.

@@ -69,6 +69,12 @@ def mineru_group() -> None:
 @click.option("--port", type=int, default=0, help="Port for mineru-api (0 = auto-assign).")
 def start(port: int) -> None:
     """Start the MinerU API server."""
+    # nexus-2k66t.4.2: mineru-api ships with the `pdf` extra. Installed now or
+    # refused with the command, never a spawn that fails on a missing binary.
+    # `stop` and `status` read a pid file and need no stack.
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    pdf_stack.ensure_or_exit("nx mineru start")
     if port == 0:
         # nexus incident 2026-07-01: auto-assign used to ignore config
         # outright, so an operator with a fixed non-default local port in

@@ -1424,6 +1424,14 @@ class PDFExtractor:
                 f"PDF not found or not a regular file: {pdf_path}"
             )
 
+        # nexus-2k66t.4.2: defense in depth. The CLI entry points call
+        # pdf_stack.ensure() before they write anything; a caller that did not
+        # (a library user, a future MCP tool) is refused here, by name, instead
+        # of meeting an ImportError halfway through a document.
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred import
+
+        pdf_stack.require(f"extracting {pdf_path.name}")
+
         # nexus-i0cwh: every backend fires on_page per page (or per MinerU
         # batch, which then names its pages in ``page_numbers``) with
         # ``text_length``; the pages that produced text are the coverage
@@ -1547,7 +1555,14 @@ class PDFExtractor:
         Same reasoning as the MinerU branch of auto mode (nexus-2fyb).
         """
         _log.error("docling_import_failed", error=str(exc), path=str(pdf_path))
-        from nexus import install_advice  # noqa: PLC0415 — deferred import
+        from nexus import install_advice, pdf_stack  # noqa: PLC0415 — deferred import
+
+        # nexus-2k66t.4.2: the stack is an extra now. An import that fails
+        # because it was never installed is a different message from one that
+        # fails over an installed-but-corrupt tree.
+        missing = pdf_stack.missing_message(f"PDF {pdf_path.name}")
+        if missing is not None:
+            return RuntimeError(f"PDF {pdf_path.name}: docling could not be loaded ({exc}). {missing}")
 
         reinstall = install_advice.upgrade_command("uv tool install --reinstall conexus")
         return RuntimeError(
@@ -1581,7 +1596,7 @@ class PDFExtractor:
                 on_formula_oom=on_formula_oom,
             )
         except ImportError as exc:
-            # do_parse is None — mineru is a default dep since nexus-2fyb so a
+            # do_parse is None — mineru ships with the `pdf` extra (installed on demand, nexus-2k66t.4.2), so with the stack present a
             # missing import means the conexus install itself is corrupt.
             _log.error(
                 "mineru_import_failed",
@@ -1589,7 +1604,16 @@ class PDFExtractor:
                 formula_count=formula_count,
                 path=str(pdf_path),
             )
-            from nexus import install_advice  # noqa: PLC0415 — deferred import
+            from nexus import install_advice, pdf_stack  # noqa: PLC0415 — deferred import
+
+            # nexus-2k66t.4.2: see _docling_not_importable. Never fall back to
+            # formula-stripped output because the stack was never installed.
+            missing = pdf_stack.missing_message(f"PDF {pdf_path.name}")
+            if missing is not None:
+                raise RuntimeError(
+                    f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
+                    f"but MinerU is not importable: {exc}. {missing}"
+                ) from exc
 
             reinstall = install_advice.upgrade_command(
                 "uv tool install --reinstall conexus"

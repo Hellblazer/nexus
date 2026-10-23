@@ -273,6 +273,34 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
         _log.warning("upgrade_preconditions_failed", error=str(exc))
 
     _converge_vc_runtime(auto_mode=auto_mode)
+    _converge_pdf_stack(auto_mode=auto_mode, skip_t3=skip_t3)
+
+
+def _converge_pdf_stack(*, auto_mode: bool, skip_t3: bool) -> None:
+    """nexus-2k66t.4.2: an existing install ALWAYS carries the PDF stack forward.
+
+    The old installer that moved this box to the first post-split release built
+    a slim generation, since the new package no longer requires docling or
+    MinerU and the old installer cannot know the rule. This is the first code of
+    the new release to run; it sees a receipt written before the split and
+    builds the generation that adds ``pdf``. Only a fresh install starts slim.
+    ``--skip-t3`` is the fast T2-only run and skips it, as it skips the engine
+    install: the download is minutes. Never raises."""
+    if skip_t3:
+        return
+    try:
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred to keep the CLI cold-start light
+
+        line = pdf_stack.carry_forward(auto_mode=auto_mode)
+    except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the ladder must not be blocked by it
+        _log.warning("upgrade_pdf_stack_failed", error=str(exc))
+        return
+    if line is None:
+        return
+    if auto_mode:
+        _log.info("upgrade_pdf_stack", detail=line)
+    else:
+        click.echo(f"PDF support: {line}")
 
 
 #: How long ``nx upgrade --auto`` waits after a failed VC++ runtime download.

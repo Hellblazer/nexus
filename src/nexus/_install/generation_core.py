@@ -1136,6 +1136,10 @@ def migrate_legacy(
         raise GenerationError(f"could not create the generation root {root}: {exc}") from exc
 
     extras = legacy_extras(legacy)
+    # nexus-2k66t.4.2: a legacy uv tree predates the PDF split, so an existing
+    # install carries the stack forward (twin of migrate_legacy.sh).
+    if "pdf" not in extras:
+        extras = sorted([*extras, "pdf"])
     gen = build_generation(
         source, version=version, extras=extras,
         python_version=python_version or "3.12", tools=root, run=run, platform=platform,

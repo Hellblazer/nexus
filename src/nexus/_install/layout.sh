@@ -70,7 +70,7 @@ NX_RECEIPT_NAME="nexus-install.json"
 #: (nexus-xn84f review: a slow resolve/download writes nothing into the tree).
 NX_BUILDING_MARKER_NAME=".nx-building"
 NX_RECEIPT_SCHEMA=1
-NX_INSTALLER_SCHEMA=1
+NX_INSTALLER_SCHEMA=2
 
 # Pinned against the Python dataclass by the twins test, so that the half
 # which WRITES a receipt cannot add or drop a field the half which READS it

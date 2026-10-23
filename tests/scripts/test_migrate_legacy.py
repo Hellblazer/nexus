@@ -192,8 +192,9 @@ requirements = [
     assert result.returncode == 0, result.stderr
     gen = Path(result.stdout.strip().splitlines()[-1])
     payload = json.loads((gen / "nexus-install.json").read_text())
-    assert payload["extras"] == ["local"], "the [local] extra did not survive the bridge"
-    assert payload["spec"] == "conexus[local]==7.18.0"
+    # nexus-2k66t.4.2: a legacy tree predates the PDF split, so `pdf` joins the bridged extras.
+    assert payload["extras"] == ["local", "pdf"], "the [local] extra did not survive the bridge"
+    assert payload["spec"] == "conexus[local,pdf]==7.18.0"
 
 
 def test_the_bridge_build_is_constrained_to_the_lock_the_package_ships(scaffold) -> None:
@@ -258,10 +259,12 @@ requirements = [
     assert result.returncode == 0, result.stderr
     gen = Path(result.stdout.strip().splitlines()[-1])
     payload = json.loads((gen / "nexus-install.json").read_text())
-    assert payload["extras"] == ["local"]
+    assert payload["extras"] == ["local", "pdf"]  # mineru dropped; pdf carried (nexus-2k66t.4.2)
 
 
-def test_no_receipt_bridges_to_no_extras(scaffold) -> None:
+def test_no_receipt_bridges_to_the_pdf_stack_alone(scaffold) -> None:
+    """No legacy receipt means no extras to bridge; the box is still a legacy
+    tree that had the PDF stack in every install (nexus-2k66t.4.2)."""
     tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
     legacy = _legacy_tree(tmp_path, receipt=None)
 
@@ -273,8 +276,8 @@ def test_no_receipt_bridges_to_no_extras(scaffold) -> None:
     assert result.returncode == 0, result.stderr
     gen = Path(result.stdout.strip().splitlines()[-1])
     payload = json.loads((gen / "nexus-install.json").read_text())
-    assert payload["extras"] == []
-    assert payload["spec"] == "conexus==7.18.0"
+    assert payload["extras"] == ["pdf"]
+    assert payload["spec"] == "conexus[pdf]==7.18.0"
 
 
 # --------------------------------------------------------------------------

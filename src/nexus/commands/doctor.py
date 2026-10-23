@@ -2065,12 +2065,23 @@ def _run_check_mineru() -> None:
     matching the MinerU-server check's existing not-configured semantics
     just below.
     """
+    # nexus-2k66t.4.2: MinerU ships with the `pdf` extra. Without the stack the
+    # probe has nothing to check: say so, as not applicable, and do not import.
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    _stack = pdf_stack.state()
+    if _stack.status == "absent":
+        click.echo(
+            "MinerU import: N/A (PDF support is not installed; indexing a PDF installs it, "
+            f"or run `{pdf_stack.install_plan().command}`)"
+        )
+        return
     try:
         from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
     except Exception as exc:  # noqa: BLE001 — boundary catch of optional MinerU import failure; surfaced via click.echo
         click.echo(_check("MinerU import", False, _exc_detail(exc, with_type=True)))
         click.echo(
-            "  ↳ MinerU is required since nexus-2fyb. Reinstall with "
+            "  ↳ MinerU ships with PDF support (the pdf extra), so this install is broken. Reinstall with "
             f"`{_reinstall_command()}`."
         )
         return

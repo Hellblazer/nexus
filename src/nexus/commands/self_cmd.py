@@ -162,9 +162,14 @@ class _WindowsBuild:
 
 def perform_self_install(
     *, keep: int = 3, version: str | None = None, dry_run: bool = False,
-    add_extras: tuple[str, ...] = (), bootstrap: bool = False,
+    add_extras: tuple[str, ...] = (), bootstrap: bool = False, progress: bool = False,
 ) -> Path | None:
     """Build a new generation from the running one's receipt, flip, reap.
+
+    *progress* (nexus-2k66t.4.2) passes the builder's stderr (uv's download
+    progress) through to this process's stderr while it runs, for the
+    on-demand PDF install, where a 370 MB fetch with no output reads as a hang.
+    Failure diagnosis reads the same captured text either way.
 
     *add_extras* (nexus-pffc4) MERGES with the receipt's existing extras —
     never replaces them — so ``nx self install --extras local`` is the
@@ -261,11 +266,19 @@ def perform_self_install(
     # install, and on a box whose current has already moved those differ.
     receipt = install_layout.read_receipt(host)
     extras = _merge_extras(receipt.extras, new_extras)
+    # nexus-2k66t.4.2, Sam 2026-10-23: an EXISTING install always carries the
+    # PDF stack forward. A receipt written before `pdf` became an extra
+    # (installer_schema < 2) belongs to a box that has had docling and MinerU
+    # in every generation; the installer this process runs may be the new one
+    # building the first post-split generation. Only a fresh install goes slim.
+    extras = _carry_pdf_forward(receipt, extras)
     build = _build_request(install_dir, receipt, version=version, extras=extras)
     if dry_run:
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
-    generation = _build_flip_shims(build, install_dir=install_dir, tools=tools, bin_dir=bin_dir)
+    generation = _build_flip_shims(
+        build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, progress=progress,
+    )
 
     # RULE (d) IS PASSED HERE. --self names the generation hosting this very
     # process; without it the reap below is free to delete the tree these
@@ -732,6 +745,18 @@ def _merge_extras(existing: list[str], new: list[str]) -> list[str]:
     return list(existing) + [n for n in new if _norm(n) not in have]
 
 
+def _carry_pdf_forward(receipt, extras: list[str]) -> list[str]:
+    """*extras* plus ``pdf`` when *receipt* predates the PDF split (the upgrade
+    rule in :func:`perform_self_install`). A receipt that already lists ``pdf``
+    or was written by the split-aware installer is returned unchanged: a fresh
+    slim install stays slim."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    if install_layout.receipt_predates_pdf_split(receipt):
+        return _merge_extras(extras, ["pdf"])
+    return extras
+
+
 def _build_argv(
     install_dir: Path, receipt, *, version: str | None,
     extras: list[str] | None = None,
@@ -1011,8 +1036,40 @@ def _with_platform_hint(detail: str) -> str:
     return f"{hint}\n\nuv output:\n{detail}" if hint else detail
 
 
+def _run_build(argv: list[str], *, progress: bool) -> "subprocess.CompletedProcess[str]":
+    """Run one generation build, capturing stdout and stderr. With *progress*
+    the builder's stderr is also written through to this process's stderr as it
+    arrives (uv's download progress), so a long fetch is visible."""
+    if not progress:
+        return subprocess.run(  # noqa: S603 — fixed argv, no shell
+            argv_off_cwd(argv), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
+        )
+    import threading  # noqa: PLC0415 — stdlib, only this path
+
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        argv_off_cwd(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+        env=_script_env(),
+    )
+    captured: list[str] = []
+
+    def _pump() -> None:
+        assert proc.stderr is not None
+        for chunk in iter(lambda: proc.stderr.readline(), ""):
+            captured.append(chunk)
+            sys.stderr.write(chunk)
+            sys.stderr.flush()
+
+    pump = threading.Thread(target=_pump, daemon=True)
+    pump.start()
+    out = proc.stdout.read() if proc.stdout is not None else ""
+    proc.wait()
+    pump.join(timeout=5)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, "".join(captured))
+
+
 def _build_flip_shims(
     build, *, install_dir: Path, tools: Path, bin_dir: Path, bootstrap: bool = False,
+    progress: bool = False,
 ) -> Path:
     """Run one generation build, flip ``current`` to it, write the shims.
 
@@ -1028,9 +1085,7 @@ def _build_flip_shims(
     tools.mkdir(parents=True, exist_ok=True)
     if isinstance(build, _WindowsBuild):
         return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
-    built = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
-    )
+    built = _run_build(build, progress=progress)
     if built.returncode != 0:
         detail = built.stderr.strip()
         hint = "\n".join(
@@ -1254,7 +1309,10 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
             )
             if not dry_run:
                 target = _build_flip_shims(
-                    _build_argv(install_dir, receipt, version=uv_version),
+                    _build_argv(
+                        install_dir, receipt, version=uv_version,
+                        extras=_carry_pdf_forward(receipt, list(receipt.extras)),
+                    ),
                     install_dir=install_dir, tools=tools, bin_dir=bin_dir,
                 )
                 lines.append(f"installed {target.name}")
