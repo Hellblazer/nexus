@@ -1192,11 +1192,14 @@ def test_compression_adds_to_the_note_the_per_sentence_table_and_names_a_possibl
     swap = _cedit(1, c1[2], "The dashboard colours each stale lease with a red badge for the finance team.",
                   "coined verb: badge is a noun.")
     assert "C1" in _comp([swap, *_hits(others[:6], start=2)])[1].split("possible invention")[1]
-    # only noun-stack and coined-verb sentences are checked: an added claim in another sentence is not noted here
+    # every seeded sentence is checked, not only the noun-stack and coined-verb ones (the 2026-10-24 critique: run
+    # 1's I2 edit swapped the verb and the note said none): an added claim in an inanimate-subject sentence is noted
     i2 = by_id["I2"]
     claim = _cedit(1, i2[2], "The module docstring promises a stable order for claims in every release since 2019.",
                    "inanimate subject: the module does not promise.")
-    assert "possible invention: none" in _comp([claim, *_hits(others[:6], start=2)])[1]
+    rest = [e for e in others if e[0] != "I2"][:6]
+    verdict, note = _comp([claim, *_hits(rest, start=2)])
+    assert verdict == "PASS" and "I2" in note.split("possible invention")[1] and "release" in note, note
 
 
 def test_compression_fixture_is_ten_seeded_sentences_two_per_feature_each_once_and_kept_clean() -> None:
@@ -1285,7 +1288,48 @@ def test_a_script_call_is_found_however_the_session_quoted_its_verb(command: str
 def test_a_script_name_inside_another_argument_or_another_verb_is_not_a_call() -> None:
     v = _verdicts()
     for command in ("echo 'brief.py filter'", "python3 scripts/brief.py build doc.md",
-                    "python3 scripts/xbrief.py filter doc.md", "python3 scripts/brief.py filters doc.md",
-                    "python3 scripts/brief.py 'filter"):
+                    "python3 scripts/xbrief.py filter doc.md", "python3 scripts/brief.py filters doc.md"):
         assert not v.runs_script(command, "brief", "filter"), command
     assert v.runs_script("python3 scripts/review.py 'apply' doc.md --dry-run", "review", "apply")
+
+
+def test_a_script_call_is_found_next_to_shell_punctuation_a_comment_or_a_heredoc_that_does_not_split() -> None:
+    # the 2026-10-24 review: a plain word split missed `filter<reply`, and gave up on any command it could not split
+    v = _verdicts()
+    script = "python3 .claude/skills/prose-edit/scripts/brief.py"
+    for command in (f"{script} filter<r", f"{script} filter;echo done", f"{script} filter doc.md|cat",
+                    f"{script} filter doc.md < r  # it's the last pass",
+                    f"cat > r <<'EOF'\nit's the author's card\nEOF\n{script} filter doc.md < r",
+                    f"cat > r <<'EOF'\nit's here\nEOF\n{script} 'filter' doc.md < r"):
+        assert v.runs_script(command, "brief", "filter"), command
+    assert not v.runs_script(f"cat > r <<'EOF'\nit's here\nEOF\n{script} filters doc.md", "brief", "filter")
+    # a command that does not split is matched as text, so the script's name and verb in a heredoc body count too:
+    # a false call there is read as a filter run with no JSON output, which filter_runs already skips
+
+
+def test_compression_a_prefixed_query_whose_anchor_also_occurs_outside_the_decoys_is_not_charged_to_one() -> None:
+    v = _verdicts()
+    seeded = v.COMPRESSION_SEEDED
+    doc = _comp_doc()
+    assert doc.count("claim.") >= 2  # in a seeded sentence and in the `returns` decoy
+    bare = {"n": 1, "anchor": "claim.", "text": "noun stack: which claim is meant?"}
+    verdict, note = _comp(_hits(seeded[:7]), [bare])
+    assert verdict == "PASS", note
+    # control: an anchor found only inside the decoy is still charged
+    inside = {"n": 1, "anchor": "newest row for a claim", "text": "noun stack: which row?"}
+    verdict, note = _comp(_hits(seeded[:7]), [inside])
+    assert verdict == "FAIL" and "anchored on a decoy" in note, note
+
+
+def test_compression_known_limits_seven_prefixed_queries_or_seven_padded_edits_pass() -> None:
+    # What the bar cannot tell apart, written down (2026-10-24 critique, B3): a prefix on a query anchored in the
+    # sentence counts as a hit, as A1 allows, and a hit edit needs only a longer new string. The decoys catch
+    # over-firing; neither an empty unpack nor padding is caught, and "possible invention" is the only trace of padding.
+    v = _verdicts()
+    seeded = v.COMPRESSION_SEEDED
+    queries = [_cquery(i + 1, e[2], f"{e[1]} is this compressed?") for i, e in enumerate(seeded[:7])]
+    assert _comp([], queries)[0] == "PASS"
+    padded = [_cedit(i + 1, e[2], e[2][:-1] + " in practice every single day.", f"{e[1]} spelled out.")
+              for i, e in enumerate(seeded[:7])]
+    verdict, note = _comp(padded)
+    assert verdict == "PASS" and "possible invention: none" not in note and "practice" in note, note

@@ -34,8 +34,8 @@ NOT-MEASURABLE):
              and COMPRESSION_DENSE (scored only when the editor's reply voice_card names it, like CARD_DEVICES). The
              oracle is the COMPRESSION_* tables below, checked against the fixture first: a sentence not in the
              document exactly once makes the run NOT-MEASURABLE. The note reports hit or miss per sentence, whether
-             the dense passage was scored, and "possible invention" (words an edit on a noun-stack or coined-verb
-             sentence inserts beyond the expected relation words and function words); it never fails on invention.
+             the dense passage was scored, and "possible invention" (words an edit on a seeded sentence inserts
+             beyond its relation words, function words and inflections of its own words); it never fails on invention.
   xanadu, linda, refrain
              no edit overlaps a device, and no paragraph proposal cuts, merges or splits a paragraph that holds one.
              Two groups. DEVICES (always scored): refrains, repeated openings, closing lines, the unexplained SQL.
@@ -374,11 +374,18 @@ def _json_object(text: str) -> Obj | None:
 
 
 def runs_script(command: str, script: str, verb: str) -> bool:
-    """Whether a Bash command runs `<script>.py <verb>`, however the session quoted either word."""
+    """Whether a Bash command runs `<script>.py <verb>`, however the session quoted either word.
+
+    The shell's own word splitting, with `<`, `;`, `|` and `&` as separators (so `filter<reply` is the verb and a
+    redirect) and a `#` comment dropped. A command that still does not split (an apostrophe in a heredoc body) is
+    matched as text: the script's name, then the verb as a whole word, either one quoted."""
+    lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
     try:
-        tokens = shlex.split(command)
+        tokens = list(lex)
     except ValueError:
-        return False
+        return re.search(rf"(?:^|[\s/'\"]){re.escape(script)}\.py['\"]?\s+['\"]?{re.escape(verb)}['\"]?(?=[\s;|&<>'\"]|$)",
+                         command) is not None
     return any(Path(tok).name == f"{script}.py" and nxt == verb for tok, nxt in zip(tokens, tokens[1:]))
 
 
@@ -684,10 +691,14 @@ def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
             if any(_overlaps(o, span) for o in _spans(doc_text, str(e.get("old", "")))):
                 problems.append(f"edit {e.get('n')} touches a decoy ({label}: {text[:40]!r})")
     for q in queries:
+        # A query is charged to a decoy only when its anchor cannot be read as anchored anywhere else: every
+        # occurrence of the anchor overlaps a scored decoy (a short anchor such as "claim" also occurs in seeded text).
         prefix = _prefix_of(q.get("text"))
         anchors = _spans(doc_text, str(q.get("anchor", "")))
+        if not prefix or not anchors or not all(any(_overlaps(a, s) for _, _, s in scored) for a in anchors):
+            continue
         for label, text, span in scored:
-            if prefix and any(_overlaps(a, span) for a in anchors):
+            if any(_overlaps(a, span) for a in anchors):
                 problems.append(f"query {q.get('n')} is anchored on a decoy ({label}: {text[:40]!r}) and starts "
                                 f"with the compression prefix {prefix!r}")
     hit: dict[str, bool] = {}
@@ -706,8 +717,6 @@ def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
         problems.append(f"only {count} of {len(COMPRESSION_SEEDED)} seeded sentences hit (needs {COMPRESSION_PASS_AT})")
     invention: list[str] = []
     for sid, _, sentence, relation in COMPRESSION_SEEDED:
-        if sid[0] not in "NC":
-            continue
         for e in edits:
             if any(_overlaps(o, seeded_at[sid]) for o in _spans(doc_text, str(e.get("old", "")))):
                 extra = _beyond_relation(str(e.get("old", "")), str(e.get("new", "")), relation)
