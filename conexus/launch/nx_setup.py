@@ -18,7 +18,7 @@ unexpected failure prints an object whose ``state`` is ``error`` and whose
 ``message`` carries the error text, never a traceback. Exit 2 means the arguments
 were wrong (argparse's own usage message on standard error and no object)::
 
-    nx_setup.py start --mode local|cloud|cli-only|not-now [--autostart] [--slim]
+    nx_setup.py start --mode local|cloud|cli-only|not-now [--autostart] [--slim|--no-slim]
     nx_setup.py status
     nx_setup.py not-now
 
@@ -59,9 +59,11 @@ then saves the pair the page accepted and verifies; it downloads no service file
 ``autostart`` is false unless given (and is ignored by ``cloud``), so the
 login unit is never registered without an explicit yes. When it is given and a
 usable service is already running, the run does not register the unit and its
-final message says so and how to do it. ``slim`` (nexus-2k66t.4.9) is false unless given:
-the build installs everything, PDF support included (``--extras pdf``), and ``--slim`` leaves
-it out. The status records ``slim`` only when it was given, so a resume passes the same choice.
+final message says so and how to do it. ``slim`` (nexus-2k66t.4.9) is tri-state (nexus-w8ug5): the
+build installs everything, PDF support included (``--extras pdf``), and ``--slim`` leaves it out.
+Omitted, it follows an unfinished slim run of the same mode (a resume passes the same choice);
+``--no-slim`` is the explicit full install and does not follow it. The status records ``slim``
+only when the run is slim.
 
 **The credentials page** (mode ``cloud``; :class:`CredentialsPage`). A cloud token must reach the
 config file without passing through the model, the conversation or a tool argument. The run binds
@@ -291,6 +293,8 @@ RECONNECT_NEXT: str = (
 #: so the model that resumes the run does not drop it.
 SLIM_DONE_NOTE: str = "PDF support was left out (slim); `nx self install --extras pdf` adds it, and the first PDF indexed installs it."
 SLIM_WORDS: str = " and slim true"
+#: Appended to a slim run's resume text: a resume inherits slim, so the way out has to be said.
+FULL_WORDS: str = " To switch to the full install (PDF support included), pass slim false instead."
 
 #: What the status file records about ``nx init``, across runs.
 INIT_BEGUN = "begun"
@@ -1909,7 +1913,8 @@ class _Run:
     def fail(self, step: str, message: str) -> int:
         return self.end(
             FAILED, message,
-            f"If the user agrees, call setup again{' with slim true' if self.slim else ''}: it resumes at the {step} step. Log: {self.log_path}",
+            f"If the user agrees, call setup again{' with slim true' if self.slim else ''}: it resumes at the {step} step."
+            f"{FULL_WORDS if self.slim else ''} Log: {self.log_path}",
             failed_step=step,
         )
 
@@ -2623,13 +2628,14 @@ def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str,
     elif state == RUNNING and not live:
         state = INTERRUPTED
         again = f"with the same mode{SLIM_WORDS if data.get('slim') else ''}"
-        data["next"] = f"Setup was interrupted. If the user agrees, call setup again {again}: it resumes. Log: {setup / _LOG}"
+        full = FULL_WORDS if data.get("slim") else ""
+        data["next"] = f"Setup was interrupted. If the user agrees, call setup again {again}: it resumes.{full} Log: {setup / _LOG}"
         if data.get("mode") == MODE_CLOUD and data.get("credentials") == CRED_ACCEPTED:
             # The accepted pair was in the dead run's memory only: the field is dropped and the words say it.
             data.pop("credentials")
             data["message"] = f"{data.get('message', '')} {_LOST_INTERRUPTED}".strip()
             data["next"] = (
-                f"Setup was interrupted. If the user agrees, call setup again {again}: it resumes. {_LOST_NEXT} "
+                f"Setup was interrupted. If the user agrees, call setup again {again}: it resumes.{full} {_LOST_NEXT} "
                 f"Log: {setup / _LOG}"
             )
     if state == DOCTOR_FAILED and only_git_failed(data.get("doctor_failing")):
@@ -2654,7 +2660,7 @@ def _error_view(message: str) -> dict[str, Any]:
     }
 
 
-def start(mode: str, autostart: bool, slim: bool = False) -> dict[str, Any]:
+def start(mode: str, autostart: bool, slim: bool | None = None) -> dict[str, Any]:
     """The one way to start a run. Returns the status, with ``started``; an object
     whose ``state`` is ``error`` when the setup directory cannot be used."""
     setup = setup_dir()
@@ -2664,7 +2670,7 @@ def start(mode: str, autostart: bool, slim: bool = False) -> dict[str, Any]:
         return _error_view(f"setup could not start: {type(exc).__name__}: {exc}")
 
 
-def _start(setup: Path, mode: str, autostart: bool, slim: bool = False) -> dict[str, Any]:
+def _start(setup: Path, mode: str, autostart: bool, slim: bool | None = None) -> dict[str, Any]:
     os.makedirs(setup, mode=0o700, exist_ok=True)
     marker = setup / _MARKER
     if mode == MODE_NOT_NOW:
@@ -2692,10 +2698,13 @@ def _start(setup: Path, mode: str, autostart: bool, slim: bool = False) -> dict[
         with contextlib.suppress(FileNotFoundError):
             (setup / _ERROR_FILE).unlink()
         prior = read_status(setup) or {}
-        if prior.get("slim") and prior.get("mode") == mode and prior.get("state") in (RUNNING, FAILED):
-            # A resume of an unfinished slim run is slim, so a caller that does not repeat the choice does not
-            # silently turn the install into the default one. A finished run, or another mode, starts afresh.
-            slim = True
+        if slim is None:
+            # Omitted: a resume of an unfinished slim run is slim, so a caller that does not repeat the choice
+            # does not silently turn the install into the default one. A finished run, or another mode, starts
+            # afresh. An explicit false (``--no-slim``) is the way out of an inherited slim run (nexus-w8ug5).
+            slim = bool(
+                prior.get("slim") and prior.get("mode") == mode and prior.get("state") in (RUNNING, FAILED)
+            )
         log_path = setup / _LOG
         base: dict[str, Any] = {
             "state": RUNNING, "stage": "starting", "mode": mode, "autostart": autostart, "log": str(log_path),
@@ -2747,7 +2756,11 @@ def main(argv: list[str]) -> int:
     start_p = sub.add_parser("start", help="start a run")
     start_p.add_argument("--mode", choices=MODES, required=True)
     start_p.add_argument("--autostart", action="store_true", help="register the login unit (local mode)")
-    start_p.add_argument("--slim", action="store_true", help="leave PDF support out of the install")
+    start_p.add_argument(
+        "--slim", action=argparse.BooleanOptionalAction, default=None,
+        help="--slim leaves PDF support out of the install; --no-slim installs it even over an unfinished slim run; "
+        "omitted follows an unfinished slim run",
+    )
     sub.add_parser("status", help="print the status")
     sub.add_parser(MODE_NOT_NOW, help="write the not-now marker")
     run_p = sub.add_parser("run", help=argparse.SUPPRESS)

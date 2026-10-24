@@ -13127,7 +13127,7 @@ def daemon_uninstall(
 async def setup(
     mode: Annotated[str, Field(description=_setup_tools.MODE_DESCRIPTION)],
     autostart: Annotated[bool, Field(description=_setup_tools.AUTOSTART_DESCRIPTION)] = False,
-    slim: Annotated[bool, Field(description=_setup_tools.SLIM_DESCRIPTION)] = False,
+    slim: Annotated[bool | None, Field(description=_setup_tools.SLIM_DESCRIPTION)] = None,
 ) -> str:
     import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 

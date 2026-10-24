@@ -145,8 +145,9 @@ def test_the_schema_takes_a_mode_an_autostart_and_a_slim_and_status_takes_nothin
     tools = _tools()
     schema = tools["setup"].inputSchema
     assert sorted(schema["properties"]) == ["autostart", "mode", "slim"]
-    assert schema["properties"]["slim"]["type"] == "boolean"
-    assert schema["properties"]["slim"]["default"] is False
+    # nexus-w8ug5: tri-state, so no false default; null is "omitted".
+    assert schema["properties"]["slim"]["anyOf"] == [{"type": "boolean"}, {"type": "null"}]
+    assert schema["properties"]["slim"]["default"] is None
     assert schema["required"] == ["mode"]
     assert schema["properties"]["mode"]["type"] == "string"
     assert schema["properties"]["autostart"]["type"] == "boolean"
@@ -718,9 +719,22 @@ def test_slim_reaches_the_script_for_every_mode_that_installs(
     assert recorder.calls() == [argv]
 
 
-def test_slim_is_false_when_not_given(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+def test_slim_is_omitted_when_not_given(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
     _service(monkeypatch, False)
     _call("setup", mode="cli-only")
+    assert recorder.calls() == [["start", "--mode", "cli-only"]]
+
+
+def test_an_explicit_false_slim_reaches_the_script_as_no_slim(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    """nexus-w8ug5: false is not omitted; the script uses the difference to leave an inherited slim run."""
+    _service(monkeypatch, False)
+    _call("setup", mode="cli-only", slim=False)
+    assert recorder.calls() == [["start", "--mode", "cli-only", "--no-slim"]]
+
+
+def test_a_null_slim_is_the_same_as_an_omitted_one(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    _service(monkeypatch, False)
+    _call("setup", mode="cli-only", slim=None)
     assert recorder.calls() == [["start", "--mode", "cli-only"]]
 
 
@@ -1429,12 +1443,13 @@ def test_both_servers_answer_setup_status_alike_for_every_state(
 
 
 _SETUP_CASES = [
-    ("local", True, False, ["start", "--mode", "local", "--autostart"]),
-    ("local", False, False, ["start", "--mode", "local"]),
-    ("cli-only", True, False, ["start", "--mode", "cli-only"]),
-    ("not-now", False, False, ["not-now"]),
+    ("local", True, None, ["start", "--mode", "local", "--autostart"]),
+    ("local", False, None, ["start", "--mode", "local"]),
+    ("cli-only", True, None, ["start", "--mode", "cli-only"]),
+    ("not-now", False, None, ["not-now"]),
     ("local", True, True, ["start", "--mode", "local", "--autostart", "--slim"]),
     ("cli-only", False, True, ["start", "--mode", "cli-only", "--slim"]),
+    ("cli-only", False, False, ["start", "--mode", "cli-only", "--no-slim"]),
 ]
 
 
@@ -1442,7 +1457,7 @@ _SETUP_CASES = [
 @pytest.mark.parametrize("state", sorted(VIEWS))
 def test_both_servers_answer_setup_alike_for_every_state_and_start_the_same_command(
     monkeypatch: pytest.MonkeyPatch, recorder: Recorder, standin_with: Recorder, standin_module: Any,
-    state: str, mode: str, autostart: bool, slim: bool, argv: list[str],
+    state: str, mode: str, autostart: bool, slim: bool | None, argv: list[str],
 ) -> None:
     """Same recording script on both, same view for the command; the text and the
     command line each server produced are equal. Intentionally different, and not
@@ -1455,7 +1470,8 @@ def test_both_servers_answer_setup_alike_for_every_state_and_start_the_same_comm
     for rec in (recorder, standin_with):
         rec.views(status=NONE, start=view, **{"not-now": view})
     real = _answer(lambda: setup_tools.run_setup(mode, autostart, slim))
-    standin = _answer(lambda: standin_module.run_setup({"mode": mode, "autostart": autostart, "slim": slim}))
+    arguments = {"mode": mode, "autostart": autostart, **({} if slim is None else {"slim": slim})}
+    standin = _answer(lambda: standin_module.run_setup(arguments))
     assert real == standin, (real, standin)
     assert recorder.calls() == standin_with.calls() == [argv]
 

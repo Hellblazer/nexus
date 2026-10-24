@@ -13,7 +13,7 @@ that test names the other.
 The tools do none of the setup work. They start ``conexus/launch/nx_setup.py``, the
 file ``NX_SETUP_SCRIPT`` names (the launcher sets it when it hands off to this
 server), with this server's own Python, and read its answer: one JSON object on
-standard output per command (``start --mode M [--autostart] [--slim]``, ``status``,
+standard output per command (``start --mode M [--autostart] [--slim|--no-slim]``, ``status``,
 ``not-now``). Nothing here reads or writes the setup directory, its lock, its
 status file or its log: a second reader of that layout would be a second
 implementation of it. A server that was not started by the launcher has no such
@@ -111,8 +111,10 @@ AUTOSTART_DESCRIPTION: str = (
 )
 
 SLIM_DESCRIPTION: str = (
-    "true only if the user asked to leave PDF support (docling, MinerU and torch) out of the install; false (the default) "
-    "installs everything. A slim install fetches PDF support the first time a PDF is indexed."
+    "true only if the user asked to leave PDF support (docling, MinerU and torch) out of the install. Omit it otherwise: "
+    "omitted installs everything, except that it resumes an unfinished slim run as slim. false installs everything even then, "
+    "which is the answer for a user who left PDF support out in an earlier run and now wants it. "
+    "A slim install fetches PDF support the first time a PDF is indexed."
 )
 
 # -- the words the tools answer with (kept equal to the stand-in's copy) ------------------
@@ -165,6 +167,8 @@ def _choice_lines(view: dict[str, Any], state: str) -> list[str]:
     if state in _RESUMABLE:
         again = f"mode {mode}" + (", autostart true" if autostart else "") + (", slim true" if slim else "")
         lines.append(f"To resume, ask the user first; if they agree, call setup again with the same choice ({again}).")
+        if slim:
+            lines.append("To install PDF support instead, ask the user first; if they agree, call setup with the same mode and slim false.")
     return lines
 
 
@@ -412,7 +416,13 @@ def _report_for_usable_service(view: dict[str, Any]) -> str | None:
     return None
 
 
-def run_setup(mode: str, autostart: bool, slim: bool = False) -> str:
+def _slim_args(slim: bool | None) -> list[str]:
+    """The script's flag for the tri-state *slim* (nexus-w8ug5): omitted passes nothing, so the script
+    inherits an unfinished slim run's choice; false is ``--no-slim``, which does not."""
+    return ["--slim"] if slim else ["--no-slim"] if slim is False else []
+
+
+def run_setup(mode: str, autostart: bool, slim: bool | None = None) -> str:
     """The ``setup`` tool. Raises :class:`SetupError` for a refusal or a failure."""
     if mode not in MODES:
         raise SetupError(mode_refusal(mode))
@@ -434,7 +444,7 @@ def run_setup(mode: str, autostart: bool, slim: bool = False) -> str:
         if view.get("state") == "error":
             return _checked(view)
         return NOT_NOW_TEXT + (("\n" + render(view)) if view.get("live") else "")
-    args = ["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else []) + (["--slim"] if slim else [])
+    args = ["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else []) + _slim_args(slim)
     view = _call_script(script, args)
     return _checked(view, started=bool(view.get("started")))
 

@@ -122,7 +122,10 @@ async def test_no_cli_and_nx_mcp_is_a_stand_in_with_exactly_the_two_setup_tools(
     by_name = {tool.name: tool for tool in tools}
     schema = by_name["setup"].inputSchema
     assert sorted(schema["properties"]) == ["autostart", "mode", "slim"] and schema["required"] == ["mode"]
-    assert schema["properties"]["slim"]["type"] == "boolean" and schema["properties"]["slim"]["default"] is False
+    # nexus-w8ug5: tri-state. Omitted is not false, so the schema has no false default and
+    # accepts null; the real server's schema is the same (tests/mcp/test_setup_tools.py).
+    assert schema["properties"]["slim"]["anyOf"] == [{"type": "boolean"}, {"type": "null"}]
+    assert schema["properties"]["slim"]["default"] is None
     assert by_name["setup_status"].inputSchema.get("properties") in ({}, None)
     for tool in tools:
         assert tool.annotations is None, f"{tool.name}: Phase 1 gave no hints; the stand-in and the real server give none"
@@ -262,12 +265,13 @@ async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_b
         ({"mode": "local", "autostart": True, "slim": True}, ["start", "--mode", "local", "--autostart", "--slim"]),
         ({"mode": "cloud", "slim": True}, ["start", "--mode", "cloud", "--slim"]),
         ({"mode": "cli-only", "slim": True}, ["start", "--mode", "cli-only", "--slim"]),
-        ({"mode": "cli-only", "slim": False}, ["start", "--mode", "cli-only"]),
+        ({"mode": "cli-only", "slim": False}, ["start", "--mode", "cli-only", "--no-slim"]),
+        ({"mode": "cli-only", "slim": None}, ["start", "--mode", "cli-only"]),
     ],
     ids=[
         "local+autostart", "local", "local autostart false", "cloud", "cloud ignores autostart", "cli-only",
         "cli-only ignores autostart", "not-now", "local slim", "local autostart slim", "cloud slim", "cli-only slim",
-        "cli-only slim false",
+        "cli-only slim false", "cli-only slim null",
     ],
 )
 async def test_setup_starts_the_setup_script_with_the_mode_and_autostart_given(

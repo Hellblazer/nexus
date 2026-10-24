@@ -526,7 +526,13 @@ def _install_lock():
         yield
         return
     try:
-        _locking.lock_fd(fd, blocking=True)
+        try:
+            _locking.lock_fd(fd, blocking=False)
+        except BlockingIOError:
+            # A peer is mid-install: a waiter would otherwise sit silent for
+            # minutes (nexus-2k66t.4.8). Say so once, then block.
+            _say("Another process is installing PDF support; waiting for it to finish.")
+            _locking.lock_fd(fd, blocking=True)
         yield
     finally:
         with contextlib.suppress(OSError):
@@ -668,19 +674,24 @@ def _fail(exc: PdfStackError, *, hint: str = "") -> NoReturn:
     raise SystemExit(exc.exit_code)
 
 
-def ensure_or_exit(entry: str, *, hold_on_refuse: bool = False, defer_rerun: bool = False) -> bool:
+def ensure_or_exit(
+    entry: str, *, hold_on_refuse: bool = False, defer_rerun: bool = False, quiet_refusal: bool = False,
+) -> bool:
     """The CLI form of :func:`ensure`. Returns True to go on. Exits the process
     with the right status on a failure, or with the child's status after a
     re-run in the new generation. With *hold_on_refuse*, a REFUSAL returns
     False instead of exiting (``nx index repo`` indexes code and prose and holds
     the PDFs back); network and installer failures still exit. With
     *defer_rerun*, an install raises :class:`RerunRequired` for the CLI command
-    to catch after it has released its locks, instead of re-running here."""
+    to catch after it has released its locks, instead of re-running here. With
+    *quiet_refusal*, a held refusal says nothing (the caller already printed it
+    once this run)."""
     try:
         outcome = ensure(entry)
     except PdfStackMissingError as exc:
         if hold_on_refuse:
-            _say(f"nx: {exc}")
+            if not quiet_refusal:
+                _say(f"nx: {exc}")
             return False
         _fail(exc)
     except PdfStackError as exc:

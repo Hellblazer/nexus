@@ -326,8 +326,10 @@ AUTOSTART_DESCRIPTION: str = (
 )
 
 SLIM_DESCRIPTION: str = (
-    "true only if the user asked to leave PDF support (docling, MinerU and torch) out of the install; false (the default) "
-    "installs everything. A slim install fetches PDF support the first time a PDF is indexed."
+    "true only if the user asked to leave PDF support (docling, MinerU and torch) out of the install. Omit it otherwise: "
+    "omitted installs everything, except that it resumes an unfinished slim run as slim. false installs everything even then, "
+    "which is the answer for a user who left PDF support out in an earlier run and now wants it. "
+    "A slim install fetches PDF support the first time a PDF is indexed."
 )
 
 #: No ``annotations``: Phase 1 gave none and the real server gives none, so an
@@ -343,7 +345,8 @@ SETUP_TOOLS: tuple[dict[str, Any], ...] = (
             "properties": {
                 "mode": {"type": "string", "description": MODE_DESCRIPTION},
                 "autostart": {"type": "boolean", "default": False, "description": AUTOSTART_DESCRIPTION},
-                "slim": {"type": "boolean", "default": False, "description": SLIM_DESCRIPTION},
+                # Tri-state (nexus-w8ug5), the schema the real server's `bool | None = None` produces.
+                "slim": {"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": None, "description": SLIM_DESCRIPTION},
             },
             "required": ["mode"],
         },
@@ -418,6 +421,8 @@ def _choice_lines(view: dict[str, Any], state: str) -> list[str]:
     if state in _RESUMABLE:
         again = f"mode {mode}" + (", autostart true" if autostart else "") + (", slim true" if slim else "")
         lines.append(f"To resume, ask the user first; if they agree, call setup again with the same choice ({again}).")
+        if slim:
+            lines.append("To install PDF support instead, ask the user first; if they agree, call setup with the same mode and slim false.")
     return lines
 
 
@@ -535,8 +540,8 @@ def run_setup(arguments: Any, broken: str | None = None) -> str:
     autostart = arguments.get("autostart", False)
     if not isinstance(autostart, bool):
         raise SetupError("autostart must be true or false.")
-    slim = arguments.get("slim", False)
-    if not isinstance(slim, bool):
+    slim = arguments.get("slim")  # tri-state: omitted or null, true, false
+    if slim is not None and not isinstance(slim, bool):
         raise SetupError("slim must be true or false.")
     if mode not in MODES:
         raise SetupError(mode_refusal(mode))
@@ -546,7 +551,8 @@ def run_setup(arguments: Any, broken: str | None = None) -> str:
             return _checked(view)
         return NOT_NOW_TEXT + (("\n" + render(view)) if view.get("live") else "")
     view = _call_script(
-        ["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else []) + (["--slim"] if slim else []),
+        ["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else [])
+        + (["--slim"] if slim else ["--no-slim"] if slim is False else []),
         broken, mode,
     )
     return _checked(view, started=bool(view.get("started")))

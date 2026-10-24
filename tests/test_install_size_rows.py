@@ -128,3 +128,17 @@ def test_the_census_looked_at_every_place_it_names() -> None:
     missing = [p for p in paths if not (REPO / p).is_file()]
     assert missing == []
     assert len(paths) == EXPECTED_CHECKED
+
+
+@pytest.mark.parametrize("slim", [True, False])
+def test_a_slim_resume_names_the_way_back_to_the_full_install_in_both_copies(slim: bool) -> None:
+    """nexus-w8ug5: omitted slim resumes slim, so a slim run's resume text must also say how to
+    switch to the full install. The stand-in and the real server word it the same."""
+    from nexus.mcp import setup_tools
+
+    stand_in = _load("nx_standin_resume_lines", REPO / "conexus" / "launch" / "nx_standin.py")
+    view = {"mode": "local", "autostart": False, "slim": slim}
+    ours = setup_tools._choice_lines(view, "failed")
+    assert ours == stand_in._choice_lines(view, "failed")
+    offers_full = any("slim false" in line for line in ours)
+    assert offers_full is slim, ours

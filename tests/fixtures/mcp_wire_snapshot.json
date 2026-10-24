@@ -1025,8 +1025,15 @@
             "type": "string"
           },
           "slim": {
-            "default": false,
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [

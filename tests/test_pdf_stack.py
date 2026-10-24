@@ -512,3 +512,42 @@ def test_a_legacy_uv_tree_is_told_one_command_because_the_convergence_carries_pd
     assert plan.command == "nx self install"
     assert "&&" not in plan.command and "--extras" not in plan.command
     assert "PDF support" in plan.why and "carr" in plan.why, "the reason says the move keeps PDF support"
+
+
+# ── the install lock says when it waits (nexus-2k66t.4.8) ───────────────────
+
+
+def _lock_spy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, contended: bool):
+    """Route the lock file into tmp_path and record the order of lock calls
+    against what reached stderr. ``contended`` makes the non-blocking try fail
+    the way a held flock does."""
+    from nexus import _locking, install_layout
+
+    events: list[str] = []
+    monkeypatch.setattr(install_layout, "tools_dir", lambda: tmp_path / "tools")
+
+    def lock_fd(fd: int, *, blocking: bool) -> None:
+        events.append("block" if blocking else "try")
+        if not blocking and contended:
+            raise BlockingIOError("held")
+
+    monkeypatch.setattr(_locking, "lock_fd", lock_fd)
+    monkeypatch.setattr(_locking, "unlock_fd", lambda fd: events.append("unlock"))
+    monkeypatch.setattr(pdf_stack, "_say", lambda message: events.append(f"say:{message}"))
+    return events
+
+
+def test_a_waiter_on_the_install_lock_says_so_once_before_it_blocks(monkeypatch, tmp_path) -> None:
+    events = _lock_spy(monkeypatch, tmp_path, contended=True)
+    with pdf_stack._install_lock():
+        events.append("held")
+    said = [e for e in events if e.startswith("say:")]
+    assert len(said) == 1 and "waiting" in said[0] and "install" in said[0]
+    assert events == ["try", said[0], "block", "held", "unlock"]
+
+
+def test_an_uncontended_install_lock_is_silent_and_never_blocks_the_first_try(monkeypatch, tmp_path) -> None:
+    events = _lock_spy(monkeypatch, tmp_path, contended=False)
+    with pdf_stack._install_lock():
+        events.append("held")
+    assert events == ["try", "held", "unlock"]

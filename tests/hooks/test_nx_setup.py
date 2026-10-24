@@ -269,8 +269,10 @@ class Box:
             timeout=timeout, check=False, encoding=PYTHON_CHILD_ENCODING
         )
 
-    def start(self, mode: str, autostart: bool | None = None, *, slim: bool = False, **extra: str) -> dict[str, Any]:
-        args = ["start", "--mode", mode] + (["--autostart"] if autostart else []) + (["--slim"] if slim else [])
+    def start(self, mode: str, autostart: bool | None = None, *, slim: bool | None = None, **extra: str) -> dict[str, Any]:
+        """*slim* is tri-state (nexus-w8ug5): ``None`` omits the flag, ``True`` is ``--slim``, ``False`` is ``--no-slim``."""
+        args = ["start", "--mode", mode] + (["--autostart"] if autostart else []) + (
+            ["--slim"] if slim else ["--no-slim"] if slim is False else [])
         r = self.cli(*args, **extra)
         assert r.returncode == 0, f"start failed: rc={r.returncode} stderr={r.stderr!r} stdout={r.stdout!r}"
         return json.loads(r.stdout)
@@ -553,6 +555,7 @@ def test_a_resume_of_a_failed_slim_run_stays_slim_without_repeating_the_choice(b
     failed = box.wait_terminal()
     assert failed["failed_step"] == "build" and failed.get("slim") is True
     assert "slim true" in failed["next"], "the next step names the choice so the model repeats it"
+    assert "slim false" in failed["next"], "and names the way to the full install, since a resume inherits slim"
 
     box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
     resumed = box.start("cli-only")  # the caller did not repeat slim
@@ -560,6 +563,43 @@ def test_a_resume_of_a_failed_slim_run_stays_slim_without_repeating_the_choice(b
     done = box.wait_terminal()
     assert done["state"] == "done" and done.get("slim") is True
     assert "--extras" not in box.argvs()[-1], "the resumed build must stay slim"
+
+
+def test_an_explicit_no_slim_after_a_failed_slim_run_switches_to_the_full_install(box: Box) -> None:
+    """nexus-w8ug5: omitted inherits (the test above); an explicit false does not."""
+    box.behave([box.uv_builds_nx(exit=1)])
+    box.start("cli-only", slim=True)
+    assert box.wait_terminal()["failed_step"] == "build"
+
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    resumed = box.start("cli-only", slim=False)
+    assert "slim" not in resumed, "the status the start returns drops the slim choice"
+    done = box.wait_terminal()
+    assert done["state"] == "done" and "slim" not in done
+    last_build = [a for a in box.argvs() if a[0] == "uv"][-1]
+    assert last_build[-2:] == ["--extras", "pdf"], last_build
+    assert "left out" not in done["message"]
+
+
+def test_an_explicit_no_slim_also_overrides_an_interrupted_slim_run(box: Box) -> None:
+    """The RUNNING branch of the inheritance: a killed slim run (stale lock) is resumed slim when slim is
+    omitted and full when slim is false."""
+    box.layout()
+    _make_stale_lock(box.setup)
+    (box.setup / "status.json").write_text(
+        json.dumps({"state": "running", "stage": "init", "mode": "cli-only", "slim": True}), encoding="utf-8")
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    started = box.start("cli-only", slim=False)
+    assert "slim" not in started
+
+
+def test_a_run_started_with_slim_omitted_still_inherits_an_interrupted_slim_run(box: Box) -> None:
+    box.layout()
+    _make_stale_lock(box.setup)
+    (box.setup / "status.json").write_text(
+        json.dumps({"state": "running", "stage": "init", "mode": "cli-only", "slim": True}), encoding="utf-8")
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    assert box.start("cli-only").get("slim") is True
 
 
 def test_a_failed_slim_run_does_not_make_another_mode_slim(box: Box) -> None:
@@ -581,6 +621,14 @@ def test_an_interrupted_slim_run_names_slim_in_its_next_step(box: Box) -> None:
         json.dumps({"state": "running", "stage": "init", "mode": "local", "slim": True}), encoding="utf-8")
     view = box.status()
     assert view["state"] == "interrupted" and "slim true" in view["next"]
+    assert "slim false" in view["next"], "the interrupted text names the way to the full install"
+
+
+def test_a_default_runs_resume_text_does_not_offer_slim_false(box: Box) -> None:
+    box.behave([box.uv_builds_nx(exit=1)])
+    box.start("cli-only")
+    failed = box.wait_terminal()
+    assert failed["failed_step"] == "build" and "slim" not in failed["next"]
 
 
 def test_a_slim_done_message_says_pdf_support_was_left_out_and_how_to_add_it(box: Box) -> None:

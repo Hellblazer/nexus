@@ -636,8 +636,9 @@ def _bootstrap_install(
     * No cache prune. The plain command prunes ``uv``'s shared cache at its end
       (23.4 GiB from a developer's cache in the CA-3 test); this path never
       calls :func:`prune_uv_cache`.
-    * No reap and no legacy-tree registration: with an existing install it
-      refuses, so there is nothing older to reap.
+    * No legacy-tree registration, and no reap of anything but the leftovers a
+      fresh build supersedes (:func:`_reap_superseded`, nexus-5kvjb): with an
+      existing install it refuses, so there is no older install to reap.
     * No fallback to ``uv tool install`` then ``nx self install``: that runs the
       prune and leaves two copies on disk.
 
@@ -704,9 +705,96 @@ def _bootstrap_install(
     if dry_run:
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
-    return _build_flip_shims(
+    outgoing = current
+    prior_previous = _previous_target(tools)
+    generation = _build_flip_shims(
         build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=True,
     )
+    _reap_superseded(
+        install_dir, tools, outgoing=outgoing, built_version=running, prior_previous=prior_previous,
+    )
+    return generation
+
+
+def _previous_target(tools: Path) -> str | None:
+    """What ``previous`` names before a flip moves it, or None (no link, unreadable)."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    platform = _plat()
+    link = install_layout.previous_link(tools=tools)
+    try:
+        if install_layout.is_link(link, platform=platform):
+            return install_layout.read_link(link, platform=platform)
+    except OSError:
+        return None
+    return None
+
+
+def _reap_superseded(
+    install_dir: Path, tools: Path, *, outgoing: Path | None, built_version: str,
+    prior_previous: str | None = None,
+) -> None:
+    """After a bootstrap build and flip, reap the leftovers it superseded
+    (nexus-5kvjb): a slim generation rebuilt with ``pdf`` (or the reverse) would
+    otherwise stay on disk, about 1.5 GB, until some later reap.
+
+    Only when the outgoing ``current`` is provably a leftover of an interrupted
+    run: there was none, or its receipt names the version just built (the same
+    version rebuilt with other extras), or its interpreter is gone (it cannot
+    start, so it is no rollback target). A usable generation of an OLDER version
+    whose shims were lost is a working install that the bootstrap merely cannot
+    call complete; it and the ``previous`` pointer to it are left to the normal
+    keep-3 prune, as a plain install would leave them.
+
+    The reap is the install's own (:func:`_reap_generations`, ``keep=1``) with its
+    four never-delete rules, so ``current`` and a generation a live process runs
+    from stay. Rule (d) is passed as :func:`perform_self_gc` passes it, when the
+    running interpreter sits under the tools directory.
+
+    The flip records the outgoing ``current`` as ``previous``, and rule (b)
+    protects ``previous``. That pointer would keep the leftover alive, and a
+    rollback to a generation that never held a complete install is no rollback,
+    so it is dropped when it names the generation this build replaced. A failure
+    to drop it is reported and never fails a bootstrap whose flip succeeded.
+
+    When ``previous`` named some OTHER generation before the flip (*prior_previous*),
+    the flip moved it off that generation, and ``keep=1`` would then reap a rollback
+    target the user still had. Then nothing is reaped here and the normal keep-3
+    prune decides, the same as for a usable older ``current``."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+    from nexus._install import layout_core  # noqa: PLC0415 — deferred import
+
+    if outgoing is not None:
+        receipt = _read_receipt_or_none(outgoing)
+        reapable = (
+            (receipt is not None and receipt.version == built_version)
+            or _generation_interpreter_gone(outgoing)
+        )
+        if not reapable:
+            return
+    platform = _plat()
+    if prior_previous is not None and (
+        outgoing is None
+        or install_layout.compare_key(prior_previous, platform=platform)
+        != install_layout.compare_key(outgoing, platform=platform)
+    ):
+        return
+    link = install_layout.previous_link(tools=tools)
+    if outgoing is not None and install_layout.is_link(link, platform=platform):
+        try:
+            names_outgoing = install_layout.compare_key(
+                install_layout.read_link(link, platform=platform), platform=platform,
+            ) == install_layout.compare_key(outgoing, platform=platform)
+            if names_outgoing:
+                layout_core.remove_link(link)
+        except (OSError, layout_core.LayoutError) as exc:
+            click.echo(f"nexus: could not drop the rollback pointer to {outgoing.name}: {exc}", err=True)
+    host = running_generation()
+    self_generation = host if _same_dir(host.parent, tools) and _is_generation_name(host.name) else None
+    for line in _reap_generations(
+        install_dir, tools, keep=1, self_generation=self_generation, remove_launchers=False,
+    ):
+        click.echo(line)
 
 
 def _record_lockstep_after_bootstrap() -> None:
@@ -1563,15 +1651,19 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
 
 def _reap_generations(
     install_dir: Path, tools: Path, *, keep: int,
-    self_generation: Path | None, dry_run: bool = False,
+    self_generation: Path | None, dry_run: bool = False, remove_launchers: bool = True,
 ) -> list[str]:
     """Run gc.sh's reap once and return its report lines (``reaped``,
     ``would reap``, ``kept ...: held by ...``). The four never-delete rules
     live in gc.sh; this passes rule (d) when the caller runs from a
     generation and never raises: a reap that cannot run leaves the trees
-    where they are, which is the safe direction."""
+    where they are, which is the safe direction. *remove_launchers* is Windows
+    only (see :func:`_windows_reap`)."""
     if _is_windows():
-        return _windows_reap(tools, keep=keep, self_generation=self_generation, dry_run=dry_run)
+        return _windows_reap(
+            tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
+            remove_launchers=remove_launchers,
+        )
     self_arg = f' --self "{self_generation}"' if self_generation is not None else ""
     dry_arg = " --dry-run" if dry_run else ""
     out = _sh(
@@ -1584,6 +1676,7 @@ def _reap_generations(
 
 def _windows_reap(
     tools: Path, *, keep: int, self_generation: Path | None, dry_run: bool,
+    remove_launchers: bool = True,
 ) -> list[str]:
     """The Windows reap: ``generation_core.reap``, then uv's old launchers.
 
@@ -1594,6 +1687,13 @@ def _windows_reap(
     read BEFORE the reap deletes it, else the distribution's declared console
     scripts. Never anything else, and never when ``current\\bin`` has no
     replacement.
+
+    *remove_launchers* False skips that second half. The bootstrap passes False:
+    on a first install there is no uv tree to have owned a launcher, uv's bin
+    directory (``~/.local/bin``) is shared with pipx and others, and Windows has
+    no foreign-program refusal for it (the shim refusal returns early there), so
+    an ``nx.exe`` in it that is not nexus's would be deleted on the strength of a
+    name match alone.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
@@ -1609,7 +1709,7 @@ def _windows_reap(
         # A reap that cannot run leaves the trees where they are.
         click.echo(f"nexus: generation reap did not run: {exc}", err=True)
         return []
-    if legacy.is_dir():
+    if not remove_launchers or legacy.is_dir():
         return lines  # uv's tree is still there (held, or registered for a later pass)
     try:
         current = install_layout.current_generation(tools=tools, platform="win32")

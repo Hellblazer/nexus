@@ -762,23 +762,64 @@ class TestAResumeNeedsTheRightVersionAndAHealthyGeneration:
 
     def _fresh_build_took_over(self, world: World, old: Path, again) -> Path:
         assert again.returncode == 0, again.stdout + again.stderr
-        generations = _generations(world)
-        assert len(generations) == 2 and old in generations, generations
-        (new,) = [g for g in generations if g != old]
-        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
+        # nexus-5kvjb: the leftover the fresh build superseded is reaped, not left for a later gc.
+        new = install_layout.current_generation(tools=world.tools)
+        assert _generations(world) == [new] and not old.exists()
         assert install_layout.read_receipt(new).version == _running_version()
         assert "no rebuild" not in again.stdout
         assert _shim_of(world).is_file()
         return new
 
-    @pytest.mark.parametrize("flipped", [False, True], ids=["no-current", "current-set-no-shims"])
-    def test_an_older_version_leftover_is_not_finished(self, world: World, flipped: bool) -> None:
+    def test_an_older_version_leftover_with_no_current_is_not_finished(self, world: World) -> None:
         old = _built(world)
         _record_version(old, "0.0.1")
-        if flipped:
-            _lose_the_shims(world)
-        else:
-            _interrupt(world)
+        _interrupt(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        self._fresh_build_took_over(world, old, again)
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="reads the POSIX previous symlink")
+    def test_a_usable_older_version_current_that_lost_its_shims_is_rebuilt_beside_it_not_reaped(
+        self, world: World,
+    ) -> None:
+        """nexus-5kvjb: the reap is for interrupted-run leftovers. An older-version `current`
+        that still starts is a working install the bootstrap merely cannot call complete, so
+        the build keeps it, and the `previous` pointer to it, for the normal keep-3 prune."""
+        old = _built(world)
+        _record_version(old, "0.0.1")
+        _lose_the_shims(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        assert again.returncode == 0, again.stdout + again.stderr
+        new = install_layout.current_generation(tools=world.tools)
+        assert new != old and install_layout.read_receipt(new).version == _running_version()
+        assert sorted(_generations(world)) == sorted([old, new]), "the older usable generation was reaped"
+        previous = install_layout.previous_link(tools=world.tools)
+        assert lc.compare_key(os.readlink(previous)) == lc.compare_key(old), "the rollback pointer was dropped"
+        assert _shim_of(world).is_file()
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="`previous` is a junction there; the rule is platform-free and pinned on POSIX")
+    def test_a_rollback_target_previous_named_before_the_flip_survives_the_reap(self, world: World) -> None:
+        """nexus-5kvjb: a broken `current` is reapable, but if `previous` named another,
+        usable generation before the flip, the flip moved the pointer off it and keep=1
+        would take it. The bootstrap leaves that case to the normal keep-3 prune."""
+        old = _built(world)
+        _record_version(old, "0.0.1")
+        broken = _receipted_generation(world, name="gen-20990101T000000Z", version=_running_version())
+        (world.tools / "current").unlink()
+        _point_current(world, broken)
+        previous = install_layout.previous_link(tools=world.tools)
+        if previous.is_symlink():
+            previous.unlink()
+        os.symlink(old, previous)
+        _lose_the_shims(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert old.is_dir(), "the generation `previous` named before the flip was reaped"
+
+    def test_an_older_version_current_whose_interpreter_is_gone_is_reaped(self, world: World) -> None:
+        old = _built(world)
+        _record_version(old, "0.0.1")
+        lc.venv_python(old).unlink()
+        _lose_the_shims(world)
         again = world.run(world.python, "self", "install", "--bootstrap")
         self._fresh_build_took_over(world, old, again)
 
@@ -993,8 +1034,9 @@ class TestTheFlagTakesNothingElse:
     def test_keep_is_accepted_and_changes_nothing_about_the_build(
         self, world: World, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Nothing is reaped on this path, so the count has nothing to act on;
-        the flag is still accepted, because the plain command's callers pass it."""
+        """The bootstrap's own reap keeps only the new generation, so the count has
+        nothing to act on; the flag is still accepted, because the plain command's
+        callers pass it."""
         plain = self._invoke(world, monkeypatch, "--dry-run")
         kept = self._invoke(world, monkeypatch, "--keep", "7", "--dry-run")
         assert kept.exit_code == 0, kept.output
@@ -1085,12 +1127,47 @@ class TestTheBootstrapTakesExtras:
         again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
 
         assert again.returncode == 0, again.stdout + again.stderr
-        generations = _generations(world)
-        assert len(generations) == 2 and slim in generations, "no generation was built"
         current = install_layout.current_generation(tools=world.tools)
         assert current != slim and install_layout.read_receipt(current).extras == ["pdf"]
         assert self._has_dep(current)
         assert _shim_of(world).is_file()
+        # nexus-5kvjb: the slim generation this build superseded is reaped, with the
+        # rollback pointer that named it; only the new generation is left.
+        assert _generations(world) == [current], "the superseded slim generation stayed on disk"
+        assert not slim.exists()
+        assert not os.path.lexists(install_layout.previous_link(tools=world.tools))
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="the holder is a POSIX process started from the generation")
+    def test_a_superseded_generation_a_live_process_runs_from_is_kept(self, tmp_path: Path) -> None:
+        """The reap is the install's own, so a process running from the leftover keeps it."""
+        world = self._pdf_world(tmp_path / "w")
+        slim = _built(world)
+        _lose_the_shims(world)
+        holder = subprocess.Popen(  # noqa: S603 -- fixed argv
+            [str(lc.venv_python(slim)), "-c", "import time; time.sleep(120)"],
+        )
+        try:
+            again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+            assert again.returncode == 0, again.stdout + again.stderr
+            assert slim.is_dir(), "a generation with a live holder was reaped"
+            assert f"kept {slim}" in again.stdout
+        finally:
+            holder.kill()
+            holder.wait()
+
+    def test_a_receipted_leftover_with_no_current_is_reaped_when_the_build_supersedes_it(
+        self, tmp_path: Path,
+    ) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        slim = _built(world)
+        _interrupt(world)
+        assert not (world.tools / "current").exists()
+
+        again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        current = install_layout.current_generation(tools=world.tools)
+        assert _generations(world) == [current] and not slim.exists()
 
     def test_an_interrupted_pdf_build_is_finished_by_the_same_command_without_a_rebuild(
         self, tmp_path: Path,
@@ -1112,7 +1189,7 @@ class TestTheBootstrapTakesExtras:
     ) -> None:
         """``--slim`` after an interrupted default install: the leftover carries pdf, the
         caller asked for none, so finishing it would silently flip in what ``--slim`` left
-        out. It builds the slim generation instead, and the pdf one stays on disk unflipped."""
+        out. It builds the slim generation instead, and the pdf one it superseded is reaped (nexus-5kvjb)."""
         world = self._pdf_world(tmp_path / "w")
         first = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
         assert first.returncode == 0, first.stdout + first.stderr
@@ -1123,11 +1200,10 @@ class TestTheBootstrapTakesExtras:
 
         assert again.returncode == 0, again.stdout + again.stderr
         assert "no rebuild" not in again.stdout
-        generations = _generations(world)
-        assert len(generations) == 2 and built in generations, "no slim generation was built"
         current = install_layout.current_generation(tools=world.tools)
         assert current != built and install_layout.read_receipt(current).extras == []
         assert not self._has_dep(current)
+        assert _generations(world) == [current], "the pdf generation --slim superseded stayed on disk"
 
     def test_the_finishing_and_dry_run_lines_name_the_extras(self, tmp_path: Path) -> None:
         world = self._pdf_world(tmp_path / "w")
@@ -1199,10 +1275,8 @@ class TestAnInstallWhoseInterpreterWasPruned:
         assert not gone.exists()
         result = world.run(world.python, "self", "install", "--bootstrap")
         assert result.returncode == 0, result.stdout + result.stderr
-        generations = _generations(world)
-        assert len(generations) == 2 and old in generations, "the old generation is left for garbage collection"
-        (new,) = [g for g in generations if g != old]
-        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
+        new = install_layout.current_generation(tools=world.tools)
+        assert _generations(world) == [new] and not old.exists(), "the unstartable generation the build replaced is reaped"
         assert _shim_of(world).is_file()
         # The repaired install is complete again: the next call refuses.
         again = world.run(world.python, "self", "install", "--bootstrap")
@@ -1306,8 +1380,8 @@ class TestALegacyUvToolInstallWhoseInterpreterWasPruned:
         result = world.run(world.python, "self", "install", "--bootstrap")
         assert result.returncode == 0, result.stdout + result.stderr
         generations = _generations(world)
-        assert len(generations) == 2 and old in generations
-        (new,) = [g for g in generations if g != old]
+        (new,) = generations
+        assert new != old and not old.exists()
         assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
 
 
@@ -1587,3 +1661,39 @@ class TestTheBuildInstallsTheVersionsThePackageShips:
         assert result.returncode == 0, result.stdout + result.stderr
         assert self._dep_version(world) == "2.0.0"
         assert "UNCONSTRAINED" in result.stdout + result.stderr
+
+
+class TestTheBootstrapReapNeverRemovesUvLaunchers:
+    """Windows (nexus-5kvjb): the plain reap also removes uv's conexus launchers from uv's bin
+    directory once the legacy tree is gone. On a first install there is no legacy tree and the
+    directory is shared with pipx, so a name match alone would delete somebody else's ``nx.exe``."""
+
+    def _fake_core(self, calls: list[str]):
+        import types
+
+        return types.SimpleNamespace(
+            legacy_launcher_names=lambda legacy: [],
+            reap=lambda tools, **kw: calls.append("reap") or [],
+            declared_launcher_names=lambda generation, platform=None: ["nx"],
+            uv_bin_dir=lambda: Path("uv-bin"),
+            current_launcher_dir=lambda tools: Path("current-bin"),
+            remove_uv_launchers=lambda *a, **kw: calls.append("remove_uv_launchers") or ["removed nx.exe"],
+        )
+
+    def _windows(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, calls: list[str]) -> None:
+        monkeypatch.setattr(self_cmd, "_generation", lambda: self._fake_core(calls))
+        monkeypatch.setattr(install_layout, "uv_conexus_venv", lambda platform=None: tmp_path / "no-legacy-tree")
+        monkeypatch.setattr(install_layout, "current_generation", lambda tools=None, platform=None: tmp_path / "gen")
+
+    def test_the_plain_windows_reap_still_removes_them(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        calls: list[str] = []
+        self._windows(monkeypatch, tmp_path, calls)
+        lines = self_cmd._windows_reap(tmp_path, keep=3, self_generation=None, dry_run=False)
+        assert calls == ["reap", "remove_uv_launchers"] and lines == ["removed nx.exe"]
+
+    def test_the_bootstrap_reap_does_not(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        calls: list[str] = []
+        self._windows(monkeypatch, tmp_path, calls)
+        monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
+        self_cmd._reap_superseded(tmp_path, tmp_path, outgoing=None, built_version="1.0.0")
+        assert calls == ["reap"], "the bootstrap's reap reached uv's bin directory"
