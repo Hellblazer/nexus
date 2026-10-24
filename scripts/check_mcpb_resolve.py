@@ -20,12 +20,17 @@ release is not on PyPI before the tag), and ``uv lock`` runs. The produced
 at least ``MIN_LOCKED`` packages must be present, and every unconditional pin
 whose package was locked must be locked at the pinned version.
 
+Both variants the extension can start as are resolved (nexus-dzc61): bare, and
+with its ``include_pdf`` setting on, where the launcher's own ``_set_pdf``
+rewrites the requirement to ``conexus[pdf]``. The PDF lock must also carry
+``PDF_REQUIRED`` and at least ``MIN_LOCKED_PDF`` packages.
+
     python3 scripts/check_mcpb_resolve.py [--conexus PATH] [--conexus-version X.Y.Z] [--uv UV]
 
 Needs the network (package index metadata). Prints one verdict line, either
 ``MCPB RESOLVE GATE PASSED ...`` or ``MCPB RESOLVE GATE FAILED ...``, and exits
-0 only for the first; the counts it examined are in the line, so a pass over
-nothing cannot read as a pass.
+0 only for the first; the counts it examined are in the line, for each variant,
+so a pass over nothing cannot read as a pass.
 """
 from __future__ import annotations
 
@@ -48,6 +53,9 @@ STAGER = REPO / "scripts" / "stage_mcpb_constraints.py"
 MIN_LOCKED = 100
 #: ... and at least this many of the staged pins must be the locked version of a locked package.
 MIN_HELD = 80
+#: The pdf variant locks the PDF stack on top (docling, MinerU, torch and theirs).
+MIN_LOCKED_PDF = 170
+PDF_REQUIRED = ("docling-slim", "mineru", "torch")
 UV_TIMEOUT_S = 900
 
 _IGNORE = shutil.ignore_patterns(".venv", "uv.lock", "__pycache__", "*.pyc", "constraints.txt", "*.mcpb")
@@ -116,29 +124,55 @@ def _run(args: argparse.Namespace, scratch: Path) -> int:
         return _fail(f"the scratch pyproject does not parse ({exc})")
     pyproject.write_text(text, encoding="utf-8")
 
+    summaries = []
+    for variant in ("bare", "pdf"):
+        if variant == "pdf":
+            changed, refusal = launcher._set_pdf(str(bundle), True)
+            if not changed:
+                return _fail(f"the launcher did not switch the bundle to conexus[pdf] ({refusal or 'no change'})")
+            (bundle / "uv.lock").unlink(missing_ok=True)
+        rc, summary = _lock_and_check(args, bundle, pins, release, variant)
+        if rc:
+            return rc
+        summaries.append(summary)
+    print(f"MCPB RESOLVE GATE PASSED: conexus {release}; " + "; ".join(summaries))
+    return 0
+
+
+def _lock_and_check(args: argparse.Namespace, bundle: Path, pins: list[str], release: str,
+                    variant: str) -> tuple[int, str]:
+    """Lock the scratch bundle as it stands and check the lock: (exit code, the variant's counts)."""
+    def fail(msg: str) -> tuple[int, str]:
+        return _fail(f"{variant}: {msg}"), ""
+
     cmd = [args.uv, "lock", "--no-config", "--directory", str(bundle)]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=UV_TIMEOUT_S
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return _fail(f"could not run {args.uv} lock ({type(exc).__name__})")
+        return fail(f"could not run {args.uv} lock ({type(exc).__name__})")
     if proc.returncode != 0:
         sys.stdout.write(proc.stdout)
         sys.stdout.write(proc.stderr)
-        return _fail(f"uv lock exited {proc.returncode}: the staged lock and the bundle's dependencies do not resolve together")
+        return fail(f"uv lock exited {proc.returncode}: the staged lock and the bundle's dependencies do not resolve together")
 
     try:
         lock = tomllib.loads((bundle / "uv.lock").read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        return _fail(f"uv wrote no readable uv.lock ({type(exc).__name__})")
+        return fail(f"uv wrote no readable uv.lock ({type(exc).__name__})")
     locked: dict[str, set[str]] = {}
     for pkg in lock.get("package", []):
         locked.setdefault(_norm(pkg["name"]), set()).add(str(pkg.get("version", "")))
     if release not in locked.get("conexus", set()):
-        return _fail(f"conexus is not locked at {release} (locked: {sorted(locked.get('conexus', ()))})")
-    if len(locked) < MIN_LOCKED:
-        return _fail(f"only {len(locked)} packages locked (floor {MIN_LOCKED}); the resolve examined almost nothing")
+        return fail(f"conexus is not locked at {release} (locked: {sorted(locked.get('conexus', ()))})")
+    floor = MIN_LOCKED_PDF if variant == "pdf" else MIN_LOCKED
+    if len(locked) < floor:
+        return fail(f"only {len(locked)} packages locked (floor {floor}); the resolve examined almost nothing")
+    if variant == "pdf":
+        missing = [name for name in PDF_REQUIRED if name not in locked]
+        if missing:
+            return fail(f"the PDF stack is not in the lock: {', '.join(missing)} missing")
 
     held, unheld, absent = 0, [], 0
     for pin in pins:
@@ -153,14 +187,11 @@ def _run(args: argparse.Namespace, scratch: Path) -> int:
         else:
             unheld.append(f"{name}=={version} (locked {sorted(versions)})")
     if unheld:
-        return _fail(f"{len(unheld)} pins not honoured: {'; '.join(unheld[:5])}")
+        return fail(f"{len(unheld)} pins not honoured: {'; '.join(unheld[:5])}")
     if held < MIN_HELD:
-        return _fail(f"only {held} pins held (floor {MIN_HELD}); the pins reached almost nothing")
-    print(
-        f"MCPB RESOLVE GATE PASSED: conexus {release}; {len(locked)} packages locked; "
-        f"{held} of {len(pins)} pins held, {absent} pinned packages not needed by this bundle, 0 pins moved"
-    )
-    return 0
+        return fail(f"only {held} pins held (floor {MIN_HELD}); the pins reached almost nothing")
+    return 0, (f"{variant}: {len(locked)} packages locked, {held} of {len(pins)} pins held, "
+               f"{absent} pinned packages not needed, 0 pins moved")
 
 
 def main(argv: list[str] | None = None) -> int:

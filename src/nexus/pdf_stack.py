@@ -338,8 +338,9 @@ def install_plan() -> InstallPlan:
     if _running_from_mcpb_bundle(host):
         return InstallPlan(
             "mcpb", False, _cli_install_command(),
-            "this is the Claude Desktop extension (.mcpb) environment, which stays bare conexus; "
-            "PDF indexing needs the CLI install",
+            "this is the Claude Desktop extension (.mcpb) environment, installed without PDF support; "
+            "turn on its Include PDF support setting (Claude Desktop, Settings, Extensions) and restart "
+            "the extension, or install the CLI",
         )
     return InstallPlan(
         "dev", False, "uv sync",

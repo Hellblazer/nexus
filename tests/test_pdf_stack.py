@@ -487,7 +487,9 @@ def test_the_desktop_extension_environment_is_told_to_use_the_cli_install_not_uv
     plan = pdf_stack.install_plan()
     assert plan.kind == "mcpb" and not plan.auto
     assert "uv sync" not in plan.command and "install.sh" in plan.command
-    assert ".mcpb" in plan.why and "CLI install" in plan.why
+    assert ".mcpb" in plan.why and "install the CLI" in plan.why
+    # nexus-dzc61: the extension's own opt-in setting is the first remedy named
+    assert "Include PDF support setting" in plan.why
 
 
 def test_a_source_checkout_is_still_a_dev_install(monkeypatch, tmp_path) -> None:

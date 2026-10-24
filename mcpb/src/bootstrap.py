@@ -54,6 +54,16 @@ written, and a result that does not parse is never written. If the sync fails
 for any reason other than the release-propagation window while the pin is in
 force, the pin is removed and the sync runs once more without it.
 
+PDF support is opt-in (nexus-dzc61). The bundle ships bare ``conexus``; the
+extension's ``include_pdf`` setting (manifest ``user_config``, off by default)
+reaches the launcher as ``NX_MCPB_INCLUDE_PDF=true``, and before the sync this
+file rewrites the bundle's one conexus requirement to ``conexus[pdf]``. Off, it
+writes the bare requirement back and the exact ``uv sync`` removes the PDF stack.
+The extra is deliberately not a declared optional dependency: ``uv sync`` locks
+every declared extra on every start, so torch would be resolved on every bare
+start too. A sync that fails with PDF support on reverts to bare and syncs once
+more, saying so: the setting never takes the extension down.
+
 Deliberately conservative syntax: the launcher runs this on whatever Python
 >=3.12 uv finds, which need not satisfy the bundle's own
 ``requires-python`` (that constraint governs the project venv ``uv sync``
@@ -144,6 +154,10 @@ _PIN_BLOCK = re.compile(
 # anything else means it is not the file we think it is.
 _PIN_LINE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9.!+*_-]+(?:\s*;\s*\S.*)?$")
 _OPT_OUT_VALUES = ("1", "true")
+# What the manifest's `include_pdf` setting becomes ("true"/"false"; an unsubstituted placeholder is off).
+_PDF_ENV = "NX_MCPB_INCLUDE_PDF"
+# The bundle's one conexus requirement, bare or with the pdf extra, as the dependencies array writes it.
+_CONEXUS_REQ = re.compile(r'^([ \t]*)"conexus(\[pdf\])?((?:>=|==|~=)[^"]*)"', re.MULTILINE)
 
 
 def _toml_string(text):
@@ -292,6 +306,64 @@ def _apply_pin(bundle_dir, environ=None):
         "[conexus-mcpb] WARNING: %s; dependencies resolve fresh from the package index, "
         "unpinned, so versions may differ from the release's lock.%s" % (reason, stale)
     )
+
+
+def _conexus_requirements(text):
+    """The ``conexus`` entries of *text*'s ``[project] dependencies``, or ``None`` when it is not TOML."""
+    try:
+        deps = tomllib.loads(text).get("project", {}).get("dependencies", [])
+    except tomllib.TOMLDecodeError:
+        return None
+    return [d for d in deps if isinstance(d, str) and re.match(r"conexus\b", d.strip(), re.IGNORECASE)]
+
+
+def _set_pdf(bundle_dir, on):
+    """Rewrite the bundle's conexus requirement with (*on*) or without the pdf
+    extra. ``(changed, refusal)``: a refusal is the reason it was left as it was.
+    Same parse-before-write rule as ``_apply_pin``."""
+    path = os.path.join(bundle_dir, "pyproject.toml")
+    try:
+        with open(path, "r", encoding="utf-8", newline="") as handle:
+            text = handle.read()
+    except (OSError, UnicodeError) as exc:
+        return False, "could not read pyproject.toml (%s)" % type(exc).__name__
+    reqs = _conexus_requirements(text)
+    # The lock's own `conexus==X` line lives in the managed pin block; only the project's requirement counts.
+    pinned = [(m.start(), m.end()) for m in _PIN_BLOCK.finditer(text)]
+    found = [m for m in _CONEXUS_REQ.finditer(text) if not any(a <= m.start() < z for a, z in pinned)]
+    if reqs is None or len(reqs) != 1 or len(found) != 1:
+        return False, "pyproject.toml does not hold exactly one conexus requirement"
+    match = found[0]
+    if bool(match.group(2)) is bool(on):
+        return False, ""
+    new = (text[:match.start()] + match.group(1) + '"conexus' + ("[pdf]" if on else "")
+           + match.group(3) + '"' + text[match.end():])
+    if _conexus_requirements(new) != [("conexus[pdf]" if on else "conexus") + match.group(3)]:
+        return False, "the edited pyproject.toml would not parse to the one requirement asked for"
+    try:
+        _write_pyproject(path, new)
+    except OSError as exc:
+        return False, "could not write pyproject.toml (%s)" % type(exc).__name__
+    return True, ""
+
+
+def _apply_pdf(bundle_dir, environ=None):
+    """Make the bundle's conexus requirement match the ``include_pdf`` setting.
+    ``(in_force, line)``: whether the pdf extra is now requested, and the line to
+    state on stderr (``""`` when off and already bare). Never raises."""
+    environ = os.environ if environ is None else environ
+    want = str(environ.get(_PDF_ENV, "")).strip().lower() in _OPT_OUT_VALUES
+    changed, refusal = _set_pdf(bundle_dir, want)
+    if refusal:
+        return False, "[conexus-mcpb] WARNING: the include_pdf setting was not applied: %s." % refusal
+    if want:
+        return True, (
+            "[conexus-mcpb] PDF support is on (the include_pdf setting): the sync installs conexus[pdf]%s."
+            % (", about 0.25 GB more to download and 0.85 GB more on disk on macOS" if changed else "")
+        )
+    if changed:
+        return False, "[conexus-mcpb] PDF support is off (the include_pdf setting): the sync removes it."
+    return False, ""
 
 
 def _pin_state(bundle_dir):
@@ -729,10 +801,24 @@ def main(platform=None) -> None:
     else:
         # Before the sync AND before the launch's own `uv run`, which resolves too.
         print(_apply_pin(bundle_dir), file=sys.stderr, flush=True)
-        if platform == _WINDOWS:
-            _sync_with_retry(bundle_dir, uv=uv)
-        else:
-            _sync_with_retry(bundle_dir)
+        pdf, line = _apply_pdf(bundle_dir)
+        if line:
+            print(line, file=sys.stderr, flush=True)
+        sync_kw = {"uv": uv} if platform == _WINDOWS else {}
+        try:
+            _sync_with_retry(bundle_dir, **sync_kw)
+        except SystemExit:
+            # PDF support is a setting, never a reason the extension does not start.
+            if not (pdf and _set_pdf(bundle_dir, False)[0]):
+                raise
+            print(
+                "[conexus-mcpb] WARNING: the sync failed with PDF support on; syncing once more "
+                "without PDF support so the extension starts. Turn the include_pdf setting off, "
+                "or retry it later.",
+                file=sys.stderr,
+                flush=True,
+            )
+            _sync_with_retry(bundle_dir, **sync_kw)
     # POSIX: exec, so Claude Desktop's stdio pipes land on the server process
     # itself for the MCP handshake. Windows: see _launch_windows.
     code = _launch(["uv", "run", "--directory", bundle_dir, "src/server.py"], platform=platform)

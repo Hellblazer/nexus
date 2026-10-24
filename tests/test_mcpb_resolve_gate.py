@@ -29,11 +29,12 @@ import json, pathlib, sys
 cfg = json.loads(pathlib.Path({cfg!r}).read_text())
 args = sys.argv[1:]
 bundle = pathlib.Path(args[args.index("--directory") + 1])
-pathlib.Path(cfg["record"]).write_text(json.dumps({{
-    "argv": args,
-    "pyproject": (bundle / "pyproject.toml").read_text(),
-    "constraints": (bundle / "constraints.txt").read_text(),
-}}))
+pyproject = (bundle / "pyproject.toml").read_text()
+sent = {{"argv": args, "pyproject": pyproject, "constraints": (bundle / "constraints.txt").read_text()}}
+pathlib.Path(cfg["record"]).write_text(json.dumps(sent))
+calls = pathlib.Path(cfg["record"] + ".all")
+calls.write_text(json.dumps(json.loads(calls.read_text()) + [sent] if calls.exists() else [sent]))
+pdf = '"conexus[pdf]' in pyproject
 if cfg.get("exit"):
     print("error: No solution found when resolving dependencies", file=sys.stderr)
     sys.exit(cfg["exit"])
@@ -46,6 +47,8 @@ for pin in pins[: cfg.get("limit", 10**9)]:
     if name in cfg.get("move", {{}}):
         version = cfg["move"][name]
     if name == "conexus" and cfg.get("drop_conexus"):
+        continue
+    if pdf and name in cfg.get("drop_in_pdf", ()):
         continue
     rows.append((name, version))
 (bundle / "uv.lock").write_text("version = 1\\n" + "".join(
@@ -85,6 +88,37 @@ def test_a_lock_that_resolves_passes_and_the_verdict_names_what_it_examined(tmp_
     assert Path(doc["tool"]["uv"]["sources"]["conexus"]["path"]) == REPO_ROOT
     assert doc["tool"]["uv"]["override-dependencies"], "the bundle's own overrides must reach the resolve"
     assert sent["argv"][0] == "lock" and "--no-config" in sent["argv"]
+
+
+def _calls(record: Path) -> list[dict]:
+    return json.loads(Path(str(record) + ".all").read_text(encoding="utf-8"))
+
+
+def _conexus_reqs(pyproject: str) -> list[str]:
+    return [d for d in tomllib.loads(pyproject)["project"]["dependencies"] if d.startswith("conexus")]
+
+
+def test_both_variants_are_locked_bare_then_with_the_pdf_setting_and_both_are_named(tmp_path: Path) -> None:
+    # nexus-dzc61: the extension starts bare or, with include_pdf on, as conexus[pdf]; the gate resolves both
+    proc, record = _gate(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    calls = _calls(record)
+    assert [c["argv"][0] for c in calls] == ["lock", "lock"]
+    bare, pdf = (_conexus_reqs(c["pyproject"]) for c in calls)
+    assert len(bare) == 1 and bare[0].startswith("conexus>=")
+    assert pdf == ["conexus[pdf]" + bare[0][len("conexus"):]]
+    for c in calls:  # the pdf lock keeps the pin and the source
+        doc = tomllib.loads(c["pyproject"])
+        assert "conexus==9.9.9" in doc["tool"]["uv"]["constraint-dependencies"]
+        assert Path(doc["tool"]["uv"]["sources"]["conexus"]["path"]) == REPO_ROOT
+    verdict = next(ln for ln in proc.stdout.splitlines() if ln.startswith("MCPB RESOLVE GATE PASSED"))
+    assert "bare: " in verdict and "pdf: " in verdict and verdict.count("pins held") == 2
+
+
+@pytest.mark.parametrize("missing", ["torch", "mineru", "docling-slim"])
+def test_a_pdf_lock_without_the_pdf_stack_fails(tmp_path: Path, missing: str) -> None:
+    proc, _ = _gate(tmp_path, drop_in_pdf=[missing])
+    assert proc.returncode == 1 and "pdf: the PDF stack is not in the lock" in proc.stdout and missing in proc.stdout
 
 
 def test_a_wheel_is_resolved_instead_of_the_checkout(tmp_path: Path) -> None:

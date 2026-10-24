@@ -42,7 +42,8 @@
         "src/bootstrap.py"
       ],
       "env": {
-        "NX_MCPB_INSTALL_UNPINNED": "${user_config.install_unpinned}"
+        "NX_MCPB_INSTALL_UNPINNED": "${user_config.install_unpinned}",
+        "NX_MCPB_INCLUDE_PDF": "${user_config.include_pdf}"
       }
     }
   },
@@ -51,6 +52,13 @@
       "type": "boolean",
       "title": "Install the newest dependencies (unpinned)",
       "description": "Off by default: the extension installs the dependency versions this release was tested with. Turn on to resolve every dependency fresh from the package index instead (versions may differ from the release's lock). Takes effect the next time the extension starts.",
+      "required": false,
+      "default": false
+    },
+    "include_pdf": {
+      "type": "boolean",
+      "title": "Include PDF support",
+      "description": "Off by default. Turn on to install PDF indexing (docling, MinerU and torch) into the extension: about 0.25 GB more to download and 0.85 GB more on disk on macOS. Turning it off removes it again. Takes effect the next time the extension starts.",
       "required": false,
       "default": false
     }

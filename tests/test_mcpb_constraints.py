@@ -608,7 +608,9 @@ def test_the_manifest_carries_the_opt_out_as_a_boolean_user_setting() -> None:
     assert setting["type"] == "boolean" and setting["default"] is False and setting["required"] is False
     # The env overlay names a variable of its own, so it cannot shadow a host-level NX_INSTALL_UNPINNED.
     env = manifest["server"]["mcp_config"]["env"]
-    assert env == {"NX_MCPB_INSTALL_UNPINNED": "${user_config.install_unpinned}"}
+    # (and include_pdf has its own, tests/test_mcpb_pdf_setting.py)
+    assert env == {"NX_MCPB_INSTALL_UNPINNED": "${user_config.install_unpinned}",
+                   "NX_MCPB_INCLUDE_PDF": "${user_config.include_pdf}"}
 
 
 @pytest.mark.parametrize(
