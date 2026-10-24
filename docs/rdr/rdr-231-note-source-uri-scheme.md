@@ -8,7 +8,7 @@ author: nexus_8f2
 reviewed-by: self
 created: 2026-10-23
 accepted_date:
-related_issues: [nexus-t7fbb]
+related_issues: [nexus-t7fbb, nexus-ql5m5]
 ---
 
 # RDR-231: Note source_uri scheme: replace chroma:// with nx-note://
@@ -27,7 +27,8 @@ was retired in RDR-155. The name now misleads anyone reading `nx catalog show`
 (the cross-surface shakeout reported it as a bug, nexus-t7fbb). Sam's ruling
 (2026-10-23): replace the scheme as one change covering the writer, the engine's
 rename rewrite and a backfill of existing rows, riding an engine tag after the
-RDR-007 A2 freeze.
+RDR-007 A2 freeze. Sam's rulings of 2026-10-24 on the draft's open questions are
+in § Decisions; one of them folds nexus-ql5m5 in as Gap 4.
 
 In this RDR a **note URI** is `chroma://<c>/<rest>` or `nx-note://<c>/<rest>` whose
 first path segment `<c>` (the collection name) does not start with `rdr__`, `docs__`
@@ -63,7 +64,7 @@ on develop, 2026-10-23):
 | Compares URIs exactly | `http_catalog_client.by_source_uri` `:2184`; store hook chash-dedup guard `:930`; exporter import `:745`, `:748`; `recovery_bundle._resolve_link_endpoint` `:498` |
 | User-facing text | `commands/catalog.py:606` (register help), `commands/enrich.py:2094` (help) |
 | Comments and docs only | `integrity.py:623` (a docstring; there is no constant there), `doctor_references.py:14`, `aspect_worker.py:585`, `db/t3.py:771`, `catalog/AGENTS.md:9`, `db/AGENTS.md:7` |
-| Engine | rename rewrite `CatalogRepository.java:9713-9734` (collision pre-check) and `:9915-9929` (three UPDATEs); `deriveSourceUri` javadoc `:933`. Two applied changelogs mention it in comments (`hygiene-001-not-null.xml:93`, `aspects-004-doc-id-backfill.xml:30`); applied changesets are never edited. |
+| Engine | rename rewrite `CatalogRepository.java:9713-9734` (collision pre-check) and `:9915-9929` (three UPDATEs); `deriveSourceUri` javadoc `:933`; the three moves in Gap 4, which do not spell it and should. Two applied changelogs mention it in comments (`hygiene-001-not-null.xml:93`, `aspects-004-doc-id-backfill.xml:30`); applied changesets are never edited. |
 
 `engine_version.py:577` is release history and stays as written. A change that
 misses one site leaves notes that a classifier, reader or rename treats as
@@ -88,6 +89,27 @@ holds: a new client that sends `nx-note://` to an engine without canonicalizatio
 mints a duplicate beside every un-backfilled `chroma://` row, and that duplicate
 then makes the backfill collide. The fix must keep one Document per note for old
 clients, new clients and old artifacts, against old and new engines.
+
+#### Gap 4: Moving a collection by any path other than rename leaves note URIs naming the old collection
+
+The collection rename rewrites `chroma://<old>/` to `chroma://<new>/` in all three
+tables (nexus-sis0m.3). Three other engine paths move rows between collections and
+leave `source_uri` as it was (nexus-ql5m5; the highlight rename was found while
+folding that bead in):
+
+| Path | Route | Moves | Site |
+| --- | --- | --- | --- |
+| Re-home | `POST /v1/catalog/collections/rehome` | `catalog_documents.physical_collection`, `document_aspects.collection`, `document_highlights.collection` | `CatalogRepository.rehomeCollection` `:10083`, `moveScopedTable` `:10272` |
+| Aspect rename | `POST /v1/aspects/rename_collection` | `document_aspects.collection` | `AspectRepository.renameAspectCollection` `:429` |
+| Highlight rename | `POST /v1/aspects/highlights/rename_collection` | `document_highlights.collection` | `AspectRepository.renameHighlightsCollection` `:1358` |
+
+A note moved this way keeps an identity naming its old collection. A re-put under
+the new collection misses it and mints a duplicate, and its aspects and highlights
+stop joining it by URI. The two aspect renames are also legs of the client's
+`rename_collection_cascade`, where the catalog rename has already moved and
+rewritten the rows, so there they find nothing to move; they leave stale URIs when
+called on their own. The fix delivers one rule: every path that moves a note row
+between collections rewrites its URI in the same statement.
 
 ## Relationship to Prior RDRs
 
@@ -235,7 +257,31 @@ only to an engine known to canonicalize.
 4. **Rename rewrite, both spellings.** `renameCollectionTxn` runs its collision
    pre-check (`:9713-9734`) and its three UPDATEs (`:9915-9929`) once per scheme,
    `chroma://X/ -> chroma://Y/` and `nx-note://X/ -> nx-note://Y/`, so residue keeps
-   its spelling and notes keep theirs.
+   its spelling and notes keep theirs. The per-scheme rewrite is one helper,
+   `NoteUri.moveTo(field, oldColl, newColl)`: a jOOQ `CASE` on `starts_with` for
+   each scheme, every other value unchanged. Step 4a reuses it.
+
+4a. **Every other collection move rewrites too (Gap 4, nexus-ql5m5; Sam,
+   2026-10-24).** Each move sets `source_uri = NoteUri.moveTo(...)` in the same
+   UPDATE that sets the collection column, so only rows that call moves are
+   rewritten, never a row already at the target.
+
+   - **Re-home** (`moveScopedTable`, for `catalog_documents`, `document_aspects` and
+     `document_highlights`). The target is live and populated, so a moved note can
+     land on a URI a live document already holds, which catalog-016 refuses
+     tenant-wide. Re-home's rule is move and report (Sam, 2026-09-16), so
+     `movableAtSource` gains, for `catalog_documents`, a `NOT EXISTS` on a live
+     document holding the rewritten URI. That document stays at the source and is
+     counted in `leftBehindByTable`, as a `search_telemetry` key collision is. Its
+     aspect and highlight rows stay with it: for those two tables the predicate
+     also excludes rows whose `doc_id` names a document left behind. Because
+     `rehomeStatus` uses the same `movableAtSource`, the progress report counts
+     these rows as stuck, not movable. Neither aspect table has a unique key on
+     `source_uri` (`aspects-001-baseline.xml:75`, `:121`), so their rewrites
+     cannot collide.
+   - **Aspect rename and highlight rename.** The existing UPDATE gains the
+     `source_uri` column. The aspect rename's collision defense (it deletes
+     target rows with the same `source_path` first) is unchanged.
 
 5. **Backfill (DATA EFFECT), one changeset.** Tenant-spanning, in one transaction,
    in the shape of `aspects-004-1` and `fk-004-0-reconcile-precount`
@@ -277,8 +323,8 @@ only to an engine known to canonicalize.
    single UPDATE cannot trip catalog-016 once the guard has passed. Its comment
    carries the `DATA EFFECT:` line `tests/test_changelog_data_effect_lint.py`
    requires. Rollback is empty: an older engine binary never runs Liquibase
-   rollback, so a reverse rewrite would protect no real downgrade (see Open
-   Questions). The same commit seeds and effect-asserts it in
+   rollback, so a reverse rewrite would protect no real downgrade (Sam,
+   2026-10-24: no rollback; see Decisions). The same commit seeds and effect-asserts it in
    `SchemaUpgradeRehearsalIntegrationTest`'s data leg (row DML on FORCE-RLS
    tables), and raises `migration_ddl_per_worker` in `tests/ddl_ceiling.toml` by
    its DDL count.
@@ -310,7 +356,7 @@ static String legacy(String uri)     // note "nx-note://c/r" -> "chroma://c/r"; 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | Client note-URI rule | `reconcile_stale._STORE_PUT_URI_PREFIX`, literals in Gap 2 | Replace: one definition in `aspect_readers`, every site imports it |
-| Engine `NoteUri` | rename prefix literals `:9717-9718` | New helper; the rename calls it |
+| Engine `NoteUri` | rename prefix literals `:9717-9718` | New helper; the rename, re-home and both aspect renames call it |
 | Input canonicalization | `deriveSourceUri` (register paths) | Extend: canonicalize inside it; other routes call `NoteUri.canonical` directly |
 | Legacy rendering | `docRowFromRecord`, `recordToMap`, `highlightToMap` | Extend: one flag from the request header |
 | Capability header | `client_identity_headers()` | Extend: second header |
@@ -371,6 +417,7 @@ because document rows have one renderer. The header, not a parsed
 
 - **Risk**: the backfill collides on catalog-016. **Mitigation**: the in-transaction guard aborts before any row moves; the pre-tag census finds pairs first; `mint_note_uri` keeps new clients from creating twins against old engines.
 - **Risk**: a route is missed, so an old client mints a duplicate or sees `nx-note://`. **Mitigation**: `NoteUriRouteGateTest`.
+- **Risk**: a re-home skips a document whose rewritten URI is taken, and the operator reads the 200 as done. **Mitigation**: the skip is counted in `leftBehindByTable` and in `rehomeStatus`, the existing move-and-report contract.
 - **Risk**: a classifier misses the new spelling and treats notes as residue. **Mitigation**: one `is_note_uri`, and a lint that no `chroma://` or `nx-note://` literal, and no `"chroma"` scheme key, appears outside the definitions.
 
 ### Failure Modes
@@ -380,7 +427,9 @@ re-put: two live rows whose URIs differ only in scheme. A missed output route sh
 as `nx-note://` in an old client's output, and in the worst case as notes missing
 from its recovery bundle. A missed client classifier shows as notes reported as
 migration residue by `nx catalog reconcile-stale`. A collision halts the engine's
-migration at boot, with the count in the error.
+migration at boot, with the count in the error. A move path that misses the
+rewrite shows as a note whose URI names a collection it no longer lives in, and
+as a duplicate on its next re-put.
 
 ## Implementation Plan
 
@@ -401,9 +450,9 @@ a `code__` collection follow the rename in their own spelling.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: Engine `NoteUri`, input canonicalization, legacy rendering, rename, backfill changeset (engine tag)
+#### Step 1: Engine `NoteUri`, input canonicalization, legacy rendering, rename and the other three moves, backfill changeset (engine tag)
 
-Includes the parity test, `NoteUriRouteGateTest`, the rehearsal seed, the DDL
+Includes the re-home and aspect-rename rewrites (step 4a, closes nexus-ql5m5), the parity test, `NoteUriRouteGateTest`, the rehearsal seed, the DDL
 ceiling bump, and a `docs/wire-contract-pending.md` entry marked additive (a new
 request header; responses change only for callers that send it).
 
@@ -438,6 +487,9 @@ None.
 - **Scenario**: old-client re-put after backfill (no header) — **Verify**: same Document, `created=false`, no duplicate.
 - **Scenario**: new-client re-put of a backfilled note (header) — **Verify**: same Document.
 - **Scenario**: rename with a note and a `code__` residue row — **Verify**: each follows in its own spelling; the collision pre-check fires for either spelling.
+- **Scenario**: re-home a collection holding a note, then re-put the note under the target — **Verify**: one live Document whose URI names the target; its aspect and highlight rows carry the same URI.
+- **Scenario**: re-home where the target already holds a live document at the note's rewritten URI — **Verify**: the note, its aspects and its highlights stay at the source, `leftBehindByTable` and `rehomeStatus` count them, nothing else is blocked.
+- **Scenario**: aspect rename and highlight rename called alone, with a note row and a `code__` residue row — **Verify**: the note's URI follows in its spelling, the residue keeps `chroma://`.
 - **Scenario**: backfill with a planted live twin — **Verify**: the migration aborts, no row changed, FORCE still set on all three tables.
 - **Scenario**: backfill effect in `SchemaUpgradeRehearsalIntegrationTest` — **Verify**: seeded note rows in all three tables rewritten, residue untouched, `columnsHolding("chroma://")` finds only the residue.
 - **Scenario**: Java and Python file-routed prefixes — **Verify**: parity test equal.
@@ -489,11 +541,15 @@ To be completed at gate.
 
 To be completed at gate.
 
-## Open Questions for Sam
+## Decisions
 
-1. Downgrade below the tag is unsupported: an older engine over backfilled rows has no canonicalization, so its clients mint duplicates. Is that acceptable as stated, or should the changeset ship a reverse-rewrite rollback for an operator-run `liquibase rollback`?
-2. On a collision the migration halts and names the count. Halt (proposed), or merge each pair automatically inside the changeset?
-3. `rehomeCollection` (`CatalogRepository.java:10083`) moves documents without rewriting note URIs, and `/v1/aspects/rename_collection` (`AspectRepository.renameAspectCollection` `:429`) moves aspect rows without rewriting theirs. Both predate this RDR. In scope here, or a separate bead?
+Sam, 2026-10-24, on the draft's three open questions:
+
+1. **No rollback.** Downgrading the engine below the tag is unsupported. An older engine over backfilled rows has no canonicalization, so its clients would mint duplicates; the changeset ships no reverse rewrite, because no procedure runs `liquibase rollback` before a downgrade.
+2. **Halt on a collision.** The backfill aborts and names the count; an operator merges each pair with `POST /v1/catalog/merge` and restarts. No automatic merge inside the changeset. The pre-tag census is expected to find no pairs.
+3. **Fold nexus-ql5m5 in.** The re-home and aspect-rename gaps are Gap 4 and step 4a, in the same engine tag.
+
+The header, not the client version, chooses the rendering (§ Decision Rationale); no question was open on it.
 
 ## References
 
@@ -506,3 +562,5 @@ To be completed at gate.
 - 2026-10-23: First draft (nexus-t7fbb), after Sam's ruling to make the change as one RDR-scoped engine-plus-client change.
 
 - 2026-10-23: Revised against the T2 critique (part B). Old clients: chose legacy rendering (the engine shows `chroma://` to any request without `X-Nexus-Note-Uri: nx-note`) and stated each old-client path; recorded that register's `created=false` closes the rollback hazard once register is canonicalized. Replaced Critical Assumption 1: three tables hold note URIs, and the backfill and rename cover all three. Completed the Gap 2 inventory and dropped the false `integrity.py` constant. Added the engine route table and `NoteUriRouteGateTest`. Scoped the note predicate (and so the backfill, canonicalizer and rename) away from file-routed residue. Gave the guard and UPDATE SQL, and made the guard an in-transaction `DO` block, because a `sqlCheck` precondition counts zero under FORCE RLS. Added the rehearsal seed, DDL ceiling and relay attestation. Added `NOTE_URI_MIN_ENGINE_VERSION` so a new client sends `nx-note://` only to an engine that canonicalizes. Added Alternatives 3 and 4 and three open questions.
+
+- 2026-10-24: Sam's rulings on the three open questions, recorded in § Decisions: no rollback, halt on a collision, fold nexus-ql5m5 in. Added Gap 4 (re-home, aspect rename and highlight rename move note rows without rewriting their URI; the highlight rename was not in the bead), Technical Design step 4a with the `NoteUri.moveTo` helper shared with the rename, re-home's left-behind rule for a taken URI, three test scenarios, and a risk and a failure mode.
