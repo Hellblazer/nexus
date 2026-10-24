@@ -665,6 +665,15 @@ fresh set of three runs, never a retry of one. Then rerun the canaries and the
 `range` scenarios on the changed tree; they pass as they did before the
 amendment.
 
+Sam's ruling of 2026-10-24 (nexus-4s8sb), made after the three runs: under the
+`dependency:` prefix an edit that changes the sentence and keeps at least as
+many words is a hit, because a split or a reorder fixes a dependency without
+lengthening it. The other prefixes keep the lengthening rule. The A1 runs stand
+as judged under the bar above (3 of 3 at 9 of 10; T2
+`nexus_rdr/221-a1-acceptance-2026-10-24` records that runs 1 and 3 fixed D2 by
+an 18-word split under `dependency:`). Runs after the ruling use the amended
+rule; none of the three is rescored.
+
 #### Step 1a.4: Tally after merge
 
 Over Sam's next five `/prose-edit` runs on published docs, count for each
