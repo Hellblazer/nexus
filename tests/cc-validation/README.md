@@ -325,7 +325,7 @@ finding.
 
 ### Observations that change with the Claude Code version
 
-Scenarios 06, 07 and 33 ask permission questions whose answers have flipped, or may flip, across Claude
+Scenarios 06, 07, 33 and 34 ask permission questions whose answers have flipped, or may flip, across Claude
 Code releases (and between a bypass-flag launch and an enforced one). Each is an
 OBSERVATION of one build, recorded with its date, never a fact about the product.
 Re-measure on every pin bump (see "Bumping the Claude Code pin"); nothing may be
@@ -355,7 +355,7 @@ deleted, or relied on, on the strength of what is written here.
     Replace In Files Tool: (MCP)` (kept in the second run's pane; the recorded run shows
     the same path in its debug log: the PermissionRequest step for the tool, then a
     denial when the harness pressed Escape). The call did not run. What the agent does
-    after a denial, or while a prompt is left unanswered, was not measured.
+    after a denial, or while a prompt is left unanswered, is scenario 34.
   - **33b, auto:** the call ran and reached the server. That is the auto-mode
     classifier's judgement of this call, with this prompt (it declares a test harness
     and a stub that edits nothing), not a rule: an earlier wording ("attempt every call
@@ -370,8 +370,42 @@ deleted, or relied on, on the strength of what is written here.
   sessions only (a headless `-p` session has no parent pane). Both readings fit
   `sn/hooks/scripts/serena-section.md`: Serena writes go through Claude Code's
   permission flow, and "do not retry" covers a refused write.
+- **34** — the same write with the sn plugin of this checkout INSTALLED (`cc_plugin_require`;
+  the copy's serena server launches the stub and context7 is dropped), so its own
+  SubagentStart, PreToolUse and PermissionRequest hooks run and the agent receives
+  serena-section.md ("If one is denied or never answered, do not retry it: use Edit or Write
+  on the absolute path, or report that you are blocked"). The agent's brief names the Serena
+  writer and says nothing about refusals. sn's PermissionRequest hook ran for the writer and
+  gave no decision, so the dialog was Claude Code's own. Observed on 2.1.302 on 2026-10-24
+  (nexus-kqqxt), four runs (cc-val-evidence-20261024T022652Z, T023824Z, T024817Z, T025706Z;
+  the last two with the forensic outcome checks, the last with the brief that loads the tool
+  schemas first), Haiku 5.5 as both parent and agent:
+  - **34a, acceptEdits, the prompt answered with Escape (a denial):** every time the agent
+    did not retry; it read the file and made the change with Edit. Every reply cites the
+    injected guidance ("The hook guidance says not to retry a denied Serena write and to fall
+    back to Edit on the absolute path"). That the guidance caused it is not isolated: Claude
+    Code's denial text also says to try a different approach, and no leg without the guidance
+    has run (nexus-k2qxv).
+  - **34b, acceptEdits, the prompt left up:** every time the background agent made no tool
+    call and gave no reply for at least 120 s (124 s by transcript timestamps in the first
+    run) while the parent's dialog stood: its call stays pending until the dialog is answered.
+    Once it was denied the agent fell back to Edit as in 34a.
+  - **34c, auto, three fresh sessions per run:** the agent's write ran in every sample whose
+    write was the agent's own. In the third run one agent called `find_symbol` with no
+    arguments (its schema not loaded), handed back, and the parent made the write itself; the
+    scenario gave that run no verdict, and the brief now has the agent load both schemas with
+    ToolSearch and the parent leave the work to it.
 
-Verdict lines from 06, 07 and 33 say `observed on Claude Code <version>`, report what they saw without
+  Limits: Haiku 5.5 only; acceptEdits, where the fallback Edit is allowed without a prompt,
+  so the fall-back itself was never prompted; only `replace_in_files`, whose dialog shows
+  the stub's description ("logs and claims success"), which the 33b review showed can sway
+  the classifier; the conexus plugin (and its auto-approve verb) not installed alongside sn;
+  interactive sessions only. The trigger the bead set for one more clause in
+  serena-section.md (a background write shown to block on the parent's prompt) was met; no
+  clause was added, because a call pending on the dialog leaves the agent nothing to act on
+  until it is answered, and the dialog is in the parent's pane, where the user sees it.
+
+Verdict lines from 06, 07, 33 and 34 say `observed on Claude Code <version>`, report what they saw without
 asserting a direction, and compare it with `docs/tables/cc-version-answers.toml` (a
 checked RDR-201 table; `lib/version_answers.py` reads it): the recorded answer for that
 version passes; a different answer FAILS "answer changed since <version>"; a version with
@@ -382,9 +416,9 @@ that does not enforce permissions.
 ### Bumping the Claude Code pin
 
 `ARG CLAUDE_CODE_VERSION` in `container/Dockerfile` pins the build. A bump re-runs
-scenarios 06 and 07 and updates `docs/tables/cc-version-answers.toml` (add the new
+scenarios 06, 07, 33 and 34 and updates `docs/tables/cc-version-answers.toml` (add the new
 version's rows, or read why a recorded answer changed before touching it). A bump with no
-re-run leaves the table silent about the new build, so 06 and 07 are what announce it:
+re-run leaves the table silent about the new build, so these scenarios are what announce it:
 an unrecorded version prints the INFO line, a recorded one whose answer flipped FAILS, and so does a
 run that cannot read its Claude Code version at all ("unknown").
 Run them on every bump.
@@ -532,8 +566,8 @@ scenario part: an install replaces all plugin state.
 Evidence (plugin list/install output, debug log, settings, registry, transcripts)
 goes to `$CC_VAL_EVIDENCE_DIR/<scenario>` when the container mounted one.
 
-Census (2026-10-17, 30 scenarios; 31 with 33, nexus-xhisb): plugin-dependent were 12, 13b, 14b, 18 and 32;
-the other 26 install nothing. The container carries what a loaded plugin needs:
+Census (2026-10-17, 30 scenarios; 31 with 33, nexus-xhisb; 32 with 34, nexus-kqqxt): plugin-dependent were
+12, 13b, 14b, 18, 32 and 34; the other 26 install nothing. The container carries what a loaded plugin needs:
 the Nexus CLI built from the staged source tree, not fetched from PyPI by version
 (`nx-mcp`, `nx-hook`; without it the plugin loads and then its `mcp_tool` hooks
 fail with "Nexus is not installed"),

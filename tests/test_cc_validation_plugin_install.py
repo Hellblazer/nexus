@@ -42,10 +42,11 @@ RUNNER = CCV / "runner.sh"
 #: The scenarios that install or depend on a plugin, found by the census in the
 #: bead's commit (grep installed_plugins / enabledPlugins / plugin install /
 #: marketplace over every scenario). The census count is the non-vacuity floor.
-CENSUS = {"12", "13", "14", "18", "32"}
+CENSUS = {"12", "13", "14", "18", "32", "34"}
 #: Scenarios in tests/cc-validation/scenarios when the census was taken (31 since nexus-xhisb added
-#: 33, which installs nothing: its sn hook is wired from settings.json, as 29's is).
-SCENARIO_COUNT = 31
+#: 33, which installs nothing: its sn hook is wired from settings.json, as 29's is; 32 since
+#: nexus-kqqxt added 34, which installs sn through cc_plugin_require).
+SCENARIO_COUNT = 32
 
 #: What marks a scenario as plugin-dependent: it installs one through the helper,
 #: or carries any of the hand-written install's markers.
@@ -1303,8 +1304,10 @@ def test_every_scenario_claude_prompt_probe_is_either_linted_or_a_side_effect_ch
                 unlinted.append((path.name, tok))
     # known and checked by hand: the marker is a file the prompted command writes (32), a payload
     # compared in the stub's own log (11's PARENT-CALL-PROBE, 29/30 tool names), or a tool name read
-    # from the agent's tool_use records, which only Claude Code writes (33), not a pane reply
-    allowed = {("11_agent_inline_mcpservers.sh", "PARENT-CALL-PROBE"), ("29_sn_worktree_guard.sh", "replace_in_files"),
+    # from the agent's tool_use records, which only Claude Code writes (33), not a pane reply, or the
+    # content of the file the agent's own Edit wrote (34's yyy-marker)
+    allowed = {("34_background_serena_after_refusal.sh", "yyy-marker"),
+               ("11_agent_inline_mcpservers.sh", "PARENT-CALL-PROBE"), ("29_sn_worktree_guard.sh", "replace_in_files"),
                ("33_background_serena_write.sh", "mcp__plugin_sn_serena__replace_in_files"),
                ("29_sn_worktree_guard.sh", "zzz-marker"), ("32_pretooluse_no_blanket_allow.sh", "scenario32-nexus-452oy-marker")}
     assert set(unlinted) <= allowed, f"a scenario greps for a token its own prompt contains: {sorted(set(unlinted) - allowed)}"

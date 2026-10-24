@@ -1,5 +1,5 @@
-# What cc-validation scenarios 06, 07 and 33 observed, per Claude Code version
-# (nexus-qsmc5; 33 is nexus-xhisb). Each asks a question whose answer is a
+# What cc-validation scenarios 06, 07, 33 and 34 observed, per Claude Code version
+# (nexus-qsmc5; 33 is nexus-xhisb, 34 nexus-kqqxt). Each asks a question whose answer is a
 # property of the Claude Code build, so no answer is a durable fact about the product.
 # This table is the baseline a run compares itself with, nothing more:
 #
@@ -31,6 +31,19 @@
 #              denied    neither; the agent attempted the call and was told it was refused
 #            33b samples the auto-mode classifier's judgement of one prompt, not a rule: a
 #            changed answer there means re-read the evidence, not a regression.
+# answer_34a, answer_34b, answer_34c
+#            the same write with the installed sn plugin (its serena server a stub):
+#            34a, acceptEdits, the prompt answered with Escape (a denial): what the agent did next
+#              retried    it called the Serena writer again
+#              fell-back  it made the edit with Edit, Write or MultiEdit instead
+#              reported   neither; it finished without the edit
+#            34b, acceptEdits, the prompt left unanswered
+#              blocked    no tool call and no reply from the agent for at least 120 s
+#              proceeded  one or the other
+#            34c, auto, three fresh sessions
+#              all-ran | all-prompted | mixed
+#            34a and 34c sample a model's (Haiku 5.5 when recorded) and a classifier's
+#            judgement, not a rule.
 # observed   the day the recorded row was measured (a recorded row only)
 
 [table]
@@ -39,7 +52,7 @@ kind = "decision-table"
 version = 1
 
 [dimensions.scenario]
-domain = ["06", "07", "33a", "33b"]
+domain = ["06", "07", "33a", "33b", "34a", "34b", "34c"]
 [dimensions.version]
 domain = ["2.1.302", "unrecorded"]
 [dimensions.answer_06]
@@ -50,6 +63,12 @@ domain = ["preempts", "fires-regardless"]
 domain = ["ran", "prompted", "denied"]
 [dimensions.answer_33b]
 domain = ["ran", "prompted", "denied"]
+[dimensions.answer_34a]
+domain = ["retried", "fell-back", "reported"]
+[dimensions.answer_34b]
+domain = ["blocked", "proceeded"]
+[dimensions.answer_34c]
+domain = ["all-ran", "all-prompted", "mixed"]
 
 [[row]]
 id = "06::2.1.302::does-not-match"
@@ -121,4 +140,58 @@ emit = { verdict = "changed", since = "2.1.302", observed = "2026-10-23" }
 id = "33b::unrecorded"
 match = { scenario = "33b" }
 guard = { version = "unrecorded", answer_33b = ["ran", "prompted", "denied"] }
+emit = { verdict = "unrecorded", since = "", observed = "" }
+
+[[row]]
+id = "34a::2.1.302::fell-back"
+match = { scenario = "34a" }
+guard = { version = "2.1.302", answer_34a = "fell-back" }
+emit = { verdict = "agrees", since = "2.1.302", observed = "2026-10-24" }
+
+[[row]]
+id = "34a::2.1.302::other"
+match = { scenario = "34a" }
+guard = { version = "2.1.302", answer_34a = ["retried", "reported"] }
+emit = { verdict = "changed", since = "2.1.302", observed = "2026-10-24" }
+
+[[row]]
+id = "34a::unrecorded"
+match = { scenario = "34a" }
+guard = { version = "unrecorded", answer_34a = ["retried", "fell-back", "reported"] }
+emit = { verdict = "unrecorded", since = "", observed = "" }
+
+[[row]]
+id = "34b::2.1.302::blocked"
+match = { scenario = "34b" }
+guard = { version = "2.1.302", answer_34b = "blocked" }
+emit = { verdict = "agrees", since = "2.1.302", observed = "2026-10-24" }
+
+[[row]]
+id = "34b::2.1.302::other"
+match = { scenario = "34b" }
+guard = { version = "2.1.302", answer_34b = "proceeded" }
+emit = { verdict = "changed", since = "2.1.302", observed = "2026-10-24" }
+
+[[row]]
+id = "34b::unrecorded"
+match = { scenario = "34b" }
+guard = { version = "unrecorded", answer_34b = ["blocked", "proceeded"] }
+emit = { verdict = "unrecorded", since = "", observed = "" }
+
+[[row]]
+id = "34c::2.1.302::all-ran"
+match = { scenario = "34c" }
+guard = { version = "2.1.302", answer_34c = "all-ran" }
+emit = { verdict = "agrees", since = "2.1.302", observed = "2026-10-24" }
+
+[[row]]
+id = "34c::2.1.302::other"
+match = { scenario = "34c" }
+guard = { version = "2.1.302", answer_34c = ["all-prompted", "mixed"] }
+emit = { verdict = "changed", since = "2.1.302", observed = "2026-10-24" }
+
+[[row]]
+id = "34c::unrecorded"
+match = { scenario = "34c" }
+guard = { version = "unrecorded", answer_34c = ["all-ran", "all-prompted", "mixed"] }
 emit = { verdict = "unrecorded", since = "", observed = "" }
