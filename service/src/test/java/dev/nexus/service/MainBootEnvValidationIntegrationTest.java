@@ -357,9 +357,10 @@ class MainBootEnvValidationIntegrationTest {
      * and the model is a sparse file of zeros past the size floor, so ONNX Runtime refuses it in
      * createSession. A process that stayed up would trip bootWith's 120 s "did not exit" assertion; the
      * native smoke would read that as a 60 s "never became healthy" FAIL, never a pass.
-     * Scope: this runs Main on the JVM. On the native image, native-boot-shapes-smoke.sh's truncated-model
-     * leg covers a throw before OrtInitGate.enter (the size floor); a throw after it (signal handlers in,
-     * ORT loaded, createSession failing) is not exercised on the native image.
+     * Scope: this runs Main on the JVM. On the native image, native-boot-shapes-smoke.sh covers both sides:
+     * its truncated-model shape throws before OrtInitGate.enter (the size floor), and its zero-model shape
+     * reaches createSession with this same 250 MB file (nexus-rc4pz; engine-service-v0.1.164 linux-amd64
+     * exited 1 on ORT_INVALID_PROTOBUF within seconds, 2026-10-23). That shape runs at engine release.
      */
     @Test
     void anUncaughtBgeEmbedderFailure_endsTheProcessOnItsOwn() throws Exception {

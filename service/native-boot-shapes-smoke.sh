@@ -9,6 +9,10 @@
 #   truncated-model  both bge files present, model a few bytes: exits non-zero naming
 #                    the size floor (never "absent"), keyless AND keyed (Sam's ruling:
 #                    a both-files-present truncated model fails loud even with a key).
+#   zero-model       both bge files present, model 250 MB of zeros (past the size floor):
+#                    ONNX Runtime refuses it in createSession and the process ends on its own,
+#                    non-zero, naming the embedder (nexus-rc4pz; the JVM's counterpart is
+#                    MainBootEnvValidationIntegrationTest's anUncaughtBgeEmbedderFailure test).
 #
 # Every boot gets its own EMPTY NX_ORT_NATIVE_DIR and its own NX_ONNX_MODEL_DIR under
 # one per-run private scratch dir, and a clean env (env -i) so an ambient
@@ -49,10 +53,11 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WINLIKE=1 ;; *) WINLIKE=0 ;; esac
 # nexus-s5lfh: bounded docker calls, as native-smoke.sh bounds its own (nexus-ub4ge). GNU timeout on
 # Linux runners; gtimeout from Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call
 # runs unbounded as before.
+# --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
 _bounded() {
   local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
   else "$@"; fi
 }
 
@@ -270,9 +275,34 @@ run_truncated_model() {
   done
 }
 
+# ── Shape (d): a zero model past the size floor (nexus-rc4pz) ─────────────────
+# The truncated model fails at the size floor; this one passes it, so the engine loads ONNX Runtime
+# and createSession refuses the bytes. Measured on engine-service-v0.1.164 linux-amd64 (2026-10-23):
+# ORT_INVALID_PROTOBUF from OrtSession.createSession, exit 1 within seconds. The file is sparse.
+run_zero_model() {
+  leg_ok=0
+  boot_prepare zero-model || { leg_ok=1; verdict "zero-model"; return; }
+  mkdir -p "$BOOT_MODELS/bge-base-en-v1.5/onnx"
+  printf '{}' > "$BOOT_MODELS/bge-base-en-v1.5/onnx/tokenizer.json"
+  python3 -c "import sys; open(sys.argv[1], 'wb').truncate(250000000)" "$BOOT_MODELS/bge-base-en-v1.5/onnx/model.onnx"
+  boot_start ""
+  wait_exit 90; EXIT_TIMEOUT=$?
+  ck "exits within the bound" 'echo "still running after 90 s; killed"' exited_in_bound
+  ck "exits non-zero, not a crash or a kill" 'echo "exit $EXIT_RC"' exited_with_failure
+  ck "never reaches service_ready" 'echo "service_ready was logged"' no_log 'event=service_ready'
+  ck "ONNX Runtime extracted (applyAtBoot ran)" 'grep -m1 ort_native_dir "$BOOT_LOG"' \
+    has_log 'event=ort_native_dir source=extracted'
+  ck "reached createSession (ONNX Runtime refused the model)" 'echo "no OrtSession.createSession frame"' \
+    has_log 'OrtSession.createSession'
+  ck "the failure is the embedder's" 'echo "no Bge768Embedder failure in the output"' \
+    has_log 'Failed to initialise Bge768Embedder'
+  verdict "zero-model (both files present, 250 MB of zeros: createSession refuses it, the process ends on its own)"
+}
+
 echo "boot shapes (RDR-210 P2.2): $BIN"
 run_cloud_shape
 run_neither_family
 run_truncated_model
+run_zero_model
 
 if [ "$fail" = "0" ]; then echo "BOOT SHAPES PASS"; exit 0; else echo "BOOT SHAPES FAIL"; exit 1; fi

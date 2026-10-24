@@ -14,13 +14,16 @@ BUILDER=lp2qo-lin-build
 
 # nexus-rc4pz: bounded docker calls, as native-smoke.sh bounds its own (nexus-ub4ge). GNU timeout on
 # Linux; gtimeout from Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call runs
-# unbounded as before.
+# unbounded as before, with a warning.
+# --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
 _bounded() {
   local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
   else "$@"; fi
 }
+command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 \
+  || echo "WARN: neither timeout nor gtimeout (brew install coreutils); every Docker call runs unbounded" >&2
 
 cleanup() {
   _bounded 60 docker rm -f "$PG" "$BUILDER" >/dev/null 2>&1 || true
@@ -49,8 +52,9 @@ _bounded 600 docker run -d --name "$PG" --network "$NET" \
   -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus -e POSTGRES_PASSWORD=nexus \
   pgvector/pgvector:pg17 >/dev/null
 echo "waiting for pg..."
-for _ in $(seq 1 90); do _bounded 10 docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
-_bounded 10 docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector not ready after 90 s"; exit 2; }
+# 90 attempts: 90 s when docker answers, about 9 min at most when every exec hangs to its 5 s bound.
+for _ in $(seq 1 90); do _bounded 5 docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
+_bounded 5 docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector not ready after 90 attempts"; exit 2; }
 sleep 2; echo "pg ready"
 
 # Build + smoke inside the linux/arm64 GraalVM container. Docker socket + host

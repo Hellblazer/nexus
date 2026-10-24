@@ -33,10 +33,11 @@ export SMOKE_TMP
 
 # nexus-ub4ge: bounded docker and psql calls. GNU timeout on Linux runners; gtimeout from
 # Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call runs unbounded as before.
+# --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
 _bounded() {
   local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
   else "$@"; fi
 }
 

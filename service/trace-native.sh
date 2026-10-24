@@ -12,22 +12,26 @@ mkdir -p "$TRACE_DIR"
 
 # nexus-rc4pz: bounded docker calls, as native-smoke.sh bounds its own (nexus-ub4ge). GNU timeout on
 # Linux; gtimeout from Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call runs
-# unbounded as before.
+# unbounded as before, with a warning.
+# --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
 _bounded() {
   local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"
+  if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
   else "$@"; fi
 }
+command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 \
+  || echo "WARN: neither timeout nor gtimeout (brew install coreutils); every Docker call runs unbounded" >&2
 
 PGPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 SVCPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 echo "PGPORT=$PGPORT SVCPORT=$SVCPORT TRACE_DIR=$TRACE_DIR"
 _bounded 60 docker rm -f lp2qo-pg >/dev/null 2>&1 || true
 _bounded 600 docker run -d --name lp2qo-pg -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus -e POSTGRES_PASSWORD=nexus -p ${PGPORT}:5432 pgvector/pgvector:pg17 >/dev/null
-for _ in $(seq 1 90); do _bounded 10 docker exec lp2qo-pg pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
-_bounded 10 docker exec lp2qo-pg pg_isready -U nexus >/dev/null 2>&1 \
-  || { echo "FAIL: pgvector not ready after 90 s"; _bounded 60 docker rm -f lp2qo-pg >/dev/null 2>&1; exit 2; }
+# 90 attempts: 90 s when docker answers, about 9 min at most when every exec hangs to its 5 s bound.
+for _ in $(seq 1 90); do _bounded 5 docker exec lp2qo-pg pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
+_bounded 5 docker exec lp2qo-pg pg_isready -U nexus >/dev/null 2>&1 \
+  || { echo "FAIL: pgvector not ready after 90 attempts"; _bounded 60 docker rm -f lp2qo-pg >/dev/null 2>&1; exit 2; }
 sleep 2; echo "PG ready"
 
 export NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/nexus"
