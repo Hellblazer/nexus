@@ -59,9 +59,9 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "up to about 1.3 GB to download, 2.4 to 3.1 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
-    "address, token and tenant for, up to about 0.7 GB to download, 2.1 to 2.3 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 2.1 to 2.3 GB on disk; a service can be added later), "
-    "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
+    "up to about 0.55 GB to download, 1.6 to 2.3 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
+    "address, token and tenant for, up to about 0.2 GB to download, 1.3 to 1.5 GB on disk), cli-only (the CLI alone, up to about 0.2 GB to download, 1.3 to 1.5 GB on disk; a service can be added later), "
+    "not-now (install nothing and stop asking). These sizes leave out PDF support, which installs the first time a PDF is indexed. For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. For cloud, setup opens a page in the user's browser "
     "where they type the service address, token and tenant themselves: never ask for the token, and never put it in a message "
     "or a tool call. Setup takes several minutes. "
@@ -257,8 +257,8 @@ def no_service_notice() -> str | None:
         "Nexus has no usable service on this machine: no service address is configured and no local service "
         "is running, so the Nexus tools that need storage will fail. The setup tool, or the user running "
         "/conexus:setup, sets one up, and setup_status says what is already done. Setup installs software "
-        "(a local service: up to about 1.3 GB to download, 2.4 to 3.1 GB on disk; the CLI alone: up to about 0.7 GB to "
-        "download, 2.1 to 2.3 GB on disk) or connects a managed service the user has an address, token and tenant for (no service "
+        "(a local service: up to about 0.55 GB to download, 1.6 to 2.3 GB on disk; the CLI alone: up to about 0.2 GB to "
+        "download, 1.3 to 1.5 GB on disk) or connects a managed service the user has an address, token and tenant for (no service "
         "download; the user types them into a page that opens in their browser), so act only on the user's answer."
     )
 

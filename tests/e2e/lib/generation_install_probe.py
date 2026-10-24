@@ -48,7 +48,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from lock_check import LOCK_WITNESSES, lock_verdict  # sibling module: the probe is run as a script from tests/e2e/lib
+from lock_check import LOCK_PDF_WITNESSES, LOCK_WITNESSES, lock_verdict  # sibling module: the probe is run as a script from tests/e2e/lib
 
 FAILURES: list[str] = []
 
@@ -187,6 +187,31 @@ def build_generation(
         )
 
     return install_with_propagation_wait(run, source, settings, clock=clock, sleep=sleep)
+
+
+#: The modules the ``pdf`` extra installs (nexus.pdf_stack.STACK_MODULES, restated: this
+#: probe runs as a script and imports nothing from the package under test).
+PDF_STACK_MODULES = ("docling", "mineru", "torch", "torchvision", "pdftext")
+
+
+def requested_pdf_extra(source: str) -> bool:
+    """Whether the install spec asks for the ``pdf`` extra: ``conexus[pdf]``,
+    ``conexus[local,pdf]``, ``/path/to.whl[pdf]``. A plain ``conexus`` is slim
+    since nexus-2k66t.4.2: docling, MinerU, torch, torchvision and pdftext move
+    to an extra the first PDF index fetches."""
+    import re
+
+    match = re.search(r"\[([^\]]*)\]\s*$", source.strip())
+    return bool(match) and "pdf" in {part.strip() for part in match.group(1).split(",")}
+
+
+def stack_mode(found: dict[str, bool]) -> str:
+    """``pdf`` (every stack module resolves), ``slim`` (none does) or ``partial``
+    (some: a broken install, never a valid shape)."""
+    count = sum(1 for ok in found.values() if ok)
+    if count == len(found):
+        return "pdf"
+    return "slim" if count == 0 else "partial"
 
 
 def pdftext_bound_ok(pdftext_version: str, pypdfium2_version: str) -> bool:
@@ -398,6 +423,27 @@ def main() -> int:
         "PyAV's ffmpeg-62 dylibs colliding with opencv's ffmpeg-61 (nexus-heykz)",
     )
 
+    # (7b) nexus-2k66t.4.2: is the PDF stack here, and is that what the source
+    # spec asked for? A plain `conexus` is SLIM (no docling, MinerU, torch,
+    # torchvision, pdftext); `conexus[pdf]` has all five. A mix is a broken
+    # install. Checked both ways so neither shape passes for the other.
+    found_proc = subprocess.run(
+        [str(generation / "bin" / "python"), "-c",
+         "import importlib.util as u;"
+         f"print(','.join(m for m in {PDF_STACK_MODULES!r} if u.find_spec(m)))"],
+        capture_output=True, text=True, timeout=300, env=env,
+    )
+    present = {m for m in found_proc.stdout.strip().split(",") if m}
+    mode = stack_mode({m: m in present for m in PDF_STACK_MODULES})
+    expect_pdf = requested_pdf_extra(source)
+    check(
+        mode != "partial" and (mode == "pdf") == expect_pdf,
+        f"the generation's PDF stack is {mode} and the source spec {'asks for' if expect_pdf else 'does not ask for'} the pdf extra",
+        f"the generation's PDF stack is {mode} ({sorted(present)}) but the source spec {source!r} "
+        f"{'asks for' if expect_pdf else 'does not ask for'} the pdf extra: a slim spec must install none of "
+        "docling/mineru/torch/torchvision/pdftext, a pdf spec all of them (nexus-2k66t.4.2)",
+    )
+
     # (8) nexus-kard5 (GH #1533 follow-on): the generation's OWN resolve of
     # pdftext/pypdfium2 must land below the same ceiling leg 8c already
     # checks for $PROBE_PYTHON -- see pdftext_bound_ok()'s docstring for why
@@ -405,27 +451,33 @@ def main() -> int:
     # today (the packaged [tool.uv] override already reaches
     # install_generation.sh's overrides.txt); this closes the gap so a
     # regression in that path is caught by the MVV instead of shipping.
-    bound = subprocess.run(
-        [str(generation / "bin" / "python"), "-c",
-         "from importlib.metadata import version;"
-         "print(version('pdftext'));"
-         "print(version('pypdfium2'))"],
-        capture_output=True, text=True, timeout=300, env=env,
-    )
-    bound_lines = bound.stdout.strip().splitlines()
-    bound_ok = (
-        bound.returncode == 0
-        and len(bound_lines) == 2
-        and pdftext_bound_ok(bound_lines[0], bound_lines[1])
-    )
-    check(
-        bound_ok,
-        f"pdftext/pypdfium2 in the generation are below the GH #1533 bound: {bound_lines}",
-        "pdftext/pypdfium2 in the generation are ABOVE the GH #1533 bound "
-        f"({bound_lines or bound.stderr.strip()[:200]!r}) -- the packaged "
-        "overrides file did not reach the generation's own `uv pip install`; "
-        "mineru's PageChars loses __iter__ on pdftext>=0.7 (GH #1533)",
-    )
+    # On a SLIM generation neither package is installed: there is nothing to
+    # bound, and the stack-mode check above is the assertion that proves it.
+    if mode == "pdf":
+        bound = subprocess.run(
+            [str(generation / "bin" / "python"), "-c",
+             "from importlib.metadata import version;"
+             "print(version('pdftext'));"
+             "print(version('pypdfium2'))"],
+            capture_output=True, text=True, timeout=300, env=env,
+        )
+        bound_lines = bound.stdout.strip().splitlines()
+        bound_ok = (
+            bound.returncode == 0
+            and len(bound_lines) == 2
+            and pdftext_bound_ok(bound_lines[0], bound_lines[1])
+        )
+        check(
+            bound_ok,
+            f"pdftext/pypdfium2 in the generation are below the GH #1533 bound: {bound_lines}",
+            "pdftext/pypdfium2 in the generation are ABOVE the GH #1533 bound "
+            f"({bound_lines or bound.stderr.strip()[:200]!r}) -- the packaged "
+            "overrides file did not reach the generation's own `uv pip install`; "
+            "mineru's PageChars loses __iter__ on pdftext>=0.7 (GH #1533)",
+        )
+    else:
+        print("SKIP pdftext/pypdfium2 bound: the generation is slim (no pdftext to bound); "
+              "the PDF stack check above proved none of the stack is installed")
 
     # (9) nexus-2k66t.4.1: the generation holds the versions the wheel's lock
     # names. The constraints file is read out of the GENERATION (the copy its
@@ -439,9 +491,10 @@ def main() -> int:
                  "nothing to constrain the install with (nexus-2k66t.4.1)"):
         print("\ngeneration install path: assertions failed")
         return 1
+    witnesses = LOCK_WITNESSES + (LOCK_PDF_WITNESSES if mode == "pdf" else ())
     lock = subprocess.run(
         [str(generation / "bin" / "python"), str(Path(__file__).with_name("lock_check.py")),
-         str(shipped), *LOCK_WITNESSES],
+         str(shipped), *witnesses],
         capture_output=True, text=True, timeout=300, env=env,
     )
     try:
@@ -452,7 +505,7 @@ def main() -> int:
                  f"the lock check did not produce a report: {(lock.stdout + lock.stderr).strip()[-400:]!r}"):
         print("\ngeneration install path: assertions failed")
         return 1
-    problems = lock_verdict(lock_report)
+    problems = lock_verdict(lock_report, witnesses)
     for name, (have, locked) in sorted(lock_report["witness"].items()):
         print(f"     {name}: installed {have}, lock {locked}")
     print(f"     pins examined {lock_report['examined']}, matched {lock_report['matched']}, "
@@ -461,7 +514,7 @@ def main() -> int:
     check(
         not problems,
         f"the generation matches the shipped lock ({lock_report['matched']} pins, "
-        f"witnesses {', '.join(LOCK_WITNESSES)})",
+        f"witnesses {', '.join(witnesses)})",
         "the generation does NOT match the lock its wheel shipped: " + "; ".join(problems[:6]),
     )
 

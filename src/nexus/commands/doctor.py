@@ -2666,9 +2666,11 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
     "check_mineru",
     is_flag=True,
     default=False,
-    help="Verify MinerU is importable. nexus-2fyb promoted mineru[all] "
-         "from optional extra to default dep; this surfaces a corrupt "
-         "install at doctor-time instead of waiting for the first "
+    help="Verify MinerU is importable. MinerU is part of the on-demand "
+         "pdf extra (nexus-2k66t.4.2; a default dependency from nexus-2fyb "
+         "until then), so on an install without PDF support this reports "
+         "N/A and names the command that installs it. Otherwise it surfaces "
+         "a corrupt install at doctor-time instead of waiting for the first "
          "math-PDF index to fail.",
 )
 @click.option(

@@ -24,8 +24,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests" / "e2e" / "lib"))
 
-from generation_install_probe import pdftext_bound_ok  # noqa: E402
-from lock_check import LOCK_MATCHED_FLOOR, LOCK_WITNESSES, lock_verdict  # noqa: E402
+from generation_install_probe import PDF_STACK_MODULES, pdftext_bound_ok, requested_pdf_extra, stack_mode  # noqa: E402
+from lock_check import LOCK_MATCHED_FLOOR, LOCK_PDF_WITNESSES, LOCK_WITNESSES, lock_verdict  # noqa: E402
 
 
 class TestPdftextBoundOk:
@@ -71,6 +71,54 @@ class TestLockVerdict:
     def test_a_check_that_examined_too_little_fails(self) -> None:
         problems = lock_verdict(_report(matched=LOCK_MATCHED_FLOOR - 1))
         assert any("examined too little" in p for p in problems)
+
+
+class TestSlimGeneration:
+    """nexus-2k66t.4.2: a plain `conexus` is slim, so the release probe must not ask a slim
+    generation for pdftext, and must not let a slim generation pass for a pdf one."""
+
+    def test_the_probe_names_the_same_modules_as_the_package(self) -> None:
+        from nexus.pdf_stack import STACK_MODULES
+
+        assert PDF_STACK_MODULES == STACK_MODULES
+
+    def test_a_plain_spec_is_slim_and_a_pdf_extra_spec_is_not(self) -> None:
+        assert not requested_pdf_extra("conexus")
+        assert not requested_pdf_extra("conexus==7.86.0")
+        assert not requested_pdf_extra("conexus[local]")
+        assert requested_pdf_extra("conexus[pdf]")
+        assert requested_pdf_extra("conexus[local, pdf]")
+        assert requested_pdf_extra("/tmp/conexus-7.86.0-py3-none-any.whl[pdf]")
+
+    def test_stack_mode_distinguishes_slim_pdf_and_a_broken_mix(self) -> None:
+        assert stack_mode({m: False for m in PDF_STACK_MODULES}) == "slim"
+        assert stack_mode({m: True for m in PDF_STACK_MODULES}) == "pdf"
+        assert stack_mode({m: m == "torch" for m in PDF_STACK_MODULES}) == "partial"
+
+    def test_a_slim_install_passes_the_lock_witnesses_without_the_pdf_only_one(self) -> None:
+        report = _report(witness={name: ["1", "==1"] for name in LOCK_WITNESSES})
+        assert lock_verdict(report) == []
+        assert any("opencv-python-headless" in p for p in lock_verdict(report, LOCK_WITNESSES + LOCK_PDF_WITNESSES)), (
+            "an install that carries the stack and lacks opencv is NOT proved by the slim witnesses"
+        )
+
+    def test_the_pdf_only_witness_is_not_in_the_default_closure(self) -> None:
+        """If opencv-python-headless ever moves into the default dependencies the slim witnesses should grow."""
+        import tomllib
+
+        lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+        pk = {p["name"]: p for p in lock["package"]}
+        seen: set[str] = set()
+        todo = [d["name"] for d in pk["conexus"]["dependencies"]]
+        while todo:
+            name = todo.pop()
+            if name not in seen:
+                seen.add(name)
+                todo.extend(d["name"] for d in pk.get(name, {}).get("dependencies", []))
+        for w in LOCK_WITNESSES:
+            assert w in seen, f"{w} is a slim witness but is not in the default dependency closure"
+        for w in LOCK_PDF_WITNESSES:
+            assert w not in seen, f"{w} is now a default dependency; move it to LOCK_WITNESSES"
 
 
 class TestLockCheckScript:

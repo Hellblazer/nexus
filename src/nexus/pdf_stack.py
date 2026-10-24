@@ -343,6 +343,62 @@ def _running_version() -> str:
     return version("conexus")
 
 
+# ── the CURRENT generation (what a peer's install produced) ──────────────────
+
+#: Run by the current generation's own interpreter: whether it resolves every
+#: stack module. Never imports one.
+_PROBE_SOURCE = (
+    "import importlib.util as u, sys\n"
+    "sys.exit(0 if all(u.find_spec(m) is not None for m in sys.argv[1:]) else 1)\n"
+)
+_PROBE_TIMEOUT_S = 30.0
+
+
+def _current_generation_receipt():
+    """``(generation_dir, receipt)`` for what ``<tools>/current`` names, or
+    None when there is no readable current generation."""
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred
+        from nexus.commands import self_cmd  # noqa: PLC0415 — deferred
+
+        gen = self_cmd._current_generation_dir(install_layout.tools_dir())  # noqa: SLF001 — same module family
+        if gen is None:
+            return None
+        return gen, install_layout.read_receipt(gen)
+    except Exception:  # noqa: BLE001 — no readable current generation: no claim
+        return None
+
+
+def current_generation_has_stack() -> bool:
+    """Whether the generation ``current`` names already holds the stack: its
+    receipt lists ``pdf`` AND its own interpreter resolves every module.
+
+    :func:`state` answers for the RUNNING interpreter, and the running
+    interpreter is the old generation: a peer that installed the stack built a
+    different generation and flipped ``current`` to it, which ``state()`` cannot
+    see. This is the question a waiter asks after it gets the install lock."""
+    found = _current_generation_receipt()
+    if found is None:
+        return False
+    gen, receipt = found
+    if "pdf" not in receipt.extras:
+        return False
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred
+        from nexus.commands import self_cmd  # noqa: PLC0415 — deferred
+
+        python = install_layout.venv_python(gen, platform=self_cmd._plat())  # noqa: SLF001
+        from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred
+
+        proc = run_bounded(  # the generation's own interpreter, argv list, no shell
+            argv_off_cwd([str(python), "-c", _PROBE_SOURCE, *STACK_MODULES]),
+            timeout=_PROBE_TIMEOUT_S, text=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 # ── require / ensure ─────────────────────────────────────────────────────────
 
 _present_cache: bool = False
@@ -442,11 +498,30 @@ def _install_lock():
 
 
 def _install_generation(*, carrying: bool = False) -> None:
-    """Build a generation that adds the ``pdf`` extra at the running version
-    and flip to it. The one place the on-demand install is spelled."""
+    """Build a generation that adds the ``pdf`` extra and flip to it. The one
+    place the on-demand install is spelled.
+
+    The version is the running one, unless ``current`` already holds a NEWER
+    one: a stale process (a long-lived hook, an old session) must not flip
+    ``current`` backward. Then the build is at current's version and keeps
+    current's extras, or, when current was built from a checkout, refuses with
+    the command that rebuilds it."""
     from nexus.commands import self_cmd  # noqa: PLC0415 — deferred
 
     version = _running_version()
+    extras: tuple[str, ...] = ("pdf",)
+    found = _current_generation_receipt()
+    if found is not None:
+        _gen, receipt = found
+        if _newer(receipt.version, version):
+            if receipt.source_kind == "directory":
+                raise PdfStackMissingError(
+                    f"PDF support is not installed in the current generation ({receipt.version}, built from "
+                    f"{receipt.source}), which is newer than this process ({version}); nothing was written. "
+                    "Run: NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh"
+                )
+            version = receipt.version
+            extras = tuple(sorted({"pdf", *receipt.extras}))
     notice = INSTALL_NOTICE.format(version=version)
     if carrying:
         notice = notice.replace("Installing PDF support", "Carrying PDF support forward", 1)
@@ -454,7 +529,18 @@ def _install_generation(*, carrying: bool = False) -> None:
     # perform_self_install reports its reap on stdout; this command's stdout is
     # its own (a caller may parse it), so the install's chatter goes to stderr.
     with contextlib.redirect_stdout(sys.stderr):
-        self_cmd.perform_self_install(add_extras=("pdf",), version=version, progress=True)
+        self_cmd.perform_self_install(add_extras=extras, version=version, progress=True)
+
+
+def _newer(candidate: str, than: str) -> bool:
+    """Whether version *candidate* is strictly newer than *than*. An unreadable
+    version is not newer (the running version stays the pin)."""
+    from packaging.version import InvalidVersion, Version  # noqa: PLC0415 — deferred
+
+    try:
+        return Version(candidate) > Version(than)
+    except InvalidVersion:
+        return False
 
 
 def ensure(entry: str) -> Outcome:
@@ -493,11 +579,15 @@ def ensure(entry: str) -> Outcome:
             f"and run: {plan.command}"
         )
     with _install_lock():
-        # A peer may have installed it while we waited.
+        # A peer may have installed it while we waited. state() reads THIS
+        # interpreter, which is the old generation; the peer built and flipped
+        # to another one, so the question goes to `current`. The caller re-runs.
         st = state()
         if st.present:
             _present_cache = True
             return Outcome.PRESENT
+        if current_generation_has_stack():
+            return Outcome.INSTALLED
         try:
             _install_generation()
         except PdfStackError:
@@ -524,8 +614,20 @@ def rerun_command(argv: list[str] | None = None) -> int:
     return proc.returncode
 
 
-def _fail(exc: PdfStackError) -> NoReturn:
+#: Appended to a network or installer failure of a command that CAN go on
+#: without the stack (``nx index repo``: code and prose do not need it), so an
+#: offline box is not locked out of indexing its code by a PDF it happens to hold.
+HOLD_HINT = (
+    "To index code and prose now and hold the PDFs back, run the same command with "
+    f"{POLICY_ENV}=refuse (it exits {EXIT_REFUSED} over the held PDFs); "
+    f"{INSTALL_COMMAND} installs PDF support when the network is back."
+)
+
+
+def _fail(exc: PdfStackError, *, hint: str = "") -> NoReturn:
     _say(f"nx: {exc}")
+    if hint:
+        _say(hint)
     raise SystemExit(exc.exit_code)
 
 
@@ -545,7 +647,7 @@ def ensure_or_exit(entry: str, *, hold_on_refuse: bool = False, defer_rerun: boo
             return False
         _fail(exc)
     except PdfStackError as exc:
-        _fail(exc)
+        _fail(exc, hint=HOLD_HINT if hold_on_refuse else "")
     if outcome is Outcome.INSTALLED:
         if defer_rerun:
             raise RerunRequired()
@@ -646,6 +748,10 @@ def carry_forward(*, auto_mode: bool = False) -> str | None:
             return f"PDF support carry-forward deferred: the last attempt failed {int(age)}s ago"
     try:
         with _install_lock():
+            # A peer's carry (the lockstep upgrade, a SessionStart --auto, a
+            # pre-change hook) may have built it while we waited.
+            if current_generation_has_stack():
+                return "PDF support was already carried forward into the current generation"
             _install_generation(carrying=True)
     except Exception as exc:  # noqa: BLE001 — reported, retried next run
         if sentinel is not None:

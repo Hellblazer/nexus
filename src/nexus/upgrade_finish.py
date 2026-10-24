@@ -863,10 +863,32 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
             if _classify(process_command(proc.pid)) != "mineru":
                 actions.append(f"{proc.kind} pid {proc.pid}: gone or recycled; skipped")
                 continue
+            # nexus-2k66t.4.2: `nx mineru start` ensures the PDF stack first, and on a
+            # box without it that is a 0.8 GB install -- inside a 300 s cap, in a
+            # restart pass. Cycle MinerU only onto a generation that HAS the stack
+            # (this interpreter's, or `current`'s after a carry-forward), and run the
+            # start under NX_PDF_STACK=refuse so it can never turn into a download.
+            # Otherwise leave the stale server running and say how to finish.
+            if not _pdf_stack_available_for_restart():
+                actions.append(
+                    f"mineru pid {proc.pid} is stale but the PDF stack is not installed in the "
+                    "current generation, so it was left running; `nx self install --extras pdf` "
+                    "installs it, then `nx mineru stop && nx mineru start`"
+                )
+                continue
             try:
                 run_bounded(nx_argv("mineru", "stop"), text=False, timeout=60)
-                run_bounded(nx_argv("mineru", "start"), text=False, timeout=300)
-                actions.append(f"cycled MinerU (was pid {proc.pid})")
+                started = run_bounded(
+                    nx_argv("mineru", "start"), text=False, timeout=300,
+                    env={**os.environ, "NX_PDF_STACK": "refuse"},
+                )
+                if started.returncode == 69:
+                    actions.append(
+                        f"mineru pid {proc.pid} was stopped but not restarted: the PDF stack is not "
+                        "installed (`nx self install --extras pdf`, then `nx mineru start`)"
+                    )
+                else:
+                    actions.append(f"cycled MinerU (was pid {proc.pid})")
             except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
                 actions.append(f"mineru cycle failed: {exc}")
     for proc in report.session_bound:
@@ -887,6 +909,17 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
             remedy = f"predates {report.installed_version}; restart it manually"
         actions.append(f"NEEDS HUMAN: {proc.kind} (pid {proc.pid}) {remedy}")
     return actions
+
+
+def _pdf_stack_available_for_restart() -> bool:
+    """Whether a MinerU restart can find the PDF stack without installing it:
+    this interpreter has it, or the generation ``current`` names does."""
+    try:
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+        return pdf_stack.state().present or pdf_stack.current_generation_has_stack()
+    except Exception:  # noqa: BLE001 — cannot tell: do not start a restart that might download
+        return False
 
 
 def _current_generation_receipt() -> "install_layout.Receipt | None":

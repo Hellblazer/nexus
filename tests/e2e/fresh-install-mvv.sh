@@ -387,10 +387,17 @@ if [ "$SELF_TEST" = 1 ]; then
 fi
 
 if [ "$PUBLISHED_MODE" = 1 ]; then
+    # nexus-2k66t.4.2: a plain `conexus` is SLIM (docling, MinerU, torch,
+    # torchvision and pdftext are the on-demand `pdf` extra). The opt-in formula
+    # check parses a real PDF through MinerU on THIS uv-tool layer, which an
+    # on-demand install cannot reach (it builds a generation), so that run
+    # installs the extra up front.
+    _PKG_EXTRAS=""
+    [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ] && _PKG_EXTRAS="[pdf]"
     if [ -n "$PUBLISHED_VERSION" ]; then
-        PKG_SPEC="conexus==$PUBLISHED_VERSION"
+        PKG_SPEC="conexus${_PKG_EXTRAS}==$PUBLISHED_VERSION"
     else
-        PKG_SPEC="conexus"
+        PKG_SPEC="conexus${_PKG_EXTRAS}"
     fi
     echo "================================================================"
     echo " FRESH-INSTALL MVV — PUBLISHED artifact (uv-tool resolution layer)"
@@ -1104,10 +1111,30 @@ echo "── 8c/10 always-on resolver bound: pdftext/pypdfium2 (nexus-gqrg0 roun
 # generation -- see generation_install_probe.py's matching assertion
 # (pattern: its own av-absence check) for the SAME bound checked a second
 # time against the GENERATION's python once leg 9 creates it.
-RESOLVER_BOUND_OUT="$("$PROBE_PYTHON" -c '
-import sys
+# nexus-2k66t.4.2: on a SLIM install (the default since the pdf extra went
+# on-demand) pdftext is not installed, so there is no resolve to bound. The leg
+# then asserts the slim shape instead -- none of the five stack modules is
+# present -- and says SLIM in its output. It is never a quiet pass: a partial
+# stack fails, and the opt-in formula check (which installs conexus[pdf])
+# requires the stack to be present.
+RESOLVER_BOUND_OUT="$(EXPECT_PDF_STACK="${NX_MVV_FORMULA_PDF_CHECK:-0}" "$PROBE_PYTHON" -c '
+import importlib.util, os, sys
 from importlib.metadata import version
 from packaging.version import Version
+
+MODS = ("docling", "mineru", "torch", "torchvision", "pdftext")
+found = [m for m in MODS if importlib.util.find_spec(m)]
+if len(found) == len(MODS):
+    pass
+elif not found:
+    if os.environ.get("EXPECT_PDF_STACK") == "1":
+        print("expected the pdf extra (NX_MVV_FORMULA_PDF_CHECK=1) but none of the stack is installed")
+        sys.exit(1)
+    print("SLIM install: none of docling/mineru/torch/torchvision/pdftext is installed (pdf extra on demand); pdftext/pypdfium2 bound not applicable bound_ok=n/a")
+    sys.exit(0)
+else:
+    print(f"PARTIAL PDF stack {found} -- a broken install, neither slim nor pdf")
+    sys.exit(1)
 
 pdftext_v = Version(version("pdftext"))
 pypdfium2_v = Version(version("pypdfium2"))
@@ -1119,7 +1146,7 @@ RESOLVER_BOUND_RC=$?
 echo "  $RESOLVER_BOUND_OUT" | tee "$LOGS/resolver-bound.log" >/dev/null
 echo "  $RESOLVER_BOUND_OUT"
 if [ "$RESOLVER_BOUND_RC" -ne 0 ]; then
-    _fail "resolved pdftext/pypdfium2 above the GH #1533 bound in $PROBE_PYTHON -- $RESOLVER_BOUND_OUT"
+    _fail "the PDF-stack resolver leg failed in $PROBE_PYTHON (pdftext/pypdfium2 above the GH #1533 bound, a partial stack, or a missing expected pdf extra) -- $RESOLVER_BOUND_OUT"
 fi
 
 # ── formula-PDF index (opt-in, --published mode only; nexus-gqrg0 / GH #1533) ──

@@ -121,9 +121,9 @@ NOT_INSTALLED: str = (
 QUESTION_TABLE: str = (
     "| Choice | What happens | Download |\n"
     "|---|---|---|\n"
-    "| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 to 3.1 GB on disk |\n"
-    "| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 2.1 to 2.3 GB on disk |\n"
-    "| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 2.1 to 2.3 GB on disk |\n"
+    "| Local | Install the CLI and run a Nexus service on this machine | about 0.55 GB down, 1.6 to 2.3 GB on disk |\n"
+    "| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.2 GB down, 1.3 to 1.5 GB on disk |\n"
+    "| CLI only | Install the CLI and decide about a service later | about 0.2 GB down, 1.3 to 1.5 GB on disk |\n"
     "| Not now | Nothing is installed | none |"
 )
 
@@ -149,9 +149,9 @@ BROKEN_PHRASE: str = "Nexus is installed but cannot start; setup repairs it"
 
 #: What the repair asks and costs: it builds the CLI again (the work of ``cli-only``).
 BROKEN_REPAIR: str = (
-    "Setup repairs it by building the CLI again, up to about 0.7 GB to download and several minutes. "
+    "Setup repairs it by building the CLI again, up to about 0.2 GB to download and several minutes. "
     "ASK THE USER FIRST and act only on the answer: cli-only repairs the CLI, local repairs it and also sets up "
-    "or starts a service on this machine (up to about 1.3 GB), cloud repairs it and connects it to a managed "
+    "or starts a service on this machine (up to about 0.55 GB), cloud repairs it and connects it to a managed "
     "service, not-now leaves it."
 )
 
@@ -217,14 +217,14 @@ def setup_text(platform: str | None = None, broken: str | None = None, mode: str
             "Show the user the command below and let them decide. "
             "It is for the user to run in a terminal; do not run it yourself unless the user asks you to.\n\n"
             f"    {REPAIR_COMMAND}\n\n"
-            "It builds the CLI again: up to about 0.7 GB to download and several minutes. Afterwards the user "
+            "It builds the CLI again: up to about 0.2 GB to download and several minutes. Afterwards the user "
             f"reconnects the `nexus` server ({RECONNECT_HOW}).\n\n"
             f"Commands for each operating system, and troubleshooting: {INSTALL_PAGE}"
         )
     if mode == "cloud":
         third = (
             "third asks for the managed service's address, token and tenant (the tenant for a mint credential) and saves them, "
-            "and downloads no service. Together they download about 0.7 GB and take several minutes."
+            "and downloads no service. Together they download about 0.2 GB and take several minutes."
         )
     else:
         third = (
@@ -262,9 +262,9 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "up to about 1.3 GB to download, 2.4 to 3.1 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
-    "address, token and tenant for, up to about 0.7 GB to download, 2.1 to 2.3 GB on disk), cli-only (the CLI alone, up to about 0.7 GB to download, 2.1 to 2.3 GB on disk; a service can be added later), "
-    "not-now (install nothing and stop asking). For local also ask whether the service should start when the "
+    "up to about 0.55 GB to download, 1.6 to 2.3 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
+    "address, token and tenant for, up to about 0.2 GB to download, 1.3 to 1.5 GB on disk), cli-only (the CLI alone, up to about 0.2 GB to download, 1.3 to 1.5 GB on disk; a service can be added later), "
+    "not-now (install nothing and stop asking). These sizes leave out PDF support, which installs the first time a PDF is indexed. For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. For cloud, setup opens a page in the user's browser "
     "where they type the service address, token and tenant themselves: never ask for the token, and never put it in a message "
     "or a tool call. Setup takes several minutes. "

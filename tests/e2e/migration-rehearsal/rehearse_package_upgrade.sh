@@ -477,11 +477,11 @@ if "$HOME/nxenv/bin/python" -c "import sys,zipfile; sys.exit(0 if 'nexus/_instal
     if [ -z "$LOCK_FILE" ]; then
       bad "the built generation holds no constraints.txt"
     else
-      LOCK_REPORT="$("$LOCK_GEN/bin/python" "$HOME/lib/lock_check.py" "$LOCK_FILE" onnxruntime opencv-python-headless pymupdf mcp 2>&1)"
+      LOCK_REPORT="$("$LOCK_GEN/bin/python" "$HOME/lib/lock_check.py" "$LOCK_FILE" onnxruntime pymupdf mcp 2>&1)"
       LOCK_CHECK_RC=$?
       printf '%s\n' "$LOCK_REPORT" | sed 's/^/       /'
       if [ "$LOCK_CHECK_RC" -eq 0 ]; then
-        ok "the generation's installed versions equal the wheel's lock (onnxruntime, opencv-python-headless, pymupdf, mcp and every other pin that applies)"
+        ok "the generation's installed versions equal the wheel's lock (onnxruntime, pymupdf, mcp and every other pin that applies; opencv-python-headless is the pdf extra's, and this bare build is slim by design, nexus-2k66t.4.2)"
       else
         bad "the generation's installed versions DIFFER from the wheel's lock"
       fi

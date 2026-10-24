@@ -297,23 +297,10 @@ def test_a_held_pdf_still_counts_as_present_for_the_orphan_sweep(tmp_path) -> No
     assert seen == [{"a.py", "held.pdf"}, {"a.py"}]
 
 
-def test_the_catalog_hook_hands_the_held_pdfs_to_the_sweep() -> None:
-    import inspect
-
-    from nexus import indexer as idx
-
-    assert "keep=housekeeping_keep" in inspect.getsource(idx._catalog_hook)
-    assert "housekeeping_keep=_pdf_held" in inspect.getsource(idx._run_index)
-
-
-def test_a_held_pdf_keeps_the_since_head_base_from_advancing() -> None:
-    """--since-head diffs from owners.head_hash; advancing it past a commit
-    whose PDF was held would never offer that PDF again."""
-    import inspect
-
-    from nexus import indexer as idx
-
-    assert 'stats.get("pdf_stack_held", 0)' in inspect.getsource(idx.index_repository)
+# The hold's wiring (keep= to housekeeping, pdf_stack_held in the stats, the
+# since-head base staying put, the exit 69) is pinned by behaviour in
+# tests/test_pdf_stack_index_repo_hold.py; source-text greps here let three
+# mutations through.
 
 
 def test_the_post_commit_hook_never_starts_a_download() -> None:
@@ -322,3 +309,165 @@ def test_the_post_commit_hook_never_starts_a_download() -> None:
     dispatch = [ln for ln in _STANZA.splitlines() if ln.lstrip().startswith("NX_PDF_STACK=refuse nx index repo")]
     assert len(dispatch) == 1, "the dispatch line must carry the refuse policy"
     assert "--since-head" in dispatch[0]
+
+
+# ── nx collection reindex: the purge comes first, so the gate comes before it ─
+
+
+@pytest.fixture
+def reindex_bed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A docs__ collection whose one source is a PDF on disk. The catalog and
+    the T3 client are fakes (tenant-free); the purge is a spy."""
+    from nexus.db.collection_purge import CascadeCounts
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    md = tmp_path / "note.md"
+    md.write_text("# note\n")
+
+    class _Bed:
+        pass
+
+    bed = _Bed()
+    bed.pdf, bed.md = pdf, md
+    bed.db = MagicMock(spec=HttpVectorClient)
+    bed.db.collection_info.side_effect = lambda _name: {"count": 4, "metadata": {}}
+    bed.sources = [str(pdf)]
+
+    def _col_get(**_kw):
+        return {"ids": [f"id{i}" for i in range(len(bed.sources))], "metadatas": [{"source_path": s} for s in bed.sources]}
+
+    col = MagicMock()
+    col.get.side_effect = _col_get
+    bed.db.get_or_create_collection.return_value = col
+    bed.purge = MagicMock(return_value=CascadeCounts())
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: MagicMock())
+    monkeypatch.setattr("nexus.catalog.tombstones.read_tombstones", lambda cat: [])
+    monkeypatch.setattr("nexus.catalog.tombstones.deleted_only_sources", lambda cat, tombs, paths, collection=None: [])
+    monkeypatch.setattr("nexus.db.collection_purge.purge_collection_cascade", bed.purge)
+    monkeypatch.setattr("nexus.commands.collection._t3", lambda: bed.db)
+    monkeypatch.setattr("nexus.commands.index.run_collection_postprocessing", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.corpus.discard_cached_registration", lambda name: None)
+    monkeypatch.setattr("nexus.corpus.ensure_collection_registered", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.db.t3.verify_collection_deep", MagicMock())
+    return bed
+
+
+@pytest.mark.parametrize("exc, code", [(_REFUSED, 69), (PdfStackNetworkError("could not be downloaded; nothing was written."), 75)])
+def test_collection_reindex_gates_on_the_stack_before_it_purges_the_collection(runner, reindex_bed, monkeypatch, exc, code) -> None:
+    ensure, calls = _ensure_raising(exc)
+    monkeypatch.setattr(pdf_stack, "ensure", ensure)
+    with patch("nexus.doc_indexer.index_pdf") as index_pdf:
+        result = runner.invoke(main, ["collection", "reindex", "docs__papers", "--force"])
+    assert result.exit_code == code, result.output
+    assert calls == ["nx collection reindex"]
+    reindex_bed.purge.assert_not_called()  # the data is still there
+    index_pdf.assert_not_called()
+    assert "Deleting collection" not in result.output
+
+
+def test_collection_reindex_after_an_install_reruns_and_purges_nothing_here(runner, reindex_bed, monkeypatch) -> None:
+    monkeypatch.setattr(pdf_stack, "ensure", lambda entry: Outcome.INSTALLED)
+    rerun = MagicMock(return_value=0)
+    monkeypatch.setattr(pdf_stack, "rerun_command", rerun)
+    result = runner.invoke(main, ["collection", "reindex", "docs__papers", "--force"])
+    assert result.exit_code == 0, result.output
+    rerun.assert_called_once()
+    reindex_bed.purge.assert_not_called()
+
+
+def test_collection_reindex_of_markdown_only_never_asks(runner, reindex_bed, monkeypatch) -> None:
+    reindex_bed.sources = [str(reindex_bed.md)]
+    ensure, calls = _ensure_raising(_REFUSED)
+    monkeypatch.setattr(pdf_stack, "ensure", ensure)
+    with patch("nexus.doc_indexer.index_markdown", return_value=1):
+        result = runner.invoke(main, ["collection", "reindex", "docs__papers", "--force"])
+    assert calls == [], result.output
+    reindex_bed.purge.assert_called_once()
+
+
+def test_collection_reindex_does_not_turn_a_stack_error_into_a_warning(runner, reindex_bed, monkeypatch) -> None:
+    """The gate passed, then the stack broke: every remaining PDF would fail
+    alike. The old shape was 'Warning: failed to re-index', 'N -> 0 chunks', exit 0."""
+    monkeypatch.setattr(pdf_stack, "ensure", lambda entry: Outcome.PRESENT)
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_REFUSED):
+        result = runner.invoke(main, ["collection", "reindex", "docs__papers", "--force"])
+    assert result.exit_code == 69, result.output
+    assert "Warning: failed to re-index" not in result.output
+    assert "Re-indexed:" not in result.output
+    assert "nx self install --extras pdf" in result.output
+
+
+# ── nx dt capture: the gate comes before DEVONthink is touched ───────────────
+
+
+@pytest.fixture
+def capture_bed(monkeypatch: pytest.MonkeyPatch):
+    """DEVONthink present; every DT side effect is a spy. ``bed.touched`` lists
+    what reached DEVONthink."""
+    monkeypatch.setattr("nexus.commands.dt._is_darwin", lambda: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+
+    class _Bed:
+        touched: list[str]
+
+    bed = _Bed()
+    bed.touched = []
+
+    def _spy(label: str):
+        def _fn(*a, **kw):
+            bed.touched.append(label)
+            return "NEW-UUID"
+        return _fn
+
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page", _spy("capture_web_page"))
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_download_pdf_from_doi", _spy("download_pdf_from_doi"))
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_import_file", _spy("import_file"))
+    monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
+    monkeypatch.setattr("nexus.commands.dt._index_record", lambda uuid, path, **kw: (True, 1))
+    monkeypatch.setattr("nexus.commands.dt._index_dt_content_record", lambda uuid, **kw: True)
+    return bed
+
+
+_PDF_CAPTURES = [
+    pytest.param(["https://e.com/a", "--type", "pdf"], id="url-as-pdf"),
+    pytest.param(["--doi", "10.1000/xyz"], id="doi"),
+    pytest.param(["--file", "/tmp/paper.PDF"], id="file-pdf"),
+]
+
+
+@pytest.mark.parametrize("argv", _PDF_CAPTURES)
+def test_dt_capture_of_a_pdf_gates_before_any_devonthink_side_effect(runner, capture_bed, monkeypatch, argv) -> None:
+    ensure, calls = _ensure_raising(_REFUSED)
+    monkeypatch.setattr(pdf_stack, "ensure", ensure)
+    result = runner.invoke(main, ["dt", "capture", *argv])
+    assert result.exit_code == 69, result.output
+    assert calls == ["nx dt capture"]
+    assert capture_bed.touched == [], "a refused capture must leave DEVONthink untouched"
+
+
+@pytest.mark.parametrize("argv", _PDF_CAPTURES)
+def test_dt_capture_after_an_install_reruns_without_capturing_in_this_process(runner, capture_bed, monkeypatch, argv) -> None:
+    """The re-run child repeats the whole argv, so a capture here would be a
+    second capture of the same source: two DEVONthink records."""
+    monkeypatch.setattr(pdf_stack, "ensure", lambda entry: Outcome.INSTALLED)
+    rerun = MagicMock(return_value=0)
+    monkeypatch.setattr(pdf_stack, "rerun_command", rerun)
+    result = runner.invoke(main, ["dt", "capture", *argv])
+    assert result.exit_code == 0, result.output
+    rerun.assert_called_once()
+    assert capture_bed.touched == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["https://e.com/a"],  # webarchive (the default)
+    ["https://e.com/a", "--type", "markdown"],
+    ["--file", "/tmp/notes.md"],
+])
+def test_dt_capture_of_a_non_pdf_never_asks(runner, capture_bed, monkeypatch, argv) -> None:
+    ensure, calls = _ensure_raising(_REFUSED)
+    monkeypatch.setattr(pdf_stack, "ensure", ensure)
+    monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: [(kw["uuids"][0], "/captured.md")])
+    result = runner.invoke(main, ["dt", "capture", *argv])
+    assert calls == [], result.output

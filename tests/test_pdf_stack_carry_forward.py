@@ -152,7 +152,19 @@ def test_a_crash_in_the_rung_never_fails_the_upgrade(bed, monkeypatch) -> None:
     upgrade_cmd._converge_pdf_stack(auto_mode=False, skip_t3=False)  # does not raise
 
 
-def test_the_rung_is_wired_into_the_preconditions_stage() -> None:
-    import inspect
-
-    assert "_converge_pdf_stack(" in inspect.getsource(upgrade_cmd._converge_preconditions)
+def test_the_carry_runs_before_the_process_cycle_so_processes_cycle_onto_the_carried_generation(bed, monkeypatch) -> None:
+    """converge_preconditions restarts the service and MinerU. The carry builds a
+    generation and flips `current`; run after the cycle, the processes would be
+    started on the slim generation the carry then replaces."""
+    order: list[str] = []
+    monkeypatch.setattr("nexus.commands.self_cmd.repair_uv_takeover", lambda **kw: order.append("takeover") or [])
+    monkeypatch.setattr(
+        "nexus.upgrade_ladder.preconditions.converge_preconditions",
+        lambda **kw: order.append("process-cycle") or [],
+    )
+    monkeypatch.setattr(upgrade_cmd, "_converge_vc_runtime", lambda **kw: order.append("vc-runtime"))
+    monkeypatch.setattr(pdf_stack, "_install_generation", lambda *, carrying=False: order.append("carry"))
+    upgrade_cmd._converge_preconditions(auto_mode=True)
+    assert order.index("carry") < order.index("process-cycle"), order
+    assert order.index("takeover") < order.index("carry"), order
+    assert order.count("carry") == 1, "the carry must not run twice (before and after the cycle)"

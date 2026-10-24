@@ -69,12 +69,12 @@ When the install finishes, run `/reload-plugins` or start a new session. In that
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 to 3.1 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 2.1 to 2.3 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 2.1 to 2.3 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.55 GB down, 1.6 to 2.3 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.2 GB down, 1.3 to 1.5 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.2 GB down, 1.3 to 1.5 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The macOS and Windows cache figures were measured on 2026-10-16 with conexus 7.81.0.
+These sizes leave out PDF support (docling, MinerU and torch), which a new install fetches the first time you index a PDF: about 240 MB down on macOS and 370 MB on Linux, 0.8 GB on disk. The figures are derived from the 2026-10-23 lock walk; measurements from the first release-candidate rehearsal replace them. The 7.81.0 measurement, from nothing on macOS, Linux and Windows, is what they are derived from (Windows is the high end). `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The macOS and Windows cache figures were measured on 2026-10-16 with conexus 7.81.0.
 
 ## Install by hand
 

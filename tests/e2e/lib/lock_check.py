@@ -24,8 +24,14 @@ import json
 import sys
 
 #: The packages whose drift motivated the file; each must be installed AND equal
-#: to the lock, or the check has not proved what it claims.
-LOCK_WITNESSES = ("onnxruntime", "opencv-python-headless", "pymupdf", "mcp")
+#: to the lock, or the check has not proved what it claims. These are in the
+#: DEFAULT dependency closure, so a slim install (nexus-2k66t.4.2) has them.
+LOCK_WITNESSES = ("onnxruntime", "pymupdf", "mcp")
+
+#: Witnesses that only the ``pdf`` extra brings (opencv-python-headless comes with
+#: MinerU). A caller checking an install that carries the stack adds these; on a
+#: slim install they are absent by design and are not witnesses.
+LOCK_PDF_WITNESSES = ("opencv-python-headless",)
 
 #: The lock holds ~220 pins; an environment installs the large majority. A floor
 #: far below that and far above "the check examined almost nothing".
@@ -61,7 +67,7 @@ def build_report(constraints: str, witnesses: tuple[str, ...]) -> dict:
     return report
 
 
-def lock_verdict(report: dict) -> list[str]:
+def lock_verdict(report: dict, witnesses: tuple[str, ...] = LOCK_WITNESSES) -> list[str]:
     """Why an environment does NOT match its shipped constraints; empty when it does.
 
     Pure so it is unit-testable without an environment. Three ways to fail: a pin
@@ -70,7 +76,7 @@ def lock_verdict(report: dict) -> list[str]:
     input it never looked at is not a pass).
     """
     problems = [f"MISMATCH {m}" for m in report.get("mismatched", [])]
-    for name in LOCK_WITNESSES:
+    for name in witnesses:
         if name not in report.get("witness", {}):
             problems.append(f"witness {name} is not installed or not pinned: the check did not examine it")
     if report.get("matched", 0) < LOCK_MATCHED_FLOOR:
@@ -85,11 +91,13 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: lock_check.py <constraints.txt> [witness ...]", file=sys.stderr)
         return 2
-    report = build_report(argv[1], tuple(argv[2:]) or LOCK_WITNESSES)
-    for problem in lock_verdict(report):
+    witnesses = tuple(argv[2:]) or LOCK_WITNESSES
+    report = build_report(argv[1], witnesses)
+    problems = lock_verdict(report, witnesses)
+    for problem in problems:
         print(f"LOCK-CHECK FAIL {problem}")
     print(json.dumps(report))
-    return 1 if lock_verdict(report) else 0
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

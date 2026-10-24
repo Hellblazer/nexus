@@ -4,10 +4,14 @@
 Extraction backends (selected by ``extractor`` param):
 1. Docling — neural layout model for multi-column academic PDFs, Type3 fonts,
    and complex tables.  Enriched mode enables formula detection via FormulaItem.
-2. MinerU — math-aware extraction. Default-installed since nexus-2fyb (was
-   previously an optional ``[mineru]`` extra; the extras gate produced silent
-   formula loss for weeks because fresh installs never picked it up). Used
-   when auto mode detects formulas in the Docling probe pass.
+2. MinerU — math-aware extraction. Part of the on-demand ``pdf`` extra
+   (nexus-2k66t.4.2): a fresh install leaves it out and the first PDF index
+   fetches it (``nexus.pdf_stack``), an existing install keeps it. It was a
+   default dependency from nexus-2fyb, after an optional ``[mineru]`` extra
+   produced silent formula loss for weeks; the contract that came out of that
+   still holds, in a different place: no entry point ever falls back to a
+   plainer extractor, it installs the stack or stops with the command to run.
+   Used when auto mode detects formulas in the Docling probe pass.
 3. PyMuPDF normalized — fallback for the explicit ``extractor='docling'``
    path when Docling itself fails.
 
@@ -1621,9 +1625,9 @@ class PDFExtractor:
             raise RuntimeError(
                 f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
                 f"but MinerU is not importable: {exc}. "
-                f"MinerU is a required dependency since nexus-2fyb; if it is "
-                f"missing your conexus install is corrupt — reinstall with "
-                f"`{reinstall}`. To bypass formula "
+                f"MinerU is part of the pdf extra and the PDF stack reports itself "
+                f"installed, so this conexus install is corrupt — reinstall with "
+                f"`{reinstall}`, or `nx self install --extras pdf`. To bypass formula "
                 f"extraction entirely, rerun with `--extractor docling`."
             ) from exc
         except MineruMachineResourceError:

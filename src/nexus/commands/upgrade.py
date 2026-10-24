@@ -252,6 +252,14 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; a repair failure must not block the walk
         _log.warning("upgrade_uv_takeover_repair_failed", error=str(exc))
 
+    # nexus-2k66t.4.2: the PDF stack carry-forward builds a generation and flips
+    # `current`, so it runs BEFORE the process cycle below: the cycle then
+    # restarts the service and MinerU onto the generation that has the stack,
+    # not onto a slim one the carry replaces a minute later (and the stale
+    # MinerU restart in upgrade_finish never has a stack-less generation to
+    # start). It needs the layout the takeover repair above just settled.
+    _converge_pdf_stack(auto_mode=auto_mode, skip_t3=skip_t3)
+
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         from nexus.upgrade_ladder.preconditions import converge_preconditions  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
@@ -273,7 +281,6 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
         _log.warning("upgrade_preconditions_failed", error=str(exc))
 
     _converge_vc_runtime(auto_mode=auto_mode)
-    _converge_pdf_stack(auto_mode=auto_mode, skip_t3=skip_t3)
 
 
 def _converge_pdf_stack(*, auto_mode: bool, skip_t3: bool) -> None:

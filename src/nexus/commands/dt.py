@@ -1875,6 +1875,18 @@ def highlights_cmd(tumbler_or_uuid: str) -> None:
         click.echo("\n## Mentions\n" + rec.mentions_md)
 
 
+def _capture_is_pdf(url: str | None, doi: str | None, file_path: str | None, capture_type: str) -> bool:
+    """Whether the capture ends in a PDF record that ``nx dt index`` will
+    extract: a DOI (the open-access PDF), a ``--file`` ending in ``.pdf``, or a
+    URL captured as ``--type pdf``. html, webarchive and markdown captures
+    never reach the PDF extractor."""
+    if doi:
+        return True
+    if file_path:
+        return file_path.lower().endswith(".pdf")
+    return bool(url) and capture_type.lower() == "pdf"
+
+
 @dt.command("capture")
 @click.argument("url", required=False)
 @click.option("--doi", default=None, help="Capture by DOI: download the open-access PDF (Unpaywall).")
@@ -1954,6 +1966,16 @@ def capture_cmd(
             "nx dt capture requires DEVONthink to be running — this verb is "
             "DT-bound by design (unlike nx dt index, which degrades silently).",
         )
+
+    # nexus-2k66t.4.2: a PDF capture needs the PDF stack to index what it
+    # captures. Settled HERE, before DEVONthink is touched: the install re-runs
+    # this whole command in the new generation, so a gate that came after the
+    # capture would capture (or import) the same source twice, and a refusal
+    # that came after it would leave a DEVONthink record nothing indexed.
+    if _capture_is_pdf(url, doi, file_path, capture_type):
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+        pdf_stack.ensure_or_exit("nx dt capture")
 
     if url:
         # pdf AND markdown captures are stored by DT as on-disk files (.pdf /

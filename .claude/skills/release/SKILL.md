@@ -628,7 +628,7 @@ Local-mode boxes skip this gate — their engine converges from
 `PINNED_SERVICE_TAG` at reinstall.
 
 ```bash
-scripts/reinstall-tool.sh    # preserves [local] and other extras (mineru is now a default dep)
+scripts/reinstall-tool.sh    # preserves [local] and other extras; the PDF stack (mineru, docling, torch) is the on-demand [pdf] extra: NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh keeps it
 nx --version                 # must print X.Y.Z
 ```
 

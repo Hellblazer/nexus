@@ -176,18 +176,18 @@ def test_the_descriptions_tell_the_model_to_ask_first_and_name_both_fixes() -> N
 def test_the_download_sizes_are_ceilings_not_promises() -> None:
     """A provisioned service downloads nothing: the description says "up to"."""
     text = _tools()["setup"].description
-    assert "up to about 1.3 GB" in text and "up to about 0.7 GB" in text
-    assert "about 1.3 GB to download" not in text.replace("up to about 1.3 GB", "")
+    assert "up to about 0.55 GB" in text and "up to about 0.2 GB" in text
+    assert "about 0.55 GB to download" not in text.replace("up to about 0.55 GB", "")
 
 
 def test_the_descriptions_give_the_disk_sizes_beside_the_download_sizes() -> None:
     """The Desktop question (Sam, 2026-10-14): the choice shows what it takes on disk as
     well as what it downloads, as measured from nothing on macOS, Linux and Windows with conexus
-    7.81.0 (2.4 to 3.1 GB for local, 2.1 to 2.3 GB for the CLI alone; nexus-gxzfq), so the user
+    7.81.0, less the PDF stack since nexus-2k66t.4.2 (1.6 to 2.3 GB for local, 1.3 to 1.5 GB for the CLI alone; derived, nexus-gxzfq), so the user
     is not surprised after answering."""
     text = _tools()["setup"].description
-    assert "up to about 1.3 GB to download, 2.4 to 3.1 GB on disk" in text, text
-    assert "up to about 0.7 GB to download, 2.1 to 2.3 GB on disk" in text, text
+    assert "up to about 0.55 GB to download, 1.6 to 2.3 GB on disk" in text, text
+    assert "up to about 0.2 GB to download, 1.3 to 1.5 GB on disk" in text, text
 
 
 # -- the instructions notice --------------------------------------------------------
@@ -263,7 +263,7 @@ def test_the_notice_gives_the_sizes_a_choice_takes(monkeypatch: pytest.MonkeyPat
     service: the sizes of the two ways to fix it, download and disk, in the table's words."""
     _service(monkeypatch, False)
     text = setup_tools.no_service_notice() or ""
-    assert "1.3 GB" in text and "2.4 to 3.1 GB on disk" in text and "0.7 GB" in text and "2.1 to 2.3 GB on disk" in text, text
+    assert "0.55 GB" in text and "1.6 to 2.3 GB on disk" in text and "0.2 GB" in text and "1.3 to 1.5 GB on disk" in text, text
 
 
 def _provision(config: Path, *, files: int = 3) -> None:
@@ -287,7 +287,7 @@ def test_a_provisioned_local_service_that_is_down_is_not_called_missing(
     text = setup_tools.no_service_notice() or ""
     assert "not running" in text and "/conexus:setup" in text and "setup tool" in text, text
     assert "act only on the user's answer" in text and "ask the user" not in text.lower()
-    assert "no service address is configured" not in text and "1.3 GB" not in text, text
+    assert "no service address is configured" not in text and "0.55 GB" not in text, text
 
 
 def test_a_partly_provisioned_service_is_still_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -295,7 +295,7 @@ def test_a_partly_provisioned_service_is_still_missing(monkeypatch: pytest.Monke
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     _provision(tmp_path, files=2)
     _service(monkeypatch, False)
-    assert "1.3 GB" in (setup_tools.no_service_notice() or "")
+    assert "0.55 GB" in (setup_tools.no_service_notice() or "")
 
 
 def _recorded(config: Path, **status: Any) -> None:

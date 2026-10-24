@@ -805,7 +805,12 @@ _NETWORK_FAILURE_RE = re.compile(
     r"temporary failure in name resolution|name or service not known|"
     r"request failed after \d+ retries|error sending request|"
     r"tcp connect error|connection refused|connection reset|"
-    r"timed out|failed to connect",
+    r"timed out|failed to connect|"
+    # uv with UV_OFFLINE / --offline, or a cache miss it may not fill: the network
+    # is the cause and is off on purpose or by policy ("Packages were unavailable
+    # because the network was disabled", "Network connectivity is disabled, but
+    # the requested data wasn't found in the cache").
+    r"network was disabled|network connectivity is disabled",
     re.IGNORECASE,
 )
 #: A certificate or TLS failure: reachability is not the problem, trust is.

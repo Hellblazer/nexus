@@ -1028,6 +1028,7 @@ def reindex_cmd(name: str, force: bool) -> None:
     from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.t3 import verify_collection_deep  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.pdf_stack import PdfStackError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     db = _t3()
 
@@ -1048,7 +1049,8 @@ def reindex_cmd(name: str, force: bool) -> None:
     # and before the sourceless scan below: that scan asks for --force
     # first, so an operator paid a second run to reach this refusal
     # (GH #1546, nexus-rndy5).
-    if split_candidate_collection_name(name)[0] == "code":
+    candidate_type = split_candidate_collection_name(name)[0]
+    if candidate_type == "code":
         raise click.ClickException(
             f"Refusing to reindex code collection '{name}': this verb has "
             "no re-index driver for code — it would delete the collection "
@@ -1218,6 +1220,19 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"Use --force to proceed and accept that loss."
         )
 
+    # 2c. The PDF stack (nexus-2k66t.4.2), BEFORE the purge below. The loop
+    # that follows indexes each existing .pdf source through index_pdf, which
+    # needs docling and MinerU; on a slim install every one of them fails, and
+    # the failure used to be a per-file warning AFTER the collection was gone:
+    # "Re-indexed: N -> 0 chunks", exit 0, the data deleted. ensure_or_exit
+    # installs (and re-runs this command) or exits 69/75/70 with nothing deleted.
+    if candidate_type in ("docs", "knowledge") and any(
+        sp.lower().endswith(".pdf") and Path(sp).exists() for sp in source_paths
+    ):
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        pdf_stack.ensure_or_exit("nx collection reindex")
+
     # 3. Delete collection — via the canonical cascade, exactly like
     # `nx collection delete` (nexus-sjb52: the old direct
     # db.delete_collection(name) call raised NotImplementedError on every
@@ -1364,6 +1379,17 @@ def reindex_cmd(name: str, force: bool) -> None:
                 else:
                     index_markdown(p, corpus=corpus, collection_name=name, force=True)
                 indexed += 1
+            except PdfStackError as exc:
+                # The gate at 2c passed, so this is a stack that broke mid-run. It is
+                # not a per-file problem: every remaining PDF would fail the same way
+                # and the exit status must say so (nexus-2fyb: never silent).
+                click.echo(
+                    f"Re-indexing failed: {exc}\n"
+                    f"Collection '{name}' was deleted. Re-run 'nx collection reindex {name}' "
+                    f"after resolving the error, or re-index manually.",
+                    err=True,
+                )
+                raise click.exceptions.Exit(exc.exit_code)
             except Exception as exc:  # noqa: BLE001 — per-file re-index failure surfaced as warning; loop continues
                 click.echo(f"  Warning: failed to re-index {p.name}: {exc}", err=True)
 

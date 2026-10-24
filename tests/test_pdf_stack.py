@@ -302,18 +302,19 @@ def test_ensure_refuses_on_windows_without_the_vc_runtime_before_downloading(sta
     assert stack.installed == 0
 
 
-def test_a_peer_that_installed_while_we_waited_is_not_installed_twice(stack, monkeypatch) -> None:
-    """The waiter re-checks state() after it gets the lock."""
-    answers = iter(["absent", "present"])
-    monkeypatch.setattr(pdf_stack, "state", lambda: StackState(next(answers), ""))
-    assert pdf_stack.ensure("nx index pdf") is Outcome.PRESENT
-    assert stack.installed == 0
+# A peer that installed while we waited is pinned in
+# tests/test_pdf_stack_current_generation.py against two real generations on disk:
+# state() reads the running interpreter and cannot see a peer's generation, so a
+# test that flips state() between two calls tests a transition no producer makes.
 
 
 @pytest.mark.parametrize("text, cls, code", [
     ("generation build failed:\nerror: Failed to fetch: dns error: failed to lookup address", PdfStackNetworkError, 75),
     ("generation build failed:\nrequest failed after 3 retries: timed out", PdfStackNetworkError, 75),
     ("generation build failed:\ninvalid peer certificate: UnknownIssuer", PdfStackNetworkError, 75),
+    # uv 0.8 under UV_OFFLINE (measured by the review of cb36b89de): the old regexes read these as 70
+    ("generation build failed:\nerror: Failed to fetch: x\n  Caused by: Packages were unavailable because the network was disabled", PdfStackNetworkError, 75),
+    ("generation build failed:\nNetwork connectivity is disabled, but the requested data wasn't found in the cache", PdfStackNetworkError, 75),
     ("generation build failed:\nNo solution found when resolving dependencies", PdfStackInstallError, 70),
     ("generation build failed:\nNo space left on device", PdfStackInstallError, 70),
 ])
