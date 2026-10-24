@@ -41,8 +41,9 @@ def private_tempdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     "scratch is removed" assertions cannot see another xdist worker's."""
     scratch = tmp_path / "scratch-root"
     scratch.mkdir()
+    # tempfile.tempdir alone: the scratch dirs are made in-process by tempfile.mkdtemp,
+    # and a TMPDIR override must go through tests._tmp_root (its census forbids a bare one).
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
-    monkeypatch.setenv("TMPDIR", str(scratch))
     return scratch
 
 TARGET_SCRIPT = """#!/usr/bin/env bash
