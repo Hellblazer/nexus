@@ -68,9 +68,9 @@ main() {
 	and says so. By default the build installs everything, PDF support included
 	(docling, MinerU and torch): it downloads about 0.45 GB on macOS and 0.6 GB on Linux
 	for the command-line tool, and the service adds the rest of the --local figure. The
-	download sizes are derived from a 2026-10-23 measurement of 7.85.0. Disk use is up to about
-	2.3 GB for the command-line tool and 3.1 GB with --local, upper bounds from a 7.81.0-era
-	measurement. Neither is a promise.
+	sizes were measured on 7.85.0 on macOS and Linux (2026-10-24); Windows was not measured.
+	Disk use is about 1.8 to 2.2 GB for the command-line tool and 2.5 to 2.9 GB with --local.
+	None of them is a promise.
 
 	On Linux it asks for the CPU build of torch, so it does not download the CUDA libraries,
 	about 4.5 GB more (set NX_TORCH_BACKEND to choose another build).

@@ -817,7 +817,7 @@ def test_help_names_slim_and_states_the_default_size(box: Box) -> None:
     assert "0.8 GB" in text and "0.9 GB" in text, "the default local size, macOS and Linux"
     assert "0.45 GB" in text and "0.6 GB" in text, "the default CLI-only and cloud size"
     assert "1.3 GB" not in text and "700 MB" not in text, "the 7.81.0 sizes"
-    assert "derived" in text, "the sizes say they are derived, not a gate"
+    assert "measured on 7.85.0" in text and "derived" not in text, "the sizes say they were measured, and are not a gate"
 
 
 def test_the_menu_states_the_default_local_size(box: Box) -> None:
