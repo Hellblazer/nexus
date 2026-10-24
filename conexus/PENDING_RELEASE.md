@@ -30,5 +30,23 @@ mechanize, it matters enough to ship.
 cut_plugin_release.py`) refuses when a ledger entry's bead also touches wheel
 content (`src/`, `conexus/plans/`, `conexus/daemon/`, `mcpb/`, `dt/`) the
 wholesale import cannot hold back on a per-entry basis. The only fix is moving
-that entry under `## Deferred to the next client release
+that entry under `## Deferred to the next client release` below: the cut then
+holds the entry's channel path(s) back from itself too (restored to the base
+branch's own content) so the whole bead ships together, in one piece, at the
+next client release. A deferred entry is exempt from the release-window
+"ledger must be empty" rule above -- still declared there is correct, not
+stale -- and stays exactly where it is until moved back deliberately.
 
+---
+
+
+
+## Awaiting the next release or plugin cut (pinned: v7.85.0)
+
+ONE PATH PER BULLET, on the bullet's FIRST line.
+
+
+## Deferred to the next client release
+
+- `conexus/commands/setup.md` (nexus-2k66t.4.2): the setup command's install-size rows follow the on-demand PDF stack (derived sizes; nexus-2k66t.4.9 restores the full-default sizes when the installers install [pdf] by default). Needs the client release that carries the [pdf] split.
+- `conexus/launch/nx_standin.py` (nexus-2k66t.4.2): the stand-in's install-size rows match the setup tool's, for the same release. Needs the client release that carries the [pdf] split.
