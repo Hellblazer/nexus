@@ -1707,7 +1707,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected]
+    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, mcpb-resolve-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1723,6 +1723,7 @@ jobs:
           release_ledger_result="${{ needs.release-ledger-gate.result }}"
           integration_any="${{ needs.changes.outputs.integration_any }}"
           integration_result="${{ needs.test-integration-affected.result }}"
+          mcpb_result="${{ needs.mcpb-resolve-gate.result }}"
           event_name="${{ github.event_name }}"
           base_ref="${{ github.base_ref }}"
 
@@ -1816,6 +1817,23 @@ jobs:
                 exit 1
                 ;;
             esac
+          fi
+
+          # mcpb-resolve-gate (nexus-zzkko, Sam 2026-10-24: blocking for PRs
+          # into main). The job always runs and resolves the Desktop bundle's
+          # pins only when their inputs changed, so success covers both. On a
+          # PR into main (the release PR, the last stop before a tag) anything
+          # but success blocks; elsewhere a red is reported and does not block,
+          # since develop is pushed directly and release.yml blocks before
+          # publish anyway.
+          echo "mcpb-resolve-gate result: $mcpb_result"
+          if [ "$event_name" = "pull_request" ] && [ "$base_ref" = "main" ]; then
+            if [ "$mcpb_result" != "success" ]; then
+              echo "::error::PR targets main but mcpb-resolve-gate reported '$mcpb_result' instead of success — the Desktop bundle's pinned dependencies must resolve before a release PR can merge"
+              exit 1
+            fi
+          elif [ "$mcpb_result" != "success" ]; then
+            echo "::warning::mcpb-resolve-gate reported '$mcpb_result' (advisory off the release PR; release.yml blocks before publish)"
           fi
 
           # nexus-rpaat: the affected-integration job MUST succeed when the
@@ -2592,7 +2610,7 @@ jobs:
       # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
       NX_JOOQ_CACHE: "off"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
@@ -2774,3 +2792,66 @@ jobs:
           # manifest-rewrite-visibility core tests actually ran+passed, and no
           # prereq-skip vacuously cleared the run.
           uv run python scripts/assert_write_seam_ran.py write-seam.xml
+
+  mcpb-resolve-gate:
+    # nexus-zzkko — the Desktop .mcpb lock must RESOLVE, checked on the change
+    # that breaks it instead of after the release tag. release.yml's pack step
+    # runs scripts/check_mcpb_resolve.py against the built wheel; by then the
+    # tag is pushed, and a lock that cannot resolve costs a workflow_dispatch
+    # retry or a moved tag. This runs the same check against the checkout
+    # (conexus as a path source at this tree), resolve only, nothing installed.
+    #
+    # PATH GATE, same shape as write-seam-gate above: the job ALWAYS runs so
+    # the check reports on every PR, and the one expensive step (an index
+    # metadata resolve, seconds) runs only when an input of the resolve changed:
+    # the lock itself, uv.lock and the root pyproject (conexus's own dependency
+    # floors, which the pins must satisfy), the bundle's pyproject and launcher,
+    # and the two scripts. The non-vacuity step makes an unusable filter output
+    # fail the job instead of skipping the resolve under a green check.
+    name: mcpb lock resolve gate (nexus-zzkko)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
+
+      # SHA-pinned like the other filters in this file: a floating tag that
+      # always emitted mcpb='false' would skip the resolve under a green check.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: changes
+        with:
+          filters: |
+            mcpb:
+              - 'src/nexus/_install/constraints.txt'
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'mcpb/pyproject.toml'
+              - 'mcpb/manifest.json'
+              - 'mcpb/src/bootstrap.py'
+              - 'scripts/check_mcpb_resolve.py'
+              - 'scripts/stage_mcpb_constraints.py'
+
+      - name: Verify the mcpb predicate is usable (fail loud, never default-skip)
+        run: |
+          set -euo pipefail
+          mcpb="${{ steps.changes.outputs.mcpb }}"
+          case "$mcpb" in
+            true|false) ;;
+            *)
+              echo "::error::paths-filter produced no usable mcpb output ('$mcpb') — cannot prove whether the .mcpb lock inputs changed, refusing to silently skip the resolve"
+              exit 1
+              ;;
+          esac
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        if: steps.changes.outputs.mcpb == 'true'
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Resolve the bundle under the staged lock (checkout, not a wheel)
+        if: steps.changes.outputs.mcpb == 'true'
+        run: |
+          set -euo pipefail
+          python3 scripts/check_mcpb_resolve.py

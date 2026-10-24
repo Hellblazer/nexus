@@ -29,7 +29,11 @@ permissions, a genuinely missing package) fails immediately with uv's own
 output: behavior unchanged from before this file existed.
 
 Set ``NX_MCPB_SKIP_RESOLVE_RETRY=1`` to skip the sync-with-retry and hand
-off to the server directly (the pre-r433b behavior).
+off to the server directly (the pre-r433b behavior). The release's dependency
+lock (below) is then NOT applied, and one left in ``pyproject.toml`` by an
+earlier launch is removed: the unpinned fallback lives in the sync step, and
+the handoff is an exec with no process left to retry, so a pin that cannot
+resolve would end the start with no way back (nexus-puzdu).
 
 Dependencies install under the release's lock (nexus-2k66t.4.6). The release
 workflow stages ``src/nexus/_install/constraints.txt`` into the bundle as
@@ -318,6 +322,21 @@ def _strip_pin(bundle_dir):
         return True
     except (OSError, UnicodeError):
         return False
+
+
+def _skip_pin(bundle_dir):
+    """The line to state when ``NX_MCPB_SKIP_RESOLVE_RETRY`` skips the sync: the
+    release's lock is not applied, and a block from an earlier launch is removed."""
+    _strip_pin(bundle_dir)
+    if _pin_state(bundle_dir)[0]:
+        return (
+            "[conexus-mcpb] NX_MCPB_SKIP_RESOLVE_RETRY is set, so the sync fallback is skipped; "
+            "the pin from an earlier launch could not be removed and is still in force."
+        )
+    return (
+        "[conexus-mcpb] NX_MCPB_SKIP_RESOLVE_RETRY is set, so the sync fallback is skipped and "
+        "dependencies are not pinned to the release's lock."
+    )
 
 
 def _has_opencv_python(bundle_dir):
@@ -704,9 +723,12 @@ def main(platform=None) -> None:
             # as the launch step gives; nothing has been spawned yet.
             _report_missing("uv")
             sys.exit(127)
-    # Before the sync AND before the launch's own `uv run`, which resolves too.
-    print(_apply_pin(bundle_dir), file=sys.stderr, flush=True)
-    if not os.environ.get("NX_MCPB_SKIP_RESOLVE_RETRY"):
+    if os.environ.get("NX_MCPB_SKIP_RESOLVE_RETRY", "").strip().lower() in ("1", "true"):
+        # No sync step means no unpinned fallback (the launch is an exec), so no pin.
+        print(_skip_pin(bundle_dir), file=sys.stderr, flush=True)
+    else:
+        # Before the sync AND before the launch's own `uv run`, which resolves too.
+        print(_apply_pin(bundle_dir), file=sys.stderr, flush=True)
         if platform == _WINDOWS:
             _sync_with_retry(bundle_dir, uv=uv)
         else:

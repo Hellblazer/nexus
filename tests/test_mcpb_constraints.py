@@ -309,15 +309,62 @@ def test_main_applies_the_pin_before_the_sync_and_prints_the_line(bootstrap, mon
     assert "LINE" in capsys.readouterr().err
 
 
-def test_main_pins_even_when_the_sync_retry_is_skipped(bootstrap, monkeypatch) -> None:
-    """The launch `uv run` resolves too, so the pin must already be in place."""
+def test_main_does_not_pin_when_the_sync_retry_is_skipped(bootstrap, bundle: Path, monkeypatch, capsys) -> None:
+    """nexus-puzdu: the unpinned fallback lives in `_sync_with_retry`. With it skipped the
+    launch `uv run` is exec'd (no process left to retry), so a pin that cannot resolve would
+    take the start down with no way back. No pin is applied, and the line says so."""
     order: list[str] = []
     monkeypatch.setattr(bootstrap, "_apply_pin", lambda d, environ=None: order.append("pin") or "x")
     monkeypatch.setattr(bootstrap, "_sync_with_retry", lambda d: order.append("sync"))
     monkeypatch.setattr(bootstrap, "_launch", lambda argv, platform=None: order.append("launch") or None)
+    monkeypatch.setattr(bootstrap, "_bundle_dir", lambda: str(bundle))  # never the real mcpb/
     monkeypatch.setenv("NX_MCPB_SKIP_RESOLVE_RETRY", "1")
     bootstrap.main(platform="linux")
-    assert order == ["pin", "launch"]
+    assert order == ["launch"]
+    err = capsys.readouterr().err
+    assert "NX_MCPB_SKIP_RESOLVE_RETRY" in err and "not pinned" in err
+
+
+@pytest.mark.parametrize("value", ["0", "false", "", "no"])
+def test_a_skip_variable_that_is_not_1_or_true_keeps_the_pin_and_the_sync(
+    bootstrap, bundle: Path, monkeypatch, value,
+) -> None:
+    """Only 1 or true skip: `=0` used to count, and now that skipping also drops the pin,
+    a value meant as 'off' must not unpin the extension."""
+    order: list[str] = []
+    monkeypatch.setattr(bootstrap, "_apply_pin", lambda d, environ=None: order.append("pin") or "x")
+    monkeypatch.setattr(bootstrap, "_sync_with_retry", lambda d: order.append("sync"))
+    monkeypatch.setattr(bootstrap, "_launch", lambda argv, platform=None: order.append("launch") or None)
+    monkeypatch.setattr(bootstrap, "_bundle_dir", lambda: str(bundle))
+    monkeypatch.setenv("NX_MCPB_SKIP_RESOLVE_RETRY", value)
+    bootstrap.main(platform="linux")
+    assert order == ["pin", "sync", "launch"]
+
+
+def test_skipped_sync_removes_a_pin_left_by_an_earlier_launch(bootstrap, bundle: Path, monkeypatch, capsys) -> None:
+    """The pyproject on disk is what `uv run` reads: a block written by a previous
+    (non-skipped) launch must not outlive the skip."""
+    _stage(bundle)
+    bootstrap._apply_pin(str(bundle), environ={})
+    assert _constraint_deps(bundle)
+    monkeypatch.setattr(bootstrap, "_bundle_dir", lambda: str(bundle))
+    monkeypatch.setattr(bootstrap, "_launch", lambda argv, platform=None: None)
+    monkeypatch.setattr(bootstrap, "_sync_with_retry", lambda d: pytest.fail("the sync must be skipped"))
+    monkeypatch.setenv("NX_MCPB_SKIP_RESOLVE_RETRY", "1")
+    bootstrap.main(platform="linux")
+    assert not _constraint_deps(bundle)
+    assert bootstrap._PIN_BEGIN not in (bundle / "pyproject.toml").read_text(encoding="utf-8")
+    assert "not pinned" in capsys.readouterr().err
+
+
+def test_skipped_sync_with_no_pin_on_disk_leaves_pyproject_alone(bootstrap, bundle: Path, monkeypatch) -> None:
+    _stage(bundle)
+    before = (bundle / "pyproject.toml").read_bytes()
+    monkeypatch.setattr(bootstrap, "_bundle_dir", lambda: str(bundle))
+    monkeypatch.setattr(bootstrap, "_launch", lambda argv, platform=None: None)
+    monkeypatch.setenv("NX_MCPB_SKIP_RESOLVE_RETRY", "1")
+    bootstrap.main(platform="linux")
+    assert (bundle / "pyproject.toml").read_bytes() == before
 
 
 # ── the managed block never yields invalid TOML (critic blocker 1) ──────────

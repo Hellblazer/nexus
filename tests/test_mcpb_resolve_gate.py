@@ -9,6 +9,8 @@ real resolve is the release workflow's step and the live run recorded in the bea
 """
 from __future__ import annotations
 
+import re
+
 import json
 import stat
 import subprocess
@@ -143,3 +145,103 @@ def test_the_release_workflow_runs_the_gate_before_publishing() -> None:
     # The freshly built wheel is what is resolved: the release is not on the index yet.
     assert "--conexus" in step and "dist/conexus-" in step
     assert text.index("- name: Build wheel and sdist") < text.index("- name: Pack .mcpb Desktop Extension")
+
+
+# ── the PR-time run (nexus-zzkko) ────────────────────────────────────────────
+
+#: The inputs of the resolve: a change to any of them can make the staged lock
+#: stop resolving, and each must keep the job's filter pointed at a real file.
+_FILTER_PATHS = (
+    "src/nexus/_install/constraints.txt",
+    "uv.lock",
+    "pyproject.toml",
+    "mcpb/pyproject.toml",
+    "mcpb/manifest.json",
+    "mcpb/src/bootstrap.py",
+    "scripts/check_mcpb_resolve.py",
+    "scripts/stage_mcpb_constraints.py",
+)
+
+
+def _ci_job() -> dict:
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    jobs = [j for j in doc["jobs"].values() if "scripts/check_mcpb_resolve.py" in json.dumps(j)]
+    assert len(jobs) == 1, "exactly one ci.yml job must run scripts/check_mcpb_resolve.py"
+    return jobs[0]
+
+
+def _step(job: dict, needle: str) -> dict:
+    """The one step whose `run` or `uses` mentions the needle (the filter's path list does not count)."""
+    hits = [s for s in job["steps"] if needle in s.get("run", "") + s.get("uses", "") + s.get("name", "")]
+    assert len(hits) == 1, f"expected exactly one step mentioning {needle!r}, got {len(hits)}"
+    return hits[0]
+
+
+def test_ci_runs_the_gate_on_prs_and_develop_pushes() -> None:
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    on = doc.get("on", doc.get(True))
+    assert on["pull_request"]["branches"] == ["main", "develop"]
+    assert on["push"]["branches"] == ["develop"]
+    job = _ci_job()
+    # Always runs so a check reports on every PR; the paths filter below decides whether it works.
+    assert "if" not in job, "a job-level `if` would leave the check unreported on unrelated PRs"
+    assert job["timeout-minutes"] <= 15
+
+
+def test_ci_gate_resolves_the_checkout_not_a_wheel() -> None:
+    run = _step(_ci_job(), "scripts/check_mcpb_resolve.py")
+    assert "--conexus" not in run["run"], "the PR-time gate resolves the checkout (the default), not a wheel"
+    assert run["if"].strip() == "steps.changes.outputs.mcpb == 'true'"
+
+
+def test_ci_gate_is_path_filtered_on_every_input_of_the_resolve() -> None:
+    import yaml
+
+    filt = _step(_ci_job(), "dorny/paths-filter")
+    assert filt["uses"].startswith("dorny/paths-filter@") and len(filt["uses"].split("@")[1].split()[0]) == 40
+    listed = yaml.safe_load(filt["with"]["filters"])["mcpb"]
+    assert tuple(listed) == _FILTER_PATHS
+    for path in _FILTER_PATHS:
+        assert (REPO_ROOT / path).is_file(), f"{path} is in the filter but is not a file: the filter would never fire"
+
+
+def test_ci_gate_fails_loud_on_an_unusable_filter_output() -> None:
+    """The non-vacuity assert: an empty or malformed `mcpb` output must fail the job, never skip the resolve."""
+    job = _ci_job()
+    check = _step(job, "produced no usable mcpb output")
+    assert "true|false" in check["run"] and "exit 1" in check["run"]
+    assert "if" not in check
+    steps = job["steps"]
+    assert steps.index(_step(job, "dorny/paths-filter")) < steps.index(check) < steps.index(_step(job, "scripts/check_mcpb_resolve.py"))
+
+
+def test_every_checkout_in_ci_is_pinned_to_a_sha() -> None:
+    """A floating actions/checkout tag is a supply-chain hole the rest of ci.yml closed; the
+    mcpb and write-seam gates had copied one (nexus-zzkko review)."""
+    text = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    refs = re.findall(r"uses:\s*actions/checkout@(\S+)", text)
+    assert refs, "ci.yml names no checkout step"
+    floating = [r for r in refs if not re.fullmatch(r"[0-9a-f]{40}", r)]
+    assert not floating, f"floating checkout refs in ci.yml: {floating}"
+
+
+def test_the_resolve_gate_blocks_a_pr_into_main_through_pytest_gate() -> None:
+    """Sam, 2026-10-24 (nexus-zzkko): the required fan-in waits on the job and, on a PR into
+    main (the release PR), fails on anything but success; elsewhere it only warns."""
+    import yaml
+
+    doc = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    gate = doc["jobs"]["pytest-gate"]
+    assert "mcpb-resolve-gate" in gate["needs"]
+    script = "\n".join(step.get("run", "") for step in gate["steps"])
+    assert 'mcpb_result="${{ needs.mcpb-resolve-gate.result }}"' in script
+    block = script[script.index("mcpb-resolve-gate result"):]
+    main_branch = block[: block.index("elif")]
+    assert '"$base_ref" = "main"' in main_branch and '"$mcpb_result" != "success"' in main_branch
+    assert "exit 1" in main_branch, "a failed resolve must block the release PR"
+    advisory = block[block.index("elif"): block.index("fi", block.index("elif"))]
+    assert "::warning::" in advisory and "exit 1" not in advisory, "off the release PR it only warns"
