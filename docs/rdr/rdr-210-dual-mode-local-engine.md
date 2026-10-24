@@ -451,6 +451,11 @@ the code is cited and the disagreement is noted.
   embedding_model) with ON DELETE CASCADE (vectors-030 `:1032-1036`) and its
   topic on (tenant, topic_id) with ON DELETE CASCADE
   (`taxonomy-014-topics-tenant-unique.xml:270-273`).
+  *Amended 2026-10-24 (nexus-2u3lm, nexus-0khi2):* the `doc_id` of
+  `document_aspects` and `aspect_extraction_queue` is no longer nullable.
+  `hygiene-001-not-null.xml` (changesets `hygiene-001-1` and `hygiene-001-2`) set
+  it NOT NULL, and the composite foreign key to `catalog_documents` stays, so a
+  satellite row always names a document.
 - **✅ Verified** (source search) — `/version` already reports the served model
   set as `embedding_models` beside `embedding_mode` (`VersionHandler.java:479-489`).
 - **✅ Verified** (git grep) — No production client calls `POST /v1/vectors/resolve`:
@@ -937,10 +942,21 @@ which then skips it (the spike measured the block at over 5 s). A client
 re-index in the dual world writes to the profile's sibling and moves the document
 itself, through the same transaction. A client that writes an already-moved
 document back into the source (an old client, or a `--collection` pin) moves its
-manifest back, and the next pass moves it again. Inferred, not read or measured:
-whether that client write also sets `physical_collection` back, since today it
-is set by a separate call (`updateDocumentCollection`,
-`CatalogRepository.java:3365-3370`); Phase 6 Step 1 tests it.
+manifest back, and the next pass moves it again.
+
+*Amended 2026-10-24 (nexus-2u3lm, nexus-0khi2):* that write-back does not set
+`physical_collection`. `writeManifestRows` (`CatalogRepository.java:5346`,
+`:5403`) writes manifest rows only; `physical_collection` is set by
+`updateDocumentCollection`, a separate call (`CatalogRepository.java:3431`), and
+by the conflict arm of `upsertDocument` (`CatalogRepository.java:836`). A bare client manifest write of a moved document
+back into the source therefore leaves the manifest naming the source and
+`physical_collection` naming the target, until the next pass moves the document;
+`upsertDocument` first leaves the two agreeing (`DocumentMoveTest.java:616` and
+`:641`). Sam accepted the disagreement
+window as self-healing, with no client change (nexus-0khi2, 2026-10-22). The job
+enumerates by manifest rows and never walks `physical_collection` alone
+(`ReembedSourceReader`, `service/.../db/ReembedSourceReader.java`), so the
+document is found either way. The Phase 6 Step 1 test pins both cases.
 
 **Throughput.** The move is about 25% slower than the bulk copy of Alternative 3
 (Key Discoveries), the price of one transaction per document. The spike's
@@ -981,11 +997,15 @@ again for the target after the job; LEAVE rows stay naming the source.
 | `pdf_pipeline`, `chash_remap` | LEAVE | The gate's documented exclusions (transient queue; permanent ledger, nexus-4nll0) |
 | `reembed_jobs`, `reembed_job_moves` (new, Managed) | LEAVE | The job's own record, kept after the source delete |
 
-The three REPOINT satellites are found per document: `document_highlights` by
-`doc_id`; `document_aspects` and `aspect_extraction_queue` by `doc_id` equal to the
-document's tumbler, or by an empty `doc_id` and a `source_path` equal to the
-document's path (inferred, not read: that `source_path` is the path of the
-document's `source_uri`; Phase 6 Step 1 confirms it). Where the target already
+The three REPOINT satellites are found per document by `doc_id` equal to the
+document's tumbler. *Amended 2026-10-24 (nexus-2u3lm, nexus-0khi2):* an earlier
+draft added a second arm for `document_aspects` and `aspect_extraction_queue`, an
+empty `doc_id` with a `source_path` equal to the document's path. That arm can
+match nothing: both `doc_id` columns are NOT NULL with a composite foreign key to
+`catalog_documents` (`hygiene-001-not-null.xml`, fk-001), so a row with no document
+cannot be written. The move joins by `doc_id` alone (`CatalogRepository.java:6340-6350`),
+and `DocumentMoveTest#noDocLessSatelliteRowCanExist_theRdrsPathArmMatchesNothing`
+pins the premise. Where the target already
 holds a row with the same unique key, the target row stands and the source row
 is deleted. A parity test beside `COLLECTION_SCOPED_TABLES` lists a cross-model
 disposition for every registered table and fails on a new table without one, as
@@ -1044,8 +1064,10 @@ run.
   4. the source's own topic assignments (`:8369`), topics, `taxonomy_meta` and
      centroids (`:8430`, `:8433`, `:8445`), being rebuilt for the target;
   5. any `document_aspects`, `document_highlights` or `aspect_extraction_queue`
-     row still naming the source (`:8448-8450`), such as a doc-less aspect row
-     whose `source_path` matched no document. Decision: the plan counts them,
+     row still naming the source (`:8448-8450`), such as a satellite row of a
+     document the job does not move (a tombstoned or skipped one; *amended
+     2026-10-24, nexus-2u3lm, nexus-09iho:* a doc-less aspect row cannot exist,
+     since `doc_id` is NOT NULL). Decision: the plan counts them,
      and the job refuses the delete while any remain unless the job row's
      `force_delete` is set (from `--force-delete` at start, Managed); the job
      then ends `done` with disposition `kept_residue` and the count in last
@@ -1056,7 +1078,15 @@ run.
 - *Order inside cutover* (author's decision). Each step is safe to repeat, so a
   restart in `cutover` re-runs it from the first step: (1) if a live document
   remains in the source (a skip), the job ends `done_with_skips` and supersedes
-  nothing; (2) supersede the source, a no-op when this job already superseded
+  nothing (*amended 2026-10-24, nexus-2u3lm, nexus-6grho:* a live document is a
+  candidate when a manifest row names the source, so a stray manifest row, such
+  as a moved document written back, is found here, before the supersede, and
+  ends the job `done_with_skips` with nothing superseded, not `parity_mismatch`
+  (`ReembedRunner.cutover`, `ReembedRunner.java:523-529`;
+  `ReembedCutoverTest#aManifestRowWrittenBackBeforeTheSupersede_holdsTheSupersede_nothingIsSupersededOrDeleted`);
+  a row that lands between that look and the supersede, or after it, reaches
+  step 5 and fails the parity check). Once the source is superseded, step 1
+  differs: see `CUTOVER_RESCAN` in the state table; (2) supersede the source, a no-op when this job already superseded
   it; (3) if any document row remains (a tombstoned one), disposition
   `kept_tombstoned` and `done`, with no parity check and no delete; (4) if the
   row's `keep_source` is set, disposition `kept_by_flag` and `done`; (5) the
@@ -1150,9 +1180,22 @@ variable; Phase 6 Step 2 names it and checks.
 | `paused` | Stopped by `--pause`; cursor kept | `running` (`--resume`); `aborted` |
 | `failed` | A batch failed for a reason other than a skip, the profile changed, the token cap was reached, or the parity check refused the delete; cursor at the last committed document, reason in last error | `running` (`--resume`); `aborted` |
 | `aborted` | Stopped by `--abort`; moved documents stay moved | none; a later run is a new job |
-| `cutover` | The pass is complete; Cutover's ordered steps run | `done`; `done_with_skips`; `failed`; `aborted` (only before the delete step starts) |
+| `cutover` | The pass is complete; Cutover's ordered steps run | `done`; `done_with_skips`; `failed`; `aborted` (only before the delete step starts); `running` on `CUTOVER_RESCAN` (below) |
 | `done` | The source holds no live document and is superseded; disposition `deleted`, `kept_by_flag` (`--keep-source`), `kept_tombstoned`, `kept_residue` (satellite rows the delete would take, Cutover) or `revived` (a later job the other way took the source back as its target) | none, except that a later `--all` re-enters `running` or `cutover` for `kept_tombstoned` (below) |
 | `done_with_skips` | The pass ended with skipped documents still live in the source; the source is neither superseded nor deleted | none; the source is still stale, so the next user-started run is a new job that moves the skips |
+
+*Amended 2026-10-24 (nexus-2u3lm, nexus-09iho):* the state machine has one edge
+the table above did not list, `CUTOVER_RESCAN` (`ReembedStateMachine.java:90`,
+`:132`): `cutover` to `running`. It fires when cutover finds a live document in a
+source the job has already superseded (after a parity failure and `--resume`, or
+a re-entry) and at least one such document is one the job has not already tried
+to move (`ReembedRunner.rescan`, `ReembedRunner.java:693-699`). The job walks the
+source again, then re-enters `cutover`, rather than leave the document in a
+superseded source nothing routes to. If every live document left is one the job
+already tried and skipped, there is no rescan and the job ends `done_with_skips`
+with a last error naming the superseded source and `nx collection delete <source>`
+(`ReembedRunner.java:530-537`;
+`ReembedCutoverTest#aLiveDocumentThisJobTriedAndCouldNotMove_inASupersededSource_endsDoneWithSkipsAndSaysWhere`).
 
 The lock states are `planned`, `running`, `paused`, `cutover` and `failed`
 (Managed). The self-transitions are idempotent (author's decision): `--pause` on
@@ -1169,6 +1212,18 @@ guarantees that only for the documents it moved; the skip count is in the row
 and `--status`. `--wait` returns when the job reaches `done`, `done_with_skips`,
 `aborted`, `failed` or `paused`, naming the state, and runs taxonomy discover for
 the target on the first two (author's decision).
+
+*Amended 2026-10-24 (nexus-2u3lm, nexus-09iho; Sam chose to state both, with no
+`/jobs/{id}/reenter` route):* the `kept_tombstoned` re-entry is a start whose
+body is `source_collection` alone. When that source is the kept source of a
+finished job, the engine re-enters that job instead of planning a new one; it
+keeps its own target, token cap and flags, so a body with any other field is
+refused (`ReembedHandler.java:436-450`, `reenter` at `:534`). `--wait` exits 0
+when every job it waited on ended `done` or `done_with_skips` and every
+discover ran, and 1 when any ended `aborted`, `failed` or `paused`, is parked
+blocked in `cutover`, or its discover failed, naming the state and the retry
+command (`_wait_and_report`, `src/nexus/commands/collection.py:1960-2007`;
+`FINISHED_STATES`, `src/nexus/reembed_job.py:262-265`).
 
 - *Tombstoned documents.* A source kept as `kept_tombstoned` is re-listed by
   `re-embed --all` once its tombstones are gone, which the author reads as one
@@ -1198,7 +1253,14 @@ the target on the first two (author's decision).
   revives it through that upsert, the move reuses its chunks where the text
   matches, and the earlier job's disposition becomes `revived` so a later
   `--all` never deletes it; superseded by anything else, the plan refuses,
-  naming the row and its successor.
+  naming the row and its successor. *Amended 2026-10-24 (nexus-2u3lm,
+  nexus-f98bg):* the revive marks a prior job in `done` or `aborted`
+  (`TargetSelection.Revive.markEarlierJob`, `TargetSelection.java:148-155`). A
+  prior job in `failed` holds its source's lock (the source of that job is the
+  revived row), so the start is refused until that job is aborted: reviving
+  under the lock would let its `--resume` supersede or delete the revived target
+  again (`TargetSelection.java:26-39`; `TargetSelectionTest.java:206-228`;
+  `ReembedTargetTest.java:116`).
 
 **The verb.** `nx collection re-embed` is extended rather than joined by a second
 verb:
@@ -1757,13 +1819,15 @@ aspect join on `source_path` by source reading first. Add the cross-model
 disposition list beside `COLLECTION_SCOPED_TABLES` and its parity test; delete
 `remap_collection_references`. **Test**: engine integration tests on real
 Postgres: a document moves whole (chunks, manifest, `physical_collection`, its
-aspects, queue item and highlight, including a doc-less aspect row matched by
-path); a target row with the same unique key stands and the source row goes; a
+aspects, queue item and highlight; a satellite row of a document the job does not
+move stays put, and no doc-less satellite row can be written, which pins the
+`doc_id` join); a target row with the same unique key stands and the source row goes; a
 document changed after the read is skipped with `move_precondition_failed`, not
 "internal error"; a tombstoned document is refused; a chunk shared by two
 documents is embedded once; a client write of a moved document back into the
-source leaves manifest and `physical_collection` naming the same collection, and
-the next pass moves it; a mid-move search through the client returns each
+source through `upsertDocument` leaves manifest and `physical_collection` naming
+the same collection, a bare manifest write leaves them disagreeing (manifest the
+source, `physical_collection` the target), and the next pass moves either; a mid-move search through the client returns each
 document once, one request per sibling; the disposition parity test fails on a
 fixture table added to the registry without a disposition.
 
@@ -1791,7 +1855,9 @@ change nothing; the cap and flags survive a restart (a job started with
 local-engine variable the runner does not start and the routes refuse; a
 profile changed before `--resume` leaves the job `failed` with
 `profile_changed`; a superseded target row of the same tuple, whatever its name, whose `superseded_by` names this job's source is revived and
-the earlier job's disposition becomes `revived`, and one superseded by another
+the earlier job's disposition becomes `revived` when that job is `done` or
+`aborted`, a `failed` earlier job holds the lock so the start is refused until it
+is aborted, and one superseded by another
 name is refused at plan time; each state's allowed transitions, and a refused
 one, as a table-driven test.
 
@@ -1828,12 +1894,17 @@ naming the state, and runs taxonomy discover for the target on the first two.
 **Test**: a source holding one tombstoned document ends `kept_tombstoned`
 without a parity check; a `parity_mismatch` job fails the same way on
 `--resume` and leaves the source superseded and undeleted on `--abort`;
-`--wait` returns on each of its five states with the state named;
+`--wait` returns on each of its five states with the state named, and exits 0
+for `done` and `done_with_skips` and 1 for `aborted`, `failed`, `paused` or a
+failed discover; a `kept_tombstoned` re-entry is a start with the source alone,
+refused when the body carries anything else;
 after the last move the source is superseded and out of the routing listing; it
 is deleted only when it holds no document row, and kept with `--keep-source`;
-a fixture that leaves one manifest row naming the source, or a moved document
-homed back in the source, fails the parity check with `parity_mismatch` and
-deletes nothing; an unmatched doc-less aspect row blocks the delete
+a manifest row naming the source before the supersede ends the job
+`done_with_skips` with nothing superseded, and one written after the cutover
+looked (a document registered at the source after the supersede, or a moved
+document homed back) fails the parity check with `parity_mismatch` and deletes
+nothing; a satellite row of a document the job does not move blocks the delete
 (`kept_residue`) and `--force-delete` lets it through; a skipped document ends
 the job `done_with_skips` with the source neither superseded nor deleted; after
 the delete, no aspect, highlight or queue row of a moved document names the
@@ -1960,9 +2031,14 @@ None open. Resolved by Sam on 2026-10-17 (T2
   (`kept_tombstoned`) and the parity check does not run; after purge-trash
   removes the row, the next `re-embed --all` deletes it; after a restore
   instead, the next `re-embed --all` moves the restored document first.
-- **Scenario**: the parity check finds a manifest row still naming the source —
+- **Scenario**: a manifest row names the source before the supersede —
+  **Verify**: the job ends `done_with_skips`, nothing superseded or deleted
+  (amended 2026-10-24, nexus-2u3lm, nexus-6grho).
+- **Scenario**: the parity check finds a live document homed at the source, or a
+  manifest row naming it, that appeared after the cutover looked —
   **Verify**: nothing deleted, job `failed` with `parity_mismatch`; `--resume`
-  fails the same way; `--abort` leaves the source superseded and undeleted.
+  fails the same way while the cause stands; `--abort` leaves the source
+  superseded and undeleted.
 - **Scenario**: profile changed in `nx config set`, or by `nx config unset
   voyage_api_key` with no choice recorded — **Verify**: the re-embed line
   prints; `nx daemon service start` prints it while a collection is
@@ -2191,3 +2267,4 @@ and the per-table dispositions.
 - 2026-10-18: Fix check on 7d26a0a93 failed (3 of 3, one BLOCKS-PLANNING: the superseded-target branch and its test still found the target by name, and `for_tuple` cannot see a superseded row). The target lookup now reads the list route without `lifecycle_state`, and the revive branch and its Phase 6 Step 2 test key on the row tuple. The three DISCOVER-AT-IMPLEMENTATION items every critic raised are for Phase 4 Step 1 and Phase 6 Step 2: the client `list_collections` gains a `content_type` parameter, the Phase 4 fixture registers a non-conformant row past the strict guard, and the `--to` source model is read from the row, not the name.
 - 2026-10-18: Gate round 3 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `ecd51d2c3`; critique `nexus_rdr/210-gate-critique-2026-10-18-r3`.
 - 2026-10-18: Accept dispositions (residuals by bead): S-R3-1 nexus-b4w2n and nexus-a0814; S-R3-2 nexus-lard5; S-R3-3 nexus-noayy; S-R3-4 nexus-zyu6n; S-R2-2 nexus-6grho; S-R2-3 nexus-hx3c8; S-R2-4 nexus-q6t89; S-R2-5 nexus-n6mh0; target row selection nexus-5ki2n; client parameter and fixture nexus-dxifx; admission-gate order nexus-e81g7; native-load errors nexus-lt84r.
+- 2026-10-24: Five text amendments from the Phase 6 implementation, approved by Sam ("Apply all five"; nexus-2u3lm). Each is marked in place. (1) The doc-less aspect and queue row arm is dropped: `doc_id` is NOT NULL with a composite foreign key (nexus-0khi2, nexus-09iho). (2) A bare client manifest write-back leaves manifest and `physical_collection` disagreeing until the next pass (nexus-0khi2). (3) A revive applies to a prior job in `done` or `aborted`; a `failed` one holds the lock (nexus-f98bg). (4) A stray manifest row before the supersede ends `done_with_skips`; the re-entry and the `--wait` exit codes are stated (nexus-6grho, nexus-09iho). (5) `CUTOVER_RESCAN` joins the state table (nexus-09iho).
