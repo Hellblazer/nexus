@@ -4409,6 +4409,10 @@ converge it with `nx self install`. A GPU build of torch on Linux
 (`NX_TORCH_BACKEND=auto`) still resolves from the shipped file, which carries no
 `+cpu` local label; `scripts/reinstall-tool.sh`'s checkout flow exports the raw
 lock with its `+cpu` labels, so it cannot pick a CUDA build.
+`NX_TORCH_BACKEND` defaults to `cpu`. `auto` picks a build from the NVIDIA
+driver. A CUDA 12.6 to 12.8 driver needs `cu126`; newer drivers can use `cu129`
+or `cu130`. `cu128` no longer exists for this torch (2.13): `auto` on a
+CUDA 12.8-only driver can fail to resolve, so name `cu126`.
 
 **`--extras pdf` installs PDF support now (nexus-2k66t.4.2).** The extra merges with the receipt's, like any other. The on-demand install in `nx index pdf` is this command with `--extras pdf --version <running version>`, run for you. Use it directly to fetch the stack before going offline. Not available on a directory-source generation (use `NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh`), a legacy uv tree (run `nx self install` first) or a dev checkout (`uv sync`, whose dev group carries the stack).
 

@@ -119,6 +119,6 @@ def test_the_project_itself_is_not_constrained() -> None:
 
 
 def test_no_pin_carries_a_local_label_that_would_fence_out_a_gpu_backend() -> None:
-    """``torch==2.8.0+cpu`` would refuse ``2.8.0+cu130`` (NX_TORCH_BACKEND=auto)."""
+    """``torch==X.Y.Z+cpu`` would refuse ``X.Y.Z+cu130`` (NX_TORCH_BACKEND=auto)."""
     labelled = [ln for ln in _pin_lines(_SHIPPED.read_text()) if re.match(r"^[^ ;]+==[^ ;]*\+", ln)]
     assert not labelled, f"local-labelled pins: {labelled}"

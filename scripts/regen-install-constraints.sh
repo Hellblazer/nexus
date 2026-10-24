@@ -24,9 +24,9 @@
 #     a package; it only bounds one that something else requests.
 #   * markers stay (`; sys_platform == 'linux'`), so one file serves every
 #     platform and Python in the lock.
-#   * the `+cpu` local label is dropped from pins (`torch==2.8.0+cpu` becomes
-#     `torch==2.8.0`). PEP 440 lets `==2.8.0` match `2.8.0+cpu` and
-#     `2.8.0+cu130`, so the default CPU backend and an `NX_TORCH_BACKEND=auto`
+#   * the `+cpu` local label is dropped from pins (`torch==X.Y.Z+cpu` becomes
+#     `torch==X.Y.Z`). PEP 440 lets `==X.Y.Z` match `X.Y.Z+cpu` and
+#     `X.Y.Z+cu130`, so the default CPU backend and an `NX_TORCH_BACKEND=auto`
 #     GPU opt-in both still resolve.
 #   * `--no-annotate --no-header`: no `# via` comments and no command echo, so
 #     the file does not churn between uv versions.

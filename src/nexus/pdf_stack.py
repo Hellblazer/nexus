@@ -26,7 +26,7 @@ HOW THE INSTALL RUNS. Through ``perform_self_install(add_extras=("pdf",),
 version=<running>)``: the generation builder with its own arguments (CPU torch
 on Linux, the overrides, the constraints shipped in the wheel). A bare
 ``uv pip install conexus[pdf]`` would resolve CUDA torch on Linux, because
-``torch==2.8.0`` in the constraints matches the CPU and CUDA builds alike. The
+``torch==<version>`` in the constraints matches the CPU and CUDA builds alike. The
 version pin is load-bearing: without it the fetch is silently an upgrade. The
 receipt records the extra, so every later ``nx self install``, the SessionStart
 lockstep and ``claude-restart-sessions`` carry it.

@@ -43,8 +43,11 @@
   nvidia packages and triton that nothing on this path uses: measured
   2026-10-07 in a fresh ubuntu:24.04 container, 4,264 MB downloaded and
   7,955 MB unpacked, against 688 MB and 2,250 MB with the flag. Set
-  `NX_TORCH_BACKEND` (to `auto`, `cu130`, and so on) to opt a GPU box back in
-  at `nx self install`. macOS and Windows wheels carry no CUDA payload, so
+  `NX_TORCH_BACKEND` to opt a GPU box back in at `nx self install`. The
+  default is `cpu`; `auto` picks a build from the NVIDIA driver. A driver that
+  supports CUDA 12.6 to 12.8 needs `cu126`; a newer driver can use `cu129` or
+  `cu130`. `cu128` does not exist for this torch (2.13), so `auto` on a
+  CUDA 12.8-only driver can fail to resolve: name `cu126` instead. macOS and Windows wheels carry no CUDA payload, so
   nothing is pinned there.
 
   **Memory.** Measured on an Apple Silicon Mac, sampling the local-stack

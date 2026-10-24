@@ -115,8 +115,13 @@ def test_the_dev_environment_has_the_stack_on_its_pins() -> None:
 def test_pins_read_from_the_shipped_constraints_keep_only_this_platforms_line() -> None:
     pins = pdf_stack._pins(pdf_stack.STACK_DISTS)
     assert set(pins) == set(pdf_stack.STACK_DISTS), pins
-    # torch has three marker lines in the file; exactly one holds here.
-    assert pins["torch"] in ("2.8.0", "2.10.0")
+    # torch can have several marker lines in the file; exactly one holds here.
+    # Compared with the lock's own torch entries, not a literal: a literal
+    # failed the full suite the day the lock moved torch (nexus-13z79).
+    lock = tomllib.loads((Path(__file__).resolve().parents[1] / "uv.lock").read_text())
+    locked = {p["version"].split("+")[0] for p in lock["package"] if p["name"] == "torch"}
+    assert locked, "uv.lock carries no torch entry"
+    assert pins["torch"] in locked, (pins["torch"], locked)
     assert "+" not in pins["torch"], "the +cpu label is dropped from the pins"
 
 
