@@ -214,7 +214,8 @@ versioned target contract before plan execution:
 ```text
 TargetContract(
     family_id: string | unresolved,
-    family_version: integer,
+    family_version: integer | null,
+    contract_version: integer,
     request: RequestCoverage,
     required_slots: list[SlotObligation],
     witness_obligations: list[WitnessObligation],
@@ -235,14 +236,25 @@ candidate ids; it never silently picks the first. A caller may pin
 the id must be a nonempty string and the version a positive integer (not a
 boolean). Unknown or invalid values produce a diagnostic, never a guessed
 family. These are routing inputs, not plan identity and not new configuration.
+For `family_id=unresolved`, `family_version=null`, family-specific obligation
+lists are empty, and the environment remains bound. A complete family-bound
+target requires a positive family version and instantiated obligations; an
+unresolved target is complete only as the explicit generic fallback and makes
+no family-specific preservation claim.
 
 **Versioning.** Routing capability stores `family_id`, `family_version`, and
 `contract_version` separately from plan identity. Existing RDR-232 starter
 kinds migrate to reviewed family capabilities by an explicit mapping, never by
 assuming their names or number define the registry. Unknown-family or old-
 version requests retain the local fallback and disclose the lack of family-
-specific checks. Changing a family's obligations increments its version; old
-run summaries remain interpretable under the version that produced them.
+specific checks. New execution uses only a compatible current family. An old
+family pin therefore uses generic realization and `requiresReview`; it does
+not evaluate under retired obligations. Historical run summaries instead use
+the immutable source-controlled declaration for their original
+`family_id/family_version/contract_version`, which P2 retains after promotion;
+interpreting an old run never reroutes its request. Changing a family's
+obligations increments its version, and `contract_version` travels from target
+construction into the run summary.
 
 **Environment profile Γ(E).** The reduced executable profile records the
 capabilities needed to assess this target: available collections/source
@@ -387,9 +399,12 @@ promotion criterion. See Decision D2.
   /search /list /exists /import /import_batch` plus three metrics routes,
   all delegating to `PlanRepository`. It stores `plan_json` as an opaque
   blob and never interprets it.
-- **No execution engine-side.** `grep -rniE
+- **No execution engine-side.** The July `grep -rniE
   "plan_?run|execute.*plan|operator_?(extract|filter|rank|check|verify|generate)|claude_?dispatch"
-  service/src/main/java` returns zero hits.
+  service/src/main/java` returned zero hits. A later re-run matched three
+  unrelated identifiers; they are false positives for target execution, so
+  the conclusion rests on the bounded handler/source review, not that old
+  zero-hit count.
 
 **Conclusion**: the engine is a persistence + retrieval substrate for the
 plan library. Target-family interpretation, operator dispatch, and
@@ -423,7 +438,7 @@ scale is 10-20 human-annotated queries; the paper calls scaling past that
 
 **None of it is computable from current telemetry.** The run parent stores
 `question, plan_id, matched_confidence, step_count, final_text, cost_usd,
-duration_ms`; step children record operator/model/cost/elapsed outcomes. No
+duration_ms, created_at`; step children record operator/model/cost/elapsed outcomes. No
 coverage, target, or preservation field exists. Plan success/failure remains
 a structural counter, not family adequacy. No field backs any
 of the three subtasks, and they cannot be computed before P2 (families) or P4
@@ -620,7 +635,8 @@ implemented.
   `check`/`verify` schemas differ, hydration drops ids/collections, and
   `verify` id-hydration falls through to an unsupported `inputs` argument
   instead of `evidence`. P1 must define claim/evidence hydration, host-bound
-  identity, returned-id validation, and an explicit non-bundling boundary.
+  identity, returned-id validation, quote/span fidelity checks, and an explicit
+  non-bundling boundary.
   Ship P1 only when direct/bundled success and failure cases, shared-chash
   ambiguity, and all enrichment outcomes pass.
 - [ ] **A2 — a small human-reviewed family set can bind requests without silent
@@ -758,7 +774,10 @@ P1 defines one versioned witness schema for direct and bundled operators:
 that id to `{tumbler, chash, collection}` from the evidence stream; the model
 never emits or infers hashes. Hydration preserves typed evidence items and
 source identity, direct and bundle schemas stay aligned, and host-side joins
-reject returned ids outside the supplied evidence. Shared chashes across
+reject returned ids outside the supplied evidence. Host-side quote/span
+validation also requires containment in the bound evidence after Unicode NFKC
+and whitespace normalization; a fabricated quote or wrong-document span yields
+`ambiguous` or `requiresReview`, never a valid witness. Shared chashes across
 documents require the parent document/collection or an `ambiguous` state.
 
 - Align `operator_verify` with the structured evidence schema used by
@@ -771,14 +790,20 @@ documents require the parent document/collection or an `ambiguous` state.
   hide intermediate witness output inside a bundle.
 - Preserve successful `nx enrich --validate-sample` witnesses in a new
   `aspect_validation.jsonl` all-outcomes record beside the existing
-  `aspect_validation_failures.jsonl` (or the `--validation-out` location).
+  `aspect_validation_failures.jsonl`. Keep `--validation-out` exclusively for
+  the legacy failures file. Add `--validation-all-out` for the additive file,
+  with a distinct default under the Nexus config directory, and reject equal
+  paths rather than mixing schemas.
   Each row carries `status` (`verified`, `disagreement`, `unverifiable`,
   `errored`), source identity, extracted claims, host-bound witness items,
   verify reason, timestamp, and evidence-window metadata. The existing
-  failures file keeps its schema and consumers; the new file is additive and
-  follows the same output-path override. It stores evidence anchors and
-  claim identifiers, not full document text or private source hints by
-  default; `trace=False` redacts text and retains only ids/states/counts.
+  failures file keeps its schema and consumers; the new file is additive.
+  It stores evidence anchors and claim identifiers, not full document text or
+  private source hints by default. A new `--validation-trace` /
+  `--no-validation-trace` CLI option, default `--validation-trace`, passes
+  `trace` into `_run_validation_sample`; this is distinct from `nx_answer`'s
+  `trace` argument and needs no new configuration file. `trace=False` redacts
+  free text and retains only permitted ids/states/counts.
   Retention and deletion follow the existing validation-output lifecycle;
   there is no new service or database table.
 - **Requires an RDR-088 amendment** and synchronized updates to
@@ -826,7 +851,8 @@ matrix rather than silently narrowing to a lookup or inventing obligations.
 Optional structured extraction uses at most one direct operator call with
 separately measured cost and deadline. Acceptance fixtures cover family
 binding, ambiguity, unknown family, explicit family/version pins, migration
-from RDR-232 starter capabilities, unavailable environment capabilities, and
+from RDR-232 starter capabilities, `contract_version` propagation, unresolved
+`family_version=null`, and unavailable environment capabilities, and
 both valid and invalid pins. Fixtures require both pin keys together, reject
 partial pins, empty ids, non-positive or non-integer versions, booleans, and
 unknown ids/versions, and prove that a valid pin resolves an ambiguity without
@@ -838,14 +864,14 @@ changing plan identity.
 | --- | --- | --- |
 | No compatible family | RDR-232 generic realization; `family_id=unresolved`; no family-specific preservation claim | Return the target's unresolved state; do not invent slots or obligations. |
 | Multiple compatible families | Stop family-specific realization and return candidate ids with an ambiguity diagnostic | No first-match choice; a valid `bindings.target_family_id` plus `target_family_version` pin resolves the ambiguity. |
-| Old family or contract version | Evaluate under the version that produced the run when available; otherwise use the local fallback and mark `requiresReview` | Preserve original version in run summary; never reinterpret old evidence under new obligations silently. |
+| Old family or contract version | For new execution, use generic realization and `requiresReview`; do not evaluate under retired obligations | For historical runs, interpret evidence under the immutable source-controlled original family/contract declaration; preserve all version fields in the summary and never reroute the old request. |
 | Missing required environment capability | Keep primary/direct evidence; omit dependent secondary behavior; unresolved target or `requiresReview` as appropriate | Mark the capability missing; never infer support from an ignored parameter or HTTP 200. |
 | RDR-232 required coverage incomplete after its one repair | RDR-232 returns `INSUFFICIENT_EVIDENCE`, its notice/chunk references, and the coverage ledger; no normal partial-prose answer | Increment `failure_count`, suppress plan growth, and mark affected P4 obligations `unavailable` or `requiresReview`; do not return or assess partial prose as `preserved`. |
 | Old client/envelope without target fields | Preserve legacy answer behavior and structural classification | Do not fabricate a target or trace; mark `target=unavailable` in new responses that can represent it. |
 | Run-summary persistence unsupported or readback dropped | Return the live target/coverage/preservation result without claiming storage | `persistence=unsupported` or `dropped`; no second write, no silent success. |
 | `trace=False` | Authorized handoff/report protocol retains the question, facets, source hints, evidence text, exact final output, and typed ids needed for reduction and host assessment | Logs, telemetry, validation files, and other persisted artifacts keep only permitted ids, states, counts, and capability outcomes; redact question/facet text, source hints, quotes, and other free text. Exact-output persistence requires an explicit bounded retention policy, not blanket persistence. |
 | Continuation handed off, report not yet received | Preservation is `pending`, not preserved | Hand off target, live ledger, environment, and finalization obligations. |
-| Continuation report has exact final output | Host validates continuation identity, schema version, digest, and returned evidence ids, then assesses the output against the retained target and ledger | `ok` reports execution only. Caller-supplied preservation states are never authoritative. |
+| Continuation report has exact final output | Host validates continuation identity, schema version, digest, and typed `returned_evidence_ids`, then assesses the output against the retained target and ledger | `ok` reports execution only. Caller-supplied preservation states are never authoritative. |
 | Continuation report missing, failed, or lacks/mismatches required output | `unavailable` or `failed` per obligation; `requiresReview` for an integrity mismatch; no final preservation claim | Record the reason and preserve the partial ledger. `ok=true` alone never completes P4. |
 
 A fallback never upgrades an unresolved or unsupported state to `preserved`.
@@ -859,7 +885,7 @@ storage, not runtime input. Coverage says evidence existed for a facet. P4
 asks whether the answer preserved each required slot, treatment constraint,
 and witness obligation.
 
-Use per-obligation states `preserved`, `approximated`, `weakened`,
+Use per-obligation states `pending`, `preserved`, `approximated`, `weakened`,
 `requiresReview`, `unavailable`, and `failed`, with host-bound witnesses.
 Declared witness obligations use direct host-visible dispatch or an explicit
 non-bundling boundary; no hidden bundled intermediate. Reuse RDR-232's
@@ -872,8 +898,10 @@ P4 assessment**. Hand off the target, live coverage ledger, environment, and
 finalization obligations, retained by continuation id. Extend
 `nx_answer_report` with a versioned finalization payload containing
 `continuation_id`, `finalization_schema_version`, the exact final output (or
-an explicit unavailable state), and its digest. `ok` means reduction executed;
-it is not a preservation state.
+an explicit unavailable state), its digest, and `returned_evidence_ids`.
+Each returned id is a typed local id with host-bound
+`{tumbler, chash, collection}`; unavailable output carries an empty list and
+the reason. `ok` means reduction executed; it is not a preservation state.
 
 On report, the host validates the continuation identity, schema version,
 output digest, and returned evidence ids against retained state, then assesses
@@ -1039,7 +1067,9 @@ under the fallback matrix.
 
 - **Scenario**: direct and bundled `check`/`verify` consume the same evidence —
   **Verify**: one versioned schema, host-bound source identity, returned ids
-  restricted to supplied evidence, and no hidden intermediate witness output.
+  restricted to supplied evidence, quote/span containment in the bound evidence,
+  and no hidden intermediate witness output. Fabricated quotes and
+  wrong-document spans fail rather than becoming valid witnesses.
   A saved-plan `verify` id-hydration case supplies both `claim` and `evidence`
   and no rejected `inputs` argument.
 - **Scenario**: identical chunk text occurs in two documents —
@@ -1047,14 +1077,17 @@ under the fallback matrix.
   result is `ambiguous`; another document's section metadata is not inherited.
 - **Scenario**: enrichment validation succeeds, disagrees, is unverifiable, or
   errors — **Verify**: the additive all-outcomes JSONL retains the correct
-  status and host witness, the legacy failures file is unchanged, and output
-  override/redaction rules hold.
+  status and host witness, the legacy failures file is unchanged, the two
+  output paths cannot collide, and `--validation-trace` default and
+  `--no-validation-trace` redaction both propagate into the validator.
 - **Scenario**: zero, one, or several reviewed families match a request —
   **Verify**: unresolved, exactly bound, or ambiguity diagnostic respectively;
   no first-match selection or invented obligations.
 - **Scenario**: a family or contract version is pinned or is no longer current —
-  **Verify**: versioned interpretation and migration, original version retained
-  in the run summary, and explicit fallback when interpretation is unavailable.
+  **Verify**: new execution uses the generic route plus `requiresReview`, never
+  retired-obligation evaluation; historical summaries use the retained
+  immutable original family/contract declarations without rerouting. An
+  unresolved target carries `family_version=null` and no family obligations.
 - **Scenario**: a required environment capability is absent or an engine ignores
   a new field — **Verify**: missing capability is disclosed; no HTTP 200 or
   cached capability is treated as proof; unsupported persistence is not success.
@@ -1073,7 +1106,9 @@ under the fallback matrix.
 - **Scenario**: continuation returns `ok=true` but its exact output drops a
   required obligation — **Verify**: the host assesses `weakened` or
   `requiresReview`, not `preserved`; missing/mismatched output cannot complete
-  P4 and caller-supplied preservation states are not trusted.
+  P4 and caller-supplied preservation states are not trusted. An unknown or
+  mismatched `returned_evidence_ids` entry is rejected, and unavailable output
+  carries an empty list plus its reason.
 - **Scenario**: `trace=False` with private sources and facets — **Verify**:
   authorized handoff/report protocol retains the content needed for reduction
   and host assessment; logs, telemetry, validation files, and other persisted
@@ -1119,9 +1154,11 @@ repeat the plan prefix or add an unbounded assessment loop.
 
 Before P6 measurement, record the baseline distribution and the smallest
 improvement in human-labeled target fidelity that Sam considers worth the
-added cost. Continue P2–P4 only if the lower confidence bound for the paired
-target-fidelity delta meets that pre-registered minimum and measured added
-cost stays within the agreed budget. Stop for futility if the upper bound is
+added cost. P2–P4 proceed under their stated prerequisites so P6 can measure
+the result. After P6, keep the target layer only if the lower confidence bound
+for the paired target-fidelity delta meets that pre-registered minimum and
+measured added cost stays within the agreed budget. Stop or narrow for
+futility if the upper bound is
 below that minimum or the cost/latency ceiling is exceeded without the gain;
 treat any other inconclusive interval as insufficient evidence, not adoption.
 Cap evaluation spend and important-stratum label floors before comparing arms.
@@ -1136,7 +1173,8 @@ through the P2 review workflow. The scope ladder supplies its governance
 concept; no current executable plan-promotion command is assumed. Versioned
 run summaries use RDR-232's
 migration, import/export, readback, and deletion lifecycle. `aspect_validation.jsonl`
-uses the existing local validation-output path and retention lifecycle, with
+uses its separate `--validation-all-out` path and the existing local
+validation-output retention lifecycle, with
 redaction and deletion covered by tests. No new database table, collection,
 service, credential, or independent telemetry write is proposed.
 
@@ -1199,8 +1237,9 @@ cost/value decision, not a substitute for the phase MVV.
 ### Cross-Cutting Concerns
 
 - **Versioning**: family, contract, witness schema, envelope, and run-summary
-  versions are explicit; old evidence is interpreted under its original
-  version or marked for review.
+  versions are explicit. New execution of an old family uses generic
+  realization plus review; historical evidence is interpreted under its
+  immutable original declaration or marked for review.
 - **Build tool compatibility**: existing Python and Java/Maven paths. Engine
   migration and graph dependencies belong to RDR-232 and its release process.
 - **Licensing**: no new dependency or copied external implementation.
@@ -1259,7 +1298,7 @@ RDR-232 safeguards remain.
 - Research completion: `nexus_rdr/189-research-10` through `-16`: canonical
   research registration, current census, deployment evidence, governance,
   current interfaces, roadmap ghost-source verification, and gate-readiness
-  validation with its test limitation.
+  validation with its test limitation. Gate-fix evidence: research 17–22.
 - Code: `src/nexus/plans/{runner,schema,bundle}.py`,
   `src/nexus/mcp/core.py`, `src/nexus/commands/enrich.py`.
 
@@ -1358,3 +1397,9 @@ RDR-232 safeguards remain.
   complete; proposed runtime behavior and D4 value remain unproven. No gate,
   acceptance, or implementation performed.
 - 2026-10-24: Gate round 1 — BLOCKED (1 Critical, 4 Significant, 1 ship-blocker(s)); commit `6aa585629`; critique `nexus_rdr/189-gate-critique-2026-10-24-r1`.
+- 2026-10-24 — **Fix-check repair (research 22).** Separated legacy and
+  all-outcomes validation paths; defined the enrichment trace flag and default;
+  made unresolved version, contract-version, and continuation evidence-id
+  fields explicit; separated old-request routing from historical interpretation;
+  added pending, quote/span fidelity, and negative tests; corrected the P4/P6
+  keep/stop ordering. This records design repair, not runtime verification.
