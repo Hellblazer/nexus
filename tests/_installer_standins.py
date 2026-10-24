@@ -13,8 +13,11 @@ from pathlib import Path
 
 # What the script runs for the CLI build, word for word (the bead's Build item 3). The
 # requirement is ``conexus@latest``: a bare ``conexus`` reuses the environment ``uv`` cached on an
-# earlier run, which may predate ``--bootstrap`` (nexus-sv2wx.28).
-BOOTSTRAP = "uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap"
+# earlier run, which may predate ``--bootstrap`` (nexus-sv2wx.28). The default build asks for the
+# ``pdf`` extra, so a fresh install has PDF support as 7.85.0 did (nexus-2k66t.4.9, Sam
+# 2026-10-23: install everything by default); ``--slim`` runs the build without it.
+BOOTSTRAP_SLIM = "uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap"
+BOOTSTRAP = BOOTSTRAP_SLIM + " --extras pdf"
 
 # Strings the script prints that the tests look for.
 SERVICE_QUESTION = "How should Nexus run its storage service?"

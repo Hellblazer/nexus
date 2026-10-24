@@ -5,6 +5,7 @@
 #
 #   curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh
 #   curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local
+#   curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --slim
 #
 # Everything is inside the one function main, and main is called on the last
 # line. A download that is cut short is then a syntax error or a file with no
@@ -39,11 +40,12 @@ main() {
 	Install the Nexus command-line tool (nx). Adds the conexus plugin to Claude Code
 	when claude is on the PATH, and sets up the storage service if you ask for it.
 
-	Usage: install.sh [--local | --cloud | --cli-only] [--autostart | --no-autostart]
+	Usage: install.sh [--local | --cloud | --cli-only] [--autostart | --no-autostart] [--slim]
 
-	  --local          Run the storage service on this machine. Downloads up to about
-	                   1.3 GB. Runs `nx init`, in local mode even when a service
-	                   address is already configured.
+	  --local          Run the storage service on this machine. Downloads about 0.8 GB
+	                   in all on macOS and 0.9 GB on Linux, PDF support included. Runs
+	                   `nx init`, in local mode even when a service address is already
+	                   configured.
 	  --cloud          Use a managed service. Runs `nx config init`, which asks for the
 	                   service address and your token. With no terminal attached it
 	                   needs NX_SERVICE_URL and NX_SERVICE_TOKEN (or NX_MINT_TOKEN) in
@@ -54,15 +56,24 @@ main() {
 	                   as --yes.
 	  --no-autostart   With --local: do not start the service at login. Passed to
 	                   `nx init` as --no-autostart.
+	  --slim           Leave PDF support out: the download falls to about 0.2 GB for the
+	                   command-line tool (about 0.55 GB with --local). The first PDF you
+	                   index then fetches it (`nx self install --extras pdf` does it
+	                   ahead of time).
 	  -h, --help       Show this text.
 
 	Typing this command is your consent to install the command-line tool, so the
 	script does not ask about that. It installs uv first when uv is missing, using
 	the uv project's own installer. When nx is already installed it skips the build
-	and says so. The build downloads about 700 MB (the conexus package and its
-	dependencies; measured on Linux x86-64 with 7.81.0). On Linux it asks for the CPU
-	build of torch, so it does not download the CUDA libraries, about 4.5 GB more (set
-	NX_TORCH_BACKEND to choose another build).
+	and says so. By default the build installs everything, PDF support included
+	(docling, MinerU and torch): it downloads about 0.45 GB on macOS and 0.6 GB on Linux
+	for the command-line tool, and the service adds the rest of the --local figure. The
+	download sizes are derived from a 2026-10-23 measurement of 7.85.0. Disk use is up to about
+	2.3 GB for the command-line tool and 3.1 GB with --local, upper bounds from a 7.81.0-era
+	measurement. Neither is a promise.
+
+	On Linux it asks for the CPU build of torch, so it does not download the CUDA libraries,
+	about 4.5 GB more (set NX_TORCH_BACKEND to choose another build).
 
 	With no service flag, the script asks one question on the terminal, before it
 	downloads anything. With no terminal attached and no flag, it installs the
@@ -88,7 +99,7 @@ main() {
     choose_mode() {
         {
             printf '\n%s\n' "How should Nexus run its storage service?"
-            printf '  1) local     run it on this machine (downloads up to about 1.3 GB)\n'
+            printf '  1) local     run it on this machine (downloads about 0.8 GB, 0.9 GB on Linux)\n'
             printf '  2) cloud     use a managed service (you type its address and token)\n'
             printf '  3) CLI only  install the command-line tool and nothing else\n'
         } >/dev/tty
@@ -118,6 +129,7 @@ main() {
     MODE=""
     AUTOSTART=""
     AUTOSTART_ARG=""
+    SLIM=no
     for arg in "$@"; do
         case $arg in
             -h|--help) usage; return 0 ;;
@@ -133,6 +145,7 @@ main() {
             --no-autostart)
                 if [ "$AUTOSTART" = yes ]; then bad_usage "--autostart and --no-autostart cannot be used together"; fi
                 AUTOSTART=no; AUTOSTART_ARG=$arg ;;
+            --slim) SLIM=yes ;;
             *) bad_usage "unknown option: $arg" ;;
         esac
     done
@@ -251,18 +264,27 @@ main() {
         say "Building the Nexus CLI (this downloads the conexus package)."
         # conexus@latest, not bare conexus: uv reuses the environment it cached for a bare
         # requirement, which can be a conexus from before --bootstrap existed.
+        # The default build installs everything: --extras pdf goes to the GENERATION (the
+        # throwaway environment that runs --bootstrap stays slim, and uv's cache means the
+        # shared part is fetched once). --slim leaves PDF support out; the first PDF index
+        # fetches it then (nexus-2k66t.4.9).
         # On Linux the build gets the CPU build of torch, as the plugin's setup tool gives
         # it to the same build (its build_env function): without it uv installs the CUDA torch
         # and its libraries, about 4.5 GB. NX_TORCH_BACKEND alone overrides, and an
         # ambient UV_TORCH_BACKEND is replaced, so the throwaway environment and the
         # generation get the same torch. A uv too old to know the variable ignores it.
+        build_cli() {
+            if [ "$SLIM" = yes ]; then
+                uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap
+            else
+                uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap --extras pdf
+            fi
+        }
         if [ "$(uname -s 2>/dev/null || true)" = Linux ]; then
-            UV_TORCH_BACKEND="${NX_TORCH_BACKEND:-cpu}" \
-                uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap \
+            ( UV_TORCH_BACKEND="${NX_TORCH_BACKEND:-cpu}"; export UV_TORCH_BACKEND; build_cli ) \
                 || die "the build failed (see the lines above). Nothing else was done."
         else
-            uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap \
-                || die "the build failed (see the lines above). Nothing else was done."
+            build_cli || die "the build failed (see the lines above). Nothing else was done."
         fi
         find_cli || die "the build finished but nx was not found in $TOOLS_DIR/current/bin. Open a new terminal and run this again."
     fi
