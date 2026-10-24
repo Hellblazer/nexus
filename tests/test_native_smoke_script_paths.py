@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_process import kill_group, popen_in_group, signal_group, terminal_signals_default
 from tests._tmp_root import child_env_with_tmpdir
 
 SERVICE = Path(__file__).resolve().parent.parent / "service"
@@ -208,19 +209,18 @@ def test_bounded_ends_a_hung_command_and_lets_ctrl_c_through(script: str) -> Non
     else:  # a vanilla Mac: the helper runs the command bare, by design
         out = subprocess.run(["bash", "-c", fn + "_bounded 1 sh -c 'exit 7'; echo rc=$?"], capture_output=True, text=True, timeout=20)
         assert out.stdout.strip() == "rc=7", out
-    proc = subprocess.Popen(
-        ["bash", "-c", fn + "_bounded 60 sleep 60\necho after"],
-        stdout=subprocess.PIPE, text=True, start_new_session=True,
-    )
+    # SIGINT at its default in the child: a run started with & from a script inherits it ignored.
+    with terminal_signals_default():
+        proc = popen_in_group(["bash", "-c", fn + "_bounded 60 sleep 60\necho after"], stdout=subprocess.PIPE, text=True)
     try:
         time.sleep(0.5)
         t0 = time.monotonic()
-        os.killpg(proc.pid, signal.SIGINT)
+        signal_group(proc, signal.SIGINT)
         stdout, _ = proc.communicate(timeout=20)
         assert time.monotonic() - t0 < 10 and "after" not in stdout, "Ctrl-C did not reach the bounded command"
     finally:
         if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
+            kill_group(proc)
             proc.wait()
 
 
@@ -259,7 +259,8 @@ present = os.path.exists(model) and os.path.exists(tok)
 key = bool(os.environ.get("NX_VOYAGE_API_KEY"))
 shown = "/opt/elsewhere/onnx" if DEFECT == "cloud-wrong-probe-path" else bge
 state = lambda p: "present" if os.path.exists(p) else "absent"
-log(f"event=embedder_presence bge_present={str(present).lower()} voyage_key_present={str(key).lower()} "
+said = (present or (DEFECT == "cloud-presence-wrong" and key)) and not (DEFECT == "truncated-presence-absent" and present)
+log(f"event=embedder_presence bge_present={str(said).lower()} voyage_key_present={str(key).lower()} "
     f'bge="model={state(model)} path={shown}/model.onnx tokenizer={state(tok)} path={shown}/tokenizer.json"')
 if DEFECT == "truncated-keyed-boots" and present and key:
     present = False  # a key lets the engine boot Voyage-only past a broken model (Sam's ruling: it must not)
@@ -276,6 +277,8 @@ if present:
         if DEFECT == "truncated-no-size-floor":
             die("java.lang.IllegalStateException: cannot load the bge model")
         die(f"java.lang.IllegalStateException: model at {model} is {size} bytes, far below the standard fp32 bge export")
+    if DEFECT == "zero-boots":
+        log("event=service_ready")
     if DEFECT == "zero-hangs":
         time.sleep(600)
     if DEFECT == "zero-fails-before-session":
@@ -320,7 +323,7 @@ if DEFECT == "cloud-reports-bge":
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
+        self.send_response(404 if DEFECT == "cloud-no-version" else 200)
         self.end_headers()
         self.wfile.write(json.dumps(version).encode())
 
@@ -341,6 +344,7 @@ class _ShapesRun:
     def __init__(self, proc: subprocess.CompletedProcess[str], calls: list[str], boots: list[tuple[int, str]],
                  leftover: list[int], scratch: Path) -> None:
         self.proc, self.calls, self.boots, self.leftover, self.scratch = proc, calls, boots, leftover, scratch
+        self.elapsed = 0.0
         self.out = proc.stdout + proc.stderr
 
     def verdicts(self) -> dict[str, tuple[str, list[str]]]:
@@ -387,6 +391,7 @@ def _run_shapes(
     if borrowed_pg is not None:
         env["BOOT_SHAPES_PG_CONTAINER"], env["BOOT_SHAPES_PG_PORT"] = borrowed_pg
     boots: list[tuple[int, str]] = []
+    t0 = time.monotonic()
     try:
         proc = subprocess.run(["bash", str(BOOT_SHAPES)], cwd=SERVICE, env=env, capture_output=True, text=True, timeout=300)
     finally:
@@ -396,7 +401,9 @@ def _run_shapes(
         for pid in leftover:
             os.kill(pid, signal.SIGKILL)
     calls = log.read_text().splitlines() if log.exists() else []
-    return _ShapesRun(proc, calls, boots, leftover, scratch)
+    run = _ShapesRun(proc, calls, boots, leftover, scratch)
+    run.elapsed = time.monotonic() - t0
+    return run
 
 
 def _own_container(calls: list[str]) -> tuple[str, str]:
@@ -445,6 +452,8 @@ _EXIT = ("exits within the bound", "exits non-zero, not a crash or a kill")
     [
         ("cloud-never-ready", {"cloud-shape": ["reaches service_ready"]}),
         ("cloud-dies-before-ready", {"cloud-shape": ["reaches service_ready"]}),
+        ("cloud-presence-wrong", {"cloud-shape": ["probe saw the voyage key and no bge"]}),
+        ("cloud-no-version", {"cloud-shape": ["GET /version answers", "/version reports embedding_mode voyage"]}),
         ("cloud-wrong-probe-path", {"cloud-shape": ["probe looked in NX_ONNX_MODEL_DIR"]}),
         ("cloud-reports-bge", {"cloud-shape": ["/version reports embedding_mode voyage with Voyage models only"]}),
         ("cloud-extracts-ort", {"cloud-shape": ["no ort_native_dir event"]}),
@@ -459,6 +468,8 @@ _EXIT = ("exits within the bound", "exits non-zero, not a crash or a kill")
         ("neither-no-event", {"neither-family": ["logs event=no_embedder_available"]}),
         ("neither-drops-key-remedy", {"neither-family": ["names the Voyage-key remedy"]}),
         ("neither-names-one-remedy", {"neither-family": ["names the local-model remedy"]}),
+        ("truncated-presence-absent", {leg: ["probe reports the truncated model PRESENT"]
+                                       for leg in ("truncated-model:keyless", "truncated-model:keyed")}),
         ("truncated-reads-as-absent", {leg: ["is not reported as absent"] for leg in ("truncated-model:keyless", "truncated-model:keyed")}),
         ("truncated-no-size-floor", {leg: ["names the size floor"] for leg in ("truncated-model:keyless", "truncated-model:keyed")}),
         ("truncated-skips-extraction", {
@@ -470,6 +481,7 @@ _EXIT = ("exits within the bound", "exits non-zero, not a crash or a kill")
             *_EXIT, "never reaches service_ready", "positive control: applyAtBoot logged",
             "positive control: NX_ORT_NATIVE_DIR was filled", "names the size floor"]}),
         ("zero-hangs", {"zero-model": [*_EXIT, "reached createSession", "the failure is the embedder's"]}),
+        ("zero-boots", {"zero-model": ["never reaches service_ready"]}),
         ("zero-fails-before-session", {"zero-model": ["reached createSession"]}),
         ("zero-other-failure", {"zero-model": ["the failure is the embedder's"]}),
     ],
@@ -490,7 +502,19 @@ def test_each_check_fails_on_an_engine_that_breaks_it_and_nothing_else_does(
         assert len(got) == len(want) and all(any(g.startswith(w) for g in got) for w in want), (shape, got, want)
     assert "BOOT SHAPES FAIL" in run.out
     assert run.leftover == [], "the script ended every engine it started, the hung ones included"
+    # A hung engine is killed by the script's 90-step bound (9 s here), not by the fake's 120 s alarm.
+    assert run.elapsed < 90, f"{run.elapsed:.0f} s: something other than the script ended a hung engine"
     assert len(run.kept()) == 1 and "logs kept in" in run.out, "a failed run keeps its scratch dir and says where"
+
+
+def test_the_zero_model_is_past_the_engines_size_floor() -> None:
+    """Below Bge768Embedder.MIN_MODEL_BYTES the zero-model shape would fail at the size floor, as the
+    truncated shape does, and its createSession check would fail at release, not here."""
+    java = (SERVICE / "src/main/java/dev/nexus/service/vectors/Bge768Embedder.java").read_text()
+    floor = re.search(r"MIN_MODEL_BYTES = ([\d_]+)L;", java)
+    size = re.search(r"truncate\((\d+)\)", BOOT_SHAPES.read_text())
+    assert floor and size, "the floor constant or the zero model's size moved; this test needs updating"
+    assert int(size.group(1)) > int(floor.group(1).replace("_", "")), (size.group(1), floor.group(1))
 
 
 def test_a_container_that_cannot_start_or_never_gets_ready_stops_the_run_before_any_boot(tmp_path: Path) -> None:

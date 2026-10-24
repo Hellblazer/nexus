@@ -89,7 +89,7 @@ free_port() { python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0)
 if [ -z "$PGC" ]; then
   if [ -n "${NX_DB_URL:-}" ]; then
     echo "SKIP boot shapes: external NX_DB_URL cannot give each boot a clean database."
-    echo "     WARN the cloud shape and the two failure boots are NOT covered by this run."
+    echo "     WARN the cloud shape and the failure shapes are NOT covered by this run."
     # A gate that skip-passes when its dependency is absent needs a max-skip: a release
     # leg sets NATIVE_SMOKE_REQUIRE_SHAPES=1 so a skipped shapes block fails the run.
     if [ "${NATIVE_SMOKE_REQUIRE_SHAPES:-0}" = "1" ]; then
@@ -292,11 +292,11 @@ run_zero_model() {
   ck "never reaches service_ready" 'echo "service_ready was logged"' no_log 'event=service_ready'
   ck "ONNX Runtime extracted (applyAtBoot ran)" 'grep -m1 ort_native_dir "$BOOT_LOG"' \
     has_log 'event=ort_native_dir source=extracted'
-  ck "reached createSession (ONNX Runtime refused the model)" 'echo "no OrtSession.createSession frame"' \
+  ck "reached createSession (an OrtSession.createSession frame in the failure)" 'echo "no OrtSession.createSession frame"' \
     has_log 'OrtSession.createSession'
   ck "the failure is the embedder's" 'echo "no Bge768Embedder failure in the output"' \
     has_log 'Failed to initialise Bge768Embedder'
-  verdict "zero-model (both files present, 250 MB of zeros: createSession refuses it, the process ends on its own)"
+  verdict "zero-model (both files present, 250 MB of zeros: the embedder fails in createSession, the process ends on its own)"
 }
 
 echo "boot shapes (RDR-210 P2.2): $BIN"

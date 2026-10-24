@@ -803,11 +803,12 @@ fi
 fi  # end voyage-mode phase (OWN_PG)
 
 # ── Boot shapes at the probe's edges (RDR-210 P2.2, nexus-hgzx4) ──────────────
-# The cloud shape (key, no bge files) and the two failure boots (neither family; a truncated
-# model) each need a clean database and their own env, so they live in their own script. Stop the
-# voyage-mode engine first; the script boots the same binary three more ways and cleans up after
-# itself. With an external NX_DB_URL (no container to create databases in) it SKIPS loudly.
-echo "boot shapes (cloud shape + the two failure boots):"
+# The cloud shape (key, no bge files) and the three failure shapes (neither family; a truncated
+# model, keyless and keyed; a zero model past the size floor) each need a clean database and their
+# own env, so they live in their own script. Stop the voyage-mode engine first; the script boots the
+# same binary five more times and cleans up after itself. With an external NX_DB_URL (no container to
+# create databases in) it SKIPS loudly.
+echo "boot shapes (cloud shape + the three failure shapes):"
 [ -n "${SVCPID:-}" ] && { kill "$SVCPID" 2>/dev/null; wait "$SVCPID" 2>/dev/null; SVCPID=""; }
 if [ "$OWN_PG" = "1" ]; then
   BOOT_SHAPES_PG_CONTAINER="$PGNAME" BOOT_SHAPES_PG_PORT="$PGPORT" BIN="$BIN" ./native-boot-shapes-smoke.sh || fail=1
