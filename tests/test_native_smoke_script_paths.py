@@ -191,13 +191,14 @@ def test_every_docker_call_in_the_script_is_bounded(script: str) -> None:
 
 
 def _bounded_fn(script: str) -> str:
-    m = re.search(r"^_bounded\(\) \{\n.*?^\}\n", (SERVICE / script).read_text(), re.MULTILINE | re.DOTALL)
-    assert m, f"{script} defines no _bounded"
+    # The function and the top-level INT trap that follows it.
+    m = re.search(r"^_bounded\(\) \{\n.*?^\}\ntrap [^\n]* INT\n", (SERVICE / script).read_text(), re.MULTILINE | re.DOTALL)
+    assert m, f"{script} defines no _bounded followed by its INT trap"
     return m.group(0)
 
 
 @pytest.mark.parametrize("script", _SCRIPTS)
-def test_bounded_ends_a_hung_command_and_lets_ctrl_c_through(script: str) -> None:
+def test_bounded_ends_a_hung_command_and_lets_ctrl_c_through(script: str, tmp_path: Path) -> None:
     """timeout without --foreground puts itself in its own process group, so a terminal's Ctrl-C
     never reaches the command it runs (the rc4pz review: a 2 h native build could not be
     interrupted). The SIGINT here goes to the script's whole process group, as a terminal sends it."""
@@ -209,15 +210,30 @@ def test_bounded_ends_a_hung_command_and_lets_ctrl_c_through(script: str) -> Non
     else:  # a vanilla Mac: the helper runs the command bare, by design
         out = subprocess.run(["bash", "-c", fn + "_bounded 1 sh -c 'exit 7'; echo rc=$?"], capture_output=True, text=True, timeout=20)
         assert out.stdout.strip() == "rc=7", out
+    _assert_ctrl_c_stops(fn, os.environ.copy())
+    # uutils timeout (Ubuntu's default, chas) exits 2 on SIGINT where GNU re-raises it, and bash goes
+    # on unless its child died by the signal; CI's GNU timeout cannot show that, so a stand-in does.
+    shim = tmp_path / "timeout"
+    shim.write_text("#!/bin/bash\ntrap 'exit 2' INT\nshift 2\n\"$@\"\n")
+    shim.chmod(0o755)
+    _assert_ctrl_c_stops(fn, {**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"})
+
+
+def _assert_ctrl_c_stops(fn: str, env: dict[str, str]) -> None:
     # SIGINT at its default in the child: a run started with & from a script inherits it ignored.
+    # The script runs under a bash caller, as mac-signed-binary-gate.sh runs native-smoke.sh: the script
+    # must die by SIGINT, not exit 130, or the caller carries on.
+    inner = fn + "trap 'echo cleaned' EXIT\n_bounded 60 sleep 60\necho after"
     with terminal_signals_default():
-        proc = popen_in_group(["bash", "-c", fn + "_bounded 60 sleep 60\necho after"], stdout=subprocess.PIPE, text=True)
+        proc = popen_in_group(["bash", "-c", 'bash -c "$1"\necho caller-continues', "caller", inner], stdout=subprocess.PIPE, text=True, env=env)
     try:
         time.sleep(0.5)
         t0 = time.monotonic()
         signal_group(proc, signal.SIGINT)
         stdout, _ = proc.communicate(timeout=20)
         assert time.monotonic() - t0 < 10 and "after" not in stdout, "Ctrl-C did not reach the bounded command"
+        assert "cleaned" in stdout, "the EXIT cleanup did not run"
+        assert "caller-continues" not in stdout and proc.returncode == -signal.SIGINT, (proc.returncode, stdout)
     finally:
         if proc.poll() is None:
             kill_group(proc)

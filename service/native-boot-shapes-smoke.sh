@@ -54,12 +54,17 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WINLIKE=1 ;; *) WINLIKE=0 ;; esac
 # Linux runners; gtimeout from Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call
 # runs unbounded as before.
 # --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
+# The INT trap below then stops the script: uutils timeout (coreutils 0.8.0 on chas) exits 2 on SIGINT
+# where GNU re-raises it, and bash goes on unless its child died by the signal. The trap re-raises, so
+# the script dies by SIGINT and a bash caller stops too; it is set at top level because bash resets
+# traps inside $(...).
 _bounded() {
   local secs="$1"; shift
   if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
   else "$@"; fi
 }
+trap 'trap - INT; kill -INT $$' INT
 
 SHAPES_TMP=$(mktemp -d "${TMPDIR:-/tmp}/native-boot-shapes.XXXXXX") \
   || { echo "FAIL: cannot create scratch dir under ${TMPDIR:-/tmp}"; exit 2; }

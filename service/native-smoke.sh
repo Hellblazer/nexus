@@ -34,12 +34,17 @@ export SMOKE_TMP
 # nexus-ub4ge: bounded docker and psql calls. GNU timeout on Linux runners; gtimeout from
 # Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call runs unbounded as before.
 # --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
+# The INT trap below then stops the script: uutils timeout (coreutils 0.8.0 on chas) exits 2 on SIGINT
+# where GNU re-raises it, and bash goes on unless its child died by the signal. The trap re-raises, so
+# the script dies by SIGINT and a bash caller stops too; it is set at top level because bash resets
+# traps inside $(...).
 _bounded() {
   local secs="$1"; shift
   if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
   else "$@"; fi
 }
+trap 'trap - INT; kill -INT $$' INT
 
 OWN_PG=0
 if [ -z "${NX_DB_URL:-}" ]; then
@@ -313,12 +318,6 @@ fi
 # read a green run as proof this section executed.
 echo "T1 via the real Python client (routing + backend together):"
 REPO_ROOT="$(cd .. && pwd)"
-# `timeout` is GNU coreutils -- present on every CI runner (Linux) but not
-# guaranteed on a vanilla local macOS dev machine (only via `brew install
-# coreutils`, and even then often as `gtimeout`). Degrade gracefully rather
-# than break local runs that lack it.
-TIMEOUT_CMD=""
-command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD="timeout 60"
 if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   T1_PY_TMPDIR=$(mktemp -d)
   # NX_SERVICE_URL='' (nexus-rxqqd review): NEXUS_CONFIG_DIR isolation alone is
@@ -348,7 +347,7 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
     NX_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' \
     NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
     NX_STORAGE_BACKEND=service NATIVE_SMOKE_CLEANUP_ROWS="$NATIVE_SMOKE_CLEANUP_ROWS" \
-    $TIMEOUT_CMD uv run python "$REPO_ROOT/service/smoke-probes/t1_real_client.py" 2>&1)
+    _bounded 60 uv run python "$REPO_ROOT/service/smoke-probes/t1_real_client.py" 2>&1)
   rm -rf "$T1_PY_TMPDIR"
   if echo "$PY_OUT" | grep -q "^OK$"; then
     echo "  ok   t1 real-client put/get/search/list (routing + backend together)"
@@ -400,7 +399,7 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$T2_PY_TMPDIR" NX_SERVICE_URL='' \
     NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
     NATIVE_SMOKE_CLEANUP_ROWS="$NATIVE_SMOKE_CLEANUP_ROWS" \
-    $TIMEOUT_CMD uv run python "$REPO_ROOT/service/smoke-probes/t2_real_client.py" 2>&1)
+    _bounded 60 uv run python "$REPO_ROOT/service/smoke-probes/t2_real_client.py" 2>&1)
   rm -rf "$T2_PY_TMPDIR"
   if echo "$PY_OUT" | grep -q "^OK$"; then
     echo "  ok   memory/plans/taxonomy/chash real-client put/get/search/list (routing + backend together)"
@@ -439,7 +438,7 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   # leak applies here and is closed the same way.
   PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$TUPLES_PY_TMPDIR" NX_SERVICE_URL='' \
     NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
-    $TIMEOUT_CMD uv run python "$REPO_ROOT/service/smoke-probes/tuples_real_client.py" 2>&1)
+    _bounded 60 uv run python "$REPO_ROOT/service/smoke-probes/tuples_real_client.py" 2>&1)
   rm -rf "$TUPLES_PY_TMPDIR"
   if grep -q "^OK$" <<<"$PY_OUT"; then
     echo "  ok   tuples real-client out/inp/renew/ack-with-reply/rdp/typed-refusal (routing + backend together)"
