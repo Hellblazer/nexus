@@ -1567,6 +1567,23 @@ class TestTheLockstepMarker:
         assert result.exit_code == 0, result.output
         assert marker.read_text(encoding="utf-8") == _running_version()
 
+    def test_the_bootstrap_build_is_asked_to_show_progress(
+        self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """install.ps1 and the setup tool run ``nx self install --bootstrap``; on Windows the
+        build behind it was silent for minutes (nexus-2k66t.4.7)."""
+        built = world.tools / "gen-20260303T000000Z"
+        seen: list[dict] = []
+
+        def _build(*a, **k):
+            seen.append(k)
+            return built
+
+        monkeypatch.setattr(self_cmd, "_build_flip_shims", _build)
+        result = self._invoke(world, monkeypatch)
+        assert result.exit_code == 0, result.output
+        assert seen and seen[0].get("progress") is True
+
     def test_a_dry_run_writes_no_marker(
         self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

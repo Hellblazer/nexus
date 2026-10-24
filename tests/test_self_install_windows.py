@@ -12,6 +12,7 @@ flip, shims, ledger registration).
 """
 from __future__ import annotations
 
+import io
 import os
 import stat
 import subprocess
@@ -65,6 +66,22 @@ class FakeUvAndSpy:
         raise AssertionError(f"unexpected uv command {argv}")
 
 
+class _PopenOf:
+    """What ``subprocess.Popen`` hands back for a command the fake already answered:
+    the progress-mode build (nexus-2k66t.4.7) starts uv with Popen and reads its pipes."""
+
+    def __init__(self, done: "subprocess.CompletedProcess[str]") -> None:
+        self.stdout = io.StringIO(done.stdout or "")
+        self.stderr = io.StringIO(done.stderr or "")
+        self.returncode = done.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
+
+
 @pytest.fixture
 def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     tools = tmp_path / "tools"
@@ -87,6 +104,11 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     spy = FakeUvAndSpy(subprocess.run, uv_bin=uv_bin)
     setattr_in(monkeypatch, gen_core, "subprocess.run", spy)
     setattr_in(monkeypatch, self_cmd, "subprocess.run", spy)
+    real_popen = subprocess.Popen
+    setattr_in(
+        monkeypatch, gen_core, "subprocess.Popen",
+        lambda argv, *a, **kw: _PopenOf(spy(argv)) if list(argv)[0] == "uv" else real_popen(argv, *a, **kw),
+    )
     return tools, uv_bin, spy
 
 

@@ -168,3 +168,51 @@ def test_the_carry_runs_before_the_process_cycle_so_processes_cycle_onto_the_car
     assert order.index("carry") < order.index("process-cycle"), order
     assert order.index("takeover") < order.index("carry"), order
     assert order.count("carry") == 1, "the carry must not run twice (before and after the cycle)"
+
+
+def test_the_vc_runtime_is_provisioned_before_the_carry_so_the_first_upgrade_is_not_refused(bed, monkeypatch) -> None:
+    """On Windows the carry refuses when the VC++ runtime DLLs are missing, and the
+    vc-runtime step is what provisions them on a cloud-mode box. Run after the
+    carry (as it was), the first upgrade always refused and the stack waited a
+    whole extra upgrade."""
+    order: list[str] = []
+    monkeypatch.setattr("nexus.commands.self_cmd.repair_uv_takeover", lambda **kw: order.append("takeover") or [])
+    monkeypatch.setattr(
+        "nexus.upgrade_ladder.preconditions.converge_preconditions",
+        lambda **kw: order.append("process-cycle") or [],
+    )
+    monkeypatch.setattr(upgrade_cmd, "_converge_vc_runtime", lambda **kw: order.append("vc-runtime"))
+    monkeypatch.setattr(pdf_stack, "_install_generation", lambda *, carrying=False: order.append("carry"))
+    upgrade_cmd._converge_preconditions(auto_mode=True)
+    assert order == ["takeover", "vc-runtime", "carry", "process-cycle"], order
+
+
+# ── the VC++ runtime check (nexus-2k66t.4.7) ─────────────────────────────────
+
+
+def test_carry_forward_refuses_before_building_when_the_windows_runtime_is_missing(bed, monkeypatch) -> None:
+    """ensure() refuses a Windows box without the VC++ runtime before it writes
+    anything; the carry used to skip the check, install the stack, and leave
+    `nx doctor` showing PDF support broken."""
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: True)
+    line = pdf_stack.carry_forward()
+    assert bed.installs == [], "no generation may be built on a box that cannot load the stack"
+    assert line is not None and pdf_stack.VCRT_URL in line and "not carried forward" in line
+    assert pdf_stack.INSTALL_COMMAND in line
+
+
+def test_the_carry_and_ensure_refuse_with_the_same_words(bed, monkeypatch) -> None:
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: True)
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "no docling"))
+    with pytest.raises(pdf_stack.PdfStackMissingError) as exc:
+        pdf_stack.ensure("nx index repo")
+    assert str(exc.value) in pdf_stack.carry_forward()
+
+
+def test_a_runtime_refusal_is_not_a_failed_attempt_so_the_auto_backoff_stays_clear(bed, monkeypatch) -> None:
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: True)
+    pdf_stack.carry_forward(auto_mode=True)
+    assert not (Path(os.environ["NEXUS_CONFIG_DIR"]) / "pdf-carry-forward-failed").exists()
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: False)
+    line = pdf_stack.carry_forward(auto_mode=True)
+    assert bed.installs == [True] and line is not None and "carried forward" in line

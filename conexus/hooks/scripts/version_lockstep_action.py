@@ -362,7 +362,7 @@ def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
         if DEBUG and result.stdout:
             debug(f"{cmd[0]} stdout: {result.stdout[:500]}")
         if result.returncode != 0:
-            debug(f"{' '.join(cmd)} exited {result.returncode}: {result.stderr[:500]}")
+            debug(f"{' '.join(cmd)} exited {result.returncode}: {result.stderr[-500:]}")
             return False
         return True
     except (subprocess.SubprocessError, OSError) as exc:

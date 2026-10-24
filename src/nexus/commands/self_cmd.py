@@ -196,6 +196,7 @@ def perform_self_install(
     if bootstrap:
         return _bootstrap_install(
             install_dir, tools, bin_dir, version=version, extras=new_extras, dry_run=dry_run,
+            progress=progress,
         )
     host = running_generation()
 
@@ -618,7 +619,7 @@ def _refuse_a_foreign_program_in_the_bin_directory(
 
 def _bootstrap_install(
     install_dir: Path, tools: Path, bin_dir: Path, *, version: str | None,
-    extras: list[str], dry_run: bool,
+    extras: list[str], dry_run: bool, progress: bool = False,
 ) -> Path | None:
     """The first install of the CLI, in one command and one generation (RDR-228
     Phase 2 Step 1, nexus-sv2wx.14).
@@ -709,6 +710,7 @@ def _bootstrap_install(
     prior_previous = _previous_target(tools)
     generation = _build_flip_shims(
         build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=True,
+        progress=progress,
     )
     _reap_superseded(
         install_dir, tools, outgoing=outgoing, built_version=running, prior_previous=prior_previous,
@@ -1170,8 +1172,11 @@ def _run_build(argv: list[str], *, progress: bool) -> "subprocess.CompletedProce
         assert proc.stderr is not None
         for chunk in iter(lambda: proc.stderr.readline(), ""):
             captured.append(chunk)
-            sys.stderr.write(chunk)
-            sys.stderr.flush()
+            try:
+                sys.stderr.write(chunk)
+                sys.stderr.flush()
+            except (OSError, ValueError, AttributeError):
+                pass  # a dead stderr must not stop this drain: uv would block on a full pipe
 
     pump = threading.Thread(target=_pump, daemon=True)
     pump.start()
@@ -1179,6 +1184,11 @@ def _run_build(argv: list[str], *, progress: bool) -> "subprocess.CompletedProce
     proc.wait()
     pump.join(timeout=5)
     return subprocess.CompletedProcess(argv, proc.returncode, out, "".join(captured))
+
+
+def _tail(text: str, lines: int = 15) -> str:
+    """The last *lines* lines of *text*."""
+    return "\n".join(text.splitlines()[-lines:])
 
 
 def _build_flip_shims(
@@ -1198,7 +1208,9 @@ def _build_flip_shims(
     """
     tools.mkdir(parents=True, exist_ok=True)
     if isinstance(build, _WindowsBuild):
-        return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
+        return _windows_build_flip_shims(
+            build, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap, progress=progress,
+        )
     built = _run_build(build, progress=progress)
     if built.returncode != 0:
         detail = built.stderr.strip()
@@ -1207,10 +1219,13 @@ def _build_flip_shims(
                 index_failure_hint(detail, bootstrap=bootstrap), platform_failure_hint(detail),
             ) if h
         )
+        # A streamed build already showed uv's output: repeat only its tail.
+        shown = _tail(detail) if progress else detail
+        label = "uv output (last lines; the full output is above)" if progress else "uv output"
         if not hint:
-            raise click.ClickException(f"generation build failed:\n{detail}")
+            raise click.ClickException(f"generation build failed:\n{shown}")
         raise click.ClickException(
-            f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
+            f"generation build failed:\n{hint}\n\n{label}:\n{shown}"
         )
     _echo_build_warnings(built.stderr)
     generation = Path(built.stdout.strip().splitlines()[-1])
@@ -1242,16 +1257,19 @@ def _echo_path_result(result) -> None:
 
 def _windows_build_flip_shims(
     build: _WindowsBuild, *, tools: Path, bin_dir: Path, bootstrap: bool = False,
+    progress: bool = False,
 ) -> Path:
     """The Windows twin of the build, flip and shim steps, through
     ``generation_core``: the shim step is the user PATH entry. A build failure
     keeps the POSIX path's wording and its package-index diagnosis; nothing is
-    flipped unless the build finished."""
+    flipped unless the build finished. *progress* streams uv's stderr and prints
+    a heartbeat while it is silent, as the POSIX build's ``_run_build`` does
+    (nexus-2k66t.4.7)."""
     core = _generation()
     try:
         generation = core.build_generation(
             build.source, version=build.version or "", extras=build.extras, tools=tools,
-            platform=_plat(),
+            platform=_plat(), progress=progress,
         )
     except core.GenerationError as exc:
         detail = str(exc)
@@ -1587,7 +1605,7 @@ def _windows_converge_legacy_install(
     try:
         generation = core.migrate_legacy(
             "conexus", version=version or "", tools=tools, platform=_plat(),
-            on_path=_echo_path_result,
+            on_path=_echo_path_result, progress=True,  # a person waits on this (nexus-2k66t.4.7)
         )
     except core.GenerationError as exc:
         detail = str(exc)
@@ -1807,6 +1825,7 @@ def install_cmd(
     """
     generation = perform_self_install(
         keep=keep, version=version, dry_run=dry_run, add_extras=extras, bootstrap=bootstrap,
+        progress=True,  # interactive: install.ps1, the setup build and a person at a prompt (nexus-2k66t.4.7)
     )
     if generation is None:
         return

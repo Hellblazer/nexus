@@ -495,6 +495,19 @@ def _windows_runtime_missing() -> bool:
     return kind == _vcrt.MISSING
 
 
+def _require_windows_runtime(plan: InstallPlan) -> None:
+    """Refuse, before anything is written, on a Windows box that lacks the VC++
+    runtime the stack's extension modules need. Both install paths (:func:`ensure`
+    and :func:`carry_forward`) run it, so neither builds a generation whose PDF
+    support would then show as broken in ``nx doctor`` (nexus-2k66t.4.7)."""
+    if _windows_runtime_missing():
+        raise PdfStackMissingError(
+            f"PDF support needs the Microsoft Visual C++ redistributable, which this machine lacks "
+            f"and a cloud-mode install has no engine copy to borrow. Install it from {VCRT_URL} "
+            f"and run: {plan.command}"
+        )
+
+
 def _classify_failure(message: str) -> PdfStackError:
     """Map an installer failure message to the exit-code classes. Reuses
     ``self_cmd``'s diagnosis so the network and TLS wording stays one rule."""
@@ -615,12 +628,7 @@ def ensure(entry: str) -> Outcome:
     plan = install_plan()
     if not plan.auto:
         raise PdfStackMissingError(_remedy(entry, st, plan))
-    if _windows_runtime_missing():
-        raise PdfStackMissingError(
-            f"PDF support needs the Microsoft Visual C++ redistributable, which this machine lacks "
-            f"and a cloud-mode install has no engine copy to borrow. Install it from {VCRT_URL} "
-            f"and run: {plan.command}"
-        )
+    _require_windows_runtime(plan)
     with _install_lock():
         # A peer may have installed it while we waited. state() reads THIS
         # interpreter, which is the old generation; the peer built and flipped
@@ -822,6 +830,12 @@ def carry_forward(*, auto_mode: bool = False) -> str | None:
     and retried by the next run (backed off under ``--auto``)."""
     if not carry_forward_pending():
         return None
+    try:
+        _require_windows_runtime(install_plan())
+    except PdfStackMissingError as exc:
+        # The same refusal ensure() raises, as this function's contract has it:
+        # a line, never a raise, and no attempt, so no failure sentinel either.
+        return f"PDF support was not carried forward. {exc}"
     sentinel = _carry_failed_sentinel()
     if auto_mode and sentinel is not None:
         try:

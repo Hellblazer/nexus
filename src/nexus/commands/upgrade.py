@@ -258,6 +258,13 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     # not onto a slim one the carry replaces a minute later (and the stale
     # MinerU restart in upgrade_finish never has a stack-less generation to
     # start). It needs the layout the takeover repair above just settled.
+    #
+    # nexus-2k66t.4.7: the VC++ runtime goes first. On Windows the carry refuses
+    # (it returns a line, builds nothing) when the DLLs the stack's extension
+    # modules load are missing, and this step is the only thing that provisions
+    # them on a cloud-mode box; run after the carry, the first upgrade would
+    # always be refused and the stack wait for the next one.
+    _converge_vc_runtime(auto_mode=auto_mode)
     _converge_pdf_stack(auto_mode=auto_mode, skip_t3=skip_t3)
 
     try:
@@ -279,8 +286,6 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
                 click.echo(f"Precondition [{report.name}] pending: {report.detail}")
     except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the walk and T2 migration must not be blocked by a precondition probe failure
         _log.warning("upgrade_preconditions_failed", error=str(exc))
-
-    _converge_vc_runtime(auto_mode=auto_mode)
 
 
 def _converge_pdf_stack(*, auto_mode: bool, skip_t3: bool) -> None:
@@ -322,8 +327,11 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
     SessionStart ``nx upgrade --auto``, which runs detached with a limit on starting new
     ladder work (nexus-dcbof; this step is not bounded by it), so the download is never
     interrupted. A cheap three-directory stat on every run once
-    the DLLs are in place, a no-op off Windows. Runs after the engine axis so a
-    local-mode install gets the DLLs from its engine first. Never raises."""
+    the DLLs are in place, a no-op off Windows. Runs before the PDF carry-forward
+    (nexus-2k66t.4.7), which refuses without them, and so before the engine
+    axis: a local-mode box that would have taken the DLLs from its engine gets
+    them from this download instead, and the engine's copy is then redundant,
+    not missing. Never raises."""
     try:
         import nexus.config as _config  # noqa: PLC0415 — deferred to keep config import off the CLI's cold-start path; module attribute, not by-value (nexus-78blw ratchet)
         from nexus.daemon.binary_install import ensure_vc_runtime  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start

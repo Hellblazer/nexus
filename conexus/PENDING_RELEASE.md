@@ -45,6 +45,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/version_lockstep_action.py` (nexus-2k66t.4.7): a failed `nx self install` logs the LAST 500 characters of its stderr, not the first, because the build now streams uv's progress ahead of the error.
 
 ## Deferred to the next client release
 
