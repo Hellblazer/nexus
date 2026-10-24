@@ -62,6 +62,12 @@ _KEY_HINT = "check anthropic_api_key (nx config set anthropic_api_key <key>, or 
 _USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
+def resolved_model_id(requested: str | None) -> str:
+    """The API model id a dispatch ``model`` value (an alias, an id, or ``None``)
+    is sent as: what a row written from this call should name."""
+    return resolve_api_model(requested)
+
+
 class _AnthropicStream(StreamState):
     def __init__(self, scrub: Any) -> None:
         self._scrub = scrub

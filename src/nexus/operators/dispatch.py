@@ -254,6 +254,10 @@ def _build_dispatch_env(
         )
 
     base = dict(os.environ)
+    # nexus-2k66t.3 P2: the openai_compat key belongs to that backend alone; a
+    # claude child (or the tools it runs) has no use for it. ANTHROPIC_API_KEY
+    # stays: ``claude -p`` honours it, as it did before the API backends existed.
+    base.pop("NX_LLM_OPENAI_API_KEY", None)
 
     if share_t1:
         raise RuntimeError(
@@ -1136,7 +1140,7 @@ def _backend_for(req: DispatchRequest) -> "LLMBackend":
     try:
         name = resolve_backend_name(req)
     except NoBackendAvailableError as exc:
-        return CliBackend(missing_hint=str(exc))
+        return CliBackend(missing_hint=str(exc), missing_error=NoBackendAvailableError)
     if name == "cli":
         if req.grants_tool_access:
             hint = (
@@ -1162,11 +1166,15 @@ class CliBackend:
         self,
         which: "Callable[[str], str | None] | None" = None,
         missing_hint: str | None = None,
+        missing_error: "type[OperatorError]" = OperatorError,
     ) -> None:
         self._which = which
-        #: What to raise, as an ``OperatorError``, when the spawn finds no
-        #: ``claude`` binary (nexus-2k66t.3 P2): the reason it was chosen.
+        #: What to raise when the spawn finds no ``claude`` binary
+        #: (nexus-2k66t.3 P2): the reason it was chosen.
         self._missing_hint = missing_hint
+        #: The class it is raised as: ``NoBackendAvailableError`` when ``auto``
+        #: found no backend at all, so the spawn path names it as selection does.
+        self._missing_error = missing_error
 
     def available(self) -> BackendStatus:
         return cli_status(self._which)
@@ -1414,7 +1422,7 @@ class CliBackend:
                 )
             except FileNotFoundError as exc:
                 if self._missing_hint and (self._which or shutil.which)("claude") is None:
-                    raise OperatorError(self._missing_hint) from exc
+                    raise self._missing_error(self._missing_hint) from exc
                 raise
             _dispatch_spawn_at = time.monotonic()
             # nexus-6y4e0: Windows job-object containment, assigned right after

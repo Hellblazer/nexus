@@ -28,6 +28,7 @@ the API backends at load time (both import it); the backends are built lazily.
 """
 from __future__ import annotations
 
+import math
 import os
 import shutil
 from collections.abc import Callable, Mapping
@@ -181,15 +182,34 @@ def _env_key_present(env: Mapping[str, str]) -> KeyPresent:
     return lambda name: bool((env.get(CREDENTIALS[name], "") or "").strip())
 
 
+def config_error_fields(exc: BaseException) -> dict[str, Any]:
+    """What a log line or an error may say about a failure to read the global
+    config: the exception type and, for a YAML error, the 1-based line. Never
+    ``str(exc)``: a YAML error quotes the offending line, and that line can be a
+    credential value."""
+    fields: dict[str, Any] = {"error_type": type(exc).__name__}
+    mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+    line = getattr(mark, "line", None)
+    if isinstance(line, int):
+        fields["line"] = line + 1
+    return fields
+
+
+def _unreadable_config_message(exc: BaseException) -> str:
+    line = config_error_fields(exc).get("line")
+    return "global config.yml is unreadable" + (f" at line {line}" if line is not None else "")
+
+
 def real_key_present(name: str) -> bool:
     """Whether credential *name* resolves from the real environment or the
-    global config. A config that cannot be read counts as absent (and warns)."""
+    global config. A config that cannot be read counts as absent (and warns,
+    with the exception type and line only: see :func:`config_error_fields`)."""
     try:
         from nexus.config import get_credential  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
 
         return bool((get_credential(name) or "").strip())
     except Exception as exc:  # noqa: BLE001 - a broken config.yml must not turn a probe into a crash
-        _log.warning("llm_backend_credential_unreadable", credential=name, error=str(exc))
+        _log.warning("llm_backend_credential_unreadable", credential=name, **config_error_fields(exc))
         return False
 
 
@@ -344,7 +364,7 @@ def _load_llm_config() -> Mapping[str, Any]:
     except Exception as exc:  # noqa: BLE001 - a broken config.yml must not turn a probe into a crash
         # Warning, not debug: a typo in config.yml must not silently move a
         # user who set llm.backend back to the default.
-        _log.warning("llm_backend_config_unreadable", error=str(exc))
+        _log.warning("llm_backend_config_unreadable", **config_error_fields(exc))
         return {}
 
 
@@ -364,17 +384,81 @@ def llm_backend_available(
     return backend_status(config, env, which, key_present).available
 
 
+def _credential(name: str) -> str:
+    """Credential *name*, stripped; ``""`` when unset. A global ``config.yml`` that
+    cannot be parsed raises a clean ``OperatorError`` naming the line and nothing
+    else: the parser's own text quotes the offending line, which can be a
+    credential. The error is raised outside the ``except`` so no exception chain
+    carries that text either."""
+    import yaml  # noqa: PLC0415 - deferred: only an API backend build reads credentials
+
+    from nexus.config import get_credential  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
+
+    problem: str | None = None
+    value = ""
+    try:
+        value = get_credential(name) or ""
+    except (yaml.YAMLError, OSError) as exc:
+        problem = _unreadable_config_message(exc)
+    if problem is not None:
+        raise OperatorError(problem)
+    return value.strip()
+
+
+def _config_number(value: Any, label: str) -> float:
+    if isinstance(value, bool):
+        raise OperatorError(f"{label} must be a number of dollars per million tokens")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise OperatorError(f"{label} must be a number of dollars per million tokens") from None
+    if not (math.isfinite(number) and number >= 0):
+        raise OperatorError(f"{label} must be a finite number >= 0")
+    return number
+
+
+def openai_compat_pricing(config: Mapping[str, Any] | None) -> tuple[tuple[float, float] | None, bool]:
+    """``((price_in, price_out) | None, unpriced_ok)`` from the GLOBAL config:
+    ``llm.openai_compat.price_in_per_mtok`` / ``.price_out_per_mtok`` (USD per
+    million tokens; both or neither) and ``.unpriced_ok`` (for a free local
+    server: a budget ceiling is then accepted unenforced). Malformed values raise
+    ``OperatorError``: a ceiling that silently stopped working is the failure
+    this exists to prevent."""
+    section = (config or {}).get("llm")
+    sub = section.get("openai_compat") if isinstance(section, Mapping) else None
+    sub = sub if isinstance(sub, Mapping) else {}
+    p_in, p_out = sub.get("price_in_per_mtok"), sub.get("price_out_per_mtok")
+    price: tuple[float, float] | None = None
+    if p_in is not None or p_out is not None:
+        if p_in is None or p_out is None:
+            raise OperatorError(
+                "llm.openai_compat.price_in_per_mtok and llm.openai_compat.price_out_per_mtok must be set together"
+            )
+        price = (
+            _config_number(p_in, "llm.openai_compat.price_in_per_mtok"),
+            _config_number(p_out, "llm.openai_compat.price_out_per_mtok"),
+        )
+    raw_ok = sub.get("unpriced_ok")
+    if raw_ok is None:
+        unpriced_ok = False
+    elif isinstance(raw_ok, bool):
+        unpriced_ok = raw_ok
+    elif isinstance(raw_ok, str) and raw_ok.strip().lower() in ("true", "false"):
+        unpriced_ok = raw_ok.strip().lower() == "true"  # `nx config set` writes strings
+    else:
+        raise OperatorError("llm.openai_compat.unpriced_ok must be true or false")
+    return price, unpriced_ok
+
+
 def build_api_backend(name: str) -> LLMBackend:
     """The API backend named *name* (``anthropic`` or ``openai_compat``), built
     from the real credentials and global config. The key is read here, held by
     the backend, and goes nowhere else: not into ``os.environ``, not into a log
     line, not into a child process."""
-    from nexus.config import get_credential  # noqa: PLC0415 - deferred: config pulls yaml and the tuning tables
-
     if name == "anthropic":
         from nexus.operators.llm_anthropic import AnthropicBackend  # noqa: PLC0415 - deferred: httpx stays off the CLI-only path
 
-        return AnthropicBackend(api_key=(get_credential(ANTHROPIC_KEY) or "").strip() or None)
+        return AnthropicBackend(api_key=_credential(ANTHROPIC_KEY) or None)
     if name == "openai_compat":
         from nexus.operators.llm_openai import OpenAICompatBackend  # noqa: PLC0415 - deferred, as above
 
@@ -383,8 +467,10 @@ def build_api_backend(name: str) -> LLMBackend:
         if problem:
             raise OperatorError(problem)
         base, model = openai_compat_settings(config, os.environ)
+        price, unpriced_ok = openai_compat_pricing(config)
         return OpenAICompatBackend(
-            base_url=base, model=model, api_key=(get_credential(OPENAI_KEY) or "").strip() or None,
+            base_url=base, model=model, api_key=_credential(OPENAI_KEY) or None,
+            price=price, unpriced_ok=unpriced_ok,
         )
     raise OperatorError(f"LLM backend {name!r} has no API implementation")
 
@@ -399,6 +485,21 @@ def selected_api_backend() -> str | None:
     except NoBackendAvailableError:
         return None
     return None if name == "cli" else name
+
+
+def api_model_name(backend_name: str, requested: str | None) -> str | None:
+    """The model a call to the API backend *backend_name* with *requested* as its
+    model would run on: the configured server model for ``openai_compat`` (which
+    ignores the Claude alias it is handed), the resolved id for ``anthropic``.
+    ``None`` when it cannot be told. Used to label what an extraction ran on."""
+    try:
+        if backend_name == "openai_compat":
+            return openai_compat_settings(_load_llm_config(), os.environ)[1] or None
+        from nexus.operators.llm_anthropic import resolved_model_id  # noqa: PLC0415 - deferred: httpx stays off the CLI-only path
+
+        return resolved_model_id(requested)
+    except Exception:  # noqa: BLE001 - a label must never fail an extraction
+        return None
 
 
 def run_text_sync(

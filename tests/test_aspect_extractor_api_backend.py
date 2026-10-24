@@ -233,3 +233,75 @@ class TestErrorMapping:
         ((name, fields),) = events
         assert name == "aspect_extractor_usage"
         assert fields["backend"] == "anthropic" and fields["cost_usd"] == 0.002 and fields["models"] == ["claude-haiku-4-5"]
+
+
+class TestRowsNameTheModelThatProducedThem:
+    """nexus-oc98c: the model_version on a row is the model that produced it. The
+    config pins a Claude id; under openai_compat the call runs on the configured
+    server model, so stamping the Claude id would be a false provenance."""
+
+    @pytest.fixture
+    def openai_backend(self, server, monkeypatch):
+        from nexus.operators.llm_openai import OpenAICompatBackend
+
+        setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: None)
+        monkeypatch.setenv("NX_LLM_BACKEND", "openai_compat")
+        monkeypatch.setenv("NX_LLM_OPENAI_BASE_URL", server.url)
+        monkeypatch.setenv("NX_LLM_OPENAI_MODEL", "router/auto")
+
+        def build(name):
+            assert name == "openai_compat"
+            return OpenAICompatBackend(base_url=server.url, model="router/auto", api_key=None, trust_env=False)
+
+        with patch("nexus.operators.llm_backend.build_api_backend", side_effect=build):
+            yield server
+
+    def test_a_single_extraction_is_stamped_with_the_model_the_server_reports(self, openai_backend) -> None:
+        from tests._llm_fake_server import openai_stream
+
+        openai_backend.add(Step(events=openai_stream(content=INNER, model="qwen2.5-14b-instruct")))
+        with _no_cli():
+            record = _extract()
+        assert record.problem_formulation == "Sharded WAL bottleneck."
+        assert record.model_version == "qwen2.5-14b-instruct"
+
+    def test_a_batch_extraction_is_stamped_the_same_way(self, openai_backend) -> None:
+        from tests._llm_fake_server import openai_stream
+
+        batch = {"papers": [{"source_path": "/p1.pdf", **json.loads(INNER)}]}
+        openai_backend.add(Step(events=openai_stream(content=json.dumps(batch), model="qwen2.5-14b-instruct")))
+        with _no_cli():
+            (record,) = ae.extract_aspects_batch([("knowledge__delos", "/p1.pdf", _PAPER_SHAPED_CONTENT)])
+        assert record.problem_formulation == "Sharded WAL bottleneck."
+        assert record.model_version == "qwen2.5-14b-instruct"
+
+    def test_a_server_that_reports_no_model_is_stamped_with_the_configured_one(self, openai_backend) -> None:
+        from tests._llm_fake_server import openai_stream
+
+        openai_backend.add(Step(events=openai_stream(content=INNER, model="")))
+        with _no_cli():
+            record = _extract()
+        assert record.problem_formulation == "Sharded WAL bottleneck."
+        assert record.model_version == "router/auto"
+
+    def test_a_failed_extraction_row_does_not_claim_the_claude_id_either(self, openai_backend) -> None:
+        from tests._llm_fake_server import openai_error
+
+        openai_backend.add(openai_error(401, "bad key", etype="authentication_error"))
+        with _no_cli():
+            record = _extract()
+        assert record.problem_formulation is None
+        assert record.model_version == "router/auto"  # the model the call was aimed at
+
+    def test_the_anthropic_path_keeps_the_pinned_id(self, api_backend) -> None:
+        api_backend.add(Step(events=anthropic_stream(text=INNER, model="claude-haiku-4-5-20251001")))
+        with _no_cli():
+            assert _extract().model_version == "claude-haiku-4-5-20251001"
+
+    def test_the_cli_path_is_unchanged_and_clears_a_stale_api_model(self, monkeypatch) -> None:
+        # An earlier API extraction on this thread must not stamp a later CLI row.
+        ae._API_MODEL.model = "stale-model-from-an-earlier-call"
+        setattr_in(monkeypatch, "nexus.operators.llm_backend", "shutil.which", lambda name: "/usr/bin/claude")
+        with patch.object(ae, "_run_claude_isolated", lambda prompt, timeout, **kw: _make_completed(_ok_stdout())):
+            record = _extract()
+        assert record.model_version == "claude-haiku-4-5-20251001"

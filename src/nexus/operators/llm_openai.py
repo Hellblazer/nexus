@@ -16,16 +16,22 @@ GLOBAL config and the environment only, never a per-repo ``.nexus.yml``: a
 cloned repository must not be able to point prompts at a server of its choosing.
 The configured model is used for every call; the Claude aliases dispatch passes
 (``haiku``, ``opus``) mean nothing to such a server. No price is known for these
-models, so ``cost_usd`` is ``None`` (with one warning per model) and a
-``max_budget_usd`` ceiling is not enforced (a warning says so).
+models unless the operator configures one (``llm.openai_compat.price_in_per_mtok``
+and ``.price_out_per_mtok``): without it ``cost_usd`` is ``None`` (one warning per
+model) and a ``max_budget_usd`` ceiling is REFUSED, because it could not be
+enforced. ``llm.openai_compat.unpriced_ok: true`` accepts the ceiling unenforced
+(a warning says so), for a free local server.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 import httpx
+import structlog
 
 from nexus.operators.llm_api import (
     CALL_THE_TOOL_INSTRUCTION,
@@ -39,7 +45,10 @@ from nexus.operators.llm_api import (
     parse_retry_after,
 )
 from nexus.operators.llm_backend import BackendStatus, DispatchRequest
+from nexus.operators.llm_models import ModelPrice
 from nexus.operators.llm_types import OperatorAPIError, OperatorError
+
+_log = structlog.get_logger(__name__)
 
 _FENCE = re.compile(r"^```(?:json)?\s*\n(.*?)\n?```\s*$", re.DOTALL)
 
@@ -165,18 +174,76 @@ def _int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+#: ``(base url, model)`` of every server model that answered ``max_tokens`` with a
+#: 400 naming ``max_completion_tokens`` in this process: OpenAI's newer models and
+#: some proxies accept only that spelling. They are sent it from then on.
+_COMPLETION_TOKENS_MODELS: set[tuple[str, str]] = set()
+
+#: Hosts a key has already been reported going to over cleartext http.
+_WARNED_INSECURE: set[str] = set()
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class OpenAICompatBackend(ApiBackend):
     """Chat Completions backend. *base_url* is the server root (``http://localhost:11434``)
     or an OpenAI-style root ending in ``/v1`` (``https://openrouter.ai/api/v1``);
-    *model* is sent on every call; *api_key* is optional (local servers take none)."""
+    *model* is sent on every call; *api_key* is optional (local servers take none).
+
+    *price* is ``(usd_in_per_mtok, usd_out_per_mtok)`` from the operator's config;
+    without one the call has no ``cost_usd`` and a ``max_budget_usd`` ceiling is
+    refused unless *unpriced_ok* (a free local server) says to accept it unenforced.
+
+    The server and model must support tool calling: the schema rides a function
+    tool. A server that truncates prompts to its context window does so silently
+    (Ollama's ``num_ctx`` default is the usual case); size it for the longest
+    prompt the operators send."""
 
     name: ClassVar[str] = "openai_compat"
-    budget_enforceable_without_price: ClassVar[bool] = True
     drift_check: ClassVar[bool] = False
 
-    def __init__(self, *, base_url: str, model: str, api_key: str | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+        price: tuple[float, float] | None = None,
+        unpriced_ok: bool = False,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(base_url=base_url, api_key=api_key, **kwargs)
         self._model = model
+        self._price_row = (
+            # Cached prompt tokens are already inside prompt_tokens at the full input
+            # rate, so the cache-read rate is 0 here: they are not billed twice.
+            ModelPrice(input=price[0], output=price[1], cache_write=price[0], cache_read=0.0)
+            if price is not None else None
+        )
+        self._unpriced_ok = unpriced_ok
+
+    def _price(self, model: str) -> ModelPrice | None:
+        return self._price_row
+
+    def _unpriced_ceiling_remedy(self) -> str:
+        return (
+            "set llm.openai_compat.price_in_per_mtok and price_out_per_mtok in the global config.yml, "
+            "or llm.openai_compat.unpriced_ok: true for a free local server, or unset the ceiling"
+        )
+
+    def _adapt_to_rejection(self, exc: OperatorAPIError, model: str) -> bool:
+        key = (self._base_url, model)
+        if exc.status == 400 and "max_completion_tokens" in str(exc).lower() and key not in _COMPLETION_TOKENS_MODELS:
+            _COMPLETION_TOKENS_MODELS.add(key)
+            return True
+        return False
 
     def available(self) -> BackendStatus:
         if self._base_url and self._model:
@@ -189,6 +256,16 @@ class OpenAICompatBackend(ApiBackend):
                 "the openai_compat backend needs a base_url and a model "
                 "(llm.openai_compat.base_url / .model in the global config.yml, or "
                 "NX_LLM_OPENAI_BASE_URL / NX_LLM_OPENAI_MODEL)"
+            )
+        parts = urlsplit(self._base_url)
+        host = parts.hostname
+        if self._api_key and parts.scheme == "http" and host and not _is_loopback(host) and host not in _WARNED_INSECURE:
+            _WARNED_INSECURE.add(host)
+            _log.warning(
+                "llm_openai_compat_key_over_cleartext",
+                host=host,
+                effect="the openai_compat key is sent in cleartext to a host that is not this machine",
+                remedy="use an https base_url",
             )
 
     def _url(self) -> str:
@@ -222,8 +299,11 @@ class OpenAICompatBackend(ApiBackend):
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "max_tokens": max_tokens,
         }
+        # ``max_tokens`` is what Ollama, vLLM and most proxies take; OpenAI's newer
+        # models refuse it for ``max_completion_tokens``. A server that says so once
+        # is sent the other spelling from then on (_adapt_to_rejection).
+        body["max_completion_tokens" if (self._base_url, model) in _COMPLETION_TOKENS_MODELS else "max_tokens"] = max_tokens
         if tool_schema is not None:
             body["tools"] = [{
                 "type": "function",
@@ -242,7 +322,12 @@ class OpenAICompatBackend(ApiBackend):
 
     def _repair(self, messages: list[Any], outcome: TurnOutcome, feedback: str) -> list[Any]:
         repaired = list(messages)
-        repaired.append(outcome.assistant)
+        echo = outcome.assistant
+        # An answer with no content and no tool call has nothing to echo, and an
+        # assistant message with null content and no tool_calls is rejected by many
+        # servers: send the repair instruction alone.
+        if isinstance(echo, dict) and (echo.get("content") or echo.get("tool_calls")):
+            repaired.append(echo)
         ids = [i for i in outcome.tool_call_ids if i]
         if ids:
             for n, call_id in enumerate(ids):

@@ -44,12 +44,13 @@ def _llm_env(monkeypatch) -> None:
     from nexus.operators import llm_api
 
     monkeypatch.setattr(llm_api, "_WARNED_UNPRICED", set())
+    monkeypatch.setattr(llm_api, "_FORCED_REJECTED", set(), raising=False)  # the per-process memo of a rejected forced tool_choice
     for var in ("NX_LLM_MAX_TOKENS", "NX_LLM_MAX_CONCURRENCY", "NX_LLM_BACKEND", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 
 
 class Harness:
-    def __init__(self, server: FakeLLMServer, **kw) -> None:
+    def __init__(self, server: FakeLLMServer, *, api_key: str = SECRET, base_url: str | None = None, **kw) -> None:
         self.server = server
         self.sleeps: list[float] = []
 
@@ -57,7 +58,7 @@ class Harness:
             self.sleeps.append(seconds)
 
         self.backend = AnthropicBackend(
-            api_key=SECRET, base_url=server.url, sleep=sleep, rng=random.Random(7), trust_env=False, **kw,
+            api_key=api_key, base_url=base_url or server.url, sleep=sleep, rng=random.Random(7), trust_env=False, **kw,
         )
 
     def run(self, **req_kw):
@@ -570,12 +571,8 @@ class TestKeyNeverLeaks:
         Harness(server).run(model="haiku")
         assert dict(os.environ) == before and SECRET not in "".join(os.environ.values())
 
-    def test_a_timeout_log_file_holds_no_key(self, server, tmp_path, monkeypatch) -> None:
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        server.add(Step(delay_before=30))
-        with pytest.raises(OperatorTimeoutError) as ei:
-            Harness(server).run(model="haiku", timeout=0.3)
-        assert ei.value.log_path is not None and SECRET not in ei.value.log_path.read_text()
+    # The timeout log's no-key pin lives in TestTheKeyIsScrubbedFromEveryThirdPartyString: a stall
+    # before any event writes an empty partial, which holds no key whatever the code does.
 
     def test_no_key_raises_before_any_request(self, server) -> None:
         backend = AnthropicBackend(api_key=None, base_url=server.url, trust_env=False)
@@ -586,3 +583,152 @@ class TestKeyNeverLeaks:
     def test_availability_reason_names_no_key(self) -> None:
         status = AnthropicBackend(api_key=SECRET, base_url="http://x", trust_env=False).available()
         assert status.available and SECRET not in status.reason
+
+
+# ── nexus-2k66t.3 P2 fix round ──────────────────────────────────────────────
+
+#: Lowercase and not ``sk-`` shaped: only the exact-key scrub can remove it (the
+#: ``sk-...`` pattern scrub would hide a missing exact-key scrub for SECRET), and
+#: valid as a URL scheme, so a bad ``base_url`` makes httpx quote it.
+PLAIN_KEY = "zzkey-lowercase-0123456789abcdef"
+
+
+def _everything(logs, exc) -> str:
+    return json.dumps(logs, default=str) + str(exc) + repr(exc) + repr(exc.__cause__) + repr(exc.__context__)
+
+
+class TestTheKeyIsScrubbedFromEveryThirdPartyString:
+    def test_an_in_stream_error_event_that_echoes_the_key(self, server) -> None:
+        err = ("error", json.dumps({"type": "error", "error": {"type": "api_error", "message": f"bad credential {PLAIN_KEY}"}}))
+        server.add(*[Step(events=anthropic_stream(tool_input=GOOD)[:3] + [err]) for _ in range(3)])
+        with structlog.testing.capture_logs() as logs, pytest.raises(OperatorAPIError) as ei:
+            Harness(server, api_key=PLAIN_KEY).run(model="haiku")
+        assert "the stream carried" in str(ei.value) and "[REDACTED]" in str(ei.value)  # non-vacuity: this path ran
+        assert PLAIN_KEY not in _everything(logs, ei.value)
+
+    def test_a_connection_failure_that_echoes_the_key(self, server) -> None:
+        import httpx
+
+        # Non-vacuity: httpx itself puts the "scheme" (here, the key) into the exception text.
+        with pytest.raises(httpx.UnsupportedProtocol, match=PLAIN_KEY):
+            httpx.Client(trust_env=False).post(f"{PLAIN_KEY}://x/v1/messages")
+        with structlog.testing.capture_logs() as logs, pytest.raises(OperatorAPIError) as ei:
+            Harness(server, api_key=PLAIN_KEY, base_url=f"{PLAIN_KEY}://x").run(model="haiku")
+        assert "connection failed" in str(ei.value) and "[REDACTED]" in str(ei.value)
+        assert PLAIN_KEY not in _everything(logs, ei.value)
+
+    def test_partial_output_that_contains_the_key_is_scrubbed_in_the_error_and_the_log_file(
+        self, server, tmp_path, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        events = anthropic_stream(tool_json_chunks=['{"answer": "my key is ', PLAIN_KEY, ' and more'])
+        server.add(Step(events=events, stall_after=len(events) - 4))  # inside the tool input, before content_block_stop
+        with structlog.testing.capture_logs() as logs, pytest.raises(OperatorTimeoutError) as ei:
+            Harness(server, api_key=PLAIN_KEY).run(model="haiku", timeout=0.6)
+        err = ei.value
+        assert any(PLAIN_KEY in json.dumps(e) for e in events)  # non-vacuity: the stream did carry it
+        assert err.partial_text.startswith('{"answer": "my key is ') and "[REDACTED]" in err.partial_text
+        assert err.log_path is not None and "[REDACTED]" in err.log_path.read_text()
+        assert PLAIN_KEY not in _everything(logs, err) + err.partial_text + err.log_path.read_text()
+
+
+class TestAMemoOfARejectedForcedChoice:
+    def test_each_model_pays_the_wasted_400_once_per_process(self, server) -> None:
+        server.add(
+            anthropic_error(400, "invalid_request_error", "tool_choice: type tool is not supported for this model"),
+            _ok(model="claude-future-9"),
+            _ok(model="claude-future-9"),
+        )
+        h = Harness(server)
+        assert h.run(model="claude-future-9").structured == GOOD
+        assert h.run(model="claude-future-9").structured == GOOD
+        kinds = [r.body["tool_choice"]["type"] for r in server.requests]
+        assert kinds == ["tool", "auto", "auto"]  # the second call went straight to auto
+
+    def test_another_model_is_still_tried_forced(self, server) -> None:
+        server.add(
+            anthropic_error(400, "invalid_request_error", "tool_choice: not supported for this model"),
+            _ok(model="claude-future-9"),
+            _ok(model="claude-haiku-5-5"),
+        )
+        h = Harness(server)
+        h.run(model="claude-future-9")
+        h.run(model="haiku")
+        assert [r.body["tool_choice"]["type"] for r in server.requests] == ["tool", "auto", "tool"]
+
+
+class TestAResponseThatIsNotTheStreamWeAsked:
+    def test_a_redirect_is_a_distinct_error_and_is_not_followed_or_retried(self, server) -> None:
+        server.add(Step(status=302, headers={"location": "http://elsewhere.invalid/"}), _ok())
+        with pytest.raises(OperatorAPIError) as ei:
+            Harness(server).run(model="haiku")
+        assert ei.value.status == 302 and not ei.value.transient
+        assert "redirect" in str(ei.value) and "stream ended" not in str(ei.value)
+        assert len(server.requests) == 1
+
+    def test_a_200_that_is_not_an_event_stream_is_a_distinct_error_and_is_not_retried(self, server) -> None:
+        server.add(Step(status=200, content_type="text/html", body=b"<html>welcome to nginx</html>"), _ok())
+        with pytest.raises(OperatorAPIError) as ei:
+            Harness(server).run(model="haiku")
+        assert ei.value.status == 200 and not ei.value.transient
+        assert "text/event-stream" in str(ei.value) and "stream ended" not in str(ei.value)
+        assert len(server.requests) == 1
+
+
+class TestThePermitWaitIsBoundedByTheDeadline:
+    def test_a_call_queued_behind_a_slow_one_times_out_at_its_deadline(self, server, monkeypatch) -> None:
+        import time
+
+        monkeypatch.setenv("NX_LLM_MAX_CONCURRENCY", "1")
+        server.add(Step(events=anthropic_stream(tool_input=GOOD), hold=2.0))
+        h = Harness(server)
+
+        async def both():
+            slow = asyncio.ensure_future(
+                h.backend.run(DispatchRequest(prompt="p", json_schema=SCHEMA, model="haiku", timeout=20.0)))
+            await asyncio.sleep(0.3)  # let the slow call take the only permit
+            t0 = time.monotonic()
+            req = DispatchRequest(prompt="p", json_schema=SCHEMA, model="haiku", timeout=20.0,
+                                  deadline=time.monotonic() + 0.4)
+            try:
+                await h.backend.run(req)
+            except Exception as exc:  # noqa: BLE001 - the assertion below inspects it
+                return exc, time.monotonic() - t0, await slow
+            raise AssertionError("the queued call should not have run")
+
+        exc, waited, slow_result = asyncio.run(both())
+        assert isinstance(exc, OperatorTimeoutError) and "concurrency" in str(exc)
+        assert waited < 1.5  # not the 2 s the holder keeps the permit
+        assert slow_result.structured == GOOD and len(server.requests) == 1
+
+
+class TestObservabilityOfTheTables:
+    def test_the_unpriced_warning_carries_the_price_table_date(self, server) -> None:
+        from nexus.operators.llm_models import PRICES_AS_OF
+
+        server.add(_ok(model="claude-future-9"))
+        with structlog.testing.capture_logs() as logs:
+            Harness(server).run(model="claude-future-9")
+        (event,) = [e for e in logs if e["event"] == "llm_price_unknown"]
+        assert event["prices_as_of"] == PRICES_AS_OF and PRICES_AS_OF[:2] == "20"
+
+    def test_a_repair_turn_logs_the_model_output_at_debug_never_info(self, server, monkeypatch) -> None:
+        # The suite runs structlog at WARNING, so capture_logs never sees INFO or DEBUG:
+        # record the module logger's calls by level instead.
+        from nexus.operators import llm_api
+
+        calls: list[tuple[str, str, dict]] = []
+
+        class Recorder:
+            def __getattr__(self, level):
+                return lambda event, **kw: calls.append((level, event, kw))
+
+        monkeypatch.setattr(llm_api, "_log", Recorder())
+        server.add(_ok(tool_input={"answer": 31337}), _ok())
+        Harness(server).run(model="haiku")
+        at_info = [(e, kw) for level, e, kw in calls if level == "info"]
+        assert not any("31337" in json.dumps(kw, default=str) for _e, kw in at_info)  # the model's value stays out of INFO
+        (repair,) = [kw for e, kw in at_info if e == "llm_structured_output_repair"]
+        assert repair["backend"] == "anthropic" and "reason" not in repair
+        (detail,) = [kw for level, e, kw in calls if level == "debug" and e == "llm_structured_output_repair_detail"]
+        assert "31337" in detail["reason"]

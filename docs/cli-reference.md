@@ -3174,7 +3174,7 @@ nx config set voyage_api_key --from-file ~/.secrets/voyage.key
 
 | Key | Env var | Purpose |
 |-----|---------|---------|
-| `anthropic_api_key` | `ANTHROPIC_API_KEY` | Anthropic API key for the `anthropic` LLM backend. Used when `claude` is not on PATH (`auto`) or `llm.backend` is `anthropic`. Masked by `nx config get`/`list`. Never copied into a `claude` child's environment. Persist it with `nx config set anthropic_api_key --stdin` so a GUI-launched `nx-mcp` sees it. |
+| `anthropic_api_key` | `ANTHROPIC_API_KEY` | Anthropic API key for the `anthropic` LLM backend. Used when `claude` is not on PATH (`auto`) or `llm.backend` is `anthropic`. Masked by `nx config get`/`list`. A key kept in `config.yml` is never copied into a `claude` child's environment; an exported `ANTHROPIC_API_KEY` is inherited by `claude -p` children, as before. Persist it with `nx config set anthropic_api_key --stdin` so a GUI-launched `nx-mcp` sees it. |
 | `openai_compat_api_key` | `NX_LLM_OPENAI_API_KEY` | Optional key for the `openai_compat` backend (`llm.backend: openai_compat`, endpoint in `llm.openai_compat.base_url` / `.model`). `OPENAI_API_KEY` is deliberately not read. |
 
 Resolution is env first, then `config.yml`, for both. See

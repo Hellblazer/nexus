@@ -58,6 +58,11 @@ class ModelPrice:
         ) / 1_000_000
 
 
+#: The day :data:`PRICES` was last read against the published list. Logged with
+#: ``llm_price_unknown`` so a reader of that warning can tell how old the table
+#: is, and bumped with every edit of the table.
+PRICES_AS_OF: Final[str] = "2026-10-23"
+
 _HAIKU_5_5_LONG = ModelPrice(0.50, 2.50, 0.625, 0.05)
 
 #: Canonical model id -> price. Dated ids (``claude-haiku-4-5-20251001``) resolve

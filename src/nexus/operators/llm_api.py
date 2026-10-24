@@ -41,12 +41,13 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
 
 from nexus.operators.llm_backend import BackendStatus, DispatchRequest, DispatchResult
-from nexus.operators.llm_models import ModelPrice
+from nexus.operators.llm_models import PRICES_AS_OF, ModelPrice
 from nexus.operators.llm_types import (
     DispatchUsage,
     ModelUsage,
@@ -146,13 +147,18 @@ def _semaphore() -> threading.Semaphore:
 
 
 @contextlib.asynccontextmanager
-async def concurrency_permit() -> AsyncIterator[None]:
+async def concurrency_permit(deadline: float | None = None) -> AsyncIterator[None]:
     """Hold one of the process's ``NX_LLM_MAX_CONCURRENCY`` slots for the
-    duration of one HTTP attempt (not across a retry sleep)."""
+    duration of one HTTP attempt (not across a retry sleep). The wait for a slot
+    ends at *deadline* (an absolute ``time.monotonic()`` timestamp) with
+    ``StreamTimeout("permit")``: a caller that set a hard wall-clock ceiling must
+    not sit behind other calls past it."""
     sem = _semaphore()
     wait = 0.005
     while not sem.acquire(blocking=False):
-        await asyncio.sleep(wait)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise StreamTimeout("permit")
+        await asyncio.sleep(wait if deadline is None else max(0.0, min(wait, deadline - time.monotonic())))
         wait = min(wait * 2, 0.05)
     try:
         yield
@@ -226,9 +232,9 @@ def backoff_delay(attempt: int, rng: random.Random) -> float:
 
 
 class StreamTimeout(Exception):
-    """A phase of the stream ran out of time. *phase* is ``first_event`` or
-    ``stream``. Internal: the backend turns it into ``OperatorTimeoutError``
-    carrying the partial output."""
+    """A phase of the call ran out of time. *phase* is ``permit`` (waiting for a
+    concurrency slot), ``first_event`` or ``stream``. Internal: the backend turns
+    it into ``OperatorTimeoutError`` carrying the partial output."""
 
     def __init__(self, phase: str) -> None:
         super().__init__(phase)
@@ -333,6 +339,11 @@ def _for_operator(operator: str | None) -> str:
 
 _WARNED_UNPRICED: set[str] = set()
 
+#: ``(backend name, base url, model)`` of every model that answered a forced
+#: ``tool_choice`` with a 400 in this process. A model that did is sent ``auto``
+#: from its next call on, so each pays the wasted request once, not per call.
+_FORCED_REJECTED: set[tuple[str, str, str]] = set()
+
 
 class ApiBackend:
     """Base of the API backends. Subclasses supply the provider's request
@@ -340,8 +351,6 @@ class ApiBackend:
     and error parsing (:meth:`_http_error`); this class runs the call."""
 
     name: ClassVar[str] = "api"
-    #: Whether a ``max_budget_usd`` ceiling can be enforced (needs a price).
-    budget_enforceable_without_price: ClassVar[bool] = False
     #: Whether the model-family drift tripwire (requested alias vs the model the
     #: provider reports) means anything: it does for Anthropic aliases, not for
     #: a local model that ignores them.
@@ -361,6 +370,10 @@ class ApiBackend:
         self._sleep = sleep or asyncio.sleep
         self._rng = rng or random.Random()
         self._trust_env = trust_env
+        #: Whether a ``max_budget_usd`` ceiling is accepted unenforced when the
+        #: model has no price. Only an operator's explicit opt-in sets it (the
+        #: ``openai_compat`` ``unpriced_ok`` setting, for a free local server).
+        self._unpriced_ok = False
 
     # -- provider hooks ----------------------------------------------------
 
@@ -412,6 +425,16 @@ class ApiBackend:
     def _forced_choice_rejected(self, exc: OperatorAPIError) -> bool:
         return False
 
+    def _adapt_to_rejection(self, exc: OperatorAPIError, model: str) -> bool:
+        """A provider hook: change the request shape when the server's 400 says
+        a parameter is wrong for this model, and return True to send the turn
+        again. Must return True at most once per change (it is bounded by the
+        caller as well)."""
+        return False
+
+    def _unpriced_ceiling_remedy(self) -> str:
+        return "add it to llm_models.PRICES, or unset the ceiling"
+
     def _salvage_text(self, outcome: TurnOutcome) -> Any:
         """A provider hook: a structured value found in plain text when the
         model made no tool call (``NO_VALUE`` when none)."""
@@ -436,12 +459,12 @@ class ApiBackend:
         price = self._price(model)
         if price is None:
             self._warn_unpriced(model)
-        if req.max_budget_usd is not None and price is None and not self.budget_enforceable_without_price:
-            raise OperatorError(
-                f"cannot enforce max_budget_usd={req.max_budget_usd}: no price is known for model {model!r} "
-                f"(add it to llm_models.PRICES, or unset the ceiling)"
-            )
         if req.max_budget_usd is not None and price is None:
+            if not self._unpriced_ok:
+                raise OperatorError(
+                    f"cannot enforce max_budget_usd={req.max_budget_usd}: no price is known for model {model!r} "
+                    f"({self._unpriced_ceiling_remedy()})"
+                )
             _log.warning("llm_budget_not_enforceable", backend=self.name, model=model)
         schema = req.json_schema
         wrap = schema is not None and schema.get("type") != "object"
@@ -453,7 +476,10 @@ class ApiBackend:
         validator = _build_validator(schema)
         budget = _Budget(req.max_budget_usd, price, enforceable=price is not None)
         max_tokens_cfg = configured_max_tokens()
-        forced = schema is not None and self._supports_forced(model)
+        forced = (
+            schema is not None and self._supports_forced(model)
+            and self._forced_key(model) not in _FORCED_REJECTED
+        )
         messages = self._initial_messages(req, auto_mode=schema is not None and not forced)
         turns: list[TurnOutcome] = []
         settled: list[DispatchUsage | None] = []
@@ -461,7 +487,7 @@ class ApiBackend:
         def settle() -> DispatchUsage | None:
             if settled:
                 return settled[0]
-            usage = self._usage(turns, price, started) if turns else None
+            usage = self._usage(turns, price, started, model) if turns else None
             if usage is not None:
                 record_usage(
                     usage,
@@ -517,8 +543,11 @@ class ApiBackend:
                 if feedback is None:
                     return DispatchResult(structured=value, usage=settle())
                 if turn_no == 1:
-                    _log.info(
-                        "llm_structured_output_repair",
+                    _log.info("llm_structured_output_repair", backend=self.name, model=model, operator=req.operator)
+                    # The validator's text quotes the model's own output (a bad value),
+                    # which can be anything the document held: DEBUG, never INFO.
+                    _log.debug(
+                        "llm_structured_output_repair_detail",
                         backend=self.name, model=model, operator=req.operator, reason=feedback[:200],
                     )
                     messages = self._repair(messages, outcome, feedback)
@@ -575,11 +604,14 @@ class ApiBackend:
         forced: bool,
     ) -> tuple[TurnOutcome, bool]:
         """One round trip. Returns the outcome and the ``forced`` setting that
-        worked (a model that rejects a forced tool choice is retried once with
-        ``auto``, and stays on it for the repair turn)."""
-        for attempt_forced in ([forced, False] if forced else [False]):
+        worked. A model that rejects a forced tool choice is retried once with
+        ``auto``, stays on it for the repair turn, and is remembered for the rest
+        of the process (:data:`_FORCED_REJECTED`); a server that rejects another
+        request parameter gets the one change :meth:`_adapt_to_rejection` makes.
+        At most three requests: the first, and one fallback of each kind."""
+        for _ in range(3):
             body = self._body(
-                messages, model=model, max_tokens=max_tokens, tool_schema=tool_schema, forced=attempt_forced,
+                messages, model=model, max_tokens=max_tokens, tool_schema=tool_schema, forced=forced,
             )
             stream = self._new_stream()
             t0 = time.monotonic()
@@ -588,8 +620,13 @@ class ApiBackend:
             except StreamTimeout as st:
                 raise self._timeout_error(req, stream, st.phase) from None
             except OperatorAPIError as exc:
-                if attempt_forced and self._forced_choice_rejected(exc):
+                if forced and self._forced_choice_rejected(exc):
+                    _FORCED_REJECTED.add(self._forced_key(model))
                     _log.info("llm_forced_tool_choice_rejected", backend=self.name, model=model)
+                    forced = False
+                    continue
+                if self._adapt_to_rejection(exc, model):
+                    _log.info("llm_request_adapted_to_rejection", backend=self.name, model=model)
                     continue
                 raise
             outcome = stream.outcome()
@@ -601,13 +638,25 @@ class ApiBackend:
                 request_id=stream.request_id, stop=outcome.stop,
                 input_tokens=outcome.input_tokens, output_tokens=outcome.output_tokens,
             )
-            return outcome, attempt_forced
+            return outcome, forced
         raise AssertionError("unreachable")  # pragma: no cover
+
+    def _forced_key(self, model: str) -> tuple[str, str, str]:
+        return (self.name, self._base_url, model)
 
     def _timeout_error(self, req: DispatchRequest, stream: StreamState, phase: str) -> OperatorTimeoutError:
         from nexus.operators.dispatch import _persist_timeout_log  # noqa: PLC0415 - dispatch imports llm_backend at load; deferred
 
-        partial = stream.partial_text()
+        if phase == "permit":
+            return OperatorTimeoutError(
+                f"{self.name} call reached its deadline waiting for a free concurrency slot "
+                f"({NX_LLM_MAX_CONCURRENCY_ENV}={configured_concurrency()} requests are in flight); nothing was sent",
+                partial_text="",
+                event_count=0,
+                log_path=None,
+            )
+        # The model's own output can echo anything it was shown, the key included.
+        partial = self._scrub(stream.partial_text())
         n = stream.event_count
         log_path = _persist_timeout_log(req.timeout, partial, b"", n)
         where = "before the first event" if phase == "first_event" else "mid-stream"
@@ -626,7 +675,7 @@ class ApiBackend:
         attempt = 0
         while True:
             try:
-                async with concurrency_permit():
+                async with concurrency_permit(req.deadline):
                     await self._one_attempt(body, stream, req)
                 return
             except OperatorAPIError as exc:
@@ -658,9 +707,18 @@ class ApiBackend:
 
         async def consume() -> None:
             timeout = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=None)
+            failure: str | None = None
             async with httpx.AsyncClient(timeout=timeout, trust_env=self._trust_env, follow_redirects=False) as client:
                 try:
                     async with client.stream("POST", url, headers=headers, json=body) as resp:
+                        if 300 <= resp.status_code < 400:
+                            where = urlsplit(resp.headers.get("location", "")).hostname
+                            raise OperatorAPIError(
+                                f"{self.name}: the server answered {resp.status_code}, a redirect"
+                                f"{' to ' + self._scrub(where) if where else ''}; redirects are not followed, "
+                                "so point base_url at the final endpoint",
+                                status=resp.status_code, retryable=False,
+                            )
                         if resp.status_code >= 400:
                             raw = b""
                             async for chunk in resp.aiter_bytes():
@@ -668,14 +726,24 @@ class ApiBackend:
                                 if len(raw) >= _ERROR_BODY_CAP:
                                     break
                             raise self._http_error(resp.status_code, resp.headers, raw[:_ERROR_BODY_CAP])
+                        ctype = resp.headers.get("content-type", "")
+                        if "text/event-stream" not in ctype.lower():
+                            raise OperatorAPIError(
+                                f"{self.name}: the server answered {resp.status_code} with content-type "
+                                f"{self._scrub(ctype)[:80]!r}, not text/event-stream; is base_url a streaming "
+                                "endpoint of this API?",
+                                status=resp.status_code, retryable=False,
+                            )
                         stream.request_id = resp.headers.get("request-id") or resp.headers.get("x-request-id")
                         async for ev in iter_sse(resp.aiter_lines()):
                             first_event.set()
                             stream.feed(ev)
                 except httpx.HTTPError as exc:
-                    raise OperatorAPIError(
-                        f"{self.name}: connection failed ({type(exc).__name__}: {self._scrub(str(exc))[:200]})"
-                    ) from None
+                    # Raised below, outside the handler: no exception chain keeps the
+                    # transport's own text, which can quote the URL (and so the key).
+                    failure = f"{self.name}: connection failed ({type(exc).__name__}: {self._scrub(str(exc))[:200]})"
+                if failure is not None:
+                    raise OperatorAPIError(failure)
                 if not stream.finished:
                     raise OperatorAPIError(f"{self.name}: the stream ended before the response was complete")
 
@@ -709,16 +777,23 @@ class ApiBackend:
         if model in _WARNED_UNPRICED:
             return
         _WARNED_UNPRICED.add(model)
-        _log.warning("llm_price_unknown", backend=self.name, model=model, effect="cost_usd is None for this model")
+        _log.warning(
+            "llm_price_unknown", backend=self.name, model=model, prices_as_of=PRICES_AS_OF,
+            effect="cost_usd is None for this model",
+        )
 
-    def _usage(self, turns: list[TurnOutcome], price: ModelPrice | None, started: float) -> DispatchUsage:
+    def _usage(
+        self, turns: list[TurnOutcome], price: ModelPrice | None, started: float, requested_model: str | None = None,
+    ) -> DispatchUsage:
         def total(attr: str) -> int | None:
             vals = [getattr(t, attr) for t in turns if getattr(t, attr) is not None]
             return sum(vals) if vals else None
 
         costs = [_turn_cost(price, t) for t in turns] if price is not None else [None]
         cost = None if any(c is None for c in costs) else float(sum(costs))  # type: ignore[arg-type]
-        model = next((t.model for t in reversed(turns) if t.model), None)
+        # The model the provider reports; when it reports none (a server that omits
+        # ``model`` from its stream), the one this call was sent to.
+        model = next((t.model for t in reversed(turns) if t.model), None) or requested_model
         in_t, out_t = total("input_tokens"), total("output_tokens")
         cc_t, cr_t = total("cache_creation_tokens"), total("cache_read_tokens")
         return DispatchUsage(

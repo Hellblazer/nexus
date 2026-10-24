@@ -87,9 +87,10 @@ import random
 import re
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -116,6 +117,25 @@ __all__ = [
 ]
 
 _log = structlog.get_logger(__name__)
+
+#: The model the most recent API extraction on this thread ran on (nexus-oc98c:
+#: a row's ``model_version`` names the model that produced it). Set by
+#: :func:`_api_inner_text`, cleared by the retry loops before they start, read by
+#: :func:`_stamped_with_actual_model`. Thread-local: the daemon and the batch
+#: enrich run extractions on worker threads.
+_API_MODEL = threading.local()
+
+
+def _stamped_with_actual_model(config: "ExtractorConfig") -> "ExtractorConfig":
+    """*config* with ``model_version`` set to the model an API backend actually
+    ran the call on, when it ran on one. The config pins a Claude id; under
+    ``openai_compat`` the call goes to the configured server model, and stamping
+    the Claude id on the row would name a model that never saw the document. On
+    the ``claude -p`` path (nothing recorded) the config is returned unchanged."""
+    model = getattr(_API_MODEL, "model", None)
+    if model and model != config.model_version:
+        return replace(config, model_version=model)
+    return config
 
 
 # ── Read-failure sentinel (RDR-096 P1.2) ─────────────────────────────────────
@@ -1466,6 +1486,7 @@ def extract_aspects(
 
     prompt = config.prompt_template.format(content=_bound_content(content, source_path))
     parsed = _retry_subprocess(prompt, config)
+    config = _stamped_with_actual_model(config)
     if parsed is None:
         record = _empty_record(source_path, collection, config)
     else:
@@ -1671,6 +1692,7 @@ def extract_aspects_batch(
         prompt = _build_batch_prompt(group, cfg)
         timeout = 180 + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(group) - 1)
         parsed = _retry_subprocess_batch(prompt, cfg, timeout=timeout)
+        cfg = _stamped_with_actual_model(cfg)
 
         if parsed is None:
             # Whole sub-batch failed: every doc in it gets a null-fields record.
@@ -1739,6 +1761,7 @@ def _retry_subprocess_batch(
     null-out). Returns the outer dict ``{"papers": [...]}`` on
     success, ``None`` on final failure.
     """
+    _API_MODEL.model = None
     for attempt in range(_RETRY_ATTEMPTS):
         try:
             return _invoke_once_batch(prompt, timeout=timeout, model=config.model_version)
@@ -1917,6 +1940,7 @@ def _retry_subprocess(
     """Invoke the Claude CLI with retry. Return the parsed JSON dict on
     success, or ``None`` after final failure.
     """
+    _API_MODEL.model = None
     for attempt in range(_RETRY_ATTEMPTS):
         try:
             return _invoke_once(prompt, model=config.model_version)
@@ -2171,9 +2195,13 @@ def _api_inner_text(prompt: str, backend_name: str, *, timeout: float, model: st
     and takes that loop's 2 s / 5 s / 12 s backoff; every other backend error
     (a bad key, a bad request, a cut-off or refused answer) is hard.
     """
-    from nexus.operators.llm_backend import run_text_sync  # noqa: PLC0415 - deferred: keeps the extractor import light
+    from nexus.operators.llm_backend import api_model_name, run_text_sync  # noqa: PLC0415 - deferred: keeps the extractor import light
     from nexus.operators.llm_types import OperatorAPIError, OperatorError, OperatorTimeoutError  # noqa: PLC0415 - deferred, as above
 
+    # The model this call is aimed at, so a row written after a FAILED call does not
+    # name the pinned Claude id either; a successful call overwrites it below with
+    # the model the provider reports.
+    _API_MODEL.model = api_model_name(backend_name, model)
     try:
         result = run_text_sync(backend_name, prompt, model=model, timeout=timeout, operator="aspect_extractor")
     except OperatorTimeoutError as exc:
@@ -2184,6 +2212,8 @@ def _api_inner_text(prompt: str, backend_name: str, *, timeout: float, model: st
     except OperatorError as exc:
         raise _HardFailure(_redact_tokens(str(exc))) from exc
     usage = result.usage
+    if usage is not None and usage.model:
+        _API_MODEL.model = usage.model
     _log.info(
         "aspect_extractor_usage",
         requested_model=model,

@@ -42,6 +42,9 @@ class Step:
     hold: float = 0.0
     #: Seconds to wait between events (a slow but steady stream).
     event_delay: float = 0.0
+    #: When set, a 200 answers ``body`` with this content type instead of an event
+    #: stream (a server that is not the endpoint the client thinks it is).
+    content_type: str | None = None
 
 
 @dataclass
@@ -87,6 +90,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(step.status)
         for k, v in step.headers.items():
             self.send_header(k, v)
+        if step.status == 200 and step.content_type is not None:
+            self.send_header("content-type", step.content_type)
+            self.send_header("content-length", str(len(step.body)))
+            self.end_headers()
+            self.wfile.write(step.body)
+            return
         if step.status != 200:
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(step.body)))

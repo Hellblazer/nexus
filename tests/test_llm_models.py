@@ -160,3 +160,12 @@ class TestApiErrorClassification:
 
     def test_it_is_an_operator_error(self) -> None:
         assert issubclass(OperatorAPIError, OperatorError)
+
+
+class TestThePriceTableSaysWhenItWasRead:
+    def test_prices_as_of_is_an_iso_date(self) -> None:
+        import datetime
+
+        from nexus.operators.llm_models import PRICES_AS_OF
+
+        assert datetime.date.fromisoformat(PRICES_AS_OF).year >= 2026

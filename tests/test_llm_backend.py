@@ -767,3 +767,156 @@ class TestSelectedApiBackendAndTextRun:
                 return run_text_sync("anthropic", "p", model=None, timeout=5.0)
 
         assert asyncio.run(caller()).text == "from-thread"
+
+
+# ── nexus-2k66t.3 P2 fix round ──────────────────────────────────────────────
+
+
+_BROKEN_KEY_LINE = "sk-ant-FAKEBROKEN0123456789"
+#: A YAML scanner error whose offending line (line 3) carries a credential value.
+_BROKEN_CONFIG = "credentials:\n  other: 1\n  anthropic_api_key: " + _BROKEN_KEY_LINE + ": [x\n"
+_BROKEN_OPENAI_CONFIG = (
+    "credentials:\n  other: 1\n  openai_compat_api_key: " + _BROKEN_KEY_LINE + ": [x\n"
+)
+
+
+def _log_text(logs) -> str:
+    import json
+
+    return json.dumps(logs, default=str)
+
+
+class TestAMalformedConfigNeverLeaksACredential:
+    """A YAML error's text quotes the offending line, which can be a credential
+    value. Only the exception type and the line number may be logged or raised."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch) -> None:
+        for var in ("NX_LLM_BACKEND", "ANTHROPIC_API_KEY", "NX_LLM_OPENAI_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_the_fixture_really_quotes_the_key(self) -> None:
+        # Non-vacuity: the raw parser error DOES carry the value, so a pass below means the scrub worked.
+        import yaml
+
+        with pytest.raises(yaml.YAMLError) as ei:
+            yaml.safe_load(_BROKEN_CONFIG)
+        assert _BROKEN_KEY_LINE in str(ei.value)
+
+    def test_the_credential_probe_logs_the_type_and_line_only(self) -> None:
+        import structlog
+
+        from nexus.operators.llm_backend import real_key_present
+
+        _write_global_config(_BROKEN_CONFIG)
+        with structlog.testing.capture_logs() as logs:
+            assert real_key_present("anthropic_api_key") is False
+        events = [e for e in logs if e["event"] == "llm_backend_credential_unreadable"]
+        assert len(events) == 1 and events[0]["error_type"] == "ScannerError" and events[0]["line"] == 3
+        assert _BROKEN_KEY_LINE not in _log_text(logs)
+
+    def test_the_section_reader_logs_the_type_and_line_only(self) -> None:
+        import structlog
+
+        _write_global_config(_BROKEN_CONFIG)
+        with structlog.testing.capture_logs() as logs:
+            resolve_backend_name(_req())  # auto: the broken config means auto, and says so
+        events = [e for e in logs if e["event"] == "llm_backend_config_unreadable"]
+        assert len(events) == 1 and events[0]["error_type"] == "ScannerError" and events[0]["line"] == 3
+        assert _BROKEN_KEY_LINE not in _log_text(logs)
+
+    @pytest.mark.parametrize("name,text,extra_env", [
+        ("anthropic", _BROKEN_CONFIG, {}),
+        ("openai_compat", _BROKEN_OPENAI_CONFIG, _OPENAI_OK),
+    ])
+    def test_building_a_backend_raises_a_clean_operator_error(self, name, text, extra_env, monkeypatch) -> None:
+        import structlog
+
+        for k, v in extra_env.items():
+            monkeypatch.setenv(k, v)
+        _write_global_config(text)
+        with structlog.testing.capture_logs() as logs, pytest.raises(OperatorError) as ei:
+            build_api_backend(name)
+        assert str(ei.value) == "global config.yml is unreadable at line 3"
+        everything = _log_text(logs) + str(ei.value) + repr(ei.value) + repr(ei.value.__cause__) + repr(ei.value.__context__)
+        assert _BROKEN_KEY_LINE not in everything
+        assert ei.value.__cause__ is None and ei.value.__context__ is None
+
+    def test_an_explicit_anthropic_dispatch_over_a_broken_config_leaks_nothing(self, monkeypatch) -> None:
+        import structlog
+
+        monkeypatch.setenv("NX_LLM_BACKEND", "anthropic")
+        _write_global_config(_BROKEN_CONFIG)
+        with structlog.testing.capture_logs() as logs, _spawn_raises(), pytest.raises(OperatorError) as ei:
+            asyncio.run(claude_dispatch("p", _SCHEMA))
+        assert _BROKEN_KEY_LINE not in _log_text(logs) + str(ei.value) + repr(ei.value)
+
+
+class TestTheDispatchEnvKeepsAnOpenAiCompatKeyOutOfClaudeChildren:
+    @pytest.mark.parametrize("kwargs", [{}, {"ephemeral": True}, {"ephemeral": True, "grants_tool_access": True}],
+                             ids=["owned", "ephemeral", "ephemeral-tools"])
+    def test_nx_llm_openai_api_key_is_dropped(self, monkeypatch, kwargs) -> None:
+        monkeypatch.setenv("NX_LLM_OPENAI_API_KEY", "oa-secret-must-not-reach-claude")
+        monkeypatch.setattr("nexus.db.t1.mint_t1_session_token", lambda sid, *, context: {"session_token": "t"})
+        env = dispatch_mod._build_dispatch_env(**kwargs)
+        assert "NX_LLM_OPENAI_API_KEY" not in env
+        assert "oa-secret-must-not-reach-claude" not in "".join(env.values())
+
+    def test_an_exported_anthropic_api_key_is_still_inherited(self, monkeypatch) -> None:
+        # Unchanged CLI semantics: claude -p honours an exported ANTHROPIC_API_KEY.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", _KEY)
+        assert dispatch_mod._build_dispatch_env()["ANTHROPIC_API_KEY"] == _KEY
+
+
+class TestNoBackendIsTheNamedErrorAtTheSpawnToo:
+    def test_auto_with_neither_raises_no_backend_available_error(self, claude_off_path) -> None:
+        async def spawn(*_a, **_k):
+            raise FileNotFoundError("claude")
+
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=spawn):
+            with pytest.raises(NoBackendAvailableError) as ei:
+                asyncio.run(claude_dispatch("p", _SCHEMA))
+        assert str(ei.value) == NO_BACKEND_MESSAGE
+
+    def test_an_explicit_cli_without_claude_stays_a_plain_operator_error(self, claude_off_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_LLM_BACKEND", "cli")
+
+        async def spawn(*_a, **_k):
+            raise FileNotFoundError("claude")
+
+        with patch_in("nexus.operators.dispatch", "asyncio.create_subprocess_exec", side_effect=spawn):
+            with pytest.raises(OperatorError) as ei:
+                asyncio.run(claude_dispatch("p", _SCHEMA))
+        assert not isinstance(ei.value, NoBackendAvailableError)
+
+
+class TestOpenAiCompatPriceSettings:
+    @pytest.fixture(autouse=True)
+    def _endpoint(self, monkeypatch) -> None:
+        for k, v in _OPENAI_OK.items():
+            monkeypatch.setenv(k, v)
+
+    def test_a_configured_price_reaches_the_backend(self) -> None:
+        _write_global_config("llm:\n  openai_compat:\n    price_in_per_mtok: 0.5\n    price_out_per_mtok: 1.5\n")
+        price = build_api_backend("openai_compat")._price("llama3.1")
+        assert (price.input, price.output) == (0.5, 1.5)
+
+    def test_no_price_means_none_and_not_unpriced_ok(self) -> None:
+        backend = build_api_backend("openai_compat")
+        assert backend._price("llama3.1") is None and backend._unpriced_ok is False
+
+    def test_unpriced_ok_true_reaches_the_backend(self) -> None:
+        _write_global_config("llm:\n  openai_compat:\n    unpriced_ok: true\n")
+        assert build_api_backend("openai_compat")._unpriced_ok is True
+
+    @pytest.mark.parametrize("text", [
+        "llm:\n  openai_compat:\n    price_in_per_mtok: 0.5\n",                       # half a price
+        "llm:\n  openai_compat:\n    price_in_per_mtok: x\n    price_out_per_mtok: 1\n",
+        "llm:\n  openai_compat:\n    price_in_per_mtok: -1\n    price_out_per_mtok: 1\n",
+        "llm:\n  openai_compat:\n    price_in_per_mtok: .inf\n    price_out_per_mtok: 1\n",
+        "llm:\n  openai_compat:\n    unpriced_ok: maybe\n",
+    ])
+    def test_a_malformed_price_setting_fails_loud(self, text) -> None:
+        _write_global_config(text)
+        with pytest.raises(OperatorError, match="llm.openai_compat"):
+            build_api_backend("openai_compat")
