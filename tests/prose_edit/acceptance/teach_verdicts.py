@@ -115,7 +115,7 @@ def check_s6(events: list[Obj]) -> tuple[str, str]:
 
 
 def _stores_card(command: str) -> bool:
-    return "memory.py voice-card" in command and "--from-stdin" in command
+    return V.runs_script(command, "memory", "voice-card") and "--from-stdin" in command
 
 
 def check_card(t1: list[Obj], t2c: list[Obj], t3: list[Obj], after: Obj | None) -> tuple[str, str]:
@@ -154,7 +154,7 @@ def _first_run_problem(t1: list[Obj], t2c: list[Obj]) -> str | None:
         return (f"the first run showed fewer than two edits ({len(edits)}): accepting one and rejecting the rest "
                 "stores no rejection, so there is nothing to promote")
     for command, out, bad in _commands(t2c):
-        if "review.py apply" in command and "--dry-run" not in command and not bad \
+        if V.runs_script(command, "review", "apply") and "--dry-run" not in command and not bad \
                 and (_json(out) or {}).get("rejections_stored") is True:
             return None
     return "the confirm turn stored no rejection (no real apply that reports rejections_stored): there is nothing to promote"
@@ -172,7 +172,7 @@ def check_promote(nodry_rc: str | None, nodry_err: str, t4: list[Obj], t4c: list
     if code is None or code.group(1) != "1" or "dry run" not in nodry_err:
         return FAIL, f"a promote with no dry run was not refused naming a dry run ({nodry_rc.strip()})"
     first = _commands(t4)
-    promotes = [(c, out, bad) for c, out, bad in first if "memory.py promote" in c]
+    promotes = [(c, out, bad) for c, out, bad in first if V.runs_script(c, "memory", "promote")]
     if any("--dry-run" not in c for c, _, _ in promotes):
         return FAIL, "the skill ran a real promote before the author confirmed it"
     dry = [(_json(out) or {}) for _, out, bad in promotes if (_json(out) or {}).get("dry_run") is True and not bad]
@@ -182,7 +182,7 @@ def check_promote(nodry_rc: str | None, nodry_err: str, t4: list[Obj], t4c: list
     if old and old not in _norm(V.final_text(t4)):
         return FAIL, (f"the entry's old text {old!r} is not in the reply that asks the author to confirm: "
                       "the author was not shown what would be stored")
-    real = [(out, bad) for c, out, bad in _commands(t4c) if "memory.py promote" in c and "--dry-run" not in c]
+    real = [(out, bad) for c, out, bad in _commands(t4c) if V.runs_script(c, "memory", "promote") and "--dry-run" not in c]
     if not real:
         return FAIL, "no real promote after the author's confirm"
     ok = [out for out, bad in real if not bad and (_json(out) or {}).get("title") and "dry_run" not in (_json(out) or {})]

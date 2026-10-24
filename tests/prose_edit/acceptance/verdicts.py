@@ -373,13 +373,22 @@ def _json_object(text: str) -> Obj | None:
     return value if isinstance(value, dict) else None
 
 
+def runs_script(command: str, script: str, verb: str) -> bool:
+    """Whether a Bash command runs `<script>.py <verb>`, however the session quoted either word."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    return any(Path(tok).name == f"{script}.py" and nxt == verb for tok, nxt in zip(tokens, tokens[1:]))
+
+
 def filter_runs(events: list[Obj]) -> list[tuple[str, Obj]]:
     """(the command, what it printed) for every `brief.py filter` run in the transcript, in order."""
     results = tool_results(events)
     out: list[tuple[str, Obj]] = []
     for tid, name, inp, _ in tool_uses(events):
         command = str(inp.get("command", ""))
-        if name == "Bash" and "brief.py filter" in command and tid in results:
+        if name == "Bash" and runs_script(command, "brief", "filter") and tid in results:
             value = _json_object(results[tid])
             if value is not None and isinstance(value.get("edits"), list):
                 out.append((command, value))
@@ -425,7 +434,7 @@ def _filter_work_dirs(events: list[Obj]) -> set[str]:
     out: set[str] = set()
     for _, name, inp, _ in tool_uses(events):
         command = str(inp.get("command", ""))
-        if name != "Bash" or "brief.py filter" not in command:
+        if name != "Bash" or not runs_script(command, "brief", "filter"):
             continue
         try:
             tokens = shlex.split(command)
