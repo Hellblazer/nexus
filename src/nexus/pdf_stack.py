@@ -1010,31 +1010,41 @@ def _current_lock_applied() -> bool:
     return found is not None and found[1].constraints == install_layout.CONSTRAINTS_APPLIED
 
 
-def _rebuild_generation(extras: tuple[str, ...]) -> None:
+def _rebuild_generation(extras: tuple[str, ...], *, after_flip=None) -> None:
     """Build a generation at the running version with the running installer and
     EXACTLY *extras* (current's, not the host's), flip to it, reap by the normal
     keep-3 rule. No version change, no extra added or dropped: the build differs
-    from ``current`` only in how it was resolved."""
+    from ``current`` only in how it was resolved.
+
+    *after_flip* is called with the new generation after the flip and BEFORE the
+    reap (nexus-ff366), so a check that fails can put the old pointers back while
+    the generation ``previous`` used to name still exists."""
     from nexus.commands import self_cmd  # noqa: PLC0415 — deferred
 
     version = _running_version()
     _say(REBUILD_NOTICE.format(version=version))
     with contextlib.redirect_stdout(sys.stderr):
-        self_cmd.perform_self_install(exact_extras=extras, version=version, progress=True)
+        self_cmd.perform_self_install(
+            exact_extras=extras, version=version, progress=True, after_flip=after_flip,
+        )
 
 
 def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
     """Rebuild ``current`` when :func:`installer_rebuild_pending`. Returns a
     one-line account, or None when there was nothing to do. Never raises: a
-    failure leaves ``current`` as it was (the build flips only on success), is
-    reported in the line, and is retried by the next run, backed off under
+    failed build leaves ``current`` as it was (the build flips only on success), a
+    failed post-check puts it back (below), either is reported in the line, and
+    is retried by the next run, backed off under
     ``--auto`` by a marker of its own (same window as the carry-forward's) so a
     box that cannot reach the index does not refetch at every session start.
 
     A build that returns without raising is not yet a success: ``current``'s
     receipt must now say the lock was applied. A build that leaves it unpinned (an
     installer fallback, an index serving a different wheel) is a failure, so it cannot be
-    reported as done and repeated at every session start."""
+    reported as done and repeated at every session start, and ``current`` and
+    ``previous`` are put back where they were before the build flipped them
+    (nexus-ff366): the new generation is no better than the one it replaced, and
+    keeping it as ``current`` would let each retry's keep-3 reap the original."""
     if not installer_rebuild_pending():
         return None
     sentinel = _rebuild_failed_sentinel()
@@ -1045,6 +1055,7 @@ def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
             age = None
         if age is not None and age < CARRY_FORWARD_AUTO_BACKOFF_S:
             return f"installer rebuild deferred: the last attempt failed {int(age)}s ago"
+    moved_back: list[str] = []
     try:
         with _install_lock("rebuilding the current generation"):
             # A peer's run may have rebuilt it while we waited; `current` is the
@@ -1052,11 +1063,18 @@ def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
             extras = _stale_current_extras()
             if extras is None:
                 return "the current generation was already rebuilt with the release's dependency lock"
-            _rebuild_generation(extras)
-            if not _current_lock_applied():
-                raise InstallerRebuildError(
-                    "the rebuilt generation does not record the release's dependency lock as applied"
-                )
+            replaced, replaced_previous = _generation_pointers()
+
+            def check(_generation: Path) -> None:
+                """Runs after the flip and before the reap: the build is only a success if
+                `current` now says the lock was applied, else the flip is undone."""
+                if not _current_lock_applied():
+                    moved_back.append(_put_current_back(replaced, replaced_previous))
+                    raise InstallerRebuildError(
+                        "the rebuilt generation does not record the release's dependency lock as applied"
+                    )
+
+            _rebuild_generation(extras, after_flip=check)
     except Exception as exc:  # noqa: BLE001 — reported, retried next run
         if sentinel is not None:
             with contextlib.suppress(OSError):
@@ -1066,9 +1084,70 @@ def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
         why = "the build did not apply the lock" if isinstance(exc, InstallerRebuildError) else type(exc).__name__
         return (
             f"the current generation could not be rebuilt with the release's dependency lock ({why}); "
-            f"it keeps working as built. Retry: {REBUILD_RETRY_COMMAND}"
+            f"it keeps working as built{''.join(moved_back)}. Retry: {REBUILD_RETRY_COMMAND}"
         )
     if sentinel is not None:
         with contextlib.suppress(OSError):
             sentinel.unlink(missing_ok=True)
     return "rebuilt the current generation with the release's dependency lock"
+
+
+def _generation_pointers() -> tuple[Path | None, str | None]:
+    """``(what current names, what previous names)`` before a build flips them; the
+    first is None when ``current`` names no existing directory, which leaves nothing
+    to put back."""
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred
+        from nexus.commands import self_cmd  # noqa: PLC0415 — deferred
+
+        tools = install_layout.tools_dir()
+        return (
+            self_cmd._current_generation_dir(tools),  # noqa: SLF001 — same module family
+            self_cmd._previous_target(tools),  # noqa: SLF001
+        )
+    except Exception:  # noqa: BLE001 — unreadable pointers: no claim, no rollback
+        return None, None
+
+
+def _put_current_back(replaced: Path | None, replaced_previous: str | None) -> str:
+    """Re-point ``current`` and ``previous`` at what the failed build's flip replaced, and
+    return the words for the account: "" when there was nothing to undo, a clause saying what
+    the pointers are NOW otherwise. Never raises. The words come from re-reading both pointers
+    after the attempt, never from the attempt's own success: a rollback that moved ``current``
+    and then failed to restore ``previous`` says so, and one that could not move ``current``
+    says it stays on the rebuilt generation (which exists and works)."""
+    if replaced is None:
+        return ""
+    try:
+        from nexus import install_layout  # noqa: PLC0415 — deferred
+        from nexus.commands import self_cmd  # noqa: PLC0415 — deferred
+
+        tools = install_layout.tools_dir()
+        if self_cmd._current_generation_dir(tools) == replaced:  # noqa: SLF001
+            return ""  # the build never flipped: nothing to undo
+        try:
+            self_cmd.restore_current_generation(replaced, previous=replaced_previous)
+        except Exception as exc:  # noqa: BLE001 — what is left is read back below
+            _log.warning("installer_rebuild_rollback_failed", error=str(exc), generation=str(replaced))
+        now = self_cmd._current_generation_dir(tools)  # noqa: SLF001
+        if now != replaced:
+            return f"; current could not be moved back to {replaced.name} and stays on the rebuilt generation"
+        platform = self_cmd._plat()  # noqa: SLF001
+        previous_now = self_cmd._previous_target(tools)  # noqa: SLF001
+        same = (
+            previous_now is None if replaced_previous is None
+            else previous_now is not None and install_layout.compare_key(
+                previous_now, platform=platform,
+            ) == install_layout.compare_key(replaced_previous, platform=platform)
+        )
+        if same:
+            return f"; current is back on {replaced.name}"
+        was = "no rollback target" if replaced_previous is None else Path(replaced_previous).name
+        names = "no rollback target" if previous_now is None else Path(previous_now).name
+        return (
+            f"; current is back on {replaced.name}, but previous was {was} before the build "
+            f"and is now {names}"
+        )
+    except Exception as exc:  # noqa: BLE001 — reported, not raised
+        _log.warning("installer_rebuild_rollback_failed", error=str(exc), generation=str(replaced))
+        return "; current may not have been moved back: run `nx doctor`"

@@ -69,7 +69,28 @@ NX_RECEIPT_NAME="nexus-install.json"
 #: keeps a receipt-less tree whose marker is younger than NX_GC_BUILD_CLAIM_MINUTES
 #: (nexus-xn84f review: a slow resolve/download writes nothing into the tree).
 NX_BUILDING_MARKER_NAME=".nx-building"
+#
+# RECEIPT COMPATIBILITY RULE (nexus-lvvhm, nexus-ff366). Whoever changes what
+# this file's writer (nx_render_receipt, via install_generation.sh) records
+# reads this first. The receipt is written by the installer of the release
+# being INSTALLED and read back by the older release that is running, and
+# released clients (<= 7.85.0) compare NX_RECEIPT_SCHEMA with strict equality.
+#   * An ADDITIVE field needs NO bump: any bump locks those clients out of every
+#     receipt written after it. Do not bump "to record that the format grew".
+#   * A change in what an EXISTING field means needs a NEW field name (the one
+#     exception on record, installer_schema 1 -> 2 changing what `extras`
+#     implies, is not a pattern to copy).
+#   * Widening a closed vocabulary (source_kind, NX_SOURCE_KINDS) breaks every
+#     older reader, which refuses the unknown word: a new kind needs a new
+#     field, or a bump planned together with NX_MIN_READABLE_RECEIPT_SCHEMA.
+#   * An unknown `constraints` word reads as `unknown` in a newer reader, and
+#     the installer-rebuild rung treats `unknown` as owed: it rebuilds that
+#     generation once.
+# The full text is on RECEIPT_SCHEMA in layout_core.py.
 NX_RECEIPT_SCHEMA=1
+# The oldest receipt schema the reader accepts; separate from the writer's
+# stamp so that a bump never makes receipts already on disk unreadable.
+NX_MIN_READABLE_RECEIPT_SCHEMA=1
 NX_INSTALLER_SCHEMA=2
 
 # Pinned against the Python dataclass by the twins test, so that the half
@@ -160,6 +181,23 @@ nx_root() { _nx_core root "${1-}"; }
 # The receipt inside a generation, which must already be an absolute path.
 # $1 generation directory.
 nx_receipt_path() { _nx_core receipt_path "${1-}"; }
+
+# Read a generation's receipt with THIS release's reader (nexus-lvvhm). Prints
+# the receipt's version, or refuses (EX_USAGE) with the reason. Call it between a
+# build and the flip that points `current` at it: every step after the flip
+# reads the receipt, and the build was done by the installer of the release being
+# installed, which may write a receipt this release cannot read.
+# $1 generation directory (absolute).
+nx_check_receipt() { _nx_core check_receipt "${1-}"; }
+
+# The source_kind of a generation's receipt (directory | registry), by the real
+# reader. $1 generation directory (absolute).
+nx_receipt_kind() { _nx_core receipt_kind "${1-}"; }
+
+# The extras a rebuild of a generation carries, comma-separated, by the real
+# reader: the receipt's, minus mineru, plus pdf when the receipt predates the PDF
+# split. $1 generation directory (absolute).
+nx_receipt_extras() { _nx_core receipt_extras "${1-}"; }
 
 # The body of <bin>/<command>.
 #

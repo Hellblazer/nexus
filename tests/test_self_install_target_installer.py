@@ -15,6 +15,7 @@ a marker proves WHICH installer ran. The registry case goes through a real
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -120,6 +121,8 @@ class World:
         self.flips: list[Path] = []
         self.host = self._generation("20260101T000000Z", "conexus")
         monkeypatch.setattr(self_cmd, "running_generation", lambda: self.host)
+        self.real_flip_and_shim = self_cmd._flip_and_shim
+        self.real_reap = self_cmd._reap_generations
         # The post-build steps are the running code's own and have their tests; this
         # file is about WHICH installer builds, so they are recorded, not run.
         monkeypatch.setattr(self_cmd, "_flip_and_shim", lambda gen, **kw: self.flips.append(gen))
@@ -321,6 +324,11 @@ def build_generation(source, *, version="", extras=(), python_version="3.12", co
         raise GenerationError("the target core failed")
     gen = Path(tools) / "gen-20261024T000000Z"
     gen.mkdir(parents=True, exist_ok=True)
+    (gen / "nexus-install.json").write_text(
+        '{"schema": 1, "version": "99.0.0", "spec": "conexus", "source_kind": "registry", '
+        '"source": "conexus", "python": "3.12.8", "base_interpreter": "/py", '
+        '"created_at": "2026-10-24T00:00:00Z", "extras": []}'
+    )
     return gen
 '''
 
@@ -366,16 +374,32 @@ def report():
     return layout.MARK, layout.__file__
 '''
 
-#: A core that also has the legacy convergence entry point.
+#: A core that also has the legacy convergence entry point, as the current one has it: the built
+#: generation is handed to ``verify`` before the "flip" (a marker file) happens.
 MIGRATE_CORE = FAKE_CORE + '''
 
 def migrate_legacy(source, *, version="", python_version="", legacy_venv=None, tools=None, run=None,
-                   ops=None, platform=None, store=None, uv_bin=None, environ=None, on_path=None):
+                   ops=None, platform=None, store=None, uv_bin=None, environ=None, on_path=None,
+                   verify=None):
     Path(os.environ["NX_TEST_MARKER"]).write_text(f"target-migrate source={source} version={version}\\n")
     gen = Path(tools) / "gen-20261024T000000Z"
     gen.mkdir(parents=True, exist_ok=True)
+    schema = 0 if os.environ.get("NX_TEST_BAD_RECEIPT") else 1
+    (gen / "nexus-install.json").write_text(
+        '{"schema": %d, "version": "99.0.0", "spec": "conexus", "source_kind": "registry", '
+        '"source": "conexus", "python": "3.12.8", "base_interpreter": "/py", '
+        '"created_at": "2026-10-24T00:00:00Z", "extras": []}' % schema
+    )
+    if verify is not None:
+        verify(gen)
+    Path(os.environ["NX_TEST_MARKER"] + ".flipped").write_text("flipped\\n")
     return gen
 '''
+
+#: The same entry point as an older target release has it: no ``verify`` to call before its flip.
+OLD_MIGRATE_CORE = MIGRATE_CORE.replace(",\n                   verify=None", "").replace(
+    "    if verify is not None:\n        verify(gen)\n", "",
+)
 
 
 class TestWindowsTargetCore:
@@ -564,6 +588,46 @@ echo "$NX_TOOLS_DIR/gen-20261024T000000Z"
         assert world.marker.read_text() == "target-migrate source=conexus version=99.0.0\n"
         assert target_installer._CORE_KEY not in sys.modules
 
+    def test_windows_reads_the_receipt_back_before_the_targets_migrate_legacy_flips(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-lvvhm: the flip is inside the target's migrate_legacy, so the check is its `verify`
+        argument. A receipt this nx cannot read stops the convergence before the flip."""
+        monkeypatch.setenv("NX_TEST_BAD_RECEIPT", "1")
+        _index_for(tmp_path, monkeypatch, {
+            **WINDOWS_SUPPORT, "nexus/_install/generation_core.py": MIGRATE_CORE,
+        })
+        monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
+        monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda gen: pytest.fail("autostart retargeted"))
+        with pytest.raises(click.ClickException) as raised:
+            self_cmd._converge_legacy_install(tmp_path / "unused", world.tools, version="99.0.0", dry_run=False)
+        assert "cannot read its receipt" in raised.value.message and "`current` was not moved" in raised.value.message
+        assert not Path(str(world.marker) + ".flipped").exists(), "the target core never reached its flip"
+        assert target_installer._CORE_KEY not in sys.modules
+
+    def test_a_target_core_that_cannot_take_the_check_is_replaced_by_the_running_core_and_says_so(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A core that predates `verify` flips with no seam to check before it, so it is not run:
+        the running release's core converges instead, with the check, and one line says why."""
+        _index_for(tmp_path, monkeypatch, {
+            **WINDOWS_SUPPORT, "nexus/_install/generation_core.py": OLD_MIGRATE_CORE,
+        })
+        monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
+        monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda gen: None)
+        running = self_cmd._generation()
+        seen: list[dict] = []
+
+        def spy(source, *, verify=None, progress=False, **kw):
+            seen.append({"verify": verify, "progress": progress, **kw})
+            return world.tools / "gen-x"
+
+        monkeypatch.setattr(running, "migrate_legacy", spy)
+        self_cmd._converge_legacy_install(tmp_path / "unused", world.tools, version="99.0.0", dry_run=False)
+        assert not world.marker.exists(), "the old target core's migrate_legacy was not run"
+        assert len(seen) == 1 and seen[0]["verify"] is self_cmd._require_readable_receipt
+        assert "cannot check the receipt before it flips" in capsys.readouterr().err
+
 
 class TestAfterTheBuild:
     def test_a_version_the_index_moved_to_is_warned_about_by_both_numbers(
@@ -655,6 +719,173 @@ class TestAfterTheBuild:
         assert "ships no installer" in warnings[0]["note"]
 
 
+def _script_with_receipt(receipt_text: str) -> str:
+    """The target installer, but its generation carries *receipt_text* verbatim."""
+    return TARGET_SCRIPT.replace(
+        'echo "$GEN"\n', f"cat > \"$GEN/nexus-install.json\" <<'RECEIPT'\n{receipt_text}\nRECEIPT\necho \"$GEN\"\n",
+    )
+
+
+def _target_receipt(**overrides) -> str:
+    """A receipt as a future target would write it: the current fields with *overrides*
+    applied; a ``None`` value deletes the key."""
+    payload = json.loads(install_layout.Receipt(
+        version="99.0.0", spec="conexus", source_kind="registry", source="conexus",
+        python="3.12.8", base_interpreter="/py", created_at="2026-10-24T00:00:00Z", extras=[],
+    ).to_json())
+    for key, value in overrides.items():
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+    return json.dumps(payload, indent=2)
+
+
+class TestAReceiptTheRunningCodeReadsBack:
+    """nexus-lvvhm. The target release's installer writes the receipt; the RUNNING code
+    flips, shims, reaps and reads it back. The rule: a newer schema is read (the fields
+    it knows, the rest dropped); a receipt the running code cannot use stops the install
+    BEFORE ``current`` moves."""
+
+    def _run(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt_text: str,
+        *, running_receipt: str | None = None,
+    ):
+        """*receipt_text* is what the TARGET's installer writes. The running (packaged) installer is
+        faked: it writes *running_receipt*, or the same text when none is given, and its builds are
+        listed in ``world.running_builds``."""
+        wheel = _wheel(tmp_path / "w" / "conexus-99.0.0-py3-none-any.whl", _release_files(_script_with_receipt(receipt_text)))
+        world.point_host_at(str(wheel))
+        os.symlink(str(world.host), world.tools / "current")  # absolute, as the layout requires
+        packaged = str(self_cmd.packaged_install_dir())
+        world.running_builds = []
+
+        def run_build(argv, *, progress):
+            if str(argv[1]).startswith(packaged):
+                world.running_builds.append(list(argv))
+                gen = world.tools / f"gen-2026102400000{len(world.running_builds)}Z"
+                gen.mkdir()
+                text = receipt_text if running_receipt is None else running_receipt
+                (gen / "nexus-install.json").write_text(text)
+                return subprocess.CompletedProcess(argv, 0, f"{gen}\n", "")
+            return world.real_run_build(argv, progress=progress)
+
+        monkeypatch.setattr(self_cmd, "_run_build", run_build)
+        shims: list[str] = []
+        real_sh = self_cmd._sh
+
+        def sh(install_dir, command, **kwargs):
+            if "nx_write_shims" in command:  # needs a real venv; the flip and the reap do not
+                shims.append(command)
+                return ""
+            return real_sh(install_dir, command, **kwargs)
+
+        monkeypatch.setattr(self_cmd, "_sh", sh)
+        monkeypatch.setattr(self_cmd, "_flip_and_shim", world.real_flip_and_shim)
+        monkeypatch.setattr(self_cmd, "_reap_generations", world.real_reap)
+        return shims
+
+    def test_a_newer_schema_with_an_extra_field_flips_shims_and_reaps(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        shims = self._run(
+            world, tmp_path, monkeypatch,
+            _target_receipt(schema=install_layout.RECEIPT_SCHEMA + 1, field_from_the_future={"x": [1]}),
+        )
+        generation = self_cmd.perform_self_install()
+        assert generation is not None and generation.name == "gen-20261024T000000Z"
+        assert world.current == str(generation)
+        assert os.readlink(world.tools / "previous") == str(world.host)
+        assert len(shims) == 1
+        assert world.host.is_dir() and generation.is_dir()  # the reap (keep 3) removed neither
+        read = install_layout.read_receipt(generation)
+        assert read.version == "99.0.0" and read.schema == install_layout.RECEIPT_SCHEMA + 1
+        assert "cannot read its receipt" not in capsys.readouterr().err
+
+    @pytest.mark.parametrize("missing", ["base_interpreter", "version", "created_at"])
+    def test_a_missing_required_field_stops_the_install_before_current_moves(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str,
+    ) -> None:
+        shims = self._run(
+            world, tmp_path, monkeypatch,
+            _target_receipt(schema=install_layout.RECEIPT_SCHEMA + 1, **{missing: None}),
+        )
+        with pytest.raises(click.ClickException) as raised:
+            self_cmd.perform_self_install()
+        message = raised.value.message
+        assert "cannot read its receipt" in message and missing in message
+        assert "`current` was not moved" in message and "NX_INSTALL_RUNNING_INSTALLER=1" in message
+        assert world.current == str(world.host), "current stayed on the generation in use"
+        assert not (world.tools / "previous").is_symlink(), "nothing was recorded as previous"
+        assert shims == []
+
+    def test_a_schema_below_what_the_running_code_reads_is_refused_the_same_way(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        shims = self._run(world, tmp_path, monkeypatch, _target_receipt(schema=0))
+        with pytest.raises(click.ClickException) as raised:
+            self_cmd.perform_self_install()
+        assert "cannot read its receipt" in raised.value.message
+        assert world.current == str(world.host) and shims == []
+
+    def test_an_unreadable_receipt_falls_back_once_to_the_running_installer_and_says_so(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """nexus-ff366: a refusal after a full build would repeat at every session start (the
+        --auto run) and leave a complete, receipted generation each time for the keep-3 rule to
+        count. The target's generation is discarded and the running installer builds once."""
+        shims = self._run(
+            world, tmp_path, monkeypatch, _target_receipt(schema=0), running_receipt=_target_receipt(),
+        )
+        with structlog.testing.capture_logs() as logs:
+            generation = self_cmd.perform_self_install()
+        assert generation is not None and generation.name == "gen-20261024000001Z"
+        assert len(world.running_builds) == 1, "the fallback builds once"
+        assert world.current == str(generation) and len(shims) == 1
+        assert not (world.tools / "gen-20261024T000000Z").exists(), "the unreadable generation was removed"
+        assert world.host.is_dir(), "the generation in use was not touched"
+        err = capsys.readouterr().err
+        assert "wrote a receipt this nx cannot read" in err and "building again with the installer of the running release" in err
+        warned = [e for e in logs if e["event"] == "target_installer_fallback"]
+        assert len(warned) == 1 and warned[0]["log_level"] == "warning"
+
+    def test_the_fallback_is_attempted_once_and_a_second_refusal_is_final(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        shims = self._run(world, tmp_path, monkeypatch, _target_receipt(schema=0))  # both installers write it
+        with pytest.raises(click.ClickException, match="cannot read its receipt"):
+            self_cmd.perform_self_install()
+        assert len(world.running_builds) == 1, "one fallback build, no loop"
+        assert world.current == str(world.host) and shims == []
+
+    def test_no_fallback_when_the_running_installer_was_asked_for(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        shims = self._run(world, tmp_path, monkeypatch, _target_receipt(schema=0))
+        monkeypatch.setenv("NX_INSTALL_RUNNING_INSTALLER", "1")
+        with pytest.raises(click.ClickException, match="cannot read its receipt"):
+            self_cmd.perform_self_install()
+        assert len(world.running_builds) == 1, "the one build was the running installer's, and it was not repeated"
+        assert shims == []
+
+    def test_a_generation_that_current_or_previous_names_is_never_discarded(
+        self, world: World,
+    ) -> None:
+        names_current = world.tools / "gen-20261024T000009Z"
+        names_current.mkdir()
+        os.symlink(str(names_current), world.tools / "current")
+        self_cmd._discard_unflipped_generation(names_current, world.tools)
+        assert names_current.is_dir()
+        stray = world.tools / "gen-20261024T000008Z"
+        stray.mkdir()
+        self_cmd._discard_unflipped_generation(stray, world.tools)
+        assert not stray.exists()
+        outside = world.tmp / "gen-20261024T000007Z"
+        outside.mkdir()
+        self_cmd._discard_unflipped_generation(outside, world.tools)
+        assert outside.is_dir(), "only a generation directly under the tools directory is removed"
+
+
 class TestFetchFailureWording:
     def test_a_network_failure_gets_the_index_hint(
         self, world: World, monkeypatch: pytest.MonkeyPatch,
@@ -720,6 +951,21 @@ class TestTheRealPackagedInstaller:
                 ) is None
         finally:
             target_installer._clear_loaded_cores()
+
+
+def test_verify_is_passed_only_to_a_core_that_names_it() -> None:
+    """A `**kwargs` would swallow the argument without running the check, so it does not count."""
+    def old(name, *, tools):  # noqa: ARG001
+        return None
+
+    def new(name, *, tools, verify=None):  # noqa: ARG001
+        return None
+
+    def swallows(name, **kw):  # noqa: ARG001
+        return None
+
+    assert self_cmd._verify_kwarg(old) == {} and self_cmd._verify_kwarg(swallows) == {}
+    assert self_cmd._verify_kwarg(new) == {"verify": self_cmd._require_readable_receipt}
 
 
 def test_progress_is_passed_only_to_a_core_that_takes_it() -> None:

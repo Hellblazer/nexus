@@ -1238,7 +1238,7 @@ def migrate_legacy(
     legacy_venv: Path | str | None = None, tools: Path | None = None, run=None,
     ops: LinkOps | None = None, platform: str | None = None,
     store: UserPathStore | None = None, uv_bin: Path | str | None = None,
-    environ=None, on_path=None, progress: bool = False,
+    environ=None, on_path=None, progress: bool = False, verify=None,
 ) -> Path | None:
     """Converge a legacy ``uv tool install conexus`` tree onto the generation layout.
 
@@ -1251,7 +1251,11 @@ def migrate_legacy(
     the flip is finished by :func:`repair_layout`, not rebuilt.
 
     *on_path* receives the :class:`PathResult`. *progress* is :func:`build_generation`'s
-    (nexus-2k66t.4.7). Returns the new generation, or
+    (nexus-2k66t.4.7). *verify* (nexus-lvvhm) is called with the built generation AFTER the
+    build and BEFORE the flip; whatever it raises propagates and ``current`` is untouched.
+    The caller is the one who knows which receipt reader matters: this module may be a
+    TARGET release's copy, older than the nx running it, and the steps after the flip are
+    read by that nx. Returns the new generation, or
     ``None`` when uv resolves and there is no legacy tree to migrate.
     """
     layout = _layout()
@@ -1277,6 +1281,8 @@ def migrate_legacy(
         python_version=python_version or "3.12", tools=root, run=run, platform=platform,
         progress=progress,
     )
+    if verify is not None:
+        verify(gen)
     flip_current(gen, root, ops=ops, platform=platform)
     result = ensure_user_path(
         current_launcher_dir(root), uv_bin=uv_bin, store=store, environ=environ, run=run,

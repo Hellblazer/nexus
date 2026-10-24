@@ -240,6 +240,60 @@ def test_the_build_script_can_be_named_by_the_caller(scaffold) -> None:
     assert Path(result.stdout.strip().splitlines()[-1]).name.startswith("gen-")
 
 
+def _build_script_that_rewrites_the_receipt(tmp_path: Path, mutation: str) -> Path:
+    """A caller-named build script: the real install_generation.sh, then *mutation* (python,
+    given ``doc``, the receipt as a dict) applied to the receipt it wrote."""
+    sibling = _MIGRATE.parent / "install_generation.sh"
+    alt = tmp_path / "mutating_install_generation.sh"
+    alt.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -e\n"
+        f'gen="$(bash "{sibling}" "$@")"\n'
+        'python3 - "$gen/nexus-install.json" <<\'PY\'\n'
+        "import json, sys\n"
+        "path = sys.argv[1]\n"
+        "doc = json.load(open(path))\n"
+        f"{mutation}\n"
+        "json.dump(doc, open(path, 'w'))\n"
+        "PY\n"
+        'echo "$gen"\n'
+    )
+    return alt
+
+
+def test_a_receipt_this_release_cannot_read_stops_the_legacy_convergence_before_the_flip(scaffold) -> None:
+    """nexus-lvvhm: migrate_legacy.sh flipped `current` itself right after the build. The
+    build is the TARGET release's, so its receipt is read back first: a refusal leaves
+    `current`, `previous` and the shims untouched."""
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    legacy = _legacy_tree(tmp_path, receipt="[tool]\nrequirements = [ { name = \"conexus\" } ]\n")
+    alt = _build_script_that_rewrites_the_receipt(tmp_path, 'doc["schema"] = 0')
+    result = _run(
+        env({"NX_MIGRATE_BUILD_SCRIPT": str(alt)}),
+        "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy),
+    )
+    assert result.returncode == 64, result.stderr
+    assert "cannot read its receipt" in result.stderr and "NX_INSTALL_RUNNING_INSTALLER=1" in result.stderr
+    assert not (tools / "current").exists() and not (tools / "current").is_symlink(), "current was not created"
+    assert not (tools / "previous").is_symlink()
+    assert not list(bin_dir.iterdir()), "no shim was written"
+    assert result.stdout.strip() == "", "no generation is announced as the result"
+
+
+def test_a_receipt_from_a_newer_installer_is_read_and_the_convergence_completes(scaffold) -> None:
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    legacy = _legacy_tree(tmp_path, receipt="[tool]\nrequirements = [ { name = \"conexus\" } ]\n")
+    alt = _build_script_that_rewrites_the_receipt(
+        tmp_path, 'doc["schema"] = 7\ndoc["a_field_from_the_future"] = {"x": [1]}',
+    )
+    result = _run(
+        env({"NX_MIGRATE_BUILD_SCRIPT": str(alt)}),
+        "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy),
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tools / "current").is_symlink()
+
+
 def test_a_package_without_the_file_warns_in_the_line_self_install_re_echoes(scaffold) -> None:
     """The real migrate_legacy.sh, a package that ships no constraints.txt: the
     UNCONSTRAINED warning is on its stderr and starts with the prefix

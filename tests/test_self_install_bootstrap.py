@@ -1469,6 +1469,11 @@ class TestTheWindowsTwin:
         core = self_cmd._generation()
         generation = tmp_path / "tools" / "gen-20260101T000000Z"
         generation.mkdir(parents=True)
+        # A built generation always carries its receipt, and the flip step reads it first (nexus-lvvhm).
+        (generation / install_layout.RECEIPT_NAME).write_text(install_layout.Receipt(
+            version="1.0.0", spec="conexus", source_kind="registry", source="conexus", python="3.12.8",
+            base_interpreter="/py", created_at="2026-10-24T00:00:00Z", extras=[],
+        ).to_json())
         monkeypatch.setattr(core, "build_generation", lambda *a, **k: generation)
         monkeypatch.setattr(self_cmd, "_plat", lambda: "win32")
         monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda *_: None)

@@ -17,17 +17,20 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import time
 from pathlib import Path
 
 import pytest
 
 from nexus import install_layout, pdf_stack
+from nexus.commands import self_cmd
 from nexus.commands import upgrade as upgrade_cmd
 
 RUNNING = "9.9.9"
 SENTINEL = "installer-rebuild-failed"
 _REAL_INSTALL_PLAN = pdf_stack.install_plan
+_REAL_REBUILD_GENERATION = pdf_stack._rebuild_generation
 
 
 def _receipt(*, constraints: str = "unknown", version: str = RUNNING, extras: list[str] | None = None,
@@ -68,11 +71,13 @@ def bed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr("nexus.commands.self_cmd.running_generation", lambda: tmp_path / "gen-run")
     monkeypatch.setattr(pdf_stack, "install_plan", lambda: b.plan)
 
-    def _build(extras: tuple[str, ...]) -> None:
+    def _build(extras: tuple[str, ...], *, after_flip=None) -> None:
         b.builds.append(extras)
         if b.error is not None:
             raise b.error
         b.current = _receipt(constraints=b.leaves, extras=list(extras))
+        if after_flip is not None:
+            after_flip(tmp_path / "gen-new")
 
     monkeypatch.setattr(pdf_stack, "_rebuild_generation", _build)
     return b
@@ -284,7 +289,7 @@ def test_the_rebuild_installs_exactly_currents_extras_at_the_running_version(mon
         "nexus.commands.self_cmd.perform_self_install", lambda **kw: seen.update(kw),
     )
     pdf_stack._rebuild_generation(("local",))
-    assert seen == {"exact_extras": ("local",), "version": RUNNING, "progress": True}
+    assert seen == {"exact_extras": ("local",), "version": RUNNING, "progress": True, "after_flip": None}
 
 
 # ── what the user is told ────────────────────────────────────────────────────
@@ -375,7 +380,7 @@ def test_the_rebuild_runs_after_the_carry_and_before_the_process_cycle(bed, monk
     )
     monkeypatch.setattr(upgrade_cmd, "_converge_vc_runtime", lambda **kw: order.append("vc-runtime"))
     monkeypatch.setattr(upgrade_cmd, "_converge_pdf_stack", lambda **kw: order.append("carry"))
-    monkeypatch.setattr(pdf_stack, "_rebuild_generation", lambda extras: order.append("rebuild"))
+    monkeypatch.setattr(pdf_stack, "_rebuild_generation", lambda extras, **kw: order.append("rebuild"))
     upgrade_cmd._converge_preconditions(auto_mode=True)
     assert order == ["takeover", "vc-runtime", "carry", "rebuild", "process-cycle"], order
 
@@ -420,3 +425,236 @@ def test_the_default_run_asks_the_row() -> None:
     from nexus import health
 
     assert "_check_installer_rebuild()" in inspect.getsource(health.run_health_checks)
+
+
+# ── a failed post-check puts current (and previous) back (nexus-ff366) ───────
+
+
+def _layout_with_a_real_flip(bed, monkeypatch, tmp_path: Path, *, with_previous: bool):
+    """Real ``current``/``previous`` links under the bed's tools dir, and a faked build that
+    flips to a new generation with the REAL flip helper, as ``perform_self_install`` does."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    older, original, rebuilt = (tools / f"gen-2026100{n}T000000Z" for n in (1, 2, 3))
+    for generation in (older, original, rebuilt):
+        generation.mkdir()
+    os.symlink(str(original), tools / "current")
+    if with_previous:
+        os.symlink(str(older), tools / "previous")
+
+    def build(extras: tuple[str, ...], *, after_flip=None) -> None:
+        bed.builds.append(extras)
+        self_cmd._sh(self_cmd.packaged_install_dir(), f'nx_flip_current "{rebuilt}" "{tools}"')
+        bed.current = _receipt(constraints=bed.leaves, extras=list(extras))
+        if after_flip is not None:
+            after_flip(rebuilt)
+
+    monkeypatch.setattr(pdf_stack, "_rebuild_generation", build)
+    return tools, older, original, rebuilt
+
+
+@pytest.mark.parametrize("with_previous", [True, False])
+def test_a_build_that_leaves_current_unpinned_ends_with_current_and_previous_back_where_they_were(
+    bed, monkeypatch, tmp_path, with_previous,
+) -> None:
+    bed.leaves = "none"
+    tools, older, original, rebuilt = _layout_with_a_real_flip(bed, monkeypatch, tmp_path, with_previous=with_previous)
+    line = pdf_stack.rebuild_stale_installer(auto_mode=True)
+    assert len(bed.builds) == 1
+    assert os.readlink(tools / "current") == str(original), "current is back on the generation it replaced"
+    if with_previous:
+        assert os.readlink(tools / "previous") == str(older), "previous is what it was before the flip"
+    else:
+        assert not (tools / "previous").is_symlink(), "there was no previous, and the flip's is dropped"
+    assert rebuilt.is_dir() and original.is_dir(), "no generation was deleted by the rollback"
+    assert (Path(os.environ["NEXUS_CONFIG_DIR"]) / SENTINEL).exists(), "the backoff marker is still written"
+    assert line is not None and "could not be rebuilt" in line and original.name in line
+
+
+def test_a_build_that_applies_the_lock_leaves_current_on_the_new_generation(bed, monkeypatch, tmp_path) -> None:
+    tools, older, original, rebuilt = _layout_with_a_real_flip(bed, monkeypatch, tmp_path, with_previous=True)
+    assert "rebuilt" in pdf_stack.rebuild_stale_installer()
+    assert os.readlink(tools / "current") == str(rebuilt)
+    assert os.readlink(tools / "previous") == str(original)
+
+
+def test_a_rollback_that_cannot_run_is_reported_and_leaves_current_on_a_working_generation(
+    bed, monkeypatch, tmp_path,
+) -> None:
+    bed.leaves = "none"
+    tools, older, original, rebuilt = _layout_with_a_real_flip(bed, monkeypatch, tmp_path, with_previous=True)
+
+    def refuse(*args, **kwargs):
+        raise self_cmd.click.ClickException("no")
+
+    monkeypatch.setattr(self_cmd, "restore_current_generation", refuse)
+    line = pdf_stack.rebuild_stale_installer(auto_mode=True)
+    assert line is not None and "could not be moved back" in line
+    assert os.readlink(tools / "current") == str(rebuilt) and rebuilt.is_dir(), "current names a built generation"
+
+
+def test_on_windows_the_rollback_goes_through_the_junction_helpers_and_retargets_the_task(
+    monkeypatch, tmp_path,
+) -> None:
+    """Junctions are not symlinks: the flip is `generation_core.flip_current` (which also repoints
+    the logon task and the PATH entry) and `previous` is a `swap_link`, never the bash helpers."""
+    tools = tmp_path / "tools"
+    original, older = tools / "gen-1", tools / "gen-0"
+    original.mkdir(parents=True)
+    older.mkdir()
+    calls: list[tuple] = []
+
+    class Core:
+        class GenerationError(Exception):
+            pass
+
+        @staticmethod
+        def flip_current(generation, where, *, platform):
+            calls.append(("flip", generation, where))
+
+        @staticmethod
+        def current_launcher_dir(where):
+            return where / "current" / "bin"
+
+        @staticmethod
+        def ensure_user_path(entry):
+            calls.append(("path", entry))
+            return type("R", (), {"changed": False, "entry": entry})()
+
+        @staticmethod
+        def swap_link(target, link):
+            calls.append(("previous", target, link))
+
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    monkeypatch.setattr(self_cmd, "_is_windows", lambda: True)
+    monkeypatch.setattr(self_cmd, "_generation", lambda: Core)
+    monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda generation: calls.append(("task", generation)))
+    monkeypatch.setattr(self_cmd, "_sh", lambda *a, **k: pytest.fail("a bash helper ran on Windows"))
+    self_cmd.restore_current_generation(original, previous=str(older))
+    assert [c[0] for c in calls] == ["flip", "path", "task", "previous"]
+    assert calls[0][1] == original and calls[3][1] == str(older)
+
+
+def test_a_generation_that_is_gone_is_never_flipped_to(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tmp_path / "tools"))
+    monkeypatch.setattr(self_cmd, "_sh", lambda *a, **k: pytest.fail("flipped to a missing generation"))
+    with pytest.raises(self_cmd.click.ClickException, match="is gone"):
+        self_cmd.restore_current_generation(tmp_path / "tools" / "gen-gone", previous=None)
+
+
+# ── the post-check runs BEFORE the reap (nexus-ff366) ─────────────────────────
+
+
+def _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path: Path):
+    """The REAL ``_rebuild_generation`` and ``perform_self_install``, with only the build faked: it
+    flips to a new generation with the real flip helper. Five generations are on disk, so a keep-3
+    reap that runs right after the flip removes the oldest, which is what ``previous`` named."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    gens = {n: tools / f"gen-2026100{n}T000000Z" for n in (1, 2, 3, 4, 5)}
+    for generation in gens.values():
+        generation.mkdir()
+        # a COMPLETE generation: the reap counts receipted trees against keep and keeps a
+        # recently written receipt-less one as a build in progress
+        (generation / install_layout.RECEIPT_NAME).write_text(_receipt().to_json())
+    os.symlink(str(gens[2]), tools / "current")
+    os.symlink(str(gens[1]), tools / "previous")
+    monkeypatch.setenv("NX_INSTALL_RUNNING_INSTALLER", "1")
+    monkeypatch.setattr(pdf_stack, "_rebuild_generation", _REAL_REBUILD_GENERATION)
+    monkeypatch.setattr(self_cmd, "running_generation", lambda: gens[2])
+    monkeypatch.setattr(self_cmd, "_register_legacy_tree_if_present", lambda *a, **k: None)
+
+    def fake_build(build, **kwargs):
+        bed.builds.append(build)
+        self_cmd._sh(self_cmd.packaged_install_dir(), f'nx_flip_current "{gens[5]}" "{tools}"')
+        bed.current = _receipt(constraints=bed.leaves)
+        return gens[5]
+
+    monkeypatch.setattr(self_cmd, "_build_flip_shims", fake_build)
+    return tools, gens
+
+
+def test_a_failed_post_check_rolls_back_before_the_reap_can_remove_the_old_previous(
+    bed, monkeypatch, tmp_path,
+) -> None:
+    bed.leaves = "none"
+    tools, gens = _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path)
+    line = pdf_stack.rebuild_stale_installer(auto_mode=True)
+    assert os.readlink(tools / "current") == str(gens[2])
+    assert os.readlink(tools / "previous") == str(gens[1]), "the generation previous named is still the rollback target"
+    assert gens[1].is_dir(), "the keep-3 reap did not take it before the check ran"
+    assert line is not None and "current is back on" in line and "previous was" not in line
+
+
+def test_a_passing_post_check_reaps_after_it(bed, monkeypatch, tmp_path) -> None:
+    tools, gens = _perform_self_install_with_a_real_flip_and_reap(bed, monkeypatch, tmp_path)
+    assert "rebuilt" in pdf_stack.rebuild_stale_installer()
+    assert os.readlink(tools / "current") == str(gens[5])
+    assert os.readlink(tools / "previous") == str(gens[2])
+    assert not gens[1].exists(), "an ordinary upgrade still reaps what keep-3 releases"
+
+
+def test_the_reap_runs_after_the_check_and_still_runs_when_the_check_raises(monkeypatch, tmp_path) -> None:
+    order: list[str] = []
+    generation = tmp_path / "tools" / "gen-20261001T000000Z"
+    host = tmp_path / "tools" / "gen-20260901T000000Z"
+    for g in (generation, host):
+        g.mkdir(parents=True)
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tmp_path / "tools"))
+    monkeypatch.setattr(install_layout, "read_receipt", lambda _g: _receipt())
+    monkeypatch.setattr(self_cmd, "running_generation", lambda: host)
+    monkeypatch.setattr(self_cmd, "_build_flip_shims", lambda *a, **k: generation)
+    monkeypatch.setattr(self_cmd, "_reap_generations", lambda *a, **k: order.append("reap") or [])
+    monkeypatch.setattr(self_cmd, "_register_legacy_tree_if_present", lambda *a, **k: None)
+    monkeypatch.setenv("NX_INSTALL_RUNNING_INSTALLER", "1")
+
+    def check(_g: Path) -> None:
+        order.append("check")
+        raise RuntimeError("refused")
+
+    with pytest.raises(RuntimeError, match="refused"):
+        self_cmd.perform_self_install(after_flip=check)
+    assert order == ["check", "reap"]
+
+
+# ── the account says what the pointers ARE (re-read), not what was attempted ──
+
+
+def _flipped_layout(tmp_path: Path):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    older, original, rebuilt = (tools / f"gen-2026100{n}T000000Z" for n in (1, 2, 3))
+    for generation in (older, original, rebuilt):
+        generation.mkdir()
+    os.symlink(str(rebuilt), tools / "current")
+    os.symlink(str(original), tools / "previous")
+    return tools, older, original, rebuilt
+
+
+def test_a_previous_that_was_removed_after_the_flip_is_not_claimed_as_restored(monkeypatch, tmp_path) -> None:
+    tools, older, original, rebuilt = _flipped_layout(tmp_path)
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    shutil.rmtree(older)
+    line = pdf_stack._put_current_back(original, str(older))
+    assert os.readlink(tools / "current") == str(original)
+    assert "current is back on" in line and "previous was gen-20261001T000000Z" in line
+    assert "no rollback target" in line
+
+
+def test_a_previous_swap_that_fails_after_current_moved_back_does_not_say_current_stays(
+    monkeypatch, tmp_path,
+) -> None:
+    tools, older, original, rebuilt = _flipped_layout(tmp_path)
+    monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
+    real_restore = self_cmd.restore_current_generation
+
+    def moves_current_then_fails(generation, *, previous):
+        self_cmd._sh(self_cmd.packaged_install_dir(), f'nx_flip_current "{generation}" "{tools}"')
+        raise self_cmd.click.ClickException("could not restore `previous`")
+
+    monkeypatch.setattr(self_cmd, "restore_current_generation", moves_current_then_fails)
+    line = pdf_stack._put_current_back(original, str(older))
+    assert os.readlink(tools / "current") == str(original)
+    assert "stays on the rebuilt generation" not in line
+    assert "current is back on" in line and "previous was gen-20261001T000000Z" in line
+    assert real_restore is not moves_current_then_fails

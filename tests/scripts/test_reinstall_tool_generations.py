@@ -21,6 +21,7 @@ absence instead. Holders are now a FACT to report, not an obstacle.
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -165,6 +166,51 @@ def test_current_advances_to_the_new_generation(env, holder) -> None:
     assert (current / "nexus-install.json").is_file(), (
         "current points at a directory with no receipt, which is not a generation"
     )
+
+
+def test_a_receipt_from_a_newer_installer_is_read_not_refused(env, holder) -> None:
+    """nexus-ff366: the script reads the receipt through the real reader, so a later schema and a
+    field this release never heard of do not stop a reinstall."""
+    _, gen = holder
+    tools, _, _, _ = env
+    receipt = gen / "nexus-install.json"
+    payload = json.loads(receipt.read_text())
+    payload.update({"schema": 7, "field_from_the_future": {"x": [1]}})
+    receipt.write_text(json.dumps(payload))
+    result = _run(env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tools / "current").resolve() != gen.resolve(), "the reinstall went ahead"
+
+
+@pytest.mark.parametrize("breakage", [{"installer_schema": "x"}, {"installer_schema": None}, {"version": {"a": 1}}])
+def test_an_unreadable_receipt_stops_the_reinstall_instead_of_dropping_the_extras(env, holder, breakage) -> None:
+    """The inline reader turned any failure into 'no extras', which re-opens the 768->384 embedder
+    downgrade. The real reader refuses, and the script stops before building anything."""
+    _, gen = holder
+    tools, _, _, _ = env
+    receipt = gen / "nexus-install.json"
+    payload = json.loads(receipt.read_text())
+    payload.update(breakage)
+    receipt.write_text(json.dumps(payload))
+    result = _run(env)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "REFUSING: cannot read the install receipt" in result.stderr
+    assert (tools / "current").resolve() == gen.resolve(), "nothing was installed"
+
+
+def test_an_unreadable_receipt_with_named_extras_proceeds_with_those_extras(env, holder) -> None:
+    """The refusal names NX_REINSTALL_EXTRAS as the way through; that must actually work: the
+    operator states the extras, so nothing is guessed, and the reinstall goes ahead."""
+    _, gen = holder
+    tools, _, _, _ = env
+    receipt = gen / "nexus-install.json"
+    payload = json.loads(receipt.read_text())
+    payload.update({"installer_schema": "x"})
+    receipt.write_text(json.dumps(payload))
+    result = _run(env, extra_env={"NX_REINSTALL_EXTRAS": "local"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "using NX_REINSTALL_EXTRAS=local as the extras" in result.stderr
+    assert (tools / "current").resolve() != gen.resolve(), "the reinstall went ahead"
 
 
 @pytest.mark.parametrize("flag", ["--force", "--cycle-daemons", "--cycle-mcp", "--no-cycle"])

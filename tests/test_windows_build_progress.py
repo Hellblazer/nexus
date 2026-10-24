@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from nexus._install import generation_core as gen_core
+from nexus.install_layout import Receipt
 from nexus.commands import self_cmd
 from tests._module_seam import setattr_in
 from tests.test_install_generation_windows import WIN, FakeUv, SymlinkOps
@@ -95,6 +96,12 @@ def spy_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
     def _fake_build(source, **kw):
         seen.append(kw)
+        # A built generation carries its receipt, and the flip step reads it first (nexus-lvvhm).
+        generation.mkdir(parents=True, exist_ok=True)
+        (generation / "nexus-install.json").write_text(Receipt(
+            version="7.0.0", spec="conexus", source_kind="registry", source="conexus", python="3.12.8",
+            base_interpreter="/py", created_at="2026-10-24T00:00:00Z", extras=[],
+        ).to_json())
         return generation
 
     monkeypatch.setattr(core, "build_generation", _fake_build)

@@ -112,21 +112,24 @@ fi
 # receipt; it is now source_kind in ours, which is the same fact stated by the
 # half of the system that owns it.
 #
-# The receipt path travels by ENV VAR, never interpolated into the python source
-# (nexus-2fyb R5-I1): a path containing a quote would otherwise be executable.
+# The receipt is read by the real reader (nx_receipt_kind / nx_receipt_extras ->
+# layout_core.read_receipt), not by inline python (nexus-ff366): the inline copies
+# had no schema rule, so a receipt written by a newer installer was parsed by a
+# private, drifting reader, and a field they could not coerce silently dropped the
+# box's extras. The generation path is an argv word to a script, never interpolated
+# into python source (nexus-2fyb R5-I1). An unreadable receipt STOPS the script: a
+# reinstall that guessed would re-open the 768->384 embedder downgrade.
 SOURCE_KIND="$(nx_source_kind "$SOURCE")"
 
 if [ -n "$CURRENT_GEN" ] && [ "$SOURCE_KIND" = "registry" ] \
    && [ "$ALLOW_REGISTRY_OVER_DEV" != "1" ]; then
     _receipt="$(nx_receipt_path "$CURRENT_GEN")"
     if [ -f "$_receipt" ]; then
-        _kind="$(NX_RECEIPT="$_receipt" python3 -c '
-import json, os
-try:
-    print(json.load(open(os.environ["NX_RECEIPT"])).get("source_kind", ""))
-except Exception:
-    print("")
-' 2>/dev/null || true)"
+        _kind="$(nx_receipt_kind "$CURRENT_GEN")" || {
+            echo "REFUSING: cannot read the install receipt ${_receipt} (above)." >&2
+            echo "  The divergent-source guard needs it; a reinstall that guessed could wipe a dev checkout." >&2
+            exit 1
+        }
         if [ "$_kind" = "directory" ]; then
             echo "REFUSING: the installed conexus came from a DIRECTORY source (dev"
             echo "  checkout, per ${_receipt}), and '${SOURCE}' is a registry package —"
@@ -189,26 +192,22 @@ EXTRAS=""
 if [ -n "$CURRENT_GEN" ]; then
     _receipt="$(nx_receipt_path "$CURRENT_GEN")"
     if [ -f "$_receipt" ]; then
-        # nexus-2k66t.4.2: the receipt stores extras as a JSON list (a string is
-        # tolerated), and a receipt whose installer_schema is below 2 predates
+        # nexus-2k66t.4.2: the receipt stores extras as a JSON list, and a
+        # receipt whose installer_schema is below 2 predates
         # the PDF split: that box has had the stack in every generation, so an
         # existing install carries `pdf` forward (Sam, 2026-10-23). Only a box
         # with no receipt at all (a fresh install) goes without it.
-        EXTRAS="$(NX_RECEIPT="$_receipt" python3 -c '
-import json, os
-try:
-    doc = json.load(open(os.environ["NX_RECEIPT"]))
-    raw = doc.get("extras", "") or ""
-    old = int(doc.get("installer_schema", 1)) < 2
-except Exception:
-    raw, old = "", False
-if isinstance(raw, str):
-    raw = raw.split(",")
-keep = [e for e in (str(p).strip() for p in raw) if e and e != "mineru"]
-if old and "pdf" not in keep:
-    keep.append("pdf")
-print(",".join(sorted(set(keep))))
-' 2>/dev/null || true)"
+        EXTRAS="$(nx_receipt_extras "$CURRENT_GEN")" || {
+            if [ -z "${NX_REINSTALL_EXTRAS:-}" ]; then
+                echo "REFUSING: cannot read the install receipt ${_receipt} (above)." >&2
+                echo "  Its extras decide what the rebuilt generation carries; guessing would drop them" >&2
+                echo "  (the 768->384 embedder downgrade). Name the extras yourself to proceed:" >&2
+                echo "  NX_REINSTALL_EXTRAS=local,pdf $0 ...   (or repair the receipt, then re-run)." >&2
+                exit 1
+            fi
+            echo "WARNING: cannot read the install receipt ${_receipt}; using NX_REINSTALL_EXTRAS=${NX_REINSTALL_EXTRAS} as the extras." >&2
+            EXTRAS=""
+        }
     fi
 fi
 # NX_REINSTALL_EXTRAS=pdf adds extras to the rebuilt generation (the way a

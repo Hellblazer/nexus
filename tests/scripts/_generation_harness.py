@@ -104,8 +104,11 @@ def fabricate_generation(
             make_executable(gen / "bin" / ep, f'#!/bin/sh\necho "ran-{ep}"\n')
     (gen / "pyvenv.cfg").write_text("home = /opt/py/bin\nversion = 3.12.8\n")
     (gen / "nexus-install.json").write_text(json.dumps({
-        "schema": 1, "version": version, "spec": "conexus",
-        "source_kind": source_kind, "source": "/src/nexus", "extras": extras,
+        "schema": 1, "version": version,
+        "spec": f"conexus[{','.join(sorted(e for e in extras.split(',') if e))}]" if extras else "conexus",
+        "source_kind": source_kind, "source": "/src/nexus",
+        # the receipt's extras are a JSON list (the real reader refuses a string)
+        "extras": [e for e in extras.split(",") if e],
         "python": "3.12", "base_interpreter": "/opt/py/bin",
         "created_at": "2026-08-25T00:00:00Z", "installer_schema": 1,
     }))

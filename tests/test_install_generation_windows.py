@@ -961,6 +961,25 @@ class TestMigrateLegacy:
         # Never uninstalled, never reaped, and no file written into uv's bin dir.
         assert (legacy / "Scripts" / "nx.exe").read_bytes() == b"uv's launcher"
 
+    def test_a_verify_that_refuses_stops_the_convergence_before_the_flip(
+        self, tools: Path, tmp_path: Path,
+    ) -> None:
+        """nexus-lvvhm: `verify` runs on the built generation after the build and before `current`
+        moves; what it raises propagates, and nothing after the build has happened."""
+        legacy = self._legacy(tmp_path)
+        seen: list[Path] = []
+
+        def refuse(gen: Path) -> None:
+            seen.append(gen)
+            raise gen_core.GenerationError("cannot read the receipt")
+
+        with pytest.raises(gen_core.GenerationError, match="cannot read the receipt"):
+            self._migrate(tools, tmp_path, legacy, verify=refuse)
+        assert len(seen) == 1 and seen[0].name.startswith("gen-")
+        assert not (tools / "current").exists() and not (tools / "current").is_symlink()
+        assert not (tools / "gen-legacy-uv-tool").exists(), "the legacy tree was not registered"
+        assert (tmp_path / "userpath.txt").read_text().strip() == "C:\\Windows;C:\\uvbin", "the PATH entry was not added"
+
     def test_no_legacy_tree_is_a_clean_no_op(self, tools: Path, tmp_path: Path) -> None:
         uv = FakeUv()
         got = gen_core.migrate_legacy(

@@ -475,9 +475,40 @@ PREVIOUS_LINK_NAME = "previous"
 #: extras. Losing extras re-opens the 768->384 embedder downgrade (README:80).
 RECEIPT_NAME = "nexus-install.json"
 
-#: Format version of the receipt. A receipt stamped with a schema this code
-#: does not know is refused rather than half-read.
+#: Format version of the receipt, as WRITTEN by this code.
+#:
+#: COMPATIBILITY RULE (nexus-lvvhm, nexus-ff366). Read the whole rule before
+#: touching the receipt. An upgrade is built by the TARGET release's installer,
+#: which writes the receipt, while the RUNNING release flips, shims, reaps and
+#: reads it back; the running code is routinely older than the writer, and
+#: released clients (<= 7.85.0) read a receipt with a STRICT equality on this
+#: number, so a writer that bumps it locks every one of them out of every
+#: receipt it writes.
+#:
+#: * An ADDITIVE field needs NO bump. Readers take the fields they know and drop
+#:   the rest. Do not bump to "record that the format grew".
+#: * A change in what an EXISTING field means needs a NEW field name, never a
+#:   new meaning under the old name. (The one exception on record:
+#:   ``installer_schema`` 1 -> 2 changed what ``extras`` implies, see
+#:   :data:`INSTALLER_SCHEMA`; do not copy it.)
+#: * WIDENING a closed vocabulary (``source_kind``, :data:`SOURCE_KINDS`) breaks
+#:   every older reader, which refuses the unknown word. A new kind needs a new
+#:   field, or a bump planned together with :data:`MIN_READABLE_RECEIPT_SCHEMA`.
+#:   ``constraints`` is the lenient case: a word a reader does not know reads as
+#:   ``unknown``, which the installer-rebuild rung treats as OWED (it rebuilds
+#:   ``current``), so a new constraints word must be one that rung may rebuild.
+#: * Bumping this number is a deliberate act, not a bookkeeping one: it must be
+#:   coordinated with every reader that compares it. This code's own reader
+#:   accepts anything from :data:`MIN_READABLE_RECEIPT_SCHEMA` upward, so a bump
+#:   here never makes a receipt this code wrote earlier unreadable.
 RECEIPT_SCHEMA = 1
+
+#: The oldest receipt schema this code reads, and the only number its reader
+#: compares against. SEPARATE from :data:`RECEIPT_SCHEMA` (the writer's stamp):
+#: one constant for both would make a bump, as the rule above permits, refuse
+#: every receipt already on disk. Raise it only when a format this code can no
+#: longer read must be refused.
+MIN_READABLE_RECEIPT_SCHEMA = 1
 
 #: Provenance of the installer that wrote the receipt. Recorded, not gated:
 #: it describes who wrote the file, while ``schema`` describes the format.
@@ -509,7 +540,11 @@ PDF_SPLIT_INSTALLER_SCHEMA = 2
 #: ``none``      the package shipped no constraints file (a release that
 #:               predates it, or a venv layout the installer did not expect).
 #: ``unknown``   the receipt predates the field, or names a word this code does
-#:               not know. Read leniently, never an error.
+#:               not know. Read leniently, never an error. The installer-rebuild
+#:               rung treats ``unknown`` like ``none``: the generation is owed a
+#:               rebuild, so a NEW word written by a newer installer makes a
+#:               release that has the rung rebuild that generation once with its
+#:               own installer -- pick a new word only knowing that.
 CONSTRAINTS_APPLIED = "applied"
 CONSTRAINTS_UNPINNED = "unpinned"
 CONSTRAINTS_NONE = "none"
@@ -891,6 +926,14 @@ class Receipt:
     generation's ``pyvenv.cfg`` points at a uv-managed CPython that uv itself
     can prune out from under us (the pipx#146 / uv#8028 class). We cannot
     prevent that; recording it is what lets ``nx doctor`` detect it.
+
+    COMPATIBILITY: this class is read by releases older than the one that wrote
+    the file. Add a field without bumping :data:`RECEIPT_SCHEMA` (released
+    clients <= 7.85.0 compare it strictly); give a changed meaning a NEW field
+    name; do not widen a closed vocabulary (``source_kind``) without a new
+    field or a bump planned with :data:`MIN_READABLE_RECEIPT_SCHEMA`; an
+    unknown ``constraints`` word reads as ``unknown``, which the installer
+    rebuild rung treats as owed. The full rule is on :data:`RECEIPT_SCHEMA`.
     """
 
     version: str
@@ -955,51 +998,75 @@ class Receipt:
         """Strict about the fields it knows, tolerant of the ones it does not.
 
         Generation GC keeps the previous generation for free rollback, so an
-        OLDER nx will read a receipt a NEWER installer wrote. An unknown key
-        is therefore not an error; an unknown ``schema`` is, because that
-        says the fields we DO recognise may not mean what we think.
+        OLDER nx will read a receipt a NEWER installer wrote, and an upgrade is
+        built by the target's installer while the running code reads the
+        result. An unknown key is therefore not an error, and neither is a
+        NEWER ``schema`` (:data:`RECEIPT_SCHEMA` has the rule). Refused, always
+        as :class:`LayoutError`: a schema that is not an integer or is below
+        :data:`MIN_READABLE_RECEIPT_SCHEMA`, an ``installer_schema`` that is not
+        an integer, and a required field that is missing or not a string.
         """
-        found = payload.get("schema")
-        try:
-            found = int(found)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            pass
-        if found != RECEIPT_SCHEMA:
+        found = _receipt_int(payload.get("schema"), "schema")
+        if found < MIN_READABLE_RECEIPT_SCHEMA:
             raise LayoutError(
                 f"{RECEIPT_NAME} declares schema {found!r}, this nexus reads "
-                f"schema {RECEIPT_SCHEMA}"
+                f"schema {MIN_READABLE_RECEIPT_SCHEMA} and newer"
             )
         required = ("version", "spec", "source_kind", "source", "python",
                     "base_interpreter", "created_at")
         missing = sorted(name for name in required if name not in payload)
         if missing:
             raise LayoutError(f"{RECEIPT_NAME} is missing {', '.join(missing)}")
+        for name in required:
+            if not isinstance(payload[name], str):
+                raise LayoutError(
+                    f"{RECEIPT_NAME} {name} must be a string, got {type(payload[name]).__name__}"
+                )
 
         # Field-by-field, never ``cls(**payload)``: index-access makes a
-        # truncated receipt fail loud, re-coercion keeps a hand-edited file
-        # usable, and an unknown key is dropped by simply not being read.
-        # Same shape as ``daemon/service_registry.py``'s LeaseRecord.
+        # truncated receipt fail loud, a wrong TYPE fails loud too (a dict or
+        # null is not coerced into a string that looks valid), and an unknown
+        # key is dropped by simply not being read. Same shape as
+        # ``daemon/service_registry.py``'s LeaseRecord.
         extras = payload.get("extras", [])
         if not isinstance(extras, list):
             raise LayoutError(
                 f"{RECEIPT_NAME} extras must be a list, got {type(extras).__name__}"
             )
+        if not all(isinstance(extra, str) for extra in extras):
+            raise LayoutError(f"{RECEIPT_NAME} extras must be a list of strings")
         return cls(
-            version=str(payload["version"]),
-            spec=str(payload["spec"]),
-            source_kind=str(payload["source_kind"]),
-            source=str(payload["source"]),
-            python=str(payload["python"]),
-            base_interpreter=str(payload["base_interpreter"]),
-            created_at=str(payload["created_at"]),
-            extras=[str(extra) for extra in extras],
-            schema=int(payload["schema"]),
-            installer_schema=int(payload.get("installer_schema", 1)),
+            version=payload["version"],
+            spec=payload["spec"],
+            source_kind=payload["source_kind"],
+            source=payload["source"],
+            python=payload["python"],
+            base_interpreter=payload["base_interpreter"],
+            created_at=payload["created_at"],
+            extras=list(extras),
+            schema=found,
+            installer_schema=_receipt_int(payload.get("installer_schema", 1), "installer_schema"),
             # Lenient: a receipt that predates the field, or a newer installer's
-            # word this code does not know, reads as unknown. The strict schema
-            # number is not involved (an older nx drops the key it cannot read).
+            # word this code does not know, reads as unknown (which the
+            # installer-rebuild rung treats as owed). The schema number is not
+            # involved: an older nx drops the key it cannot read.
             constraints=_known_constraints(payload.get("constraints")),
         )
+
+
+def _receipt_int(raw: Any, name: str) -> int:
+    """A receipt integer: an int, or a string of digits a hand edit left
+    behind. Anything else (null, a float, a bool, a dict, "x") is a
+    :class:`LayoutError`, so every reader of a receipt sees one exception type
+    and never a raw ``TypeError`` or ``ValueError``."""
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    elif isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    raise LayoutError(f"{RECEIPT_NAME} {name} must be an integer, got {raw!r}")
 
 
 def _known_constraints(raw: Any) -> str:
@@ -1219,6 +1286,33 @@ def _cli_receipt_path(generation: str) -> str:
     return str(receipt_path(Path(generation)))
 
 
+def _cli_check_receipt(generation: str) -> str:
+    """Read *generation*'s receipt with THIS code's reader (nexus-lvvhm) and
+    print its version, or refuse. The shell callers that flip ``current`` right
+    after a build (``migrate_legacy.sh``) use it to find out, BEFORE the flip,
+    whether the receipt the build wrote is one this release can read; the
+    steps after the flip all read it."""
+    return read_receipt(Path(generation)).version
+
+
+def _cli_receipt_kind(generation: str) -> str:
+    """The ``source_kind`` of *generation*'s receipt, read by the real reader."""
+    return read_receipt(Path(generation)).source_kind
+
+
+def _cli_receipt_extras(generation: str) -> str:
+    """The extras a rebuild of *generation* carries, comma-separated and sorted,
+    read by the real reader (nexus-ff366): the receipt's extras without
+    ``mineru`` (a default dependency since nexus-2fyb, so a stale receipt naming
+    it must not propagate), plus ``pdf`` when the receipt predates the PDF split
+    (an existing install always carries the stack forward)."""
+    receipt = read_receipt(Path(generation))
+    keep = {extra for extra in receipt.extras if extra and extra != "mineru"}
+    if receipt_predates_pdf_split(receipt):
+        keep.add("pdf")
+    return ",".join(sorted(keep))
+
+
 def _cli_render_shim(command: str, tools: str = "") -> str:
     return render_shim(command, tools=_opt_path(tools)).rstrip("\n")
 
@@ -1296,6 +1390,9 @@ _VERBS = {
     "previous_link": _cli_previous_link,
     "root": _cli_root,
     "receipt_path": _cli_receipt_path,
+    "check_receipt": _cli_check_receipt,
+    "receipt_kind": _cli_receipt_kind,
+    "receipt_extras": _cli_receipt_extras,
     "render_shim": _cli_render_shim,
     "build_spec": _cli_build_spec,
     "render_receipt": _cli_render_receipt,

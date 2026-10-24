@@ -126,7 +126,18 @@ else
     GEN="$("$_here/install_generation.sh" "${_build_args[@]}")" || exit $?
 fi
 
-# ── 3. flip ───────────────────────────────────────────────────────────
+# ── 3. read the receipt back, then flip ──────────────────────────────────
+# The build ran the install_generation.sh of the release being installed
+# (NX_MIGRATE_BUILD_SCRIPT), which may write a receipt THIS release cannot
+# read, and every step after the flip reads it. Check with this release's
+# reader first: a refusal leaves `current`, `previous` and the shims untouched
+# (nexus-lvvhm). The built generation stays on disk for the reap to take.
+nx_check_receipt "$GEN" >/dev/null || {
+    echo "migrate_legacy: the generation $(basename "$GEN") was built, but this nx cannot read its receipt (above)." >&2
+    echo "  \`current\` was not moved; the install in use is unchanged. NX_INSTALL_RUNNING_INSTALLER=1 builds" >&2
+    echo "  with the installer of the running release instead." >&2
+    exit 64
+}
 nx_flip_current "$GEN" "$TOOLS_DIR" || exit $?
 
 # ── 4. shim takeover: uv-owned symlinks become nexus-owned files ────────

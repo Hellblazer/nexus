@@ -38,11 +38,13 @@ from pathlib import Path
 
 import pytest
 
+from nexus._install import layout_core
 from nexus.install_layout import (
     BIN_DIR_ENV,
     CURRENT_LINK_NAME,
     GENERATION_PREFIX,
     INSTALLER_SCHEMA,
+    MIN_READABLE_RECEIPT_SCHEMA,
     RECEIPT_NAME,
     RECEIPT_SCHEMA,
     SOURCE_KINDS,
@@ -278,8 +280,10 @@ def test_receipt_tolerates_fields_a_newer_installer_added() -> None:
 def test_receipt_records_what_the_installer_did_about_the_lock() -> None:
     """nexus-au0s3: the receipt says whether the release's constraints.txt was
     applied, left off on purpose, or absent from the package. A receipt that
-    never recorded it reads as unknown. The strict schema number is NOT bumped:
-    an older nx drops the key it does not know (test above)."""
+    never recorded it reads as unknown. The schema number is NOT bumped: released
+    clients (<= 7.85.0) compare it with strict equality, so any bump locks them out
+    of every receipt written after it, and they drop the key they do not know
+    (test above)."""
     assert RECEIPT_SCHEMA == 1 and INSTALLER_SCHEMA == 2, "the integers are not the contract"
     assert _receipt().constraints == "unknown"
     for value in ("applied", "unpinned", "none", "unknown"):
@@ -298,12 +302,121 @@ def test_receipt_refuses_to_be_built_with_an_unrecognised_constraints_word() -> 
         _receipt(constraints="mostly")
 
 
-def test_receipt_refuses_a_schema_it_cannot_interpret() -> None:
+def test_receipt_reads_a_newer_schema_and_drops_what_it_does_not_know() -> None:
+    """nexus-lvvhm: the TARGET release's installer writes the receipt the RUNNING
+    (older) code reads back, so a newer schema with an extra field is read, not refused."""
     payload = json.loads(_receipt().to_json())
     payload["schema"] = RECEIPT_SCHEMA + 1
+    payload["field_from_the_future"] = {"anything": [1, 2]}
+    read = Receipt.from_json(json.dumps(payload))
+    assert read.version == "7.18.0" and read.schema == RECEIPT_SCHEMA + 1
+    assert "field_from_the_future" not in read.to_dict()
+
+
+@pytest.mark.parametrize("bad", [0, -1, "abc", None, True, 1.5])
+def test_receipt_refuses_a_schema_below_the_one_it_reads_or_not_an_integer(bad) -> None:
+    payload = json.loads(_receipt().to_json())
+    payload["schema"] = bad
     with pytest.raises(InstallLayoutError) as excinfo:
         Receipt.from_json(json.dumps(payload))
-    assert str(RECEIPT_SCHEMA + 1) in str(excinfo.value)
+    assert "schema" in str(excinfo.value)
+
+
+def test_a_newer_schema_does_not_excuse_a_missing_required_field() -> None:
+    payload = json.loads(_receipt().to_json())
+    payload["schema"] = RECEIPT_SCHEMA + 1
+    del payload["base_interpreter"]
+    with pytest.raises(InstallLayoutError) as excinfo:
+        Receipt.from_json(json.dumps(payload))
+    assert "base_interpreter" in str(excinfo.value)
+
+
+def test_a_newer_schema_does_not_excuse_a_malformed_field() -> None:
+    payload = json.loads(_receipt().to_json())
+    payload["schema"] = RECEIPT_SCHEMA + 1
+    payload["extras"] = "local"
+    with pytest.raises(InstallLayoutError):
+        Receipt.from_json(json.dumps(payload))
+    payload["extras"] = []
+    payload["source_kind"] = "a-kind-from-the-future"
+    with pytest.raises(InstallLayoutError):
+        Receipt.from_json(json.dumps(payload))
+
+
+def test_bumping_the_writers_stamp_does_not_make_a_schema_1_receipt_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """nexus-lvvhm: RECEIPT_SCHEMA is what the writer stamps; the reader compares
+    MIN_READABLE_RECEIPT_SCHEMA. An author who bumps the first, as the rule on it
+    permits, must not turn every receipt already on disk (all schema 1) into a
+    refusal, which would kill every `nx upgrade` at its first read."""
+    assert MIN_READABLE_RECEIPT_SCHEMA == 1
+    generation = tmp_path / "gen-20261024T000000Z"
+    generation.mkdir()
+    written = _receipt()
+    assert written.schema == 1
+    (generation / RECEIPT_NAME).write_text(written.to_json())
+    monkeypatch.setattr("nexus._install.layout_core.RECEIPT_SCHEMA", 2)
+    assert read_receipt(generation).version == "7.18.0"
+    assert read_receipt(generation).schema == 1
+
+
+def test_a_schema_below_the_minimum_readable_is_refused_even_when_the_stamp_is_higher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("nexus._install.layout_core.RECEIPT_SCHEMA", 3)
+    monkeypatch.setattr("nexus._install.layout_core.MIN_READABLE_RECEIPT_SCHEMA", 2)
+    payload = json.loads(_receipt().to_json())
+    payload["schema"] = 1
+    with pytest.raises(InstallLayoutError, match="schema 2 and newer"):
+        Receipt.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("bad", [None, "x", {"a": 1}, [1], 1.5, True, ""])
+def test_a_malformed_installer_schema_is_a_layout_error_not_a_type_error(bad) -> None:
+    """nexus-ff366: `int(...)` raised TypeError/ValueError past every caller that
+    catches only the layout error (`_require_readable_receipt`, `read_receipt`)."""
+    payload = json.loads(_receipt().to_json())
+    payload["installer_schema"] = bad
+    with pytest.raises(InstallLayoutError, match="installer_schema"):
+        Receipt.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("name,bad", [
+    ("version", {"a": 1}), ("source", None), ("spec", 7), ("python", ["3.12"]),
+    ("base_interpreter", None), ("created_at", {}), ("source_kind", None),
+])
+def test_a_required_string_field_that_is_not_a_string_is_refused_not_coerced(name, bad) -> None:
+    """`str({"a": 1})` and `str(None)` are strings that look like values; a
+    receipt carrying them was not written by an installer."""
+    payload = json.loads(_receipt().to_json())
+    payload[name] = bad
+    with pytest.raises(InstallLayoutError, match=name):
+        Receipt.from_json(json.dumps(payload))
+
+
+def test_an_extras_entry_that_is_not_a_string_is_refused() -> None:
+    payload = json.loads(_receipt().to_json())
+    payload["extras"] = ["local", {"a": 1}]
+    with pytest.raises(InstallLayoutError, match="extras"):
+        Receipt.from_json(json.dumps(payload))
+
+
+def test_the_compatibility_rule_is_written_where_a_writers_author_reads_it() -> None:
+    """nexus-ff366: the rule that an additive field needs no bump (released
+    clients compare strictly) lives on the constant, the class and the shell twin."""
+    shell = (Path(layout_core.__file__).parent / "layout.sh").read_text()
+    for where, text in (
+        ("layout_core.py", Path(layout_core.__file__).read_text()),
+        ("layout.sh", shell),
+        ("Receipt docstring", layout_core.Receipt.__doc__),
+    ):
+        lowered = " ".join(text.lower().replace("#:", " ").replace("#", " ").split())
+        assert "7.85.0" in text or where == "Receipt docstring", where
+        assert "new field name" in lowered, where
+        assert "no bump" in lowered or "without bumping" in lowered, where
+        assert "source_kind" in text, where
+        assert "unknown" in lowered, where
 
 
 def test_receipt_refuses_a_missing_required_field() -> None:

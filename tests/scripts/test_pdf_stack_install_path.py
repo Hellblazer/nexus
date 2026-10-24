@@ -219,29 +219,53 @@ def test_a_legacy_uv_tree_moving_onto_generations_carries_the_stack(tmp_path: Pa
 _REINSTALL = Path(__file__).resolve().parents[2] / "scripts" / "reinstall-tool.sh"
 
 
+def _full_receipt(**over) -> dict:
+    """A complete receipt as an installer writes it, with *over* applied (None deletes a key)."""
+    payload = {
+        "schema": 1, "version": "7.0.0", "spec": "conexus", "source_kind": "registry", "source": "conexus",
+        "python": "3.12.8", "base_interpreter": "/py", "created_at": "2026-10-01T00:00:00Z",
+        "extras": [], "installer_schema": 2, "constraints": "applied",
+    }
+    for key, value in over.items():
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+    extras = sorted(set(payload["extras"]))
+    payload["spec"] = f"conexus[{','.join(extras)}]" if extras else "conexus"  # one fact, not two
+    return payload
+
+
 def _reinstall_extras(tmp_path: Path, receipt: dict) -> str:
-    """Run the receipt-reading snippet embedded in reinstall-tool.sh, verbatim."""
-    text = _REINSTALL.read_text()
-    marker = "python3 -c '"
-    start = text.rindex(marker, 0, text.index('doc.get("installer_schema"')) + len(marker)
-    snippet = text[start:text.index("'", start)]
-    path = tmp_path / "nexus-install.json"
-    path.write_text(json.dumps(receipt))
+    """The extras reinstall-tool.sh carries forward, through the shell function it calls
+    (``nx_receipt_extras``, layout.sh -> layout_core.read_receipt): the real reader, not a copy."""
+    generation = tmp_path / "gen-20261001T000000Z"
+    generation.mkdir(exist_ok=True)
+    (generation / "nexus-install.json").write_text(json.dumps(receipt))
+    install = _REINSTALL.parents[1] / "src" / "nexus" / "_install"
     proc = subprocess.run(
-        [sys.executable, "-c", snippet], capture_output=True, text=True, check=False,
-        env={**os.environ, "NX_RECEIPT": str(path)},
+        ["bash", "-c", f'export NX_LAYOUT_HOME="{install}"; . "{install}/layout.sh" && nx_receipt_extras "{generation}"'],
+        capture_output=True, text=True, check=False,
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 
 
 @pytest.mark.parametrize("receipt, expected", [
-    ({"extras": ["local"], "installer_schema": 1}, "local,pdf"),  # an existing install carries the stack
-    ({"extras": [], "installer_schema": 1}, "pdf"),
-    ({"extras": ["local"]}, "local,pdf"),  # no field at all reads as pre-split
-    ({"extras": ["local"], "installer_schema": 2}, "local"),  # split-aware and slim stays slim
-    ({"extras": ["local", "pdf"], "installer_schema": 2}, "local,pdf"),
-    ({"extras": "local,mineru", "installer_schema": 2}, "local"),  # a string, and the retired extra, still read
+    (_full_receipt(extras=["local"], installer_schema=1), "local,pdf"),  # an existing install carries the stack
+    (_full_receipt(extras=[], installer_schema=1), "pdf"),
+    (_full_receipt(extras=["local"], installer_schema=None), "local,pdf"),  # no field at all reads as pre-split
+    (_full_receipt(extras=["local"], installer_schema=2), "local"),  # split-aware and slim stays slim
+    (_full_receipt(extras=["local", "pdf"], installer_schema=2), "local,pdf"),
+    (_full_receipt(extras=["local", "mineru"], installer_schema=2), "local"),  # the retired extra is dropped
+    # nexus-ff366: a receipt from a newer installer (a later schema, a field this one never heard of)
+    (_full_receipt(extras=["local"], schema=7, field_from_the_future={"x": [1]}), "local"),
 ])
 def test_reinstall_tool_carries_the_stack_for_a_pre_split_receipt_only(tmp_path, receipt, expected) -> None:
     assert _reinstall_extras(tmp_path, receipt) == expected
+
+
+def test_reinstall_tool_no_longer_parses_the_receipt_in_inline_python() -> None:
+    text = _REINSTALL.read_text()
+    assert "nx_receipt_extras" in text and "nx_receipt_kind" in text
+    assert "json.load(open(os.environ" not in text, "a private copy of the reader drifts from the real one"
