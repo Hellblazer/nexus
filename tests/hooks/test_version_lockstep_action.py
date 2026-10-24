@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -110,8 +113,13 @@ class TestMarkerFixtureIsolatesLockstepLogToo:
         )
 
 
-def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results):
+def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results, background: bool = False):
     """Install the standard set of seam patches.
+
+    background: whether ``start_background_upgrade`` answers a pid. False (the default)
+    is the "cannot start the detached upgrade" fallback, so every test written
+    against the synchronous ``nx upgrade`` step keeps exercising it; the detached
+    path has its own class, ``TestBackgroundUpgrade`` (nexus-qytet).
 
     installed_versions: list popped left-to-right on each installed_nx_version()
     run_results: dict mapping the first two argv tokens (e.g. "uv tool") -> bool
@@ -137,6 +145,7 @@ def _wire(mod, monkeypatch, *, receipt: bool, installed_versions, run_results):
         return run_results.get(key, True)
 
     monkeypatch.setattr(mod, "run_cmd", fake_run)
+    monkeypatch.setattr(mod, "start_background_upgrade", lambda: 4242 if background else None)
     return calls
 
 
@@ -762,3 +771,273 @@ class TestInlineLayoutKnowledgeMatchesThePackage:
         from nexus import install_layout
 
         assert mod.TOOLS_DIR_ENV == install_layout.TOOLS_DIR_ENV
+
+
+_FAKE_NX = """#!{py}
+import sys, time, pathlib, os
+if sys.argv[1:2] == ["upgrade"]:
+    with open({calls!r}, "a") as f:
+        f.write(" ".join(sys.argv[1:]) + "\\n")
+    sys.stderr.write("fake-nx-stderr\\n")
+    if {rc}:
+        sys.exit({rc})
+    time.sleep(float({sleep}))
+    pathlib.Path({done!r}).write_text(" ".join(sys.argv[1:]))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shebang scripts")
+class TestBackgroundUpgrade:
+    """nexus-qytet: the action's ``nx upgrade`` step was ``subprocess.run`` under a
+    120 s timeout, which KILLED an upgrade-time rebuild (the PDF carry, the
+    installer rebuild rung; about 0.8 GB) mid-build. It now detaches PLAIN
+    ``nx upgrade`` itself (``--auto`` skips plugin convergence, generated-agent
+    refresh, git hooks and the engine install, which the lockstep action is
+    where those run) and goes on."""
+
+    def _fake_cli(self, tmp_path: Path, monkeypatch, mod, *, sleep: float = 0, rc: int = 0):
+        bindir = tmp_path / "gen" / "bin"
+        bindir.mkdir(parents=True)
+        done = tmp_path / "upgrade-finished"
+        calls = tmp_path / "upgrade-calls"
+        nx = bindir / "nx"
+        nx.write_text(
+            _FAKE_NX.format(py=sys.executable, sleep=sleep, done=str(done), calls=str(calls), rc=rc),
+            encoding="utf-8",
+        )
+        nx.chmod(0o755)
+        cfg = tmp_path / "cfg"
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        monkeypatch.setattr(mod, "resolve_nx", lambda: str(nx))
+        return done, calls, cfg
+
+    def _drive_main(self, mod, monkeypatch):
+        """Run ``main`` with only the binary step faked; the ``nx upgrade`` step
+        goes through the REAL ``start_background_upgrade`` and ``run_cmd``."""
+        monkeypatch.setattr(mod, "uv_receipt_present", lambda: True)
+        monkeypatch.setattr(mod, "generation_install_present", lambda: False)
+        versions = ["1.0.0", "9.9.9"]
+        monkeypatch.setattr(mod, "installed_nx_version", lambda: versions.pop(0) if versions else None)
+        real_run_cmd = mod.run_cmd
+        monkeypatch.setattr(
+            mod, "run_cmd",
+            lambda cmd, timeout=300: True if cmd[0] == "uv" else real_run_cmd(cmd, timeout=timeout),
+        )
+        monkeypatch.setattr(mod, "_UPGRADE_START_WAIT_S", 0.5)
+        mod.main(["action", "9.9.9"])
+
+    def test_a_long_upgrade_keeps_running_after_the_action_returns(
+        self, mod, marker, log, tmp_path, monkeypatch,
+    ) -> None:
+        import re
+        import signal
+
+        done, calls, cfg = self._fake_cli(tmp_path, monkeypatch, mod, sleep=10)
+        monkeypatch.setattr(mod, "_NX_UPGRADE_TIMEOUT", 1)  # the old cap, scaled down
+        self._drive_main(mod, monkeypatch)
+
+        text = log.read_text(encoding="utf-8")
+        m = re.search(r"lockstep_upgrade_background .*pid=(\d+)", text)
+        assert m, text
+        pid = int(m.group(1))
+        try:
+            os.kill(pid, 0)  # raises when the child is gone
+            assert not done.exists(), "the upgrade must still be running when the action returns"
+            assert marker.read_text(encoding="utf-8").strip() == "9.9.9", "the action must complete its other steps"
+            assert f"log={cfg / 'logs' / 'lockstep-upgrade.log'}" in text
+            assert "state=running" in text
+            assert "nx_upgrade_failed" not in text
+            assert "outcome=success" in text
+        finally:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    def test_the_child_runs_plain_upgrade_not_auto(self, mod, marker, log, tmp_path, monkeypatch) -> None:
+        """``--auto`` skips plugin convergence, the generated-agent refresh, the
+        git-hooks refresh, the repos.json migration, beads PRIME and the engine
+        install; the lockstep action is where those run."""
+        done, calls, cfg = self._fake_cli(tmp_path, monkeypatch, mod, sleep=0)
+        self._drive_main(mod, monkeypatch)
+        deadline = time.monotonic() + 30
+        while not done.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert done.read_text(encoding="utf-8") == "upgrade"
+        assert calls.read_text(encoding="utf-8").splitlines() == ["upgrade"]
+
+    def test_the_child_stderr_lands_in_the_action_s_own_log(self, mod, tmp_path, monkeypatch) -> None:
+        done, calls, cfg = self._fake_cli(tmp_path, monkeypatch, mod, sleep=0)
+        monkeypatch.setattr(mod, "_UPGRADE_START_WAIT_S", 5)
+        assert mod.start_background_upgrade() is not None
+        assert mod.upgrade_log_path() == cfg / "logs" / "lockstep-upgrade.log"
+        assert "fake-nx-stderr" in mod.upgrade_log_path().read_text(encoding="utf-8")
+
+    def test_a_child_that_exits_nonzero_at_once_is_not_started_and_falls_back(
+        self, mod, marker, log, tmp_path, monkeypatch,
+    ) -> None:
+        """"Started" must be real: a child that dies at once (here exit 3, as an
+        `nx` that rejects the invocation would) is not a started upgrade, so the
+        bounded synchronous run takes over and its failure leaves the marker stale."""
+        done, calls, cfg = self._fake_cli(tmp_path, monkeypatch, mod, rc=3)
+        monkeypatch.setattr(mod, "_UPGRADE_START_WAIT_S", 5)
+        assert mod.start_background_upgrade() is None
+        self._drive_main(mod, monkeypatch)
+        # once from the direct call above, then detach attempt + synchronous fallback
+        assert calls.read_text(encoding="utf-8").splitlines() == ["upgrade"] * 3
+        text = log.read_text(encoding="utf-8")
+        assert "lockstep_upgrade_background" not in text
+        assert "outcome=nx_upgrade_failed" in text
+        assert not marker.exists()
+
+    def test_a_child_that_exits_zero_quickly_counts_as_started(self, mod, tmp_path, monkeypatch) -> None:
+        self._fake_cli(tmp_path, monkeypatch, mod, sleep=0)
+        monkeypatch.setattr(mod, "_UPGRADE_START_WAIT_S", 5)
+        assert isinstance(mod.start_background_upgrade(), int)
+        assert mod._last_start_state == "finished", "a child done inside the window is logged as finished, not started"
+
+    def test_the_child_starts_in_the_filesystem_root_with_the_session_dir_as_repo_root(
+        self, mod, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-x3m8e: a detached child that outlives a deleted worktree cwd fails every
+        os.getcwd(); it starts in the filesystem root and is handed the session's directory
+        as NEXUS_REPO_ROOT, and a relative NEXUS_CONFIG_DIR is made absolute first."""
+        self._fake_cli(tmp_path, monkeypatch, mod, sleep=0)
+        session = tmp_path / "worktree"
+        session.mkdir()
+        monkeypatch.chdir(session)
+        monkeypatch.delenv("NEXUS_REPO_ROOT", raising=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", "rel-cfg")
+        seen: dict = {}
+
+        def spy(argv, env, stderr):
+            seen["env"] = env
+            raise OSError("stop here")
+
+        monkeypatch.setattr(mod, "_popen_detached", spy)
+        assert mod.start_background_upgrade() is None
+        assert mod._STABLE_CWD == os.path.abspath(os.sep)
+        assert seen["env"]["NEXUS_REPO_ROOT"] == str(session)
+        assert seen["env"]["NEXUS_CONFIG_DIR"] == str(session / "rel-cfg")
+
+    def test_a_popen_oserror_is_not_started(self, mod, tmp_path, monkeypatch) -> None:
+        self._fake_cli(tmp_path, monkeypatch, mod)
+
+        def boom(*a, **kw):
+            raise OSError("no exec")
+
+        setattr_in(monkeypatch, mod, "subprocess.Popen", boom)
+        assert mod.start_background_upgrade() is None
+
+    def test_no_nx_is_not_started(self, mod, monkeypatch) -> None:
+        monkeypatch.setattr(mod, "resolve_nx", lambda: None)
+        assert mod.start_background_upgrade() is None
+
+    def test_the_child_gets_the_fresh_installs_bin_first_on_path(self, mod, tmp_path, monkeypatch) -> None:
+        """A box whose application PATH lacks the fresh install would otherwise run
+        the child's own `nx` subcommands from an older tree."""
+        self._fake_cli(tmp_path, monkeypatch, mod)
+        seen: dict = {}
+
+        class FakeProc:
+            pid = 4242
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("x", timeout)
+
+        def fake_popen(argv, **kw):
+            seen["argv"], seen["kw"] = argv, kw
+            return FakeProc()
+
+        setattr_in(monkeypatch, mod, "subprocess.Popen", fake_popen)
+        assert mod.start_background_upgrade() == 4242
+        assert seen["argv"] == [str(tmp_path / "gen" / "bin" / "nx"), "upgrade"]
+        assert seen["kw"]["env"]["PATH"].split(os.pathsep)[0] == str(tmp_path / "gen" / "bin")
+        assert seen["kw"]["start_new_session"] is True
+        assert "creationflags" not in seen["kw"]
+        assert seen["kw"]["stdin"] is subprocess.DEVNULL
+        assert seen["kw"]["stdout"] is subprocess.DEVNULL
+        assert seen["kw"]["close_fds"] is True
+
+    def test_the_synchronous_step_is_not_run_when_the_detach_started(self, mod, marker, log, monkeypatch) -> None:
+        calls = _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0", "9.9.9"],
+            run_results={}, background=True,
+        )
+        mod.main(["action", "9.9.9"])
+        assert [c[:2] for c in calls] == [["uv", "tool"]], calls
+        assert marker.read_text(encoding="utf-8").strip() == "9.9.9"
+
+    def test_it_falls_back_to_the_bounded_synchronous_run(self, mod, marker, log, monkeypatch) -> None:
+        calls = _wire(
+            mod, monkeypatch, receipt=True, installed_versions=["1.0.0"],
+            run_results={"nx upgrade": False}, background=False,
+        )
+        mod.main(["action", "9.9.9"])
+        assert calls[-1] == ["nx", "upgrade"]
+        assert not marker.exists()
+        assert "outcome=nx_upgrade_failed" in log.read_text(encoding="utf-8")
+
+
+class TestSelfInstallBudget:
+    """Step 3a under the generation layout is ``nx self install``: a first install
+    is ~0.8 GB, which a 300 s cap can kill on a slow link."""
+
+    def test_self_install_gets_its_own_longer_budget(self, mod, marker, log, monkeypatch) -> None:
+        assert mod._SELF_INSTALL_TIMEOUT > mod._UV_TIMEOUT
+        seen: dict[str, int] = {}
+        monkeypatch.setattr(mod, "uv_receipt_present", lambda: False)
+        monkeypatch.setattr(mod, "generation_install_present", lambda: True)
+        versions = ["1.0.0", "9.9.9"]
+        monkeypatch.setattr(mod, "installed_nx_version", lambda: versions.pop(0) if versions else None)
+        monkeypatch.setattr(mod, "start_background_upgrade", lambda: 4242)
+
+        def fake_run(cmd, timeout=300):
+            seen[" ".join(cmd[:3])] = timeout
+            return True
+
+        monkeypatch.setattr(mod, "run_cmd", fake_run)
+        mod.main(["action", "9.9.9"])
+        assert seen == {"nx self install": mod._SELF_INSTALL_TIMEOUT}
+
+
+class TestWindowsDetach:
+    """The Windows branch cannot run here; the platform seam (``_IS_WINDOWS``) and a
+    recording Popen pin the flags it builds. Untested on a real Windows host."""
+
+    def _run(self, mod, tmp_path, monkeypatch, popen_side_effects):
+        monkeypatch.setattr(mod, "_IS_WINDOWS", True)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(mod, "resolve_nx", lambda: str(tmp_path / "nx.exe"))
+        attempts: list[dict] = []
+
+        class FakeProc:
+            pid = 7
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("x", timeout)
+
+        def fake_popen(argv, **kw):
+            attempts.append(kw)
+            effect = popen_side_effects[len(attempts) - 1]
+            if effect is not None:
+                raise effect
+            return FakeProc()
+
+        setattr_in(monkeypatch, mod, "subprocess.Popen", fake_popen)
+        return attempts
+
+    def test_flags_are_no_window_new_group_breakaway_and_no_posix_session(self, mod, tmp_path, monkeypatch) -> None:
+        attempts = self._run(mod, tmp_path, monkeypatch, [None])
+        assert mod.start_background_upgrade() == 7
+        kw = attempts[0]
+        assert kw["creationflags"] == 0x08000000 | 0x00000200 | 0x01000000
+        assert "start_new_session" not in kw
+
+    def test_a_job_that_forbids_breakaway_is_retried_without_it(self, mod, tmp_path, monkeypatch) -> None:
+        attempts = self._run(mod, tmp_path, monkeypatch, [OSError("breakaway refused"), None])
+        assert mod.start_background_upgrade() == 7
+        assert [a["creationflags"] for a in attempts] == [
+            0x08000000 | 0x00000200 | 0x01000000,
+            0x08000000 | 0x00000200,
+        ]

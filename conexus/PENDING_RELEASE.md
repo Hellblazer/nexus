@@ -45,7 +45,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/hooks/scripts/version_lockstep_action.py` (nexus-2k66t.4.7): a failed `nx self install` logs the LAST 500 characters of its stderr, not the first, because the build now streams uv's progress ahead of the error.
+- `conexus/hooks/scripts/version_lockstep_action.py` (nexus-2k66t.4.7, nexus-qytet): a failed `nx self install` logs the LAST 500 characters of its stderr, not the first, because the build now streams uv's progress ahead of the error. The action's `nx upgrade` step no longer runs under the 120 s cap that killed an upgrade-time rebuild (the PDF carry, the installer rebuild rung): the action detaches PLAIN `nx upgrade` itself (not `--auto`, which skips plugin convergence, the generated-agent and hooks refresh, the repos.json migration, beads PRIME and the engine install), stderr to `logs/lockstep-upgrade.log`, waits up to 2 s and treats an immediate nonzero exit or a spawn error as not started, then falls back to the bounded synchronous run. `lockstep.log` records `lockstep_upgrade_background state=started pid=... log=...`; the marker still means "binary confirmed", not "upgrade finished". `nx self install` (step 3a) now has its own 1800 s budget (`NX_LOCKSTEP_SELF_INSTALL_TIMEOUT`) for a first ~0.8 GB install. Works with the released client. Known gap: the ref-drift branch still waits on plain `nx upgrade` under 120 s (it runs plugin convergence and parses its output), so a carry or rebuild owed at that moment is cut off and retried by the next SessionStart.
 
 ## Deferred to the next client release
 
