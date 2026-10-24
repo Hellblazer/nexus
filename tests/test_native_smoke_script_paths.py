@@ -241,7 +241,7 @@ import http.server, json, os, signal, sys, time
 
 signal.alarm(120)  # never outlive a run whose bash was killed before its EXIT trap ran
 with open(PIDS, "a") as f:
-    f.write(f"{os.getpid()} {os.environ['NX_DB_URL']}\n")
+    f.write(f"{os.getpid()} {int('NX_RC4PZ_AMBIENT' in os.environ)} {os.environ['NX_DB_URL']}\n")
 
 
 def log(line):
@@ -345,6 +345,7 @@ class _ShapesRun:
                  leftover: list[int], scratch: Path) -> None:
         self.proc, self.calls, self.boots, self.leftover, self.scratch = proc, calls, boots, leftover, scratch
         self.elapsed = 0.0
+        self.leaked: list[int] = []
         self.out = proc.stdout + proc.stderr
 
     def verdicts(self) -> dict[str, tuple[str, list[str]]]:
@@ -383,6 +384,7 @@ def _run_shapes(
     base = {k: v for k, v in os.environ.items() if not k.startswith(("NX_DB_", "BOOT_SHAPES_", "NATIVE_SMOKE_"))}
     env = child_env_with_tmpdir(base, scratch)
     env.update(PATH=f"{stubs}{os.pathsep}{env.get('PATH', '')}", BIN=str(fake), DOCKER_LOG=str(log), NX_NO_TELEMETRY="1")
+    env["NX_RC4PZ_AMBIENT"] = "1"  # the script boots under env -i; the fake records whether this leaked through
     env.update({k.upper(): str(v) for k, v in docker_rc.items()})
     if db_url is not None:
         env["NX_DB_URL"] = db_url
@@ -391,18 +393,21 @@ def _run_shapes(
     if borrowed_pg is not None:
         env["BOOT_SHAPES_PG_CONTAINER"], env["BOOT_SHAPES_PG_PORT"] = borrowed_pg
     boots: list[tuple[int, str]] = []
+    leaked: list[int] = []
     t0 = time.monotonic()
     try:
         proc = subprocess.run(["bash", str(BOOT_SHAPES)], cwd=SERVICE, env=env, capture_output=True, text=True, timeout=300)
     finally:
         if pids.exists():
-            boots = [(int(pid), url) for pid, url in (line.split(" ", 1) for line in pids.read_text().splitlines())]
+            rows = [line.split(" ", 2) for line in pids.read_text().splitlines()]
+            boots = [(int(pid), url) for pid, _, url in rows]
+            leaked = [int(pid) for pid, leak, _ in rows if leak == "1"]
         leftover = [pid for pid, _ in boots if not _gone(pid, 1.0)]
         for pid in leftover:
             os.kill(pid, signal.SIGKILL)
     calls = log.read_text().splitlines() if log.exists() else []
     run = _ShapesRun(proc, calls, boots, leftover, scratch)
-    run.elapsed = time.monotonic() - t0
+    run.elapsed, run.leaked = time.monotonic() - t0, leaked
     return run
 
 
@@ -424,6 +429,7 @@ def test_every_boot_shape_passes_against_an_engine_that_answers_as_the_published
     assert run.verdicts() == {shape: ("PASS", []) for shape in _SHAPES}, run.out
     assert "BOOT SHAPES PASS" in run.out
     assert run.leftover == [], "every engine ended before the script did"
+    assert run.leaked == [], "an engine saw the test's environment: the boot is not under env -i"
     # The throwaway pgvector: cleared first, started once on loopback, removed last; each boot gets
     # its own fresh database, and the engine is pointed at that database on the published port.
     name, port = _own_container(run.calls)
