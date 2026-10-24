@@ -165,10 +165,13 @@ def test_two_runs_name_their_containers_apart(tmp_path: Path) -> None:
     assert len(names) == 2, names
 
 
-@pytest.mark.parametrize("script", ["native-smoke.sh", "native-boot-shapes-smoke.sh"])
+@pytest.mark.parametrize(
+    "script", ["native-smoke.sh", "native-boot-shapes-smoke.sh", "linux-native-verify.sh", "trace-native.sh"],
+)
 def test_every_docker_call_in_the_script_is_bounded(script: str) -> None:
     """nexus-ub4ge bounded native-smoke.sh's docker calls through _bounded (timeout/gtimeout); its
-    not-ready rm -f, and every call in native-boot-shapes-smoke.sh, were left unbounded (nexus-s5lfh).
+    not-ready rm -f, and every call in native-boot-shapes-smoke.sh, were left unbounded (nexus-s5lfh);
+    the two hand-run spike scripts followed (nexus-rc4pz).
     Comment lines are not code."""
     code = [
         (n, line) for n, line in enumerate((SERVICE / script).read_text().splitlines(), 1)
@@ -178,3 +181,146 @@ def test_every_docker_call_in_the_script_is_bounded(script: str) -> None:
     assert calls, "no docker call found; this test needs updating"  # non-vacuity
     unbounded = [(n, line.strip()) for n, line in calls if not re.search(r"_bounded\s+\d+\s+docker\s", line)]
     assert unbounded == [], unbounded
+
+
+# --- native-boot-shapes-smoke.sh (nexus-rc4pz) ---------------------------------------
+#
+# The boot-shapes script starts every boot under ``env -i``, so the fake engine learns
+# nothing from the test's environment: its pid file and its defect are baked into its text.
+# It answers each shape the way the real engine's probe does: the presence line, then
+# Voyage-only readiness (key, no bge files), the two-remedy refusal (neither) or the
+# size-floor refusal after extracting ONNX Runtime (both files present).
+
+BOOT_SHAPES = SERVICE / "native-boot-shapes-smoke.sh"
+
+_SHAPES_BIN = """#!/usr/bin/env python3
+import http.server, json, os, signal, sys
+signal.alarm(120)  # never outlive a run whose bash was killed before its EXIT trap ran
+DEFECT = {defect!r}
+with open({pids!r}, "a") as f:
+    f.write(f"{{os.getpid()}}\\n")
+def log(line):
+    print(line, flush=True)
+bge = os.path.join(os.environ["NX_ONNX_MODEL_DIR"], "bge-base-en-v1.5", "onnx")
+model = os.path.join(bge, "model.onnx")
+present = os.path.exists(model) and os.path.exists(os.path.join(bge, "tokenizer.json"))
+key = bool(os.environ.get("NX_VOYAGE_API_KEY"))
+log(f"event=embedder_presence bge_present={{str(present).lower()}} voyage_key_present={{str(key).lower()}} path={{bge}}/")
+if present:
+    ort = os.environ["NX_ORT_NATIVE_DIR"]
+    if DEFECT != "truncated-skips-extraction":
+        log(f"event=ort_native_dir source=extracted dir={{ort}}")
+        open(os.path.join(ort, "libonnxruntime.so"), "w").close()
+    if DEFECT == "truncated-reads-as-absent":
+        log("event=no_embedder_available")
+    else:
+        log(f"model at {{model}} is {{os.path.getsize(model)}} bytes, far below the standard fp32 bge export")
+    sys.exit(1)
+if not key:
+    remedies = "set NX_VOYAGE_API_KEY" if DEFECT == "neither-names-one-remedy" else "set NX_VOYAGE_API_KEY or run nx init"
+    log(f"event=no_embedder_available remedy: {{remedies}}")
+    sys.exit(1)
+if DEFECT == "cloud-extracts-ort":
+    log("event=ort_native_dir source=extracted")
+if DEFECT == "cloud-ignores-sigterm":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(json.dumps({{"embedding_mode": "voyage", "embedding_models": ["voyage-context-3"]}}).encode())
+    def log_message(self, *args):
+        pass
+srv = http.server.HTTPServer(("127.0.0.1", int(os.environ["NX_SERVICE_PORT"])), H)
+log("event=service_ready")
+srv.serve_forever()
+"""
+
+
+def _run_shapes(
+    tmp_path: Path, *, defect: str = "", db_url: str | None = None, require_shapes: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[int]]:
+    stubs = tmp_path / "stubs"
+    stubs.mkdir(parents=True)
+    # 100 ms: the script's waits are 1 s loops (90 for readiness, 30 after SIGTERM); a tenth keeps
+    # a run to seconds and leaves a loaded CI worker 9 s for the fake engine to bind its port.
+    for name, body in (("docker", _DOCKER), ("sleep", "#!/bin/sh\nexec /bin/sleep 0.1\n")):
+        (stubs / name).write_text(body)
+        (stubs / name).chmod(0o755)
+    log, pids = tmp_path / "docker.log", tmp_path / "bin.pids"
+    fake = tmp_path / "nexus-service"
+    fake.write_text(_SHAPES_BIN.format(defect=defect, pids=str(pids)))
+    fake.chmod(0o755)
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("NX_DB_", "BOOT_SHAPES_", "NATIVE_SMOKE_"))}
+    env = child_env_with_tmpdir(base, scratch)
+    env.update(PATH=f"{stubs}{os.pathsep}{env.get('PATH', '')}", BIN=str(fake), DOCKER_LOG=str(log), NX_NO_TELEMETRY="1")
+    if db_url is not None:
+        env["NX_DB_URL"] = db_url
+    if require_shapes:
+        env["NATIVE_SMOKE_REQUIRE_SHAPES"] = "1"
+    try:
+        proc = subprocess.run(["bash", str(BOOT_SHAPES)], cwd=SERVICE, env=env, capture_output=True, text=True, timeout=180)
+    finally:
+        started = [int(p) for p in pids.read_text().split()] if pids.exists() else []
+        for pid in started:
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)
+    calls = log.read_text().splitlines() if log.exists() else []
+    return proc, calls, started
+
+
+def test_the_four_boot_shapes_pass_against_an_engine_that_answers_each_as_specified(tmp_path: Path) -> None:
+    proc, calls, started = _run_shapes(tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert len(re.findall(r"^PASS ", out, re.MULTILINE)) == 4, out
+    for shape in ("PASS cloud-shape", "PASS neither-family", "PASS truncated-model (keyless", "PASS truncated-model (keyed"):
+        assert shape in out, out
+    assert "FAIL" not in out, out
+    assert "BOOT SHAPES PASS" in out
+    assert len(started) == 4, "one engine per boot"
+    # The throwaway pgvector: cleared first, started once on loopback, one fresh database per boot,
+    # removed last.
+    runs = [c for c in calls if c.startswith("run ")]
+    assert len(runs) == 1, calls
+    m = re.search(r"--name (nx-bootshapes-pg-\d+) ", runs[0])
+    assert m, runs[0]
+    name = m.group(1)
+    assert re.search(r" -p 127\.0\.0\.1:\d+:5432 ", runs[0]), runs[0]
+    assert calls[0] == f"rm -f {name}" and calls[-1] == f"rm -f {name}", calls
+    created = [c for c in calls if "CREATE DATABASE" in c]
+    assert len(created) == 4 and len(set(created)) == 4, created
+
+
+@pytest.mark.parametrize(
+    ("defect", "failed_shape"),
+    [
+        ("cloud-extracts-ort", "FAIL cloud-shape"),
+        ("cloud-ignores-sigterm", "FAIL cloud-shape"),
+        ("neither-names-one-remedy", "FAIL neither-family"),
+        ("truncated-reads-as-absent", "FAIL truncated-model (keyless"),
+        ("truncated-skips-extraction", "FAIL truncated-model (keyless"),
+    ],
+)
+def test_each_shape_fails_on_an_engine_that_breaks_its_contract(tmp_path: Path, defect: str, failed_shape: str) -> None:
+    """The checks bite: one defect in the fake engine fails its shape and the run."""
+    proc, _, _ = _run_shapes(tmp_path, defect=defect)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    assert failed_shape in out, out
+    assert "BOOT SHAPES FAIL" in out
+    assert "logs kept in" in out, "a failed run keeps its scratch dir and says where"
+
+
+def test_an_external_database_skips_the_shapes_loudly_and_fails_when_they_are_required(tmp_path: Path) -> None:
+    url = "jdbc:postgresql://127.0.0.1:1/external"
+    proc, calls, started = _run_shapes(tmp_path / "a", db_url=url)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "SKIP boot shapes" in proc.stdout and "NOT covered" in proc.stdout
+    assert calls == [] and started == []
+    proc, calls, started = _run_shapes(tmp_path / "b", db_url=url, require_shapes=True)
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert "NATIVE_SMOKE_REQUIRE_SHAPES=1 and the boot shapes were skipped" in proc.stdout
+    assert calls == [] and started == []
