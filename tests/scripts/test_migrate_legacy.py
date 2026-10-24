@@ -221,6 +221,25 @@ requirements = [
     assert f"--constraints {shipped}" in installs[1] and "--no-deps" not in installs[1]
 
 
+def test_the_build_script_can_be_named_by_the_caller(scaffold) -> None:
+    """nexus-2k66t.4.3: `nx self install` hands the script the install_generation.sh the
+    release being installed ships (NX_MIGRATE_BUILD_SCRIPT), so that release's lock pin
+    applies. The named script builds, in place of the sibling."""
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    legacy = _legacy_tree(tmp_path, receipt="[tool]\nrequirements = [ { name = \"conexus\" } ]\n")
+    ran = tmp_path / "alt-ran"
+    alt = tmp_path / "alt_install_generation.sh"
+    sibling = _MIGRATE.parent / "install_generation.sh"
+    alt.write_text(f'#!/usr/bin/env bash\necho "$@" > "{ran}"\nexec bash "{sibling}" "$@"\n')
+    result = _run(
+        env({"NX_MIGRATE_BUILD_SCRIPT": str(alt)}),
+        "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy),
+    )
+    assert result.returncode == 0, result.stderr
+    assert ran.read_text().split() == ["--source", "conexus", "--version", "7.18.0", "--extras", "pdf"]
+    assert Path(result.stdout.strip().splitlines()[-1]).name.startswith("gen-")
+
+
 def test_a_package_without_the_file_warns_in_the_line_self_install_re_echoes(scaffold) -> None:
     """The real migrate_legacy.sh, a package that ships no constraints.txt: the
     UNCONSTRAINED warning is on its stderr and starts with the prefix

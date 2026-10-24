@@ -90,6 +90,10 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
     monkeypatch.setenv("NX_BIN_DIR", str(bin_dir))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # These tests drive the RUNNING installer's build against a fake uv; the
+    # target-installer lookup (a real `uv` fetch) has its own tests, in
+    # test_self_install_target_installer.py (nexus-2k66t.4.3).
+    monkeypatch.setenv("NX_INSTALL_RUNNING_INSTALLER", "1")
     monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
     setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
     monkeypatch.setattr(

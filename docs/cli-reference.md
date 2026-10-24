@@ -4422,6 +4422,8 @@ transitive dependency has a security fix the release's lock does not yet carry.
 An explicit `--constraints` file (the checkout flow) still wins. The next plain
 `nx self install` pins again.
 
+**Building with the running release's installer: `NX_INSTALL_RUNNING_INSTALLER=1`** (nexus-2k66t.4.3). An upgrade builds the new generation with the installer the release being installed ships (fetched first for a registry source, read from the checkout or wheel for a directory source), so a release that changes how it installs is installed its own way; a release that ships no usable installer is built with the running one, and the command says so. Set this on the command to skip the fetch and build with the running release's installer, for example when the fetch fails or the new installer's build does. Upgrades from 7.85.0 and earlier are built by their own installer, since they predate this.
+
 **macOS 14 or later on Apple Silicon.** The pinned dependency set includes
 onnxruntime (the embedder runtime), which ships only macOS 14 wheels from 1.24 on,
 and Apple patches only recent releases. On macOS 13 or earlier, or an Intel Mac,

@@ -146,10 +146,13 @@ def _is_generation_name(name: str) -> bool:
 class _WindowsBuild:
     """What a Windows generation build needs: there is no bash argv to hand over."""
 
-    def __init__(self, source: str, extras: list[str], version: str | None) -> None:
+    def __init__(self, source: str, extras: list[str], version: str | None, core=None) -> None:
         self.source = source
         self.extras = extras
         self.version = version
+        #: The TARGET release's ``generation_core`` when it supplies the build
+        #: (nexus-2k66t.4.3); ``None`` builds with the running one.
+        self.core = core
 
     def describe(self) -> str:
         parts = ["generation_core.build_generation", "--source", self.source]
@@ -183,6 +186,12 @@ def perform_self_install(
     see :func:`_bootstrap_install`. It is the only way into that path; nothing
     is inferred from where this process runs, and without it every refusal
     below is unchanged.
+
+    The build runs the installer of the release being installed (nexus-2k66t.4.3),
+    so its lock pin applies: see :mod:`nexus.target_installer`. That covers
+    upgrades FROM a release that carries this code; the hop out of one that does
+    not is built by that release's installer. ``--dry-run`` prints the RUNNING
+    installer's argv (reading the target's would be a fetch).
 
     Returns the new generation, or ``None`` on a dry run.
     """
@@ -273,13 +282,24 @@ def perform_self_install(
     # in every generation; the installer this process runs may be the new one
     # building the first post-split generation. Only a fresh install goes slim.
     extras = _carry_pdf_forward(receipt, extras)
-    build = _build_request(install_dir, receipt, version=version, extras=extras)
     if dry_run:
+        # The argv shown is the RUNNING installer's. The real run reads the
+        # target release's installer first (a fetch, so not done here) and uses
+        # that one when it can (nexus-2k66t.4.3).
+        build = _build_request(install_dir, receipt, version=version, extras=extras)
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
-    generation = _build_flip_shims(
-        build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, progress=progress,
-    )
+    # nexus-2k66t.4.3: the build runs the installer of the release being
+    # installed, so an upgrade into a release that changed the installer (the
+    # lock pin) is built by it. The flip, shims and reap below stay ours.
+    with _target_installer(receipt.source, version=version, extras=extras) as staged:
+        build = _build_request(
+            staged.install_dir or install_dir, receipt, version=version, extras=extras, core=staged.core,
+        )
+        generation = _build_flip_shims(
+            build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, progress=progress,
+        )
+        _warn_on_version_skew(staged, generation)
 
     # RULE (d) IS PASSED HERE. --self names the generation hosting this very
     # process; without it the reap below is free to delete the tree these
@@ -895,14 +915,130 @@ def _build_argv(
     return build
 
 
+#: The failures a target installer can be blamed for: the build step's own messages.
+_BUILD_FAILURE_PREFIXES = ("generation build failed", "legacy migration failed")
+
+
+def _target_installer(
+    source: str, *, version: str | None, extras: list[str] | bool,
+    purpose: str = "build", package_root: Path | None = None,
+):
+    """Which installer builds *source* at *version*: see
+    :mod:`nexus.target_installer`. Used by every route that builds a generation
+    (the upgrade, the uv-takeover repair, the legacy convergence), so there is
+    one selection rule. *purpose* is ``"build"`` or ``"migrate"``; *package_root*
+    is a directory already holding the target package (no fetch).
+
+    Says its one line on stderr when it is not the plain case (and logs a
+    fallback at warning level: the plugin's detached ``nx self install``
+    captures stderr and only logs it at DEBUG), turns a failed fetch into a
+    clean exit before anything has been built, and names the escape hatches when
+    a build run by the target's installer fails.
+    ``NX_INSTALL_RUNNING_INSTALLER=1`` skips the lookup."""
+    from contextlib import contextmanager, nullcontext  # noqa: PLC0415 — stdlib, deferred
+
+    from nexus import target_installer  # noqa: PLC0415 — deferred; only the build path needs it
+
+    if os.environ.get("NX_INSTALL_RUNNING_INSTALLER") == "1":
+        return nullcontext(target_installer.Staged())
+
+    @contextmanager
+    def _ctx():
+        from importlib.metadata import PackageNotFoundError, version as dist_version  # noqa: PLC0415 — stdlib
+
+        try:
+            running = dist_version("conexus")
+        except PackageNotFoundError:
+            running = ""
+        try:
+            with target_installer.staged_installer(
+                source, version=version, running_version=running, windows=_is_windows(),
+                with_extras=bool(extras), env=_script_env(), platform=_plat(),
+                purpose=purpose, package_root=package_root,
+            ) as staged:
+                if staged.note:
+                    click.echo(staged.note, err=True)
+                    if staged.fallback:
+                        import structlog  # noqa: PLC0415 — deferred
+
+                        structlog.get_logger(__name__).warning(
+                            "target_installer_fallback", note=staged.note, source=source,
+                        )
+                try:
+                    yield staged
+                except click.ClickException as exc:
+                    if (staged.install_dir is not None or staged.core is not None) and exc.message.startswith(
+                        _BUILD_FAILURE_PREFIXES
+                    ):
+                        exc.message += (
+                            "\n\nThe installer used here is the one shipped by the release being installed. "
+                            "NX_INSTALL_RUNNING_INSTALLER=1 builds with the running release's installer "
+                            "instead; if the pinned dependency resolve is what failed, "
+                            "NX_INSTALL_UNPINNED=1 resolves fresh."
+                        )
+                    raise
+        except target_installer.TargetFetchError as exc:
+            detail = str(exc)
+            if exc.registry:
+                pinned = f"=={version}" if version else ""
+                head = f"could not fetch {source}{pinned} to read the installer it ships"
+                hint = index_failure_hint(detail)
+                detail = f"{hint}\n\nuv output:\n{detail}" if hint else detail
+            else:
+                head = f"could not read the installer of {source}"
+            raise click.ClickException(
+                f"{head}; nothing was built or changed:\n{detail}\n"
+                "Set NX_INSTALL_RUNNING_INSTALLER=1 to build with the installer of the running release instead."
+            ) from exc
+
+    return _ctx()
+
+
+def _warn_on_version_skew(staged, generation: Path | None) -> None:
+    """One stderr warning when the generation just built holds a different
+    conexus version than the installer was read at (the build resolves again,
+    so an index that moved in between can disagree). Silent when either side is
+    unknown. No ``--version`` pin is added to prevent it: that would change the
+    receipt's spec, and ``upgrade_finish`` reports a pin as a one-shot."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    if generation is None or not staged.version:
+        return
+    try:
+        built = install_layout.read_receipt(generation).version
+    except (install_layout.InstallLayoutError, OSError):
+        return
+    if not built or _same_version(built, staged.version):
+        return
+    message = (
+        f"warning: the installer was read from conexus {staged.version} but the generation holds {built}; "
+        "the package index changed between the two steps. The generation is installed and working."
+    )
+    click.echo(message, err=True)
+    import structlog  # noqa: PLC0415 — deferred
+
+    structlog.get_logger(__name__).warning(
+        "target_installer_version_skew", installer_version=staged.version, built_version=built,
+    )
+
+
+def _same_version(left: str, right: str) -> bool:
+    from packaging.version import InvalidVersion, Version  # noqa: PLC0415 — deferred import
+
+    try:
+        return Version(left) == Version(right)
+    except InvalidVersion:
+        return left == right
+
+
 def _build_request(
-    install_dir: Path, receipt, *, version: str | None, extras: list[str] | None = None,
+    install_dir: Path, receipt, *, version: str | None, extras: list[str] | None = None, core=None,
 ):
     """What one generation build is asked to do: the bash argv on POSIX, a
     :class:`_WindowsBuild` on Windows, where the build is a Python call."""
     if _is_windows():
         effective = receipt.extras if extras is None else extras
-        return _WindowsBuild(receipt.source, list(effective), version)
+        return _WindowsBuild(receipt.source, list(effective), version, core)
     return _build_argv(install_dir, receipt, version=version, extras=extras)
 
 
@@ -1186,6 +1322,19 @@ def _run_build(argv: list[str], *, progress: bool) -> "subprocess.CompletedProce
     return subprocess.CompletedProcess(argv, proc.returncode, out, "".join(captured))
 
 
+def _progress_kwarg(fn, progress: bool) -> dict[str, bool]:
+    """``{"progress": progress}`` when *fn* takes it, else ``{}``: a target release's
+    ``generation_core`` older than nexus-2k66t.4.7 builds quietly, as it always did,
+    rather than being refused for a keyword it predates."""
+    import inspect  # noqa: PLC0415 — stdlib, only the Windows build path
+
+    try:
+        accepts = "progress" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    return {"progress": progress} if accepts else {}
+
+
 def _tail(text: str, lines: int = 15) -> str:
     """The last *lines* lines of *text*."""
     return "\n".join(text.splitlines()[-lines:])
@@ -1265,11 +1414,11 @@ def _windows_build_flip_shims(
     flipped unless the build finished. *progress* streams uv's stderr and prints
     a heartbeat while it is silent, as the POSIX build's ``_run_build`` does
     (nexus-2k66t.4.7)."""
-    core = _generation()
+    core = build.core or _generation()
     try:
         generation = core.build_generation(
             build.source, version=build.version or "", extras=build.extras, tools=tools,
-            platform=_plat(), progress=progress,
+            platform=_plat(), **_progress_kwarg(core.build_generation, progress),
         )
     except core.GenerationError as exc:
         detail = str(exc)
@@ -1440,13 +1589,21 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
                 f"(source {receipt.source}, extras {','.join(receipt.extras) or 'none'})"
             )
             if not dry_run:
-                target = _build_flip_shims(
-                    _build_argv(
-                        install_dir, receipt, version=uv_version,
-                        extras=_carry_pdf_forward(receipt, list(receipt.extras)),
-                    ),
-                    install_dir=install_dir, tools=tools, bin_dir=bin_dir,
-                )
+                takeover_extras = _carry_pdf_forward(receipt, list(receipt.extras))
+                # The uv tree's own package is on disk and IS the release being
+                # built: its installer is read there, nothing is fetched.
+                with _target_installer(
+                    receipt.source, version=uv_version, extras=takeover_extras,
+                    package_root=_site_packages(legacy),
+                ) as staged:
+                    target = _build_flip_shims(
+                        _build_argv(
+                            staged.install_dir or install_dir, receipt, version=uv_version,
+                            extras=takeover_extras,
+                        ),
+                        install_dir=install_dir, tools=tools, bin_dir=bin_dir,
+                    )
+                    _warn_on_version_skew(staged, target)
                 lines.append(f"installed {target.name}")
                 taken = []  # _build_flip_shims wrote the shims
     if taken:
@@ -1464,6 +1621,14 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
         if not dry_run:
             _register_legacy_tree_if_present(install_dir, tools)
     return lines
+
+
+def _site_packages(venv: Path) -> Path | None:
+    """A POSIX venv's ``site-packages``, or ``None``."""
+    for candidate in sorted(venv.glob("lib/python*/site-packages")):
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def _register_legacy_tree_if_present(install_dir: Path, tools: Path) -> Path | None:
@@ -1555,16 +1720,26 @@ def _converge_legacy_install(
         return None
 
     tools.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
-    )
-    if r.returncode != 0:
-        raise click.ClickException(
-            f"legacy migration failed:\n{_with_platform_hint(r.stderr.strip())}"
+    # nexus-2k66t.4.3: the build inside migrate_legacy.sh runs the install_generation.sh of
+    # the release being installed (the newest when no version is asked for), so its lock
+    # pin applies. The script's flip, shims and ledger steps stay the running one's.
+    # --extras is always passed by the script (it adds pdf), hence extras=True.
+    with _target_installer("conexus", version=version, extras=True, purpose="migrate") as staged:
+        env = _script_env()
+        env.pop("NX_MIGRATE_BUILD_SCRIPT", None)
+        if staged.install_dir is not None:
+            env["NX_MIGRATE_BUILD_SCRIPT"] = str(staged.install_dir / "install_generation.sh")
+        r = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=env,
         )
-    _echo_build_warnings(r.stderr)
+        if r.returncode != 0:
+            detail = _with_platform_hint(r.stderr.strip())
+            raise click.ClickException(f"legacy migration failed:\n{detail}")
+        _echo_build_warnings(r.stderr)
 
-    out = r.stdout.strip()
+        out = r.stdout.strip()
+        if out:
+            _warn_on_version_skew(staged, Path(out.splitlines()[-1]))
     if not out:
         # migrate_legacy.sh's documented clean no-op: uv resolved and found no
         # legacy tree. Reaching it HERE is a contradiction -- we only got here
@@ -1595,23 +1770,29 @@ def _windows_converge_legacy_install(
     extras read from uv's receipt one last time, a generation built beside uv's
     tree, ``current`` flipped, launcher shims written, the legacy tree
     registered in the ledger as a junction. Never reaps, never uninstalls."""
-    core = _generation()
     if dry_run:
         click.echo(
             "generation_core.migrate_legacy --source conexus"
             + (f" --version {version}" if version else "")
         )
         return None
-    try:
-        generation = core.migrate_legacy(
-            "conexus", version=version or "", tools=tools, platform=_plat(),
-            on_path=_echo_path_result, progress=True,  # a person waits on this (nexus-2k66t.4.7)
-        )
-    except core.GenerationError as exc:
-        detail = str(exc)
-        hint = index_failure_hint(detail)
-        message = f"{hint}\n\nuv output:\n{detail}" if hint else detail
-        raise click.ClickException(f"legacy migration failed:\n{message}") from exc
+    # nexus-2k66t.4.3: the TARGET release's migrate_legacy runs whole when it can (its build,
+    # flip and PATH entry are one call here); its own GenerationError class is the one caught.
+    with _target_installer("conexus", version=version, extras=True, purpose="migrate") as staged:
+        core = staged.core or _generation()
+        try:
+            generation = core.migrate_legacy(
+                "conexus", version=version or "", tools=tools, platform=_plat(),
+                on_path=_echo_path_result,
+                # a person waits on this (nexus-2k66t.4.7); a target core older than that has no keyword
+                **_progress_kwarg(core.migrate_legacy, True),
+            )
+        except core.GenerationError as exc:
+            detail = str(exc)
+            hint = index_failure_hint(detail)
+            message = f"{hint}\n\nuv output:\n{detail}" if hint else detail
+            raise click.ClickException(f"legacy migration failed:\n{message}") from exc
+        _warn_on_version_skew(staged, generation)
     if generation is None:
         raise click.ClickException(
             "this nx looks like a packaged uv-tool install, but the migration "

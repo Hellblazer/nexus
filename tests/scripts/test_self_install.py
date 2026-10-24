@@ -309,10 +309,9 @@ def test_it_does_not_run_the_migration_ladder(bed, monkeypatch) -> None:
 
     _run_self_install()
 
-    joined = [" ".join(c) for c in calls]
-    assert not any("upgrade" in j and "nx" in j for j in joined), (
-        f"the self-install invoked the migration ladder: {joined}"
-    )
+    # Match argv tokens, not substrings: a worktree path containing "upgrade" or "nx" is not a call.
+    ladder = [c for c in calls if Path(c[0]).name in ("nx", "nx.exe") and "upgrade" in c[1:]]
+    assert not ladder, f"the self-install invoked the migration ladder: {ladder}"
 
 
 def test_the_builder_claims_its_tree_and_the_receipt_supersedes_it(bed, monkeypatch) -> None:

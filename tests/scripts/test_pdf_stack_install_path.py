@@ -69,6 +69,9 @@ def bed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("NX_TORCH_BACKEND", raising=False)
     monkeypatch.delenv("NX_INSTALL_UNPINNED", raising=False)
+    # These tests read the RUNNING installer's arguments off the stub uv; the
+    # target-installer fetch (nexus-2k66t.4.3) would add a call of its own.
+    monkeypatch.setenv("NX_INSTALL_RUNNING_INSTALLER", "1")
     return tools, argv_log
 
 

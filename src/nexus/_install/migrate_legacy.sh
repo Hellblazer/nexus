@@ -117,7 +117,14 @@ _build_args=(--source "$SOURCE")
 [ -n "$PYTHON_VERSION" ] && _build_args+=(--python "$PYTHON_VERSION")
 
 # ── 2. build side-by-side; the legacy tree is never touched ─────────────
-GEN="$("$_here/install_generation.sh" "${_build_args[@]}")" || exit $?
+# NX_MIGRATE_BUILD_SCRIPT names the install_generation.sh to build with: `nx self
+# install` sets it to the one the release being installed ships (nexus-2k66t.4.3),
+# so the lock pin in that release applies to this build. Unset, the sibling builds.
+if [ -n "${NX_MIGRATE_BUILD_SCRIPT:-}" ]; then
+    GEN="$(bash "$NX_MIGRATE_BUILD_SCRIPT" "${_build_args[@]}")" || exit $?
+else
+    GEN="$("$_here/install_generation.sh" "${_build_args[@]}")" || exit $?
+fi
 
 # ── 3. flip ───────────────────────────────────────────────────────────
 nx_flip_current "$GEN" "$TOOLS_DIR" || exit $?
