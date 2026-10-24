@@ -33,6 +33,9 @@ ALL_SKIP_ALLOWED: dict[str, str] = {
     "tests/test_search_fanout_recall_parity.py": (
         "runner limit: needs a real nexus config pointing at the live cloud engine"
     ),
+    "tests/integration/test_llm_live.py": (
+        "runner limit: spends money against a paid LLM API; hand-run with NX_LIVE_LLM=1 and a key"
+    ),
 }
 
 

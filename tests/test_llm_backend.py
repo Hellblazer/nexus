@@ -815,7 +815,7 @@ class TestAMalformedConfigNeverLeaksACredential:
         assert len(events) == 1 and events[0]["error_type"] == "ScannerError" and events[0]["line"] == 3
         assert _BROKEN_KEY_LINE not in _log_text(logs)
 
-    def test_the_section_reader_logs_the_type_and_line_only(self) -> None:
+    def test_the_section_reader_logs_the_type_and_line_only(self, claude_on_path) -> None:
         import structlog
 
         _write_global_config(_BROKEN_CONFIG)

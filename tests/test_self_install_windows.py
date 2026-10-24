@@ -245,7 +245,8 @@ class TestLegacySite:
         spy.tool_dir = legacy.parent
         generation = self_cmd.perform_self_install()
         assert generation is not None and generation.parent == tools
-        assert install_layout.read_receipt(generation).extras == ["local"]  # mineru dropped
+        # mineru dropped; a legacy tree predates the [pdf] split, so pdf carries forward
+        assert install_layout.read_receipt(generation).extras == ["local", "pdf"]
         assert os.readlink(tools / "current") == str(generation)
         assert (generation / "bin" / "nx.exe").read_bytes().endswith(b"launcher:nx")
         entry = str(tools / "current" / "bin")

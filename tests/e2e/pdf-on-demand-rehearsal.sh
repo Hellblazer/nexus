@@ -203,7 +203,7 @@ fi
 echo "── fresh install (bootstrap route) ──"
 _clean_env uv tool run --python 3.12 --from "$RC_WHEEL" nx self install --bootstrap >"$LOGS/bootstrap.log" 2>&1 \
     || { cat "$LOGS/bootstrap.log" >&2; fail "bootstrap install failed"; }
-[ -x "$BIN/nx" ] || fail "no nx shim after bootstrap"
+[ -x "$BIN/nx" ] || fail "bootstrap left no shim"
 FRESH_GEN="$(current_gen)"
 FRESH_KB="$(du -sk "$FRESH_GEN" | cut -f1)"
 
@@ -363,14 +363,14 @@ leg_u() {
     # 1. the previous release, by its own bootstrap: pre-split receipt, stack present.
     _clean_env uv tool run --python 3.12 --from "conexus==$OLD_VERSION" nx self install --bootstrap >"$LOGS/u-old-bootstrap.log" 2>&1 \
         || { tail -30 "$LOGS/u-old-bootstrap.log" >&2; fail "could not install conexus==$OLD_VERSION by its bootstrap"; }
-    [ -x "$BIN/nx" ] || fail "no nx shim after the old bootstrap"
+    [ -x "$BIN/nx" ] || fail "the old bootstrap left no shim"
     schema="$(receipt_field installer_schema 2>/dev/null || echo missing)"
     [ "$schema" = "1" ] || [ "$schema" = "missing" ] || fail "conexus==$OLD_VERSION wrote installer_schema $schema, not a pre-split receipt: pick an older --old-version"
     [ "$(stack_module_count)" = 5 ] || fail "the old release's generation does not have the whole PDF stack"
 
     # 2. the OLD installer builds the release candidate: slim, receipt still pre-split.
     _nx self install --version "$RC_VERSION" >"$LOGS/u-old-installer.log" 2>&1 \
-        || { tail -30 "$LOGS/u-old-installer.log" >&2; fail "the old nx could not build the candidate"; }
+        || { tail -30 "$LOGS/u-old-installer.log" >&2; fail "the old installer could not build the candidate"; }
     nx_version_is "$RC_VERSION" || fail "nx --version does not name $RC_VERSION after the old installer's build"
     [ -z "$(stack_modules_present)" ] || fail "the old installer's build of the candidate has the stack (it cannot know the rule): $(stack_modules_present)"
     extras="$(receipt_field extras)"

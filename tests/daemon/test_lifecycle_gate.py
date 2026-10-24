@@ -152,6 +152,11 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # model once. Waiters re-check and take the holder's result; no lease, no
     # heartbeat, no daemon-scope election.
     "db/minilm_direct.py",
+    # PDF-stack install lock (nexus-2k66t.4.2): a blocking critical section on
+    # <tools>/.pdf-stack.lock so two commands that both need the [pdf] extra
+    # build one generation. The waiter re-checks the current generation and
+    # skips the install; no lease, no heartbeat, no daemon-scope election.
+    "pdf_stack.py",
 })
 
 
