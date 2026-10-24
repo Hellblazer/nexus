@@ -34,11 +34,11 @@ dill==0.4.1
 dirtyjson==1.0.8
 distro==1.9.0
 dnspython==2.8.0
-doclang==0.7.3
-docling-core==2.94.1
+doclang==0.8.0
+docling-core==2.104.0
 docling-ibm-models==4.0.2
-docling-parse==7.17.0
-docling-slim==2.125.0
+docling-parse==7.23.0
+docling-slim==2.132.0
 email-validator==2.3.0
 et-xmlfile==2.0.0
 fast-langdetect==0.2.5
@@ -79,6 +79,7 @@ jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 langchain-core==1.2.14
 langchain-text-splitters==1.1.1
+langcodes==3.5.1
 langsmith==0.7.6
 latex2mathml==3.78.1
 lazy-loader==0.5
@@ -150,7 +151,7 @@ qwen-vl-utils==0.0.14
 referencing==0.37.0
 regex==2026.2.19
 reportlab==4.4.10
-requests==2.32.5
+requests==2.34.2
 requests-toolbelt==1.0.0
 rfc3161-client==1.0.6
 rfc8785==0.1.4

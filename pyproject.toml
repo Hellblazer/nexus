@@ -169,7 +169,12 @@ pdf = [
     # opencv-python-headless (zero `import cv2` here, and mineru requires
     # the non-headless build unconditionally) and uuid7-standard (nothing
     # references it).
-    "docling-slim[convert-core,format-pdf,models-local]>=2.125.0,<2.125.1",
+    # nexus-13z79 (2026-10-24): 2.125.0 -> 2.132.0, still an exact patch. Seven
+    # advisories on 2.125.0 (PYSEC-2026-4209..4214, 4216; fixed in 2.131.0 and
+    # 2.132.0) sit in backends nexus never calls (HTML, JATS, METS-GBS, LaTeX,
+    # JSON_DOCLING input, external plugins), but the shipped lock should not
+    # carry them.
+    "docling-slim[convert-core,format-pdf,models-local]>=2.132.0,<2.132.1",
     # nexus-mt1tj: torch and torchvision are transitive (mineru[pipeline],
     # docling) and nexus never imports them; they are declared here ONLY so
     # that [tool.uv.sources] below can route the Linux resolution to the
