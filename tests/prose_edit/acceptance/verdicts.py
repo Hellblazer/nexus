@@ -28,13 +28,16 @@ NOT-MEASURABLE):
              (RDR-221 Amendment A1) at least 7 of the 10 seeded sentences of fixtures/compression.md hit, and no
              decoy touched. Hit: an edit whose old string overlaps the sentence, whose new string is longer and whose
              reason starts with that sentence's prefix (noun stack:, coined verb:, inanimate subject:, dependency:,
-             optional word:), or a query anchored inside the sentence whose text starts with that prefix; the right
+             optional word:), or a query anchored inside the sentence whose text starts with that prefix; for
+             dependency: the new string need only differ and hold at least as many words (Sam's ruling of 2026-10-24,
+             nexus-4s8sb: a split or reorder that fixes a dependency keeps its length; A1 was judged before it); the right
              sentence under another prefix does not count. Touched decoy: an edit overlapping it, or a query anchored
-             in it whose text starts with any of the five prefixes. The decoys are COMPRESSION_DECOYS (always scored)
-             and COMPRESSION_DENSE (scored only when the editor's reply voice_card names it, like CARD_DEVICES). The
+             in it whose text starts with any of the five prefixes. The decoys are COMPRESSION_DECOYS and
+             COMPRESSION_DENSE, all always scored (the dense passage too, whatever the voice_card says: Sam's ruling of
+             2026-10-24, nexus-6n8l1; the note says whether the card named it). The
              oracle is the COMPRESSION_* tables below, checked against the fixture first: a sentence not in the
              document exactly once makes the run NOT-MEASURABLE. The note reports hit or miss per sentence, whether
-             the dense passage was scored, and "possible invention" (words an edit on a seeded sentence inserts
+             the voice card named the dense passage, and "possible invention" (words an edit on a seeded sentence inserts
              beyond its relation words, function words and inflections of its own words); it never fails on invention.
   xanadu, linda, refrain
              no edit overlaps a device, and no paragraph proposal cuts, merges or splits a paragraph that holds one.
@@ -208,8 +211,9 @@ COMPRESSION_DECOYS: tuple[tuple[str, str], ...] = (
     ("thing verb: checks", "The validator checks each field against the schema."),
     ("two-modifier compound: session scratch", "The session scratch holds notes for the length of one session."),
 )
-# Scored only when the editor's reply voice_card names it (any marker, case and quotes ignored), like CARD_DEVICES: a
-# deliberately dense passage is a device only if the card says so.
+# Always scored, like COMPRESSION_DECOYS (Sam's ruling of 2026-10-24, nexus-6n8l1: Step 1a.3's "no decoy is
+# touched" binds whatever the card says). The markers only say, in the note, whether the editor's voice_card named it
+# (any marker, case and quotes ignored).
 COMPRESSION_DENSE: tuple[str, tuple[str, ...]] = (
     "Queue depth alarm threshold breach, lease age alarm threshold breach, sweep lag alarm threshold breach.",
     ("pager message", "queue depth alarm", "dense on purpose"),
@@ -668,6 +672,14 @@ def _beyond_relation(old: str, new: str, relation: tuple[str, ...]) -> list[str]
             and not (len(w) >= 4 and any(o[:4] == w[:4] for o in old_words))]
 
 
+def _unpacks(prefix: str, old: str, new: str) -> bool:
+    """Whether an edit's new string counts as an unpacking under `prefix`: longer, or for dependency: changed and no
+    fewer words (a split or reorder that fixes a dependency keeps its length; Sam's ruling of 2026-10-24, nexus-4s8sb)."""
+    if prefix == "dependency:":
+        return new != old and sum(words(new).values()) >= sum(words(old).values())
+    return len(new) > len(old)
+
+
 def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
                         card: str) -> tuple[str | None, list[str], str]:
     """(a reason the oracle tables no longer fit the document or None, what fails the run, the note) for a compression
@@ -681,9 +693,8 @@ def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
                     "the oracle table no longer matches it"), [], ""
         table.append((label, text, found[0]))
     seeded_at = {e[0]: table[i][2] for i, e in enumerate(COMPRESSION_SEEDED)}
-    decoy_at = table[len(COMPRESSION_SEEDED):-1]
-    dense_scored = _on_card(card, COMPRESSION_DENSE[1])
-    scored = [*decoy_at, *([table[-1]] if dense_scored else [])]
+    scored = table[len(COMPRESSION_SEEDED):]
+    dense_named = _on_card(card, COMPRESSION_DENSE[1])
     applicable = _unique_edits(doc_text, edits)
     problems: list[str] = []
     for e in edits:
@@ -705,7 +716,7 @@ def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
     for sid, prefix, _, _ in COMPRESSION_SEEDED:
         span = seeded_at[sid]
         by_edit = any(
-            _prefix_of(e.get("reason")) == prefix and len(str(e.get("new", ""))) > len(str(e.get("old", "")))
+            _prefix_of(e.get("reason")) == prefix and _unpacks(prefix, str(e.get("old", "")), str(e.get("new", "")))
             and any(_overlaps(o, span) for o in _spans(doc_text, str(e["old"]))) for e in applicable)
         by_query = any(
             _prefix_of(q.get("text")) == prefix
@@ -722,11 +733,10 @@ def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
                 extra = _beyond_relation(str(e.get("old", "")), str(e.get("new", "")), relation)
                 if extra:
                     invention.append(f"{sid} edit {e.get('n')} {extra}")
-    always = len(decoy_at)
     note = (f"{count} of {len(COMPRESSION_SEEDED)} seeded sentences hit ["
             + " ".join(f"{sid}:{'hit' if hit[sid] else 'miss'}" for sid, _, _, _ in COMPRESSION_SEEDED) + "]; "
-            + f"dense passage scored: {'yes (the voice card names it)' if dense_scored else 'no (the voice card does not name it)'}; "
-            + f"decoys scored: {len(scored)} of {always + 1}; "
+            + f"dense passage named on the voice card: {'yes' if dense_named else 'no'}; "
+            + f"decoys scored: {len(scored)}; "
             + f"possible invention: {'; '.join(invention) if invention else 'none'}")
     return None, problems, note
 

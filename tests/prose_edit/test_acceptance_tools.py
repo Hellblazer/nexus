@@ -1117,7 +1117,8 @@ def test_compression_a_query_with_a_compression_prefix_anchored_on_a_decoy_fails
         assert _comp(edits, [_cquery(1, text, "Which schema does this check against?")])[0] == "PASS", label
 
 
-def test_compression_the_dense_passage_is_scored_only_when_the_voice_card_names_it_and_the_note_says_which() -> None:
+def test_compression_the_dense_passage_is_always_scored_and_the_note_says_whether_the_card_named_it() -> None:
+    # Sam's ruling of 2026-10-24 (nexus-6n8l1): Step 1a.3's "no decoy is touched" binds whatever the voice card says
     v = _verdicts()
     seeded = v.COMPRESSION_SEEDED
     dense, markers = v.COMPRESSION_DENSE
@@ -1126,24 +1127,51 @@ def test_compression_the_dense_passage_is_scored_only_when_the_voice_card_names_
     touch = [_cedit(11, dense, dense[:-1] + " then.", "noun stack: the pager reader needs the relation")]
     asked = [_cquery(1, dense, "noun stack: what does each line mean?")]
     named = f"Plain register. Deliberate density: {markers[0]}, the reader scans it at a glance."
-    for card in (None, "", "Plain register. No devices.", "Deliberate density: the lease table."):
+    unnamed = (None, "", "Plain register. No devices.", "Deliberate density: the lease table.")
+    for card in unnamed:
         verdict, note = _comp(base + touch, card=card)
-        assert verdict == "PASS" and "dense passage scored: no" in note, (card, note)
+        assert verdict == "FAIL" and "decoy" in note and "named on the voice card: no" in note, (card, note)
         verdict, note = _comp(base, asked, card=card)
-        assert verdict == "PASS" and "dense passage scored: no" in note, (card, note)
+        assert verdict == "FAIL" and "decoy" in note, (card, note)
+        verdict, note = _comp(base, card=card)
+        assert verdict == "PASS" and "named on the voice card: no" in note, (card, note)
     for marker in markers:
         card = f"Voice: second person. Device: {marker.upper()}."  # case ignored
         verdict, note = _comp(base + touch, card=card)
-        assert verdict == "FAIL" and "dense passage scored: yes" in note and "decoy" in note, (marker, note)
+        assert verdict == "FAIL" and "named on the voice card: yes" in note and "decoy" in note, (marker, note)
         verdict, note = _comp(base, asked, card=card)
-        assert verdict == "FAIL" and "dense passage scored: yes" in note, (marker, note)
-    # named and untouched passes, and says it was scored
+        assert verdict == "FAIL", (marker, note)
     verdict, note = _comp(base, card=named)
-    assert verdict == "PASS" and "dense passage scored: yes" in note, note
-    # the note counts what was scored: the always-scored decoys, and the dense passage when the card names it
-    always = len(v.COMPRESSION_DECOYS)
-    assert f"decoys scored: {always} of {always + 1}" in _comp(base)[1]
-    assert f"decoys scored: {always + 1} of {always + 1}" in _comp(base, card=named)[1]
+    assert verdict == "PASS" and "named on the voice card: yes" in note, note
+    # every decoy is scored, the dense passage included, card or no card
+    total = len(v.COMPRESSION_DECOYS) + 1
+    assert f"decoys scored: {total};" in _comp(base)[1]
+    assert f"decoys scored: {total};" in _comp(base, card=named)[1]
+
+
+def test_compression_a_dependency_fix_at_equal_word_count_hits_and_other_prefixes_still_need_longer() -> None:
+    # Sam's ruling of 2026-10-24 (nexus-4s8sb): the P2.2 D2 fix, a split at 18 words to 18 that is shorter in characters
+    v = _verdicts()
+    seeded = {e[0]: e for e in v.COMPRESSION_SEEDED}
+    d2 = seeded["D2"][2]
+    split = ("The worker resets the retry counter after every successful renewal of its lease. "
+             "It drives the backoff delay.")
+    assert len(split) < len(d2) and len(re.findall(r"[A-Za-z0-9`_'-]+", split)) >= len(re.findall(r"[A-Za-z0-9`_'-]+", d2))
+    others = [e for sid, e in seeded.items() if sid != "D2"][:6]
+    edit = _cedit(7, d2, split, "dependency: the clause between subject and verb splits off")
+    verdict, note = _comp([*_hits(others), edit])
+    assert verdict == "PASS" and "7 of 10" in note and "D2:hit" in note, note
+    # unchanged text, fewer words, or the wrong prefix earn nothing
+    for bad in (_cedit(7, d2, d2, "dependency: same"),
+                _cedit(7, d2, "The retry counter drives the backoff delay.", "dependency: cut the clause"),
+                _cedit(7, d2, split, "noun stack: split")):
+        verdict, note = _comp([*_hits(others), bad])
+        assert verdict == "FAIL" and "D2:miss" in note, (bad, note)
+    # every other prefix keeps the character rule: an equal-word reorder of N1 is no hit
+    n1 = seeded["N1"][2]
+    reorder = "After a successful renewal the lease renewal failure retry count resets."
+    assert len(reorder.split()) == len(n1.split()) and len(reorder) <= len(n1)
+    assert "N1:miss" in _comp([_cedit(1, n1, reorder, "noun stack: reordered")])[1]
 
 
 def test_compression_a_fixture_that_no_longer_matches_the_oracle_is_not_measurable() -> None:
@@ -1173,7 +1201,7 @@ def test_compression_adds_to_the_note_the_per_sentence_table_and_names_a_possibl
     n1 = by_id["N1"]
     verdict, note = _comp(_hits(others[:6]))
     assert verdict == "FAIL" and "N1:miss" in note and "N2:hit" in note, note
-    assert "possible invention: none" in note and "dense passage scored: no" in note, note
+    assert "possible invention: none" in note and "dense passage named on the voice card: no" in note, note
     # the expected relation (a stack unpacked with its relation words and function words) is not invention
     ok = _cedit(1, n1[2], "The count of retries after a failed lease renewal resets after a successful renewal.",
                 "noun stack: the count is of retries after a failed renewal.")
