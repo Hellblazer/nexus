@@ -185,14 +185,13 @@ def test_the_download_sizes_are_ceilings_not_promises() -> None:
 
 def test_the_descriptions_give_the_disk_sizes_beside_the_download_sizes() -> None:
     """The Desktop question (Sam, 2026-10-14): the choice shows what it takes on disk as
-    well as what it downloads, as measured from nothing on macOS, Linux and Windows with conexus
-    7.81.0 (2.4 to 3.1 GB for local, 2.1 to 2.3 GB for the CLI alone), so the user is not surprised after
-    answering. The default install includes PDF support again since nexus-2k66t.4.9 (Sam, 2026-10-23); the
-    download figures are derived from the 2026-10-23 measurement of 7.85.0."""
+    well as what it downloads, (2.5 to 2.9 GB for local, 1.8 to 2.2 GB for the CLI alone), so the user is
+    not surprised after answering. The default install includes PDF support again since nexus-2k66t.4.9
+    (Sam, 2026-10-23); the figures are measured on 7.85.0 on macOS and Linux (nexus-2k66t.4.10)."""
     text = _tools()["setup"].description
-    assert "up to about 0.8 GB to download (0.9 GB on Linux), 2.4 to 3.1 GB on disk" in text, text
-    assert "up to about 0.45 GB to download (0.6 GB on Linux), 2.1 to 2.3 GB on disk" in text, text
-    assert "include PDF support" in text and "derived from a measurement of 7.85.0" in text, "what the sizes cover, and where from"
+    assert "up to about 0.8 GB to download (0.9 GB on Linux), 2.5 to 2.9 GB on disk" in text, text
+    assert "up to about 0.45 GB to download (0.6 GB on Linux), 1.8 to 2.2 GB on disk" in text, text
+    assert "include PDF support" in text and "measured on 7.85.0 on macOS and Linux; Windows was not measured" in text, "what the sizes cover, and where from"
     assert "slim true" in text, "the description offers the slim choice"
 
 
@@ -269,7 +268,7 @@ def test_the_notice_gives_the_sizes_a_choice_takes(monkeypatch: pytest.MonkeyPat
     service: the sizes of the two ways to fix it, download and disk, in the table's words."""
     _service(monkeypatch, False)
     text = setup_tools.no_service_notice() or ""
-    assert "0.8 GB" in text and "2.4 to 3.1 GB on disk" in text and "0.45 GB" in text and "2.1 to 2.3 GB on disk" in text, text
+    assert "0.8 GB" in text and "2.5 to 2.9 GB on disk" in text and "0.45 GB" in text and "1.8 to 2.2 GB on disk" in text, text
 
 
 def _provision(config: Path, *, files: int = 3) -> None:

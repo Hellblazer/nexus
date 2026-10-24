@@ -118,16 +118,14 @@ NOT_INSTALLED: str = (
 
 
 #: The sizes of the default install, which includes the PDF stack (nexus-2k66t.4.9, Sam 2026-10-23:
-#: install everything by default). Download figures are derived from the 2026-10-23 measurement of
-#: 7.85.0 (T2 nexus/install-weight-measurement-2026-10-23): the CLI alone is 428 MB on macOS and
-#: 567 MB on Linux, a local service adds about 0.34 GB. The disk figures are the 7.81.0 measurement
-#: of the full install, which the PDF split's slim figures were derived from. Pinned by
+#: install everything by default). The figures are MEASURED on 7.85.0 on macOS and Linux, 2026-10-24
+#: (nexus-2k66t.4.10, T2 nexus/install-size-measurement-2026-10-24); Windows was not measured. Pinned by
 #: tests/test_install_size_rows.py in every place a user chooses an install.
-LOCAL_SIZE: str = "about 0.8 GB down (0.9 GB on Linux), 2.4 to 3.1 GB on disk"
-CLI_SIZE: str = "about 0.45 GB down (0.6 GB on Linux), 2.1 to 2.3 GB on disk"
+LOCAL_SIZE: str = "about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk"
+CLI_SIZE: str = "about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk"
 #: The same two sizes in the sentence form the tool descriptions use ("up to about ...").
-LOCAL_SIZE_UP_TO: str = "about 0.8 GB to download (0.9 GB on Linux), 2.4 to 3.1 GB on disk"
-CLI_SIZE_UP_TO: str = "about 0.45 GB to download (0.6 GB on Linux), 2.1 to 2.3 GB on disk"
+LOCAL_SIZE_UP_TO: str = "about 0.8 GB to download (0.9 GB on Linux), 2.5 to 2.9 GB on disk"
+CLI_SIZE_UP_TO: str = "about 0.45 GB to download (0.6 GB on Linux), 1.8 to 2.2 GB on disk"
 
 #: The one question's choices, as the record gives them (RDR-228 "The one question"),
 #: with the sizes it measured. The session-start hook (``nx_setup_notice.py``) imports
@@ -144,15 +142,15 @@ QUESTION_TABLE: str = (
 )
 
 #: What the sizes are, and the one line for the slim install (nexus-2k66t.4.9). The savings are the
-#: same measurement's: dropping docling, MinerU and torch takes 242 MB off the download on macOS,
-#: 370 MB on Linux, and 792 MB off the disk.
+#: same measurement's: dropping docling, MinerU and torch takes 237 MB off the download on macOS,
+#: 371 MB on Linux, and 847 MB off the disk on macOS, 1272 MB on Linux.
 SIZES_NOTE: str = (
-    "These sizes include PDF support (docling, MinerU and torch). Download sizes are derived from a measurement of "
-    "7.85.0 on macOS and Linux; disk sizes are upper bounds from a 7.81.0-era measurement. Windows was not measured. Neither is a promise."
+    "These sizes include PDF support (docling, MinerU and torch). They were measured on 7.85.0 on macOS and Linux; "
+    "Windows was not measured. They are not a promise."
 )
 SLIM_LINE: str = (
     "Slim (setup with slim true) leaves PDF support out: about 0.25 GB less to download on macOS, 0.37 GB on Linux, "
-    "and 0.8 GB less on disk. The first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out."
+    "and 0.85 GB less on disk on macOS and 1.3 GB on Linux. The first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out."
 )
 
 #: What Local adds to the question, and what a no means.

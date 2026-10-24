@@ -2,18 +2,16 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Every place a user chooses an install shows the DEFAULT size, and the default includes the PDF stack.
 
-nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default). The four sizes below are the
-default install, labelled DERIVED: the download figures come from the 2026-10-23 measurement of
-7.85.0 (T2 ``nexus/install-weight-measurement-2026-10-23``: the CLI alone 428 MB on macOS and 567 MB
-on Linux, a local service about 0.34 GB more), and the disk figures are the 7.81.0 measurement of the
-full install. They are pinned in each place so a copy cannot keep quoting the slim figures of
-nexus-2k66t.4.2 (0.55 / 0.2 GB down, 1.6 to 2.3 / 1.3 to 1.5 GB on disk) or the 7.81.0 download
-figures (1.3 GB, 700 MB).
+nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default), figures replaced by nexus-2k66t.4.10.
+The sizes below are MEASURED on 7.85.0 on macOS (hellmini) and Linux (chas, qwent WSL) on 2026-10-24
+(T2 ``nexus/install-size-measurement-2026-10-24``): wheels, Python and the local service's downloads,
+and the generation directory on disk. Windows was not measured. They are pinned in each place so a
+copy cannot keep quoting the derived figures (2.4 to 3.1 / 2.1 to 2.3 GB on disk, a 0.8 GB slim
+saving on disk, a 2.4 GB Linux and 3.6 GB macOS uv cache) or the slim figures of nexus-2k66t.4.2.
 
 The web/ copies (install.sh, install.ps1, index.html) are pinned in tests/test_web_install_size_rows.py,
 which lands with them: Pages publishes web/ from develop on every push, so they wait for the client
-release that accepts ``--bootstrap --extras``. The disk figures are 7.81.0-era upper bounds and Windows
-was not measured; every place says so.
+release that accepts ``--bootstrap --extras``.
 """
 from __future__ import annotations
 
@@ -26,8 +24,8 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 
 #: The default install (PDF support included), as the table rows state it.
-LOCAL = "about 0.8 GB down (0.9 GB on Linux), 2.4 to 3.1 GB on disk"
-CLI = "about 0.45 GB down (0.6 GB on Linux), 2.1 to 2.3 GB on disk"
+LOCAL = "about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk"
+CLI = "about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk"
 
 ROWS = (
     f"| Local | Install the CLI and run a Nexus service on this machine | {LOCAL} |",
@@ -35,8 +33,12 @@ ROWS = (
     f"| CLI only | Install the CLI and decide about a service later | {CLI} |",
 )
 
-#: The figures a copy must not keep (the slim ones from the PDF split, and the 7.81.0 ones).
-STALE_TABLE = ("about 0.55 GB", "1.6 to 2.3 GB", "1.3 to 1.5 GB", "about 0.2 GB down", "about 1.3 GB", "about 0.7 GB down")
+#: The figures a copy must not keep (the slim ones from the PDF split, the 7.81.0 download ones, and
+#: the derived disk ones nexus-2k66t.4.10 replaced).
+STALE_TABLE = (
+    "about 0.55 GB", "1.6 to 2.3 GB", "1.3 to 1.5 GB", "about 0.2 GB down", "about 1.3 GB", "about 0.7 GB down",
+    "2.4 to 3.1 GB", "2.1 to 2.3 GB",
+)
 
 #: Files that carry the three-row table. README writes the separator as a semicolon.
 TABLE_FILES = {
@@ -52,8 +54,14 @@ TABLE_FILES = {
 EXPECTED_CHECKED = len(TABLE_FILES) + 2  # + the stand-in and the real server's twin
 
 
-#: The words every place that gives sizes carries about where they come from.
-PROVENANCE_PAGES = ("derived", "7.81.0-era")
+#: How every place that gives sizes says where they come from (the date is allowed in prose, not in a tool description).
+PROVENANCE = "measured on 7.85.0 on macOS and Linux"
+
+#: Words that described the old figures and must not survive anywhere.
+STALE_PROVENANCE = ("derived", "7.81.0-era", "0.8 GB less", "0.8 GB off", "0.8 GB on disk")
+
+#: Pages that carry a uv cache sentence.
+CACHE_FILES = ("README.md", "docs/getting-started.md", "docs/windows-install.md", "docs/desktop-deployment.md")
 
 
 def _text(path: str) -> str:
@@ -65,7 +73,7 @@ def test_the_table_shows_the_default_sizes_and_no_stale_ones(path: str) -> None:
     text = _text(path)
     semicolon = TABLE_FILES[path]
     for row in ROWS:
-        # README writes "about 0.8 GB down (0.9 GB on Linux); 2.4 to 3.1 GB on disk"
+        # README writes "about 0.8 GB down (0.9 GB on Linux); 2.5 to 2.9 GB on disk"
         expected = row.replace("), ", "); ") if semicolon else row
         assert expected in text, f"{path} lacks the row {expected!r}"
     for stale in STALE_TABLE:
@@ -73,16 +81,31 @@ def test_the_table_shows_the_default_sizes_and_no_stale_ones(path: str) -> None:
 
 
 @pytest.mark.parametrize("path", sorted(set(TABLE_FILES) - {"docs/rdr/rdr-228-plugin-installs-the-cli.md"}))
-def test_the_page_says_the_sizes_include_pdf_support_and_are_derived(path: str) -> None:
+def test_the_page_says_the_sizes_include_pdf_support_and_are_measured(path: str) -> None:
     text = _text(path)
     assert "include PDF support" in text, path
-    assert "derived" in text, f"{path} does not label the figures as derived"
+    assert PROVENANCE in text, f"{path} does not say the figures were measured"
+    assert "Windows was not measured" in text, f"{path} does not say Windows was not measured"
+    for stale in STALE_PROVENANCE:
+        assert stale not in text, f"{path} still says {stale!r}"
     assert "slim" in text.lower(), f"{path} gives no slim line"
     assert "0.25 GB less" in text or "0.25 GB off" in text, f"{path} does not size the slim saving"
-    if path == "conexus/commands/setup.md":  # the SIZES_NOTE twin; the guides word their provenance themselves
-        for word in PROVENANCE_PAGES:
-            assert word in text, f"{path} does not say where the sizes come from ({word!r})"
-        assert "upper bounds" in text, f"{path} does not call the disk sizes upper bounds"
+    assert "0.85 GB" in text and "1.3 GB" in text, f"{path} does not give the slim saving on disk per OS"
+
+
+@pytest.mark.parametrize("path", CACHE_FILES)
+def test_the_uv_cache_sentence_gives_the_measured_figures(path: str) -> None:
+    text = _text(path)
+    assert "about 2.1 GB on Linux" in text and "1.8 GB on macOS" in text, f"{path} lacks the measured cache sizes"
+    for stale in ("2.4 GB on Linux", "3.6 GB on macOS", "2.4 GB, not 4.4 GB", "2.4 GB in uv's cache"):
+        assert stale not in text, f"{path} still quotes {stale!r}"
+
+
+@pytest.mark.parametrize("path", ["README.md", "docs/getting-started.md"])
+def test_the_on_demand_pdf_install_sizes_are_the_measured_ones(path: str) -> None:
+    text = _text(path)
+    assert "240 MB" in text and "370 MB" in text, path
+    assert "0.85 GB on disk on macOS and 1.3 GB on Linux" in text, path
 
 
 def _load(name: str, path: Path):
@@ -103,11 +126,12 @@ def test_the_stand_in_and_the_real_server_carry_the_same_sizes_in_the_same_words
     stand_in = _load("nx_standin_size_rows", REPO / "conexus" / "launch" / "nx_standin.py")
     for module in (stand_in, setup_tools):
         description = module.SETUP_DESCRIPTION
-        assert "up to about 0.8 GB to download (0.9 GB on Linux), 2.4 to 3.1 GB on disk" in description
-        assert "up to about 0.45 GB to download (0.6 GB on Linux), 2.1 to 2.3 GB on disk" in description
-        assert "include PDF support" in description and "derived from a measurement of 7.85.0" in description
-        assert "upper bounds from a 7.81.0-era measurement" in description
-        assert "Windows was not measured" in description
+        assert "up to about 0.8 GB to download (0.9 GB on Linux), 2.5 to 2.9 GB on disk" in description
+        assert "up to about 0.45 GB to download (0.6 GB on Linux), 1.8 to 2.2 GB on disk" in description
+        assert "include PDF support" in description and "measured on 7.85.0 on macOS and Linux; Windows was not measured" in description
+        for word in ("derived", "7.81.0-era", "upper bounds"):
+            assert word not in description, (module.__name__, word)
+        assert "0.85 GB less on disk on macOS and 1.3 GB on Linux" in description
         assert "2026-" not in description, "an ISO date in a tool description fails tests/test_mcp_tool_description_lint.py"
         assert "slim true" in description
         for stale in ("0.55 GB", "1.6 to 2.3", "1.3 to 1.5", "about 0.2 GB"):
@@ -142,3 +166,12 @@ def test_a_slim_resume_names_the_way_back_to_the_full_install_in_both_copies(sli
     assert ours == stand_in._choice_lines(view, "failed")
     offers_full = any("slim false" in line for line in ours)
     assert offers_full is slim, ours
+
+
+def test_the_on_demand_install_notice_gives_the_measured_sizes() -> None:
+    """The line `nx` prints before it installs PDF support on first use (nexus-2k66t.4.10)."""
+    from nexus.pdf_stack import INSTALL_NOTICE
+
+    assert "about 240 MB (macOS) / 370 MB (Linux) download" in INSTALL_NOTICE
+    assert "0.85 GB (macOS) / 1.3 GB (Linux) on disk" in INSTALL_NOTICE
+    assert "0.8 GB on disk" not in INSTALL_NOTICE
