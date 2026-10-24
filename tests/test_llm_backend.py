@@ -915,6 +915,7 @@ class TestOpenAiCompatPriceSettings:
         "llm:\n  openai_compat:\n    price_in_per_mtok: -1\n    price_out_per_mtok: 1\n",
         "llm:\n  openai_compat:\n    price_in_per_mtok: .inf\n    price_out_per_mtok: 1\n",
         "llm:\n  openai_compat:\n    unpriced_ok: maybe\n",
+        "llm:\n  openai_compat:\n    price_in_per_mtok: 0\n    price_out_per_mtok: 0\n",   # free: say unpriced_ok
     ])
     def test_a_malformed_price_setting_fails_loud(self, text) -> None:
         _write_global_config(text)

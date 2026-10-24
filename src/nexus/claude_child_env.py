@@ -65,8 +65,14 @@ def apply_harness_oauth_grant(base: Mapping[str, str]) -> dict[str, str]:
     tool-granting dispatch whose nested nx-mcp dispatches again still has
     it to map). Neither value is ever logged -- at most one log line
     records, once per process, that a grant was applied, naming neither.
+    ``NX_LLM_OPENAI_API_KEY`` is always removed from the result.
     """
     result = dict(base)
+    # The openai_compat API key is nexus's own credential and no claude child
+    # uses it: drop it at the one helper every claude launch site goes through
+    # (dispatch's _build_dispatch_env and the aspect extractor's isolated
+    # runner), so a new launch site cannot forget it (nexus-2k66t.3).
+    result.pop("NX_LLM_OPENAI_API_KEY", None)
     harness_value = result.get(HARNESS_OAUTH_TOKEN_ENV_VAR)
     if harness_value and CLAUDE_OAUTH_TOKEN_ENV_VAR not in result:
         result[CLAUDE_OAUTH_TOKEN_ENV_VAR] = harness_value

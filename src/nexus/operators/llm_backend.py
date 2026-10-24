@@ -400,6 +400,10 @@ def _credential(name: str) -> str:
         value = get_credential(name) or ""
     except (yaml.YAMLError, OSError) as exc:
         problem = _unreadable_config_message(exc)
+    except (TypeError, AttributeError, ValueError):
+        # A credential that is not a string (a list, a mapping) in config.yml:
+        # name the setting, never the value.
+        problem = f"credential {name} in the global config.yml is not a string"
     if problem is not None:
         raise OperatorError(problem)
     return value.strip()
@@ -438,6 +442,13 @@ def openai_compat_pricing(config: Mapping[str, Any] | None) -> tuple[tuple[float
             _config_number(p_in, "llm.openai_compat.price_in_per_mtok"),
             _config_number(p_out, "llm.openai_compat.price_out_per_mtok"),
         )
+        if price[1] == 0:
+            # A zero output price would divide the budget clamp by zero; a
+            # free server says so with unpriced_ok instead.
+            raise OperatorError(
+                "llm.openai_compat.price_out_per_mtok must be above 0; "
+                "for a free local server set llm.openai_compat.unpriced_ok: true"
+            )
     raw_ok = sub.get("unpriced_ok")
     if raw_ok is None:
         unpriced_ok = False
