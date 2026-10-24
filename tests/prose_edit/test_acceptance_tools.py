@@ -1260,3 +1260,32 @@ def test_compression_is_in_the_readme_with_its_invocation_and_run_name_and_run_s
     # the kind comes from the run name and the budget from the prompt: the runner holds no kind table
     runner = (ACC / "run-scenario.sh").read_text(encoding="utf-8")
     assert "compression" not in runner and "qa)" not in runner and "case " not in runner
+
+
+QUOTED_FILTER_SPELLINGS = (
+    "python3 .claude/skills/prose-edit/scripts/brief.py filter doc.md --budget 12 < /w/reply.txt",
+    "python3 .claude/skills/prose-edit/scripts/brief.py 'filter' 'doc.md' '--budget' '12' < '/w/reply.txt'",
+    'python3 .claude/skills/prose-edit/scripts/brief.py "filter" doc.md --budget 12 < /w/reply.txt',
+    "python3 '.claude/skills/prose-edit/scripts/brief.py' filter doc.md < /w/reply.txt",
+)
+
+
+@pytest.mark.parametrize("command", QUOTED_FILTER_SPELLINGS)
+def test_a_script_call_is_found_however_the_session_quoted_its_verb(command: str) -> None:
+    # compression-2 (2026-10-24) quoted the verb as 'filter' and was scored NOT-MEASURABLE for a filter that ran
+    v = _verdicts()
+    assert v.runs_script(command, "brief", "filter")
+    events = [_use("t1", "Bash", {"command": command}), _res("t1", json.dumps({"edits": [], "queries": []}))]
+    assert len(v.filter_runs(events)) == 1
+    assert v._filter_work_dirs([_use("t1", "Bash", {"command": command + " --save /w/x/filtered.json"})]) == {"x"}
+    rv = _review_verdicts()
+    assert len(rv.script_results(events, "brief", "filter")) == 1
+
+
+def test_a_script_name_inside_another_argument_or_another_verb_is_not_a_call() -> None:
+    v = _verdicts()
+    for command in ("echo 'brief.py filter'", "python3 scripts/brief.py build doc.md",
+                    "python3 scripts/xbrief.py filter doc.md", "python3 scripts/brief.py filters doc.md",
+                    "python3 scripts/brief.py 'filter"):
+        assert not v.runs_script(command, "brief", "filter"), command
+    assert v.runs_script("python3 scripts/review.py 'apply' doc.md --dry-run", "review", "apply")

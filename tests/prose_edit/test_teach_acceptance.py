@@ -304,3 +304,15 @@ def test_the_readme_documents_the_teach_runner_and_what_it_cannot_prove() -> Non
     text = (ACC / "README.md").read_text(encoding="utf-8")
     assert "run-teach.sh" in text and "teach_verdicts.py" in text
     assert "scenario 6" in text.lower() and "step 13" in text.lower()
+
+
+def test_the_teach_checks_find_a_memory_or_review_call_whose_verb_the_session_quoted() -> None:
+    # the compression-2 spelling (2026-10-24): the session quoted each word of the command
+    assert T._stores_card(f"{MEMORY} 'voice-card' '{DOC}' '--from-stdin' < /w/card.txt")
+    two = {"edits": [{"n": 1, "old": "a", "new": "b"}, {"n": 2, "old": "c", "new": ""}], "queries": [], "dropped": []}
+    t1 = _bash("f1", f"{BRIEF} 'filter' '{DOC}' --budget 5", two)
+    t2c = _bash("ap", f"python3 .claude/skills/prose-edit/scripts/review.py 'apply' '{DOC}'", {"rejections_stored": True})
+    assert T._first_run_problem(t1, t2c) is None
+    early = _bash("p1", f"{MEMORY} 'promote' x", {"title": "t"}) + [_final("Store it?")]
+    verdict, note = T.check_promote("rc=1", "refused: dry run first", early, [])
+    assert verdict == "FAIL" and "before the author confirmed" in note, note

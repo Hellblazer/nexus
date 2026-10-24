@@ -121,7 +121,7 @@ def script_results(events: list[Obj], script: str, verb: str) -> list[Obj]:
     out: list[Obj] = []
     for tid, name, inp, _ in V.tool_uses(events, sub=False):
         command = str(inp.get("command", ""))
-        if name == "Bash" and f"scripts/{script}.py {verb}" in command and tid in results:
+        if name == "Bash" and V.runs_script(command, script, verb) and tid in results:
             parsed = first_json(results[tid])
             if parsed is not None:
                 out.append(parsed)
