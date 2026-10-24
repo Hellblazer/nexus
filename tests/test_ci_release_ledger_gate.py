@@ -181,6 +181,8 @@ _BASE_VALUES = {
     # nexus-rpaat: no integration tests affected, so that job skipped.
     "needs.changes.outputs.integration_any": "false",
     "needs.test-integration-affected.result": "skipped",
+    # nexus-zzkko: the always-run mcpb resolve gate (resolves only when its inputs changed).
+    "needs.mcpb-resolve-gate.result": "success",
     "github.event_name": "push",
     "github.base_ref": "",
 }
@@ -276,3 +278,23 @@ def test_fanin_still_fails_on_genuine_release_ledger_failure_off_main_pr() -> No
     }))
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert "release-ledger-gate" in proc.stdout + proc.stderr
+
+
+def test_fanin_blocks_a_main_pr_when_the_mcpb_resolve_gate_did_not_succeed() -> None:
+    """nexus-zzkko (Sam 2026-10-24): the release PR cannot merge with Desktop bundle pins that
+    do not resolve. Exercised as real bash, like the release-ledger case above."""
+    for bad_result in ("failure", "cancelled", "skipped"):
+        proc = _run(_pytest_gate_script(**{
+            "github.event_name": "pull_request",
+            "github.base_ref": "main",
+            "needs.release-ledger-gate.result": "success",
+            "needs.mcpb-resolve-gate.result": bad_result,
+        }))
+        assert proc.returncode == 1, (bad_result, proc.stdout, proc.stderr)
+        assert "mcpb-resolve-gate" in proc.stdout + proc.stderr
+
+
+def test_fanin_only_warns_on_a_failed_mcpb_resolve_off_the_release_pr() -> None:
+    proc = _run(_pytest_gate_script(**{"needs.mcpb-resolve-gate.result": "failure"}))
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "::warning::mcpb-resolve-gate" in proc.stdout + proc.stderr
