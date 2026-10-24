@@ -1322,6 +1322,13 @@ def _run_build(argv: list[str], *, progress: bool) -> "subprocess.CompletedProce
     return subprocess.CompletedProcess(argv, proc.returncode, out, "".join(captured))
 
 
+def _stderr_is_a_terminal() -> bool:
+    try:
+        return sys.stderr is not None and sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _progress_kwarg(fn, progress: bool) -> dict[str, bool]:
     """``{"progress": progress}`` when *fn* takes it, else ``{}``: a target release's
     ``generation_core`` older than nexus-2k66t.4.7 builds quietly, as it always did,
@@ -1329,7 +1336,10 @@ def _progress_kwarg(fn, progress: bool) -> dict[str, bool]:
     import inspect  # noqa: PLC0415 — stdlib, only the Windows build path
 
     try:
-        accepts = "progress" in inspect.signature(fn).parameters
+        params = inspect.signature(fn).parameters
+        accepts = "progress" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
     except (TypeError, ValueError):
         accepts = False
     return {"progress": progress} if accepts else {}
@@ -1602,6 +1612,9 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
                             extras=takeover_extras,
                         ),
                         install_dir=install_dir, tools=tools, bin_dir=bin_dir,
+                        # Interactive `nx upgrade` waits on this build; the hook's background
+                        # --auto run has no terminal and stays captured (nexus-2k66t.4.7).
+                        progress=_stderr_is_a_terminal(),
                     )
                     _warn_on_version_skew(staged, target)
                 lines.append(f"installed {target.name}")

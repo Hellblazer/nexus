@@ -261,3 +261,24 @@ def test_self_install_from_uvs_tree_repairs_instead_of_migrating(bed, monkeypatc
         "extras were bridged from uv's rebuilt receipt -- the exact way [local] is lost"
     )
     assert _shims_are_nexus_owned(bin_dir, tools)
+
+
+@pytest.mark.parametrize("tty", [True, False])
+def test_the_upgrade_build_streams_only_when_a_person_is_watching(bed, monkeypatch, tty: bool) -> None:
+    """nexus-2k66t.4.7: interactive `nx upgrade` waits on the takeover's rebuild, so it streams
+    uv's output on a terminal; the hook's background --auto run has none and stays captured."""
+    tools, bin_dir, uv_tools, current, versions = bed
+    legacy = _uv_tree(uv_tools, extras_in_uv_receipt="")
+    versions[str(legacy)] = "7.21.0"
+    _take_shims(bin_dir, legacy)
+    seen: list[bool] = []
+    real = self_cmd._build_flip_shims
+
+    def spy(*a, progress=False, **kw):
+        seen.append(progress)
+        return real(*a, progress=progress, **kw)
+
+    monkeypatch.setattr(self_cmd, "_build_flip_shims", spy)
+    monkeypatch.setattr(self_cmd, "_stderr_is_a_terminal", lambda: tty)
+    repair_uv_takeover()
+    assert seen == [tty]

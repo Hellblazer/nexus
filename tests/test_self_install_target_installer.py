@@ -719,3 +719,21 @@ class TestTheRealPackagedInstaller:
                 ) is None
         finally:
             target_installer._clear_loaded_cores()
+
+
+def test_progress_is_passed_only_to_a_core_that_takes_it() -> None:
+    """A target release's generation_core older than nexus-2k66t.4.7 has no `progress`
+    keyword; it builds quietly instead of failing with a TypeError or being refused."""
+    def old(name, *, tools, platform):  # noqa: ARG001 — signature is the point
+        return None
+
+    def new(name, *, tools, platform, progress=False):  # noqa: ARG001
+        return None
+
+    assert self_cmd._progress_kwarg(old, True) == {}
+    assert self_cmd._progress_kwarg(new, True) == {"progress": True}
+
+    def open_ended(name, **kw):  # noqa: ARG001
+        return None
+
+    assert self_cmd._progress_kwarg(open_ended, False) == {"progress": False}
