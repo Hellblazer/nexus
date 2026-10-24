@@ -39,9 +39,18 @@ legacy convergence, where the build, the flip and the PATH entry are a single
 
 WHICH HOPS THIS COVERS. An upgrade FROM a release that carries this code. The
 hop out of a release that does not (7.85.0 into its successor) is built by the
-old release's installer, so the successor's own pin does not apply to it; only
-the PDF carry-forward (nexus-2k66t.4.2) re-pins that generation, at the
-running version, on the first ``nx upgrade`` after it.
+old release's installer, so the successor's own pin does not apply to it. That
+generation is re-pinned by the PDF carry-forward (nexus-2k66t.4.2): 7.85.0's
+receipts predate the PDF split, so the first ``nx upgrade`` after the hop builds
+one generation at the running version with the running installer, which applies
+the lock. That is ONE build. The installer-rebuild rung (nexus-au0s3,
+``nexus.pdf_stack.rebuild_stale_installer``) covers LATER generations built
+at the running version without the lock (in practice an installer fallback; it
+requires the running package to ship the lock, so a package without the file
+never qualifies): it rebuilds a registry ``current`` at the running version whose
+receipt records ``constraints`` as ``none`` or not at all. It skips a generation
+built unpinned on purpose (``NX_INSTALL_UNPINNED=1``; the next plain
+``nx self install`` pins again) and stands aside while the carry-forward is owed.
 
 PURPOSES. ``build`` is ``nx self install`` on a generation and the uv-takeover
 repair. ``migrate`` is the legacy uv-tool convergence, whose build step lives

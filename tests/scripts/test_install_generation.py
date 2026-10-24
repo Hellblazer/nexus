@@ -511,6 +511,15 @@ def _run_builder(
     return proc, argv_log
 
 
+def _recorded_constraints(tmp_path: Path) -> str:
+    """What the receipt of the one generation built under *tmp_path* says it did
+    about the lock (nexus-au0s3)."""
+    import json  # noqa: PLC0415 — only this helper needs it
+
+    (gen,) = list((tmp_path / "tools").glob("gen-*"))
+    return json.loads((gen / "nexus-install.json").read_text())["constraints"]
+
+
 def test_constraints_file_is_handed_to_uv_pip_install(tmp_path: Path) -> None:
     """The lock, exported as constraints, reaches uv: a checkout install must
     not resolve past what the lock and the gates ran (mineru 3.4.5 vs 3.1.11)."""
@@ -524,6 +533,7 @@ def test_constraints_file_is_handed_to_uv_pip_install(tmp_path: Path) -> None:
     assert len(install_lines) == 1, argv_log.read_text()
     assert f"--constraints {constraints}" in install_lines[0]
     assert "--no-deps" not in install_lines[0]
+    assert _recorded_constraints(tmp_path) == "applied"
 
 
 def test_missing_constraints_file_refuses_before_building(tmp_path: Path) -> None:
@@ -550,6 +560,7 @@ def test_no_constraints_flag_uses_the_constraints_the_package_ships(tmp_path: Pa
     assert shipped.is_file()
     assert f"--constraints {shipped}" in final
     assert "UNCONSTRAINED" not in proc.stderr
+    assert _recorded_constraints(tmp_path) == "applied"
 
 
 def test_a_package_without_the_file_installs_unconstrained_and_says_so(tmp_path: Path) -> None:
@@ -567,6 +578,7 @@ def test_a_package_without_the_file_installs_unconstrained_and_says_so(tmp_path:
     # installed package, not that the package "ships none".
     assert "was found in the installed" in proc.stderr
     assert "ships no" not in proc.stderr
+    assert _recorded_constraints(tmp_path) == "none", "the receipt must not claim a lock that was not applied"
 
 
 def test_a_failed_constrained_install_leaves_no_generation(tmp_path: Path) -> None:
@@ -594,6 +606,7 @@ def test_install_unpinned_skips_the_constraints_step_and_says_so(tmp_path: Path)
     assert "--constraints" not in installs[0] and "--no-deps" not in installs[0]
     assert "install_generation: WARNING: NX_INSTALL_UNPINNED=1" in proc.stderr
     assert "not pinned" in proc.stderr
+    assert _recorded_constraints(tmp_path) == "unpinned", "a deliberate opt-out is recorded as such"
 
 
 def test_install_unpinned_does_not_override_an_explicit_constraints_file(tmp_path: Path) -> None:
@@ -605,6 +618,7 @@ def test_install_unpinned_does_not_override_an_explicit_constraints_file(tmp_pat
     assert proc.returncode == 0, proc.stderr
     assert f"--constraints {constraints}" in _final_install(argv_log)
     assert "NX_INSTALL_UNPINNED" not in proc.stderr
+    assert _recorded_constraints(tmp_path) == "applied"
 
 
 # nexus-heykz: the packaged overrides file reaches uv on every build.

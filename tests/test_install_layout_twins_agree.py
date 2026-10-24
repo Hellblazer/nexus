@@ -714,7 +714,7 @@ def test_layout_sh_carries_no_implementation_helpers() -> None:
 
 
 def test_an_argument_swap_would_be_caught(tmp_path: Path) -> None:
-    """render_receipt takes EIGHT same-typed strings positionally.
+    """render_receipt takes NINE same-typed strings positionally.
 
     Nothing about the types stops the dispatcher passing them in the wrong
     order, and every wrong order still produces valid JSON. So each field is
@@ -729,10 +729,11 @@ def test_an_argument_swap_would_be_caught(tmp_path: Path) -> None:
         "python": "P-python",
         "base_interpreter": "B-base",
         "created_at": "C-created",
+        "constraints": "unpinned",
     }
     written = _shell_says(
         "nx_render_receipt '{version}' '{spec}' '{source_kind}' '{source}' "
-        "'' '{python}' '{base_interpreter}' '{created_at}'".format(**fields),
+        "'' '{python}' '{base_interpreter}' '{created_at}' '{constraints}'".format(**fields),
         {"HOME": str(tmp_path)},
     )
     parsed = json.loads(written)

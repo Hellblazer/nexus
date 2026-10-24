@@ -661,7 +661,11 @@ def build_generation(
         )
         (gen / layout.BUILDING_MARKER_NAME).touch()  # each phase gets the full claim window
         python = str(layout.venv_python(gen, platform=platform))
+        # What the receipt records about the lock (nexus-au0s3), the twin of
+        # install_generation.sh's CONSTRAINTS_STATE.
+        constraints_state = layout.CONSTRAINTS_NONE
         if not constraints and os.environ.get("NX_INSTALL_UNPINNED") == "1":
+            constraints_state = layout.CONSTRAINTS_UNPINNED
             # The opt-out (the twin of install_generation.sh's): resolve fresh,
             # which is how an operator takes a transitive security fix ahead of
             # a release. An explicit *constraints* file still wins. A WARNING
@@ -691,6 +695,7 @@ def build_generation(
                 ])
         install = ["uv", "pip", "install", "--python", python, "--overrides", str(overrides)]
         if constraints:
+            constraints_state = layout.CONSTRAINTS_APPLIED
             install += ["--constraints", constraints]
         _run([*install, spec], run, "uv pip install", progress=progress)
 
@@ -710,6 +715,7 @@ def build_generation(
         rendered = layout._cli_render_receipt(
             version, spec, kind, source, ",".join(extras_list), python_full,
             base_interpreter, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock)),
+            constraints_state,
         )
         tmp = gen / ".nexus-install.json.tmp"
         tmp.write_text(rendered + "\n", encoding="utf-8")

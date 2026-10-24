@@ -266,6 +266,7 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     # always be refused and the stack wait for the next one.
     _converge_vc_runtime(auto_mode=auto_mode)
     _converge_pdf_stack(auto_mode=auto_mode, skip_t3=skip_t3)
+    _converge_installer_rebuild(auto_mode=auto_mode, skip_t3=skip_t3)
 
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -313,6 +314,35 @@ def _converge_pdf_stack(*, auto_mode: bool, skip_t3: bool) -> None:
         _log.info("upgrade_pdf_stack", detail=line)
     else:
         click.echo(f"PDF support: {line}")
+
+
+def _converge_installer_rebuild(*, auto_mode: bool, skip_t3: bool) -> None:
+    """nexus-au0s3: a generation built by an installer older than this package's
+    is rebuilt with this one, at the same version.
+
+    The hop out of a release whose installer is older (7.85.0 to the first release
+    that pins dependencies to the lock) is built by the OLD installer, which cannot
+    fetch the target's. This is the first code of the new release to run, and it
+    sees the receipt's installer_schema. One build with the running installer,
+    keeping extras, flipping, reaping by the normal keep-3 rule; the new receipt
+    is current, so it does not repeat. Not while the PDF carry-forward is owed
+    (that build is this one). ``--skip-t3`` skips it with the other downloads.
+    Never raises."""
+    if skip_t3:
+        return
+    try:
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred to keep the CLI cold-start light
+
+        line = pdf_stack.rebuild_stale_installer(auto_mode=auto_mode)
+    except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the ladder must not be blocked by it
+        _log.warning("upgrade_installer_rebuild_failed", error=str(exc))
+        return
+    if line is None:
+        return
+    if auto_mode:
+        _log.info("upgrade_installer_rebuild", detail=line)
+    else:
+        click.echo(f"Installer: {line}")
 
 
 #: How long ``nx upgrade --auto`` waits after a failed VC++ runtime download.

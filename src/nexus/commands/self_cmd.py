@@ -166,6 +166,7 @@ class _WindowsBuild:
 def perform_self_install(
     *, keep: int = 3, version: str | None = None, dry_run: bool = False,
     add_extras: tuple[str, ...] = (), bootstrap: bool = False, progress: bool = False,
+    exact_extras: tuple[str, ...] | None = None,
 ) -> Path | None:
     """Build a new generation from the running one's receipt, flip, reap.
 
@@ -181,6 +182,11 @@ def perform_self_install(
     the uv tree over the nexus-owned shims on a migrated box). The merged
     set travels through ``install_generation.sh --extras`` and is rendered
     by ``install_layout.build_spec``, so spec and extras cannot disagree.
+
+    *exact_extras* (nexus-au0s3) builds with EXACTLY these extras: no merge with the
+    running generation's receipt and no PDF carry-forward. The installer-rebuild
+    rung rebuilds ``current``, whose extras are the ones to keep, and the process
+    running the rebuild may be a different generation with different ones.
 
     *bootstrap* (RDR-228, nexus-sv2wx.14) is the explicit first-install path:
     see :func:`_bootstrap_install`. It is the only way into that path; nothing
@@ -275,13 +281,19 @@ def perform_self_install(
     # from, not from `current`: a self-install reproduces THIS process's
     # install, and on a box whose current has already moved those differ.
     receipt = install_layout.read_receipt(host)
-    extras = _merge_extras(receipt.extras, new_extras)
+    if exact_extras is not None:
+        if new_extras:
+            raise click.ClickException("exact_extras and add_extras cannot both be given")
+        extras = _normalize_extras(exact_extras)
+    else:
+        extras = _merge_extras(receipt.extras, new_extras)
     # nexus-2k66t.4.2, Sam 2026-10-23: an EXISTING install always carries the
     # PDF stack forward. A receipt written before `pdf` became an extra
     # (installer_schema < 2) belongs to a box that has had docling and MinerU
     # in every generation; the installer this process runs may be the new one
     # building the first post-split generation. Only a fresh install goes slim.
-    extras = _carry_pdf_forward(receipt, extras)
+    if exact_extras is None:
+        extras = _carry_pdf_forward(receipt, extras)
     if dry_run:
         # The argv shown is the RUNNING installer's. The real run reads the
         # target release's installer first (a fetch, so not done here) and uses

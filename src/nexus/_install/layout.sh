@@ -75,7 +75,7 @@ NX_INSTALLER_SCHEMA=2
 # Pinned against the Python dataclass by the twins test, so that the half
 # which WRITES a receipt cannot add or drop a field the half which READS it
 # does not know about.
-NX_RECEIPT_FIELDS="schema version spec source_kind source extras python base_interpreter created_at installer_schema"
+NX_RECEIPT_FIELDS="schema version spec source_kind source extras python base_interpreter created_at installer_schema constraints"
 
 # EX_UNAVAILABLE. A specific status, so an operator seeing it in a log can
 # tell "no current generation" from a command that merely failed.
@@ -182,6 +182,8 @@ nx_build_spec() { _nx_core build_spec "${1-}" "${2-}" "${3-}"; }
 #
 # $1 version  $2 spec  $3 source_kind  $4 source  $5 extras (comma-separated,
 # may be empty)  $6 python  $7 base_interpreter  $8 created_at
+# $9 constraints: what the build did about the release's lock, one of
+# applied | unpinned | none (empty is recorded as unknown). nexus-au0s3.
 nx_render_receipt() {
-    _nx_core render_receipt "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" "${6-}" "${7-}" "${8-}"
+    _nx_core render_receipt "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" "${6-}" "${7-}" "${8-}" "${9-}"
 }

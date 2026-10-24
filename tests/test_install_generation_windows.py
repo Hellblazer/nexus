@@ -156,7 +156,8 @@ class TestBuildGeneration:
         pins = tmp_path / "pins.txt"
         pins.write_text("x==1\n")
         uv = FakeUv()
-        _build(tools, uv, constraints=str(pins))
+        gen = _build(tools, uv, constraints=str(pins))
+        assert lc.read_receipt(gen).constraints == "applied"
         # An explicit file is the whole answer: one install, no fetch step.
         assert len(uv.calls) == 2
         install = uv.calls[1]
@@ -179,13 +180,15 @@ class TestBuildGeneration:
         assert install[install.index("--constraints") + 1] == str(shipped)
         assert "--no-deps" not in install
         assert "UNCONSTRAINED" not in capsys.readouterr().err
+        assert lc.read_receipt(gen).constraints == "applied"
 
     def test_install_unpinned_skips_the_constraints_step_and_says_so(
         self, tools: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("NX_INSTALL_UNPINNED", "1")
         uv = FakeUv()
-        _build(tools, uv)
+        gen = _build(tools, uv)
+        assert lc.read_receipt(gen).constraints == "unpinned", "a deliberate opt-out is recorded as such"
         installs = [c for c in uv.calls if c[:3] == ["uv", "pip", "install"]]
         assert len(installs) == 1, installs
         assert "--constraints" not in installs[0] and "--no-deps" not in installs[0]
@@ -199,16 +202,18 @@ class TestBuildGeneration:
         pins = tools / "pins.txt"
         pins.write_text("x==1\n")
         uv = FakeUv()
-        _build(tools, uv, constraints=str(pins))
+        gen = _build(tools, uv, constraints=str(pins))
         assert uv.calls[-1][uv.calls[-1].index("--constraints") + 1] == str(pins)
+        assert lc.read_receipt(gen).constraints == "applied"
 
     def test_a_package_without_the_file_installs_unconstrained_and_says_so(
         self, tools: Path, capsys: pytest.CaptureFixture[str],
     ) -> None:
         uv = FakeUv(ships_constraints=False)
-        _build(tools, uv)
+        gen = _build(tools, uv)
         install = uv.calls[-1]
         assert "--constraints" not in install
+        assert lc.read_receipt(gen).constraints == "none", "the receipt must not claim a lock that was not applied"
         err = capsys.readouterr().err
         assert "UNCONSTRAINED" in err and "constraints.txt" in err
         assert "was found in the installed" in err and "ships no" not in err

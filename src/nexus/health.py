@@ -2869,6 +2869,23 @@ def _check_pdf_support() -> list[HealthResult]:
     )]
 
 
+def _check_installer_rebuild() -> list[HealthResult]:
+    """nexus-au0s3: a generation built without the release's dependency lock is
+    rebuilt by ``nx upgrade``. This row says when that is owed or its last attempt
+    failed, and the command that retries it. A warning, never red: the install
+    works as built. Not applicable (no row) on a box that owes nothing: a virgin
+    box, a rebuilt one, one built unpinned on purpose, a checkout."""
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    note = pdf_stack.installer_rebuild_note()
+    if note is None:
+        return []
+    return [HealthResult(
+        label="Dependency lock", ok=True, warn=True, detail=note,
+        fix_suggestions=[f"Rebuild with the release's lock: {pdf_stack.REBUILD_RETRY_COMMAND}"],
+    )]
+
+
 def _check_mineru_server() -> list[HealthResult]:
     """nexus-far1c: report whether math PDFs will GET a MinerU server —
     not whether one happens to be running at this instant.
@@ -11827,6 +11844,7 @@ def run_health_checks(
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_pdf_support())
+    results.extend(_check_installer_rebuild())
     results.extend(_check_mineru_server())
     results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())

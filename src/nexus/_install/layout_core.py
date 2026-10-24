@@ -494,6 +494,28 @@ INSTALLER_SCHEMA = 2
 #: The installer_schema at which ``pdf`` became an extra. See INSTALLER_SCHEMA.
 PDF_SPLIT_INSTALLER_SCHEMA = 2
 
+#: What the installer did about the release's dependency lock (nexus-au0s3),
+#: recorded in the receipt's ``constraints`` field. A WORD, not an integer: the
+#: installer integer says who wrote the receipt, never what the build did, and
+#: a build can skip the lock on purpose (NX_INSTALL_UNPINNED=1) or by accident
+#: (a package that shipped none).
+#:
+#: ``applied``   the dependencies were installed under a constraints file: the
+#:               package's own ``nexus/_install/constraints.txt``, or one the
+#:               caller passed (``--constraints``).
+#: ``unpinned``  ``NX_INSTALL_UNPINNED=1`` skipped it on purpose (an operator
+#:               taking a transitive security fix ahead of a release). Nothing
+#:               re-pins this; the next plain ``nx self install`` does.
+#: ``none``      the package shipped no constraints file (a release that
+#:               predates it, or a venv layout the installer did not expect).
+#: ``unknown``   the receipt predates the field, or names a word this code does
+#:               not know. Read leniently, never an error.
+CONSTRAINTS_APPLIED = "applied"
+CONSTRAINTS_UNPINNED = "unpinned"
+CONSTRAINTS_NONE = "none"
+CONSTRAINTS_UNKNOWN = "unknown"
+CONSTRAINTS_VALUES = (CONSTRAINTS_APPLIED, CONSTRAINTS_UNPINNED, CONSTRAINTS_NONE, CONSTRAINTS_UNKNOWN)
+
 #: Where an install came from. A closed set, checked at construction.
 SOURCE_KINDS = ("directory", "registry")
 
@@ -881,11 +903,16 @@ class Receipt:
     extras: list[str] = field(default_factory=list)
     schema: int = RECEIPT_SCHEMA
     installer_schema: int = INSTALLER_SCHEMA
+    constraints: str = CONSTRAINTS_UNKNOWN
 
     def __post_init__(self) -> None:
         if self.source_kind not in SOURCE_KINDS:
             raise LayoutError(
                 f"source_kind must be one of {SOURCE_KINDS}, got {self.source_kind!r}"
+            )
+        if self.constraints not in CONSTRAINTS_VALUES:
+            raise LayoutError(
+                f"constraints must be one of {CONSTRAINTS_VALUES}, got {self.constraints!r}"
             )
         # Sorted and de-duplicated so that a receipt is stable across installs
         # and so that the spec the builder derives from it is deterministic.
@@ -968,7 +995,15 @@ class Receipt:
             extras=[str(extra) for extra in extras],
             schema=int(payload["schema"]),
             installer_schema=int(payload.get("installer_schema", 1)),
+            # Lenient: a receipt that predates the field, or a newer installer's
+            # word this code does not know, reads as unknown. The strict schema
+            # number is not involved (an older nx drops the key it cannot read).
+            constraints=_known_constraints(payload.get("constraints")),
         )
+
+
+def _known_constraints(raw: Any) -> str:
+    return raw if isinstance(raw, str) and raw in CONSTRAINTS_VALUES else CONSTRAINTS_UNKNOWN
 
 
 def receipt_predates_pdf_split(receipt: Receipt) -> bool:
@@ -1201,8 +1236,13 @@ def _cli_render_receipt(
     python: str,
     base_interpreter: str,
     created_at: str,
+    constraints: str = "",
 ) -> str:
     """The receipt, rendered by the same code that reads it.
+
+    *constraints* (nexus-au0s3) is what the build did about the release's lock
+    (:data:`CONSTRAINTS_VALUES`); empty, from a caller that predates the
+    argument, is recorded as unknown.
 
     The shell half hand-escaped JSON and refused a value carrying a control
     character, because it could not represent one. :meth:`Receipt.to_json`
@@ -1230,6 +1270,7 @@ def _cli_render_receipt(
         base_interpreter=base_interpreter,
         created_at=created_at,
         extras=_split_extras(extras),
+        constraints=constraints or CONSTRAINTS_UNKNOWN,
     ).to_json().rstrip("\n")
 
 

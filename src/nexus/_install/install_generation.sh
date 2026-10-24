@@ -214,7 +214,11 @@ fi
 # from the index, which is how an operator takes a transitive security fix ahead
 # of a release. An explicit --constraints FILE is a caller's choice and still
 # wins over it. The notice is a WARNING line so `nx self install` re-echoes it.
+# CONSTRAINTS_STATE is what the receipt records about the lock (nexus-au0s3):
+# none until a constraints file is in use, unpinned when the opt-out skipped it.
+CONSTRAINTS_STATE="none"
 if [ -z "$CONSTRAINTS" ] && [ "${NX_INSTALL_UNPINNED:-}" = "1" ]; then
+    CONSTRAINTS_STATE="unpinned"
     echo "install_generation: WARNING: NX_INSTALL_UNPINNED=1 is set; this install is not pinned to the release's uv.lock, its dependencies resolve fresh from the package index" >&2
 elif [ -z "$CONSTRAINTS" ]; then
     uv pip install --python "$GEN/bin/python" --no-deps "$SPEC" >&2
@@ -236,6 +240,7 @@ elif [ -z "$CONSTRAINTS" ]; then
     fi
 fi
 if [ -n "$CONSTRAINTS" ]; then
+    CONSTRAINTS_STATE="applied"
     uv pip install --python "$GEN/bin/python" ${TORCH_ARGS[@]+"${TORCH_ARGS[@]}"} --overrides "$OVERRIDES" --constraints "$CONSTRAINTS" "$SPEC" >&2
 else
     uv pip install --python "$GEN/bin/python" ${TORCH_ARGS[@]+"${TORCH_ARGS[@]}"} --overrides "$OVERRIDES" "$SPEC" >&2
@@ -272,6 +277,7 @@ _tmp_receipt="$GEN/.nexus-install.json.tmp"
 nx_render_receipt \
     "$VERSION" "$SPEC" "$SOURCE_KIND" "$SOURCE" "$EXTRAS" \
     "$PYTHON_FULL" "$BASE_INTERPRETER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$CONSTRAINTS_STATE" \
     > "$_tmp_receipt"
 mv -f "$_tmp_receipt" "$RECEIPT"
 

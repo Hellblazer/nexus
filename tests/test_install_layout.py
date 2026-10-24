@@ -275,6 +275,29 @@ def test_receipt_tolerates_fields_a_newer_installer_added() -> None:
     assert restored.version == "7.18.0"
 
 
+def test_receipt_records_what_the_installer_did_about_the_lock() -> None:
+    """nexus-au0s3: the receipt says whether the release's constraints.txt was
+    applied, left off on purpose, or absent from the package. A receipt that
+    never recorded it reads as unknown. The strict schema number is NOT bumped:
+    an older nx drops the key it does not know (test above)."""
+    assert RECEIPT_SCHEMA == 1 and INSTALLER_SCHEMA == 2, "the integers are not the contract"
+    assert _receipt().constraints == "unknown"
+    for value in ("applied", "unpinned", "none", "unknown"):
+        restored = Receipt.from_json(_receipt(constraints=value).to_json())
+        assert restored.constraints == value
+    payload = json.loads(_receipt(constraints="applied").to_json())
+    assert payload["constraints"] == "applied"
+    del payload["constraints"]
+    assert Receipt.from_json(json.dumps(payload)).constraints == "unknown", "absent is unknown, not an error"
+    payload["constraints"] = "something-from-the-future"
+    assert Receipt.from_json(json.dumps(payload)).constraints == "unknown", "an unrecognised word is unknown"
+
+
+def test_receipt_refuses_to_be_built_with_an_unrecognised_constraints_word() -> None:
+    with pytest.raises(InstallLayoutError):
+        _receipt(constraints="mostly")
+
+
 def test_receipt_refuses_a_schema_it_cannot_interpret() -> None:
     payload = json.loads(_receipt().to_json())
     payload["schema"] = RECEIPT_SCHEMA + 1

@@ -525,9 +525,10 @@ def _classify_failure(message: str) -> PdfStackError:
 
 
 @contextlib.contextmanager
-def _install_lock():
+def _install_lock(doing: str = "installing PDF support"):
     """Serialize concurrent fetches. The waiter re-checks the state after it
-    gets the lock, so two PDF indexes started together fetch once."""
+    gets the lock, so two PDF indexes started together fetch once. *doing* names
+    the build that holds the lock, for the line a waiter prints."""
     from nexus import _locking, install_layout  # noqa: PLC0415 — deferred
 
     tools = install_layout.tools_dir()
@@ -544,7 +545,7 @@ def _install_lock():
         except BlockingIOError:
             # A peer is mid-install: a waiter would otherwise sit silent for
             # minutes (nexus-2k66t.4.8). Say so once, then block.
-            _say("Another process is installing PDF support; waiting for it to finish.")
+            _say(f"Another process is {doing}; waiting for it to finish.")
             _locking.lock_fd(fd, blocking=True)
         yield
     finally:
@@ -865,3 +866,209 @@ def carry_forward(*, auto_mode: bool = False) -> str | None:
         with contextlib.suppress(OSError):
             sentinel.unlink(missing_ok=True)
     return "PDF support carried forward into a new generation (existing installs keep it)"
+
+
+# ── a generation built without the release's dependency lock (nexus-au0s3) ──
+#
+# WHICH BUILDS THIS COVERS. The hop out of 7.85.0 is NOT this rung's: that release's
+# receipts predate the PDF split, so the carry-forward above makes the one build there
+# (and that build, by the running installer, applies the lock). This rung covers a later
+# generation that was built without the lock: an installer fallback, or a package that
+# shipped no constraints file at the time. It never touches a generation built unpinned on
+# purpose (NX_INSTALL_UNPINNED=1, an operator taking a security fix); the next plain
+# `nx self install` pins again, as the docs say.
+
+#: A separate marker from the carry-forward's: a failure here is not "PDF support could
+#: not be carried", and `nx doctor` reads each for its own sentence.
+_REBUILD_FAILED_SENTINEL = "installer-rebuild-failed"
+
+REBUILD_RETRY_COMMAND = "nx upgrade"
+
+REBUILD_NOTICE = (
+    "Rebuilding the current generation of conexus {version} with the release's dependency lock: "
+    "it was built without it, so its dependencies were resolved fresh from the package index. "
+    "The download is a full install; the old generation is kept for rollback."
+)
+
+
+class InstallerRebuildError(RuntimeError):
+    """The rebuild ran and current still does not hold the lock."""
+
+
+def _rebuild_failed_sentinel() -> Path | None:
+    """The marker a failed rebuild leaves (and a success removes), or None when the
+    config directory cannot be named."""
+    try:
+        import nexus.config as _config  # noqa: PLC0415 — deferred; module attribute so a patched config dir is seen
+
+        return _config.nexus_config_dir() / _REBUILD_FAILED_SENTINEL
+    except Exception:  # noqa: BLE001 — no config dir: no marker
+        return None
+
+
+def _same_version(a: str, b: str) -> bool:
+    from packaging.version import InvalidVersion, Version  # noqa: PLC0415 — deferred
+
+    try:
+        return Version(a) == Version(b)
+    except InvalidVersion:
+        return a == b
+
+
+def _package_ships_constraints() -> bool:
+    """Whether the RUNNING package carries the lock a rebuild would apply."""
+    return constraints_path().is_file()
+
+
+def _stale_current_extras() -> tuple[str, ...] | None:
+    """The extras of the generation ``current`` names when the running installer
+    owes it a rebuild, else None.
+
+    Owed when ALL hold: ``current``'s receipt is readable, came from the registry
+    (a checkout build is rebuilt by ``reinstall-tool.sh``), names the version this
+    process runs (an older ``current`` is the ordinary upgrade's to replace, a
+    newer one was built by something newer than this process), the receipt says the
+    build applied NO lock (``none``, or nothing recorded by an installer that did
+    not know the field), and the running package ships a lock to apply. Never
+    ``unpinned`` (a deliberate opt-out) and never when this process has opted out."""
+    if os.environ.get("NX_INSTALL_UNPINNED") == "1" or not _package_ships_constraints():
+        return None
+    found = _current_generation_receipt()
+    if found is None:
+        return None
+    _gen, receipt = found
+    from nexus import install_layout  # noqa: PLC0415 — deferred
+
+    if receipt.source_kind != "registry" or receipt.constraints not in (
+        install_layout.CONSTRAINTS_NONE, install_layout.CONSTRAINTS_UNKNOWN,
+    ):
+        return None
+    # A current that predates the PDF split is the carry-forward's to rebuild (it
+    # adds pdf); a pdf-less rebuild here would stamp a post-split receipt and the
+    # stack would never be carried. installer_rebuild_pending checks the RUNNING
+    # receipt for that; this checks current's own.
+    if install_layout.receipt_predates_pdf_split(receipt):
+        return None
+    try:
+        if not _same_version(receipt.version, _running_version()):
+            return None
+    except Exception:  # noqa: BLE001 — no readable running version: no claim
+        return None
+    return tuple(receipt.extras)
+
+
+def installer_rebuild_pending() -> bool:
+    """True when ``current`` was built without the release's lock and nothing else
+    will rebuild it.
+
+    Not while the PDF carry-forward is owed: that one build is also made by the
+    running installer, and a pdf-less rebuild first would stamp a receipt that no
+    longer predates the split, so the stack would never be carried. Only a
+    generation install the auto path may touch (:func:`install_plan`) qualifies."""
+    if carry_forward_pending():
+        return False
+    if _stale_current_extras() is None:
+        return False
+    plan = install_plan()
+    return plan.kind == "generation" and plan.auto
+
+
+def installer_rebuild_note() -> str | None:
+    """One sentence for `nx doctor` when the rebuild is owed: the last attempt failed
+    (and when), or it has not run yet. None when nothing is owed, so a virgin box, a
+    rebuilt one and a deliberately unpinned one are silent, and an old failed marker
+    says nothing once the debt is gone."""
+    try:
+        if not installer_rebuild_pending():
+            return None
+    except Exception:  # noqa: BLE001 — a doctor row never raises
+        return None
+    sentinel = _rebuild_failed_sentinel()
+    if sentinel is not None:
+        try:
+            when = sentinel.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            when = None
+        except OSError:
+            when = ""
+        if when is not None:
+            stamp = f" ({when})" if when else ""
+            return (
+                f"the last attempt to rebuild the current generation with the release's dependency lock failed{stamp}; "
+                f"it keeps working as built. Retry: {REBUILD_RETRY_COMMAND}"
+            )
+    return (
+        "the current generation was built without the release's dependency lock, so its dependencies were resolved "
+        f"fresh from the package index; `nx upgrade` rebuilds it, or run {REBUILD_RETRY_COMMAND}"
+    )
+
+
+def _current_lock_applied() -> bool:
+    from nexus import install_layout  # noqa: PLC0415 — deferred
+
+    found = _current_generation_receipt()
+    return found is not None and found[1].constraints == install_layout.CONSTRAINTS_APPLIED
+
+
+def _rebuild_generation(extras: tuple[str, ...]) -> None:
+    """Build a generation at the running version with the running installer and
+    EXACTLY *extras* (current's, not the host's), flip to it, reap by the normal
+    keep-3 rule. No version change, no extra added or dropped: the build differs
+    from ``current`` only in how it was resolved."""
+    from nexus.commands import self_cmd  # noqa: PLC0415 — deferred
+
+    version = _running_version()
+    _say(REBUILD_NOTICE.format(version=version))
+    with contextlib.redirect_stdout(sys.stderr):
+        self_cmd.perform_self_install(exact_extras=extras, version=version, progress=True)
+
+
+def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
+    """Rebuild ``current`` when :func:`installer_rebuild_pending`. Returns a
+    one-line account, or None when there was nothing to do. Never raises: a
+    failure leaves ``current`` as it was (the build flips only on success), is
+    reported in the line, and is retried by the next run, backed off under
+    ``--auto`` by a marker of its own (same window as the carry-forward's) so a
+    box that cannot reach the index does not refetch at every session start.
+
+    A build that returns without raising is not yet a success: ``current``'s
+    receipt must now say the lock was applied. A build that leaves it unpinned (an
+    installer fallback, an index serving a different wheel) is a failure, so it cannot be
+    reported as done and repeated at every session start."""
+    if not installer_rebuild_pending():
+        return None
+    sentinel = _rebuild_failed_sentinel()
+    if auto_mode and sentinel is not None:
+        try:
+            age = time.time() - sentinel.stat().st_mtime
+        except OSError:
+            age = None
+        if age is not None and age < CARRY_FORWARD_AUTO_BACKOFF_S:
+            return f"installer rebuild deferred: the last attempt failed {int(age)}s ago"
+    try:
+        with _install_lock("rebuilding the current generation"):
+            # A peer's run may have rebuilt it while we waited; `current` is the
+            # only thing that says so.
+            extras = _stale_current_extras()
+            if extras is None:
+                return "the current generation was already rebuilt with the release's dependency lock"
+            _rebuild_generation(extras)
+            if not _current_lock_applied():
+                raise InstallerRebuildError(
+                    "the rebuilt generation does not record the release's dependency lock as applied"
+                )
+    except Exception as exc:  # noqa: BLE001 — reported, retried next run
+        if sentinel is not None:
+            with contextlib.suppress(OSError):
+                sentinel.parent.mkdir(parents=True, exist_ok=True)
+                sentinel.write_text(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n", encoding="utf-8")
+        _log.warning("installer_rebuild_failed", error=str(exc))
+        why = "the build did not apply the lock" if isinstance(exc, InstallerRebuildError) else type(exc).__name__
+        return (
+            f"the current generation could not be rebuilt with the release's dependency lock ({why}); "
+            f"it keeps working as built. Retry: {REBUILD_RETRY_COMMAND}"
+        )
+    if sentinel is not None:
+        with contextlib.suppress(OSError):
+            sentinel.unlink(missing_ok=True)
+    return "rebuilt the current generation with the release's dependency lock"
