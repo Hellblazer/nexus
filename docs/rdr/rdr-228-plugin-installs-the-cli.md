@@ -519,10 +519,15 @@ record does not change it.
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 0.55 GB down, 1.6 to 2.3 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.2 GB down, 1.3 to 1.5 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.2 GB down, 1.3 to 1.5 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (0.9 GB on Linux), 2.4 to 3.1 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.45 GB down (0.6 GB on Linux), 2.1 to 2.3 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.45 GB down (0.6 GB on Linux), 2.1 to 2.3 GB on disk |
 | Not now | Nothing is installed | none |
+
+The sizes are the default install, which includes PDF support (nexus-2k66t.4.9, 2026-10-23: install
+everything by default); the download figures are derived from the 2026-10-23 measurement of 7.85.0
+on macOS and Linux. The setup tool's `slim` option and the script's `--slim` leave PDF support out:
+about 0.25 GB less down on macOS, 0.37 GB on Linux, 0.8 GB less on disk.
 
 With Local, the same question asks one more thing: start the service when you
 log in, yes or no. A yes is the explicit consent RDR-174 requires for the

@@ -121,7 +121,8 @@ async def test_no_cli_and_nx_mcp_is_a_stand_in_with_exactly_the_two_setup_tools(
     assert sorted(tool.name for tool in tools) == ["setup", "setup_status"]
     by_name = {tool.name: tool for tool in tools}
     schema = by_name["setup"].inputSchema
-    assert sorted(schema["properties"]) == ["autostart", "mode"] and schema["required"] == ["mode"]
+    assert sorted(schema["properties"]) == ["autostart", "mode", "slim"] and schema["required"] == ["mode"]
+    assert schema["properties"]["slim"]["type"] == "boolean" and schema["properties"]["slim"]["default"] is False
     assert by_name["setup_status"].inputSchema.get("properties") in ({}, None)
     for tool in tools:
         assert tool.annotations is None, f"{tool.name}: Phase 1 gave no hints; the stand-in and the real server give none"
@@ -171,15 +172,22 @@ def test_the_tool_descriptions_give_the_tables_sizes() -> None:
 
     mod = _standin()
     description = mod.SETUP_DESCRIPTION
+    # nexus-2k66t.4.9: the default install includes PDF support, so the rows are the full sizes, with the
+    # Linux download beside the macOS one.
     rows = {
-        m.group(1): (m.group(2), m.group(3))
-        for m in re.finditer(r"\| (Local|Cloud|CLI only) \|[^|]*\| about ([\d.]+) GB down, ([\d.]+(?: to [\d.]+)?) GB on disk \|", mod.QUESTION_TABLE)
+        m.group(1): (m.group(2), m.group(3), m.group(4))
+        for m in re.finditer(
+            r"\| (Local|Cloud|CLI only) \|[^|]*\| about ([\d.]+) GB down \(([\d.]+) GB on Linux\), ([\d.]+(?: to [\d.]+)?) GB on disk \|",
+            mod.QUESTION_TABLE,
+        )
     }
-    assert rows == {"Local": ("0.55", "1.6 to 2.3"), "Cloud": ("0.2", "1.3 to 1.5"), "CLI only": ("0.2", "1.3 to 1.5")}, rows
-    local, cloud, cli = rows["Local"], rows["Cloud"], rows["CLI only"]
-    assert f"up to about {local[0]} GB to download, {local[1]} GB on disk" in description
-    assert f"up to about {cloud[0]} GB to download, {cloud[1]} GB on disk" in description
-    assert f"up to about {cli[0]} GB to download, {cli[1]} GB on disk" in description
+    assert rows == {
+        "Local": ("0.8", "0.9", "2.4 to 3.1"), "Cloud": ("0.45", "0.6", "2.1 to 2.3"), "CLI only": ("0.45", "0.6", "2.1 to 2.3"),
+    }, rows
+    for choice in ("Local", "Cloud", "CLI only"):
+        mac, linux, disk = rows[choice]
+        assert f"up to about {mac} GB to download ({linux} GB on Linux), {disk} GB on disk" in description, choice
+    assert "include PDF support" in description and "slim true" in description, "the description says what the sizes cover and offers slim"
 
 
 # -- installed but cannot start (Sam, 2026-10-14) --------------------------------------------
@@ -250,10 +258,16 @@ async def test_a_found_cli_that_cannot_start_is_served_to_a_real_client_as_the_b
         ({"mode": "cli-only"}, ["start", "--mode", "cli-only"]),
         ({"mode": "cli-only", "autostart": True}, ["start", "--mode", "cli-only"]),
         ({"mode": "not-now"}, ["not-now"]),
+        ({"mode": "local", "slim": True}, ["start", "--mode", "local", "--slim"]),
+        ({"mode": "local", "autostart": True, "slim": True}, ["start", "--mode", "local", "--autostart", "--slim"]),
+        ({"mode": "cloud", "slim": True}, ["start", "--mode", "cloud", "--slim"]),
+        ({"mode": "cli-only", "slim": True}, ["start", "--mode", "cli-only", "--slim"]),
+        ({"mode": "cli-only", "slim": False}, ["start", "--mode", "cli-only"]),
     ],
     ids=[
         "local+autostart", "local", "local autostart false", "cloud", "cloud ignores autostart", "cli-only",
-        "cli-only ignores autostart", "not-now",
+        "cli-only ignores autostart", "not-now", "local slim", "local autostart slim", "cloud slim", "cli-only slim",
+        "cli-only slim false",
     ],
 )
 async def test_setup_starts_the_setup_script_with_the_mode_and_autostart_given(
@@ -310,7 +324,7 @@ async def test_a_done_record_with_no_cli_found_is_not_reported_as_a_finished_bui
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", [{"mode": "Cloud"}, {"mode": "bogus"}, {}, {"mode": 3}, {"mode": "local", "autostart": "yes"}])
+@pytest.mark.parametrize("arguments", [{"mode": "Cloud"}, {"mode": "bogus"}, {}, {"mode": 3}, {"mode": "local", "autostart": "yes"}, {"mode": "local", "slim": "yes"}])
 async def test_a_refused_call_is_an_error_and_starts_nothing(tmp_path: Path, arguments: dict) -> None:
     """A mode the stand-in does not know, or an argument of the wrong type, is an error that starts nothing."""
     launch, recorder = _plugin_with_recorder(tmp_path)

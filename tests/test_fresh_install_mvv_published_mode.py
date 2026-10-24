@@ -249,6 +249,15 @@ def test_mcp_lt2_tripwire_is_shared_across_both_layers_not_duplicated() -> None:
     assert "PUBLISHED_MODE" not in between
 
 
+def test_the_summary_prints_the_slim_leg_status_just_before_the_sentinel() -> None:
+    """A skipped leg 9b must be visible in the summary (nexus-2k66t.4.9); the PASSED sentinel stays last."""
+    text = _text()
+    summary = text.index('echo "FRESH-INSTALL MVV leg 9b (slim generation): $SLIM_LEG"')
+    sentinel = text.index('echo "FRESH-INSTALL MVV PASSED', summary)
+    assert 0 < sentinel - summary < 200, "the status line must sit directly before the sentinel"
+    assert text.rindex('echo "FRESH-INSTALL MVV PASSED') > summary
+
+
 def test_passed_line_names_the_layer_honestly_in_both_modes() -> None:
     text = _text()
     assert "PUBLISHED artifact, uv-tool resolution layer" in text

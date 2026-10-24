@@ -76,6 +76,7 @@ def _running_version() -> str:
 
 def _write_standin_wheel(
     index: Path, version: str, *, requires: tuple[str, ...] = (), constraints: str | None = None,
+    provides_extras: tuple[str, ...] = (),
 ) -> None:
     """A minimal ``conexus`` wheel declaring the ``nx`` and ``nx-mcp`` scripts.
 
@@ -91,6 +92,7 @@ def _write_standin_wheel(
         "conexus_stub/__init__.py": f"def main():\n    print('stand-in nx {version}')\n",
         f"{dist_info}/METADATA": (
             f"Metadata-Version: 2.1\nName: conexus\nVersion: {version}\n"
+            + "".join(f"Provides-Extra: {extra}\n" for extra in provides_extras)
             + "".join(f"Requires-Dist: {req}\n" for req in requires)
         ),
         f"{dist_info}/WHEEL": (
@@ -245,6 +247,7 @@ class World:
 
 def _make_world(
     root: Path, *, requires: tuple[str, ...] = (), constraints: str | None = None,
+    provides_extras: tuple[str, ...] = (),
 ) -> World:
     world = World(
         root=root, index=root / "index", tools=root / "tools", bin=root / "bin",
@@ -254,8 +257,11 @@ def _make_world(
     (root / "home").mkdir(parents=True)
     for directory in (world.tools, world.bin, world.uv_cache, world.uv_tools, world.path_store.parent):
         directory.mkdir(parents=True)
-    _write_standin_wheel(world.index, _running_version(), requires=requires, constraints=constraints)
-    _write_standin_wheel(world.index, HIGHER)
+    _write_standin_wheel(
+        world.index, _running_version(), requires=requires, constraints=constraints,
+        provides_extras=provides_extras,
+    )
+    _write_standin_wheel(world.index, HIGHER, requires=requires, provides_extras=provides_extras)
     venv.EnvBuilder(with_pip=False, symlinks=not ON_WINDOWS).create(world.throwaway)
     _let_the_throwaway_import_this_checkout(world)
     return world
@@ -965,14 +971,23 @@ class TestTheFlagTakesNothingElse:
         monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
         return CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap", *args])
 
-    @pytest.mark.parametrize("args", [("--extras", "local"), ("--version", "1.2.3")], ids=["extras", "version"])
-    def test_extras_and_a_version_are_refused(
-        self, world: World, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...],
+    def test_a_version_is_refused(self, world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``--extras`` is accepted since nexus-2k66t.4.9 (Sam, 2026-10-23: the installers
+        install the PDF stack by default); a version is still the running program's."""
+        before = world.snapshot()
+        result = self._invoke(world, monkeypatch, "--version", "1.2.3")
+        assert result.exit_code == 1
+        assert "--bootstrap" in result.output and "--version" in result.output
+        assert "--extras" not in result.output, "the refusal must not claim extras are refused"
+        assert world.snapshot() == before
+
+    def test_a_bad_extra_name_is_refused_before_anything_is_built(
+        self, world: World, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         before = world.snapshot()
-        result = self._invoke(world, monkeypatch, *args)
-        assert result.exit_code == 1
-        assert "--bootstrap" in result.output and args[0] in result.output
+        result = self._invoke(world, monkeypatch, "--extras", "not a name!")
+        assert result.exit_code != 0
+        assert "not a valid extra name" in result.output
         assert world.snapshot() == before
 
     def test_keep_is_accepted_and_changes_nothing_about_the_build(
@@ -993,6 +1008,151 @@ class TestTheFlagTakesNothingElse:
         assert result.exit_code == 0, result.output
         assert "conexus" in result.output and _running_version() in result.output
         assert "--extras" not in result.output
+        assert world.snapshot() == before
+
+
+class TestTheBootstrapTakesExtras:
+    """nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default). The installers
+    and the plugin's setup run ``nx self install --bootstrap --extras pdf``; the throwaway
+    environment stays slim and the GENERATION gets the extra. The world's stand-in wheel
+    declares a ``pdf`` extra that pulls one stand-in dependency, so a build that dropped
+    the extra shows as a missing distribution, not only a receipt line."""
+
+    DEP = "pdf-standin"
+
+    def _pdf_world(self, root: Path) -> World:
+        world = _make_world(
+            root, requires=(f"{self.DEP}; extra == 'pdf'",), provides_extras=("pdf",),
+        )
+        _write_standin_dependency(world.index, self.DEP, "1.0.0")
+        return world
+
+    def _has_dep(self, generation: Path) -> bool:
+        out = subprocess.run(  # noqa: S603 -- fixed argv
+            [str(lc.venv_python(generation)), "-c",
+             f"import importlib.metadata as m, sys\n"
+             f"try: m.version('{self.DEP}')\nexcept m.PackageNotFoundError: sys.exit(3)"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        return out.returncode == 0
+
+    def test_the_pdf_extra_reaches_the_generation_and_its_receipt(self, tmp_path: Path) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        result = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert result.returncode == 0, result.stdout + result.stderr
+        (generation,) = _generations(world)
+        receipt = install_layout.read_receipt(generation)
+        assert receipt.extras == ["pdf"]
+        assert receipt.spec == f"conexus[pdf]=={_running_version()}"
+        assert self._has_dep(generation), "the generation was built without the pdf extra's dependency"
+
+    def test_without_extras_the_same_world_builds_slim(self, tmp_path: Path) -> None:
+        """The control: if this installed the dependency the test above proves nothing."""
+        world = self._pdf_world(tmp_path / "w")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        (generation,) = _generations(world)
+        assert install_layout.read_receipt(generation).extras == []
+        assert not self._has_dep(generation)
+
+    def test_extras_are_normalised_and_merged_in_order(self, tmp_path: Path) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        result = world.run(
+            world.python, "self", "install", "--bootstrap", "--extras", "PDF,pdf", "--dry-run",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "--extras pdf" in result.stdout or "extras pdf" in result.stdout.lower()
+        assert "pdf,pdf" not in result.stdout
+
+    def test_a_dry_run_names_the_extra_and_changes_nothing(self, tmp_path: Path) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf", "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "pdf" in result.stdout and _running_version() in result.stdout
+        assert world.snapshot() == before
+
+    def test_an_interrupted_slim_build_is_not_finished_when_the_pdf_extra_is_asked(
+        self, tmp_path: Path,
+    ) -> None:
+        """A run that died after its flip left a SLIM generation. The same command with
+        ``--extras pdf`` must not finish that one (it would end with no PDF support and
+        say done): it builds the generation that has it."""
+        world = self._pdf_world(tmp_path / "w")
+        slim = _built(world)
+        _lose_the_shims(world)
+
+        again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        generations = _generations(world)
+        assert len(generations) == 2 and slim in generations, "no generation was built"
+        current = install_layout.current_generation(tools=world.tools)
+        assert current != slim and install_layout.read_receipt(current).extras == ["pdf"]
+        assert self._has_dep(current)
+        assert _shim_of(world).is_file()
+
+    def test_an_interrupted_pdf_build_is_finished_by_the_same_command_without_a_rebuild(
+        self, tmp_path: Path,
+    ) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        first = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert first.returncode == 0, first.stdout + first.stderr
+        (built,) = _generations(world)
+        _lose_the_shims(world)
+
+        again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert _generations(world) == [built]
+        assert "no rebuild" in again.stdout
+
+    def test_an_interrupted_pdf_build_is_not_finished_by_a_command_that_asks_for_nothing(
+        self, tmp_path: Path,
+    ) -> None:
+        """``--slim`` after an interrupted default install: the leftover carries pdf, the
+        caller asked for none, so finishing it would silently flip in what ``--slim`` left
+        out. It builds the slim generation instead, and the pdf one stays on disk unflipped."""
+        world = self._pdf_world(tmp_path / "w")
+        first = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert first.returncode == 0, first.stdout + first.stderr
+        (built,) = _generations(world)
+        _lose_the_shims(world)
+
+        again = world.run(world.python, "self", "install", "--bootstrap")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert "no rebuild" not in again.stdout
+        generations = _generations(world)
+        assert len(generations) == 2 and built in generations, "no slim generation was built"
+        current = install_layout.current_generation(tools=world.tools)
+        assert current != built and install_layout.read_receipt(current).extras == []
+        assert not self._has_dep(current)
+
+    def test_the_finishing_and_dry_run_lines_name_the_extras(self, tmp_path: Path) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        first = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert first.returncode == 0, first.stdout + first.stderr
+        _lose_the_shims(world)
+
+        dry = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf", "--dry-run")
+        assert dry.returncode == 0, dry.stdout + dry.stderr
+        assert "would finish the interrupted install" in dry.stdout and "extras: pdf" in dry.stdout
+
+        real = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert real.returncode == 0, real.stdout + real.stderr
+        assert "finishing the interrupted install" in real.stdout and "extras: pdf" in real.stdout
+
+    def test_a_complete_install_refuses_and_names_the_command_that_adds_the_extra(
+        self, tmp_path: Path,
+    ) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        _built(world)
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "already installed" in result.stderr
+        assert "nx self install --extras pdf" in result.stderr
         assert world.snapshot() == before
 
 

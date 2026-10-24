@@ -69,6 +69,94 @@ def test_a_layout_the_auto_path_does_not_touch_names_its_own_command(monkeypatch
     assert "uv sync" in row.detail
 
 
+# ── a carry-forward that is pending or failed (nexus-2k66t.4.9) ───────────────
+
+
+def _pending(monkeypatch, value: bool = True) -> None:
+    monkeypatch.setattr(pdf_stack, "carry_forward_pending", lambda: value)
+
+
+def test_a_pending_carry_forward_is_a_warning_that_names_the_command(monkeypatch) -> None:
+    """An install built before the split that has not carried the stack forward yet: the box HAD PDF
+    support in every earlier generation, so "not installed" alone would hide that an upgrade owes it."""
+    _stack(monkeypatch, "absent")
+    _pending(monkeypatch)
+    (row,) = health._check_pdf_support()
+    assert row.label == "PDF support" and not row.ok and row.warn and not row.fatal
+    assert "built before PDF support became an extra" in row.detail
+    assert "nx upgrade" in row.detail
+    assert row.fix_suggestions and pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
+
+
+def test_a_failed_carry_forward_says_so_and_when(monkeypatch) -> None:
+    _stack(monkeypatch, "absent")
+    _pending(monkeypatch)
+    sentinel = pdf_stack._carry_failed_sentinel()
+    assert sentinel is not None
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("2026-10-23T12:00:00+0000\n", encoding="utf-8")
+    (row,) = health._check_pdf_support()
+    assert not row.ok and row.warn
+    assert "could not carry PDF support forward" in row.detail and "2026-10-23T12:00:00" in row.detail
+    assert pdf_stack.INSTALL_COMMAND in row.detail
+    assert row.fix_suggestions and pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
+
+
+def test_a_failed_note_outranks_a_pending_one(monkeypatch) -> None:
+    _stack(monkeypatch, "absent")
+    _pending(monkeypatch)
+    sentinel = pdf_stack._carry_failed_sentinel()
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("2026-10-23T12:00:00+0000\n", encoding="utf-8")
+    note = pdf_stack.carry_forward_note()
+    assert note is not None and "could not carry" in note and "built before" not in note
+
+
+def test_an_old_failed_marker_is_silent_on_an_install_that_owes_no_carry(monkeypatch) -> None:
+    """A deliberately slim box (or one that carried since) with a stale failed marker must not warn forever."""
+    _stack(monkeypatch, "absent")
+    _pending(monkeypatch, False)
+    sentinel = pdf_stack._carry_failed_sentinel()
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("2026-10-23T12:00:00+0000\n", encoding="utf-8")
+    assert pdf_stack.carry_forward_note() is None
+    (row,) = health._check_pdf_support()
+    assert row.ok and not row.warn
+
+
+def test_no_note_when_nothing_is_pending_and_nothing_failed(monkeypatch) -> None:
+    """The control: a fresh slim install stays the informational pass the earlier tests pin."""
+    _stack(monkeypatch, "absent")
+    _pending(monkeypatch, False)
+    assert pdf_stack.carry_forward_note() is None
+    (row,) = health._check_pdf_support()
+    assert row.ok and not row.warn
+
+
+def test_a_broken_stack_still_reports_red_and_adds_the_failed_note(monkeypatch) -> None:
+    _stack(monkeypatch, "broken", "mineru: 9.9.9, the pin is 3.1.11")
+    _pending(monkeypatch)
+    sentinel = pdf_stack._carry_failed_sentinel()
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("2026-10-23T12:00:00+0000\n", encoding="utf-8")
+    (row,) = health._check_pdf_support()
+    assert not row.ok and not row.warn, "broken stays a hard failure"
+    assert "mineru: 9.9.9" in row.detail and "could not carry PDF support forward" in row.detail
+
+
+def test_the_note_reads_the_marker_the_carry_forward_writes(monkeypatch, tmp_path) -> None:
+    """The producer and the reader agree on one file: run the real failing carry-forward, then ask."""
+    monkeypatch.setattr(pdf_stack, "_install_generation", lambda **kw: (_ for _ in ()).throw(OSError("offline")))
+    monkeypatch.setattr("nexus.install_layout.read_receipt", lambda _g: __import__("nexus").install_layout.Receipt(
+        version="", spec="conexus", source_kind="registry", source="conexus", python="3.12",
+        base_interpreter="/usr/bin", created_at="2026-10-01T00:00:00Z", extras=[], installer_schema=1,
+    ))
+    monkeypatch.setattr("nexus.commands.self_cmd.running_generation", lambda: tmp_path / "gen-x")
+    assert pdf_stack.carry_forward() is not None
+    note = pdf_stack.carry_forward_note()
+    assert note is not None and "could not carry PDF support forward" in note
+
+
 def test_the_default_run_asks_the_row() -> None:
     import inspect
 

@@ -48,5 +48,6 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-- `conexus/commands/setup.md` (nexus-2k66t.4.2): the setup command's install-size rows follow the on-demand PDF stack (derived sizes; nexus-2k66t.4.9 restores the full-default sizes when the installers install [pdf] by default). Needs the client release that carries the [pdf] split.
-- `conexus/launch/nx_standin.py` (nexus-2k66t.4.2): the stand-in's install-size rows match the setup tool's, for the same release. Needs the client release that carries the [pdf] split.
+- `conexus/commands/setup.md` (nexus-2k66t.4.2, nexus-2k66t.4.9): the setup command's install-size rows show the full default install (PDF support included; derived from the 2026-10-23 measurement) with a slim line, and step 3 names the `slim` argument. Needs the client release that carries the [pdf] split and the default-[pdf] installers.
+- `conexus/launch/nx_standin.py` (nexus-2k66t.4.2, nexus-2k66t.4.9): the stand-in's size rows, the `setup` tool's new `slim` argument and the manual and repair commands (`--extras pdf`) match the real server's `src/nexus/mcp/setup_tools.py`, for the same release. Needs the client release that carries the [pdf] split and the default-[pdf] installers.
+- `conexus/launch/nx_setup.py` (nexus-2k66t.4.9): the setup build runs `nx self install --bootstrap --extras pdf` (PDF support by default; `start --slim` leaves it out and records the choice). Needs the client release whose `--bootstrap` accepts `--extras`.

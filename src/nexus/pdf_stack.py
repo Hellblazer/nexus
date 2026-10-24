@@ -293,7 +293,7 @@ def policy() -> str:
 
 @dataclass(frozen=True)
 class InstallPlan:
-    kind: str  # generation | directory | legacy | dev
+    kind: str  # generation | directory | legacy | mcpb | dev
     auto: bool  # whether ensure() may install without a person
     command: str  # what a person runs instead
     why: str = ""
@@ -327,14 +327,51 @@ def install_plan() -> InstallPlan:
     except Exception:  # noqa: BLE001 — unknown layout: do not touch it
         legacy = False
     if legacy:
+        # ONE command (nexus-2k66t.4.9): `nx self install` converges a legacy tree onto the
+        # generation layout and, because the tree is an existing install, carries `pdf` with it
+        # (migrate_legacy.sh, generation_core.migrate_legacy). A second `--extras pdf` was redundant.
         return InstallPlan(
-            "legacy", False, f"nx self install && {INSTALL_COMMAND}",
-            "this is a uv tool install, not a generation; `nx self install` moves it onto the generation layout first",
+            "legacy", False, "nx self install",
+            "this is a uv tool install, not a generation; `nx self install` moves it onto the generation "
+            "layout and carries PDF support with it",
+        )
+    if _running_from_mcpb_bundle(host):
+        return InstallPlan(
+            "mcpb", False, _cli_install_command(),
+            "this is the Claude Desktop extension (.mcpb) environment, which stays bare conexus; "
+            "PDF indexing needs the CLI install",
         )
     return InstallPlan(
         "dev", False, "uv sync",
         "this is a source checkout; its dev group carries the PDF stack",
     )
+
+
+def _cli_install_command() -> str:
+    """The first-install one-liner for this platform (the installer scripts install PDF support by default)."""
+    if os.name == "nt":
+        return "irm https://hellblazer.github.io/nexus/install.ps1 | iex"
+    return "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"
+
+
+def _running_from_mcpb_bundle(prefix: Path) -> bool:
+    """Whether *prefix* (the running venv root) is the Claude Desktop extension's environment.
+
+    ``mcpb/src/bootstrap.py`` runs ``uv sync`` in the bundle directory and then ``uv run --directory
+    <bundle> src/server.py``, so the interpreter's ``sys.prefix`` is ``<bundle>/.venv``. The bundle is
+    recognised by what it ships beside that venv: ``manifest.json``, ``src/bootstrap.py`` and a
+    ``pyproject.toml`` naming ``conexus-mcpb``. A source checkout keeps ``mcpb/`` one level down, so
+    its root carries none of the three."""
+    root = prefix.parent
+    try:
+        project = root / "pyproject.toml"
+        return (
+            (root / "manifest.json").is_file()
+            and (root / "src" / "bootstrap.py").is_file()
+            and 'name = "conexus-mcpb"' in project.read_text(encoding="utf-8")
+        )
+    except OSError:
+        return False
 
 
 def _running_version() -> str:
@@ -709,6 +746,47 @@ CARRY_FORWARD_AUTO_BACKOFF_S: float = 6 * 3600.0
 _CARRY_FAILED_SENTINEL = "pdf-carry-forward-failed"
 
 
+def _carry_failed_sentinel() -> Path | None:
+    """The marker a failed carry-forward leaves (and a success removes), or None
+    when the config directory cannot be named."""
+    try:
+        import nexus.config as _config  # noqa: PLC0415 — deferred; module attribute so a patched config dir is seen (nexus-78blw)
+
+        return _config.nexus_config_dir() / _CARRY_FAILED_SENTINEL
+    except Exception:  # noqa: BLE001 — no config dir: no marker
+        return None
+
+
+def carry_forward_note() -> str | None:
+    """One sentence for `nx doctor` when an upgrade owes this install PDF support
+    (nexus-2k66t.4.9, F12): the last carry-forward failed (and when), or it has not
+    run yet. None when neither holds. A failure outranks a pending run: it is the
+    reason the run has not finished. Both need a carry to be owed: a failed marker
+    left by an old attempt says nothing on an install that no longer owes one (a
+    deliberately slim box, or one that carried PDF support forward since), so it
+    would warn for as long as the file lasts."""
+    if not carry_forward_pending():
+        return None
+    sentinel = _carry_failed_sentinel()
+    if sentinel is not None:
+        try:
+            when = sentinel.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            when = None
+        except OSError:
+            when = ""
+        if when is not None:
+            stamp = f" ({when})" if when else ""
+            return (
+                f"the last upgrade could not carry PDF support forward{stamp}; this install keeps working "
+                f"without it. Retry: {INSTALL_COMMAND}"
+            )
+    return (
+        "this install was built before PDF support became an extra and has not carried it forward yet; "
+        f"`nx upgrade` does it, or run {INSTALL_COMMAND}"
+    )
+
+
 def carry_forward_pending() -> bool:
     """True when this process runs from a generation whose receipt predates the
     PDF split and does not list ``pdf``: an existing install whose first
@@ -733,12 +811,7 @@ def carry_forward(*, auto_mode: bool = False) -> str | None:
     and retried by the next run (backed off under ``--auto``)."""
     if not carry_forward_pending():
         return None
-    try:
-        import nexus.config as _config  # noqa: PLC0415 — deferred; module attribute so a patched config dir is seen (nexus-78blw)
-
-        sentinel = _config.nexus_config_dir() / _CARRY_FAILED_SENTINEL
-    except Exception:  # noqa: BLE001 — no config dir: no backoff
-        sentinel = None
+    sentinel = _carry_failed_sentinel()
     if auto_mode and sentinel is not None:
         try:
             age = time.time() - sentinel.stat().st_mtime

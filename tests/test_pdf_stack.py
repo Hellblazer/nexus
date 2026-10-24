@@ -268,7 +268,8 @@ def test_ensure_refuse_policy_exits_69_with_the_command_and_installs_nothing(sta
 
 @pytest.mark.parametrize("kind, command", [
     ("directory", "NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh"),
-    ("legacy", "nx self install && nx self install --extras pdf"),
+    ("legacy", "nx self install"),
+    ("mcpb", "curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh"),
     ("dev", "uv sync"),
 ])
 def test_ensure_refuses_a_layout_the_auto_path_does_not_touch(stack, kind, command) -> None:
@@ -459,3 +460,55 @@ def test_skipped_record_round_trips_and_counts_per_repo(tmp_path) -> None:
     pdf_stack.record_skipped([], repo=repo_b)
     assert pdf_stack.skipped_count() == 0
     assert not (tmp_path / "cfg" / "pdf-stack-skipped.json").exists()
+
+
+def _mcpb_bundle(root: Path) -> Path:
+    """The layout `mcpb/src/bootstrap.py` leaves: manifest, bootstrap and project beside `.venv`."""
+    (root / "src").mkdir(parents=True)
+    (root / "manifest.json").write_text("{}", encoding="utf-8")
+    (root / "src" / "bootstrap.py").write_text("", encoding="utf-8")
+    (root / "pyproject.toml").write_text('[project]\nname = "conexus-mcpb"\n', encoding="utf-8")
+    venv = root / ".venv"
+    venv.mkdir()
+    return venv
+
+
+def test_the_desktop_extension_environment_is_told_to_use_the_cli_install_not_uv_sync(monkeypatch, tmp_path) -> None:
+    """The .mcpb venv is not a source checkout: `uv sync` there would be the wrong advice."""
+    from nexus.commands import self_cmd
+
+    monkeypatch.setattr(self_cmd, "running_generation", lambda: _mcpb_bundle(tmp_path / "bundle"))
+    monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: False)
+    plan = pdf_stack.install_plan()
+    assert plan.kind == "mcpb" and not plan.auto
+    assert "uv sync" not in plan.command and "install.sh" in plan.command
+    assert ".mcpb" in plan.why and "CLI install" in plan.why
+
+
+def test_a_source_checkout_is_still_a_dev_install(monkeypatch, tmp_path) -> None:
+    from nexus.commands import self_cmd
+
+    checkout = tmp_path / "repo"
+    (checkout / "mcpb").mkdir(parents=True)  # the bundle lives one level down in a checkout
+    (checkout / "mcpb" / "manifest.json").write_text("{}", encoding="utf-8")
+    (checkout / "pyproject.toml").write_text('[project]\nname = "conexus"\n', encoding="utf-8")
+    (checkout / ".venv").mkdir()
+    monkeypatch.setattr(self_cmd, "running_generation", lambda: checkout / ".venv")
+    monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: False)
+    plan = pdf_stack.install_plan()
+    assert plan.kind == "dev" and plan.command == "uv sync"
+
+
+def test_a_legacy_uv_tree_is_told_one_command_because_the_convergence_carries_pdf(monkeypatch) -> None:
+    """nexus-2k66t.4.9 (F4): ``nx self install`` on a legacy uv tool tree converges it onto the generation
+    layout AND adds ``pdf`` (an existing install always carries it, ``migrate_legacy.sh`` and
+    ``generation_core.migrate_legacy``), so a second ``--extras pdf`` command was redundant."""
+    from nexus.commands import self_cmd
+
+    monkeypatch.setattr(self_cmd, "running_generation", lambda: __import__("pathlib").Path("/uv/conexus"))
+    monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: True)
+    plan = pdf_stack.install_plan()
+    assert plan.kind == "legacy" and not plan.auto
+    assert plan.command == "nx self install"
+    assert "&&" not in plan.command and "--extras" not in plan.command
+    assert "PDF support" in plan.why and "carr" in plan.why, "the reason says the move keeps PDF support"

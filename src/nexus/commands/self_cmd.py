@@ -309,9 +309,10 @@ def perform_self_install(
 @dataclass(frozen=True)
 class _RegistryReceipt:
     """What a bootstrap build asks for, in the shape :func:`_build_request`
-    reads from a receipt: the distribution name from the package index, and no
-    extras (the documented first install records none; local mode's embedding
-    model belongs to the service, which ``nx init`` provisions)."""
+    reads from a receipt: the distribution name from the package index, and the
+    extras the caller named (``--extras``; none when it named none, which is the
+    slim install. Local mode's embedding model belongs to the service, which
+    ``nx init`` provisions, so it is not an extra here)."""
 
     source: str = "conexus"
     extras: tuple[str, ...] = ()
@@ -514,22 +515,38 @@ def _shim_names_of(generation: Path) -> list[str]:
     return sorted(install_layout.owned_shim_names(generation, platform=_plat()))
 
 
-def _unfinished_generation(tools: Path, running: str) -> Path | None:
+def _extras_key(names) -> frozenset[str]:
+    """PEP 685-normalized extras as a set, so spelling and order do not matter
+    when a leftover's receipt is compared with the extras a caller asked for."""
+    return frozenset(re.sub(r"[-_.]+", "-", str(n).lower()) for n in names)
+
+
+def _unfinished_generation(
+    tools: Path, running: str, extras: tuple[str, ...] = (),
+) -> Path | None:
     """The generation a bootstrap that died after its build can finish, or ``None``.
 
     Reached only when no complete install exists. The candidates are the
     generation ``current`` names (a run that died after the flip) or, when it
     names none, every receipted generation, newest first. A candidate is
     finished only when it is what a fresh build would produce: its receipt says
-    *running* and its interpreter answers the shim step's lookup. Otherwise the
-    caller builds afresh, which is safe because nothing complete is replaced."""
+    *running*, lists EXACTLY the requested *extras* (a slim generation is not
+    finished for a caller that asked for ``pdf``, which would end "done" with no
+    PDF support; a pdf generation is not finished for a caller that asked for
+    nothing, which would silently flip in what ``--slim`` left out) and its
+    interpreter answers the shim step's lookup. Otherwise the caller builds
+    afresh, which is safe because nothing complete is replaced."""
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     current = _current_generation_dir(tools)
     candidates = [current] if current is not None else list(reversed(install_layout.list_generations(tools=tools)))
     for generation in candidates:
         receipt = _read_receipt_or_none(generation)
-        if receipt is not None and receipt.version == running and _generation_answers_for_its_shims(generation):
+        if (
+            receipt is not None and receipt.version == running
+            and _extras_key(extras) == _extras_key(receipt.extras)
+            and _generation_answers_for_its_shims(generation)
+        ):
             return generation
     return None
 
@@ -607,7 +624,8 @@ def _bootstrap_install(
     Phase 2 Step 1, nexus-sv2wx.14).
 
     Reached ONLY through ``--bootstrap``. Installs the released package, at the
-    running program's own version and with no extras, from the package index
+    running program's own version and with the *extras* named (none by default;
+    the installers and the plugin's setup name ``pdf``, nexus-2k66t.4.9), from the package index
     into a new ``gen-<stamp>``, points ``current`` at it and writes the command
     shims. It is what ``uv tool run --python 3.12 --from conexus==<v> nx self
     install --bootstrap`` runs, from a throwaway ``uv`` environment that
@@ -639,16 +657,18 @@ def _bootstrap_install(
     other leftover falls through to a fresh build.
     Two bootstraps at once are P2.2's lock, not this command's.
     """
-    if version or extras:
+    if version:
         raise click.ClickException(
-            "--bootstrap installs the version of the running nx with no extras, so it "
-            "takes neither --version nor --extras. Nothing was changed."
+            "--bootstrap installs the version of the running nx, so it takes no "
+            "--version. Nothing was changed."
         )
     existing = _existing_install(tools, bin_dir)
     if existing is not None:
+        add = f" --extras {','.join(extras)}" if extras else ""
         raise click.ClickException(
             f"--bootstrap is for a first install and {existing} is already installed. "
-            "Run `nx self install` to update it. Nothing was changed."
+            f"Run `nx self install{add}` to update it"
+            f"{' and add the extras' if extras else ''}. Nothing was changed."
         )
     current = _current_generation_dir(tools)
     if current is not None and _read_receipt_or_none(current) is None:
@@ -662,7 +682,7 @@ def _bootstrap_install(
             f"or unreadable. Repair it with `{nx} self install`. Nothing was changed."
         )
     running = _running_version()
-    unfinished = _unfinished_generation(tools, running)
+    unfinished = _unfinished_generation(tools, running, tuple(extras))
     _refuse_a_foreign_program_in_the_bin_directory(tools, bin_dir, unfinished)
     if unfinished is not None:
         # An earlier bootstrap built this generation and died before `current`
@@ -670,7 +690,8 @@ def _bootstrap_install(
         # `nx` here to run, so the same command finishes the job, with no
         # rebuild. Only a generation at the running version that answers the
         # shim lookup is finished; any other leftover falls through to a build.
-        what = f"{unfinished.name} (conexus {running}) is already built"
+        shown = ",".join(extras) if extras else "no extras"
+        what = f"{unfinished.name} (conexus {running}, extras: {shown}) is already built"
         if dry_run:
             click.echo(f"would finish the interrupted install: {what} (no rebuild); "
                        "would set `current` and write the command shims")
@@ -679,7 +700,7 @@ def _bootstrap_install(
                    "setting `current` and the command shims")
         _flip_and_shim(unfinished, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=True)
         return unfinished
-    build = _build_request(install_dir, _RegistryReceipt(), version=running)
+    build = _build_request(install_dir, _RegistryReceipt(extras=tuple(extras)), version=running)
     if dry_run:
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
@@ -1660,14 +1681,16 @@ def self_group() -> None:
 @click.option("--version", default=None,
               help="Install this version instead of whatever the source resolves to.")
 @click.option("--extras", "extras", multiple=True,
-              help="Extra(s) to ADD, e.g. --extras local (repeatable, or "
+              help="Extra(s) to ADD, e.g. --extras pdf (repeatable, or "
                    "comma-separated). MERGED with the extras this install "
-                   "already has — never replaces them (nexus-pffc4).")
+                   "already has — never replaces them (nexus-pffc4). With "
+                   "--bootstrap they are the first install's extras.")
 @click.option("--bootstrap", is_flag=True,
               help="First install from nothing: build the released package, at the version "
-                   "of the nx running this command and with no extras, into a new "
-                   "generation. Takes neither --version nor --extras, does not prune "
-                   "uv's package cache, and refuses when an install already exists.")
+                   "of the nx running this command and with the --extras named (none by "
+                   "default; the installers pass pdf), into a new generation. Takes no "
+                   "--version, does not prune uv's package cache, and refuses when an "
+                   "install already exists.")
 @click.option("--dry-run", is_flag=True,
               help="Print the build command and stop.")
 def install_cmd(

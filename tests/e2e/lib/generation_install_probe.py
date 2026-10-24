@@ -169,12 +169,38 @@ def install_with_propagation_wait(
         backoff = min(backoff * 2, settings.max_backoff_s)
 
 
+def installer_args(source: str, extras: str = "") -> list[str]:
+    """The ``install_generation.sh`` arguments for *source* with *extras* (comma-separated).
+
+    Extras are ASKED OF THE INSTALLER (``--extras``), the way ``nx self install --extras pdf`` and
+    both one-line installers ask, never written into the source: ``conexus==X[pdf]`` is not a valid
+    spec, and ``conexus[pdf]==X`` as a source makes a receipt whose spec and extras disagree. A
+    registry pin is therefore split into ``--source conexus --version X``. (nexus-2k66t.4.9)
+    """
+    if not extras:
+        return ["--source", source]
+    pin = re.fullmatch(r"(conexus)==([^\s=;]+)", source)
+    if pin:
+        return ["--source", pin.group(1), "--extras", extras, "--version", pin.group(2)]
+    return ["--source", source, "--extras", extras]
+
+
+def propagation_spec(source: str, extras: str = "") -> str:
+    """The spec uv will name in a "no version of ..." miss: ``conexus[pdf]==X`` for a registry pin
+    built with extras, else the source itself. The propagation wait matches on this."""
+    pin = re.fullmatch(r"(conexus)==([^\s=;]+)", source)
+    if extras and pin:
+        return f"{pin.group(1)}[{','.join(sorted(set(extras.split(','))))}]=={pin.group(2)}"
+    return source
+
+
 def build_generation(
     install_dir: Path,
     source: str,
     env: dict[str, str],
     settings: PropagationSettings,
     *,
+    extras: str = "",
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> InstallOutcome:
@@ -182,11 +208,11 @@ def build_generation(
 
     def run(extra_env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["bash", str(install_dir / "install_generation.sh"), "--source", source],
+            ["bash", str(install_dir / "install_generation.sh"), *installer_args(source, extras)],
             capture_output=True, text=True, timeout=1800, env={**env, **extra_env},
         )
 
-    return install_with_propagation_wait(run, source, settings, clock=clock, sleep=sleep)
+    return install_with_propagation_wait(run, propagation_spec(source, extras), settings, clock=clock, sleep=sleep)
 
 
 #: The modules the ``pdf`` extra installs (nexus.pdf_stack.STACK_MODULES, restated: this
@@ -194,13 +220,14 @@ def build_generation(
 PDF_STACK_MODULES = ("docling", "mineru", "torch", "torchvision", "pdftext")
 
 
-def requested_pdf_extra(source: str) -> bool:
-    """Whether the install spec asks for the ``pdf`` extra: ``conexus[pdf]``,
-    ``conexus[local,pdf]``, ``/path/to.whl[pdf]``. A plain ``conexus`` is slim
-    since nexus-2k66t.4.2: docling, MinerU, torch, torchvision and pdftext move
-    to an extra the first PDF index fetches."""
-    import re
-
+def requested_pdf_extra(source: str, extras: str = "") -> bool:
+    """Whether the install asks for the ``pdf`` extra: in the spec (``conexus[pdf]``,
+    ``conexus[local,pdf]``, ``/path/to.whl[pdf]``) or in the *extras* handed to the installer.
+    A plain ``conexus`` with no extras is slim since nexus-2k66t.4.2: docling, MinerU, torch,
+    torchvision and pdftext are an extra, which the installers ask for by default since
+    nexus-2k66t.4.9 and a ``--slim`` run leaves out."""
+    if "pdf" in {part.strip() for part in extras.split(",")}:
+        return True
     match = re.search(r"\[([^\]]*)\]\s*$", source.strip())
     return bool(match) and "pdf" in {part.strip() for part in match.group(1).split(",")}
 
@@ -270,11 +297,14 @@ def sandboxed(home: Path) -> dict[str, str]:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: generation_install_probe.py <virgin-home> <source-spec>")
+    if len(sys.argv) not in (3, 4):
+        print("usage: generation_install_probe.py <virgin-home> <source-spec> [<extras>]")
         return 2
     home = Path(sys.argv[1])
     source = sys.argv[2]
+    # nexus-2k66t.4.9: the extras the installers ask for by default ("pdf"); empty is the slim leg.
+    extras = sys.argv[3] if len(sys.argv) == 4 else ""
+    print(f"generation extras: {extras or '(none: slim)'}")
 
     from nexus.commands.self_cmd import packaged_install_dir
 
@@ -318,7 +348,7 @@ def main() -> int:
     # release can be visible to leg 1's resolve yet not to this one (CDN edge
     # lag). build_generation() retries the REAL installer on exactly that
     # miss, bounded; success still means install_generation.sh exited 0.
-    outcome = build_generation(install_dir, source, env, PropagationSettings.from_env(os.environ))
+    outcome = build_generation(install_dir, source, env, PropagationSettings.from_env(os.environ), extras=extras)
     built = outcome.proc
     if outcome.attempts > 1 and built.returncode == 0:
         print(f"generation install propagation wait: {outcome.waited_s:.0f}s "
@@ -345,6 +375,18 @@ def main() -> int:
     )
     check((generation / "nexus-install.json").is_file(),
           "receipt written", "generation has no nexus-install.json receipt")
+    # nexus-2k66t.4.9: the receipt records the extras the installer was asked for, so a later
+    # `nx self install` reproduces this install (and `nx doctor` can tell a slim box from a full one).
+    try:
+        receipt_extras = sorted(json.loads((generation / "nexus-install.json").read_text(encoding="utf-8")).get("extras", []))
+    except (OSError, ValueError):
+        receipt_extras = None
+    wanted_extras = sorted(part for part in extras.split(",") if part)
+    check(
+        receipt_extras == wanted_extras,
+        f"the receipt records the requested extras: {receipt_extras}",
+        f"the receipt records extras {receipt_extras!r} but the installer was asked for {wanted_extras!r}",
+    )
 
     # (3) Flip, and write the shims.
     tools = generation.parent
@@ -435,7 +477,7 @@ def main() -> int:
     )
     present = {m for m in found_proc.stdout.strip().split(",") if m}
     mode = stack_mode({m: m in present for m in PDF_STACK_MODULES})
-    expect_pdf = requested_pdf_extra(source)
+    expect_pdf = requested_pdf_extra(source, extras)
     check(
         mode != "partial" and (mode == "pdf") == expect_pdf,
         f"the generation's PDF stack is {mode} and the source spec {'asks for' if expect_pdf else 'does not ask for'} the pdf extra",

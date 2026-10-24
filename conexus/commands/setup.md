@@ -19,7 +19,7 @@ nx self install
 nx upgrade
 ```
 
-The first builds the current version and the second converges the data. On the older uv-tool layout (`nx self install` says this nx is not running from a generation) the first is `uv tool upgrade conexus`. Afterwards the user reconnects the `nexus` server or starts a new session, and runs `/conexus:setup` again. Stop here.
+The first builds the current version and the second converges the data. On the older uv-tool layout (`nx self install` says this nx is not running from a generation) the first is `uv tool upgrade conexus`, and a third command, `nx self install`, then moves the box onto the generation layout and keeps PDF support (the upgrade alone leaves a slim tree). Afterwards the user reconnects the `nexus` server or starts a new session, and runs `/conexus:setup` again. Stop here.
 
 ## Step 2: act on the answer
 
@@ -35,12 +35,12 @@ ASK THE USER FIRST, once, and act only on the answer. Show only the choices that
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 0.55 GB down, 1.6 to 2.3 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.2 GB down, 1.3 to 1.5 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.2 GB down, 1.3 to 1.5 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (0.9 GB on Linux), 2.4 to 3.1 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.45 GB down (0.6 GB on Linux), 2.1 to 2.3 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.45 GB down (0.6 GB on Linux), 2.1 to 2.3 GB on disk |
 | Not now | Nothing is installed | none |
 
-These sizes leave out PDF support, which installs the first time a PDF is indexed (about 240 MB to 370 MB down, 0.8 GB on disk). They are derived figures, not yet measured.
+These sizes include PDF support (docling, MinerU and torch). Download sizes are derived from a 2026-10-23 measurement of 7.85.0 on macOS and Linux; disk sizes are upper bounds from a 7.81.0-era measurement. Windows was not measured. Neither is a promise. Slim (`setup` with `slim` true) leaves PDF support out: about 0.25 GB less to download on macOS, 0.37 GB on Linux, and 0.8 GB less on disk, and the first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out.
 
 With Local, also ask whether the service should start when the user logs in: yes registers a login unit, and no means the user starts the service again after each reboot.
 
@@ -48,7 +48,7 @@ With Cloud, setup opens a page in the user's browser where they type the service
 
 ## Step 3: call `setup` with the answer
 
-Call the `setup` tool with `mode` set to `local`, `cloud`, `cli-only` or `not-now`. For `local` pass `autostart` true only if the user said yes to starting at login; leave it out otherwise.
+Call the `setup` tool with `mode` set to `local`, `cloud`, `cli-only` or `not-now`. For `local` pass `autostart` true only if the user said yes to starting at login; leave it out otherwise. Pass `slim` true only if the user asked to leave PDF support out; leave it out otherwise.
 
 The call returns at once and the work continues in the background for several minutes. Tell the user it has started, then follow it with `setup_status`, not in a loop and no sooner than the interval each answer names. When the answer says setup is done, the user reconnects the `nexus` server (in Claude Code: `/mcp`, the server, Reconnect) or starts a new session before the Nexus tools appear.
 

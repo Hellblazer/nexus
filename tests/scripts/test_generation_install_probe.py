@@ -24,7 +24,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests" / "e2e" / "lib"))
 
-from generation_install_probe import PDF_STACK_MODULES, pdftext_bound_ok, requested_pdf_extra, stack_mode  # noqa: E402
+from generation_install_probe import (  # noqa: E402
+    PDF_STACK_MODULES,
+    installer_args,
+    is_propagation_miss,
+    pdftext_bound_ok,
+    propagation_spec,
+    requested_pdf_extra,
+    stack_mode,
+)
 from lock_check import LOCK_MATCHED_FLOOR, LOCK_PDF_WITNESSES, LOCK_WITNESSES, lock_verdict  # noqa: E402
 
 
@@ -119,6 +127,50 @@ class TestSlimGeneration:
             assert w in seen, f"{w} is a slim witness but is not in the default dependency closure"
         for w in LOCK_PDF_WITNESSES:
             assert w not in seen, f"{w} is now a default dependency; move it to LOCK_WITNESSES"
+
+
+class TestTheDefaultInstallCarriesPdf:
+    """nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default). The release gate builds its
+    generation the way the installers do (``--extras pdf``), so the probe's pdf branches (the opencv
+    witness, the pdftext/pypdfium2 bound on the generation) run in the gate; a slim leg stays."""
+
+    def test_extras_are_asked_of_the_installer_not_written_into_the_source(self) -> None:
+        """``conexus==X[pdf]`` is not a valid spec and ``conexus[pdf]==X`` as a SOURCE makes a receipt whose
+        spec and extras disagree: the real route is ``--source conexus --extras pdf --version X``."""
+        assert installer_args("conexus==7.86.0", "pdf") == [
+            "--source", "conexus", "--extras", "pdf", "--version", "7.86.0",
+        ]
+        assert installer_args("/tmp/conexus-7.86.0-py3-none-any.whl", "pdf") == [
+            "--source", "/tmp/conexus-7.86.0-py3-none-any.whl", "--extras", "pdf",
+        ]
+
+    def test_no_extras_is_the_slim_argv_as_before(self) -> None:
+        assert installer_args("conexus==7.86.0", "") == ["--source", "conexus==7.86.0"]
+        assert installer_args("/tmp/x.whl", "") == ["--source", "/tmp/x.whl"]
+
+    def test_the_propagation_wait_watches_the_spec_uv_will_see(self) -> None:
+        """With the extra, uv's miss message names ``conexus[pdf]==X``; a watch on ``conexus==X`` would
+        read a late release as a hard failure."""
+        spec = propagation_spec("conexus==7.86.0", "pdf")
+        assert spec == "conexus[pdf]==7.86.0"
+        miss = "error: no version of conexus[pdf]==7.86.0 found in the registry"
+        assert is_propagation_miss(miss, spec)
+        assert not is_propagation_miss(miss, "conexus==7.86.0")
+        assert propagation_spec("conexus==7.86.0", "") == "conexus==7.86.0"
+        assert propagation_spec("/tmp/x.whl", "pdf") == "/tmp/x.whl"
+
+    def test_the_extras_argument_alone_asks_for_the_stack(self) -> None:
+        assert requested_pdf_extra("conexus==7.86.0", "pdf")
+        assert requested_pdf_extra("conexus==7.86.0", "local,pdf")
+        assert not requested_pdf_extra("conexus==7.86.0", "local")
+        assert not requested_pdf_extra("conexus==7.86.0", "")
+
+    def test_the_mvv_script_builds_the_default_generation_with_pdf_and_keeps_a_slim_leg(self) -> None:
+        text = (REPO_ROOT / "tests" / "e2e" / "fresh-install-mvv.sh").read_text(encoding="utf-8")
+        assert 'GEN_EXTRAS="pdf"' in text, "the default generation leg must ask for the pdf extra"
+        assert "NX_MVV_SKIP_SLIM_LEG" in text and 'GEN_EXTRAS=""' in text, "a slim leg must stay"
+        assert "generation-install-slim.log" in text, "the slim leg is re-checked by the non-vacuity leg"
+        assert '"$HOME_DIR" "$GEN_SOURCE" "$GEN_EXTRAS"' in text, "the extras must reach the probe"
 
 
 class TestLockCheckScript:

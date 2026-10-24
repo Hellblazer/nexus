@@ -245,7 +245,8 @@ class TestLegacySite:
         spy.tool_dir = legacy.parent
         generation = self_cmd.perform_self_install()
         assert generation is not None and generation.parent == tools
-        # mineru dropped; a legacy tree predates the [pdf] split, so pdf carries forward
+        # mineru dropped; pdf carried (nexus-2k66t.4.2: a legacy uv tree is an existing install, which keeps
+        # PDF support, so `nx self install` on it is ONE command, nexus-2k66t.4.9)
         assert install_layout.read_receipt(generation).extras == ["local", "pdf"]
         assert os.readlink(tools / "current") == str(generation)
         assert (generation / "bin" / "nx.exe").read_bytes().endswith(b"launcher:nx")

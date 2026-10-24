@@ -462,7 +462,18 @@ if "$HOME/nxenv/bin/python" -c "import sys,zipfile; sys.exit(0 if 'nexus/_instal
   LOCK_INSTALL_DIR="$("$HOME/nxenv/bin/python" -c 'from nexus.commands.self_cmd import packaged_install_dir; print(packaged_install_dir())' 2>&1 | tail -1)"
   LOCK_TOOLS="$HOME/lock-check-tools"
   mkdir -p "$LOCK_TOOLS"
-  LOCK_OUT="$(NX_TOOLS_DIR="$LOCK_TOOLS" bash "$LOCK_INSTALL_DIR/install_generation.sh" --source "$WHEEL" 2>"$HOME/lock-check-build.log")"
+  # nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default): the generation is built the
+  # way `nx self install` rebuilds an existing install and both one-line installers build a new
+  # one, with the pdf extra, so the pdf-only lock witness (opencv-python-headless) is checked
+  # too. NX_REHEARSE_SLIM=1 builds the slim shape instead (a bare `uv tool install`, the .mcpb
+  # bundle, --slim); the release gate's fresh-install MVV covers that shape on every run.
+  LOCK_EXTRAS=(--extras pdf)
+  LOCK_WITNESSES="onnxruntime pymupdf mcp opencv-python-headless"
+  if [ "${NX_REHEARSE_SLIM:-0}" = "1" ]; then
+    LOCK_EXTRAS=()
+    LOCK_WITNESSES="onnxruntime pymupdf mcp"
+  fi
+  LOCK_OUT="$(NX_TOOLS_DIR="$LOCK_TOOLS" bash "$LOCK_INSTALL_DIR/install_generation.sh" --source "$WHEEL" ${LOCK_EXTRAS[@]+"${LOCK_EXTRAS[@]}"} 2>"$HOME/lock-check-build.log")"
   LOCK_RC=$?
   LOCK_GEN="${LOCK_OUT##*$'\n'}"
   if [ "$LOCK_RC" -ne 0 ] || [ ! -d "$LOCK_GEN" ]; then
@@ -477,11 +488,13 @@ if "$HOME/nxenv/bin/python" -c "import sys,zipfile; sys.exit(0 if 'nexus/_instal
     if [ -z "$LOCK_FILE" ]; then
       bad "the built generation holds no constraints.txt"
     else
-      LOCK_REPORT="$("$LOCK_GEN/bin/python" "$HOME/lib/lock_check.py" "$LOCK_FILE" onnxruntime pymupdf mcp 2>&1)"
+      # LOCK_WITNESSES is a space-separated list of distribution names; it is split on purpose.
+      # shellcheck disable=SC2086
+      LOCK_REPORT="$("$LOCK_GEN/bin/python" "$HOME/lib/lock_check.py" "$LOCK_FILE" $LOCK_WITNESSES 2>&1)"
       LOCK_CHECK_RC=$?
       printf '%s\n' "$LOCK_REPORT" | sed 's/^/       /'
       if [ "$LOCK_CHECK_RC" -eq 0 ]; then
-        ok "the generation's installed versions equal the wheel's lock (onnxruntime, pymupdf, mcp and every other pin that applies; opencv-python-headless is the pdf extra's, and this bare build is slim by design, nexus-2k66t.4.2)"
+        ok "the generation's installed versions equal the wheel's lock ($LOCK_WITNESSES and every other pin that applies; the build asks for ${LOCK_EXTRAS[*]:-no extras})"
       else
         bad "the generation's installed versions DIFFER from the wheel's lock"
       fi

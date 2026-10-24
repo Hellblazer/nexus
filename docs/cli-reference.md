@@ -4436,21 +4436,27 @@ into a first install from there, and nothing is inferred from where the
 process runs. The command the plugin runs is:
 
 ```
-uv tool run --python 3.12 --from conexus==<version> nx self install --bootstrap
+uv tool run --python 3.12 --from conexus==<version> nx self install --bootstrap --extras pdf
 ```
+
+(`--extras pdf` is what the one-line installers and the plugin's setup pass since
+nexus-2k66t.4.9, so a new install has PDF support as 7.85.0 did; the throwaway
+environment that runs the command stays slim, and only the generation gets the
+extra. Leave it off, or pass `--slim` to the installers, for an install without
+docling, MinerU and torch; the first PDF index then fetches them.)
 
 With the flag the command installs the released package from the package
 index, at the version of the `nx` that is running it, into a new
 `gen-<stamp>`, points `current` at it and writes the command shims (on Windows,
-the launchers and the user PATH entry described above). The receipt lists no
-extras, as the documented first install records none; `nx init` provisions the
+the launchers and the user PATH entry described above). The receipt lists the
+extras named with `--extras` and none otherwise; `nx init` provisions the
 service. Unlike the plain command it does **not** run `uv cache prune` at the
 end, because that prune removes unreferenced packages from `uv`'s cache, which
-is shared with every other tool on the account. It takes neither `--version`
-nor `--extras` (both are refused: the version is the running program's, and a
-first install has no extras), and `--keep` has no effect because nothing is
-reaped. With a complete install already present it refuses in one line that
-names the plain `nx self install` and changes nothing. Complete means `current`
+is shared with every other tool on the account. It takes no `--version`
+(it is refused: the version is the running program's); `--extras` is accepted
+and merged as a set (`--extras PDF,pdf` is `pdf`), and `--keep` has no effect
+because nothing is reaped. With a complete install already present it refuses in one line that
+names the plain `nx self install` (with `--extras` named, `nx self install --extras <the same>`, which adds them) and changes nothing. Complete means `current`
 pointing at a generation with a receipt **and** the shim step's output in place
 (POSIX: `<bin>/nx` is a nexus shim or a symlink into the `uv tool` tree;
 Windows: `current\bin\nx.exe` exists and that directory is on the user PATH), or
@@ -4469,7 +4475,9 @@ run the plain command:
   nothing, or `current` set with no shims (on Windows, no PATH entry).
   Running the same `--bootstrap` command again finishes the install with no
   rebuild and names the generation and its version. It does so only for a
-  generation whose receipt names the running version and whose own interpreter
+  generation whose receipt names the running version, lists every extra the command
+  asks for (a slim leftover is rebuilt for `--extras pdf`, not finished without it; one
+  that has more than was asked is finished as it is) and whose own interpreter
   answers the console-script lookup the shim step makes; an older-version or
   broken leftover is not finished, and the command builds afresh. If the build
   itself failed there is no generation, and the command builds from the start.

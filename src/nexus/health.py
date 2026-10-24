@@ -2849,17 +2849,22 @@ def _check_pdf_support() -> list[HealthResult]:
     held_note = (
         f"; {held} PDF(s) a background run could not index are waiting for it" if held else ""
     )
+    # nexus-2k66t.4.9 (F12): an existing install owed the stack by an upgrade says so, and says
+    # when the last attempt failed; a fresh slim install has neither and stays a plain pass.
+    owed = pdf_stack.carry_forward_note()
+    owed_note = f"; {owed}" if owed else ""
     if st.status == "absent":
         return [HealthResult(
-            label="PDF support", ok=True,
+            label="PDF support", ok=owed is None, warn=owed is not None,
             detail=(
                 "not installed; indexing a PDF installs it on first use "
-                f"(to install now: {plan.command}){held_note}"
+                f"(to install now: {plan.command}){held_note}{owed_note}"
             ),
+            fix_suggestions=[f"Install PDF support: {plan.command}"] if owed else [],
         )]
     return [HealthResult(
         label="PDF support", ok=False,
-        detail=f"broken: {st.detail}{held_note}",
+        detail=f"broken: {st.detail}{held_note}{owed_note}",
         fix_suggestions=[f"Repair: {plan.command}"] + ([plan.why] if plan.why else []),
     )]
 

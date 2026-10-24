@@ -1023,6 +1023,10 @@
           },
           "mode": {
             "type": "string"
+          },
+          "slim": {
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [

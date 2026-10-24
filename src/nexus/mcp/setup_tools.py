@@ -13,7 +13,7 @@ that test names the other.
 The tools do none of the setup work. They start ``conexus/launch/nx_setup.py``, the
 file ``NX_SETUP_SCRIPT`` names (the launcher sets it when it hands off to this
 server), with this server's own Python, and read its answer: one JSON object on
-standard output per command (``start --mode M [--autostart]``, ``status``,
+standard output per command (``start --mode M [--autostart] [--slim]``, ``status``,
 ``not-now``). Nothing here reads or writes the setup directory, its lock, its
 status file or its log: a second reader of that layout would be a second
 implementation of it. A server that was not started by the launcher has no such
@@ -49,6 +49,25 @@ _CREATE_NO_WINDOW = 0x08000000
 #: detached process is running; ``status`` reads one file.
 _SCRIPT_TIMEOUT_SECONDS: float = 60.0
 
+# -- the sizes of the default install (kept equal to the stand-in's copy) ---------------------
+#
+# The default install includes the PDF stack (nexus-2k66t.4.9, Sam 2026-10-23: install everything
+# by default). Download figures are derived from the 2026-10-23 measurement of 7.85.0 (T2
+# nexus/install-weight-measurement-2026-10-23); the disk figures are the 7.81.0 measurement of the full
+# install. tests/test_install_size_rows.py pins every place a user chooses an install.
+
+LOCAL_SIZE_UP_TO: str = "about 0.8 GB to download (0.9 GB on Linux), 2.4 to 3.1 GB on disk"
+CLI_SIZE_UP_TO: str = "about 0.45 GB to download (0.6 GB on Linux), 2.1 to 2.3 GB on disk"
+
+SIZES_NOTE: str = (
+    "These sizes include PDF support (docling, MinerU and torch). Download sizes are derived from a measurement of "
+    "7.85.0 on macOS and Linux; disk sizes are upper bounds from a 7.81.0-era measurement. Windows was not measured. Neither is a promise."
+)
+SLIM_LINE: str = (
+    "Slim (setup with slim true) leaves PDF support out: about 0.25 GB less to download on macOS, 0.37 GB on Linux, "
+    "and 0.8 GB less on disk. The first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out."
+)
+
 # -- the tools, as the application sees them ----------------------------------------------
 
 SETUP_TITLE: str = "Set up Nexus"
@@ -59,9 +78,9 @@ SETUP_DESCRIPTION: str = (
     "Nexus is missing when no Nexus tool is available in this session, or when Nexus tools fail because no "
     "service is set up. The user can also run /conexus:setup. "
     "ASK THE USER FIRST and act only on the answer. The choices: local (the CLI and a service on this machine, "
-    "up to about 0.55 GB to download, 1.6 to 2.3 GB on disk), cloud (the CLI and a connection to a managed service the user has an "
-    "address, token and tenant for, up to about 0.2 GB to download, 1.3 to 1.5 GB on disk), cli-only (the CLI alone, up to about 0.2 GB to download, 1.3 to 1.5 GB on disk; a service can be added later), "
-    "not-now (install nothing and stop asking). These sizes leave out PDF support, which installs the first time a PDF is indexed. For local also ask whether the service should start when the "
+    f"up to {LOCAL_SIZE_UP_TO}), cloud (the CLI and a connection to a managed service the user has an "
+    f"address, token and tenant for, up to {CLI_SIZE_UP_TO}), cli-only (the CLI alone, up to {CLI_SIZE_UP_TO}; a service can be added later), "
+    f"not-now (install nothing and stop asking). {SIZES_NOTE} {SLIM_LINE} For local also ask whether the service should start when the "
     "user logs in; autostart is false unless the user says yes. For cloud, setup opens a page in the user's browser "
     "where they type the service address, token and tenant themselves: never ask for the token, and never put it in a message "
     "or a tool call. Setup takes several minutes. "
@@ -89,6 +108,11 @@ MODE_DESCRIPTION: str = (
 AUTOSTART_DESCRIPTION: str = (
     "Only for mode local: true if the user said the service should start when they log in; false (the default) "
     "means they start it again after each reboot."
+)
+
+SLIM_DESCRIPTION: str = (
+    "true only if the user asked to leave PDF support (docling, MinerU and torch) out of the install; false (the default) "
+    "installs everything. A slim install fetches PDF support the first time a PDF is indexed."
 )
 
 # -- the words the tools answer with (kept equal to the stand-in's copy) ------------------
@@ -136,9 +160,10 @@ def _choice_lines(view: dict[str, Any], state: str) -> list[str]:
     if not mode or state in ("none", "error"):
         return []
     autostart = bool(view.get("autostart"))
-    lines = [f"Recorded choice: mode {mode}, autostart {'yes' if autostart else 'no'}."]
+    slim = bool(view.get("slim"))
+    lines = [f"Recorded choice: mode {mode}, autostart {'yes' if autostart else 'no'}{', slim' if slim else ''}."]
     if state in _RESUMABLE:
-        again = f"mode {mode}" + (", autostart true" if autostart else "")
+        again = f"mode {mode}" + (", autostart true" if autostart else "") + (", slim true" if slim else "")
         lines.append(f"To resume, ask the user first; if they agree, call setup again with the same choice ({again}).")
     return lines
 
@@ -257,8 +282,7 @@ def no_service_notice() -> str | None:
         "Nexus has no usable service on this machine: no service address is configured and no local service "
         "is running, so the Nexus tools that need storage will fail. The setup tool, or the user running "
         "/conexus:setup, sets one up, and setup_status says what is already done. Setup installs software "
-        "(a local service: up to about 0.55 GB to download, 1.6 to 2.3 GB on disk; the CLI alone: up to about 0.2 GB to "
-        "download, 1.3 to 1.5 GB on disk) or connects a managed service the user has an address, token and tenant for (no service "
+        f"(a local service: up to {LOCAL_SIZE_UP_TO}; the CLI alone: up to {CLI_SIZE_UP_TO}) or connects a managed service the user has an address, token and tenant for (no service "
         "download; the user types them into a page that opens in their browser), so act only on the user's answer."
     )
 
@@ -388,7 +412,7 @@ def _report_for_usable_service(view: dict[str, Any]) -> str | None:
     return None
 
 
-def run_setup(mode: str, autostart: bool) -> str:
+def run_setup(mode: str, autostart: bool, slim: bool = False) -> str:
     """The ``setup`` tool. Raises :class:`SetupError` for a refusal or a failure."""
     if mode not in MODES:
         raise SetupError(mode_refusal(mode))
@@ -410,7 +434,7 @@ def run_setup(mode: str, autostart: bool) -> str:
         if view.get("state") == "error":
             return _checked(view)
         return NOT_NOW_TEXT + (("\n" + render(view)) if view.get("live") else "")
-    args = ["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else [])
+    args = ["start", "--mode", mode] + (["--autostart"] if autostart and mode == "local" else []) + (["--slim"] if slim else [])
     view = _call_script(script, args)
     return _checked(view, started=bool(view.get("started")))
 

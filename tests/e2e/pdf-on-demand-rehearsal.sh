@@ -23,7 +23,7 @@
 # (the legs need chas, hellmini and a Windows guest). Run `bash -n` and read
 # the legs first; a leg that cannot run fails loudly, it never skips green.
 #
-# LEGS (what each proves). They run in the order a, c, d, e, b, f, u: e and the
+# LEGS (what each proves). They run in the order a, c, d, e, b, f, p, u: e and the
 # refuse legs need the SLIM install, and b installs the stack, so a leg that
 # asserts "refused" after b would find the stack present and fail (or pass by
 # doing nothing).
@@ -66,7 +66,17 @@
 #      upgrade even when the installer that moved it did not know the rule.
 #      Needs the network (the previous release comes from PyPI).
 #
-# Usage: pdf-on-demand-rehearsal.sh [--legs a,b,c,d,e,f,u] [--engine]
+#   p  The default install route, for real. The installers and the plugin's setup run
+#      `nx self install --bootstrap --extras pdf` (nexus-2k66t.4.9); every other leg of
+#      this script bootstraps bare. This one runs that exact command in its own virgin
+#      HOME with real uv and the candidate wheel, and asserts the generation it built:
+#      the receipt lists pdf, has installer_schema 2, all five stack modules import
+#      from the generation, torch is the CPU build on Linux, the version is the
+#      candidate's, and the shim runs. No engine needed.
+#      Proves: --extras reaches the generation through the bootstrap, not only through
+#      install_generation.sh (which fresh-install-mvv.sh leg 9 drives).
+#
+# Usage: pdf-on-demand-rehearsal.sh [--legs a,b,c,d,e,f,u,p] [--engine]
 #            [--formula-pdf PATH] [--second-formula-pdf PATH] [--old-version X.Y.Z]
 #
 #   --engine   run `nx init` in local mode (engine + PG download, bge-768) so
@@ -82,7 +92,7 @@ _repo="$(cd "$_here/../.." && pwd)"
 source "$_here/lib/python.sh"
 e2e_python_resolve || exit 2
 
-LEGS="a,b,c,d,e,f,u"
+LEGS="a,b,c,d,e,f,u,p"
 OLD_VERSION="7.85.0"
 ENGINE=0
 NX_LOCAL_ENGINE=""
@@ -200,7 +210,9 @@ PY
 fi
 
 # ── fresh install by the documented bootstrap route ─────────────────────────
-echo "── fresh install (bootstrap route) ──"
+# A BARE --bootstrap is the slim shape (--slim, a bare uv tool install, the .mcpb bundle). The one-line installers and
+# the plugin's setup pass --extras pdf since nexus-2k66t.4.9; fresh-install-mvv.sh covers that default.
+echo "── fresh install (slim: bare bootstrap route) ──"
 _clean_env uv tool run --python 3.12 --from "$RC_WHEEL" nx self install --bootstrap >"$LOGS/bootstrap.log" 2>&1 \
     || { cat "$LOGS/bootstrap.log" >&2; fail "bootstrap install failed"; }
 [ -x "$BIN/nx" ] || fail "bootstrap left no shim"
@@ -402,6 +414,26 @@ leg_u() {
     return 0
 }
 
+# Leg p builds its own box, like leg u: its subshell re-points HOME_DIR, TOOLS and BIN.
+leg_p() {
+    HOME_DIR="$SANDBOX/p-home"; TOOLS="$SANDBOX/p-tools"; BIN="$SANDBOX/p-bin"
+    mkdir -p "$HOME_DIR" "$TOOLS" "$BIN"
+    _clean_env uv tool run --python 3.12 --from "$RC_WHEEL" nx self install --bootstrap --extras pdf >"$LOGS/p-bootstrap.log" 2>&1 \
+        || { tail -40 "$LOGS/p-bootstrap.log" >&2; fail "the bootstrap with the pdf extra failed"; }
+    [ -x "$BIN/nx" ] || fail "the bootstrap left no shim"
+    [ "$(gens | wc -l | tr -d ' ')" = 1 ] || fail "expected exactly one generation, found: $(gens | tr '\n' ' ')"
+    extras_have_pdf || fail "the receipt does not list pdf: $(receipt_field extras)"
+    [ "$(receipt_field installer_schema)" = "2" ] || fail "the receipt's installer_schema is not 2"
+    [ "$(stack_module_count)" = 5 ] || fail "the generation is missing stack modules; present: $(stack_modules_present)"
+    nx_version_is "$RC_VERSION" || fail "the shim does not report $RC_VERSION"
+    if [ "$(uname -s)" = "Linux" ]; then
+        "$(gen_python)" -c "import importlib.metadata as m; v=m.version('torch'); assert '+cpu' in v, v" \
+            || fail "torch is not the CPU build"
+    fi
+    echo "leg p: $(du -sk "$(current_gen)" | cut -f1) KiB on disk with the pdf extra (record beside leg a's slim figure)"
+    return 0
+}
+
 if want a; then run_leg a leg_a; fi
 # c, d and e run on the SLIM install (they assert a refusal); b then installs the stack; f needs it.
 if want c; then run_leg c leg_c; fi
@@ -415,6 +447,7 @@ fi
 if want f; then
     if needs_engine f; then run_leg f leg_f; fi
 fi
+if want p; then run_leg p leg_p; fi
 if want u; then
     run_leg u leg_u
     if [ -f "$SANDBOX/not-run-u" ]; then NOT_RUN="$NOT_RUN u(index)"; fi
