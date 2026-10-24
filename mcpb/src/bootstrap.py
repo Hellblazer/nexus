@@ -62,7 +62,9 @@ writes the bare requirement back and the exact ``uv sync`` removes the PDF stack
 The extra is deliberately not a declared optional dependency: ``uv sync`` locks
 every declared extra on every start, so torch would be resolved on every bare
 start too. A sync that fails with PDF support on reverts to bare and syncs once
-more, saying so: the setting never takes the extension down.
+more under the release's lock, saying so, so a PDF-only failure does not take
+the extension down; a failure that exhausted the PyPI propagation retries is not
+retried bare (it would wait the same window out again).
 
 Deliberately conservative syntax: the launcher runs this on whatever Python
 >=3.12 uv finds, which need not satisfy the bundle's own
@@ -432,6 +434,12 @@ def _has_opencv_python(bundle_dir):
     return False
 
 
+class _PropagationExhausted(SystemExit):
+    """The retry schedule ran out inside PyPI's propagation window: the release
+    is not served yet, whatever the requirement asks for, so a caller's own
+    fallback (PDF off) would only wait the whole schedule again."""
+
+
 def _sync_with_retry(bundle_dir, run=subprocess.run, sleep=time.sleep, sleeps=_RETRY_SLEEPS, uv="uv"):
     """``uv sync`` the bundle env, retrying only the propagation-window
     failure class. Raises SystemExit on terminal failure.
@@ -495,7 +503,7 @@ def _sync_with_retry(bundle_dir, run=subprocess.run, sleep=time.sleep, sleeps=_R
         flush=True,
     )
     sys.stderr.write(output)
-    raise SystemExit(1)
+    raise _PropagationExhausted(1)
 
 
 # ── executable resolution ───────────────────────────────────────────────────
@@ -807,17 +815,21 @@ def main(platform=None) -> None:
         sync_kw = {"uv": uv} if platform == _WINDOWS else {}
         try:
             _sync_with_retry(bundle_dir, **sync_kw)
+        except _PropagationExhausted:
+            raise  # bare would wait out the same window again
         except SystemExit:
-            # PDF support is a setting, never a reason the extension does not start.
+            # A PDF failure alone is never a reason the extension does not start.
             if not (pdf and _set_pdf(bundle_dir, False)[0]):
                 raise
             print(
                 "[conexus-mcpb] WARNING: the sync failed with PDF support on; syncing once more "
-                "without PDF support so the extension starts. Turn the include_pdf setting off, "
-                "or retry it later.",
+                "without PDF support, under the release's lock again, so the extension starts. "
+                "Turn the include_pdf setting off, or retry it later.",
                 file=sys.stderr,
                 flush=True,
             )
+            # The pinned sync's own fallback may have stripped the lock over a PDF-only failure.
+            print(_apply_pin(bundle_dir), file=sys.stderr, flush=True)
             _sync_with_retry(bundle_dir, **sync_kw)
     # POSIX: exec, so Claude Desktop's stdio pipes land on the server process
     # itself for the MCP handshake. Windows: see _launch_windows.

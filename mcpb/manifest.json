@@ -58,7 +58,7 @@
     "include_pdf": {
       "type": "boolean",
       "title": "Include PDF support",
-      "description": "Off by default. Turn on to install PDF indexing (docling, MinerU and torch) into the extension: about 0.25 GB more to download and 0.85 GB more on disk on macOS. Turning it off removes it again. Takes effect the next time the extension starts.",
+      "description": "Off by default. Turn on to install PDF indexing (docling, MinerU and torch) into the extension: about 0.25 GB more to download and 0.85 GB more on disk on macOS, plus about 0.5 GB of model weights on first use. Turning it off removes the packages; downloaded model weights stay in their cache. Takes effect the next time the extension starts, which takes longer that first time.",
       "required": false,
       "default": false
     }

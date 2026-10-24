@@ -154,6 +154,53 @@ def test_a_failed_sync_with_pdf_reverts_to_bare_and_starts(bootstrap, monkeypatc
     assert "without PDF support" in capsys.readouterr().err
 
 
+def test_the_bare_retry_after_a_pdf_failure_runs_under_the_release_lock_again(bootstrap, monkeypatch, bundle: Path) -> None:
+    # pdf+pinned fails, the pinned sync's own fallback strips the lock and pdf+unpinned fails too: the bare retry
+    # must re-apply the lock, not inherit the strip a PDF-only failure caused
+    (bundle / "constraints.txt").write_text("conexus==7.85.0\nidna==3.10\n", encoding="utf-8")
+    pinned: list[bool] = []
+    real = bootstrap._sync_with_retry
+
+    def sync(d, **kw):
+        def run(cmd, **k):
+            with (bundle / "pyproject.toml").open("rb") as f:
+                pinned.append(bool(tomllib.load(f)["tool"]["uv"].get("constraint-dependencies")))
+            rc = 0 if not _conexus_reqs(bundle)[0].startswith("conexus[pdf]") else 1
+            return SimpleNamespace(returncode=rc, stdout="", stderr="" if rc == 0 else "error: no wheel for this platform")
+        return real(d, run=run, sleep=lambda s: None)
+
+    monkeypatch.setattr(bootstrap, "_bundle_dir", lambda: str(bundle))
+    for k in ("NX_MCPB_SKIP_RESOLVE_RETRY", "NX_INSTALL_UNPINNED", "NX_MCPB_INSTALL_UNPINNED"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("NX_MCPB_INCLUDE_PDF", "true")
+    monkeypatch.setattr(bootstrap, "_sync_with_retry", sync)
+    monkeypatch.setattr(bootstrap, "_launch", lambda argv, platform=None: None)
+    bootstrap.main(platform="linux")
+    assert pinned == [True, False, True]
+
+
+def test_a_propagation_window_that_outlasts_the_retries_is_not_waited_out_twice(bootstrap, monkeypatch, bundle: Path) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(bootstrap, "_bundle_dir", lambda: str(bundle))
+    for k in ("NX_MCPB_SKIP_RESOLVE_RETRY", "NX_INSTALL_UNPINNED", "NX_MCPB_INSTALL_UNPINNED"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("NX_MCPB_INCLUDE_PDF", "true")
+    real = bootstrap._sync_with_retry
+
+    def run(cmd, **k):
+        calls.append(1)
+        return SimpleNamespace(returncode=1, stdout="",
+                               stderr="error: No solution found when resolving dependencies:\n"
+                                      "  Because there is no version of conexus==9.9.9 and your project depends on it")
+
+    monkeypatch.setattr(bootstrap, "_sync_with_retry", lambda d, **kw: real(d, run=run, sleep=lambda s: None))
+    monkeypatch.setattr(bootstrap, "_launch", lambda argv, platform=None: None)
+    with pytest.raises(SystemExit):
+        bootstrap.main(platform="linux")
+    assert len(calls) == len(bootstrap._RETRY_SLEEPS) + 1  # one schedule, not two
+    assert _conexus_reqs(bundle)[0].startswith("conexus[pdf]")  # the setting was not what failed
+
+
 def test_a_failed_bare_sync_still_fails_the_start(bootstrap, monkeypatch, bundle: Path) -> None:
     with pytest.raises(SystemExit):
         _main(bootstrap, monkeypatch, bundle, [1], {})
@@ -172,5 +219,18 @@ def test_the_skip_env_leaves_pdf_as_it_was(bootstrap, monkeypatch, bundle: Path)
 
 def test_the_desktop_refusal_names_the_settings_title() -> None:
     # tests/test_pdf_stack.py pins the refusal itself; this keeps it naming the title the manifest shows
-    title = json.loads((MCPB / "manifest.json").read_text(encoding="utf-8"))["user_config"]["include_pdf"]["title"]
+    manifest = json.loads((MCPB / "manifest.json").read_text(encoding="utf-8"))
+    title = manifest["user_config"]["include_pdf"]["title"]
     assert f"{title} setting" in (REPO_ROOT / "src" / "nexus" / "pdf_stack.py").read_text(encoding="utf-8")
+    # the server reads the variable the manifest sets and the launcher passes on
+    from nexus import pdf_stack
+
+    assert f"${{user_config.include_pdf}}" == manifest["server"]["mcp_config"]["env"][pdf_stack.MCPB_PDF_SETTING_ENV]
+    assert pdf_stack.MCPB_PDF_SETTING_ENV == bootstrap_env()
+
+
+def bootstrap_env() -> str:
+    spec = importlib.util.spec_from_file_location("mcpb_bootstrap_pdf_env", MCPB / "src" / "bootstrap.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod._PDF_ENV

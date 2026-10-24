@@ -23,7 +23,8 @@ whose package was locked must be locked at the pinned version.
 Both variants the extension can start as are resolved (nexus-dzc61): bare, and
 with its ``include_pdf`` setting on, where the launcher's own ``_set_pdf``
 rewrites the requirement to ``conexus[pdf]``. The PDF lock must also carry
-``PDF_REQUIRED`` and at least ``MIN_LOCKED_PDF`` packages.
+``PDF_REQUIRED`` and at least ``MIN_LOCKED_PDF`` packages, and the bare lock none of
+``PDF_REQUIRED`` (or the setting would decide nothing).
 
     python3 scripts/check_mcpb_resolve.py [--conexus PATH] [--conexus-version X.Y.Z] [--uv UV]
 
@@ -173,6 +174,10 @@ def _lock_and_check(args: argparse.Namespace, bundle: Path, pins: list[str], rel
         missing = [name for name in PDF_REQUIRED if name not in locked]
         if missing:
             return fail(f"the PDF stack is not in the lock: {', '.join(missing)} missing")
+    else:
+        present = [name for name in PDF_REQUIRED if name in locked]
+        if present:
+            return fail(f"the bare bundle locks the PDF stack ({', '.join(present)}): the setting would decide nothing")
 
     held, unheld, absent = 0, [], 0
     for pin in pins:

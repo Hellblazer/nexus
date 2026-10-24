@@ -489,7 +489,25 @@ def test_the_desktop_extension_environment_is_told_to_use_the_cli_install_not_uv
     assert "uv sync" not in plan.command and "install.sh" in plan.command
     assert ".mcpb" in plan.why and "install the CLI" in plan.why
     # nexus-dzc61: the extension's own opt-in setting is the first remedy named
-    assert "Include PDF support setting" in plan.why
+    assert "Include PDF support setting" in plan.why and "turn on" in plan.why
+
+
+@pytest.mark.parametrize("value", ["true", "1", "True"])
+def test_the_desktop_extension_with_the_setting_on_is_not_told_to_turn_it_on(monkeypatch, tmp_path, value) -> None:
+    """A fallback to bare, or an unpinned torch off the pin, leaves the stack absent or broken with the setting on."""
+    from nexus.commands import self_cmd
+
+    venv = _mcpb_bundle(tmp_path / "bundle")
+    monkeypatch.setattr(self_cmd, "running_generation", lambda: venv)
+    monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: False)
+    monkeypatch.setenv("NX_MCPB_INCLUDE_PDF", value)
+    plan = pdf_stack.install_plan()
+    assert plan.kind == "mcpb" and not plan.auto and "install.sh" in plan.command
+    assert "setting is on" in plan.why and "turn on" not in plan.why and "log" in plan.why
+    msg = pdf_stack._remedy("nx index pdf", pdf_stack.StackState("absent", "", ()), plan)
+    assert "setting is on" in msg, msg
+    monkeypatch.setenv("NX_MCPB_INCLUDE_PDF", "false")
+    assert "turn on" in pdf_stack.install_plan().why
 
 
 def test_a_source_checkout_is_still_a_dev_install(monkeypatch, tmp_path) -> None:

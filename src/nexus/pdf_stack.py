@@ -336,16 +336,26 @@ def install_plan() -> InstallPlan:
             "layout and carries PDF support with it",
         )
     if _running_from_mcpb_bundle(host):
-        return InstallPlan(
-            "mcpb", False, _cli_install_command(),
-            "this is the Claude Desktop extension (.mcpb) environment, installed without PDF support; "
-            "turn on its Include PDF support setting (Claude Desktop, Settings, Extensions) and restart "
-            "the extension, or install the CLI",
-        )
+        if os.environ.get(MCPB_PDF_SETTING_ENV, "").strip().lower() in ("1", "true"):
+            # nexus-dzc61: the launcher passes the setting through to the server, so a stack that is
+            # missing or broken with it on is a fallback or a mismatch, never a setting to turn on
+            why = ("this is the Claude Desktop extension (.mcpb) environment and its Include PDF support "
+                   "setting is on, but its PDF install did not complete or does not match this release (the "
+                   "extension's log says why; an unpinned install can drift off the release's versions); "
+                   "restart the extension to retry it, or install the CLI to index PDFs")
+        else:
+            why = ("this is the Claude Desktop extension (.mcpb) environment, installed without PDF support; "
+                   "turn on its Include PDF support setting (Settings, Connectors, Desktop, Conexus) and "
+                   "restart the extension, or install the CLI")
+        return InstallPlan("mcpb", False, _cli_install_command(), why)
     return InstallPlan(
         "dev", False, "uv sync",
         "this is a source checkout; its dev group carries the PDF stack",
     )
+
+
+#: The Desktop extension's include_pdf setting as mcpb/src/bootstrap.py receives it (and the server inherits it).
+MCPB_PDF_SETTING_ENV: str = "NX_MCPB_INCLUDE_PDF"
 
 
 def _cli_install_command() -> str:

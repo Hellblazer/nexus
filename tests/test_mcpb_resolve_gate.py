@@ -50,6 +50,8 @@ for pin in pins[: cfg.get("limit", 10**9)]:
         continue
     if pdf and name in cfg.get("drop_in_pdf", ()):
         continue
+    if not pdf and name in ("docling-slim", "mineru", "torch") and not cfg.get("stack_in_bare"):
+        continue
     rows.append((name, version))
 (bundle / "uv.lock").write_text("version = 1\\n" + "".join(
     '[[package]]\\nname = "%s"\\nversion = "%s"\\n\\n' % row for row in rows))
@@ -119,6 +121,11 @@ def test_both_variants_are_locked_bare_then_with_the_pdf_setting_and_both_are_na
 def test_a_pdf_lock_without_the_pdf_stack_fails(tmp_path: Path, missing: str) -> None:
     proc, _ = _gate(tmp_path, drop_in_pdf=[missing])
     assert proc.returncode == 1 and "pdf: the PDF stack is not in the lock" in proc.stdout and missing in proc.stdout
+
+
+def test_a_bare_lock_that_carries_the_pdf_stack_fails(tmp_path: Path) -> None:
+    proc, _ = _gate(tmp_path, stack_in_bare=True)
+    assert proc.returncode == 1 and "bare: the bare bundle locks the PDF stack" in proc.stdout
 
 
 def test_a_wheel_is_resolved_instead_of_the_checkout(tmp_path: Path) -> None:
