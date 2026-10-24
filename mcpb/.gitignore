@@ -3,3 +3,4 @@
 uv.lock
 .venv/
 __pycache__/
+constraints.txt
