@@ -22,7 +22,7 @@ T2 `nexus/directive-test-suite-architecture`. This skill is the routing card.
 | System truths, in-process | `scenario` journeys (in default loop) | `tests/test_scenario_journeys.py` |
 
 After ANY pull/rebase touching `service/`: `scripts/build-gate-jar.sh` first;
-session start refuses (exit 75) on a stale or unstamped jar.
+session start refuses (exit 75) on a missing or stale jar.
 One full suite per box at a time (AGENTS.md rule 5).
 
 ## Authoring decisions (the rules that keep the loop fast and honest)

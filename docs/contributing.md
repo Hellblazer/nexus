@@ -249,7 +249,7 @@ the settings page is https://github.com/Hellblazer/nexus/settings/branches. As o
 2026-10-24 they are:
 
 - **Required status checks** (the same three on both branches):
-  - `pytest-gate` (it fans in over the sharded hosted pytest matrix, plus the
+  - `pytest-gate` (it fans in over the sharded pytest matrix, on the lab pool or hosted runners, plus the
     lint and census legs; it replaced the two `pytest (Python 3.12)` /
     `pytest (Python 3.13)` checks at nexus-n0ful)
   - `service change detection`
@@ -305,7 +305,7 @@ rules); check them before cutting.
 Command sequence (the script does the work; the human pushes):
 
 ```bash
-# Step 0 — MANDATORY before every cut (AGENTS.md usage-discipline rule 4):
+# Step 0 — MANDATORY before every cut (`docs/agents/plugin-release-channel.md` § Usage discipline):
 tests/e2e/plugin-cut-rehearsal/run.sh --promote-machinery   # container default; --host = fast loop
 # must end: PLUGIN-CUT REHEARSAL PASSED. A rehearsal that passed on a
 # full clone has not rehearsed CI — the runs cover the depth-1 tag leg
@@ -370,7 +370,7 @@ Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) 
 
 ### Break-glass: retry, yank, revert, and tag retraction
 
-Two prior pointers to this content — `.claude/skills/release/SKILL.md`'s "See also" list and AGENTS.md § Cutting a release, both saying "rollback / one-time setup steps live in `docs/contributing.md` § Release Process" — named nothing until this subsection existed (T2 [22511] Explore sweep, dangling-pointer finding; Step 11 above only ever covered pre-release-version yanking). This is what they were pointing at.
+Two prior pointers to this content — `.claude/skills/release/SKILL.md`'s "See also" list and AGENTS.md § Cutting a release, both saying "rollback / one-time setup steps live in `docs/contributing.md` § Release Process" — named nothing until this subsection existed (T2 [22511] Explore sweep, dangling-pointer finding). This is what they were pointing at.
 
 **Publish failed after the tag already pushed.** Never move, delete, or force-push a published release tag (`vX.Y.Z` or `engine-service-vX.Y.Z`) to retry a failed publish — see "Tag retraction" below for why. Use the `release.yml` `workflow_dispatch` retry path instead: it checks out the ALREADY-PUSHED tag but runs the CURRENT workflow file from `main`, so a bug in the pipeline itself (not the artifact) can be fixed on `main` and re-run against the same immutable tag.
 ```bash

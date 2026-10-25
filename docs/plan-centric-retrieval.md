@@ -153,7 +153,7 @@ Every plan in the library pins a **dimensional identity**:
 |-----------|----------|----------------|
 | `verb` | yes | `research`, `review`, `analyze`, `debug`, `document`, `query`, `lookup` |
 | `scope` | yes | `global`, `project`, `rdr-<slug>`, `personal` |
-| `strategy` | default `"default"` | `default`, `security`, `performance` |
+| `strategy` | default `"default"` | `default`, `security`, `performance`, `compliance` |
 | `object` | optional | `change-set`, `rdr`, `module`, `test-suite` |
 | `domain` | optional | `security`, `compliance`, `ml-systems`, `frontend` |
 

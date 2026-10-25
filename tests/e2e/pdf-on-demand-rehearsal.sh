@@ -93,7 +93,7 @@ source "$_here/lib/python.sh"
 e2e_python_resolve || exit 2
 
 LEGS="a,b,c,d,e,f,u,p"
-OLD_VERSION="7.85.0"
+OLD_VERSION="7.85.0"   # the last release before the [pdf] split; leg u refuses it while the tree is still 7.85.0
 ENGINE=0
 NX_LOCAL_ENGINE=""
 FORMULA_PDF="$_repo/tests/fixtures/bft-to-smr.pdf"
