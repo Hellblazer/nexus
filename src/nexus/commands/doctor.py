@@ -49,6 +49,8 @@ _REFERENCES_WORST_CASE_AT_DEFAULT_SAMPLE_S: float = _references_estimated_worst_
 
 _CHECK = "✓"
 _WARN = "✗"
+#: A warning row: something to look at that does not move the exit code.
+_CAUTION = "⚠"
 
 
 def _check_line(label: str, ok: bool, detail: str = "") -> str:
@@ -2010,8 +2012,10 @@ def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S
         raise _MineruDoctorParseFailed(summary)
 
 
-def _run_check_mineru_parse() -> None:
-    """Report the one-page real-parse probe as its own doctor line."""
+def _run_check_mineru_parse() -> bool:
+    """Report the one-page real-parse probe as its own doctor line.
+
+    Returns True when that line is red (the caller turns it into the exit code)."""
     import subprocess  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     try:
@@ -2025,6 +2029,7 @@ def _run_check_mineru_parse() -> None:
             "  ↳ the model may still be downloading, or the box is under "
             "load. Re-run nx doctor --check-mineru once it settles."
         )
+        return True
     except _MineruDoctorParseFailed as exc:
         click.echo(_check("MinerU parse", False, str(exc)))
         click.echo(
@@ -2032,14 +2037,17 @@ def _run_check_mineru_parse() -> None:
             "— likely a mismatched transitive dependency (e.g. pdftext). "
             f"Reinstall with `{_reinstall_command()}`."
         )
+        return True
     except Exception as exc:  # noqa: BLE001 — an unexpected launch failure still renders as one FAIL line, never crashes doctor
         click.echo(_check("MinerU parse", False, _exc_detail(exc, with_type=True)))
         click.echo(
             "  ↳ mineru.cli.common imports cleanly but a real parse failed. "
             f"Reinstall with `{_reinstall_command()}`."
         )
+        return True
     else:
         click.echo(_check("MinerU parse", True, "parsed a synthesized one-page probe PDF"))
+        return False
 
 
 #: How long the cv2 import probe may run before it is reported as hung.
@@ -2078,8 +2086,12 @@ def _probe_cv2(timeout_s: float | None = None) -> tuple[str | None, str]:
     return f"the cv2 import exited {proc.returncode} with no output", ""
 
 
-def _run_check_mineru() -> None:
+def _run_check_mineru() -> bool:
     """Verify MinerU is importable and a real one-page parse succeeds.
+
+    Returns True when any row printed red (a ✗); ``nx doctor --check-mineru`` exits 1
+    on it, as the default sweep does for a hard ✗. A warning row (⚠, a stale server)
+    and a not-applicable line do not count.
 
     nexus-2fyb promoted ``mineru[all]`` from an optional extra to a default
     dependency. Before this check, a corrupt install (missing wheel,
@@ -2111,7 +2123,8 @@ def _run_check_mineru() -> None:
             "MinerU import: N/A (PDF support is not installed; indexing a PDF installs it, "
             f"or run `{pdf_stack.install_plan().command}`)"
         )
-        return
+        return False
+    failed = False
     try:
         from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
     except Exception as exc:  # noqa: BLE001 — boundary catch of optional MinerU import failure; surfaced via click.echo
@@ -2120,7 +2133,7 @@ def _run_check_mineru() -> None:
             "  ↳ MinerU ships with PDF support (the pdf extra), so this install is broken. Reinstall with "
             f"`{_reinstall_command()}`."
         )
-        return
+        return True
 
     if do_parse is None:
         click.echo(_check("MinerU import", False, "do_parse is None"))
@@ -2128,7 +2141,7 @@ def _run_check_mineru() -> None:
             "  ↳ mineru.cli.common imported but do_parse is None — "
             "the import shim is broken. Reinstall conexus."
         )
-        return
+        return True
 
     click.echo(_check("MinerU import", True, "mineru.cli.common.do_parse OK"))
 
@@ -2137,12 +2150,15 @@ def _run_check_mineru() -> None:
     # where the non-headless opencv-python won the shared cv2/ directory).
     cv2_error, cv2_version = _probe_cv2()
     if cv2_error is not None:
+        failed = True
         click.echo(_check("MinerU cv2 import", False, cv2_error))
         click.echo(
             "  ↳ MinerU needs a cv2 that loads. The non-headless opencv-python needs a system "
             "libGL (libGL.so.1) that this box lacks; the headless build does not, and the "
             "release's overrides keep only the headless one. Reinstall through "
-            f"`{pdf_stack.INSTALL_COMMAND}` to get it. Real-parse check skipped: it "
+            f"`{pdf_stack.repair_command()}` to get it, then replace a MinerU server that was "
+            "already running (`nx mineru stop`, then `nx mineru start`): it keeps the "
+            "environment it started in. Real-parse check skipped: it "
             "would fail on the same import."
         )
     else:
@@ -2153,7 +2169,8 @@ def _run_check_mineru() -> None:
                 "check skipped — run `mineru-models-download`)"
             )
         else:
-            _run_check_mineru_parse()
+            if _run_check_mineru_parse():
+                failed = True
 
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.
@@ -2173,22 +2190,58 @@ def _run_check_mineru() -> None:
             with httpx.Client(timeout=2.0) as client:
                 r = client.get(f"{url}/health")
             if r.status_code == 200:
-                click.echo(_check(
-                    "MinerU server", True,
-                    f"reachable at {url}{_mineru_interpreter_suffix()}",
-                ))
+                stale = _stale_mineru_server()
+                if stale is None:
+                    click.echo(_check(
+                        "MinerU server", True,
+                        f"reachable at {url}{_mineru_interpreter_suffix()}",
+                    ))
+                else:
+                    # A warning, not a ✗: the server answers; it just is not this install's.
+                    click.echo(
+                        f"  {_CAUTION} MinerU server: reachable at {url}{_mineru_interpreter_suffix()}, "
+                        f"but STALE: {stale}"
+                    )
+                    click.echo(
+                        "  ↳ it was started from an environment other than the current install, so it "
+                        "keeps running that environment's code (for example the one a repair just "
+                        "replaced) and a parse sent to it can fail or fall back to the slow per-page "
+                        "worker. Replace it: `nx mineru stop`, then `nx mineru start`."
+                    )
             else:
+                failed = True
                 click.echo(_check(
                     "MinerU server", False,
                     f"{url} returned HTTP {r.status_code}",
                 ))
         except Exception as exc:  # noqa: BLE001 — boundary catch of health-probe failure; surfaced via click.echo
+            failed = True
             click.echo(_check(
                 "MinerU server", False,
                 f"{url} unreachable: {type(exc).__name__}",
             ))
     else:
         click.echo("  (no mineru-api server configured; subprocess mode in use)")
+    return failed
+
+
+def _stale_mineru_server() -> str | None:
+    """One line saying why the registered MinerU server is not this install's, or None.
+
+    The pid file records the interpreter the server runs under; the default sweep's
+    "Process freshness" row already judges it against ``current``
+    (:func:`nexus.upgrade_finish.stale_registered_mineru`), and this is the
+    ``--check-mineru`` row's use of the same verdict. After a repair (``nx self install``
+    onto a new generation) a server started before it keeps answering ``/health`` from the
+    old tree, so a bare "reachable" is not health. No verdict (no pid file, no resolvable
+    generation, an unreadable layout) is None: this row only warns on evidence."""
+    try:
+        from nexus.upgrade_finish import stale_registered_mineru  # noqa: PLC0415 — deferred, heavy module
+
+        stale = stale_registered_mineru()
+    except Exception:  # noqa: BLE001 — a failed freshness read is no verdict, never a doctor failure
+        return None
+    return None if stale is None else stale.command
 
 
 # ── Supplementary checks: the cheap/read-only subset of the opt-in ─────────
@@ -2724,7 +2777,8 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
          "a corrupt install at doctor-time instead of waiting for the first "
          "math-PDF index to fail, including a cv2 that cannot load (MinerU "
          "imports it lazily; the non-headless opencv-python needs libGL.so.1 "
-         "on Linux).",
+         "on Linux). Exits 1 when a row is red; a MinerU server left running "
+         "from an environment other than the current install is a warning.",
 )
 @click.option(
     "--check-aspect-queue",
@@ -3109,7 +3163,11 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if check_mineru:
-        _run_check_mineru()
+        # A red row moves the exit code (1, as a hard ✗ does in the default sweep): a script
+        # or CI step that gates on `nx doctor --check-mineru` must not read a broken
+        # MinerU as healthy. A warning row (a stale server) does not.
+        if _run_check_mineru():
+            raise click.exceptions.Exit(1)
         return
 
     if check_aspect_queue:

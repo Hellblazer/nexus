@@ -75,7 +75,9 @@ EXIT_REFUSED = 69
 EXIT_INSTALLER = 70
 EXIT_NETWORK = 75
 
-#: The command that installs the stack now, on a generation install.
+#: The command that installs the stack now, on a GENERATION install. Every other
+#: layout refuses ``--extras`` ("this nx is not running from one"), so a message a
+#: non-generation install can reach names :func:`repair_command`, never this.
 INSTALL_COMMAND = "nx self install --extras pdf"
 
 #: The Visual C++ redistributable, for a Windows box without it.
@@ -353,6 +355,21 @@ def install_plan() -> InstallPlan:
         "dev", False, "uv sync",
         "this is a source checkout; its dev group carries the PDF stack",
     )
+
+
+def repair_command() -> str:
+    """The command a person runs to install or repair PDF support on THIS install.
+
+    ``install_plan().command``: ``nx self install --extras pdf`` on a generation,
+    plain ``nx self install`` on a legacy uv tool tree (the convergence carries
+    ``pdf``; ``--extras`` is refused there, nexus-11x9o), the rebuild script for a
+    directory install, and so on. Every message that can reach a non-generation
+    install uses this, not :data:`INSTALL_COMMAND`. Never raises: a layout that
+    cannot be read falls back to the generation command."""
+    try:
+        return install_plan().command
+    except Exception:  # noqa: BLE001 — a message must still name a command when the layout is unreadable
+        return INSTALL_COMMAND
 
 
 #: The Desktop extension's include_pdf setting as mcpb/src/bootstrap.py receives it (and the server inherits it).
@@ -644,9 +661,15 @@ def _classify_failure(message: str) -> PdfStackError:
             "PDF support could not be downloaded (network or TLS failure); nothing was written. "
             f"Retry when the network is back, or run `{INSTALL_COMMAND}` ahead of time.\n{message}"
         )
-    tail = "\n".join(message.strip().splitlines()[-12:])
+    # The build's advice (the cu126 hint for a cu128 backend, the macOS floor) is written at
+    # the HEAD of the message and uv's own text follows it; a tail alone drops the advice and
+    # leaves the person with uv's bare "unsatisfiable" (nexus-husxe). Keep the advice whole
+    # and tail only uv's output.
+    advice, uv_output = self_cmd.split_build_failure(message)
+    tail = "\n".join((uv_output or message).strip().splitlines()[-12:])
+    lead = f"{advice}\n\n" if advice else ""
     return PdfStackInstallError(
-        f"PDF support could not be installed; nothing was written.\n{tail}"
+        f"PDF support could not be installed; nothing was written.\n{lead}{tail}"
     )
 
 

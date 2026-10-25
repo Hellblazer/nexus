@@ -320,6 +320,37 @@ def invocation_is_preview(argv: list[str] | None = None) -> bool:
     return PREVIEW_ARGV_FLAG in (sys.argv[1:] if argv is None else argv)
 
 
+@dataclass(frozen=True)
+class UpgradeInvocation:
+    """What the running ``nx upgrade`` does next, as the finish pass can know it from argv."""
+
+    walks_ladder: bool  # every pending data rung converges in this command
+    cycles_service: bool  # the stale storage service is cycled by this command
+
+
+def upgrade_invocation(argv: list[str] | None = None) -> UpgradeInvocation | None:
+    """What THIS process's ``nx upgrade`` run will do after the finish pass, or ``None``
+    when the process is not a real ``nx upgrade`` run.
+
+    The finish pass fires at the root ``nx`` group, BEFORE the subcommand runs. Under
+    ``nx upgrade`` it used to print ``NEEDS HUMAN: service ... cycle it`` and ``data rung
+    ... pending -- run `nx upgrade` `` for work the same command performed seconds later
+    (the 7.86.1 shakeout: the rung converged and the service was cycled in the very run
+    that asked a person to do both). ``nx upgrade`` walks every pending rung unless it is
+    a ``--dry-run``; it cycles the storage service unless it is a ``--dry-run`` or
+    ``--skip-t3`` (commands/upgrade.py). A preview does neither, so it is ``None``, and
+    every other command keeps the lines: nothing there will do the work.
+
+    The root group takes only flags, so the subcommand is the first token that is not one.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if next((a for a in args if not a.startswith("-")), None) != "upgrade":
+        return None
+    if PREVIEW_ARGV_FLAG in args:
+        return None
+    return UpgradeInvocation(walks_ladder=True, cycles_service="--skip-t3" not in args)
+
+
 @dataclass
 class StaleProcess:
     pid: int
@@ -653,6 +684,18 @@ def detect_stale_processes(
     return report
 
 
+def stale_registered_mineru(*, now: float | None = None) -> StaleProcess | None:
+    """The pid-file MinerU server as a stale row when its interpreter is outside
+    ``current``, else ``None`` (also ``None`` when there is no verdict).
+
+    The one-call form of :func:`_registered_mineru_outside_generation` for a reader
+    that has no ``current`` in hand: ``nx doctor --check-mineru``, whose server row
+    would otherwise read "reachable" from a server that predates a repair."""
+    return _registered_mineru_outside_generation(
+        _current_generation(), now=time.time() if now is None else now,
+    )
+
+
 def _registered_mineru_outside_generation(
     current: Path | None, *, now: float,
 ) -> StaleProcess | None:
@@ -712,7 +755,9 @@ def _registered_mineru_outside_generation(
     )
 
 
-def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
+def restart_stale(
+    report: SkewReport, *, dry_run: bool = False, upgrade_cycles_service: bool = False,
+) -> list[str]:
     """Cycle the restartable classes; return human-readable action lines.
 
     aspect-worker: killed — it respawns on demand from a fresh host (and
@@ -720,6 +765,12 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
     observed twice in two days). MinerU: cycled via its own lifecycle
     verbs. MCP hosts are never touched — they belong to live Claude
     sessions; the report names them for the human.
+
+    *upgrade_cycles_service*: the running command is an ``nx upgrade`` that cycles the
+    storage service itself (see :func:`upgrade_invocation`), so a stale service is
+    reported as that, not as ``NEEDS HUMAN`` for a step this very invocation performs
+    next. Without it (the default, and every other caller) the service stays a
+    human's to cycle.
     """
     actions: list[str] = []
     for proc in report.restartable:
@@ -870,9 +921,12 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
             # start under NX_PDF_STACK=refuse so it can never turn into a download.
             # Otherwise leave the stale server running and say how to finish.
             if not _pdf_stack_available_for_restart():
+                # The command is the plan's for THIS layout: `--extras` is refused outside a
+                # generation, and this pass can run from a legacy tree beside a `current` that
+                # lacks the stack.
                 actions.append(
                     f"mineru pid {proc.pid} is stale but the PDF stack is not installed in the "
-                    "current generation, so it was left running; `nx self install --extras pdf` "
+                    f"current generation, so it was left running; `{_pdf_repair_command()}` "
                     "installs it, then `nx mineru stop && nx mineru start`"
                 )
                 continue
@@ -888,7 +942,7 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 if started.returncode == 69:
                     actions.append(
                         f"mineru pid {proc.pid} was stopped but not restarted: the PDF stack is not "
-                        "installed (`nx self install --extras pdf`, then `nx mineru start`)"
+                        f"installed (`{_pdf_repair_command()}`, then `nx mineru start`)"
                     )
                 else:
                     actions.append(f"cycled MinerU (was pid {proc.pid})")
@@ -904,6 +958,11 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 "this pid would only leave that session's tools dead)"
             )
         elif proc.kind == "service":
+            if upgrade_cycles_service:
+                actions.append(
+                    f"service (pid {proc.pid}) is the storage service — this `nx upgrade` cycles it"
+                )
+                continue
             remedy = (
                 "is the storage service — cycle it via its own lifecycle "
                 "(`nx daemon service stop` / next use respawns it)"
@@ -912,6 +971,16 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
             remedy = f"predates {report.installed_version}; restart it manually"
         actions.append(f"NEEDS HUMAN: {proc.kind} (pid {proc.pid}) {remedy}")
     return actions
+
+
+def _pdf_repair_command() -> str:
+    """The command that installs PDF support on THIS layout (:func:`nexus.pdf_stack.repair_command`)."""
+    try:
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+        return pdf_stack.repair_command()
+    except Exception:  # noqa: BLE001 — a restart pass names a command even when the layout cannot be read
+        return "nx self install"
 
 
 def _pdf_stack_available_for_restart() -> bool:
@@ -3068,7 +3137,7 @@ def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
     return actions
 
 
-def pending_data_rung_callout() -> list[str]:
+def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str]:
     """One summary line per pending DATA rung after an engine auto-converge
     (RDR-180 / critic-180-cohort finding 2). The chash-rekey rung gets an
     explicit consequence statement — its not-yet-run state silently breaks
@@ -3111,7 +3180,11 @@ def pending_data_rung_callout() -> list[str]:
             continue
         if not status.pending:
             continue
-        if rung.name == "chash-rekey":
+        if upgrade_walks_ladder:
+            # The running command IS `nx upgrade`: it walks this rung next, so telling a
+            # person to run it would be asking for the work already under way.
+            lines.append(f"data rung '{rung.name}' pending — this `nx upgrade` converges it")
+        elif rung.name == "chash-rekey":
             lines.append(
                 "chash-rekey PENDING — chash citations for existing content "
                 "will not resolve until `nx upgrade` runs the rekey"
@@ -3316,9 +3389,15 @@ def check_version_transition(
     # transition, so the real finish pass would never run automatically.
     if not seen:
         return None  # first-ever run: nothing stale to finish
+    # A real `nx upgrade` run performs the service cycle and the rung walk right after this
+    # pass; the lines below say so instead of asking a person for the same work.
+    running_upgrade = None if preview else upgrade_invocation()
     try:
         report = detect_stale_processes()
-        actions = restart_stale(report, dry_run=preview)
+        actions = restart_stale(
+            report, dry_run=preview,
+            upgrade_cycles_service=bool(running_upgrade and running_upgrade.cycles_service),
+        )
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         # nexus-p78a0 rehearsal catch: this leg used to `return None`,
         # silently aborting the WHOLE finish pass — on a ps-less box
@@ -3392,7 +3471,9 @@ def check_version_transition(
     # leg does not diverge from the established pattern the other legs
     # share.
     try:
-        actions = actions + pending_data_rung_callout()
+        actions = actions + pending_data_rung_callout(
+            upgrade_walks_ladder=bool(running_upgrade and running_upgrade.walks_ladder),
+        )
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("pending_rung_callout_failed", exc_info=True)
     _log.info(

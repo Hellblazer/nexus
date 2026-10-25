@@ -19,6 +19,7 @@ from pathlib import Path
 import click
 import pytest
 
+from nexus import pdf_stack
 from nexus.commands import self_cmd
 
 # The shape uv printed on the reporting machine (host and path from the bead).
@@ -446,3 +447,81 @@ class TestTheCu128Hint:
             )
         message = exc.value.message
         assert message.index("NX_TORCH_BACKEND=cu126") < message.index("uv output:")
+
+
+class TestTheCu128HintSurvivesTheOnDemandInstall:
+    """The on-demand PDF install keeps only the last lines of a build failure, and the hint sits at
+    the HEAD of the message: `NX_TORCH_BACKEND=cu128 nx index pdf` exited 70 with uv's tail and no
+    cu126 advice (7.86.1 shakeout, nexus-husxe follow-up). The build here is a real
+    ``_build_flip_shims`` over a script that prints a long uv failure, the same shape as the leg's
+    log (a dozen lines of venv chatter, then the unsatisfiable resolve)."""
+
+    _UV_FAILURE = (
+        "Using CPython 3.12.15\n"
+        "Creating virtual environment at: /tools/gen-20261025T151428Z\n"
+        "Activate with: source /tools/gen-20261025T151428Z/bin/activate\n"
+        "Using Python 3.12.15 environment at: /tools/gen-20261025T151428Z\n"
+        "Resolved 1 package in 0.87ms\n"
+        "Installed 1 package in 9ms\n"
+        " + conexus==7.86.1\n"
+        "Using Python 3.12.15 environment at: /tools/gen-20261025T151428Z\n"
+        "error: No solution found when resolving dependencies\n"
+        "  cause: Because there is no version of torch==2.13.0 and conexus[pdf]>=7.86.1 depends on\n"
+        "         torch{sys_platform == 'linux'}==2.13.0, we can conclude that conexus[pdf]>=7.86.1\n"
+        "         cannot be used.\n"
+        "         And because you require conexus[pdf]==7.86.1, we can conclude that your\n"
+        "         requirements are unsatisfiable.\n"
+        "UV-LAST-LINE\n"
+    )
+
+    def _failing_build(self, tmp_path, monkeypatch, *, progress: bool):
+        monkeypatch.setattr(self_cmd, "_host_system", lambda: "linux")
+        monkeypatch.setenv("NX_TORCH_BACKEND", "cu128")
+        script = tmp_path / "fake_install_generation.sh"
+        script.write_text(f"#!/usr/bin/env bash\ncat >&2 <<'EOF'\n{self._UV_FAILURE}EOF\nexit 1\n")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        with pytest.raises(click.ClickException) as exc:
+            self_cmd._build_flip_shims(
+                [_usable_bash(), str(script)], install_dir=tmp_path, tools=tmp_path / "tools",
+                bin_dir=tmp_path / "bin", progress=progress,
+            )
+        return exc.value
+
+    @pytest.mark.parametrize("progress", [True, False])
+    def test_the_exit_70_message_carries_the_advice_and_uvs_tail(self, tmp_path, monkeypatch, progress):
+        failure = self._failing_build(tmp_path, monkeypatch, progress=progress)
+        classified = pdf_stack._classify_failure(failure.message)
+        assert isinstance(classified, pdf_stack.PdfStackInstallError)
+        assert classified.exit_code == pdf_stack.EXIT_INSTALLER == 70
+        text = str(classified)
+        assert "NX_TORCH_BACKEND=cu126" in text and "12.6 to 12.8" in text
+        assert "UV-LAST-LINE" in text, "uv's own tail is still shown"
+        assert text.index("NX_TORCH_BACKEND=cu126") < text.index("UV-LAST-LINE")
+
+    def test_ensure_exits_70_with_the_advice(self, tmp_path, monkeypatch):
+        """`nx index pdf` on the on-demand path: ensure() classifies the build's ClickException."""
+        failure = self._failing_build(tmp_path, monkeypatch, progress=True)
+        monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", ""))
+        monkeypatch.setattr(
+            pdf_stack, "install_plan",
+            lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND),
+        )
+        monkeypatch.setenv(pdf_stack.POLICY_ENV, "install")
+        monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: False)
+        monkeypatch.setattr(pdf_stack, "current_generation_has_stack", lambda: False)
+
+        def _build(**_kw):
+            raise failure
+
+        monkeypatch.setattr(pdf_stack, "_install_generation", _build)
+        with pytest.raises(pdf_stack.PdfStackInstallError) as err:
+            pdf_stack.ensure("nx index pdf")
+        assert err.value.exit_code == 70
+        assert "NX_TORCH_BACKEND=cu126" in str(err.value)
+
+    def test_a_failure_with_no_advice_still_shows_the_last_twelve_lines(self):
+        """The control: no hint applies, so the message is uv's text and the tail rule is unchanged."""
+        body = "\n".join(f"uv line {n}" for n in range(1, 31))
+        text = str(pdf_stack._classify_failure(f"generation build failed:\n{body}"))
+        assert "uv line 30" in text and "uv line 19" in text, "the last twelve lines are shown"
+        assert "uv line 18" not in text, "and no more than twelve"

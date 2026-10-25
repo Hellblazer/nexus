@@ -1916,7 +1916,7 @@ def index_repo_cmd(
                 f"{pdf_stack_held} PDF(s) were NOT indexed: PDF support is not installed and "
                 f"{pdf_stack.POLICY_ENV}=refuse (or pdf_stack.auto_install: false) forbids "
                 f"installing it here. Code and prose were indexed. "
-                f"Run: {pdf_stack.INSTALL_COMMAND}   then re-run `nx index repo`."
+                f"Run: {pdf_stack.repair_command()}   then re-run `nx index repo`."
             )
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)

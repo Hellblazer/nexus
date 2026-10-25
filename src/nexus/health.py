@@ -2870,7 +2870,9 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
             f"{detail}; but both opencv-python and opencv-python-headless are installed. "
             f"{consequence}. This install ignored the release's uv overrides."
         ),
-        fix_suggestions=[f"Reinstall with the release's overrides: {pdf_stack.INSTALL_COMMAND}"],
+        # nexus-11x9o: the install this row detects (a bare `uv tool install`) is a legacy tree,
+        # where `nx self install --extras pdf` refuses; the plan names the command for THIS layout.
+        fix_suggestions=[f"Reinstall with the release's overrides: {pdf_stack.repair_command()}"],
     )
 
 

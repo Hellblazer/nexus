@@ -1645,12 +1645,16 @@ class PDFExtractor:
             reinstall = install_advice.upgrade_command(
                 "uv tool install --reinstall conexus"
             )
+            # `nx self install --extras pdf` is refused on a non-generation install (a legacy
+            # uv tool tree), so the second way is the plan's command for THIS layout.
+            repair = pdf_stack.repair_command()
+            ways = f"`{reinstall}`" if repair == reinstall else f"`{reinstall}`, or `{repair}`"
             raise RuntimeError(
                 f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
                 f"but MinerU is not importable: {exc}. "
                 f"MinerU is part of the pdf extra and the PDF stack reports itself "
                 f"installed, so this conexus install is corrupt — reinstall with "
-                f"`{reinstall}`, or `nx self install --extras pdf`. To bypass formula "
+                f"{ways}. To bypass formula "
                 f"extraction entirely, rerun with `--extractor docling`."
             ) from exc
         except MineruMachineResourceError:

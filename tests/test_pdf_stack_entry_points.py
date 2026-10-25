@@ -208,7 +208,10 @@ def repo_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return _invoke
 
 
-def test_index_repo_exits_69_over_held_pdfs_and_names_the_command(runner, repo_cmd) -> None:
+def test_index_repo_exits_69_over_held_pdfs_and_names_the_command(runner, repo_cmd, monkeypatch) -> None:
+    # a generation install: the plan's command is the `--extras` form (other layouts get theirs:
+    # tests/test_pdf_stack_index_repo_hold.py, tests/test_pdf_repair_command_per_layout.py)
+    monkeypatch.setattr(pdf_stack, "install_plan", lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND))
     result, _ = repo_cmd(runner, stats={"pdf_stack_held": 2})
     assert result.exit_code == 69, result.output
     assert "2 PDF(s) were NOT indexed" in result.output

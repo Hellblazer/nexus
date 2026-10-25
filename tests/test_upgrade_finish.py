@@ -413,10 +413,14 @@ class TestRestartStale:
         with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows", return_value=True), \
                 patch("nexus.upgrade_finish.process_command", return_value="mineru-api --host 127.0.0.1"), \
                 patch.object(pdf_stack, "state", return_value=pdf_stack.StackState("absent", "")), \
+                patch.object(pdf_stack, "install_plan", return_value=pdf_stack.InstallPlan(
+                    "generation", True, pdf_stack.INSTALL_COMMAND)), \
                 patch.object(pdf_stack, "current_generation_has_stack", return_value=False), \
                 patch("nexus.upgrade_finish.run_bounded") as sp:
             actions = restart_stale(self._stale_mineru())
         sp.assert_not_called()
+        # a generation install: the plan's command is the `--extras` form (a legacy tree gets the
+        # plain one: tests/test_pdf_repair_command_per_layout.py)
         assert any("left running" in a and "nx self install --extras pdf" in a for a in actions), actions
 
     def test_mineru_cycle_goes_ahead_when_current_has_the_stack_and_never_downloads(self):
@@ -4309,3 +4313,64 @@ class TestConvergeServiceAutostartUnitActivation:
              patch("nexus.daemon.installer.autostart_activation_state", side_effect=RuntimeError("boom")):
             actions = converge_service_autostart_unit(tmp_path)
         assert len(actions) == 1 and "NEEDS HUMAN" in actions[0], actions
+
+
+class TestFinishPassUnderNxUpgrade:
+    """The finish pass runs at the root `nx` group, before `nx upgrade` does its own work, and used
+    to print `NEEDS HUMAN: service ... cycle it` and `data rung ... pending -- run nx upgrade`
+    for the two things that very command does next (7.86.1 shakeout, macOS leg: the run cycled the
+    service and converged the rung seconds after asking a person to). It says what the command will
+    do instead, and keeps the alarm for every invocation where nothing will."""
+
+    class _PendingRung:
+        name = "rdr192-manifest-backfill"
+
+        def detect(self):
+            from nexus.upgrade_ladder.protocol import RungStatus
+            return RungStatus(applicable=True, converged=False, pending_detail="pending")
+
+    def _finish(self, tmp_path, monkeypatch, argv, *, preview=None):
+        """The REAL finish pass, restart_stale and rung callout included, over a stale storage
+        service and a pending rung. Only process discovery, the rung registry and the legs that
+        touch the machine are stood in for."""
+        (tmp_path / "last_seen_version").write_text("7.86.0\n")
+        monkeypatch.setattr("sys.argv", ["nx", *argv])
+        stale = SkewReport(installed_version="7.86.1")
+        stale.stale = [StaleProcess(pid=64750, kind="service", command="nexus-service", age_s=900)]
+        with patch("nexus.upgrade_finish.install_mtime_and_version", return_value=(0.0, "7.86.1")), \
+                patch("nexus.upgrade_finish.running_from_tool_install", return_value=True), \
+                patch("nexus.upgrade_finish.detect_stale_processes", return_value=stale), \
+                patch("nexus.upgrade_finish.converge_engine", return_value=[]), \
+                patch("nexus.upgrade_finish.converge_service_autostart_unit", return_value=[]), \
+                patch("nexus.upgrade_finish.heal_diag_view", return_value=[]), \
+                patch("nexus.upgrade_finish.unload_stale_t2_launchagent", return_value=[]), \
+                patch("nexus.upgrade_finish.unload_stale_service_launchagent", return_value=[]), \
+                patch("nexus.upgrade_ladder.registry.default_registry", return_value=[self._PendingRung()]):
+            return check_version_transition(tmp_path, preview=preview)
+
+    @pytest.mark.parametrize("argv", [["upgrade"], ["upgrade", "--yes"], ["-v", "upgrade", "--auto"]])
+    def test_nx_upgrade_does_not_ask_a_person_for_what_it_does_next(self, tmp_path, monkeypatch, argv):
+        line = self._finish(tmp_path, monkeypatch, argv)
+        assert line is not None and "7.86.0 -> 7.86.1" in line
+        assert "NEEDS HUMAN" not in line, line
+        assert "run `nx upgrade`" not in line, line
+        assert "service (pid 64750) is the storage service — this `nx upgrade` cycles it" in line
+        assert "data rung 'rdr192-manifest-backfill' pending — this `nx upgrade` converges it" in line
+
+    @pytest.mark.parametrize("argv", [["doctor"], ["index", "repo", "."], ["daemon", "restart-stale"]])
+    def test_any_other_command_keeps_the_needs_human_lines(self, tmp_path, monkeypatch, argv):
+        line = self._finish(tmp_path, monkeypatch, argv)
+        assert "NEEDS HUMAN: service (pid 64750) is the storage service — cycle it" in line, line
+        assert "data rung 'rdr192-manifest-backfill' pending — run `nx upgrade`" in line, line
+
+    def test_a_dry_run_upgrade_does_nothing_so_it_keeps_the_lines(self, tmp_path, monkeypatch):
+        line = self._finish(tmp_path, monkeypatch, ["upgrade", "--dry-run"], preview=True)
+        assert line.startswith("PREVIEW ONLY")
+        assert "NEEDS HUMAN: service (pid 64750)" in line, line
+        assert "run `nx upgrade`" in line, line
+
+    def test_skip_t3_does_not_cycle_the_service_so_that_line_stays(self, tmp_path, monkeypatch):
+        """`--skip-t3` suppresses the process cycle (commands/upgrade.py), but the ladder still walks."""
+        line = self._finish(tmp_path, monkeypatch, ["upgrade", "--skip-t3"])
+        assert "NEEDS HUMAN: service (pid 64750) is the storage service — cycle it" in line, line
+        assert "data rung 'rdr192-manifest-backfill' pending — this `nx upgrade` converges it" in line
