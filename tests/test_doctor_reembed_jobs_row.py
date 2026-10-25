@@ -364,18 +364,23 @@ def test_undiscovered_targets_takes_the_newer_of_the_attempt_and_the_stamp_and_s
 
     monkeypatch.undo()  # drop the autouse stub of the function under test
     old, sup = "docs__1-1__voyage-model-b__v1", "docs__1-1__voyage-model-c__v1"
+    gone = "docs__1-1__voyage-model-d__v1"
     seen: dict = {}
     stub = _Stub(
         seen,
         rows=[{"name": _TGT, "lifecycle_state": "live"}, {"name": old, "lifecycle_state": "live"},
-              {"name": sup, "lifecycle_state": "live", "superseded_by": "x"}],
-        # _TGT: an attempt AFTER the job (no stamp: an all-noise run); old: an attempt BEFORE, a stamp AFTER.
+              {"name": sup, "lifecycle_state": "live", "superseded_by": "x"},
+              {"name": gone, "lifecycle_state": "deleted"}],
+        # _TGT: an attempt AFTER the job (no stamp: an all-noise run); old: an attempt BEFORE and an engine stamp
+        # AFTER, written in offset form (12:00+01:00 is 11:00Z); sup is superseded and gone deleted: never asked about.
         entries=[{"title": _TGT, "content": json.dumps({"last_attempt_at": "2026-10-25T11:00:00Z", "last_outcome": "success"})},
                  {"title": old, "content": json.dumps({"last_attempt_at": "2026-10-25T09:00:00Z", "last_outcome": "success"})}],
-        stamps={old: {"last_discover_at": "2026-10-25T11:00:00Z"}},
+        stamps={old: {"last_discover_at": "2026-10-25T12:00:00+01:00"}},
     )
     _wire(monkeypatch, stub)
-    got = rj.undiscovered_targets([_done(_TGT, _END), _done(old, _END), _done(sup, _END), _job("r", "running")])
+    got = rj.undiscovered_targets([
+        _done(_TGT, _END), _done(old, _END), _done(sup, _END), _done(gone, _END), _job("r", "running"),
+    ])
     assert got == Undiscovered([], [])
     assert seen["listing"] == {"routing": True}
     assert seen["stamps"] == sorted([_TGT, old])          # the superseded target is never asked about
@@ -411,3 +416,13 @@ def test_undiscovered_targets_reads_nothing_without_a_finished_job(monkeypatch) 
     monkeypatch.setattr("nexus.db.t2.http_memory_store.HttpMemoryStore", boom)
     monkeypatch.setattr("nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore", boom)
     assert rj.undiscovered_targets([_job("r", "running"), _job("f", "failed")]) == Undiscovered([], [])
+
+
+def test_later_compares_iso_times_as_instants_not_strings() -> None:
+    from nexus.reembed_job import _later
+
+    # As strings "2026-10-25T12:00:00+02:00" > "2026-10-25T11:00:00Z", but it is 10:00Z, earlier.
+    assert _later("2026-10-25T12:00:00+02:00", "2026-10-25T11:00:00Z") is False
+    assert _later("2026-10-25T11:00:00.5+00:00", "2026-10-25T11:00:00Z") is True
+    assert _later("2026-10-25T11:00:00Z", None) is True
+    assert _later("not a time", None) is False

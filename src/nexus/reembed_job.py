@@ -344,6 +344,22 @@ def undiscovered(
     return Undiscovered(targets, unjudged)
 
 
+def _later(a: str, b: str | None) -> bool:
+    """Whether ISO time *a* is after *b* (a missing or unparseable *b* loses), compared as instants, not strings:
+    the engine and the client write different ISO forms (an offset or a ``Z``)."""
+    from datetime import datetime  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    def parse(v: str | None) -> datetime | None:
+        try:
+            t = datetime.fromisoformat(v.replace("Z", "+00:00")) if v else None
+        except ValueError:
+            return None
+        return t if t is not None and t.tzinfo is not None else None
+
+    pa, pb = parse(a), parse(b)
+    return pa is not None and (pb is None or pa > pb)
+
+
 def undiscovered_targets(jobs: Iterable[dict]) -> Undiscovered:
     """:func:`undiscovered` over the live engine. Raises on a failed listing read; the doctor row catches it.
 
@@ -390,7 +406,7 @@ def undiscovered_targets(jobs: Iterable[dict]) -> Undiscovered:
             tax.close()
         for name, stamp in stamps.items():
             at = (stamp or {}).get("last_discover_at")
-            if at and (name not in ran or str(at) > ran[name]):
+            if at and _later(str(at), ran.get(name)):
                 ran[name] = str(at)
     return undiscovered(jobs, live=live, ran=ran, count=lambda t: int(t3.count(t)), min_chunks=MIN_DISCOVER_CHUNKS)
 
