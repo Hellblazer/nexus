@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.86.2] - 2026-10-25
+
+Plugin version aligned with conexus 7.86.2. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred one included).
+
+- **The RDR accept checklist and the enrich-plan and composition-probe skills say who writes the enrichment** (nexus-cyztb). `skills/rdr-accept-checklist/SKILL.md` step 7.4 calls `nx_enrich_beads` once per implementation bead and appends each non-empty result to the bead's notes with `bd update --append-notes`; `skills/enrich-plan/SKILL.md` says the tool returns text and writes nothing; `skills/composition-probe/SKILL.md` sets `metadata.coordinator` with `bd update --set-metadata`.
+- **The shared error-handling guidance matches MCP error results** (nexus-6b6hq). `resources/agent-shared/ERROR_HANDLING.md`: a memory, store or scratch write error now arrives as an MCP error result (`isError: true`) whose text begins `Error: `, not as a success string.
+
 ## [7.86.1] - 2026-10-25
 
 Plugin version aligned with conexus 7.86.1. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included).
