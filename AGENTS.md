@@ -6,21 +6,21 @@ Nexus is a Python 3.12+ CLI + persistent server for semantic search and knowledg
 
 **Guidance precedence:** workflow routing — skills-first, agent dispatch, storage-tier checks, review paths, orchestration — is owned by the conexus plugin's injected guidance (the SessionStart guidance, the subagent-start preflight, the orchestration skill). This file and any personal CLAUDE.md yield to the plugin on workflow; they carry repo facts, hot rules, and durable authorizations. A restriction here that contradicts the plugin's workflow layer is a defect to surface, not a tiebreak to silently win.
 
-**This file keeps the rules to obey on every turn.** History, incident archives, measurements and procedures live in [`docs/agents/`](docs/agents/README.md), moved verbatim on 2026-10-14 (nexus-2ziaz); each section below links its full text.
+**This file keeps the rules to obey on every turn.** History, incident archives, measurements and procedures live in [`docs/agents/`](docs/agents/README.md), moved there on 2026-10-14 (nexus-2ziaz) and edited since; each section below links its full text.
 
 ## Quick start
 
 ```bash
 uv sync                                  # install deps
 scripts/reinstall-tool.sh                # install nx CLI locally (preserves extras)
-uv run pytest -n auto                    # full unit suite, ~13min parallel (no API keys needed; auto-capped); hand full suites: rule 13
-uv run pytest                            # serial fallback (~14min; debugging only)
+uv run pytest -n auto                    # full unit suite (no API keys needed; auto-capped); hand full suites: rule 13
+uv run pytest                            # serial fallback (debugging only)
 uv run pytest -m lint                    # O(repo) meta-tests (out of hot loop, PR-gated in CI)
 uv run pytest -m integration             # E2E (requires .env from .env.example)
 uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 ```
 
-- `-n auto` caps itself to the box's SysV shared-memory budget (each xdist worker holds a segment). A wall of substrate setup errors means look at `ipcs -m` before the diff; `NX_XDIST_NO_CAP=1` opts out.
+- `-n auto` caps itself to the box's SysV shared-memory budget (each xdist worker holds a segment) and, inside a lab-run grant, to the grant's memory (about 3.2 GiB a worker; lab-l runs 15). A wall of substrate setup errors means look at `ipcs -m` before the diff; `NX_XDIST_NO_CAP=1` opts out.
 - After any pull/rebase or edit touching `service/` (a Java comment or changelog XML counts; the gate is mtime-keyed), run `scripts/build-gate-jar.sh`. Session start refuses with exit 75 on a stale jar. Never backdate mtimes.
 - Unit tests use `InMemoryVectorClient` + bundled ONNX MiniLM (no keys, no network); engine-substrate tests self-provision a local service or skip. Test-authoring directives live in [`tests/AGENTS.md`](tests/AGENTS.md). Full text: [test-running](docs/agents/test-running.md).
 
@@ -34,7 +34,7 @@ Three storage tiers, by lifetime. **ChromaDB is not a live substrate in any mode
 
 T1 rules ([full contract](docs/agents/t1-sub-agent-contract.md); rule of record `docs/rdr/joint/JDR-001-t1-three-scopes.md`): Agent-tool sub-agents share the parent's T1; `claude -p` sub-processes default to `owned` and opt in with `share_t1=True`. Cross-process findings and durable write-back go to T2 (`memory_put`).
 
-Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (colons are invalid in ChromaDB collection names). Conformant collection-name shape (RDR-103) is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`:
+Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (the RDR-103 name grammar). Conformant collection-name shape is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__1-1__voyage-code-3__v1` (the owner segment is the owner tumbler's first two segments joined by a hyphen):
 
 | Prefix | Embedder | Document identity (catalog) | Chunk natural ID (T3) |
 |---|---|---|---|
@@ -46,7 +46,7 @@ Collection prefixes coexist in one T3 database. Always `__` (double underscore) 
 
 **Creating or naming a collection** follows [`docs/collections.md`](docs/collections.md): `code`/`docs`/`rdr` are minted only by `nx index repo`; a `knowledge` collection is a durable subject area (`distributed-systems`), never a document, session, task, source app, or placeholder (`default`, `knowledge`, `test`); reuse an existing subject before creating one; type the bare subject and never a model token or version.
 
-For the full module map, post-store hook contracts, T2 schema, and design heritage see [`docs/architecture.md`](docs/architecture.md). Module-local guidance: the `AGENTS.md` files in `src/nexus/catalog/`, `src/nexus/db/`, `src/nexus/mcp/`.
+For the full module map, post-store hook contracts, T2 schema, and design heritage see [`docs/architecture.md`](docs/architecture.md). Module-local guidance (read the one for the area you edit): the `AGENTS.md` files in `src/nexus/catalog/`, `src/nexus/db/`, `src/nexus/mcp/`, `src/nexus/daemon/`, `docs/rdr/` and `tests/`.
 
 ## Critical conventions
 
@@ -82,14 +82,14 @@ Full text with history: [hot-rules](docs/agents/hot-rules.md).
 
 ## Situational rules (`.claude/rules/`)
 
-These load only when you read a file their `paths:` matches; each is a verbatim move from this file (nexus-2ziaz follow-up):
+These load only when you read a file their `paths:` matches; each is the short-rules form of a former section of this file, and the full text is in [`docs/agents/`](docs/agents/README.md):
 
 - [`releases-and-engine.md`](.claude/rules/releases-and-engine.md): release cadence, plugin channel, engine-service release, cutting a release and its blocking Step 0. The `release` and `engine-release` skills stay the authority.
 - [`ci-and-runners.md`](.claude/rules/ci-and-runners.md): CI Cost Discipline, self-hosted runners and fork PRs.
 - [`external-service-limits.md`](.claude/rules/external-service-limits.md): `QUOTAS` limits and Voyage limits.
 - [`adding-a-cli-command.md`](.claude/rules/adding-a-cli-command.md).
 
-Two of them hold always-on rules, repeated here because no file read triggers them:
+These always-on rules are repeated here because no file read triggers them:
 
 - **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even holding the owner's `gh` token. Report the run id and stop; the click is Sam's.
 - On chas run a heavy suite as `lab-run -c <class> -- <command>` so it queues behind CI. An engine build is the exception: `scripts/mvnw-leased.sh --lab-run <class> ...` (or `scripts/build-gate-jar.sh --lab-run <class>` for the gate jar), never wrapped in lab-run, so the build lease is taken before the grant.
@@ -110,7 +110,7 @@ Two of them hold always-on rules, repeated here because no file read triggers th
 9. **Whoever pushes to `develop` fast-forwards the primary in the same breath:** `git merge --ff-only origin/develop` there. If the primary is dirty, do NOT force it; say so on the bus.
 10. **Never hand-run `nx index repo` from a worktree.**
 11. **Serena:** a session that did not START in the worktree must never use a Serena write tool (it can silently write the primary). Use Edit/Write with absolute worktree paths, then `git status --short`.
-12. **Default test host is `chas`** (`ssh chas-test`; `-n auto` = 32 workers, do not raise it); `hellmini` is the second. Recipes: T2 `nexus/chas-test-host-howto`, `nexus/hellmini-second-test-host-howto`.
+12. **Default test host is `chas`** (`ssh chas-test`); `hellmini` is the second. Inside a lab-run grant `-n auto` follows the grant, clamped to its memory (lab-l: 15 workers, `tests/_xdist_cap.py`). Recipes: T2 `nexus/chas-test-host-howto`, `nexus/hellmini-second-test-host-howto`.
 13. **Hand runs are targeted, and no tree gets two green full runs** (nexus-clmlb). Iterate on the changed modules' tests (a path, `-k` or `-m`). A green full run of a tree (same sha, clean) is not repeated by anyone, whoever ran it: hand on the sha and the status file; once pushed, develop CI's verdict is the run. A fix round reruns its reds plus its change class's tripwire. A hand full suite is announced with the change class it is for, the tree sha, and "no green full run of this tree exists"; "pre-push" alone is not a reason. Full suites run on chas through `lab-run -c lab-l -- python3 scripts/watched_pytest.py ...`; engine builds and suites through `scripts/mvnw-leased.sh --lab-run <class>`. [test-running](docs/agents/test-running.md) § Hand runs and develop CI.
 
 **Moving an in-flight session:** apply or cherry-pick into the new worktree and verify there FIRST, then revert the primary, never the reverse. **A remote pytest hand run goes through `scripts/watched_pytest.py`** (`--stall 180 --status <file> -- uv run pytest ...`); read the status file, never sleep and guess. Read long runs with `head` as well as `tail`.

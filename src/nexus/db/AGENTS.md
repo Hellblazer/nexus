@@ -10,7 +10,7 @@ dependency. (`ChromaSchemeHandler.java`, the engine's resolver for them, was
 removed with `POST /v1/vectors/resolve`, nexus-3t0jv.) Pinned by
 `tests/test_rdr155_p4b_deletion_gate.py`.
 
-## Modules
+## Key modules
 
 | File | Purpose |
 |---|---|
@@ -27,7 +27,7 @@ removed with `POST /v1/vectors/resolve`, nexus-3t0jv.) Pinned by
 | Store | Purpose |
 |---|---|
 | `HttpMemoryStore` | Persistent notes + full-text search (`nx memory`). |
-| `HttpPlanLibrary` | Plan templates with TTL auto-expiry. 17 builtin templates seeded at `nx catalog setup`. |
+| `HttpPlanLibrary` | Plan templates with TTL auto-expiry. Builtin templates (`conexus/plans/builtin/*.yml`) are seeded by `nx init` (`_seed_builtin_plans_best_effort`); `nx catalog setup` is retired. |
 | `HttpTaxonomyStore` | HDBSCAN topic discovery, assignments, taxonomy meta, topic links (RDR-070). Pure-compute half lives in `taxonomy_compute.py`. |
 | `HttpTelemetryStore` | Relevance log + search/hook telemetry + tier writes. |
 | `HttpChashIndex` | Content-hash chunk index (RDR-086; table retired by RDR-187 — shim until the 410 flip). |
@@ -67,10 +67,12 @@ Collection registration is enforced server-side at two layers:
    segments are stored; for a non-conformant name a name-only stub with empty metadata fields
    is stored.  Either way the FK is satisfied before the chunk row lands.
 
-2. **FK constraints** `chunks_384_collection_fk` / `chunks_768_collection_fk` /
-   `chunks_1024_collection_fk` / `chash_index_collection_fk` /
-   `topic_assignments_collection_fk` (all `NOT VALID` until RDR-153 data migration lands;
-   `VALIDATE CONSTRAINT` is bead nexus-70r3c.3).  `NOT VALID` still enforces ALL new writes.
+2. **FK constraints** `chunks_collection_fk` (`nexus.chunks` -> `catalog_collections`,
+   `fk-004-chunks-collection-registry.xml`, VALIDATEd by changeset fk-004-2) and
+   `topic_assignments_collection_fk` (`fk-002-validate.xml`).  The per-dimension
+   `chunks_384/768/1024_collection_fk` died with their tables when `vectors-004-unify-chunks.xml`
+   unified them into `nexus.chunks` (RDR-191), and `chash_index_collection_fk` is dead with
+   `chash_index` (RDR-187).
 
 3. **Stub upgradability**: stub rows (all metadata fields `= ''`) are upgraded in-place by
    `CatalogRepository.importCollection` via `DO UPDATE ... WHERE embedding_model='' AND
@@ -94,7 +96,7 @@ that reaches for a heavier mechanism has to argue past them.
 
 | RDR-156 decision | Mechanism chosen | Why not heavier |
 |---|---|---|
-| chunk → collection referential integrity | **declarative FK** (`chunks_<dim>/chash_index/topic_assignments` → `catalog_collections`, `NOT VALID` until RDR-153, then `VALIDATE`) | A FK is declarative and authoritative-by-construction; no function/trigger needed. Cost is one index probe per upsert (negligible vs the embedding call). |
+| chunk → collection referential integrity | **declarative FK** (`chunks_collection_fk` on `nexus.chunks`, and `topic_assignments_collection_fk`, → `catalog_collections`; both VALIDATEd) | A FK is declarative and authoritative-by-construction; no function/trigger needed. Cost is one index probe per upsert (negligible vs the embedding call). |
 | manifest → chunk integrity (orphan detection) | **declarative FK** `catalog_document_chunks (tenant_id, collection, chash) -> nexus.chunks`, `ON UPDATE CASCADE`, deferrable on delete (RDR-191 Phase 5, `catalog-029-manifest-chunk-fk.xml`, VALIDATEd) — **SUPERSEDES this row's original 2026 entry** | RDR-156's original "A FK is impossible" reasoning held only while the chunk store was split across three dim tables (`chunks_384/768/1024`); RDR-191 Phase 4 unified them into one `nexus.chunks` table first, which made the FK expressible. `nexus.manifest_orphans(dim)` and the P2.1 read backstop this row used to name are RETIRED (RDR-191 Phase 6, nexus-o8dil.33, catalog-030) — the FK rejects the dangling state at write time, making the detection function unreachable by construction. This row is the canonical "declarative FK beats a stored function" case the capability ladder above was written to produce; it took two more RDRs to actually reach it. |
 | manifest backfill / document reconstruction | **stored function** `document_text(doc_id)` (`manifest_backfill()` RETIRED, RDR-191 Phase 6) | `document_text` replaces a generated-SQL-string artifact with a first-class DB object callable by doctor / migration validation; no triggers, no app round-trips. `manifest_backfill()`'s only reason to exist — pre-stamping `collection` before the (now-retired) orphan/verify functions' `collection IS NOT NULL` filter — died with those functions, and catalog-025's later `NOT NULL` promotion means no future row can need the stamp either. |
 | per-collection stats | **`security_invoker` view** `collection_vector_stats` | Read-only aggregate; a view under the caller's RLS is exactly right — replaces remote `count()` calls. No function needed. |

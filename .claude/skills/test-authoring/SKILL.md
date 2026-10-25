@@ -15,15 +15,15 @@ T2 `nexus/directive-test-suite-architecture`. This skill is the routing card.
 | Need | Command | Notes |
 |------|---------|-------|
 | Agent hand run | `lab-run -c lab-m -- python3 scripts/watched_pytest.py --stall 180 --status <f> -- uv run pytest <paths, -k or -m>` | Targeted, on chas. No tree gets two green full runs; once pushed, develop CI is the verdict; a hand full suite is announced with its change class, tree sha and "no green full run exists" (AGENTS.md rule 13). Engine: `scripts/mvnw-leased.sh --lab-run`. |
-| Full Python suite | `uv run pytest -n auto` | ~13min parallel (auto-capped to this box's SysV shared-memory budget, AGENTS.md). The pre-push run a `src/nexus/` or `service/` change requires, once per tree (rule 13). |
-| Debugging interleaving/isolation | `uv run pytest` (serial) | ~14min; only when parallelism masks the signal |
+| Full Python suite | `uv run pytest -n auto` | Auto-capped to the box's shared-memory budget and, in a lab-run grant, to the grant's memory (AGENTS.md). The pre-push run a `src/nexus/` or `service/` change requires, once per tree (rule 13). |
+| Debugging interleaving/isolation | `uv run pytest` (serial) | Only when parallelism masks the signal |
 | Repo-structure invariants | `uv run pytest -m lint` | O(repo) meta-tests; PR-gated by CI `test-lint`; run when touching `conexus/`, RDR frontmatter, storage-boundary/hook invariants |
 | Real-substrate depth | `uv run pytest -m integration` | Nightly local-service gate territory |
 | System truths, in-process | `scenario` journeys (in default loop) | `tests/test_scenario_journeys.py` |
 
-After ANY pull/rebase touching `service/`: `scripts/build-gate-jar.sh` first —
-a stale/unstamped jar makes the entire suite error at setup in seconds.
-Sharing a box with another instance's suite run: stagger, and cap at `-n 8`.
+After ANY pull/rebase touching `service/`: `scripts/build-gate-jar.sh` first;
+session start refuses (exit 75) on a stale or unstamped jar.
+One full suite per box at a time (AGENTS.md rule 5).
 
 ## Authoring decisions (the rules that keep the loop fast and honest)
 
@@ -46,8 +46,9 @@ Sharing a box with another instance's suite run: stagger, and cap at `-n 8`.
    retiring a journey means lowering that lint's floor in the same commit.
 5. **Regression pins** keep their bead/incident name and rationale visible,
    standalone or folded. Never silently generalized.
-6. **O(repo) census tests** are `pytest.mark.lint` (they're also xdist-unsafe
-   by nature). Expensive shared scans get `functools.cache`.
+6. **O(repo) census tests** are `pytest.mark.lint`. Expensive shared scans get
+   `functools.cache`. A census that reads `session.items` is the exception
+   (tests/AGENTS.md, Test-authoring directives).
 7. **Consolidation proposals need assertion-level evidence.** Measured lesson
    (5 independent implementers, 2026-08-05 arc): no-coverage-loss
    consolidation yields ~1–2% collected-count reduction — structural

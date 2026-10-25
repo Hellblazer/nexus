@@ -4,7 +4,7 @@ Test-suite conventions for AI coding agents. `CLAUDE.md` is not a symlink here; 
 
 ## Dev loop (test-suite-compression P0, nexus-test-cleanup 2026-08-05)
 
-Default local dev loop: `uv run pytest -n auto`. `pytest-xdist` is a `dev`-group dependency, opt-in via `-n` — it is deliberately NOT baked into `addopts`, so CI's `pytest-split` duration-balanced sharding (matrix parallelism across runners, see `.github/workflows/ci.yml`) is untouched; `-n auto` is a second, independent, local-only lever. Serial fallback (`uv run pytest`, no `-n`) remains available for debugging output-interleaving or fixture-isolation issues that parallel workers can mask.
+Default local dev loop: `uv run pytest -n auto`. `pytest-xdist` is a `dev`-group dependency, opt-in via `-n` — it is deliberately NOT baked into `addopts`, so CI's `pytest-split` duration-balanced sharding (matrix parallelism across runners, see `.github/workflows/ci.yml`) is untouched; `-n` is a second, independent lever: CI passes `-n 4` itself on the self-hosted pool shards and the lint job, and nowhere on hosted shards. Serial fallback (`uv run pytest`, no `-n`) remains available for debugging output-interleaving or fixture-isolation issues that parallel workers can mask.
 
 **`-n` is capped to this machine's shared-memory headroom** (nexus-6qp25,
 `tests/_xdist_cap.py`). Every worker is a separate process, and
@@ -162,7 +162,7 @@ socket would pass `sun_path`.
 
 **The session start refuses when the engine substrate cannot boot** (`tests/conftest.py`
 `_preflight_engine_substrate`, verdict from `tests/_substrate_preflight.refusal`).
-A missing or stale service jar, or a PG bundle for the pinned engine tag that is
+A missing, stale or unstamped service jar (a plain `./mvnw package` jar is unstamped; rebuild with `scripts/build-gate-jar.sh` after any pull/rebase touching `service/`), or a PG bundle for the pinned engine tag that is
 not downloadable (the tag is not published yet, as on a release branch whose
 engine is still building), used to error every substrate-backed test at setup:
 25,636 errors on one full `-n auto` run, one fact. Now the xdist controller checks
@@ -215,27 +215,24 @@ Rules when touching this layer:
 ## Live-cloud recall-parity gate (nexus-d9xt2)
 
 `tests/test_search_fanout_recall_parity.py` (`integration` marker, skipped by
-default — `uv run pytest -m integration tests/test_search_fanout_recall_parity.py`)
+default; `uv run pytest -m integration tests/test_search_fanout_recall_parity.py`)
 compares the model-grouped batched cross-corpus fan-out against the pre-fix
-one-call-per-collection fan-out (loaded standalone via `git show <pre-fix
-SHA>:src/nexus/search_engine.py`) across 10 real queries spanning all five
-corpus specs, asserting top-10 id-set Jaccard overlap ≥ 0.9 per query against
-this box's own live cloud collections. Reads only — `search_cross_corpus`
-never writes — and self-skips on a named content precondition (this tenant
-missing real collections for one of the five corpus specs) rather than
-passing vacuously. Run it by hand after any change to
+one-call-per-collection fan-out (loaded standalone from the pre-fix commit's
+`src/nexus/search_engine.py`) across 10 real queries spanning all five
+corpus specs, against this box's own live cloud collections. Each query's new
+top-10 is scored against five runs of the old fan-out (`_reference_score`: the
+smaller of the share of new ids the old path ever returned and the share of the
+ids it always returned that the new path kept) with a floor of 0.9, or 0.6 for a
+corpus whose collection group splits into sub-batches (`_JACCARD_FLOOR_SPLIT`).
+Reads only, and self-skips on a named content precondition (this tenant missing
+real collections for one of the five corpus specs) rather than passing
+vacuously. Five old runs cost one search per collection each: tell the cloud's
+operator the UTC window before a run. Run it by hand after any change to
 `nexus.search_engine.search_cross_corpus`'s batching, grouping, or per-batch
-sizing logic. CI's affected-integration job selects it when it changes, but it
-skips there (a hosted runner has no live cloud config), so in practice it runs
-only by hand.
-
-The bounded-retry decision that separates a real regression from measured
-ANN/embedding-index jitter (`_is_confirmed_regression`) is a pure function
-with its own fast, non-`integration` unit coverage in
-`tests/test_search_fanout_recall_parity_retry_logic.py` — run in the default
-loop, so a revert of the "a second failure fails" contract (accepting
-whichever of two measurements came back last, win or lose) is caught without
-needing live-cloud credentials.
+sizing logic; CI selects it when it changes but it skips there (a hosted runner
+has no live cloud config). The scoring function has fast, non-`integration`
+coverage in `tests/test_search_fanout_recall_parity_reference_logic.py`, which
+runs in the default loop.
 
 ## Test-authoring directives (compression arc, 2026-08-05)
 
@@ -272,7 +269,7 @@ entries linked from it):
   `test_no_new_sqlite.py`, `test_private_handle_access_census.py`, etc.),
   never for a `request.session.items`-scanned one. `-m lint`/`-k` deselection
   mutates `session.items` in place, so a census reading it sees only the
-  ~800 lint-bucket tests, not the ~11.7k-test default corpus — permanently
+  lint-bucket tests, not the default corpus — permanently
   blind to anything outside the bucket, silently, with no error. (Corrected
   2026-08-05, nexus-8x4le: `test_mode_declarations_are_explicit.py` was
   wrongly reclassified under the "whole-repo census tests are xdist-unsafe
@@ -308,20 +305,12 @@ entries linked from it):
      so the guard above sees a trustworthy view and the census actually
      executes. That env var makes `tests/conftest.py` SKIP-MARK (not
      deselect) every test outside `_CENSUS_ONLY_ALLOWED_MODULES`, so
-     `session.items` stays the full collected corpus while the ~11.7k
+     `session.items` stays the full collected corpus while the
      non-census tests never reach fixture setup (skip fires in
      `pytest_runtest_setup` before `item.setup()`) — no engine substrate, PG,
      or service jar needed. Add a new session.items-based census's module
      name to `_CENSUS_ONLY_ALLOWED_MODULES` instead of standing up a second
      dedicated job.
-
-## Engine substrate: jar freshness
-
-The suite's engine substrate enforces jar-vs-source freshness and version
-stamping. After **any** pull/rebase that touches `service/`, rebuild with
-`scripts/build-gate-jar.sh` (a plain `./mvnw package` jar is unstamped and the
-client probe hard-rejects it). Symptom of forgetting: the entire suite errors
-instantly at setup (thousands of `E`s in seconds).
 
 ## The tenant is opt-in (nexus-j23ni, 2026-10)
 
@@ -725,7 +714,7 @@ What the host itself must supply:
 ## E2E isolation: a sandboxed HOME does NOT isolate a service install
 
 **Only a container isolates the service unit. `HOME` / `NEXUS_CONFIG_DIR` do
-not.** The developer box runs Hal's real cloud-mode install beside this
+not.** The developer box runs Sam's real cloud-mode install beside this
 checkout, so a harness that registers the autostart unit collides with
 production, not with a sandbox.
 
@@ -749,7 +738,7 @@ Two things keep the harnesses safe today, neither of them HOME:
 current such site is under `tests/e2e/migration-rehearsal/rehearse_*.sh`. Adding
 a host-side one, or making a container script host-runnable, arms a collision
 whose blast radius is the developer's live machine, not a red CI job.
-Un-linted — tracked on `nexus-d5yu5`, which also records the subtler hazard:
+Linted by `tests/test_nx_init_autostart_collision_lint.py` (nexus-d5yu5), which also records the subtler hazard:
 `InstallStatus.ALREADY_PRESENT` reports an existing identical unit as success,
 so a harness on that path can poll **production's** lease and pass green while
 measuring the wrong service. A differing unit is fail-loud
@@ -763,7 +752,7 @@ A distinct hazard from the one above: a harness that indexes/stores real content
 
 The suite runs in **local mode by default** — no API keys, ONNX MiniLM embedding function via `nexus.db.minilm_direct.MiniLMDirectEmbeddingFunction` (aliased `DefaultEmbeddingFunction` in test imports, e.g. `tests/conftest.py`). This matches CI (which has no credentials) and reproduces a clean-install developer environment.
 
-Tests that exercise **cloud-mode behavior** (real Voyage calls, `CloudClient` routing, `_has_credentials()`-gated code paths, `voyage-context-3` / `voyage-code-3` embedder assertions) **opt in** by depending on the `cloud_mode` fixture:
+Tests that exercise **cloud-mode behavior** (real Voyage calls, managed-service routing, `_has_credentials()`-gated code paths, `voyage-context-3` / `voyage-code-3` embedder assertions) **opt in** by depending on the `cloud_mode` fixture:
 
 ```python
 def test_something(cloud_mode, ...):
@@ -823,7 +812,7 @@ Exclusion categories are documented in `tests/conftest.py` above each set.
 Decide:
 
 1. **Is the voyage token a schema-canonical name** (e.g. `corpus.canonical_embedding_model("code")`, a collection-name parse / render round-trip, RDR-103 four-segment shape)? → mode-independent. Add the test's file to `_MODE_LINT_EXCLUDE_FILES` (if the whole file is schema-only) or its nodeid to `_MODE_LINT_EXCLUDE_NODEIDS`.
-2. **Does the test actually exercise cloud-mode behavior** (real Voyage embedder, `_has_credentials()` gated path, `CloudClient` routing)? → add `cloud_mode` to the test's fixture list, or `pytestmark = pytest.mark.usefixtures("cloud_mode")` at module scope.
+2. **Does the test actually exercise cloud-mode behavior** (real Voyage embedder, `_has_credentials()` gated path, managed-service routing)? → add `cloud_mode` to the test's fixture list, or `pytestmark = pytest.mark.usefixtures("cloud_mode")` at module scope.
 
 If the lint fails on a CI run after your edit, the failure message lists the offending nodeids and the two options above.
 
