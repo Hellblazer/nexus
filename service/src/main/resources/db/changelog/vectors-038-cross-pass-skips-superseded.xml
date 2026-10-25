@@ -21,7 +21,12 @@
 
     THE FORM. "ct.collection <> ALL (ARRAY(SELECT cc.name FROM nexus.catalog_collections cc WHERE ...))" is an
     uncorrelated array expression: the planner evaluates it once, as an InitPlan, and applies it as a plain
-    filter on the HNSW index scan, the way it applies "ct.collection <> p_collection" today. A NOT EXISTS or a
+    filter beside "ct.collection <> p_collection". In assign_from_chashes_<dim> and cross_preview_<dim> that
+    filter rides on the pinned HNSW index scan (those two set enable_seqscan and enable_sort off). The ANN
+    function carries no such pin, and for a tenant with few collections the planner's row estimate for
+    "collection <> ALL (non-constant array)" collapses (it assumes ten array elements), so its cross branch
+    can choose a Seq Scan with a top-N Sort instead of the index (measured on a 3,000-centroid fixture:
+    TaxonomyCentroidAnnPlanShapeTest); that route has no live caller. A NOT EXISTS or a
     join against catalog_collections would be pulled up into an anti-join, which can displace the pinned
     "Index Scan using the HNSW index, no Sort" plan taxonomy-020 holds (enable_seqscan and enable_sort are off
     there, so a plan that cannot be built as a presorted index scan has nowhere to go). The statement stays one
@@ -33,11 +38,16 @@
     WHAT IS NOT CHANGED. The same-collection branch of taxonomy_ann_query_<dim> and the own pass of
     assign_from_chashes_<dim> read one collection by name, and still read a tombstone's own centroids when asked
     for them. assign and assign_many (TaxonomyRepository.assignTopic, assignMany) are Java upserts, not
-    functions: they write the topic_id the caller names. The routes that hand a caller a topic_id for a
-    cross-collection projection are these functions and getForeignCentroids, so closing them closes what those
-    writers are fed. getForeignCentroids (TaxonomyCentroidRepository) is changed in Java in the same commit,
-    because nx doctor's assignment check recomputes the exact nearest foreign centroid from it and compares the
-    result with cross_preview; the two sets must be the same set.
+    functions: they write the topic_id the caller names, and `nx taxonomy project` with its persist option names the topic of a
+    target collection it read by name (centroids/by_collection, unfiltered). These functions alone therefore did
+    NOT close the defect. The same commit series closes the rest in Java, outside this changeset:
+    TaxonomyRepository.assignTopic and assignMany skip an assigned_by='projection' row whose topic belongs to a
+    superseded collection (one lookup per batch; centroid, manual and import writes are not checked, and the
+    /import/* verbs keep carrying tombstoned collections as they were), and getForeignCentroids
+    (TaxonomyCentroidRepository) filters the same way, because nx doctor's assignment check recomputes the exact
+    nearest foreign centroid from it and compares the result with cross_preview; the two sets must be the same
+    set. getForeignCentroids also feeds compute_cross_links (discover's topic_links pass), so a retired
+    collection's topics get no new cross-links.
 
     SHAPE. Nine CREATE OR REPLACE FUNCTION statements with the signatures vectors-031-1 gave them (so the
     generated jOOQ routines and the EXPECTED_RECORD_TYPES count do not move), the same function-level

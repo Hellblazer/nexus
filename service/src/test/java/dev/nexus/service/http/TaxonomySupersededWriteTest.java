@@ -355,6 +355,55 @@ class TaxonomySupersededWriteTest extends AtomicWriteTestBase {
         return t;
     }
 
+    // ── projection onto a retired collection's topic: skipped and counted, never refused (nexus-2k8wi) ─
+
+    /** A live source collection holding one real chunk, so the only thing that can stop the row is the guard. */
+    private String liveSourceChunk(String tag) {
+        Fx f = fixture(tag);
+        String chash = ch(tag + "-" + f.collection());
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(chash, "projected chunk")),
+            List.of(doc(f.docId(), List.of(row(0, chash)))), null, false, false);
+        return f.collection() + "|" + chash;
+    }
+
+    private static Map<String, Object> projection(String sourceAndChash, long topicId) {
+        String[] sc = sourceAndChash.split("\\|");
+        return Map.of("doc_id", sc[1], "topic_id", topicId, "assigned_by", "projection", "similarity", 0.9,
+            "source_collection", sc[0]);
+    }
+
+    @Test
+    void projectionAssignMany_ontoARetiredCollectionsTopic_is200_skippedAndCounted_aLiveTargetIsWritten()
+            throws Exception {
+        String src = liveSourceChunk("tx-pm-src");
+        Live retired = liveWithTopic("tx-pm-old");
+        Live live = liveWithTopic("tx-pm-new");
+        retire(retired);
+
+        Resp r = post("/assignments/assign_many", Map.of("assignments",
+            List.of(projection(src, retired.topicId()), projection(src, live.topicId()))));
+
+        assertThat(r.status()).as(r.body()).isEqualTo(200);
+        assertThat(r.json().get("persisted").asInt()).as("only the live target's row is written").isEqualTo(1);
+        assertThat(r.json().get("skipped_superseded").asInt()).as("the retired target's row is counted").isEqualTo(1);
+    }
+
+    @Test
+    void projectionAssign_ontoARetiredCollectionsTopic_is200Skipped_aLiveTargetIsWritten() throws Exception {
+        String src = liveSourceChunk("tx-p1-src");
+        Live retired = liveWithTopic("tx-p1-old");
+        Live live = liveWithTopic("tx-p1-new");
+        retire(retired);
+
+        Resp skipped = post("/assignments/assign", projection(src, retired.topicId()));
+        Resp written = post("/assignments/assign", projection(src, live.topicId()));
+
+        assertThat(skipped.status()).as(skipped.body()).isEqualTo(200);
+        assertThat(skipped.json().get("skipped_superseded").asBoolean()).isTrue();
+        assertThat(written.status()).as(written.body()).isEqualTo(200);
+        assertThat(written.json().has("skipped_superseded")).isFalse();
+    }
+
     @Test
     void unassigned_readOfARetiredName_isStillServed() throws Exception {
         Live l = liveWithTopic("tx-rd");

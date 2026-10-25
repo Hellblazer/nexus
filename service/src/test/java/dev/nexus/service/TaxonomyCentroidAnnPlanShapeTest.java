@@ -379,6 +379,51 @@ class TaxonomyCentroidAnnPlanShapeTest {
             .doesNotContain("Function Scan");
     }
 
+    // nexus-2k8wi: the cross-collection branch carries the superseded-collection filter, an uncorrelated
+    // ARRAY(SELECT ... FROM catalog_collections) beside "collection <> p_collection". What this pins is what the
+    // changeset can promise: the function still inlines (no Function Scan), and the filter is evaluated ONCE as an
+    // InitPlan rather than once per candidate row as a correlated SubPlan.
+    //
+    // It does NOT pin the HNSW index scan, because that is not true of this branch. Unlike
+    // assign_from_chashes_<dim> and cross_preview_<dim>, which set enable_seqscan and enable_sort off, the ANN
+    // function has no planner pin, and the "<> ALL (non-constant array)" test makes the planner assume an array of
+    // ten elements, each excluding about 1/n_collections of the rows: for a tenant with few collections it
+    // estimates a handful of rows and chooses a Seq Scan with a top-N Sort, exact where HNSW is approximate. Measured
+    // on this 3,000-centroid fixture (2026-10-25): without the filter an HNSW Index Scan (rows=3000), with it a Seq
+    // Scan (rows=3); a correlated NOT EXISTS beside the same predicate kept the Index Scan. No live caller
+    // reaches this branch (HttpTaxonomyStore.assign_single and compute_assignments with cross_collection are
+    // unused; the live cross pass is assign_from_chashes), so the access path is left as the planner picks it.
+
+    private void assertCrossBranchShape(int dim, Table<?> fn) {
+        String plan = explain(fn);
+        assertThat(plan)
+            .as("a Function Scan node means the cross branch of taxonomy_ann_query_%d is no longer inlinable. Plan was:%n%s",
+                dim, plan)
+            .doesNotContain("Function Scan");
+        assertThat(plan)
+            .as("the superseded filter is in the plan as an InitPlan over catalog_collections, evaluated once. Plan was:%n%s",
+                plan)
+            .contains("InitPlan").contains("catalog_collections");
+        assertThat(plan)
+            .as("the filter must not become a per-row SubPlan. Plan was:%n%s", plan)
+            .doesNotContain("SubPlan");
+    }
+
+    @Test
+    void annQuery_crossBranch_shape_filterIsAnInitPlan_1024() {
+        assertCrossBranchShape(1024, TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), COL_1024, true, 10, MODEL_1024, TENANT));
+    }
+
+    @Test
+    void annQuery_crossBranch_shape_filterIsAnInitPlan_768() {
+        assertCrossBranchShape(768, TAXONOMY_ANN_QUERY_768.call(queryVec(768), COL_768, true, 10, MODEL_768, TENANT));
+    }
+
+    @Test
+    void annQuery_crossBranch_shape_filterIsAnInitPlan_384() {
+        assertCrossBranchShape(384, TAXONOMY_ANN_QUERY_384.call(queryVec(384), COL_384, true, 10, MODEL_384, TENANT));
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // Behavioral companions: the REAL annQuery() call, end to end.
     // ════════════════════════════════════════════════════════════════════════

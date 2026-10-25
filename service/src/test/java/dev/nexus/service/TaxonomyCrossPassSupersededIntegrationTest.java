@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
@@ -52,6 +53,7 @@ class TaxonomyCrossPassSupersededIntegrationTest {
     com.zaxxer.hikari.HikariDataSource svcDs;
     TaxonomyRepository repo;
     TaxonomyCentroidRepository centroids;
+    CatalogRepository catalog;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -81,6 +83,7 @@ class TaxonomyCrossPassSupersededIntegrationTest {
         tenantScope = new TenantScope(svcDs);
         repo = new TaxonomyRepository(tenantScope);
         centroids = new TaxonomyCentroidRepository(tenantScope);
+        catalog = new CatalogRepository(tenantScope);
     }
 
     @AfterAll
@@ -186,6 +189,99 @@ class TaxonomyCrossPassSupersededIntegrationTest {
             .containsExactly(f.live);
         assertThat(centroids.getByCollection(f.tenant, f.retired))
             .as("the tombstone's own centroids are still readable by name").hasSize(1);
+    }
+
+    // ── the write side: a caller-named topic_id (nx taxonomy project --persist) ──────────────────────
+
+    private static Map<String, Object> projectionRow(Fixture f, long topicId, double similarity) {
+        return Map.of("doc_id", f.chash, "topic_id", topicId, "assigned_by", "projection",
+            "similarity", similarity, "source_collection", f.source);
+    }
+
+    @Test
+    void projectionAssignMany_ontoASupersededCollectionsTopic_isSkippedAndCounted_aLiveTargetIsStillAccepted()
+            throws Exception {
+        Fixture f = fixture("pmany");
+
+        // Non-vacuity: before the supersede the same projection onto the tombstone-to-be is written.
+        assertThat(repo.assignManyCounted(f.tenant, List.of(projectionRow(f, f.retiredTopic, 0.99))))
+            .isEqualTo(new TaxonomyRepository.AssignManyResult(1, 0));
+        assertThat(docCount(f.tenant, f.retiredTopic)).isEqualTo(1);
+        tenantDeleteAssignments(f);
+
+        supersede(f.tenant, f.retired, f.live);
+
+        var out = repo.assignManyCounted(f.tenant, List.of(
+            projectionRow(f, f.retiredTopic, 0.99), projectionRow(f, f.liveTopic, 0.6)));
+
+        assertThat(out).as("one row written, the retired target's row skipped and counted")
+            .isEqualTo(new TaxonomyRepository.AssignManyResult(1, 1));
+        assertThat(repo.getAssignmentDetails(f.tenant, List.of(f.chash)))
+            .extracting(r -> r.get("topic_id")).containsExactly(f.liveTopic);
+        assertThat(docCount(f.tenant, f.retiredTopic)).as("the retired topic does not grow").isZero();
+        assertThat(docCount(f.tenant, f.liveTopic)).isEqualTo(1);
+        assertThat(repo.assignMany(f.tenant, List.of(projectionRow(f, f.retiredTopic, 0.99))))
+            .as("the int-returning overload reports rows written").isZero();
+    }
+
+    @Test
+    void projectionAssignTopic_ontoASupersededCollectionsTopic_isSkipped() throws Exception {
+        Fixture f = fixture("pone");
+        assertThat(repo.assignTopic(f.tenant, f.chash, f.retiredTopic, "projection", 0.9, f.source, null))
+            .as("non-vacuity: written while the collection is live").isTrue();
+        tenantDeleteAssignments(f);
+
+        supersede(f.tenant, f.retired, f.live);
+
+        assertThat(repo.assignTopic(f.tenant, f.chash, f.retiredTopic, "projection", 0.9, f.source, null)).isFalse();
+        assertThat(repo.getAssignmentDetails(f.tenant, List.of(f.chash))).isEmpty();
+        assertThat(docCount(f.tenant, f.retiredTopic)).isZero();
+        assertThat(repo.assignTopic(f.tenant, f.chash, f.liveTopic, "projection", 0.6, f.source, null)).isTrue();
+        assertThat(docCount(f.tenant, f.liveTopic)).isEqualTo(1);
+    }
+
+    @Test
+    void nonProjectionAssignments_ontoASupersededCollectionsTopic_areNotThisGuardsConcern() throws Exception {
+        // The guard is projection-only: a centroid or manual write names its topic on purpose (and the import
+        // verbs carry tombstoned collections as they were), so these stay as they were.
+        Fixture f = fixture("pother");
+        supersede(f.tenant, f.retired, f.live);
+
+        assertThat(repo.assignManyCounted(f.tenant, List.of(Map.of(
+            "doc_id", f.chash, "topic_id", f.retiredTopic, "assigned_by", "manual",
+            "source_collection", f.source)))).isEqualTo(new TaxonomyRepository.AssignManyResult(1, 0));
+        assertThat(docCount(f.tenant, f.retiredTopic)).isEqualTo(1);
+    }
+
+    // ── a rename tombstone holds no centroids: the re-homed ones stay candidates ─────────────────────
+
+    @Test
+    void renamedCollection_keepsItsRehomedCentroidsAsCrossPassCandidates() throws Exception {
+        Fixture f = fixture("rename");
+        String renamed = "code__x2k8wi_rename_moved__voyage-code-3__v1";
+        // The weaker live candidate would win if the filter wrongly dropped the renamed collection.
+        assertThat(repo.crossPreview(f.tenant, f.source, List.of(f.chash)))
+            .singleElement().satisfies(r -> assertThat(r.get("topic_id")).isEqualTo(f.retiredTopic));
+
+        catalog.renameCollection(f.tenant, f.retired, renamed);
+
+        assertThat(centroids.getByCollection(f.tenant, renamed)).as("the centroid moved with the rename").hasSize(1);
+        assertThat(centroids.getByCollection(f.tenant, f.retired)).as("the tombstone holds none").isEmpty();
+        assertThat(repo.crossPreview(f.tenant, f.source, List.of(f.chash)))
+            .as("cross_preview still offers the renamed collection's (re-homed) centroid")
+            .singleElement().satisfies(r -> assertThat(r.get("topic_id")).isEqualTo(f.retiredTopic));
+        Map<String, Object> out = repo.assignFromChashes(f.tenant, f.source, List.of(f.chash), true);
+        assertThat(out.get("cross_assigned")).isEqualTo(1);
+        assertThat(docCount(f.tenant, f.retiredTopic)).as("the topic followed the rename and takes the row").isEqualTo(1);
+    }
+
+    private void tenantDeleteAssignments(Fixture f) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(
+                dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS)
+                .where(dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS.TENANT_ID.eq(f.tenant)).execute();
+        }
     }
 
     // ── helpers (same idiom as CrossPreviewRepositoryTest) ──────────────────────

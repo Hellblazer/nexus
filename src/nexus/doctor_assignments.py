@@ -85,8 +85,10 @@ sequence is retried ONCE; if it still differs, the collection is reported
 CHANGED DURING PROBE -- reported, not a failure, and never folded into a
 disagreement or an INCONCLUSIVE result. The comparison is SCOPED to the
 sampled collection's own embedding dimension (round-3 review, Minor):
-``get_foreign`` returns every OTHER collection's centroids across every
-dim a tenant's collections use, so an unscoped before/after comparison
+``get_foreign`` returns every OTHER LIVE collection's centroids (superseded
+collections' are left out from the engine cut after v0.1.164, nexus-2k8wi, as the
+engine's cross pass leaves them out) across every dim a tenant's collections
+use, so an unscoped before/after comparison
 would spuriously flag this collection over a centroid change in a
 completely unrelated dim, one this probe's own recompute never reads at
 all.

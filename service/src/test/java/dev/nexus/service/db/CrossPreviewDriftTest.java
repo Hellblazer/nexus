@@ -143,6 +143,29 @@ class CrossPreviewDriftTest {
         assertSharedSpanPresentInBoth(1024);
     }
 
+    /**
+     * nexus-2k8wi: ALL nine cross-pass functions exclude the centroids of superseded collections. The shared-CTE
+     * checks above cover assign_from_chashes and cross_preview at every dim, and the runtime tests cover the
+     * 1024 trio; this one closes the gap that left taxonomy_ann_query_384 and _768 with no test at all (deleting
+     * the filter from either body passed every other assertion). Common substring, because the ann functions
+     * spell the predicate inside a CASE and the other two on {@code ct.collection}.
+     */
+    @Test
+    void allNineCrossPassFunctions_excludeSupersededCollections() throws Exception {
+        int checked = 0;
+        for (int dim : new int[] {384, 768, 1024}) {
+            for (String fn : new String[] {"assign_from_chashes_", "cross_preview_", "taxonomy_ann_query_"}) {
+                String src = normalizeWhitespace(prosrc(fn + dim));
+                assertThat(src)
+                    .as("%s%d must leave out the centroids of a collection whose registry row names a successor", fn, dim)
+                    .contains("<> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc")
+                    .contains("COALESCE(cc.superseded_by, '') <> ''");
+                checked++;
+            }
+        }
+        assertThat(checked).as("non-vacuity: three dims by three functions").isEqualTo(9);
+    }
+
     private void assertSharedSpanPresentInBoth(int dim) throws Exception {
         String assignProsrcRaw = prosrc("assign_from_chashes_" + dim);
         String previewProsrcRaw = prosrc("cross_preview_" + dim);

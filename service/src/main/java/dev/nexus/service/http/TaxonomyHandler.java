@@ -533,8 +533,9 @@ public final class TaxonomyHandler implements HttpHandler {
         String sourceCollection = optStringOrNull(body, "source_collection");
         String assignedAt      = optStringOrNull(body, "assigned_at");
         // VISITED (RDR-194 P3c, site 1/9): docId is hex; repo.assignTopic absorbs bytes.
-        repo.assignTopic(tenant, docId, topicId, assignedBy, similarity, sourceCollection, assignedAt);
-        HttpUtil.send(ex, 200, "{\"ok\":true}");
+        boolean written = repo.assignTopic(tenant, docId, topicId, assignedBy, similarity, sourceCollection, assignedAt);
+        // nexus-2k8wi: a projection onto a superseded collection's topic is skipped; the field is additive.
+        HttpUtil.send(ex, 200, written ? "{\"ok\":true}" : "{\"ok\":true,\"skipped_superseded\":true}");
     }
 
     /**
@@ -545,7 +546,9 @@ public final class TaxonomyHandler implements HttpHandler {
      * lands under ONE tenant transaction via
      * {@link dev.nexus.service.db.TaxonomyRepository#assignMany}, mirroring the
      * single-row {@link #handleAssign} semantics exactly. Cap
-     * {@value #MAX_ASSIGN_MANY} rows. Response 200 {@code {"persisted": N}}.
+     * {@value #MAX_ASSIGN_MANY} rows. Response 200
+     * {@code {"persisted": N, "skipped_superseded": M}}: nexus-2k8wi, a {@code projection} row whose topic
+     * belongs to a superseded collection is skipped and counted in M, not written and not refused.
      */
     @SuppressWarnings("unchecked")
     private void handleAssignMany(HttpExchange ex, String tenant, String method) throws IOException {
@@ -573,8 +576,9 @@ public final class TaxonomyHandler implements HttpHandler {
             requireString(row, "assigned_by");
             rows.add(row);
         }
-        int persisted = repo.assignMany(tenant, rows);
-        HttpUtil.send(ex, 200, json(Map.of("persisted", persisted)));
+        var result = repo.assignManyCounted(tenant, rows);
+        HttpUtil.send(ex, 200, json(Map.of("persisted", result.persisted(),
+                                           "skipped_superseded", result.skippedSuperseded())));
     }
 
     /**
@@ -1351,9 +1355,13 @@ public final class TaxonomyHandler implements HttpHandler {
 
     /**
      * GET /v1/taxonomy/centroids/foreign?collection= (required)
-     * All centroids in collections OTHER than the given one (cross-collection projection
-     * source set). Serves the oracle's compute_cross_links ($ne) directly and
-     * project_against ($in) via client-side filtering. Same row shape as by_collection.
+     * All centroids in collections OTHER than the given one, leaving out the centroids of any
+     * SUPERSEDED collection (nexus-2k8wi; the engine's cross pass skips them too). Serves
+     * {@code nx doctor}'s exact nearest-foreign recompute, {@code compute_cross_links} (discover's
+     * topic_links pass: a retired collection's topics get no new cross-links) and
+     * {@code compute_assignments(cross_collection=True)}. {@code project_against} does NOT use it: it
+     * reads each named target through {@code /centroids/by_collection}, which is unfiltered, and its
+     * persist is guarded in {@code assignMany}. Same row shape as by_collection.
      */
     private void handleCentroidForeign(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");

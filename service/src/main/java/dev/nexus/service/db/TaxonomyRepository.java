@@ -584,14 +584,49 @@ public final class TaxonomyRepository {
      * - projection rows: MAX(existing.similarity, incoming.similarity)
      * - non-projection rows: INSERT OR IGNORE (idempotent)
      */
-    public void assignTopic(String tenant, String docId, long topicId,
-                             String assignedBy, Double similarity,
-                             String sourceCollection, String assignedAt) {
-        tenantScope.withTenant(tenant, ctx -> {
+    public boolean assignTopic(String tenant, String docId, long topicId,
+                               String assignedBy, Double similarity,
+                               String sourceCollection, String assignedAt) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-2k8wi: a projection row onto a SUPERSEDED collection's topic is skipped (see
+            // supersededTopicIds); every other kind of write is unchanged.
+            if ("projection".equals(assignedBy) && !supersededTopicIds(ctx, tenant, List.of(topicId)).isEmpty()) {
+                return false;
+            }
             assignOne(ctx, tenant, docId, topicId, assignedBy, similarity, sourceCollection, assignedAt);
-            return null;
+            return true;
         });
     }
+
+    /**
+     * nexus-2k8wi: which of {@code topicIds} belong to a SUPERSEDED collection (a registry row whose
+     * {@code superseded_by} is non-empty). One statement for the whole batch, no per-row round trip.
+     *
+     * <p>A supersede tombstone keeps its topics and centroids, and a projection write names its target
+     * topic_id on the wire: {@code nx taxonomy project --persist} and {@code --backfill --persist} read
+     * each target collection's centroids by name and post the nearest one. Without this check a live
+     * collection's chunks attach to the retired collection's topics and raise their {@code doc_count},
+     * the defect the engine's own cross pass ({@code vectors-038-1}) no longer produces. Projection is by
+     * definition a nearest-foreign pick, so no flow writes it onto a retired target on purpose;
+     * centroid, manual and import writes are not checked (the {@code /import/*} verbs carry
+     * tombstoned collections as they were).
+     */
+    private static java.util.Set<Long> supersededTopicIds(DSLContext ctx, String tenant,
+                                                          java.util.Collection<Long> topicIds) {
+        if (topicIds.isEmpty()) return java.util.Set.of();
+        return new java.util.HashSet<>(ctx.select(TOPICS.ID)
+            .from(TOPICS)
+            .join(CATALOG_COLLECTIONS)
+            .on(CATALOG_COLLECTIONS.TENANT_ID.eq(TOPICS.TENANT_ID))
+            .and(CATALOG_COLLECTIONS.NAME.eq(TOPICS.COLLECTION))
+            .where(TOPICS.TENANT_ID.eq(tenant))
+            .and(TOPICS.ID.in(topicIds))
+            .and(coalesce(CATALOG_COLLECTIONS.SUPERSEDED_BY, "").ne(""))
+            .fetch(TOPICS.ID));
+    }
+
+    /** {@link #assignMany} outcome: rows written, and projection rows skipped for a superseded target. */
+    public record AssignManyResult(int persisted, int skippedSuperseded) {}
 
     /**
      * Batch upsert of topic assignments (bead nexus-71988). Loops the SAME two
@@ -604,10 +639,23 @@ public final class TaxonomyRepository {
      *
      * @param rows each carries doc_id/topic_id/assigned_by (required) and
      *             optional similarity/source_collection/assigned_at.
-     * @return number of rows submitted.
+     * @return number of rows written: the rows submitted less the projection rows skipped because
+     *         their topic belongs to a superseded collection (nexus-2k8wi).
      */
     public int assignMany(String tenant, List<Map<String, Object>> rows) {
-        if (rows == null || rows.isEmpty()) return 0;
+        return assignManyCounted(tenant, rows).persisted();
+    }
+
+    /**
+     * {@link #assignMany} with the skip count. nexus-2k8wi: a projection row whose topic belongs to a
+     * superseded collection is SKIPPED, not refused. The batch is mixed by construction (one persist
+     * call spans every target collection of a project run), so a refusal would roll back the live
+     * targets' rows with the retired one's, and an older client that still names the tombstone would
+     * fail whole batches instead of losing only those rows. The count is returned so the route can
+     * report it.
+     */
+    public AssignManyResult assignManyCounted(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return new AssignManyResult(0, 0);
         // nexus-ps9wb: assignMany accumulates one row lock per assignOne across the
         // whole transaction, in arrival order. Two concurrent assignMany calls (the
         // flush-grain assign_many hook under multi-worker indexing) that touch
@@ -635,13 +683,23 @@ public final class TaxonomyRepository {
                 .filter(c -> c != null && !c.isBlank())
                 .distinct()
                 .forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
+            java.util.Set<Long> retired = supersededTopicIds(ctx, tenant, ordered.stream()
+                .filter(r -> "projection".equals(reqS(r, "assigned_by")))
+                .map(r -> reqL(r, "topic_id"))
+                .distinct()
+                .toList());
+            int skipped = 0;
             for (Map<String, Object> r : ordered) {
+                if ("projection".equals(reqS(r, "assigned_by")) && retired.contains(reqL(r, "topic_id"))) {
+                    skipped++;
+                    continue;
+                }
                 assignOne(ctx, tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
                           reqS(r, "assigned_by"), optD(r, "similarity"),
                           optS(r, "source_collection"), optS(r, "assigned_at"),
                           false);
             }
-            return ordered.size();
+            return new AssignManyResult(ordered.size() - skipped, skipped);
         }));
     }
 

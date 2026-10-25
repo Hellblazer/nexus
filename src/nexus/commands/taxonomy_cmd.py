@@ -2783,7 +2783,7 @@ def project_cmd(
             targets = [c.strip() for c in against.split(",") if c.strip()]
         else:
             targets = [
-                c for c in db.taxonomy.get_distinct_collections()
+                c for c in _without_superseded(db.taxonomy.get_distinct_collections())
                 if c != source_collection
             ]
             if not targets:
@@ -2918,6 +2918,34 @@ def _persist_assignments(
     return len(chunk_assignments)
 
 
+def _without_superseded(collections: list[str]) -> list[str]:
+    """*collections* less any whose catalog row names a successor (``superseded_by``).
+
+    A supersede tombstone keeps its topics, so ``get_distinct_collections`` lists it, and a projection
+    that names one of its topics would attach live chunks to a retired collection (nexus-2k8wi). The engine
+    refuses that write on its own (``assign``/``assign_many`` skip a projection row whose topic belongs to a
+    superseded collection), so this is the cheap early cut that keeps the run from reading the tombstone's
+    centroids and sending rows that are then dropped; the guard does not depend on it. One
+    ``/catalog/collections/list`` read, answered by every engine. A read that fails leaves *collections*
+    as given and says so: the engine's guard still holds.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        rows = make_catalog_reader().list_collections()
+    except Exception as exc:  # noqa: BLE001 - best-effort early cut; the engine guard is authoritative
+        _log.warning("taxonomy_project_superseded_listing_unavailable", error=repr(exc))
+        return collections
+    retired = {str(r.get("name")) for r in rows if isinstance(r, dict) and r.get("superseded_by")}
+    kept = [c for c in collections if c not in retired]
+    if len(kept) != len(collections):
+        _log.info(
+            "taxonomy_project_superseded_collections_left_out",
+            left_out=sorted(set(collections) & retired),
+        )
+    return kept
+
+
 def _run_backfill(
     taxonomy: "HttpTaxonomyStore",
     chroma_client: Any,
@@ -2935,7 +2963,7 @@ def _run_backfill(
     """
     from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    collections = taxonomy.get_distinct_collections()
+    collections = _without_superseded(taxonomy.get_distinct_collections())
 
     if not collections:
         click.echo("No collections with topics found. Run 'nx taxonomy discover' first.")
