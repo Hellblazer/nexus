@@ -22,7 +22,7 @@ function Install-Nexus {
     # The PATH this window has. uv's directory is added to this process's PATH below,
     # which says nothing about the windows the user opens afterwards.
     $originalPath = [string]$env:PATH
-    $state = @{ Mode = ''; Autostart = ''; AutostartArg = ''; Terminal = $false; Nx = '' }
+    $state = @{ Mode = ''; Autostart = ''; AutostartArg = ''; Terminal = $false; Nx = ''; Slim = $false }
     $marketplace = 'Hellblazer/nexus'
     $plugin = 'conexus@nexus-plugins'
     # The uv project's own installer. NX_INSTALL_UV_URL replaces it (a test seam; a file:
@@ -47,11 +47,12 @@ function Install-Nexus {
 Install the Nexus command-line tool (nx). Adds the conexus plugin to Claude Code
 when claude is on the PATH, and sets up the storage service if you ask for it.
 
-Usage: install.ps1 [--local | --cloud | --cli-only] [--autostart | --no-autostart]
+Usage: install.ps1 [--local | --cloud | --cli-only] [--autostart | --no-autostart] [--slim]
 
-  --local          Run the storage service on this machine. Downloads up to about
-                   1.3 GB. Runs `nx init`, in local mode even when a service
-                   address is already configured.
+  --local          Run the storage service on this machine. Downloads about 0.8 GB
+                   in all on macOS and 0.9 GB on Linux (Windows is not measured),
+                   PDF support included. Runs `nx init`, in local mode even when a
+                   service address is already configured.
   --cloud          Use a managed service. Runs `nx config init`, which asks for the
                    service address and your token. With no terminal attached it
                    needs NX_SERVICE_URL and NX_SERVICE_TOKEN (or NX_MINT_TOKEN) in
@@ -62,13 +63,21 @@ Usage: install.ps1 [--local | --cloud | --cli-only] [--autostart | --no-autostar
                    as --yes.
   --no-autostart   With --local: do not start the service at login. Passed to
                    `nx init` as --no-autostart.
+  --slim           Leave PDF support out: the download falls to about 0.2 GB for the
+                   command-line tool (about 0.55 GB with --local). The first PDF you
+                   index then fetches it (`nx self install --extras pdf` does it
+                   ahead of time).
   -h, --help       Show this text.
 
 Typing this command is your consent to install the command-line tool, so the
 script does not ask about that. It installs uv first when uv is missing, using
 the uv project's own installer. When nx is already installed it skips the build
-and says so. The build downloads about 700 MB (the conexus package and its
-dependencies; measured on Linux x86-64 with 7.81.0).
+and says so. By default the build installs everything, PDF support included
+(docling, MinerU and torch): it downloads about 0.45 GB on macOS and 0.6 GB on Linux
+for the command-line tool, and the service adds the rest of the --local figure. The
+sizes were measured on 7.85.0 on macOS and Linux (2026-10-24). Disk use is about 1.8 to
+2.2 GB for the command-line tool and 2.5 to 2.9 GB with --local. Windows sizes were not
+measured. None of these figures is a promise.
 
 With no service flag, the script asks one question on the terminal, before it
 downloads anything. With no terminal attached and no flag, it installs the
@@ -105,7 +114,7 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
     function Select-Mode {
         Say ''
         Say 'How should Nexus run its storage service?'
-        Say '  1) local     run it on this machine (downloads up to about 1.3 GB)'
+        Say '  1) local     run it on this machine (downloads about 0.8 GB on macOS, 0.9 GB on Linux; Windows not measured)'
         Say '  2) cloud     use a managed service (you type its address and token)'
         Say '  3) CLI only  install the command-line tool and nothing else'
         for ($tries = 0; $tries -lt 3; $tries++) {
@@ -145,6 +154,7 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
                     if ($state.Autostart -eq 'yes') { Bad-Usage '--autostart and --no-autostart cannot be used together' }
                     $state.Autostart = 'no'; $state.AutostartArg = '--no-autostart'
                 }
+                'slim' { $state.Slim = $true }
                 default { Bad-Usage ('unknown option: ' + $raw) }
             }
         }
@@ -293,8 +303,13 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             if ($IsLinux) {
                 $env:UV_TORCH_BACKEND = $(if ($env:NX_TORCH_BACKEND) { $env:NX_TORCH_BACKEND } else { 'cpu' })
             }
+            # The default build installs everything: --extras pdf goes to the GENERATION (the
+            # throwaway environment that runs --bootstrap stays slim). --slim leaves PDF
+            # support out; the first PDF index fetches it then (nexus-2k66t.4.9).
+            $buildArgs = @('tool', 'run', '--python', '3.12', '--from', 'conexus@latest', 'nx', 'self', 'install', '--bootstrap')
+            if (-not $state.Slim) { $buildArgs += @('--extras', 'pdf') }
             try {
-                & uv tool run --python 3.12 --from conexus@latest nx self install --bootstrap
+                & uv @buildArgs
                 $buildCode = $LASTEXITCODE
             } finally {
                 if ($IsLinux) { $env:UV_TORCH_BACKEND = $torchBefore }

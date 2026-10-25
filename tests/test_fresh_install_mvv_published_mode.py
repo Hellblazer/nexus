@@ -179,7 +179,9 @@ def test_published_install_scrubs_ambient_uv_tool_env(tmp_path) -> None:
     stub_uv = stub_dir / "uv"
     stub_uv.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        # The overrides fetch (nexus-11x9o) runs before `tool install`; answer it.
+        + _fetch_stub(tmp_path)
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         "    {\n"
         '        echo "UV_TOOL_DIR=${UV_TOOL_DIR-<unset>}"\n'
         '        echo "UV_TOOL_BIN_DIR=${UV_TOOL_BIN_DIR-<unset>}"\n'
@@ -424,12 +426,92 @@ def _write_stub_git(stub_dir, tag_verdict: str) -> None:
     stub_git.chmod(0o755)
 
 
+# The harness reads the overrides and constraints from the PUBLISHED package, not
+# the checkout (nexus-11x9o): it creates a scratch venv (`uv venv --python 3.12`,
+# which downloads a managed Python when the host has none), fetches the conexus
+# wheel alone into it (`uv pip install --python VENV/bin/python --no-deps
+# --target DIR conexus==X`) and hands DIR/nexus/_install/{overrides,constraints}.txt
+# to `uv tool install`. These stub fragments answer the venv and the fetch (the
+# marker lines prove the files came from the fetched package) and record what
+# `tool install` was given.
+#
+# The fetch branch REFUSES `--python 3.12` the way a `uv pip` that does not
+# download interpreters does on a host with no system python3.12 (whether uv pip
+# downloads depends on the uv version: 0.12.24 does, so the harness may not count
+# on it): the --python value must be an executable path, i.e. the scratch venv's
+# interpreter. That is what lets this suite see the 2026-10-25 review's B1 class.
+# The venv branch creates that interpreter. Both sit BEFORE the generic `pip install` / `venv`
+# branches of the individual stubs, whose calls the propagation probe counts.
+OVERRIDES_MARKER = "# stub-published-package-overrides"
+CONSTRAINTS_MARKER = "# stub-published-package-constraints"
+
+_FETCH_STUB_BRANCH = (
+    'if [ "$1" = "venv" ] && [[ "${{@: -1}}" == *overrides-fetch-venv ]]; then\n'
+    '    echo "$@" >> "{venv_argv_log}"\n'
+    "{venv_fail}"
+    '    D="${{@: -1}}"; mkdir -p "$D/bin"\n'
+    "    printf '#!/bin/sh\\nexit 0\\n' > \"$D/bin/python\"; chmod +x \"$D/bin/python\"\n"
+    "    exit 0\n"
+    "fi\n"
+    'if [ "$1" = "pip" ] && [ "$2" = "install" ] && [[ " $* " == *" --target "* ]]; then\n'
+    '    echo "$@" >> "{fetch_argv_log}"\n'
+    '    PY=""; PREV=""\n'
+    '    for A in "$@"; do [ "$PREV" = "--python" ] && PY="$A"; PREV="$A"; done\n'
+    '    if [ ! -x "$PY" ]; then\n'
+    "        echo \"error: No interpreter found for Python $PY in managed installations or search path\" >&2\n"
+    "        exit 2\n"
+    "    fi\n"
+    '    N=$(grep -c x "{fetch_counter}" 2>/dev/null || echo 0)\n'
+    '    echo x >> "{fetch_counter}"\n'
+    '    if [ "$N" -lt {fetch_fail_count} ]; then\n'
+    "        echo '  x No solution found when resolving dependencies:' >&2\n"
+    "        echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
+    "        exit 1\n"
+    "    fi\n"
+    '    T=""; PREV=""\n'
+    '    for A in "$@"; do [ "$PREV" = "--target" ] && T="$A"; PREV="$A"; done\n'
+    '    mkdir -p "$T/nexus/_install"\n'
+    f'    printf "%s\\nopencv-python; sys_platform == \'never\'\\n" "{OVERRIDES_MARKER}" > "$T/nexus/_install/overrides.txt"\n'
+    f'    printf "%s\\nopencv-python-headless==4.13.0.92\\n" "{CONSTRAINTS_MARKER}" > "$T/nexus/_install/constraints.txt"\n'
+    "    exit 0\n"
+    "fi\n"
+)
+
+
+def _fetch_stub(tmp_path, fetch_fail_count: int = 0, venv_fails: bool = False) -> str:
+    """The venv + overrides-fetch stub branches, logging under *tmp_path*."""
+    venv_fail = (
+        "    echo 'error: failed to download Python 3.12: network unreachable' >&2\n    exit 1\n"
+        if venv_fails else ""
+    )
+    return _FETCH_STUB_BRANCH.format(
+        venv_argv_log=tmp_path / "venv-argv.log",
+        venv_fail=venv_fail,
+        fetch_argv_log=tmp_path / "fetch-argv.log",
+        fetch_counter=tmp_path / "fetch-calls.txt",
+        fetch_fail_count=fetch_fail_count,
+    )
+
+
+_RECORD_OVERRIDES_STUB = (
+    '    PREV=""\n'
+    '    for A in "$@"; do\n'
+    '        if [ "$PREV" = "--overrides" ] && [ -f "$A" ]; then cat "$A" >> "{overrides_seen_log}"; fi\n'
+    '        if [ "$PREV" = "--constraints" ] && [ -f "$A" ]; then cat "$A" >> "{constraints_seen_log}"; fi\n'
+    '        PREV="$A"\n'
+    "    done\n"
+)
+
+
 def _run_propagation_branch(
     tmp_path,
     extra_env: dict[str, str],
     probe_fail_count: int,
     install_fail_count: int,
     tag_verdict: str = "yes",
+    fetch_fail_count: int = 0,
+    script: Path = SCRIPT,
+    venv_fails: bool = False,
 ) -> tuple:
     """Drive the rewritten propagation branch (nexus-tt5vm, 2026-09-24
     decision) with no real network and no real sleeping: a stub `uv`
@@ -470,11 +552,17 @@ def _run_propagation_branch(
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     stub_uv = stub_dir / "uv"
+    overrides_seen_log = tmp_path / "install-overrides-content.log"
+    constraints_seen_log = tmp_path / "install-constraints-content.log"
     stub_uv.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        + _fetch_stub(tmp_path, fetch_fail_count, venv_fails)
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         f'    echo "$@" >> "{install_argv_log}"\n'
-        f'    N=$(grep -c x "{install_counter}" 2>/dev/null || echo 0)\n'
+        + _RECORD_OVERRIDES_STUB.format(
+            overrides_seen_log=overrides_seen_log, constraints_seen_log=constraints_seen_log,
+        )
+        + f'    N=$(grep -c x "{install_counter}" 2>/dev/null || echo 0)\n'
         f'    echo x >> "{install_counter}"\n'
         f'    if [ "$N" -ge {install_fail_count} ]; then\n'
         "        exit 0\n"
@@ -511,7 +599,7 @@ def _run_propagation_branch(
     env.update(extra_env)
 
     result = subprocess.run(
-        [str(SCRIPT), "--published", "1.2.3"],
+        [str(script), "--published", "1.2.3"],
         env=env, capture_output=True, text=True, timeout=60,
     )
     probe_calls = probe_counter.read_text().count("x") if probe_counter.is_file() else 0
@@ -613,7 +701,10 @@ def test_propagation_non_propagation_error_fails_immediately_no_retry(tmp_path) 
     stub_uv = stub_dir / "uv"
     stub_uv.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        # The overrides fetch runs first (nexus-11x9o); answer it so the failure
+        # under test is the `tool install` one.
+        + _fetch_stub(tmp_path)
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         "    echo 'error: some unrelated dependency conflict' >&2\n"
         "    exit 1\n"
         "fi\n"
@@ -821,7 +912,8 @@ def test_propagation_probe_argv_loses_no_cache_would_fail_this_test(tmp_path) ->
     # (the assertion only needs ONE recorded probe call).
     stub_uv.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        + _fetch_stub(tmp_path)
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         "    echo '  x No solution found when resolving dependencies:' >&2\n"
         "    echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
         "    exit 1\n"
@@ -883,3 +975,282 @@ def test_propagation_install_argv_is_pinned(tmp_path) -> None:
             assert "conexus==1.2.3" in argv
     finally:
         _cleanup_preserved_evidence(result)
+
+
+# ── nexus-11x9o: the registry install applies the PUBLISHED package's overrides
+# (a bare `uv tool install conexus[pdf]` ignores src/nexus/_install/overrides.txt,
+# so opencv-python and opencv-python-headless both landed, the non-headless cv2
+# won 6/6 on chas, and MinerU's formula leg died on a libGL-less Linux box).
+
+
+def _patched_script(tmp_path, old: str, new: str) -> Path:
+    """A copy of the harness with *old* replaced by *new* (a hand-made regression),
+    runnable from tmp_path: REPO_ROOT and the python.sh source are pinned to the checkout."""
+    text = SCRIPT.read_text()
+    assert old in text, f"harness shape changed; update this control's needle: {old!r}"
+    text = text.replace(old, new, 1)
+    repo_root_line = 'REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"'
+    assert repo_root_line in text
+    text = text.replace(repo_root_line, f'REPO_ROOT="{REPO_ROOT}"', 1)
+    py_line = 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/python.sh"'
+    assert py_line in text
+    text = text.replace(py_line, f'source "{REPO_ROOT}/tests/e2e/lib/python.sh"', 1)
+    patched = tmp_path / "fresh-install-mvv-patched.sh"
+    patched.write_text(text)
+    patched.chmod(0o755)
+    return patched
+
+
+def _assert_install_carries_published_overrides_and_constraints(tmp_path) -> None:
+    """The assertion body shared by the real test and its controls, so a control
+    proves THIS check fails on a broken harness rather than re-asserting its own patch."""
+    argv = _last_argv_line(tmp_path / "install-argv.log")
+    assert "--overrides" in argv, (
+        f"`uv tool install` carries no --overrides: a bare registry install "
+        f"leaves both opencv wheels in one cv2/ (nexus-11x9o): {argv}"
+    )
+    assert "--constraints" in argv, (
+        f"`uv tool install` carries no --constraints: the install resolves fresh "
+        f"instead of the release's uv.lock versions (install_generation.sh does both): {argv}"
+    )
+    overrides_seen = (tmp_path / "install-overrides-content.log").read_text()
+    assert OVERRIDES_MARKER in overrides_seen, (
+        f"the --overrides file is not the fetched package's overrides.txt: {overrides_seen!r}"
+    )
+    constraints_seen = (tmp_path / "install-constraints-content.log").read_text()
+    assert CONSTRAINTS_MARKER in constraints_seen, (
+        f"the --constraints file is not the fetched package's constraints.txt: {constraints_seen!r}"
+    )
+
+
+def test_published_install_passes_the_published_packages_overrides_and_constraints(tmp_path) -> None:
+    """`uv tool install` carries `--overrides FILE` and `--constraints FILE`, and each
+    holds exactly the file of the fetched PUBLISHED package (the stub's marker
+    lines), not this checkout's copy: the harness tests published bytes."""
+    result, _probe_calls, _install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=0, install_fail_count=0,
+    )
+    try:
+        _assert_install_carries_published_overrides_and_constraints(tmp_path)
+        fetch = _last_argv_line(tmp_path / "fetch-argv.log")
+        for flag in ("--no-deps", "--no-cache", "--target"):
+            assert flag in fetch, f"overrides fetch argv missing {flag}: {fetch}"
+        assert "conexus==1.2.3" in fetch, f"fetch is not pinned to the version under test: {fetch}"
+        assert not any(a.startswith("--index") for a in fetch), fetch
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+@pytest.mark.parametrize(
+    "needle",
+    [' --overrides "$OVERRIDES_FILE"', ' --constraints "$CONSTRAINTS_FILE"'],
+    ids=["overrides", "constraints"],
+)
+def test_control_a_harness_without_the_flag_fails_the_shared_assertion(tmp_path, needle) -> None:
+    """Falsification control (nexus-11x9o F3): strip the flag from a copy of the
+    harness, run it, and the SAME assertion the real test uses must fail."""
+    patched = _patched_script(tmp_path, needle, "")
+    result, _p, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=0, install_fail_count=0, script=patched,
+    )
+    try:
+        assert install_calls >= 1, "control setup failed: the patched harness never reached `tool install`"
+        with pytest.raises(AssertionError):
+            _assert_install_carries_published_overrides_and_constraints(tmp_path)
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def _assert_fetch_runs_in_a_scratch_venv(tmp_path) -> None:
+    """On a uv whose `uv pip` does not download interpreters, `--python 3.12` on the fetch
+    dies on a host with no system python3.12. The fetch must name the scratch venv's
+    interpreter, which `uv venv --python 3.12` created (and downloaded a managed Python for)."""
+    fetch = _last_argv_line(tmp_path / "fetch-argv.log")
+    py = fetch[fetch.index("--python") + 1]
+    assert py != "3.12" and py.endswith("/bin/python"), (
+        f"the overrides fetch names {py!r} as its interpreter; a uv whose `uv pip` does not "
+        f"download one fails before installing on a host without a system python3.12: {fetch}"
+    )
+    venv_calls = [ln.split() for ln in (tmp_path / "venv-argv.log").read_text().splitlines() if ln.strip()]
+    assert venv_calls, "no scratch venv was created before the fetch"
+    assert "--python" in venv_calls[-1] and venv_calls[-1][venv_calls[-1].index("--python") + 1] == "3.12"
+    assert py == venv_calls[-1][-1] + "/bin/python", (venv_calls, py)
+
+
+def test_overrides_fetch_runs_in_a_scratch_venv_not_bare_python_312(tmp_path) -> None:
+    result, _p, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=0, install_fail_count=0,
+    )
+    try:
+        assert install_calls == 1, (
+            "the install was never reached: the stub refuses `uv pip install --python 3.12` "
+            f"the way a non-downloading uv does on a host with no system python3.12; stderr={result.stderr!r}"
+        )
+        _assert_fetch_runs_in_a_scratch_venv(tmp_path)
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_control_a_fetch_with_bare_python_312_is_refused_and_fails_the_assertion(tmp_path) -> None:
+    patched = _patched_script(tmp_path, '--python "$fetch_venv/bin/python"', "--python 3.12")
+    result, _p, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=0, install_fail_count=0, script=patched,
+    )
+    try:
+        assert install_calls == 0, "control setup failed: the stub did not refuse the bare interpreter"
+        assert "FRESH-INSTALL MVV FAILED" in result.stderr
+        with pytest.raises(AssertionError):
+            _assert_fetch_runs_in_a_scratch_venv(tmp_path)
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_a_scratch_venv_failure_is_a_plain_failure_not_a_propagation_wait(tmp_path) -> None:
+    """The venv step must not change the propagation-miss signature: its failure
+    (no network to fetch a Python) never mentions conexus, so it fails at once with the
+    install-failure message instead of waiting for a PyPI edge that was never at fault."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=0, install_fail_count=0, venv_fails=True,
+    )
+    try:
+        assert result.returncode != 0
+        assert "waiting on uv's own resolution" not in result.stdout
+        assert probe_calls == 0 and install_calls == 0
+        assert "network unreachable, version not published on PyPI" in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_overrides_fetch_miss_enters_the_propagation_wait_not_a_hard_fail(tmp_path) -> None:
+    """The overrides fetch is the first resolver call of a published run, so a
+    just-published version that the index does not serve yet fails THERE. That
+    must enter the same propagation wait as a failed `uv tool install`, and the
+    retried install must then carry the overrides."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=1, install_fail_count=0,
+        fetch_fail_count=1,
+    )
+    try:
+        assert "waiting on uv's own resolution" in result.stdout, result.stdout + result.stderr
+        assert probe_calls >= 2, "the propagation probe never ran after the fetch miss"
+        assert install_calls >= 1
+        _assert_install_carries_published_overrides_and_constraints(tmp_path)
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+# ── the installed tool env holds one OpenCV (nexus-11x9o S1) ──────────────────
+
+
+def _run_with_installed_dists(tmp_path, dists: list[str], pdf_check: bool, script: Path = SCRIPT):
+    """Run the published leg against a stub whose `tool install` leaves *dists*
+    (dist-info directory names) in a tool venv, so the post-install OpenCV check runs."""
+    import os
+
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    tool_dir = tmp_path / "tooldir"
+    site = tool_dir / "conexus" / "lib" / "python3.12" / "site-packages"
+    infos = "".join(f'    mkdir -p "{site}/{d}.dist-info"\n' for d in dists)
+    (stub_dir / "uv").write_text(
+        "#!/bin/bash\n"
+        + _fetch_stub(tmp_path)
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        + f'    mkdir -p "{site}"\n'
+        + infos
+        + "    exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ]; then\n'
+        f'    echo "{tool_dir}"\n'
+        "    exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    (stub_dir / "uv").chmod(0o755)
+    _write_stub_git(stub_dir, "yes")
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+    if pdf_check:
+        env["NX_MVV_FORMULA_PDF_CHECK"] = "1"
+    return subprocess.run(
+        [str(script), "--published", "1.2.3"], env=env, capture_output=True, text=True, timeout=60,
+    )
+
+
+_TWO_OPENCV = ["opencv_python-4.13.0.92", "opencv_python_headless-4.13.0.92"]
+_HEADLESS_ONLY = ["opencv_python_headless-4.13.0.92"]
+
+
+def test_a_non_headless_opencv_in_the_tool_env_fails_the_leg() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        result = _run_with_installed_dists(Path(d), _TWO_OPENCV, pdf_check=True)
+    try:
+        assert result.returncode != 0
+        assert "opencv_python-4.13.0.92.dist-info" in result.stderr, result.stderr
+        assert "libGL" in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_headless_only_passes_the_opencv_check_and_proceeds() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        result = _run_with_installed_dists(Path(d), _HEADLESS_ONLY, pdf_check=True)
+    try:
+        assert "opencv" not in result.stderr.lower(), result.stderr
+        assert "did not expose" in result.stderr, "the leg should proceed to the next assertion"
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_the_formula_run_fails_when_no_opencv_is_installed_at_all() -> None:
+    """Non-vacuity: with [pdf] requested the headless build must be there, or the
+    absence of the non-headless one proves nothing."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        result = _run_with_installed_dists(Path(d), [], pdf_check=True)
+    try:
+        assert result.returncode != 0
+        assert "opencv_python_headless" in result.stderr and "vacuous" in result.stderr, result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_a_slim_run_needs_no_opencv() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        result = _run_with_installed_dists(Path(d), [], pdf_check=False)
+    try:
+        assert "opencv" not in result.stderr.lower(), result.stderr
+        assert "did not expose" in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_control_without_the_opencv_check_the_two_build_env_goes_unnoticed(tmp_path) -> None:
+    """Falsification control: delete the check's call from a copy of the harness and
+    the two-build env sails past it, which is what the test above rejects."""
+    patched = _patched_script(tmp_path, "_assert_one_opencv_build\n", ":\n")
+    run = tmp_path / "run"
+    run.mkdir()
+    result = _run_with_installed_dists(run, _TWO_OPENCV, pdf_check=True, script=patched)
+    try:
+        assert "opencv_python-4.13.0.92.dist-info" not in result.stderr
+        assert "did not expose" in result.stderr
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_local_wheel_install_applies_the_wheels_own_overrides() -> None:
+    """The local-wheel leg stays consistent with the published one (nexus-11x9o):
+    its `uv pip install` carries `--overrides` read out of the wheel under test."""
+    text = _text()
+    local_block = text[text.index('Build the wheel under test ──"'):]
+    local_block = local_block[: local_block.index("MCP entry-point handshake")]
+    assert 'nexus/_install/overrides.txt' in local_block
+    assert '--overrides "$OVERRIDES_FILE" "$WHEEL"' in local_block

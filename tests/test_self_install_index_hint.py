@@ -404,3 +404,45 @@ class TestTheMacosFloorHint:
         assert message.startswith("generation build failed:")
         assert message.index("macOS 14 or later") < message.index("uv output:")
         assert "macosx_13_0_arm64" in message
+
+
+class TestTheCu128Hint:
+    """NX_TORCH_BACKEND=cu128 (set, or picked by auto for a CUDA 12.8 driver)
+    fails with uv's bare "unsatisfiable" text; the build failure names cu126
+    (nexus-husxe)."""
+
+    _UNSATISFIABLE = "  x No solution found when resolving dependencies:\n  torch==2.13.0 is unusable\n"
+
+    def test_an_explicit_cu128_names_cu126_and_the_variable(self):
+        hint = self_cmd.torch_backend_hint(
+            self._UNSATISFIABLE, env={"NX_TORCH_BACKEND": "cu128"}, system="linux",
+        )
+        assert hint is not None and "NX_TORCH_BACKEND=cu126" in hint and "12.6 to 12.8" in hint
+
+    def test_auto_counts_only_when_uv_names_cu128(self):
+        env = {"NX_TORCH_BACKEND": "auto"}
+        assert self_cmd.torch_backend_hint(self._UNSATISFIABLE, env=env, system="linux") is None
+        assert self_cmd.torch_backend_hint("torch==2.13.0+cu128", env=env, system="linux") is not None
+
+    def test_other_backends_and_hosts_get_none(self):
+        assert self_cmd.torch_backend_hint(self._UNSATISFIABLE, env={}, system="linux") is None
+        assert self_cmd.torch_backend_hint(
+            self._UNSATISFIABLE, env={"NX_TORCH_BACKEND": "cu130"}, system="linux",
+        ) is None
+        assert self_cmd.torch_backend_hint(
+            self._UNSATISFIABLE, env={"NX_TORCH_BACKEND": "cu128"}, system="darwin",
+        ) is None
+
+    def test_the_build_failure_message_carries_it_above_uvs_output(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(self_cmd, "_host_system", lambda: "linux")
+        monkeypatch.setenv("NX_TORCH_BACKEND", "cu128")
+        script = tmp_path / "fake_install_generation.sh"
+        script.write_text(f"#!/usr/bin/env bash\ncat >&2 <<'EOF'\n{self._UNSATISFIABLE}EOF\nexit 1\n")
+        script.chmod(script.stat().st_mode | stat.S_IXUSR)
+        with pytest.raises(click.ClickException) as exc:
+            self_cmd._build_flip_shims(
+                [_usable_bash(), str(script)], install_dir=tmp_path, tools=tmp_path / "tools",
+                bin_dir=tmp_path / "bin",
+            )
+        message = exc.value.message
+        assert message.index("NX_TORCH_BACKEND=cu126") < message.index("uv output:")

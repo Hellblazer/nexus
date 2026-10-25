@@ -881,6 +881,9 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 started = run_bounded(
                     nx_argv("mineru", "start"), text=False, timeout=300,
                     env={**os.environ, "NX_PDF_STACK": "refuse"},
+                    # nexus-9pc2f: the MinerU server `start` spawns must outlive this call;
+                    # a contained child's Windows job is closed on return and kills it.
+                    contained=False,
                 )
                 if started.returncode == 69:
                     actions.append(
@@ -1748,6 +1751,11 @@ def _restart_and_verify(
         start = run_bounded(
             nx_argv("daemon", "service", "start", "--config-dir", resolved_config_dir),
             timeout=120,
+            # nexus-9pc2f: `start` detach-spawns the supervisor, which must outlive this
+            # call. Contained, run_bounded's kill-on-close Windows job closes on return
+            # and kills the new supervisor and engine (7.86.0 shakeout, native Windows).
+            # `stop` above stays contained.
+            contained=False,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
         actions.append(
@@ -2578,7 +2586,9 @@ def _restart_service_after_unit_reinstall(config_dir: Path) -> tuple[bool, str]:
     resolved_config_dir = str(config_dir.resolve())
     argv = nx_argv("daemon", "service", "start", "--config-dir", resolved_config_dir)
     try:
-        start = run_bounded(argv, timeout=120)
+        # nexus-9pc2f: uncontained, as in _restart_and_verify: the supervisor `start`
+        # spawns must survive this call, and a contained child's job kills it on return.
+        start = run_bounded(argv, timeout=120, contained=False)
     except Exception as exc:  # noqa: BLE001 — best-effort restart; surfaced in the returned clause
         _log.warning(
             "upgrade_autostart_unit_restart",

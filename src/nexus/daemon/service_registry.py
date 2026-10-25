@@ -171,6 +171,42 @@ STALE_LEASE_GRACE_HEALTH_TIMEOUT_S: float = 1.5
 _GRACE_PROBE_LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost"})
 
 
+def popen_outliving_host_job(
+    popen: Callable[..., Any], argv: list[str], **kwargs: Any,
+) -> Any:
+    """``popen(argv, **kwargs)``, asking Windows to take the child out of the
+    spawning process's Job Object first (RDR-224 review finding E; nexus-9pc2f).
+
+    A detached daemon is documented as outliving the process that spawned it.
+    When that process sits in a kill-on-close job (the desktop extension's
+    bootstrap, or a ``run_bounded`` call that did not pass ``contained=False``),
+    every descendant joins the job unless it breaks away, and closing the job
+    kills it. This ORs ``CREATE_BREAKAWAY_FROM_JOB`` into ``creationflags``. A
+    job that does not allow breakaway refuses the spawn with access denied, and
+    the spawn is retried once without the flag, as ``nexus._session_end_launcher``
+    does: that case is only as safe as the caller keeping the child out of such a
+    job in the first place. A no-op off Windows (no ``creationflags``); a failure
+    that is not about breakaway fails the same way on the retry and propagates.
+
+    This is the shared home for the rule (daemon/AGENTS.md: lifecycle fixes land
+    in the primitive): the storage supervisor and the aspect worker both spawn
+    through it.
+    """
+    flags = kwargs.pop("creationflags", None)
+    if flags is None:
+        return popen(argv, **kwargs)
+    from nexus.util import win_job  # noqa: PLC0415 — deferred import — Windows spawn path only
+
+    try:
+        return popen(argv, creationflags=flags | win_job.CREATE_BREAKAWAY_FROM_JOB, **kwargs)
+    except OSError as exc:
+        _log.info(
+            "popen_outliving_host_job.breakaway_refused",
+            error=str(exc), hint="retrying the spawn inside the host job",
+        )
+        return popen(argv, creationflags=flags, **kwargs)
+
+
 def _probe_health_identity(host: str, port: int, *, timeout: float) -> bool:
     """True iff ``GET http://{host}:{port}/health`` answers the
     storage-service's documented shape (``HealthHandler.java``: 200

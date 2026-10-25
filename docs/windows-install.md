@@ -88,12 +88,12 @@ When the install finishes, run `/reload-plugins` or start a new session. In that
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (1.0 GB on Linux), 2.8 to 3.0 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.5 GB down (0.6 GB on Linux), 2.0 to 2.3 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.5 GB down (0.6 GB on Linux), 2.0 to 2.3 GB on disk |
 | Not now | Nothing is installed | none |
 
-These sizes include PDF support (docling, MinerU and torch), which the script and the setup tool install by default. The script's `--slim` and the setup tool's `slim` leave it out (about 0.25 GB less down on macOS, 0.37 GB on Linux; 0.85 GB less on disk on macOS, 1.3 GB on Linux), and the first PDF you index then fetches it. The sizes are measured on 7.85.0 on macOS and Linux (2026-10-24); Windows was not measured. The download is the wheels in the lock, the Python and, for Local, the service and its models; the sizes on disk are the install itself. `uv` also keeps a download cache, about 2.1 GB on Linux and 1.8 GB on macOS after a first install (an earlier 7.81.0 measurement found 4.8 GB on Windows). On Linux the cache and the install together measured about 2.2 GB, not 4.2 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share.
+These sizes include PDF support (docling, MinerU and torch), which the script and the setup tool install by default. The script's `--slim` and the setup tool's `slim` leave it out (about 0.28 GB less down on macOS, 0.39 GB on Linux; 1.0 GB less on disk on macOS, 1.3 GB on Linux), and the first PDF you index then fetches it. The sizes are measured on 7.86.0 on macOS and Linux (2026-10-25); Windows was not measured. The download is the wheels in the lock, the Python and, for Local, the service and its models; the sizes on disk are the install itself. `uv` also keeps a download cache, about 2.2 GB on Linux and 1.9 GB on macOS after a first install (running install.sh on macOS adds about 0.84 GB for its throwaway bootstrap environment, 2.8 GB in all) (an earlier 7.81.0 measurement found 4.8 GB on Windows). On Linux the cache and the install together measured about 2.3 GB, not 4.5 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share.
 
 ## Install by hand
 
@@ -226,8 +226,8 @@ some files twice: uv installs packages as hardlinks to the copies in its cache
 (`%LOCALAPPDATA%\uv\cache`, about 4.8 GB after a first install), so the
 environment is mostly the same data under a second name. That sharing was not
 measured with a hardlink-aware tool on Windows. The same kind of install on
-Linux (CLI only, conexus 7.85.0, PDF support included) shows the effect: 2.1 GB in uv's cache and
-2.1 GB in the install occupy 2.2 GB together.
+Linux (CLI only, conexus 7.86.0, PDF support included) shows the effect: 2.2 GB in uv's cache and
+2.25 GB in the install (generation plus Python) occupy 2.3 GB together.
 
 ## 4. Claude Code and the plugin
 

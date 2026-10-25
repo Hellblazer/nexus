@@ -571,6 +571,19 @@ def _shipped_constraints(gen: Path) -> Path | None:
     return None
 
 
+def _installed_version(gen: Path) -> str:
+    """The version of the ``conexus`` distribution installed into *gen*, read from
+    its ``conexus-X.Y.Z.dist-info`` directory name (globbed, like
+    :func:`_shipped_constraints`), or "" when none is found."""
+    for pattern in (
+        "Lib/site-packages/conexus-*.dist-info", "lib/python*/site-packages/conexus-*.dist-info",
+    ):
+        for hit in sorted(gen.glob(pattern)):
+            if hit.is_dir():
+                return hit.name[len("conexus-"):-len(".dist-info")]
+    return ""
+
+
 def _pyvenv_value(text: str, key: str) -> str:
     """The first ``key = value`` line of a ``pyvenv.cfg``, as ``sed -n 's/^key *= *//p'``."""
     for line in text.splitlines():
@@ -712,6 +725,10 @@ def build_generation(
             # generation's own launchers, so the user PATH can name one stable
             # directory and an upgrade only has to flip the junction.
             _emit(populate_launchers(gen, platform=platform))
+        # nexus-3yv0o: a build with no requested version records the one it
+        # installed, or the installer rebuild rung skips the generation.
+        if not version and kind == "registry":
+            version = _installed_version(gen)
         rendered = layout._cli_render_receipt(
             version, spec, kind, source, ",".join(extras_list), python_full,
             base_interpreter, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock)),

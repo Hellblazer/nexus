@@ -402,10 +402,13 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     # installs the extra up front.
     _PKG_EXTRAS=""
     [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ] && _PKG_EXTRAS="[pdf]"
+    # PKG_BASE_SPEC: the same pin without the extra, for the overrides fetch.
     if [ -n "$PUBLISHED_VERSION" ]; then
         PKG_SPEC="conexus${_PKG_EXTRAS}==$PUBLISHED_VERSION"
+        PKG_BASE_SPEC="conexus==$PUBLISHED_VERSION"
     else
         PKG_SPEC="conexus${_PKG_EXTRAS}"
+        PKG_BASE_SPEC="conexus"
     fi
     echo "================================================================"
     echo " FRESH-INSTALL MVV — PUBLISHED artifact (uv-tool resolution layer)"
@@ -608,8 +611,83 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
         # so the documented command there has no flag and neither does this.
         local torch_flag=()
         [ "$(uname -s)" = "Linux" ] && torch_flag=(--torch-backend cpu)
-        _uv_sandboxed tool install --python 3.12 --no-cache "$PKG_SPEC" "${torch_flag[@]+"${torch_flag[@]}"}" \
+        # nexus-11x9o: apply the release's own overrides and constraints, as
+        # install_generation.sh does for every documented route (install.sh/ps1,
+        # setup, nx self install, the on-demand PDF install; the .mcpb's uv sync
+        # reads the same overrides). A bare `uv tool install` reads neither
+        # src/nexus/_install/overrides.txt nor constraints.txt, so opencv-python and
+        # opencv-python-headless both landed in one cv2/, the non-headless one
+        # won 6/6 on chas, and MinerU's `import cv2` died on libGL.so.1 there.
+        # Both files are the PUBLISHED package's, fetched below, never this
+        # checkout's, so the run tests the bytes users get.
+        _fetch_published_install_inputs || return 1
+        _uv_sandboxed tool install --python 3.12 --no-cache \
+            --overrides "$OVERRIDES_FILE" --constraints "$CONSTRAINTS_FILE" \
+            "$PKG_SPEC" "${torch_flag[@]+"${torch_flag[@]}"}" \
             >"$LOGS/install.log" 2>&1
+    }
+    # Fetch the conexus wheel ALONE (--no-deps: ~4 MB, no dependency resolve)
+    # into a scratch --target dir and keep its nexus/_install/overrides.txt and
+    # constraints.txt. This is the first resolver call of a published run, so a
+    # version the index does not serve yet fails HERE with uv's own "no solution"
+    # text in install.log, which _is_propagation_miss and the propagation wait
+    # below handle exactly as they do a failed `uv tool install`. Done once per run.
+    #
+    # Whether `uv pip install --python 3.12` downloads a missing interpreter
+    # depends on the uv version (uv 0.12.24 on chas does; the harness cannot count
+    # on it), and this harness runs under `env -i` with a virgin HOME, so on a
+    # host with no system python3.12 a uv that does not would die before
+    # installing anything. `uv venv --python 3.12` downloads a managed Python on
+    # every uv, as the propagation probe's venv relies on, so a scratch venv comes
+    # first and the fetch names that venv's interpreter. The venv's output goes to
+    # its own log (it never mentions conexus, so it cannot read as a propagation
+    # miss) and reaches install.log only when it fails.
+    OVERRIDES_FILE="$WORK/published-overrides.txt"
+    CONSTRAINTS_FILE="$WORK/published-constraints.txt"
+    _fetch_published_install_inputs() {
+        [ -s "$OVERRIDES_FILE" ] && [ -s "$CONSTRAINTS_FILE" ] && return 0
+        local fetch_dir="$WORK/published-conexus-wheel"
+        local fetch_venv="$WORK/overrides-fetch-venv"
+        rm -rf "$fetch_dir" "$fetch_venv"
+        if ! _uv_sandboxed venv --python 3.12 -q "$fetch_venv" >"$LOGS/overrides-fetch-venv.log" 2>&1; then
+            cp "$LOGS/overrides-fetch-venv.log" "$LOGS/install.log"
+            return 1
+        fi
+        _uv_sandboxed pip install --python "$fetch_venv/bin/python" --no-cache --no-deps \
+            --target "$fetch_dir" "$PKG_BASE_SPEC" \
+            >"$LOGS/install.log" 2>&1 || return 1
+        local name
+        for name in overrides constraints; do
+            if [ ! -s "$fetch_dir/nexus/_install/$name.txt" ]; then
+                echo "the published conexus package carries no nexus/_install/$name.txt; the harness cannot apply the release's $name" >>"$LOGS/install.log"
+                return 1
+            fi
+        done
+        cp "$fetch_dir/nexus/_install/overrides.txt" "$OVERRIDES_FILE"
+        cp "$fetch_dir/nexus/_install/constraints.txt" "$CONSTRAINTS_FILE"
+    }
+    # The tool env must hold ONE OpenCV. opencv-python (non-headless) needs a
+    # system libGL.so.1 and shares cv2/ with opencv-python-headless; the
+    # release's overrides keep only headless. A dist-info of the non-headless
+    # build means an install route that ignored the overrides. Non-vacuity: a
+    # formula run installs [pdf], which brings headless, so its absence there
+    # means this check looked at nothing.
+    _assert_one_opencv_build() {
+        local site="$TOOL_VENV/lib/python*/site-packages"
+        local bad headless
+        # shellcheck disable=SC2086 — the glob in $site is deliberate
+        bad="$(find $site -maxdepth 1 -name 'opencv_python-*.dist-info' 2>/dev/null)"
+        # shellcheck disable=SC2086
+        headless="$(find $site -maxdepth 1 -name 'opencv_python_headless-*.dist-info' 2>/dev/null)"
+        if [ -n "$bad" ]; then
+            _fail "the installed tool env carries the non-headless OpenCV build ($(basename "$bad")): it needs a system libGL.so.1 and shares cv2/ with opencv-python-headless, so MinerU's import cv2 fails on a Linux box without libGL; the install ignored the release's overrides (nexus-11x9o)"
+        fi
+        if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ] && [ -z "$headless" ]; then
+            _fail "the [pdf] install carries no opencv_python_headless dist-info under $TOOL_VENV, so the check for the non-headless build passed over nothing (vacuous; nexus-11x9o)"
+        fi
+        if [ -n "$headless" ]; then
+            echo "  OpenCV: $(basename "$headless") only (no non-headless build)"
+        fi
     }
     # The one propagation-signature test, shared by the retry trigger and
     # the bounded retry loop below. Signature set kept in parity with
@@ -780,6 +858,7 @@ else:
     TOOL_VENV="$TOOL_DIR/conexus"
     [ -d "$TOOL_VENV" ] \
         || _fail "uv tool install reported success but $TOOL_VENV does not exist"
+    _assert_one_opencv_build
     BIN_DIR="$TOOL_BIN_DIR"
     PROBE_PYTHON="$TOOL_VENV/bin/python"
     [ -x "$BIN_DIR/nx" ] \
@@ -830,7 +909,20 @@ else
     # resolution at a mirror (the nexus-l2ku5 resolver-drift class) while
     # the sandboxed layer resolved the real index. Same helper both layers.
     _uv_sandboxed venv --python 3.12 -q "$VENV"
-    _uv_sandboxed pip install -q --python "$VENV/bin/python" "$WHEEL"
+    # nexus-11x9o: same overrides the published layer applies, taken from the
+    # wheel under test (its own bytes, not a second copy in the checkout).
+    OVERRIDES_FILE="$WORK/wheel-overrides.txt"
+    "$E2E_PYTHON" -I -c '
+import sys, zipfile
+wheel, out = sys.argv[1:3]
+with zipfile.ZipFile(wheel) as z:
+    data = z.read("nexus/_install/overrides.txt")
+if not data.strip():
+    sys.exit("wheel carries an empty nexus/_install/overrides.txt")
+open(out, "wb").write(data)
+' "$WHEEL" "$OVERRIDES_FILE" \
+        || _fail "wheel under test carries no usable nexus/_install/overrides.txt"
+    _uv_sandboxed pip install -q --python "$VENV/bin/python" --overrides "$OVERRIDES_FILE" "$WHEEL"
     BIN_DIR="$VENV/bin"
     PROBE_PYTHON="$VENV/bin/python"
     _nx --version

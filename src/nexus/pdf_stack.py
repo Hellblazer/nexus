@@ -83,8 +83,8 @@ VCRT_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
 #: Said once, on stderr, before uv starts (the design's wording).
 INSTALL_NOTICE = (
-    "Installing PDF support for conexus {version}: about 240 MB (macOS) / 370 MB (Linux) "
-    "download, 0.85 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow on first "
+    "Installing PDF support for conexus {version}: about 285 MB (macOS) / 390 MB (Linux) "
+    "download, 1.0 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow on first "
     "use: about 0.5 GB, plus 1.2 GB for the first PDF with formulas."
 )
 
@@ -271,7 +271,7 @@ def state() -> StackState:
 def policy() -> str:
     """``install`` (the default) or ``refuse``. ``NX_PDF_STACK`` wins over the
     ``pdf_stack.auto_install`` config key. An unreadable value refuses: a
-    typo must not start a 370 MB download."""
+    typo must not start a 390 MB download."""
     raw = os.environ.get(POLICY_ENV, "").strip().lower()
     if raw:
         if raw in (POLICY_INSTALL, POLICY_REFUSE):
@@ -708,7 +708,10 @@ def _install_generation(*, carrying: bool = False, notes: list[str] | None = Non
     notice = INSTALL_NOTICE.format(version=version)
     if carrying:
         notice = notice.replace("Installing PDF support", "Carrying PDF support forward", 1)
-    _say(notice)
+    # nexus-p4vhj: a carry-forward on a Windows box without the VC++ runtime builds slim
+    # and says so (drop_pdf_on_runtime_gap); announcing a download first would be false.
+    if not (carrying and _windows_runtime_gap() is not None):
+        _say(notice)
     # perform_self_install reports its reap on stdout; this command's stdout is
     # its own (a caller may parse it), so the install's chatter goes to stderr.
     with contextlib.redirect_stdout(sys.stderr):

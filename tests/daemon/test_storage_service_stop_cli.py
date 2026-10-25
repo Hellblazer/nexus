@@ -37,6 +37,7 @@ from tests._module_seam import patch_in
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
 DETACHED_PROCESS = 0x00000008
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────────
@@ -170,7 +171,11 @@ def test_ensure_storage_supervisor_spawns_with_those_kwargs(
     monkeypatch.setattr(daemon_mod, "_popen", fake_popen)
     with pytest.raises(_Stop):
         daemon_mod.ensure_storage_supervisor(config_dir, platform="win32")
-    assert captured["creationflags"] == CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    # nexus-9pc2f: the first attempt also asks to break away from the caller's job
+    # (the retry without it is pinned in test_supervisor_breakaway_spawn.py).
+    assert captured["creationflags"] == (
+        CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB
+    )
     assert "start_new_session" not in captured
     assert captured["stdin"] is subprocess.DEVNULL
 

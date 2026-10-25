@@ -2822,6 +2822,58 @@ def _check_docling_importable(
     )]
 
 
+def _installed_opencv_builds() -> tuple[str, ...]:
+    """Which of ``opencv-python`` / ``opencv-python-headless`` are installed here.
+
+    Distribution metadata only: ``import cv2`` is exactly what this exists to
+    avoid (a build that cannot load can kill the importing process, and the
+    package directory being present is what hides the problem from find_spec).
+    """
+    import importlib.metadata as md  # noqa: PLC0415 — deferred: only this check needs it
+
+    found: list[str] = []
+    for name in ("opencv-python", "opencv-python-headless"):
+        try:
+            md.version(name)
+        except md.PackageNotFoundError:
+            continue
+        found.append(name)
+    return tuple(found)
+
+
+def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
+    """The healthy "PDF support" row, unless both OpenCV builds are installed.
+
+    nexus-11x9o: both write ``site-packages/cv2/``, so whichever installed last
+    owns the directory. The non-headless build needs a system ``libGL.so.1``; on a
+    Linux box without it ``import cv2`` fails and every PDF (docling and MinerU
+    both import cv2) fails with it. The release's install overrides keep only the
+    headless build, so a box with both was installed by a route that ignores uv
+    overrides (a bare ``uv tool install``, pip, pipx). Red on Linux, a warning
+    elsewhere (the non-headless build loads there, but the pair is still two
+    owners of one directory).
+    """
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    if len(_installed_opencv_builds()) < 2:
+        return HealthResult(label="PDF support", ok=True, detail=detail)
+    on_linux = sys.platform.startswith("linux")
+    consequence = (
+        "On Linux the non-headless build needs libGL.so.1, so `import cv2` can fail "
+        "and PDF extraction with it"
+        if on_linux else
+        "Both write site-packages/cv2/, so which one loads depends on install order"
+    )
+    return HealthResult(
+        label="PDF support", ok=not on_linux, warn=not on_linux,
+        detail=(
+            f"{detail}; but both opencv-python and opencv-python-headless are installed. "
+            f"{consequence}. This install ignored the release's uv overrides."
+        ),
+        fix_suggestions=[f"Reinstall with the release's overrides: {pdf_stack.INSTALL_COMMAND}"],
+    )
+
+
 def _check_pdf_support() -> list[HealthResult]:
     """nexus-2k66t.4.2: the PDF stack is the ``pdf`` extra, installed on first
     use. One row says where this box stands.
@@ -2853,7 +2905,7 @@ def _check_pdf_support() -> list[HealthResult]:
                 fix_suggestions=[f"Install Microsoft's Visual C++ redistributable: {pdf_stack.VCRT_URL}"],
             )]
         return [
-            HealthResult(label="PDF support", ok=True, detail=st.detail),
+            _pdf_support_row_with_opencv(st.detail),
             *_check_docling_importable(),
         ]
     plan = pdf_stack.install_plan()

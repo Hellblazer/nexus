@@ -93,6 +93,9 @@ class FakeUv:
                 shipped = scripts.parent / "Lib" / "site-packages" / "nexus" / "_install"
                 shipped.mkdir(parents=True, exist_ok=True)
                 (shipped / "constraints.txt").write_text("mcp==1.2.3\n")
+                (scripts.parent / "Lib" / "site-packages" / "conexus-7.86.0.dist-info").mkdir(
+                    parents=True, exist_ok=True,
+                )
             python.write_text("#!/bin/sh\nprintf '%s\\n' " + " ".join(self.scripts) + "\n")
             python.chmod(python.stat().st_mode | stat.S_IXUSR)
             for name in self.scripts:
@@ -181,6 +184,12 @@ class TestBuildGeneration:
         assert "--no-deps" not in install
         assert "UNCONSTRAINED" not in capsys.readouterr().err
         assert lc.read_receipt(gen).constraints == "applied"
+
+    def test_a_plain_build_records_the_version_it_installed(self, tools: Path) -> None:
+        """nexus-3yv0o, the Windows twin: no requested version, so the receipt
+        takes the installed one or the installer rebuild rung never rebuilds it."""
+        gen = _build(tools, FakeUv())
+        assert lc.read_receipt(gen).version == "7.86.0"
 
     def test_install_unpinned_skips_the_constraints_step_and_says_so(
         self, tools: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,

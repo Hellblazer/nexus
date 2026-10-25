@@ -142,12 +142,12 @@ td:first-child{font-weight:500;white-space:nowrap}
 
 <h2 id="before">Before you start</h2>
 <div class="expect">
-  <div><b>Mac, Linux, Windows</b><span>Apple Silicon Mac, Linux on x86-64 or arm64, Windows 11 on x64</span></div>
+  <div><b>Mac, Linux, Windows</b><span>Apple Silicon Mac on macOS 14 or later, Linux on x86-64 or arm64, Windows 11 on x64</span></div>
   <div><b>1.2 GB</b><span>memory when idle, about 4.5 GB while indexing</span></div>
   <div><b>No GPU</b><span>search runs on the CPU</span></div>
-  <div><b>~1.3 GB</b><span>download for the Local choice (all four choices are under The question)</span></div>
+  <div><b>~0.8 GB</b><span>download for the Local choice, PDF support included (0.9 GB on Linux; all four choices are under The question)</span></div>
 </div>
-<p class="note">Nexus ships its own PostgreSQL, built for these platforms only, so an Intel Mac or Windows on ARM cannot run a local install and setup stops with an error. The memory figures come from an Apple Silicon Mac that indexed a medium-sized code repository. The first PDF you index downloads about 2.3 GB more, for the PDF models.</p>
+<p class="note">Nexus ships its own PostgreSQL, built for these platforms only, so an Intel Mac or Windows on ARM cannot run a local install and setup stops with an error. On macOS the floor is macOS 14: the embedder runtime ships only macOS 14 wheels from version 1.24 on, and on macOS 13 or earlier the install fails resolving with a platform-tag error. The memory figures come from an Apple Silicon Mac that indexed a medium-sized code repository. The first PDF you index downloads about 2.3 GB more, for the PDF models.</p>
 
 <div class="callout hidden" data-os-block="windows">
   <p><strong>Windows 11 x64 is supported</strong>, with the limits listed in the <a href="https://github.com/Hellblazer/nexus/blob/develop/docs/windows-install.md#what-is-not-supported-or-not-measured">install guide</a>. Windows 10 is not supported. The install, search, update, and removal steps passed on a clean Windows 11 x64 machine, in a PowerShell window without elevation. The install and search steps also passed as a standard (non-administrator) account on a machine with no Git. The Windows binaries are not code-signed, and with Smart App Control on, setup fails because Windows blocks the unsigned files it needs. On a machine where a company enforces AppLocker's default rules, a standard account cannot install, because the policy blocks the installers and the programs in the user profile. The <a href="https://github.com/Hellblazer/nexus/blob/develop/docs/windows-install.md">Windows install guide</a> has the full measured path. After you install uv, Git, or <code>nx</code>, open a new PowerShell window so the new command is on your PATH.</p>
@@ -193,10 +193,10 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <p class="note">With Local, the script asks a second question before it downloads anything: whether the service should start when you log in. The answer is No unless you type <code>y</code>.</p>
 <p class="note">If you press Enter at the question, or the script has no terminal, it installs the <code>nx</code> command only. <code>/conexus:setup</code> in Claude Code, or <code>nx init</code> (Local) or <code>nx config init</code> (Cloud) in a terminal, sets up a service later.</p>
 <p class="note hidden" data-os-block="linux">The script asks uv for the CPU build of torch. If your uv is older than 0.9.19, run <code>uv self update</code> first, or the build downloads about 4.5 GB of GPU libraries that Nexus does not use.</p>
-<p class="note" data-os-block="mac linux">To skip the question, add a flag after <code>sh -s --</code>: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example, this installs the service and does not start it at login:</p>
+<p class="note" data-os-block="mac linux">To skip the question, add a flag after <code>sh -s --</code>: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. The script installs everything, PDF support included; <code>--slim</code> leaves PDF support out, and the first PDF you index then installs it. For example, this installs the service and does not start it at login:</p>
 <div class="cmd" data-os-block="mac linux"><pre>curl -LsSf https://hellblazer.github.io/nexus/install.sh | sh -s -- --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
 <p class="note hidden" data-os-block="windows">Run it in a normal PowerShell window, not an elevated one. The script itself does not need Git. Claude Code fetches the plugin with Git, so install Git first (see Tools to have) if you want the script to add the plugin.</p>
-<p class="note hidden" data-os-block="windows">The <code>iex</code> form cannot take flags. To skip the question, run the script as a script block and add the flags after it. The flags are <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. For example:</p>
+<p class="note hidden" data-os-block="windows">The <code>iex</code> form cannot take flags. To skip the question, run the script as a script block and add the flags after it. The flags are <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>, and with <code>--local</code> also <code>--autostart</code> or <code>--no-autostart</code>. <code>--slim</code> works the same way through the script block: it leaves PDF support out, and the first PDF you index then installs it. For example:</p>
 <div class="cmd hidden" data-os-block="windows"><pre>&amp; ([scriptblock]::Create((irm https://hellblazer.github.io/nexus/install.ps1))) --local --no-autostart</pre><button class="copy" type="button">Copy</button></div>
 
 <h3 id="route-two">Route two: install uv, add the plugin, answer one question</h3>
@@ -235,12 +235,13 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <p>The route-one script asks this question without Not now, because typing the command is your permission to install. Route two asks it with all four choices:</p>
 <div class="tbl"><table>
 <tr><th>Choice</th><th>What happens</th><th>Download</th></tr>
-<tr><td>Local</td><td>Install the <code>nx</code> command and run a Nexus service on this machine</td><td>about 1.3 GB down, 2.4 to 3.1 GB on disk</td></tr>
-<tr><td>Cloud</td><td>Install the <code>nx</code> command and connect it to a managed service you have an address, token and tenant for</td><td>about 0.7 GB down, 2.1 to 2.3 GB on disk</td></tr>
-<tr><td>CLI only</td><td>Install the <code>nx</code> command and decide about a service later</td><td>about 0.7 GB down, 2.1 to 2.3 GB on disk</td></tr>
+<tr><td>Local</td><td>Install the <code>nx</code> command and run a Nexus service on this machine</td><td>about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk</td></tr>
+<tr><td>Cloud</td><td>Install the <code>nx</code> command and connect it to a managed service you have an address, token and tenant for</td><td>about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk</td></tr>
+<tr><td>CLI only</td><td>Install the <code>nx</code> command and decide about a service later</td><td>about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk</td></tr>
 <tr><td>Not now</td><td>Nothing is installed</td><td>none</td></tr>
 </table></div>
-<p class="note">With Cloud in route two, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. In route one you type them in the terminal. The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. uv also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. <code>uv cache clean</code> empties it but frees only the files the install does not share.</p>
+<p class="note">These sizes include PDF support (docling, MinerU and torch). They were measured on 7.85.0 on macOS and Linux (2026-10-24); Windows was not measured. None of them is a promise. The script&rsquo;s <code>--slim</code> and the setup tool&rsquo;s <code>slim</code> leave PDF support out: about 0.25 GB less to download on macOS, 0.37 GB on Linux, and 0.85 GB less on disk on macOS and 1.3 GB on Linux. The first PDF you index then installs it.</p>
+<p class="note">With Cloud in route two, a page opens in your browser and you type the service address, token and tenant there. Claude never sees the token. In route one you type them in the terminal. The sizes on disk are the install itself. uv also keeps a download cache, about 2.1 GB on Linux and 1.8 GB on macOS after a first install (an earlier 7.81.0 measurement found 4.8 GB on Windows). On Linux the cache and the install together measured about 2.2 GB, not 4.2 GB, because they share files, so the cache is not all extra space. <code>uv cache clean</code> empties it but frees only the files the install does not share.</p>
 
 <h3 id="after">After the install</h3>
 <ol class="steps">
@@ -348,7 +349,7 @@ nx self install</pre><button class="copy" type="button">Copy</button></div>
   <p>This command first asks whether the service should start at login. Answer yes to start it at each login. The one-command route defaults to no. It then downloads the service program, the database, and the search model, and starts the service.</p>
   <div class="cmd"><pre>nx init</pre><button class="copy" type="button">Copy</button></div>
   <div class="expect">
-    <div><b data-os-block="mac linux">~700 MB</b><b class="hidden" data-os-block="windows">~580 MB</b><span>downloaded, first run only</span></div>
+    <div><b data-os-block="mac linux">~0.34 GB</b><b class="hidden" data-os-block="windows">not measured</b><span>downloaded, first run only (Windows: not measured for this release)</span></div>
     <div><b>2–5 min</b><span>on a normal connection</span></div>
   </div>
   <p class="note">Use <code>nx init --yes</code> to answer yes automatically, or <code>nx init --no-autostart</code> to skip starting at login.</p>

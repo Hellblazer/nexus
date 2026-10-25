@@ -36,6 +36,7 @@ import pytest
 
 from tests._installer_standins import (
     BOOTSTRAP,
+    BOOTSTRAP_SLIM,
     check_the_record_quiets_the_hook,
     CLAUDE_STANDIN as _CLAUDE_STANDIN,
     FOREIGN_NX as _FOREIGN_NX,
@@ -907,6 +908,75 @@ def test_the_build_requirement_is_conexus_at_latest(box: Box) -> None:
     (build,) = [c for c in box.calls() if c.startswith("uv tool run")]
     assert "--from conexus@latest" in build
     assert build == BOOTSTRAP
+
+
+# ---- the PDF stack is installed by default; --slim opts out (nexus-2k66t.4.9) -----------------
+
+
+@needs_pwsh
+def test_the_default_build_asks_for_the_pdf_extra(box: Box) -> None:
+    """Sam, 2026-10-23: install everything by default. The throwaway environment stays slim; the
+    GENERATION gets the extra."""
+    box.with_uv()
+    assert box.run("--cli-only").returncode == 0
+    (build,) = [c for c in box.calls() if c.startswith("uv tool run")]
+    assert build.endswith("nx self install --bootstrap --extras pdf")
+    assert build == BOOTSTRAP
+
+
+@needs_pwsh
+@pytest.mark.parametrize("mode", ["--cli-only", "--local", "--cloud"])
+def test_every_mode_builds_with_the_pdf_extra_by_default(box: Box, mode: str) -> None:
+    box.with_uv().with_claude()
+    box.extra_env.update({"NX_SERVICE_URL": "https://example.invalid", "NX_SERVICE_TOKEN": "x"})
+    assert box.run(mode).returncode == 0
+    assert BOOTSTRAP in box.calls()
+    assert BOOTSTRAP_SLIM not in box.calls()
+
+
+@needs_pwsh
+def test_slim_builds_without_the_extra(box: Box) -> None:
+    box.with_uv()
+    result = box.run("--cli-only", "--slim")
+    assert result.returncode == 0, result.stderr
+    (build,) = [c for c in box.calls() if c.startswith("uv tool run")]
+    assert build == BOOTSTRAP_SLIM
+    assert "pdf" not in build
+
+
+@needs_pwsh
+@pytest.mark.parametrize("mode", ["--local", "--cloud"])
+def test_slim_is_independent_of_the_service_mode(box: Box, mode: str) -> None:
+    box.with_uv()
+    box.extra_env.update({"NX_SERVICE_URL": "https://example.invalid", "NX_SERVICE_TOKEN": "x"})
+    assert box.run(mode, "--slim").returncode == 0
+    assert BOOTSTRAP_SLIM in box.calls() and BOOTSTRAP not in box.calls()
+
+
+@needs_pwsh
+def test_single_dash_slim_is_accepted_too(box: Box) -> None:
+    box.with_uv()
+    assert box.run("-slim", "--cli-only").returncode == 0
+    assert BOOTSTRAP_SLIM in box.calls()
+
+
+@needs_pwsh
+def test_help_names_slim_and_states_the_default_size(box: Box) -> None:
+    text = box.run("--help").stdout
+    assert "--slim" in text
+    assert "PDF" in text
+    assert "0.8 GB" in text and "0.9 GB" in text, "the default local size, macOS and Linux"
+    assert "0.45 GB" in text and "0.6 GB" in text, "the default CLI-only and cloud size"
+    assert "1.3 GB" not in text and "700 MB" not in text, "the 7.81.0 sizes"
+    assert "measured on 7.85.0" in text and "derived" not in text, "the sizes say they were measured, and are not a gate"
+
+
+@needs_pwsh
+def test_the_menu_states_the_default_local_size(box: Box) -> None:
+    box.with_uv()
+    result = box.run(stdin="3\n")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "about 0.8 GB" in result.stdout and "1.3 GB" not in result.stdout
 
 
 # ---- --local means local ----------------------------------------------------------------------

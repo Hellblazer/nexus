@@ -82,13 +82,15 @@ def put_cmd(
     if source == "-":
         if not title:
             raise click.ClickException("--title is required when reading from stdin (-)")
-        content = sys.stdin.read()
+        content = sys.stdin.read().removeprefix("\ufeff")
     else:
         path = Path(source)
         if not path.exists():
             raise click.ClickException(f"File not found: {source}")
         try:
-            content = path.read_text(encoding="utf-8")
+            # utf-8-sig: Windows PowerShell 5.1 `Set-Content -Encoding UTF8` writes a
+            # BOM, which would otherwise start every stored chunk (nexus-3ppub).
+            content = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
             raise click.ClickException(f"File {source!r} is not valid UTF-8.")
         if not title:

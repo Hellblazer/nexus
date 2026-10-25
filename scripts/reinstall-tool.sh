@@ -216,10 +216,29 @@ fi
 if [ -n "${NX_REINSTALL_EXTRAS:-}" ]; then
     EXTRAS="$(printf '%s,%s' "$EXTRAS" "$NX_REINSTALL_EXTRAS" | tr ',' '\n' | sed '/^$/d' | sort -u | paste -sd, -)"
 fi
+
+# A pinned registry spec (conexus==7.86.0, or conexus[pdf]==7.86.0) goes to the
+# builder as name and version, its own extras folded into EXTRAS, so build_spec
+# assembles the spec once with the extras before the pin. Passed whole as the
+# source, a preserved extra landed after it: conexus==7.86.0[pdf], which uv
+# refuses, and claude-restart-sessions --nx 7.86.0 aborted on it (nexus-jea5y).
+BUILD_SOURCE="$SOURCE"
+BUILD_VERSION=""
+if [ "$SOURCE_KIND" = "registry" ] && [[ "$SOURCE" == *==* ]]; then
+    BUILD_SOURCE="${SOURCE%%==*}"
+    BUILD_VERSION="${SOURCE#*==}"
+    if [[ "$BUILD_SOURCE" == *\[*\] ]]; then
+        _spec_extras="${BUILD_SOURCE#*\[}"
+        _spec_extras="${_spec_extras%\]}"
+        BUILD_SOURCE="${BUILD_SOURCE%%\[*}"
+        EXTRAS="$(printf '%s,%s' "$EXTRAS" "$_spec_extras" | tr ',' '\n' | sed 's/^ *//;s/ *$//;/^$/d' | sort -u | paste -sd, -)"
+    fi
+fi
 [ -n "$EXTRAS" ] && echo "Preserving extras: [$EXTRAS]"
 
 # ── Build the new generation, then flip ──────────────────────────────────────
-_build_args=(--source "$SOURCE")
+_build_args=(--source "$BUILD_SOURCE")
+[ -n "$BUILD_VERSION" ] && _build_args+=(--version "$BUILD_VERSION")
 [ -n "$EXTRAS" ] && _build_args+=(--extras "$EXTRAS")
 
 # nexus-jd8fi drift: install what the lock says, not what PyPI says today.

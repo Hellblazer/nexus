@@ -39,6 +39,7 @@ import httpx
 import structlog
 
 from nexus.errors import ExtractionQualityError, UnextractableContentError
+from nexus.redact import redact_credentials
 
 # MinerU is resolved LAZILY (nexus-ct17r). ``mineru.cli.common`` imports
 # magika, which imports onnxruntime at module scope, and this module is
@@ -97,6 +98,28 @@ _MINERU_OOM_EXIT = 42
 #: nexus-5ny9r: how long a "no live MinerU server" verdict is trusted before
 #: the next page re-probes the endpoint (one cheap /health, no autostart).
 _MINERU_SERVER_RECHECK_S = 60.0
+
+#: nexus-11x9o: how much of the per-batch worker's stderr (its last bytes) rides
+#: on ``mineru_subprocess_failed``. A traceback's end names the cause; a progress
+#: bar's thousand lines do not need to be in a log event.
+_MINERU_STDERR_TAIL_BYTES = 2048
+
+
+def _read_stderr_tail(path: Path) -> str:
+    """The last ``_MINERU_STDERR_TAIL_BYTES`` of *path* as text; ``""`` if unreadable."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - _MINERU_STDERR_TAIL_BYTES))
+            # The cut can land inside a multibyte sequence: its orphaned bytes
+            # decode to replacement characters, which are not worth keeping.
+            text = fh.read().decode("utf-8", errors="replace").lstrip("�").strip()
+    except OSError:
+        return ""
+    # A worker's stderr can echo a rejected credential (a service 401 body does);
+    # the log event goes through the same redaction doctor's exception text does.
+    return redact_credentials(text)
+
 
 _MINERU_WORKER_SCRIPT = '''
 import json, sys, os
@@ -2654,33 +2677,38 @@ class PDFExtractor:
                 pages = 1
             timeout_s = get_mineru_page_timeout_s() * max(1, pages)
 
-            # Short-lived per-batch worker (Gap 4 carve-out): DEVNULL stdio is a
-            # judged choice — failure is returncode-detected by the caller
-            # (killpg + the Gap 5 OOM classification below).
+            # Short-lived per-batch worker (Gap 4 carve-out): stdin and stdout
+            # stay DEVNULL, a judged choice — failure is returncode-detected by
+            # the caller (killpg + the Gap 5 OOM classification below). stderr
+            # goes to a file in result_dir (not a pipe: nothing can block on a
+            # full buffer) so a failure carries the traceback's tail
+            # (nexus-11x9o: a cv2 that could not load was visible nowhere).
             from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
             from nexus.util.stable_cwd import stable_daemon_cwd  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-            proc = subprocess.Popen(
-                [
-                    sys.executable, "-c", _MINERU_WORKER_SCRIPT,
-                    # Absolute: the worker starts in the filesystem root below.
-                    os.path.abspath(pdf_path), result_dir,
-                    # Inclusive, like the server path: the worker passes this
-                    # straight to do_parse's end_page_id.
-                    str(start), "none" if end is None else str(_mineru_end_page_id(end)),
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                preexec_fn=preexec_fn,  # Linux-only RLIMIT_AS ceiling (or None)
-                # nexus-x3m8e: not the caller's directory, which may be a
-                # disposable worktree deleted under a long page run (any
-                # getcwd() in MinerU or torch then raises). Short-lived and
-                # bounded, but it imports the same libraries the server does.
-                cwd=stable_daemon_cwd(),
-                **isolation_popen_kwargs(),  # own process group (POSIX) / job object (Windows)
-            )
+            stderr_path = Path(result_dir) / "worker-stderr.log"
+            with open(stderr_path, "wb") as stderr_file:  # the child inherits the fd; the parent's copy closes at once
+                proc = subprocess.Popen(
+                    [
+                        sys.executable, "-c", _MINERU_WORKER_SCRIPT,
+                        # Absolute: the worker starts in the filesystem root below.
+                        os.path.abspath(pdf_path), result_dir,
+                        # Inclusive, like the server path: the worker passes this
+                        # straight to do_parse's end_page_id.
+                        str(start), "none" if end is None else str(_mineru_end_page_id(end)),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    preexec_fn=preexec_fn,  # Linux-only RLIMIT_AS ceiling (or None)
+                    # nexus-x3m8e: not the caller's directory, which may be a
+                    # disposable worktree deleted under a long page run (any
+                    # getcwd() in MinerU or torch then raises). Short-lived and
+                    # bounded, but it imports the same libraries the server does.
+                    cwd=stable_daemon_cwd(),
+                    **isolation_popen_kwargs(),  # own process group (POSIX) / job object (Windows)
+                )
             # Use killpg(getpgid(pid)) rather than killpg(pid) directly —
             # with start_new_session=True the pgid equals pid at spawn time,
             # but by the time we kill the child may be dead and the PID
@@ -2772,6 +2800,7 @@ class PDFExtractor:
                     classified_oom=is_oom,
                     pages=f"{start}–{end}",
                     path=str(pdf_path),
+                    stderr_tail=_read_stderr_tail(stderr_path),
                 )
                 msg = (
                     f"MinerU subprocess exited with code {returncode} "
