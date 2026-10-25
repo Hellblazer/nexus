@@ -246,10 +246,14 @@ leg_a() {
     _nx doctor --check-mineru >"$LOGS/a-mineru.log" 2>&1 || true   # its exit status is not the signal; the line is
     grep -q "MinerU import: N/A" "$LOGS/a-mineru.log" \
         || fail "doctor --check-mineru did not report N/A on a slim install"
-    "$(gen_python)" - <<'PY' || fail "PDF support row is red or missing on a slim install"
+    # Under _clean_env like every nx call: the row's install hint depends on which install
+    # kind the process sees, and that is read from HOME. Run with the caller's HOME, a
+    # generation reads as a source checkout and the row says "uv sync" (nexus-anuzd).
+    _clean_env "$(gen_python)" - <<'PY' || fail "PDF support row is red, missing or names the wrong command on a slim install"
 from nexus import health
 (row,) = health._check_pdf_support()
 assert row.label == "PDF support" and row.ok and not row.warn and "not installed" in row.detail, row
+assert "(to install now: nx self install --extras pdf)" in row.detail, row.detail
 print("row:", row.detail)
 PY
     if extras_have_pdf; then fail "a fresh install's receipt lists pdf"; fi
@@ -335,7 +339,7 @@ leg_e() {
     grep -q "paper.pdf" "$LOGS/e.log" || fail "the held PDF is not named"
     _nx search "some prose" --n 3 >"$LOGS/e-search.log" 2>&1 || true
     grep -q "prose" "$LOGS/e-search.log" || fail "prose was not indexed"
-    "$(gen_python)" -c "
+    _clean_env "$(gen_python)" -c "
 from nexus import pdf_stack
 n = pdf_stack.skipped_count()
 assert n == 1, n" || fail "the skipped-PDF record does not count the held PDF"
