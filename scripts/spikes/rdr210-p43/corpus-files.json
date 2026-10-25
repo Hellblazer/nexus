@@ -193,6 +193,10 @@
       "sha256": "bc98f6475beec5a96026e694b55d2332d7fe38e1455a5e8cc21394bcf58ee5b9"
     },
     {
+      "path": "src/nexus/_vcrt.py",
+      "sha256": "a1ba3bbdc253a796b25077144adfb2f81651b60c6fd2cf5ccbfe61162ebb7d35"
+    },
+    {
       "path": "src/nexus/catalog/catalog_spans.py",
       "sha256": "71cc75e33ac99507914000e91e23028460a5f7216eb87cade871bd631ded3686"
     },
@@ -227,10 +231,6 @@
     {
       "path": "src/nexus/commands/service_cmd.py",
       "sha256": "2261683a3c3a2b95d6a3898a05c5de5b4be326f9b9961e6b589ad0d494ceb44c"
-    },
-    {
-      "path": "src/nexus/console/routes/activity.py",
-      "sha256": "104cb0621f919456cb770c928a08565b012b76ff9ee63c605bfdcdcb13b4b46a"
     },
     {
       "path": "src/nexus/console/routes/health.py",
