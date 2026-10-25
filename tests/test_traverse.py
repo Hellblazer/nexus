@@ -3,11 +3,10 @@
 
 Focuses on the contracts that protect callers from silent data loss:
 
-  * Malformed seed strings are dropped — but the return value signals
-    the loss; an all-invalid input returns the empty-result shape, not
-    an exception.
-  * Mixed valid/invalid seeds: valid ones traverse, invalid ones are
-    silently dropped (partial result, no exception).
+  * No seed parses: a failure (nexus-4jwr0), the empty-result shape
+    plus a ``"warning"``, marked so an MCP client sees ``isError``.
+  * Mixed valid/invalid seeds: valid ones traverse; a ``"warning"``
+    names the dropped ones (partial result, no exception).
   * SC-16 mutual-exclusion: link_types + purpose together returns an
     ``{"error": ...}`` dict, not a raise.
   * Unknown purpose: returns empty result with a ``"warning"`` key.
@@ -36,13 +35,13 @@ def _empty_catalog():
 # ── Malformed seed handling ───────────────────────────────────────────────────
 
 
-def test_all_malformed_seeds_returns_empty_shape():
-    """All-invalid seeds → empty result, no exception.
+def test_all_malformed_seeds_fail():
+    """All-invalid seeds → a marked failure carrying the empty shape and a warning.
 
-    The traverse tool silently drops unparseable seeds.  When all seeds
-    are malformed the caller gets the empty-result dict, not a raise.
-    This is the drop-silent contract the critique flagged as untested.
+    nexus-4jwr0: an empty walk here would read as "nothing linked" when the
+    caller passed no usable seed at all.
     """
+    from nexus.mcp._tool_failure import is_failure
     from nexus.mcp.core import traverse
 
     with patch("nexus.mcp.core._get_catalog", return_value=_empty_catalog()):
@@ -51,17 +50,16 @@ def test_all_malformed_seeds_returns_empty_shape():
             link_types=["implements"],
         )
 
-    assert isinstance(result, dict)
-    assert result.get("tumblers") == []
-    assert result.get("ids") == []
-    assert result.get("collections") == []
-    assert "error" not in result, (
-        "All-malformed seeds must return empty shape, not an error key"
-    )
+    assert is_failure(result)
+    assert result == {
+        "tumblers": [], "ids": [], "collections": [],
+        "warning": "traverse: no seed parses as a tumbler: "
+                   "['not-a-tumbler', 'also::bad', '???']",
+    }
 
 
-def test_mixed_valid_and_malformed_seeds_drops_bad_silently():
-    """Valid seed traverses; malformed ones are dropped without error key.
+def test_mixed_valid_and_malformed_seeds_names_the_dropped_ones():
+    """Valid seed traverses; malformed ones are dropped and named in a warning.
 
     The result is a partial traversal — we verify the catalog was called
     (meaning the valid seed reached it) and no exception surfaced.
@@ -75,21 +73,25 @@ def test_mixed_valid_and_malformed_seeds_drops_bad_silently():
             link_types=["cites"],
         )
 
-    assert isinstance(result, dict)
-    assert "tumblers" in result
+    from nexus.mcp._tool_failure import is_failure
+
+    assert not is_failure(result)
+    assert "error" not in result
+    assert result["warning"] == "traverse: dropped unparseable seeds ['NOT-A-TUMBLER']"
     # Catalog must have been called — the valid seeds reached graph_many.
     assert cat.graph_many.called or cat.graph.called
 
 
-def test_single_malformed_seed_returns_empty_not_exception():
-    """Single malformed seed → empty result, catalog not invoked."""
+def test_single_malformed_seed_fails_without_calling_the_catalog():
+    """Single malformed seed → marked failure, catalog not invoked."""
+    from nexus.mcp._tool_failure import is_failure
     from nexus.mcp.core import traverse
 
     cat = _empty_catalog()
     with patch("nexus.mcp.core._get_catalog", return_value=cat):
         result = traverse(seeds="bad-seed-string", link_types=["implements"])
 
-    assert isinstance(result, dict)
+    assert is_failure(result)
     assert result["tumblers"] == []
     # No catalog call — all seeds were dropped before graph dispatch.
     assert not cat.graph.called
@@ -264,9 +266,12 @@ def test_ids_are_deduped_across_documents_sharing_a_chunk():
     assert result["ids"] == [shared, "ee" * 32]
 
 
-def test_manifest_failure_degrades_to_empty_ids_not_an_exception():
+def test_manifest_failure_degrades_to_empty_ids_with_a_warning():
     """The tumblers and collections a caller asked for must still come back if
-    the manifest lookup fails — ids are an enrichment, not the answer."""
+    the manifest lookup fails — ids are an enrichment, not the answer. The
+    warning says so (nexus-4jwr0), so empty ids do not read as chunkless
+    documents."""
+    from nexus.mcp._tool_failure import is_failure
     from nexus.mcp.core import traverse
 
     cat = _catalog_with_nodes([_node("1.1.1", "code__x__v1")], {})
@@ -275,9 +280,14 @@ def test_manifest_failure_degrades_to_empty_ids_not_an_exception():
     with patch("nexus.mcp.core._get_catalog", return_value=cat):
         result = traverse(seeds=["1.1.1"], link_types=["implements"])
 
+    assert not is_failure(result)
     assert result["ids"] == []
     assert result["tumblers"] == ["1.1.1"]
     assert result["collections"] == ["code__x__v1"]
+    assert result["warning"] == (
+        "traverse: chunk ids unavailable, manifest lookup failed: "
+        "RuntimeError: catalog down"
+    )
 
 
 def test_ids_are_capped_and_the_cap_is_reported():
