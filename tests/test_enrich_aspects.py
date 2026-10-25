@@ -835,15 +835,25 @@ class TestRejectedRowsAndBackendGate:
     """7.86.1 shakeout fixes: a row the engine's confidence gate refuses is not
     "extracted"; a null-fields line does not claim 3 attempts; a run with no LLM
     backend stops up front instead of writing nothing and exiting 0; the cost
-    line says what it assumes."""
+    line says what it assumes.
 
-    def test_rows_below_the_confidence_floor_are_not_counted_as_extracted(
+    This module provisions a T2 tenant per test, and the provisioned-tenant ceiling
+    (tests/storage_touch_ceiling.toml) has no room for one per case: only the case
+    that needs the engine's real confidence gate lives here. The backend gate, the
+    cost line and the floor pin are in tests/test_enrich_aspects_backend_gate.py."""
+
+    def test_rows_below_the_floor_and_null_rows_are_not_counted_as_extracted(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _, db_path, cat = env
-        _register_entries(cat, ["/papers/low.pdf", "/papers/good.pdf"])
+        _register_entries(cat, ["/papers/low.pdf", "/papers/good.pdf", "/papers/null.pdf"])
 
         def fake_extract(content, source_path, collection, **_kw):
+            if source_path.endswith("null.pdf"):
+                return _make_record(
+                    source_path=source_path, problem_formulation=None,
+                    proposed_method=None, confidence=None,
+                )
             return _make_record(
                 source_path=source_path,
                 confidence=0.05 if source_path.endswith("low.pdf") else 0.9,
@@ -862,138 +872,13 @@ class TestRejectedRowsAndBackendGate:
         assert "extracted" not in low_line, result.output
         assert "1 extracted" in result.output, result.output
         assert "1 below the confidence floor (0.3, not stored)" in result.output, result.output
+        # A null-fields line does not claim three attempts: a hard failure makes one.
+        assert "null-fields (extraction failed)" in result.output, result.output
+        assert "3x" not in result.output
 
         with T2Database(db_path) as db:
             rows = db.document_aspects.list_by_collection("knowledge__delos")
-        assert len(rows) == 1, "the summary must match what was actually stored"
-
-    def test_the_floor_matches_the_engines(self) -> None:
-        """The number printed is the engine's, not a copy that can drift."""
-        java = (
-            Path(__file__).resolve().parents[1]
-            / "service/src/main/java/dev/nexus/service/db/AspectRepository.java"
-        ).read_text(encoding="utf-8")
-        assert f"MIN_CONFIDENCE = {_ASPECT_CONFIDENCE_FLOOR};" in java
-
-    def test_null_fields_line_does_not_claim_three_attempts(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _, _, cat = env
-        _register_entries(cat, ["/papers/p1.pdf"])
-        monkeypatch.setattr(
-            "nexus.aspect_extractor.extract_aspects",
-            lambda content, source_path, collection, **_kw: _make_record(
-                source_path=source_path, problem_formulation=None,
-                proposed_method=None, confidence=None,
-            ),
-        )
-        result = CliRunner().invoke(
-            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
-        )
-        assert result.exit_code == 0, result.output
-        assert "null-fields (extraction failed)" in result.output
-        assert "3x" not in result.output
-
-    def test_no_llm_backend_stops_before_extracting_and_exits_nonzero(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _, _, cat = env
-        _register_entries(cat, ["/papers/p1.pdf", "/papers/p2.pdf"])
-
-        def _no_backend(req):
-            raise NoBackendAvailableError(NO_BACKEND_MESSAGE)
-
-        monkeypatch.setattr("nexus.operators.llm_backend.resolve_backend_name", _no_backend)
-        calls: list[str] = []
-        monkeypatch.setattr(
-            "nexus.aspect_extractor.extract_aspects",
-            lambda content, source_path, collection, **_kw: calls.append(source_path),
-        )
-
-        result = CliRunner().invoke(
-            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
-        )
-        assert result.exit_code != 0, result.output
-        assert NO_BACKEND_MESSAGE in result.output, result.output
-        assert calls == [], "nothing may be dispatched when no backend can run"
-
-    def test_explicit_cli_backend_with_no_claude_on_path_is_refused(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """NX_LLM_BACKEND=cli resolves to "cli" whatever is on PATH, so the real
-        resolver passed this gate and every document then failed at the spawn."""
-        _, _, cat = env
-        _register_entries(cat, ["/papers/p1.pdf"])
-        monkeypatch.setenv("NX_LLM_BACKEND", "cli")
-        monkeypatch.setattr("nexus.commands.enrich._claude_on_path", lambda: False)
-        calls: list[str] = []
-        monkeypatch.setattr(
-            "nexus.aspect_extractor.extract_aspects",
-            lambda content, source_path, collection, **_kw: calls.append(source_path),
-        )
-        result = CliRunner().invoke(
-            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
-        )
-        assert result.exit_code != 0, result.output
-        assert NO_BACKEND_MESSAGE in result.output, result.output
-        assert calls == []
-
-    def test_explicit_cli_backend_with_claude_on_path_passes_the_gate(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Positive control for the refusal above: the same setup with a claude on PATH runs."""
-        _, _, cat = env
-        _register_entries(cat, ["/papers/p1.pdf"])
-        monkeypatch.setenv("NX_LLM_BACKEND", "cli")
-        monkeypatch.setattr("nexus.commands.enrich._claude_on_path", lambda: True)
-        calls: list[str] = []
-
-        def _extract(content, source_path, collection, **_kw):
-            calls.append(source_path)
-            return _make_record(source_path=source_path)
-
-        monkeypatch.setattr("nexus.aspect_extractor.extract_aspects", _extract)
-        result = CliRunner().invoke(
-            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
-        )
-        assert NO_BACKEND_MESSAGE not in result.output, result.output
-        assert calls == ["/papers/p1.pdf"]
-
-    def test_dry_run_is_not_gated_on_a_backend(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """--dry-run makes no LLM call, so a box with no backend can still ask
-        what a run would cost."""
-        _, _, cat = env
-        _register_entries(cat, ["/papers/p1.pdf"])
-
-        def _no_backend(req):
-            raise NoBackendAvailableError(NO_BACKEND_MESSAGE)
-
-        monkeypatch.setattr("nexus.operators.llm_backend.resolve_backend_name", _no_backend)
-        monkeypatch.setattr(
-            "nexus.mcp_infra.get_t3",
-            lambda: (_ for _ in ()).throw(RuntimeError("test: no t3")),
-        )
-        result = CliRunner().invoke(enrich, ["aspects", "knowledge__delos", "--dry-run"])
-        assert result.exit_code == 0, result.output
-
-    def test_cost_estimate_names_its_assumption_and_the_measured_note_cost(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        _, _, cat = env
-        _register_entries(cat, ["/papers/p1.pdf", "/papers/p2.pdf"])
-        monkeypatch.setattr(
-            "nexus.mcp_infra.get_t3",
-            lambda: (_ for _ in ()).throw(RuntimeError("test: no t3")),
-        )
-        result = CliRunner().invoke(enrich, ["aspects", "knowledge__delos", "--dry-run"])
-        assert result.exit_code == 0, result.output
-        assert "typical for paper-sized documents" in result.output
-        assert "mean of three measured papers, $0.13-0.31 each, 54k-109k prompt tokens" in result.output
-        assert "far lower for short notes (one measured at $0.0035)" in result.output
-        # $0.20 is a mean, not a ceiling: a claim of a bound is the defect this pins.
-        assert "upper bound" not in result.output
+        assert [r.source_path for r in rows] == ["/papers/good.pdf"], "the summary must match what was stored"
 
 
 # ── --re-extract --extractor-version ─────────────────────────────────────────
