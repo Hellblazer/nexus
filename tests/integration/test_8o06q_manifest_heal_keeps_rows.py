@@ -147,8 +147,9 @@ def test_a_shared_chunk_row_another_document_wrote_last_survives_and_the_documen
 
     rows = {r.chash: r for r in d.reader.get_manifest(d.a)}
     assert set(rows) == {d.ch["s"], d.ch["p"]}, "no row dropped, none added"
-    assert rows[d.ch["s"]].position == 0 and rows[d.ch["s"]].section_title == "s-title"
-    assert rows[d.ch["s"]].labels_written is True
+    # 7.86.3 carries no tko2w (per-document labels ship with engine 0.1.165), so ManifestRow has
+    # no section_title / labels_written here; develop keeps those two assertions.
+    assert rows[d.ch["s"]].position == 0
     assert d.entry().chunk_count == 3
     assert _state(d.reader, d.a) == "failed"
     assert [(str(r.entry.tumbler), r.manifest_rows, r.chunk_count) for r in result.reindex] == [(d.a, 2, 3)]
@@ -392,7 +393,7 @@ def test_the_next_index_run_re_indexes_a_marked_document(
     writer = make_catalog_writer()
     middle = rows[1]
     kept = [
-        _row(r.chash, r.position, r.section_title or "")
+        _row(r.chash, r.position)
         for r in rows if r.chash != middle.chash
     ]
     writer.atomic_manifest_replace(tumbler, kept, collection=doc.physical_collection)
