@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Route tests for the console Threads panel (nexus-i99vk).
 
-The T2 path is real (a minted tenant, entries written through the same
-``t2_handle`` the CLI uses). The two readers are seams on the app, so the
-``bd`` and T2-failure cases inject a stand-in; nothing patches ``subprocess``.
+The two readers are seams on the app, so every case injects a stand-in and
+nothing patches ``subprocess``. The real T2 reader is covered by the tenant
+test in ``tests/test_console_app.py``, so this module provisions no tenant.
 """
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from nexus.commands._helpers import t2_handle
 from nexus.console.app import create_app
 from nexus.console.routes import threads as threads_route
 from nexus.console.threads import Bead, BeadsResult
@@ -28,47 +27,12 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%MZ")
 
 
-# ── real T2 ──────────────────────────────────────────────────────────────────
+# T2 itself is exercised once, in tests/test_console_app.py's tenant test,
+# so this module provisions no tenant (the CI provisioned-tenant ceiling).
 
 
-@pytest.mark.t2_tenant
-def test_renders_real_t2_entries_in_project_threads() -> None:
-    now = datetime.now(timezone.utc)
-    body = (
-        f"session: nexus_c9c\nupdated: {_iso(now)}\n"
-        "## RDR-234 auto-continuation\nref: RDR-234, nexus-qlrj7\n"
-        "state: spike proven; rewriting the draft\nwaiting_on: none\nneeds_sam: none\n"
-        "## Console panel\nref: nexus-i99vk\nstate: building\nwaiting_on: review\n"
-        "needs_sam: choose the port\n"
-    )
-    other = f"session: other\nupdated: {_iso(now)}\n## Quiet thread\nstate: idle\nneeds_sam: none\n"
-    with t2_handle() as db:
-        db.memory.put(project="threads", title="nexus_c9c", content=body)
-        db.memory.put(project="threads", title="other", content=other)
-        # A different project must not leak onto the board.
-        db.memory.put(project="not_threads", title="intruder", content="## Nope\nstate: x\n")
-
-    resp = _client(bd_runner=NO_BEADS).get("/threads")
-
-    assert resp.status_code == 200
-    html = resp.text
-    for expected in (
-        "nexus_c9c", "other", "RDR-234 auto-continuation", "spike proven; rewriting the draft",
-        "Console panel", "building", "review", "Quiet thread",
-    ):
-        assert expected in html, expected
-    assert "intruder" not in html
-    assert "1 thing needs you." in html
-    needs_you = html.split("<h3>Needs you</h3>", 1)[1].split("<h3>Sessions</h3>", 1)[0]
-    assert "choose the port" in needs_you
-    assert "asked by nexus_c9c" in needs_you
-    assert "Quiet thread" not in needs_you
-    assert "thread-card stale" not in html  # both rows are fresh
-
-
-@pytest.mark.t2_tenant
 def test_empty_threads_project_says_so() -> None:
-    resp = _client(bd_runner=NO_BEADS).get("/threads")
+    resp = _client(bd_runner=NO_BEADS, threads_reader=lambda: []).get("/threads")
     assert resp.status_code == 200
     assert "No Claude session has reported in yet." in resp.text
     assert "No session has reported yet, so I can't tell what needs you." in resp.text
