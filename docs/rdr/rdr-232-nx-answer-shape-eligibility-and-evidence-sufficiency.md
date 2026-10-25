@@ -62,14 +62,25 @@ before similarity or cost ranking. This is a routing constraint, not another
 similarity weight. It does not guarantee coverage of individual facets; the
 separate evidence-coverage gate handles those.
 
-#### Gap 2: Traversal can dilute the caller's primary evidence
+#### Gap 2: Plan corpus pins and traversal can dilute the caller's primary evidence
 
-RDR-097 deliberately expands factual lookup through citation and relation
-links. The traversal primitive has no caller-scope argument. It follows catalog
-links and returns up to a global cap of chunk ids from the reachable documents.
-Hydration caps input count, not the share belonging to the caller's requested
-corpus or named source. Consequently, linked code can displace the RDR evidence
-that the caller explicitly scoped.
+Two separate causes let out-of-scope evidence in.
+
+First, the caller's scope never reaches a retrieval step whose plan already
+names a corpus. The runner fills a step's corpus from caller scope only when
+the step has none (`plans/runner.py:1184-1190`), so a plan-declared corpus
+wins. All 12 builtin plans pin a corpus on their retrieval steps; ten of them
+pin `corpus: all`, which admits every collection family, quarantine
+collections included. Plan 473 pins it through its default binding, so the
+observed `scope="rdr"` call ran its vector search over every corpus (research
+14).
+
+Second, RDR-097 deliberately expands factual lookup through citation and
+relation links. The traversal primitive has no caller-scope argument. It
+follows catalog links and returns up to a global cap of chunk ids from the
+reachable documents. Hydration caps input count, not the share belonging to
+the caller's requested corpus or named source. Consequently, linked code can
+displace the RDR evidence that the caller explicitly scoped.
 
 A bounded number of irrelevant chunks is not a sufficient fix. The system needs
 to preserve primary evidence, constrain traversal to a declared evidence role,
@@ -101,8 +112,8 @@ plausible answer.
 | RDR-090/179 | Evaluation precedent | Existing retrieval and operator-quality harnesses supply baseline mechanics, not answer-shape or facet-coverage labels. RDR-232 adds those axes without treating synthetic NDCG as production answer quality. |
 
 No separate RDR proposing these three coordinated fixes was found in the index.
-RDR-189 is the closest conceptual overlap and remains a draft; the boundary
-above is deliberate.
+RDR-189 is the closest conceptual overlap. It was accepted on 2026-10-24 with
+a matching Shared Contract section; the boundary above is deliberate.
 
 ## Context
 
@@ -137,9 +148,9 @@ would still make broad questions follow a factual-answer pipeline.
   typed bindings. `answer_shape` is not a declared plan dimension today.
 - **Cost choice**: `src/nexus/mcp/core.py` invokes `choose_within_band` only on
   candidates returned by the matcher.
-- **Execution**: `src/nexus/plans/runner.py` applies caller scope to corpus
-  arguments, resolves steps, hydrates operator inputs, and bundles adjacent
-  operators.
+- **Execution**: `src/nexus/plans/runner.py` resolves steps, applies caller
+  scope only to retrieval steps that name no corpus, hydrates operator inputs,
+  and bundles adjacent operators.
 - **Traversal**: `src/nexus/mcp/core.py::traverse` accepts seeds, link types or
   purpose, depth, and direction. It has no corpus or primary-source reservation
   parameter. It returns document tumblers, chunk ids, and collections.
@@ -203,10 +214,20 @@ listed under Critical Assumptions before gate.
   questions. The matcher admitted it for a multi-facet synthesis because no
   answer-shape eligibility check exists. *Source: plan 473 YAML, run 722, and
   `plans/matcher.py`; research 1.*
-- **Verified — traversal scope stops at corpus arguments.** Caller scope is
-  applied through `_apply_caller_scope_to_args`. `traverse` does not accept a
-  corpus argument, and its catalog walk collects every reachable collection.
-  *Source: `plans/runner.py` and `mcp/core.py::traverse`; research 4.*
+- **Verified — caller scope does not reach plan-pinned retrieval steps.**
+  `_apply_caller_scope_to_args` returns early when `"corpus" in args`, and it
+  runs after the step's `$corpus` binding is resolved, so a plan-declared
+  corpus always wins (`plans/runner.py:1184-1190`, `3093-3121`). All 12
+  builtins pin a corpus on their retrieval steps: `hybrid-factual-lookup` and
+  `abstract-themes` through a `corpus: all` default binding,
+  `corpus-coverage-check` and `document-discovery` through a
+  `knowledge,code,docs,rdr` default, and the other eight with a literal
+  `corpus: all`. Plan 473's search step therefore ignored `scope="rdr"`.
+  The saved run's `resolved_step_args` has not been read to confirm this for
+  run 722. *Source: `plans/runner.py`; the 12 builtin YAMLs; research 14.*
+- **Verified — traversal has no scope.** `traverse` does not accept a corpus
+  argument, and its catalog walk collects every reachable collection.
+  *Source: `mcp/core.py::traverse`; research 4.*
 - **Verified — per-stream caps are not primary-source guarantees.** Plan 473
   reserves vector and graph budgets independently, then ranks their union.
   Neither its YAML nor `limit_per_source` expresses a caller corpus or named
@@ -299,7 +320,7 @@ listed under Critical Assumptions before gate.
 
 ### Critical Assumptions
 
-Research 6–9 executed prototypes for all four assumptions. They establish
+Research 6–10 executed prototypes for A1–A6; A7 has none yet. They establish
 feasibility within the stated fixtures, not production integration or live
 answer quality. The detailed A1/A2 census is
 `nexus_rdr/232-research-a1-a2-source-verification`; A3/A4 current interfaces
@@ -356,8 +377,9 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   1.2.4686; the recorded question contains no `ART` token, so qualifier
   extraction was not proven. The MVV therefore requires an explicit owner or
   project binding. Prototype heuristics needed fixture corrections, and
-  general inference, ambiguity fallback, and optional structured extraction
-  cost remain unverified.
+  general inference, ambiguity fallback, optional structured extraction
+  cost, and the active-project tier (the only path that fixes the call as
+  filed) remain unverified.
 - [ ] **A6 — traversal can apply scope before its chunk cap without losing
   alignment.** **Status**: Partially verified (research 10). **Method**: Source
   Search plus synthetic graph fixture with >300 out-of-scope ids preceding
@@ -365,8 +387,15 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   before manifest expansion retained it with per-id collection alignment.
   Production `traverse` integration and no-policy backward compatibility remain
   unverified. The engine also caps graphBFS at 500 nodes before client
-  filtering, so production must apply the scope predicate before that cap as
-  well. A6 does not exercise the engine path.
+  filtering. A6 does not exercise the engine path; Phase 1 discloses a capped
+  response and measures how often the cap fires before deciding on an engine
+  filter.
+- [ ] **A7 — an RDR's T2 metadata and gate records can serve as a bounded
+  lifecycle evidence stream.** **Status**: Unverified (inferred, not read: the
+  read path and record shapes were not exercised for this purpose). **Method**:
+  Phase 1 integration test resolving an RDR source, reading its `{repo}_rdr`
+  metadata and latest gate record within budget, and refusing a source from
+  another tenant.
 
 ## Proposed Solution
 
@@ -546,6 +575,20 @@ to its resolver. It verifies owner-scoped resolution given that input, not
 extraction of a qualifier from the recorded question. The active-project tier
 is a separate unverified path and is not used by the MVV.
 
+So the call exactly as filed is fixed only when the active-project tier works.
+Until then that call returns an ambiguity result naming both RDR-084
+candidates, which is honest but not the requested synthesis. Phase 2 builds
+and verifies the active-project tier as part of A5, and its proof includes the
+unmodified call.
+
+`scope` cannot carry the qualifier for this call: it takes one token, either a
+corpus prefix such as `rdr` or a catalog subtree such as `1.2`
+(`_nx_answer_normalize_scope`, research 16), and this call needs both. The
+owner therefore travels in the reserved `owner`/`project` binding. When a
+caller passes a catalog-subtree `scope` and no `owner` binding, the subtree is
+also used as the owner qualifier for source resolution; when both are given
+and disagree, the run reports the conflict instead of picking one.
+
 Deterministic extraction has no model cost. If structured extraction is needed,
 it is at most one direct operator call, never recursive `nx_answer`; it is
 bounded by the same overall deadline and reported separately from plan-match
@@ -604,10 +647,57 @@ existing traversal and operator-count caps remain; they are not substitutes for
 these budgets. Initial numeric limits are calibration parameters derived from
 current operator and bundle limits, not unmeasured constants locked by this RDR.
 
-T2 is outside the corpus graph. An RDR question whose facets include gate or
-lifecycle state may use the existing RDR metadata/memory lookup as a distinct,
-bounded evidence stream when the caller can access it. It must not be replaced
-by code links or treated as an ordinary T3 document.
+The primary stream enters at the runner, not as a plan step, so it applies
+equally to builtin, grown and inline-planned plans. Before the first operator
+that consumes retrieved evidence, the runner merges the reserved primary
+evidence ahead of the plan's own hydrated inputs. Primary items take a reserved
+share of `_OPERATOR_MAX_INPUTS` (100, `plans/runner.py:1446`); the plan's
+inputs, still bounded by their own `limit_per_source`, fill the remainder. The
+existing positional truncation (`runner.py:1948-1976`) therefore cuts only
+secondary items and never evicts reserved primary ones. Deduplication by chash
+keeps the primary copy and its attribution.
+
+T2 is outside the corpus graph. When a named source resolves to an RDR and the
+request has a gate, lifecycle or status facet, the runner adds a third stream:
+that RDR's T2 records (its metadata record and its latest gate record) from the
+`{repo}_rdr` project of the resolved source's owner. The stream is read only
+when that owner is in the caller's tenant, as every T2 read already is; it
+contributes a small fixed number of records (a calibration parameter) and
+counts against the same aggregate character budget. It applies only to RDR
+sources. It must not be replaced by code links or treated as an ordinary T3
+document. Assumption A7 covers it.
+
+#### 2a. Caller scope over plan-declared corpora
+
+Today a plan-declared corpus beats the caller's scope (nexus-zs1d's rule,
+`plans/runner.py:1156-1190`). This RDR narrows that rule. Where the caller
+gave no scope, nothing changes: the plan's corpus, then the RDR-200 default
+`knowledge,code,docs,rdr`, apply as now. Where the caller gave a corpus-prefix
+scope, it narrows every retrieval step's corpus (`search`, `query`, and the
+other tools in `_RETRIEVAL_TOOLS`):
+
+| Plan step corpus | Caller scope `rdr` | Result |
+| --- | --- | --- |
+| none | `rdr` | `rdr` (today's behavior) |
+| `all` | `rdr` | `rdr`: `all` is no restriction |
+| a list containing `rdr` | `rdr` | `rdr` |
+| a list or name without `rdr` | `rdr` | scope conflict |
+
+A scope conflict does not run the step unscoped and does not drop the
+caller's scope. The step returns no evidence, and the run discloses the
+conflict with the plan's corpus and the caller's scope in the coverage ledger's
+scope row. A catalog-subtree scope (for example `1.2`) is not a corpus and is
+not intersected; it keeps its current forwarding (inferred, not read: how a
+subtree value behaves once forwarded as `corpus` was not traced).
+
+The builtin plans are rewritten as part of this change, not worked around.
+Their `corpus: all` pins (eight literal, two through a default binding) are
+incidental: removing them makes those steps corpus-agnostic, so the existing
+caller-scope path and the RDR-200 default apply, and the plans stop admitting
+quarantine collections that `all` includes. `corpus-coverage-check` and
+`document-discovery` keep their `knowledge,code,docs,rdr` default, which the
+narrowing rule handles. The narrowing rule still matters for grown plans,
+which can pin any corpus. Source census: research 14.
 
 #### 3. Traversal as a bounded secondary stream
 
@@ -624,25 +714,31 @@ TraversalPolicy(
 )
 ```
 
-The policy is applied **inside the catalog walk before its node cap and inside
-`traverse` before manifest expansion**, not by filtering already-truncated
-results. `traverse` currently returns a sorted union of collections and caps
-ids in graph order; the engine's `graphBFS` also truncates at 500 nodes by
-`(min_depth, tumbler)` before the client sees them. A runner-only or post-BFS
-filter would lose in-scope evidence before the policy saw it.
+The policy is applied **inside `traverse` before manifest expansion**, not by
+filtering already-truncated results. `traverse` currently returns a sorted
+union of collections and caps ids in graph order. A runner-only filter would
+lose in-scope evidence before the policy saw it. The engine's `graphBFS` also
+truncates at 500 nodes by `(min_depth, tumbler)` before the client sees them;
+the observed failure hit the client's 300-id cap, and no evidence yet shows
+real traversals reaching 500 nodes.
 
 Direct MCP `traverse` keeps its current behavior when the optional policy is
 absent. With a policy it:
 
-1. Applies the allowed-collection predicate to catalog nodes **during the graph
-   walk**, before `MAX_GRAPH_NODES` truncation. This is a scoped filter on the
-   existing engine traversal, not a new graph algorithm. It requires a Java
-   engine signature/query change and a tenant-scoped join to the collection
-   metadata, followed by an engine release. `nx_answer` negotiates a dedicated
-   `catalog_graph_scope_filter` capability and requires a scoped-result marker
-   or readback count proving the predicate ran. An older engine that ignores
-   the parameter must not be treated as contained: disclose incomplete
-   traversal and omit secondary graph evidence rather than claiming success.
+1. Reports a response carrying exactly `MAX_GRAPH_NODES` (500) nodes as a
+   possibly truncated traversal. The engine logs `event=graph_node_limit` when
+   it truncates (`CatalogRepository.java:4568`); Phase 1 counts those events.
+   Only if real traversals hit the cap does a gated step add the
+   allowed-collection predicate **during the graph walk**, before truncation.
+   That is a scoped filter on the existing engine traversal, not a new graph
+   algorithm: `graphBFS` already reads each node's document, and
+   `physical_collection` is a column of that document row, so no join is
+   needed. It needs a Java query change and an engine release; `nx_answer`
+   then negotiates a dedicated `catalog_graph_scope_filter` capability and
+   requires a scoped-result marker or readback count proving the predicate
+   ran. An older engine that ignores the parameter must not be treated as
+   contained: disclose incomplete traversal and omit secondary graph evidence
+   rather than claiming success.
 2. Ranks and caps **documents**, not arbitrary manifest chunk order. Use link
    role and link distance as the available signals; `traverse` has no search
    relevance input, so none is invented. Use tumbler only as a deterministic
@@ -653,9 +749,11 @@ absent. With a policy it:
    cannot reconstruct scope from a union of collection names. Existing
    no-policy results retain the legacy shape.
 
-`nx_answer` always supplies the policy derived from request and plan. A6's
+This policy contains the graph stream only. The vector stream's scope comes
+from section 2a; containing traversal alone would leave plan-pinned searches
+unscoped. `nx_answer` always supplies the policy derived from request and plan. A6's
 fixture proves the client-side ordering against the 300-id cap; the engine's
-500-node pre-cap filtering remains an implementation verification item.
+500-node pre-cap filter is the gated Phase 1 step 6.
 
 Default rules:
 
@@ -683,7 +781,7 @@ Before terminal generation, derive a coverage ledger:
 | --- | --- | --- |
 | Named primary document | Manifest/chash anchors | covered / partial / missing |
 | Each requested facet | Supporting chunk or T2 record anchors | covered / unsupported / contradicted |
-| Explicit scope | Observed collection counts | satisfied / widened / violated |
+| Explicit scope | Observed collection counts per stream | satisfied / widened / conflict / violated |
 
 `covered` means evidence exists for the facet, not that the answer's claim is
 true. `contradicted` is retained for the reduction; it is not repaired into
@@ -691,40 +789,50 @@ agreement. Coverage evaluation uses existing structured operator dispatch with
 deterministic checks for source presence and scope. It must not issue another
 `nx_answer` call.
 
-The terminal result uses an explicit coverage state vocabulary: `complete`
-when every required facet has evidence, `partial` when at least one remains
-unsupported/contradicted or assessment is incomplete, and `unavailable` when
-no usable answer can be produced. This state is independent of prose fluency.
-For backward compatibility, terminal `answer_shape="answered"` is allowed only
-when `coverage.state="complete"`; otherwise the structured result uses
-`answer_shape="insufficient_evidence"` and human-readable output gets the
-standard insufficiency notice. A generation failure keeps the existing error
-shape. `coverage` remains the detailed facet ledger, not a redundant side
-channel that consumers can ignore.
+The terminal result carries one of four coverage states. The state is
+independent of prose fluency.
 
-Plan execution counters remain execution counters in the existing structural
-sense: they record whether the result is an answer according to `AnswerShape`,
-not whether it covered the question. Add `INSUFFICIENT_EVIDENCE` to
-`AnswerShape` and `NON_ANSWER_SHAPES`, with a stable notice and corresponding
-`nx answer-runs` classification. It is excluded from plan growth, so a partial
-answer cannot compound as a good plan. Under the current non-answer semantics,
-it also increments `failure_count`, prevents plan growth, and replaces
-`final_text` with the standard notice plus chunk references. The structured
-`coverage` object retains the detailed evidence assessment; the partial prose
-is not returned by the normal text path. Phase 3 must either preserve that
-established behavior or explicitly design a prose-preserving envelope without
-changing the no-grow rule. Existing `success_count` and `failure_count` keep
-their structural semantics; no third plan counter or plans-table migration is
-introduced here.
+| `coverage.state` | When | `answer_shape` | Text returned | Plan counter | Plan growth |
+| --- | --- | --- | --- | --- | --- |
+| `complete` | every required facet has evidence | `answered` | the answer | `success_count` | allowed |
+| `partial` | at least one required facet is unsupported or contradicted, and a usable answer exists | `insufficient_evidence` | a notice naming each unresolved facet, followed by the answer | `success_count` | blocked |
+| `unavailable` | no usable answer can be produced | an existing non-answer shape (for example `no_evidence`) | the existing non-answer notice and chunk references | `failure_count` | blocked |
+| `unassessed` | the request has no facets, or the coverage assessment itself failed | `answered` | the answer, as today | `success_count` | as today |
+
+A partial answer is still returned. Gap 3 asks for missing facets to be
+reported, not for the covered ones to be withheld; the notice comes first so
+no reader takes the prose as complete. `unassessed` keeps an assessor outage
+from turning every answer into a notice, and the coverage object says plainly
+that nothing was assessed; no facet is marked covered by default. A generation
+failure keeps the existing error shape. `coverage` remains the detailed facet
+ledger, not a redundant side channel that consumers can ignore.
+
+`INSUFFICIENT_EVIDENCE` is added to `AnswerShape` but **not** to
+`NON_ANSWER_SHAPES`. That set couples three effects: it records
+`success=False`, never grows the plan, and replaces the prose with a notice
+(`plans/answer_shape.py:98-112`, `mcp/core.py:12455-12500`, research 15). A
+partial answer needs only the no-grow effect, so growth is blocked by an
+explicit no-grow flag on the result instead. `nx answer-runs` classifies
+`insufficient_evidence` rows in their own bucket, not as degenerate.
+
+The counters keep their structural meaning, with one consequence spelled out.
+The live consumer of `failure_count` is the matcher's always-failing skip:
+`_is_always_failing` drops a plan from matching when it has zero successes and
+at least `_ALWAYS_FAILING_MIN_FAILURES` (3) failures (`plans/matcher.py:139`,
+`170-177`). Counting partial answers as failures would let a synthesis plan
+that usually covers five of six facets disappear from matching, and those
+requests would fall to the inline planner. Partial therefore counts as a
+success; only `unavailable` counts as a failure. `promote.evaluate_gates` has
+no production caller (research 15; RDR-189 R9), so this RDR does not change
+`promote.py`. No third plan counter or plans-table migration is introduced.
 
 Coverage outcomes live in the **run summary**, not new columns on `plans`:
-`coverage_complete`, `coverage_partial`, and `coverage_unavailable` are counts
-aggregated from the run's terminal coverage assessment. Because partial runs
-increment `failure_count`, they reduce the current promotion ratio. Phase 3
-includes an explicit `promote.py` policy change to consume coverage evidence
-rather than pretending the legacy ratio measures answer quality. Historical
-counters are not rewritten. This also supplies observed answer-shape evidence
-for RDR-189's family research.
+`coverage_complete`, `coverage_partial`, `coverage_unavailable` and
+`coverage_unassessed` are counts aggregated from the run's terminal coverage
+assessment. Historical counters are not rewritten. These counts, not the
+execution counters, decide whether a run can serve as a positive
+answer-quality exemplar, and they supply observed answer-shape evidence for
+RDR-189's family research.
 
 Assessment cost is bounded independently of facet count. Group facets into one
 structured assessment per evidence stream, with a calibrated cap on facets per
@@ -744,8 +852,8 @@ Preserve `{item_id, chash, collection, tumbler or T2 record id, content}` for
 each candidate and reject returned ids outside that input. `check` can supply
 per-facet evidence mappings through those ids. `verify` can assess a claim but
 its citations are textual locators, not durable anchors. `extract` requires a
-real facet-ledger output schema if used for this purpose. RDR-189 P1, if
-accepted, owns normalization of `check`/`verify` to `(tumbler, chash)` witness
+real facet-ledger output schema if used for this purpose. RDR-189 P1 (RDR-189
+accepted 2026-10-24) owns normalization of `check`/`verify` to `(tumbler, chash)` witness
 anchors; this design's additional `item_id` is only a request-local join key,
 not a competing durable citation format.
 
@@ -764,23 +872,19 @@ reduction. It is not a second full plan budget. Existing USD enforcement checks
 before segments and is a stop-line rather than a hard ceiling; unknown-cost
 steps remain a disclosed accounting limitation. Record coverage/repair usage in
 the existing step accounting vocabulary rather than inventing an unversioned
-step source. If repair is unaffordable, return the available structured
-coverage ledger and the standard insufficiency notice with a
-non-`answered` coverage state: `answer_shape="insufficient_evidence"` with
-`coverage.state="partial"` when some usable answer exists, or
-`coverage.state="unavailable"` when none exists. Both use the same non-answer
-shape; the coverage state distinguishes them. The text path returns the
-standard insufficiency notice, not the partial prose; the detailed coverage
-ledger remains structured. Do not claim `answered` solely because generation
-produced prose.
+step source. If repair is unaffordable, skip it and generate once from the
+evidence already held; the result then follows the coverage-state table above
+(`partial` with the unresolved facets listed ahead of the prose when a usable
+answer exists, `unavailable` when none does). Do not claim `answered` solely
+because generation produced prose.
 
 The structured envelope gains a small `coverage` object: requested and covered
 facet ids, primary-source state, observed corpus counts, repair attempts, and
 residual gaps. Full evidence text is not duplicated into telemetry; when
 `trace=False`, facet text and source hints are redacted as well. `answer_shape`
-and the detailed `coverage.state` follow the compatibility rule above: an
-insufficient result is never labeled `answered`. Human-readable output adds
-the standard insufficiency notice for unresolved required facets. Continuation
+and the detailed `coverage.state` follow the coverage-state table above: a
+partial result is never labeled `answered`, and its text is the
+unresolved-facet notice followed by the answer. Continuation
 responses carry the same coverage state rather than revert to unassessed.
 
 Persistence uses one nullable, versioned run-summary JSONB column on
@@ -843,12 +947,13 @@ whether a run can serve as a positive answer-quality exemplar.
 | Answer-kind compatibility | `plans/matcher.py`, `plans/schema.py`, `seed_loader.py`, builtin YAML, grown saves | Extend: validated top-level `plan_json` declaration; eligibility on cosine/category/FTS and planner few-shots before cost ranking. Never put kind in identity dimensions. |
 | Request facet extraction | `mcp/core.py`, existing structured operator dispatch | Extend narrowly: deterministic-first request kind/facet/source extraction and explicit unknown-request route; optional one direct structured call; not a general RDR-189 target registry. |
 | Named-source resolution | `rdr_canonical` admission/winner policy, owner-scope lookup, bounded catalog lookup, manifest APIs | Extend with bounded project-aware resolution; resolve explicit project qualifiers and no-guess ambiguity; do not reuse unbounded resolution or global first-exact selection. |
+| Caller scope on retrieval steps | `plans/runner.py::_apply_caller_scope_to_args`, builtin YAML | Narrow plan-pinned corpora by caller scope; disclose an empty intersection as a scope conflict; remove incidental `corpus: all` pins from the builtins. |
 | Traversal containment | `mcp/core.py::traverse`, catalog nodes/manifests | Apply policy inside traverse before manifest expansion, with per-id alignment; preserve legacy no-policy behavior. Runner-only post-filtering is insufficient. |
-| Evidence budgets | `store_get_many`, runner tumbler hydration, bundle prompt construction | Extend with source-aware reservations and content-derived document-scoped section labels; manifest order + positional fallback; shared-chash T3 titles are not authoritative. |
+| Evidence budgets | `store_get_many`, runner tumbler hydration, `_OPERATOR_MAX_INPUTS`, bundle prompt construction | Extend with a runner-level merge of the reserved primary stream ahead of plan inputs, so positional truncation cuts only secondary items; source-aware reservations and content-derived document-scoped section labels; manifest order + positional fallback; shared-chash T3 titles are not authoritative. |
 | Facet coverage | `check`, `verify`, `extract`, source annotations, runner segmentation | Reuse direct operator dispatch; add runner-owned pre-reduction state/hook and typed anchors. Do not rely on bundled intermediate output or recursive `nx_answer`. |
 | Coverage telemetry | RDR-203 composite run record, engine telemetry, structured envelope | Add nullable versioned run-summary JSONB via Liquibase; thread record/complete/read/import; capability-negotiated. No new table or extra write. |
 | Generic fallback | Inline planner | Extend with `RequestCoverage`; no existing no-model generic synthesis fallback was found. |
-| Terminal answer classifier | `plans/answer_shape.py`, `mcp/core.py`, `commands/answer_runs.py` | Extend: add `INSUFFICIENT_EVIDENCE` to `AnswerShape` and `NON_ANSWER_SHAPES`, a stable notice, read-side classification, and no-grow behavior. Keep structural counters and run coverage outcomes separate. |
+| Terminal answer classifier | `plans/answer_shape.py`, `mcp/core.py`, `commands/answer_runs.py` | Extend: add `INSUFFICIENT_EVIDENCE` to `AnswerShape` but not to `NON_ANSWER_SHAPES`; prose kept behind an unresolved-facet notice; an explicit no-grow flag; its own read-side bucket. Partial counts as success, `unavailable` as failure; run coverage outcomes stay separate. |
 | Routing/coverage evaluation | `scripts/bench`, `bench/queries`, RDR-196 operator proxy | Extend: retain retrieval and operator metrics; add answer-kind, primary-source, facet, scope, and unacceptable-plan labels. |
 
 ### Decision Rationale
@@ -936,7 +1041,10 @@ more context is useful.
 ### Consequences
 
 - More requests may fall through to inline planning when the only similar saved
-  plan has the wrong answer shape. That is an intended precision/latency trade.
+  plan has the wrong answer shape. That is an intended precision/latency trade,
+  and its size is unknown until Phase 2 measures it: an `unknown` request
+  can use only curated synthesis or unknown plans, plan 473 is the only
+  `lookup` builtin, and every existing grown plan decodes to `unknown`.
 - Source reservation gives less space to secondary evidence. It should improve
   source-grounded answers but may reduce broad contextual discovery unless the
   caller asks for it.
@@ -984,12 +1092,12 @@ more context is useful.
   return the existing planner error with eligibility diagnostics.
 - **Traversal policy failure**: keep the primary/vector stream and omit the
   secondary stream with a warning. Do not fall back to unrestricted traversal.
-- **Coverage check unavailable**: use deterministic source/scope checks and
-  disclose that facet coverage was not assessed; do not mark facets covered by
-  default.
-- **Repair exhausts budget**: generate once from available evidence when useful
-  and disclose unresolved facets, or return a structured partial/no-evidence
-  result.
+- **Coverage check unavailable**: use deterministic source/scope checks,
+  return the answer with `coverage.state="unassessed"`, and say that facet
+  coverage was not assessed; do not mark facets covered by default.
+- **Repair exhausts budget**: skip repair and generate once from available
+  evidence: `partial` with the unresolved facets listed ahead of the prose when
+  a usable answer exists, `unavailable` when none does.
 - **Older engine lacks new run fields**: omit the summary after capability
   negotiation, preserve the current run record, and expose
   `persistence=unsupported`; HTTP 200 alone does not prove persistence. Do not
@@ -1017,20 +1125,20 @@ more context is useful.
 - [x] Run the permitted A3 repair-path spike: runner-owned boundary,
   anchor-preserving ledger, at most one repair and one terminal reduction,
   shared accounting, and continuation behavior (research 8).
-- [ ] Implement and verify the production additive run-summary migration and
-  all old/new client-engine combinations, including readback and import. The
-  isolated repository spike passed; the denied client write-guard sub-leg was
-  not executed.
-- [ ] Review RDR-189 against this shared seam before either design is accepted:
-  RDR-232 owns request analysis/eligibility/containment; RDR-189 owns durable
-  target families, host-bound witness normalization (P1), and post-realization
+- [x] Review RDR-189 against this shared seam. Done: RDR-189 was accepted on
+  2026-10-24 with a Shared Contract with RDR-232 section that supersedes its
+  answer-shape-dimension option and records the split. RDR-232 owns request
+  analysis/eligibility/containment; RDR-189 owns durable target families,
+  host-bound witness normalization (P1), and post-realization
   preservation-trace semantics. RDR-232's routing capability derives from the
   target family once P2 exists; its live pre-reduction coverage ledger is
-  input to P4's final-answer preservation assessment, not its substitute. Amend RDR-189's answer-shape-dimension suggestion to
-  non-identity metadata and its P3 to deterministic-first extraction where
-  possible. Phase 3 witness-anchor work consumes P1's contract if accepted;
-  otherwise it uses the explicitly versioned local subset without claiming
+  input to P4's final-answer preservation assessment, not its substitute.
+  Phase 3 witness-anchor work consumes P1's contract once P1 lands; if Phase 3
+  lands first, it uses the explicitly versioned local subset without claiming
   RDR-189 compatibility.
+
+The production run-summary migration and its old/new client-engine matrix are
+Phase 3 step 3, not a prerequisite.
 
 ### Minimum Viable Validation
 
@@ -1040,27 +1148,34 @@ Phases 1 and 2 have separate proofs and do not claim full facet coverage.
 **Phase 1 proof:** using explicit `SourceRef` and `ScopeConstraint` inputs (the
 full `RequestCoverage` extractor is Phase 2), resolve the correct ART RDR-084,
 preserve section-diverse primary evidence, and keep a >300-out-of-scope-id
-traversal from discarding in-scope evidence. Record per-stream and reducer-input
-counts. No facet-coverage guarantee is claimed.
+traversal from discarding in-scope evidence. With `scope="rdr"`, the vector
+stream's corpus counts show only `rdr__` collections, on plan 473 and on a
+rewritten synthesis builtin alike. Record per-stream corpus counts and
+reducer-input counts. No facet-coverage guarantee is claimed.
 
-The traversal proof has two required halves:
+The traversal proof for Phase 1 is client-side:
 
 - **Client:** >300 out-of-scope manifest ids precede in-scope evidence; policy
   runs before manifest expansion and preserves per-id collection alignment.
-- **Engine:** >500 out-of-scope graph nodes precede in-scope evidence; the
-  negotiated predicate runs before `MAX_GRAPH_NODES` truncation and returns a
-  scoped-result marker. An old engine without the capability yields disclosed
-  incomplete traversal, never a containment claim.
+- **Engine cap disclosure:** an engine response with exactly 500 nodes (the
+  `MAX_GRAPH_NODES` cap, `CatalogRepository.java:4442`) is reported as a
+  possibly truncated traversal, never as contained.
 
-The engine half depends on an engine release. The peer-reported A2 engine-tag
-freeze is scheduled to lift no earlier than 2026-10-26 13:46Z; verify its
-current status before scheduling that release. The client half does not prove
-the engine half.
+The engine pre-cap filter is a separate, gated step (Phase 1 step 6). Its
+proof, run only if that step is taken: >500 out-of-scope graph nodes precede
+in-scope evidence; the negotiated predicate runs before `MAX_GRAPH_NODES`
+truncation and returns a scoped-result marker. An old engine without the
+capability yields disclosed incomplete traversal, never a containment claim.
+That step needs an engine release; the engine-tag freeze from the RDR-007 A2
+cutover lifts no earlier than 2026-10-26 13:46Z, so check its status before
+scheduling one.
 
 **Phase 2 proof:** the same request's answer kind and facets/constraints are
 extracted, and an explicit `project="ART"` or `owner="1.2"` binding resolves
 without guessing. The recorded question has no `ART` token, so this binding is
-required rather than implied. Lookup-only plan 473 is ineligible, and
+required rather than implied. The unmodified call, with no binding, resolves
+through the active-project tier when the server session's project is ART, and
+returns an ambiguity result otherwise. Lookup-only plan 473 is ineligible, and
 unknown-grown plans cannot bypass the gate. A generic route or inline planner
 receives the coverage request. No facet-coverage guarantee is claimed.
 
@@ -1075,18 +1190,33 @@ first phase that claims the complete motivating behavior.
 
 ### Phase 1: Evidence containment and sufficiency
 
-1. Accept explicit `SourceRef` and `ScopeConstraint` inputs for containment;
-   add named-source resolution and a source-aware evidence-stream model using
-   catalog manifests. Full `RequestCoverage` extraction lands in Phase 2.
-2. Add traversal evidence policy inside the catalog walk before its 500-node
-   cap and inside `traverse` before manifest expansion. This includes the Java
-   engine signature/query change, engine-release sequencing, dedicated
-   capability negotiation, and scoped-result proof. Preserve legacy no-policy
-   results and aligned scoped results for `nx_answer`.
-3. Reserve primary-source and secondary-stream budgets before hydration.
-4. Add deterministic source/scope checks and per-stream/reducer-input
-   diagnostics, plus the observed RDR-084 regression fixture.
-5. Ship behind the existing `nx_answer` path, not a new user verb. Compare the
+1. Accept explicit `SourceRef` and `ScopeConstraint` inputs for containment.
+   In production they arrive as reserved `bindings` keys on the existing
+   `nx_answer` call: `source` (an RDR id or catalog tumbler) and `owner` or
+   `project` (the qualifier), next to the existing `scope`. No builtin plan
+   declares a binding with those names today. `nx_answer` consumes them and
+   never passes them to plan binding resolution. Add named-source resolution
+   and a source-aware evidence-stream model using catalog manifests. Full
+   `RequestCoverage` extraction lands in Phase 2.
+2. Apply caller scope over plan-declared corpora (section 2a) and rewrite the
+   builtins' incidental `corpus: all` pins.
+3. Add traversal evidence policy inside `traverse` before manifest expansion,
+   with per-id collection alignment and legacy no-policy results preserved.
+   Disclose an engine response at the 500-node cap as possibly truncated.
+4. Reserve primary-source and secondary-stream budgets, and merge the primary
+   stream at the runner as section 2 specifies. Add the bounded T2 lifecycle
+   stream for a resolved RDR source.
+5. Add deterministic source/scope checks and per-stream/reducer-input
+   diagnostics, plus the observed RDR-084 regression fixture. Phase 1 and 2
+   diagnostics live in the returned envelope and logs only; they persist once
+   Phase 3 adds the run summary.
+6. Engine pre-cap graph filter, gated. Count `event=graph_node_limit` warnings
+   (`CatalogRepository.java:4568`) on real traffic first. Only if real
+   `nx_answer` traversals hit the cap, add the predicate inside the catalog
+   walk before `MAX_GRAPH_NODES` truncation: a Java query change, an engine
+   release, dedicated capability negotiation, and the scoped-result proof
+   above. The rest of Phase 1 does not wait for it.
+7. Ship behind the existing `nx_answer` path, not a new user verb. Compare the
    golden set with the pre-change baseline before enabling facet repair.
 
 ### Phase 2: Answer-shape eligibility
@@ -1099,6 +1229,15 @@ first phase that claims the complete motivating behavior.
 4. Record candidate exclusion and fallback reasons in the run envelope.
 5. Measure eligible-plan recall and wrong-shape admission on the golden set;
    do not ship a classifier whose only evidence is the motivating example.
+6. Exit criteria, measured on the golden set with request kinds labeled
+   independently of plan declarations (not each plan's own kind, as A1's
+   fixture did): the request-kind classifier's `unknown` rate, its
+   eligible-plan recall on lookup requests, and, replayed over recent
+   `nx_answer_runs`, the share of real requests whose selected plan would now
+   be excluded. The thresholds are set from the baseline measurement before
+   the gate is enabled. All grown plans decode to `unknown` today, so report
+   the drop in plan reuse on broad requests as its own number.
+7. Build and verify the active-project tier of source resolution (A5).
 
 ### Phase 3: Bounded repair and quality reporting
 
@@ -1110,11 +1249,13 @@ first phase that claims the complete motivating behavior.
 3. Add nullable versioned run-summary JSONB via Liquibase; update jOOQ and the
    DDL ratchet, thread `/record`, `/complete`, readback and import, and add
    capability negotiation. Extend the structured envelope with returned versus
-   persisted coverage states. Add `INSUFFICIENT_EVIDENCE` and its no-grow/read
-   behavior. No plans-table counter migration is needed: coverage outcomes are
-   derived from run summaries. Update `promote.py` to consume that evidence
-   explicitly; partial runs increment `failure_count` under the established
-   non-answer semantics and must not be explained away as execution successes.
+   persisted coverage states. Add `INSUFFICIENT_EVIDENCE` outside
+   `NON_ANSWER_SHAPES`, the explicit no-grow flag, the unresolved-facet notice
+   ahead of the prose, and its `nx answer-runs` bucket. Partial runs count as
+   successes and `unavailable` runs as failures, so `_is_always_failing` skips
+   only plans that never produce a usable answer. No plans-table counter
+   migration and no `promote.py` change: coverage outcomes are derived from
+   run summaries.
 4. Measure repair yield, residual-gap disclosure, latency, and cost against
    Phase 1. Keep the deterministic containment and eligibility gates even if
    model-assisted repair does not justify its cost.
@@ -1143,8 +1284,15 @@ library, and composite telemetry surfaces.
 - **Scenario**: “Which paper reported value X?” — **Verify**: an eligible
   factual-lookup plan still matches and bounded graph expansion remains useful.
 - **Scenario**: Named RDR with `scope="rdr"` and an `rdr` content binding —
-  **Verify**: traversal does not admit code merely through `implements` or
-  `relates`; corpus counts prove containment.
+  **Verify**: the vector stream searches only `rdr__` collections even when
+  the plan pins `corpus: all`; traversal does not admit code merely through
+  `implements` or `relates`; per-stream corpus counts prove containment.
+- **Scenario**: Caller scope `rdr` on a plan step pinned to `code` —
+  **Verify**: the step returns no evidence and the run discloses a scope
+  conflict; it does not run unscoped or with the plan's corpus.
+- **Scenario**: No caller scope on a rewritten builtin — **Verify**: the step
+  falls back to the RDR-200 default `knowledge,code,docs,rdr` and admits no
+  quarantine collection.
 - **Scenario**: “What does current code implement differently from RDR-084?” —
   **Verify**: implementation/code expansion is explicitly allowed, while the
   RDR remains a reserved primary stream.
@@ -1154,6 +1302,14 @@ library, and composite telemetry surfaces.
 - **Scenario**: Primary document exceeds the evidence budget — **Verify**:
   section-diverse selection survives, partial coverage is marked, and secondary
   chunks cannot consume the reservation.
+- **Scenario**: Gate-history facet on a resolved RDR source — **Verify**: the
+  T2 lifecycle stream supplies that RDR's metadata and latest gate record
+  within its record and character budget; a non-RDR source gets no T2 stream.
+- **Scenario**: Plan inputs exceed `_OPERATOR_MAX_INPUTS` with a reserved
+  primary stream — **Verify**: truncation removes only secondary items; every
+  reserved primary item reaches the operator.
+- **Scenario**: Engine traversal response with exactly 500 nodes —
+  **Verify**: the run reports a possibly truncated traversal, not containment.
 - **Scenario**: More than 300 out-of-scope traversal ids precede in-scope ids —
   **Verify**: nodes are filtered and ranked before manifest expansion, in-scope
   evidence survives, and per-id collection alignment is preserved.
@@ -1174,8 +1330,14 @@ library, and composite telemetry surfaces.
   assessment is grouped within the call cap, not six unconditional model calls.
 - **Scenario**: Execution succeeds but required evidence is missing —
   **Verify**: `answer_shape="insufficient_evidence"`, coverage is `partial`,
-  the plan is excluded from growth, structural counters remain separate from
-  run-summary coverage outcomes, and the run is not a quality exemplar.
+  the text is the unresolved-facet notice followed by the prose,
+  `success_count` increments, the no-grow flag blocks growth, the run-summary
+  outcome is `coverage_partial`, and the run is not a quality exemplar.
+- **Scenario**: A plan whose runs are all `partial` — **Verify**: it stays
+  matchable; `_is_always_failing` does not skip it. A plan with three
+  `unavailable` runs and no success is skipped.
+- **Scenario**: Request with no facets — **Verify**: `coverage.state` is
+  `unassessed` and the answer is returned as today.
 - **Scenario**: Unknown request with unknown-grown lookup history — **Verify**:
   the grown plan is ineligible; curated generic planning or inline planning is
   used instead.
@@ -1186,7 +1348,7 @@ library, and composite telemetry surfaces.
   and telemetry contain structured ids/counts, not the redacted question.
 - **Scenario**: Coverage or repair model call fails — **Verify**: deterministic
   checks still run, no facet is defaulted to covered, and the terminal state
-  discloses the limitation.
+  is `unassessed` with the answer returned, not a notice in its place.
 - **Scenario**: Older engine run-record capability — **Verify**: no extra write,
   no retrieval failure, and current record fields remain intact.
 - **Scenario**: Existing bundle/continuation path — **Verify**: the same evidence
@@ -1255,20 +1417,31 @@ current run records. No throughput target is asserted without a baseline.
 
 ### Contradiction Check
 
-Draft: no known contradiction between the observed evidence and the proposed
-containment/eligibility design. Whether facet assessment can reliably reuse
-existing operators remains an open research assumption, not a verified claim.
+Gate round 1 found two contradictions, both now resolved. The diagnosis
+blamed traversal alone while the plan-pinned vector search also ignored
+caller scope; Gap 2 now names both causes and section 2a fixes the second.
+Partial coverage was specified three ways; section 4's coverage-state table is
+now the single definition, and the counters follow it. Whether facet
+assessment can reliably reuse existing operators remains an open assumption
+(A3), not a verified claim.
 
 ### Assumption Verification
 
-A1–A6 have source-search and partial prototype verification (research 6–10).
-Production integration and live-model quality remain open and must be resolved
-before acceptance. Shared-chash section titles are not authoritative; labels
-must be content-derived or explicitly document-scoped. The telemetry design
-requires an additive migration and capability negotiation, not just client
-wire fields. A5's optional structured extraction cost and A6's production
-integration are still open; the RDR-189 boundary must be resolved rather than
-presumed compatible.
+The prototypes (research 6–10) establish feasibility within their fixtures.
+Production integration and live-model quality cannot be shown before the code
+exists, so acceptance does not wait on them. Each open assumption is instead an
+exit criterion of the phase that builds it:
+
+| Phase | Assumptions it must close before the phase is done |
+| --- | --- |
+| Phase 1 | A2 (production section selection), A6 (production `traverse` policy and no-policy compatibility), A7 (T2 lifecycle stream) |
+| Phase 2 | A1 (production eligibility on every matcher branch), A5 (request extraction and the active-project tier) |
+| Phase 3 | A3 (live facet assessment at the runner boundary), A4 (production migration and the client capability-off leg) |
+
+Shared-chash section titles are not authoritative; labels must be
+content-derived or explicitly document-scoped. The telemetry design requires
+an additive migration and capability negotiation, not just client wire fields.
+The RDR-189 boundary is settled by RDR-189's Shared Contract section.
 
 #### API Verification
 
@@ -1276,7 +1449,7 @@ presumed compatible.
 | --- | --- | --- |
 | `plan_match(...)` candidate filtering | Nexus `plans.matcher` | Source Search + external eligibility spike passed (research 6); production integration unverified |
 | `traverse(...)` policy before manifest expansion | Nexus MCP/catalog | Ordering fixture passed (research 10); production integration unverified |
-| `graphBFS(...)` scope predicate before node cap | Nexus engine catalog | Source Search verified 500-node pre-client cap; Java filter, release, capability marker, and old-engine fallback unverified |
+| `graphBFS(...)` node cap and `graph_node_limit` log | Nexus engine catalog | Source Search verified the 500-node pre-client cap and its log event (research 16); a scope predicate, release, capability marker, and old-engine fallback are needed only if Phase 1 step 6 is taken |
 | Catalog resolve/manifest + content-derived section selection | Nexus catalog/T3 | Real bounded resolution/manifest/selection spike passed (research 7); production resolver/runner and paging unverified |
 | Request extraction and owner-qualified source resolution | `mcp/core.py`, catalog owner scope | Prototype + real owner resolution passed (research 10); general extraction and ambiguity handling unverified |
 | `store_get_many(..., limit_per_source=...)` | Nexus MCP/runner | Source Search completed; not a primary-source reservation |
@@ -1299,9 +1472,10 @@ retrieval language, and an LLM-only plan judge are out of scope.
   jOOQ regeneration and the DDL ratchet are required for the telemetry column.
 - **Licensing**: No new dependency or copied external implementation.
 - **Deployment model**: Client runner/MCP changes plus an additive engine
-  telemetry migration and a Java graph-scope filter. The latter requires an
-  engine release and dedicated capability negotiation; sequence it after the
-  reported engine-tag freeze lifts, subject to verification at implementation.
+  telemetry migration (Phase 3, an engine release), and possibly a Java
+  graph-scope filter with dedicated capability negotiation. The graph filter ships
+  only if Phase 1's `graph_node_limit` count shows real traversals hit the
+  cap; the rest of Phase 1 is client-only.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Land deterministic evidence containment first,
   then eligibility, then optional bounded repair; each phase has its own
@@ -1331,7 +1505,7 @@ remain coherent without it.
   `/Research/nexus-rdr-232-verification/rdr232-verification-artifacts.tar.gz`,
   record `A7004B0A-B6D7-4F4F-840F-4C98FF8B461B`. Evidence index:
   `2922E07B-005D-43D4-8091-4FEBE7EE3D1D`. Numbered findings:
-  `nexus_rdr/232-research-1` through `-11`.
+  `nexus_rdr/232-research-1` through `-16`.
 - ART `docs/rdr/RDR-084-list-parse-canonical-consolidation.md` and T2 record
   `ART_rdr/084`, used as the independent known-good source check.
 - `src/nexus/plans/matcher.py`, `schema.py`, `runner.py`, `bundle.py`, and
@@ -1341,7 +1515,8 @@ remain coherent without it.
 - `conexus/plans/builtin/hybrid-factual-lookup.yml` (plan 473's template).
 - RDR-091: scope conflict filtering and ranking.
 - RDR-097: hybrid factual lookup and the context-precision trade-off.
-- RDR-189: target-definition layer and answer-object contracts (draft).
+- RDR-189: target-definition layer and answer-object contracts (accepted
+  2026-10-24).
 - RDR-196: cost ranking after correctness gates.
 - RDR-200: primary-source reach, crowding, and continuation evidence fidelity.
 - RDR-203: composite `nx_answer` run record.
@@ -1397,3 +1572,4 @@ remain coherent without it.
   prose; `promote.py` must consume coverage evidence. The pre-cap graph filter
   requires a Java engine release, capability negotiation, and a separate
   500-node proof. RDR-189 now carries the matching shared-contract section.
+- 2026-10-25: Gate round 1 — BLOCKED (2 Critical, 8 Significant, 2 ship-blocker(s)); commit `6b2f94e66`; critique `nexus_rdr/232-gate-critique-2026-10-25-r1`.
