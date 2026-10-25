@@ -235,6 +235,7 @@ nexus-11nm2
 nexus-11pe7
 nexus-11rjq
 nexus-11x9o
+nexus-121ke
 nexus-12gb
 nexus-12m77
 nexus-12pyx
@@ -404,6 +405,7 @@ nexus-1m9sb
 nexus-1mp5y
 nexus-1n0t
 nexus-1nfsd
+nexus-1nrcu
 nexus-1obui
 nexus-1odsl
 nexus-1odsl.1
@@ -650,6 +652,7 @@ nexus-2xx.1
 nexus-2xxl
 nexus-2y8yw
 nexus-2yajx
+nexus-2ykf1
 nexus-2yshe
 nexus-2ze8
 nexus-2zeva
@@ -701,6 +704,7 @@ nexus-39upx.1
 nexus-39zi
 nexus-39zi.1
 nexus-3ac
+nexus-3ajpd
 nexus-3bafq
 nexus-3bafq.1
 nexus-3c92m
@@ -742,6 +746,7 @@ nexus-3ihdg.1
 nexus-3ioz2
 nexus-3ioz2.1
 nexus-3j6b
+nexus-3jjkg
 nexus-3jntg
 nexus-3k43p
 nexus-3k43p.1
@@ -1070,6 +1075,7 @@ nexus-4ktfm.1
 nexus-4l80g
 nexus-4lkmz
 nexus-4lnn1
+nexus-4lqi7
 nexus-4lvq
 nexus-4m6i0
 nexus-4m6i0.1
@@ -1399,6 +1405,7 @@ nexus-60b6
 nexus-61539
 nexus-61fke
 nexus-61fzg
+nexus-61jko
 nexus-61mkk
 nexus-61vos
 nexus-61vos.1
@@ -1444,6 +1451,7 @@ nexus-6bk7i
 nexus-6bmph
 nexus-6bmph.1
 nexus-6c1sk
+nexus-6cmam
 nexus-6cn
 nexus-6d0ye
 nexus-6dan
@@ -2865,6 +2873,7 @@ nexus-cy3o
 nexus-cy4oy
 nexus-cy8g1
 nexus-cy9u7
+nexus-cyztb
 nexus-czcw5
 nexus-czoeu
 nexus-czsis
@@ -3328,6 +3337,7 @@ nexus-f0r8p.8.1
 nexus-f0r8p.9
 nexus-f0r8p.9.1
 nexus-f11ep
+nexus-f1evv
 nexus-f1f2x
 nexus-f1itv
 nexus-f1itv.1
@@ -4199,6 +4209,8 @@ nexus-i8to5
 nexus-i92ym
 nexus-i92ym.1
 nexus-i93tz
+nexus-i99vk
+nexus-i9bzg
 nexus-i9o37
 nexus-i9o37.1
 nexus-i9o37.1.1
@@ -5795,6 +5807,7 @@ nexus-p74z
 nexus-p78a0
 nexus-p78a0.1
 nexus-p7tp3
+nexus-p89h4
 nexus-p8nd5
 nexus-p8nd5.1
 nexus-p905h
@@ -6605,6 +6618,7 @@ nexus-svcg.1
 nexus-svpq
 nexus-swam7
 nexus-swam7.1
+nexus-sx1t0
 nexus-sxiay
 nexus-sxiay.1
 nexus-sybbh
@@ -6970,6 +6984,7 @@ nexus-u839f
 nexus-u88vu
 nexus-u8n4r
 nexus-u8n4r.1
+nexus-u9dc5
 nexus-u9zkn
 nexus-uai7p
 nexus-uaovy
@@ -7685,6 +7700,7 @@ nexus-x47yx
 nexus-x4hdl
 nexus-x50jb
 nexus-x50jb.1
+nexus-x54wv
 nexus-x5da
 nexus-x5kfm
 nexus-x5kfm.1
