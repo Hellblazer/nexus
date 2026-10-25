@@ -4,7 +4,7 @@
 > Nothing here was picked up; the catalog linker work continues without it.
 > Its substrate claims predate RDR-155/158.
 
-**Status:** draft — proposal only, no code or doc changes yet
+**Status:** not adopted (see banner); the proposal made no code or doc changes
 **Author:** synthesis of /nx:research run 2026-05-17
 **Source paper:** Fabio Rovai, *Open Ontologies: Tool-Augmented Ontology Engineering with Stable Matching Alignment*, arXiv:2512.05594 (2026)
 **Indexed at:** `knowledge__dt-papers__voyage-context-3__v1`, tumbler `1.12.2`

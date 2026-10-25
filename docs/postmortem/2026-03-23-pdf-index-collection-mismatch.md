@@ -5,6 +5,10 @@
 > any mode since RDR-155 P4b (2026-07-25); T3 is the engine's pgvector store
 > today. For current collection-naming rules see
 > [`docs/collections.md`](../collections.md).
+>
+> Resolved by e54bdc874 (Option A: `--collection` is normalized through
+> `t3_collection_name()`). Follow-up:
+> [fix not applied in 2.4.0](2026-03-24-pdf-index-fix-not-applied.md).
 
 **Date**: 2026-03-23
 **Severity**: High — 10,036 chunks silently stored in unsearchable collection

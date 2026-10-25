@@ -5,7 +5,7 @@
 > row-level security, which removes the split-store staleness and tenant-leak
 > failure modes this proposal argues from. Its substrate claims predate that move.
 
-**Status:** draft — proposal only, no code or doc changes yet
+**Status:** not adopted (see banner); the proposal made no code or doc changes
 **Author:** synthesis of /nx:research run 2026-05-17
 **Source paper:** Budigi & Sirigiri, *Beyond Similarity Search: A Unified Data Layer for Production RAG Systems*, arXiv:2605.03275 (2026)
 **Indexed at:** `knowledge__dt-papers__voyage-context-3__v1`, tumbler `1.12.1`
