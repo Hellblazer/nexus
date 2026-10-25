@@ -12,20 +12,19 @@ def test_app_factory_creates_app():
     assert app.title == "nx console"
 
 
-def test_root_redirects_to_activity():
+def test_root_redirects_to_threads():
     app = create_app()
     client = TestClient(app)
     resp = client.get("/", follow_redirects=False)
     assert resp.status_code == 307
-    assert "/activity" in resp.headers["location"]
+    assert resp.headers["location"] == "/threads"
 
 
-def test_activity_page_renders():
-    app = create_app()
-    client = TestClient(app)
-    resp = client.get("/activity")
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers["content-type"]
+@pytest.mark.parametrize("path", ["/activity", "/campaigns", "/campaigns/anything"])
+def test_retired_panels_are_gone(path):
+    """nexus-i99vk: Activity and Campaigns read the retired catalog JSONL files."""
+    client = TestClient(create_app())
+    assert client.get(path).status_code == 404
 
 
 @pytest.mark.t2_tenant
@@ -33,14 +32,6 @@ def test_health_page_renders():
     app = create_app()
     client = TestClient(app)
     resp = client.get("/health")
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers["content-type"]
-
-
-def test_campaigns_page_renders():
-    app = create_app()
-    client = TestClient(app)
-    resp = client.get("/campaigns")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
 
@@ -70,20 +61,6 @@ def test_static_console_css_served():
     app = create_app()
     client = TestClient(app)
     resp = client.get("/static/console.css")
-    assert resp.status_code == 200
-
-
-def test_scope_param_defaults_to_project():
-    app = create_app()
-    client = TestClient(app)
-    resp = client.get("/activity")
-    assert resp.status_code == 200
-
-
-def test_scope_param_all():
-    app = create_app()
-    client = TestClient(app)
-    resp = client.get("/activity?scope=all")
     assert resp.status_code == 200
 
 

@@ -4816,13 +4816,29 @@ you to `unset` the shell export — it cannot unset the parent shell itself.
 
 ## nx console
 
-Embedded web UI for monitoring agentic Nexus activity.
+Embedded web UI with two panels, Threads and Health. `/` redirects to `/threads`.
 
 ```
 nx console [--port PORT] [--host HOST]
 ```
 
 Starts a foreground FastAPI/uvicorn server. The PID file is written to `~/.config/nexus/console.<project>.pid` and removed on exit.
+
+**Threads** (`/threads`) is a board of every Claude session's open threads. It reads two sources: T2 project `threads`, one entry per session (the entry title is the session name), and the open beads labelled `needs-sam` (`bd list`, run from the directory the console was started in; if `bd` is missing or fails, the panel says so in one line). An entry looks like:
+
+```
+session: nexus_c9c
+updated: 2026-10-25T18:05Z
+## RDR-234 auto-continuation
+ref: RDR-234, nexus-qlrj7
+state: spike proven; rewriting the draft
+waiting_on: none
+needs_sam: none
+```
+
+Each `## ` heading starts a thread; fields are `key: value`, and a line that fits nothing is kept as a note. "Needs you" comes first: the `needs-sam` beads, then every thread whose `needs_sam` is not `none` or empty (a highlighted row). Below it are the session cards, newest first. A session whose `updated` stamp and T2 entry time are both older than 24 hours is greyed with its age.
+
+**Health** (`/health`) shows T1 session leases, MinerU, the catalog cache, the index log, the Dolt log, the aspect queue and the `nx doctor` checks.
 
 | Flag | Description |
 |------|-------------|

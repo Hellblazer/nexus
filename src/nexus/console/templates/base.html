@@ -15,19 +15,10 @@
       <li><strong>nx&nbsp;console</strong></li>
     </ul>
     <ul>
-      <li><a href="/activity?scope={{ scope }}"
-             {% if active_panel == 'activity' %}aria-current="page"{% endif %}>Activity</a></li>
-      <li><a href="/health?scope={{ scope }}"
+      <li><a href="/threads"
+             {% if active_panel == 'threads' %}aria-current="page"{% endif %}>Threads</a></li>
+      <li><a href="/health"
              {% if active_panel == 'health' %}aria-current="page"{% endif %}>Health</a></li>
-      <li><a href="/campaigns?scope={{ scope }}"
-             {% if active_panel == 'campaigns' %}aria-current="page"{% endif %}>Campaigns</a></li>
-      <li>
-        <select x-data x-on:change="window.location.search = '?scope=' + $event.target.value"
-                aria-label="Scope">
-          <option value="project" {% if scope != 'all' %}selected{% endif %}>project</option>
-          <option value="all" {% if scope == 'all' %}selected{% endif %}>all</option>
-        </select>
-      </li>
     </ul>
   </nav>
   <main class="container-fluid">
