@@ -119,7 +119,7 @@ Use **beads** (`bd`) for issue tracking. Find work with `bd ready`; claim with `
 
 ## Cross-session board
 
-Each session keeps one T2 entry in project `threads`, titled with its session name (from ListAgents), updated with `memory_put` (no ttl) at phase boundaries (a thread starts, a push, a wait on someone, done), not per step. One `## <the work in plain words>` block per open thread, with `ref:`, `state:`, `waiting_on:` and `needs_sam:` lines; delete the block when the work is done. A decision only Sam can make goes in `needs_sam:` and is also a bead labelled `needs-sam`. Sam reads the board in `nx console`, Threads tab.
+Each session keeps one T2 entry in project `threads`, titled with its session name (from ListAgents), updated with `memory_put` (no ttl) at phase boundaries (a thread starts, a push, a wait on someone, done), not per step. One `## <the work in plain words>` block per open thread, with `ref:`, `state:`, `waiting_on:` and `needs_sam:` lines; delete the block when the work is done. Each field is one line. A decision only Sam can make goes in `needs_sam:` and is also a bead labelled `needs-sam`, with that bead's id in the thread's `ref:` so the board shows it once. Sam reads the board in `nx console`, Threads tab.
 
 ## Settings
 

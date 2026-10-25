@@ -156,8 +156,14 @@ def _is_ask_key(raw_key: str) -> bool:
     return "sam" in raw_key or "needs" in raw_key
 
 
+def _mentions_sam(line: str) -> bool:
+    """A free-text line naming Sam (no colon, or an unknown key) is treated as an ask, never only a note."""
+    return re.search(r"\bsam\b", line, re.IGNORECASE) is not None
+
+
 def _new_thread(title: str) -> dict[str, Any]:
-    return {"title": title, "refs": [], "state": "", "waiting_on": "", "needs_sam": "", "notes": []}
+    return {"title": title, "refs": [], "state": "", "waiting_on": "", "needs_sam": "", "notes": [],
+            "ask_next": False}
 
 
 def _add_ask(cur: dict[str, Any], text: str) -> None:
@@ -193,12 +199,22 @@ def parse_session(name: str, content: str) -> Session:
             continue
         known = field is not None and field[0] in _THREAD_FIELDS
         ask = field is not None and not known and _is_ask_key(field[2]) and has_value(field[1])
+        # an ask key answered "none" stays a non-ask; only other text naming Sam is surfaced
+        free_ask = not known and not (field is not None and _is_ask_key(field[2])) and _mentions_sam(line)
         if cur is None:
-            if not (known or ask):
+            if not (known or ask or free_ask):
                 notes.append(line)
                 continue
             cur = _new_thread(name or "(unnamed session)")  # fields before any heading
-        if field is None:
+        if cur["ask_next"] and not known:
+            # "needs_sam:" with its value on the next line
+            cur["ask_next"] = False
+            _add_ask(cur, line)
+            continue
+        cur["ask_next"] = False
+        if free_ask:
+            _add_ask(cur, line)
+        elif field is None:
             cur["notes"].append(line)
         elif known:
             slot = _THREAD_FIELDS[field[0]]
@@ -207,10 +223,14 @@ def parse_session(name: str, content: str) -> Session:
             elif slot == "needs_sam":
                 if has_value(field[1]):
                     _add_ask(cur, field[1])
+                elif not field[1]:
+                    cur["ask_next"] = True
                 elif not cur["needs_sam"]:
                     cur["needs_sam"] = field[1]
             else:
                 cur[slot] = field[1]
+                if slot == "waiting_on" and _mentions_sam(field[1]):
+                    _add_ask(cur, f"waiting on: {field[1]}")
         elif ask:
             _add_ask(cur, line)
         else:

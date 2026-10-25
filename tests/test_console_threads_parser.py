@@ -380,3 +380,32 @@ def test_build_board_isolates_an_entry_that_cannot_be_read() -> None:
     assert board.unreadable == ("broken",)
     assert [c.session.name for c in board.cards] == ["ok"]
     assert headline(board, merge_asks(board.needs_you, ()), False) == "Can't tell what needs you right now."
+
+
+# Confirmation review follow-ups (nexus-i99vk): an ask written without a
+# field, or with its value on the next line, still reaches "Needs you".
+@pytest.mark.parametrize(
+    "content",
+    [
+        "## Cut the release\nNeeds Sam - pick A or B\n",
+        "## Cut the release\nstate: ready\nwaiting on Sam to pick A or B\n",
+        "Sam: pick A or B\n",
+        "## Cut the release\nneeds_sam:\npick A or B\n",
+    ],
+)
+def test_free_text_or_next_line_ask_is_surfaced(content: str) -> None:
+    session = parse_session("s1", content)
+    asks = [t for t in session.threads if has_value(t.needs_sam)]
+    assert len(asks) == 1, session
+    assert "pick A or B" in asks[0].needs_sam
+
+
+def test_a_word_containing_sam_is_not_an_ask() -> None:
+    session = parse_session("s1", "## Work\nstate: sample the samples\nsamba lessons\n")
+    assert not any(has_value(t.needs_sam) for t in session.threads)
+
+
+def test_waiting_on_sam_is_an_ask() -> None:
+    session = parse_session("s1", "## Cut the release\nwaiting_on: Sam's go on the tag\nneeds_sam: none\n")
+    asks = [t for t in session.threads if has_value(t.needs_sam)]
+    assert len(asks) == 1 and "Sam's go on the tag" in asks[0].needs_sam
