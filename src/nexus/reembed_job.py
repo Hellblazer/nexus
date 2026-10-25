@@ -283,6 +283,67 @@ def discover_command(target: str) -> str:
     return f"nx taxonomy discover --collection {target}"
 
 
+def undiscovered(
+    jobs: Iterable[dict], stamps: dict[str, dict], counts: dict[str, int], min_chunks: int,
+) -> list[str]:
+    """Targets of finished jobs (``done``, ``done_with_skips``) that have had no taxonomy discover since their job.
+
+    *stamps* is ``{collection: {"last_discover_at": iso}}`` (the engine's taxonomy_meta), *counts* the targets'
+    chunk counts. A target is listed when it holds at least *min_chunks* chunks (below that discover builds
+    nothing, so asking for it would never clear) and its last discover is missing or older than the newest
+    ``finished_at`` of a job into it. RDR-210 Technical Design 4: without ``--wait``, the doctor names the
+    discover command until one has run.
+    """
+    from datetime import datetime  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    def when(iso: object) -> datetime | None:
+        try:
+            return datetime.fromisoformat(str(iso).replace("Z", "+00:00")) if iso else None
+        except ValueError:
+            return None
+
+    finished: dict[str, datetime] = {}
+    for j in jobs:
+        target, at = j.get("target_collection"), when(j.get("finished_at"))
+        if j.get("state") in DISCOVER_STATES and target and at is not None:
+            finished[str(target)] = max(at, finished.get(str(target), at))
+    out = []
+    for target, at in finished.items():
+        if counts.get(target, 0) < min_chunks:
+            continue
+        last = when((stamps.get(target) or {}).get("last_discover_at"))
+        if last is None or last < at:
+            out.append(target)
+    return sorted(out)
+
+
+def undiscovered_targets(jobs: Iterable[dict]) -> list[str]:
+    """:func:`undiscovered` over the live engine: discover stamps from the taxonomy store, chunk counts from T3.
+
+    Reads only the targets of finished jobs, one stamp request and one count per target. Raises on a read error;
+    the doctor row catches it.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.db.t2.taxonomy_compute import MIN_DISCOVER_CHUNKS  # noqa: PLC0415 — deferred: CLI startup cost
+
+    jobs = list(jobs)
+    targets = sorted({
+        str(j["target_collection"]) for j in jobs
+        if j.get("state") in DISCOVER_STATES and j.get("target_collection")
+    })
+    if not targets:
+        return []
+    tax = HttpTaxonomyStore()
+    try:
+        stamps = tax.get_last_discover_stamps(targets)
+    finally:
+        tax.close()
+    t3 = make_t3()
+    counts = {t: int(t3.count(t)) for t in targets}
+    return undiscovered(jobs, stamps, counts, MIN_DISCOVER_CHUNKS)
+
+
 class WaitError(RuntimeError):
     """A job being waited on is no longer in the engine's status (it was never there, or the engine lost it)."""
 

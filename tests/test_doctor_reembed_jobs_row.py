@@ -32,6 +32,12 @@ def local(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
 
 
+@pytest.fixture(autouse=True)
+def _topics_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The topics read reaches the engine; every test here stubs it (no target is undiscovered) unless it says."""
+    monkeypatch.setattr("nexus.reembed_job.undiscovered_targets", lambda jobs: [])
+
+
 def _with_jobs(monkeypatch: pytest.MonkeyPatch, jobs) -> HealthResult:
     monkeypatch.setattr("nexus.reembed_job.local_jobs", lambda: jobs)
     rows = _check_reembed_jobs()
@@ -199,3 +205,98 @@ def test_a_virgin_box_with_no_engine_is_not_applicable(monkeypatch) -> None:
     monkeypatch.setattr("nexus.reembed_job.local_jobs", no_engine)
     (r,) = _check_reembed_jobs()
     assert _na(r)
+
+
+# ── finished jobs whose target has no topics yet (RDR-210 Technical Design 4) ──
+
+
+def test_a_done_target_with_no_discover_since_warns_and_names_the_discover_command(local, monkeypatch) -> None:
+    monkeypatch.setattr("nexus.reembed_job.undiscovered_targets", lambda jobs: [_TGT])
+    r = _with_jobs(monkeypatch, [_job("a", "done", finished_at="2026-10-25T10:00:00Z")])
+    assert r.ok is False and r.warn is True
+    assert _TGT in r.detail and "no taxonomy discover" in r.detail
+    assert r.fix_suggestions == [f"nx taxonomy discover --collection {_TGT}"]
+
+
+def test_an_unreadable_topics_state_is_not_judged_and_says_so(local, monkeypatch) -> None:
+    def unreadable(jobs):
+        raise ConnectionError("taxonomy route down")
+
+    monkeypatch.setattr("nexus.reembed_job.undiscovered_targets", unreadable)
+    r = _with_jobs(monkeypatch, [_job("a", "done")])
+    assert _na(r) and "not judged (ConnectionError)" in r.detail
+
+
+def _done(target: str, finished_at: str, state: str = "done") -> dict:
+    return _job(state=state, target=target, finished_at=finished_at)
+
+
+@pytest.mark.parametrize(
+    ("stamp", "count", "listed"),
+    [
+        (None, 20, True),                        # never discovered
+        ("2026-10-25T09:00:00Z", 20, True),      # discovered before the job finished: the moved documents miss it
+        ("2026-10-25T11:00:00Z", 20, False),     # discovered after
+        (None, 4, False),                        # below the floor discover builds nothing at, so never asked for
+        (None, 5, True),                         # at the floor
+    ],
+)
+def test_undiscovered_compares_the_last_discover_with_the_job_end(stamp, count, listed) -> None:
+    from nexus.reembed_job import undiscovered
+
+    stamps = {_TGT: {"last_discover_at": stamp}} if stamp else {}
+    got = undiscovered([_done(_TGT, "2026-10-25T10:00:00.250Z")], stamps, {_TGT: count}, 5)
+    assert got == ([_TGT] if listed else [])
+
+
+def test_undiscovered_reads_only_finished_jobs_and_the_newest_end_per_target() -> None:
+    from nexus.reembed_job import undiscovered
+
+    jobs = [
+        _done(_TGT, "2026-10-25T08:00:00Z"),
+        _done(_TGT, "2026-10-25T12:00:00Z", state="done_with_skips"),
+        _job("r", "running", target="docs__1-1__voyage-model-b__v1"),
+        _job("x", "aborted", target="docs__1-1__voyage-model-c__v1", finished_at="2026-10-25T08:00:00Z"),
+    ]
+    counts = {_TGT: 9, "docs__1-1__voyage-model-b__v1": 9, "docs__1-1__voyage-model-c__v1": 9}
+    # A discover between the two jobs does not cover the second one's documents.
+    assert undiscovered(jobs, {_TGT: {"last_discover_at": "2026-10-25T10:00:00Z"}}, counts, 5) == [_TGT]
+
+
+def test_undiscovered_targets_reads_stamps_and_counts_for_finished_targets_only(monkeypatch) -> None:
+    import nexus.reembed_job as rj
+
+    monkeypatch.undo()  # drop the autouse stub of the function under test
+    seen: dict = {}
+
+    class Tax:
+        def get_last_discover_stamps(self, collections):
+            seen["stamps"] = list(collections)
+            return {}
+
+        def close(self):
+            seen["closed"] = True
+
+    class T3:
+        def count(self, name):
+            seen.setdefault("counts", []).append(name)
+            return 7
+
+    monkeypatch.setattr("nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore", Tax)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: T3())
+    got = rj.undiscovered_targets([_done(_TGT, "2026-10-25T10:00:00Z"), _job("r", "running")])
+    assert got == [_TGT]
+    assert seen == {"stamps": [_TGT], "closed": True, "counts": [_TGT]}
+
+
+def test_undiscovered_targets_reads_nothing_without_a_finished_job(monkeypatch) -> None:
+    import nexus.reembed_job as rj
+
+    monkeypatch.undo()
+
+    def boom(*a, **k):
+        raise AssertionError("read the engine with no finished job")
+
+    monkeypatch.setattr("nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore", boom)
+    monkeypatch.setattr("nexus.db.make_t3", boom)
+    assert rj.undiscovered_targets([_job("r", "running"), _job("f", "failed")]) == []

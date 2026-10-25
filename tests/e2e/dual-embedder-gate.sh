@@ -743,11 +743,11 @@ print(json.dumps({'collection': sys.argv[1], 'source_path': sys.argv[2], 'doc_id
   printf 'gate mvv %s note: re-embedding moves documents between embedding families\n' "$DG_UID" > "$SCRATCH/mvv/note.txt"
   NX_ALLOW_PROD_WRITE="$DG_MVV_WRITE_REASON" NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx store put - --collection gate-mvv-notes \
     --title "gate-mvv-note-$DG_UID" <"$SCRATCH/mvv/note.txt" >"$DG_DIR/client.out" 2>"$DG_DIR/client.err" \
-    || dg_mvv_client_fail "nx store put of the mvv note exited non-zero"
+    || dg_mvv_client_fail "the store put of the mvv note exited non-zero"
   DG_MVV_NOTE_COLL="$(awk '/^Stored: / { print $NF }' "$DG_DIR/client.out")"
   case "$DG_MVV_NOTE_COLL" in
-    knowledge__*__bge-base-en-v15-768__v*) dg_ok "nx store put wrote the note to a bge collection ($DG_MVV_NOTE_COLL)" ;;
-    *) dg_mvv_client_fail "nx store put did not report a bge-768 knowledge collection (got '$DG_MVV_NOTE_COLL')" ;;
+    knowledge__*__bge-base-en-v15-768__v*) dg_ok "the store put wrote the note to a bge collection ($DG_MVV_NOTE_COLL)" ;;
+    *) dg_mvv_client_fail "the store put did not report a bge-768 knowledge collection (got '$DG_MVV_NOTE_COLL')" ;;
   esac
 }
 

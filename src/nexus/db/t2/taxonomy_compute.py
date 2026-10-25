@@ -167,6 +167,11 @@ class AuditHub(NamedTuple):
 MAX_CLUSTER_FRACTION_DIVISOR: int = 4
 MAX_CLUSTER_SIZE_FLOOR: int = 50
 
+#: Below this many chunks discover builds nothing (no topics, no taxonomy_meta row): HDBSCAN's
+#: min_cluster_size is 5, so a smaller collection cannot hold one cluster. ``nx taxonomy discover`` returns 0
+#: for it, and the doctor's re-embed row does not ask for a discover it cannot run (nexus-s08oe).
+MIN_DISCOVER_CHUNKS: int = 5
+
 
 def _max_cluster_size(n: int) -> int:
     """Cap on any single HDBSCAN cluster (nexus-9b9oi): 25% of the

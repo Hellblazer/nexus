@@ -20,7 +20,7 @@ from nexus.commands._helpers import (
 )
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
-from nexus.db.t2.taxonomy_compute import MixedEmbeddingDimensionsError
+from nexus.db.t2.taxonomy_compute import MIN_DISCOVER_CHUNKS, MixedEmbeddingDimensionsError
 
 
 def _T2Database(path, *, client=None):
@@ -106,7 +106,7 @@ def _fetch_service_vectors(
     except Exception:  # noqa: BLE001 - best-effort count; failure logged via log.warning, returns None
         _log.warning("taxonomy_service_count_failed", collection=collection_name)
         return None
-    if n < 5:
+    if n < MIN_DISCOVER_CHUNKS:
         return [], [], np.empty((0, 0), dtype=np.float32)
 
     stub = t3.get_or_create_collection(collection_name)
@@ -180,7 +180,7 @@ def _discover_via_service(
     if fetched is None:
         return 0
     doc_ids, texts, embeddings = fetched
-    if len(doc_ids) < 5:
+    if len(doc_ids) < MIN_DISCOVER_CHUNKS:
         _log.info("too_few_docs", collection=collection_name, n=len(doc_ids))
         return 0
     _progress(f"    clustering {len(doc_ids):,} x {embeddings.shape[1]}d (service)...")

@@ -9505,7 +9505,9 @@ def _check_reembed_jobs() -> list[HealthResult]:
     upgrade check's), when it is empty, and when nothing in it is running or failed. Green with the counts: jobs in
     ``running``, ``planned``, ``cutover`` or ``paused``. A soft warning (never fatal, never red): a ``failed`` job
     (it holds its source's lock until resumed or aborted, so ``--all`` names it instead of planning the source)
-    and a job parked in a blocked ``cutover``, each with the command that moves it on. This never raises.
+    and a job parked in a blocked ``cutover``, each with the command that moves it on; and the target of a
+    finished job that has had no taxonomy discover since (``reembed_job.undiscovered_targets``), with the
+    discover command (RDR-210 Technical Design 4). This never raises.
     """
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: patched in tests at the module attribute
     from nexus import reembed_job  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -9528,8 +9530,15 @@ def _check_reembed_jobs() -> list[HealthResult]:
     failed = [j for j in jobs if j.get("state") == "failed"]
     blocked = [j for j in jobs if reembed_job.is_blocked(j)]
     in_flight = [j for j in jobs if j.get("state") in _REEMBED_IN_PROGRESS_STATES and j not in blocked]
-    if not (failed or blocked or in_flight):
-        return _na(f"no job is running or failed ({len(jobs)} finished)")
+    topics_note = ""
+    try:
+        undiscovered = reembed_job.undiscovered_targets(jobs)
+    except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+        _log.debug("doctor_reembed_topics_unread", error=str(exc))
+        undiscovered = []
+        topics_note = f"; whether the targets have topics was not judged ({type(exc).__name__})"
+    if not (failed or blocked or in_flight or undiscovered):
+        return _na(f"no job is running or failed ({len(jobs)} finished){topics_note}")
 
     parts: list[str] = []
     fixes: list[str] = []
@@ -9565,9 +9574,18 @@ def _check_reembed_jobs() -> list[HealthResult]:
             f"{len(in_flight)} re-embed job(s) in progress ({counts}): "
             f"{_name_list([_reembed_job_summary(j) for j in in_flight])}; {_REEMBED_STATUS_COMMAND}"
         )
+    if undiscovered:
+        # RDR-210 Technical Design 4: without --wait the done report names the discover command, and this row
+        # says so until a discover has run.
+        parts.append(
+            f"{len(undiscovered)} re-embed target(s) have had no taxonomy discover since their job finished, so "
+            f"topic search and topic boosts miss the moved documents: {_name_list(undiscovered)}"
+        )
+        fixes.extend(reembed_job.discover_command(t) for t in undiscovered[:_MAX_FAILED_JOB_FIXES])
+    warn = bool(failed or blocked or undiscovered)
     return [HealthResult(
-        label=label, ok=not (failed or blocked), warn=bool(failed or blocked),
-        detail="; ".join(parts), fix_suggestions=fixes,
+        label=label, ok=not warn, warn=warn,
+        detail="; ".join(parts) + topics_note, fix_suggestions=fixes,
     )]
 
 

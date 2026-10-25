@@ -132,6 +132,12 @@ _ANY_INVOCATION_RE = re.compile(
 #: test_ledger_matches_live_count) -- a stale high entry is a free slot a
 #: future unguarded site could occupy unreviewed.
 ALLOWLIST: dict[str, tuple[int, str]] = {
+    # nexus-s08oe: the RDR-210 Phase 6 scenarios store one note through the real client into the gate's own
+    # engine: a scratch NEXUS_CONFIG_DIR provisioned by `nx init --service` in a fenced HOME, torn down at exit.
+    "tests/e2e/dual-embedder-gate.sh": (
+        1,
+        "nx store put of one note into the gate's self-provisioned scratch engine (fenced HOME, scratch NEXUS_CONFIG_DIR)",
+    ),
     # nexus-cnzei.5: imports nexus.mcp.core only to read each tool's
     # signature and schema for the committed wire snapshot; it calls no tool
     # and writes nothing, so it touches no tenant.
