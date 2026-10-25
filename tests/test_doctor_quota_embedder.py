@@ -19,6 +19,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 
 from nexus import embed_window
 from nexus.commands.doctor import _collect_quota_report, _format_quota_report
+from nexus import corpus
 
 BGE = "bge-base-en-v15-768"
 MINILM = "minilm-l6-v2-384"
@@ -91,7 +92,7 @@ def test_voyage_profile_local_install_reports_the_voyage_models() -> None:
         patch("nexus.config.get_credential", return_value="sk-test"),
     ):
         report = _collect_quota_report()
-    assert set(report["voyage"]["models"]) == {"voyage-code-3", "voyage-context-3"}
+    assert set(report["voyage"]["models"]) == set(corpus.CANONICAL_EMBEDDING_MODELS)
     assert all(c["embedding_dims"] == 1024 for c in report["voyage"]["models"].values())
 
 
@@ -99,7 +100,7 @@ def test_voyage_profile_without_a_key_says_so_instead_of_naming_a_model() -> Non
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config.local_embed_profile", return_value="voyage"),
-        patch("nexus.config.local_embed_model_choice", return_value="voyage-context-3"),
+        patch("nexus.config.local_embed_model_choice", return_value=corpus.canonical_embedding_model("knowledge")),
         patch("nexus.config.get_credential", return_value=""),
     ):
         report = _collect_quota_report()
