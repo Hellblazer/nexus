@@ -157,13 +157,11 @@ together with uv's `nx.exe` launchers in `.local\bin`. Until then `nx doctor`
 shows one ⚠ row, "Orphan uv install", which is expected.
 
 Measured on the clean machine on 2026-10-07 with a test build of the branch
-that carries the Windows layout (not yet a release): `nx self install` took
+that carried the Windows layout (it has since shipped): `nx self install` took
 35 s and downloaded nothing new, the new window resolved `nx` to
 `tools\current\bin\nx.exe`, `nx init` registered the logon task against the new
 layout, `nx doctor` ended "All checks passed" (with the ⚠ row above), store and
-search worked, and `nx self gc` then removed the uv copy and its launchers. The
-installed version has no `av` and no `opencv-python` package, which a plain
-`uv tool install` still pulls in.
+search worked, and `nx self gc` then removed the uv copy and its launchers.
 
 `nx self install` ends with a line about `nx upgrade` that applies only when it
 upgraded an existing install. On the fresh install in this page you do not run

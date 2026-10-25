@@ -90,7 +90,7 @@ The plugin's three local servers and all of its command hooks start through `uv`
 When a route fails, or when you want each step yourself, the install is three terminal commands, then a reconnect of the `nexus` server or a new session:
 
 ```bash
-uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
+uv tool install conexus --python 3.12
 nx self install
 nx init
 ```
@@ -134,13 +134,13 @@ Pre-requisite: [uv](https://docs.astral.sh/uv/) on host PATH.
 
 - macOS: `brew install uv`
 - Linux: `pipx install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Windows (from conexus 7.72.0, RDR-224; full path in [Installing nexus on Windows](windows-install.md)): `winget install astral-sh.uv`. The bundle's launcher resolves `uv` through `PATHEXT` (to `uv.exe`). Windows has no `exec`, so the launcher runs the MCP server as a child on its own stdin and stdout handles, waits for it, exits with its exit code, and ends the server with it if the host kills the launcher (a Job Object). The service itself still comes from `nx init --service`, which works on native Windows x64 (tested from PyPI on a clean Windows 11 guest at conexus 7.72.1). The `.mcpb` bundle itself has not been walked end to end on Windows (nexus-ijue9.21), so treat this path as untested; Windows is not yet declared supported. Tracked in RDR-224.
+- Windows (from conexus 7.72.0, RDR-224; full path in [Installing nexus on Windows](windows-install.md)): `winget install astral-sh.uv`. The bundle's launcher resolves `uv` through `PATHEXT` (to `uv.exe`). Windows has no `exec`, so the launcher runs the MCP server as a child on its own stdin and stdout handles, waits for it, exits with its exit code, and ends the server with it if the host kills the launcher (a Job Object). The service itself comes from `nx init`, which works on native Windows x64 (tested from PyPI on a clean Windows 11 guest at conexus 7.72.1). The `.mcpb` bundle is not a working route on Windows ([Installing nexus on Windows](windows-install.md#5-claude-desktop-chat-and-cowork) § 5); Windows 11 x64 itself is supported, through the account plugin.
 
 Install:
 
 1. Download `conexus.mcpb` from the [latest GitHub release](https://github.com/Hellblazer/nexus/releases/latest).
 2. Double-click the file. Claude Desktop registers it under Settings → Connectors → Desktop as "Conexus". On Windows the double-click does nothing: the Claude Desktop package registers only the `claude:` protocol and no `.mcpb` file type, and the Customize → Plugins upload dialog accepts zips and hides `.mcpb` files (measured 2026-10-11, Claude Desktop 1.24012.9.0). No working way to install the bundle on Windows has been found, so use the account plugin (Surface 2) there.
-3. First launch: uv resolves Nexus's dependency stack (pydantic-core, tree-sitter, numpy, torch, onnxruntime, and friends — `chromadb` was removed from the dependency set at RDR-155 P4b). Cold install ~20s on a warm network; warm restarts ~5s; the first start with Include PDF support on (below) downloads the PDF stack too and takes longer. If the install lands inside PyPI's post-release propagation window (~10-25 min where the download index does not yet serve a just-published version — nexus-r433b), the bundle's bootstrap retries the resolution with backoff for ~15 min, logging `[conexus-mcpb] PyPI has not finished propagating…` to the extension's log each attempt, before giving up with a try-again-shortly message. `NX_MCPB_SKIP_RESOLVE_RETRY=1` (or `true`) disables the retry, and with it the dependency lock: the launch then hands off to `uv run` with no step left to fall back unpinned, so it installs unpinned (nexus-puzdu).
+3. First launch: uv resolves Nexus's dependency stack (pydantic-core, tree-sitter, numpy, onnxruntime, and friends — `chromadb` was removed from the dependency set at RDR-155 P4b). Cold install ~20s on a warm network; warm restarts ~5s; the first start with Include PDF support on (below) downloads the PDF stack too and takes longer. If the install lands inside PyPI's post-release propagation window (~10-25 min where the download index does not yet serve a just-published version — nexus-r433b), the bundle's bootstrap retries the resolution with backoff for ~15 min, logging `[conexus-mcpb] PyPI has not finished propagating…` to the extension's log each attempt, before giving up with a try-again-shortly message. `NX_MCPB_SKIP_RESOLVE_RETRY=1` (or `true`) disables the retry, and with it the dependency lock: the launch then hands off to `uv run` with no step left to fall back unpinned, so it installs unpinned (nexus-puzdu).
 4. **First launch installs and starts nothing else.** `nx-mcp` used to auto-install the T2 daemon here; that path retired with the daemon (`nexus-i711w`). The extension expects the storage service to already exist on the host — provision it once with `nx init`. Without it, tools that reach T2 or T3 fail with an unresolvable-endpoint error rather than silently starting anything.
 
 Tool names: `mcp__conexus__*` (no `plugin_` infix — this is the .mcpb namespace, distinct from the Claude Code plugin's).
@@ -297,51 +297,9 @@ The host-side substrate round-trip is regression-tested by `tests/test_cowork_sd
 
 Both directions resolving the sentinel confirms the bridge shares one T2 with the host. A failure on step 1 points at the SDK transport (the VM never reached the host service); a failure on step 2 points at write-attribution or a stale read in the shared substrate — start with `nx daemon service status` then `nx memory list -p _cowork_test`.
 
-### Minimum Viable Validation (RDR-126 P6) — REMOVED
+### Validation of the Desktop surface
 
-**Both halves are deleted.** There is no automated or manual MVV for the Desktop
-surface right now. Disposition `nexus-uvn3t`, after the T2 daemon retirement
-(`nexus-i711w` Stage 2 sub-stage B). Recorded here because a missing gate that
-nobody knows is missing is worse than a red one.
-
-**P6-A** (`scripts/p6-clean-run.sh`, automated, pre-release) drove this repo's
-`nx-mcp` in a sandboxed `$HOME` with a shimmed `launchctl`/`systemctl` and
-asserted that the first MCP tool call wrote a `com.nexus.t2` LaunchAgent and
-emitted the first-run banner. Neither happens: the MCP first-run install path is
-gone (tombstone in `src/nexus/mcp/_first_run.py`), and the banner it was the sole
-producer of has no production caller. Dead by construction, and nothing in CI ran
-it, so it would have failed first at a release cut, by hand.
-
-**P6-B** (`scripts/p6-desktop-profile.sh`, manual, post-release) stood up an
-isolated Claude Desktop profile (`--user-data-dir`) as a fresh-account stand-in
-and walked: install the `.mcpb` -> banner -> `memory_put`/`memory_get`
-round-trip -> `daemon_uninstall`. Every step but the last is now dead, and the
-last one should not run casually:
-
-- the banner step has no producer, as above;
-- the **round-trip cannot pass on a fresh install**. It was chosen precisely
-  because it was cheap and credential-free — the deleted P6-A said so outright,
-  "`memory_*` is pure T2/SQLite, so no Voyage/Chroma creds are needed". RDR-152
-  flipped the hard default SQLITE -> SERVICE, so `memory_put` now needs the
-  engine + Postgres. Verified on a virgin `HOME` with a scrubbed env:
-  `storage_backend_for("memory")` resolves SERVICE and the write fails
-  `ServiceEndpointUnresolvableError`, because no lease exists and MCP boot
-  starts nothing. It passes only on a box that already has a working install —
-  which is not a fresh-account journey;
-- `daemon_uninstall` is the one step that still does something, and it is a
-  **host-level teardown**: both autostart units (the storage-service unit, and
-  any legacy `com.nexus.t2` from a pre-retirement install), the engine-service +
-  Postgres stack, and the first-run marker. The isolated profile scopes Claude
-  Desktop, not nexus state.
-
-Re-establishing Desktop MVV means deciding what a post-daemon first run is
-supposed to DO before writing a harness that asserts it. The banner subsystem's
-own fate (RDR-126 §3) was decided at nexus-37jha: deleted outright, since it
-had been producer-less since the deletion above and nothing re-points it at a
-service-mode first-run event. Re-establishing a service-mode first-run banner
-is a new capability, not a restoration — file it separately if the
-Desktop/plugin-first onboarding story wants one. Writing a new gate against
-today's unspecified behaviour would recreate exactly the rot deleted here.
+No automated or manual end-to-end check of the Desktop surface exists right now. The two RDR-126 P6 scripts were deleted after the T2 daemon retired (nexus-uvn3t): both asserted a first-run install and banner that no longer happen. A new check has to start from what a first run does today, which is nothing beyond `nx init` having provisioned the service.
 
 ## Failure modes
 

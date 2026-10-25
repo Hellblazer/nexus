@@ -51,13 +51,11 @@ In Claude Desktop, install `uv`, open Customize → Plugins, add the marketplace
 | CLI only | Install the CLI and decide about a service later | about 0.45 GB down (0.6 GB on Linux); 1.8 to 2.2 GB on disk |
 | Not now | Nothing is installed | none |
 
-These sizes include PDF support (docling, MinerU and torch). The script and the setup tool install it by default; the script's `--slim` and the setup tool's `slim` leave it out, which takes about 0.25 GB off the download on macOS, 0.37 GB on Linux, and 0.85 GB off the disk on macOS, 1.3 GB on Linux. A slim install and a bare `uv tool install conexus` that has not moved to generations arrive without it, and so does the Claude Desktop extension unless its Include PDF support setting is on (off by default; turning it on installs PDF support into the extension at its next start). On a slim or bare install the first time you index a PDF, `nx` installs it: about 240 MB down on macOS and 370 MB on Linux, 0.85 GB on disk on macOS and 1.3 GB on Linux, and it is kept by later upgrades. It installs only into the generation layout a normal install uses. Where it cannot (the Desktop extension with the setting off, a source checkout, an install built from a checkout, a `uv tool install` tree that has not moved to generations, a Windows machine without the Visual C++ runtime) or must not (`NX_PDF_STACK=refuse`, which the post-commit hook sets), it stops before writing anything with exit 69 and the command to run, and a network failure stops it with 75. The model weights follow on first use, about 0.5 GB, plus 1.2 GB for the first PDF with formulas. To fetch it ahead of time, for instance before going offline, run `nx self install --extras pdf`. An install that already had PDF support keeps it. The sizes are measured on 7.85.0 on macOS and Linux (2026-10-24): the download is the wheels in the lock, the Python and, for Local, the service and its models; the sizes on disk are the install itself. Windows was not measured. `uv` also keeps a download cache, about 2.1 GB on Linux and 1.8 GB on macOS after a first install (an earlier 7.81.0 measurement found 4.8 GB on Windows). On Linux the cache and the install together measured about 2.2 GB, not 4.2 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
+These sizes include PDF support (docling, MinerU and torch). The script and the setup tool install it by default; the script's `--slim` and the setup tool's `slim` leave it out, which takes about 0.25 GB off the download on macOS, 0.37 GB on Linux, and 0.85 GB off the disk on macOS, 1.3 GB on Linux. A slim install and a bare `uv tool install conexus` that has not moved to generations arrive without it, and so does the Claude Desktop extension unless its Include PDF support setting is on (off by default; turning it on installs PDF support into the extension at its next start). On a slim or bare install the first time you index a PDF, `nx` installs it: about 240 MB down on macOS and 370 MB on Linux, 0.85 GB on disk on macOS and 1.3 GB on Linux, and it is kept by later upgrades. It installs only into the generation layout a normal install uses. Where it cannot (the Desktop extension with the setting off, a source checkout, an install built from a checkout, a `uv tool install` tree that has not moved to generations, a Windows machine without the Visual C++ runtime) or must not (`NX_PDF_STACK=refuse`, which the post-commit hook sets), it stops before writing anything with exit 69 and the command to run, and a network failure stops it with 75. The model weights follow on first use, about 0.5 GB, plus 1.2 GB for the first PDF with formulas. To fetch it ahead of time, for instance before going offline, run `nx self install --extras pdf`. On Linux that install asks `uv` for the CPU build of torch (`NX_TORCH_BACKEND`, default `cpu`); without it uv would take the CUDA build, about 4.3 GB of downloads that Nexus never uses. An install that already had PDF support keeps it. The sizes are measured on 7.85.0 on macOS and Linux (2026-10-24): the download is the wheels in the lock, the Python and, for Local, the service and its models; the sizes on disk are the install itself. Windows was not measured. `uv` also keeps a download cache, about 2.1 GB on Linux and 1.8 GB on macOS after a first install (an earlier 7.81.0 measurement found 4.8 GB on Windows). On Linux the cache and the install together measured about 2.2 GB, not 4.2 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The [install guide](https://hellblazer.github.io/nexus/#before) has the requirements, the Windows path, the Claude Desktop extension, and how to index your first repository.
 
 ## Install by hand
 
 Use these commands when a route above fails, or when you want each step yourself. The common case is Claude Code on macOS or Linux, with `uv` and git already installed.
-
-On macOS:
 
 ```bash
 uv tool install conexus --python 3.12   # install nx; --python 3.12 is required, Python 3.14 does not work yet
@@ -66,20 +64,13 @@ nx init                                 # download and start the storage service
 nx doctor                               # every line must show ✓ ("credentials not set" is normal)
 ```
 
-On Linux, the first command also names the CPU build of torch. Without `--torch-backend cpu`, uv installs the CUDA build on x86-64: 4.3 GB of downloads and 8 GB on disk that Nexus never uses. The flag needs uv 0.9.19 or newer (`uv self update`), and uv prints a warning that it is experimental.
-
-```bash
-uv tool install conexus --python 3.12 --torch-backend cpu
-nx self install
-nx init
-nx doctor
-```
+The commands are the same on every platform. A bare `uv tool install conexus` carries no torch, so Linux needs no extra flag here; the PDF install described above names the CPU build of torch for you.
 
 Then add the plugin with the two lines from route two.
 
 ## Update, remove, problems
 
-- **Update:** run `nx self install`, then `nx upgrade`. Do not update with `uv tool install conexus` or `--force`: that removes the local search model and search returns nothing. Details: [Update Nexus](https://hellblazer.github.io/nexus/#update).
+- **Update:** run `nx self install`, then `nx upgrade`. Do not update with `uv tool install conexus` or `--force`: on a generation install that rebuilds the uv tree and takes the `nx` shims back, and it drops the `[local]` extra. Details: [Update Nexus](https://hellblazer.github.io/nexus/#update).
 - **Remove:** [Remove Nexus completely](https://hellblazer.github.io/nexus/#uninstall) covers exporting your knowledge first, removing the Claude integration, and deleting the service and data.
 - **Problems:** see [Problems](https://hellblazer.github.io/nexus/#problems). If nothing there helps, paste the [recovery runbook](https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611) as the first message of a Claude Code session. It checks the install step by step and asks before it changes any data.
 

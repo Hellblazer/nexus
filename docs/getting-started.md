@@ -19,9 +19,9 @@
   macOS 14 wheels from version 1.24 on, and Apple patches only recent releases;
   on macOS 13 or earlier the install fails resolving with a platform-tag error.
   Native Windows x64 works through the same two steps as the other platforms,
-  `uv tool install conexus` and `nx init --service`, using the published
+  `uv tool install conexus` and `nx init`, using the published
   windows-x64 engine and PostgreSQL bundle. It passed a test from PyPI on a
-  clean Windows 11 x64 machine (conexus 7.72.1: `nx init --service`, a live
+  clean Windows 11 x64 machine (conexus 7.72.1: `nx init`, a live
   Claude Code session with MCP store and search, hooks, stop and restart).
   Windows 11 x64 is supported, with the limits listed in
   [What is not supported or not measured](windows-install.md#what-is-not-supported-or-not-measured).
@@ -35,20 +35,19 @@
   on ARM are not supported.
   No GPU is required, and none is used by default. Search embeds through a
   bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
-  the tree). On Linux, torch is pinned to its CPU build at both install steps:
-  the first command is `uv tool install conexus --python 3.12 --torch-backend cpu`
-  (uv 0.9.19 or newer; uv warns that the flag is experimental), and
-  `nx self install` passes the same backend to every generation it builds.
-  Without the flag, uv takes the CUDA torch from PyPI on x86-64 and with it 15
-  nvidia packages and triton that nothing on this path uses: measured
-  2026-10-07 in a fresh ubuntu:24.04 container, 4,264 MB downloaded and
-  7,955 MB unpacked, against 688 MB and 2,250 MB with the flag. Set
-  `NX_TORCH_BACKEND` to opt a GPU box back in at `nx self install`. The
-  default is `cpu`; `auto` picks a build from the NVIDIA driver. A driver that
-  supports CUDA 12.6 to 12.8 needs `cu126`; a newer driver can use `cu129` or
-  `cu130`. `cu128` does not exist for this torch (2.13), so `auto` on a
-  CUDA 12.8-only driver can fail to resolve: name `cu126` instead. macOS and Windows wheels carry no CUDA payload, so
-  nothing is pinned there.
+  the tree). A bare `uv tool install conexus` carries no torch: torch arrives
+  only with PDF support (the `pdf` extra), which the installers add by default
+  and `nx` adds on the first PDF index or with `nx self install --extras pdf`.
+  Those builds name the CPU build of torch on Linux, so a box with an NVIDIA GPU
+  does not download the CUDA tree (about 4.3 GB and 15 nvidia packages plus
+  triton, measured 2026-10-07 in a fresh ubuntu:24.04 container, against 688 MB
+  with the CPU build). Set `NX_TORCH_BACKEND` to opt a GPU box back in at
+  `nx self install`. The default is `cpu`; `auto` picks a build from the NVIDIA
+  driver. A driver that supports CUDA 12.6 to 12.8 needs `cu126`; a newer
+  driver can use `cu129` or `cu130`. `cu128` does not exist for this torch
+  (2.13), so `auto` on a CUDA 12.8-only driver can fail to resolve: name
+  `cu126` instead. macOS and Windows wheels carry no CUDA payload, so nothing
+  is pinned there.
 
   **Memory.** Measured on an Apple Silicon Mac, sampling the local-stack
   processes' own RSS (never a whole-machine reading, which a shared box's
@@ -177,7 +176,7 @@ See [Document Catalog](catalog.md) for details.
 
 ## Claude Code plugin (optional)
 
-The conexus plugin gives Claude Code agents access to all three storage tiers, 10 specialized agents, and 44 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
+The conexus plugin gives Claude Code agents access to all three storage tiers, 10 specialized agents, and skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
@@ -277,7 +276,7 @@ taxonomy:
 Use these commands when a route under [Install](#install) fails, or when you want each step yourself.
 
 ```bash
-uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
+uv tool install conexus --python 3.12
 nx self install
 nx init
 nx doctor
@@ -381,8 +380,9 @@ on the older uv-tool layout and step 1 is `uv tool upgrade conexus`. `nx doctor`
 *Generation layout* row tells you which you have.
 
 Do not upgrade with `uv tool install conexus` or `--force`. That resets the
-environment and drops `[local]`, which downgrades the embedder from 768 to 384
-dimensions and makes search over existing collections return nothing. On a
+environment and drops `[local]`, and on a generation box it rebuilds the uv tree
+and takes the shims back. Search over existing collections is not affected by the
+extra, because the service embeds server-side. On a
 uv-tool box recover with `uv tool install --reinstall "conexus[local]"` and then run
 `nx self install` so the install is pinned to the release's lock; on a
 generation box `nx self install` rewrites the shims. Never `uv tool uninstall
@@ -418,9 +418,11 @@ block below).** First, stop any local service a 7.x install left running
 (`nx daemon service stop`). Second, make the pin run against a **local** engine,
 not a managed one. Write down your `service_url` and `service_token` values
 first (the cloud steps need both again), then `unset NX_SERVICE_URL
-NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT`, delete the `service_url:`
-line under `credentials:` in `~/.config/nexus/config.yml` (there is no
-`nx config unset`; it is a file edit), and `export NX_LOCAL=1` for the hop.
+NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT`, clear the saved
+`service_url` (`nx config unset service_url`, and `nx config unset service_token`
+if one is saved; a client too old to have `unset` needs the lines under
+`credentials:` in `~/.config/nexus/config.yml` deleted by hand), and
+`export NX_LOCAL=1` for the hop.
 `nx config get service_url` prints `service_url: not set` when it is clear.
 `NX_LOCAL=1` is needed in addition: it does not by itself override a configured
 `service_url`, and without it the pin's provisioning refuses to start a local

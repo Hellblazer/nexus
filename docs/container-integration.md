@@ -242,9 +242,12 @@ network.**
 
 What works:
 
-1. Install the conexus plugin in your Claude Code installation:
-   `/plugin install conexus@nexus-plugins`. The plugin registers
-   `nx-mcp` as an MCP server in your Claude Desktop config.
+1. Install the conexus plugin on your claude.ai account, in Claude
+   Desktop: Customize → Plugins, add the marketplace `Hellblazer/nexus`,
+   install `conexus`. Chat and Cowork read the plugins enabled on the
+   account, and a plugin installed only from the Claude Code command line is
+   not visible to them. The steps and the reason are in
+   [Desktop Deployment § Surface 2](desktop-deployment.md#surface-2-claude-desktop-chat-and-cowork-account-plugin).
 2. Start the host service: `nx daemon service start`.
 3. Open a Cowork session. Claude Desktop passes the configured MCP
    servers into the VM via `--mcp-config` with `"type": "sdk"` — the

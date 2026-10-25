@@ -9,7 +9,7 @@
 The host starts `nx-mcp` from your install, so install Nexus first. The commands are the "Install by hand" steps in [Desktop Deployment](desktop-deployment.md#install-by-hand); [Installing nexus on Windows](windows-install.md) has the Windows prerequisites.
 
 ```bash
-uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
+uv tool install conexus --python 3.12
 nx self install
 nx init
 nx doctor
