@@ -56,8 +56,11 @@ _INSTALL_RE = re.compile(
 
 #: The MVV's published-install leg, the gate that resolves against real PyPI.
 #: Flags between the interpreter pin and the spec are allowed (nexus-tt5vm
-#: added --no-cache there); the pin itself is what this lint reads.
-_MVV_RE = re.compile(r"tool install --python (\d+\.\d+)(?: --[a-z][a-z-]*)* \"\$PKG_SPEC\"")
+#: added --no-cache there, nexus-11x9o added --overrides FILE); the pin itself is
+#: what this lint reads.
+_MVV_RE = re.compile(
+    r"tool install --python (\d+\.\d+)(?: --[a-z][a-z-]*(?: \"\$OVERRIDES_FILE\")?)* \"\$PKG_SPEC\""
+)
 
 #: Non-vacuity floors: the count of typed-by-a-user install commands each
 #: surface carries today. A refactor that moves or reworks these blocks must

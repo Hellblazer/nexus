@@ -179,7 +179,13 @@ def test_published_install_scrubs_ambient_uv_tool_env(tmp_path) -> None:
     stub_uv = stub_dir / "uv"
     stub_uv.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        # The overrides fetch (nexus-11x9o) runs before `tool install`; answer it.
+        + _FETCH_STUB_BRANCH.format(
+            fetch_argv_log=tmp_path / "fetch-argv.log",
+            fetch_counter=tmp_path / "fetch-calls.txt",
+            fetch_fail_count=0,
+        )
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         "    {\n"
         '        echo "UV_TOOL_DIR=${UV_TOOL_DIR-<unset>}"\n'
         '        echo "UV_TOOL_BIN_DIR=${UV_TOOL_BIN_DIR-<unset>}"\n'
@@ -424,12 +430,49 @@ def _write_stub_git(stub_dir, tag_verdict: str) -> None:
     stub_git.chmod(0o755)
 
 
+# The harness reads the overrides from the PUBLISHED package, not the checkout
+# (nexus-11x9o): it fetches the conexus wheel alone (`uv pip install --no-deps
+# --target DIR conexus==X`) and hands DIR/nexus/_install/overrides.txt to
+# `uv tool install --overrides`. These stub fragments answer that fetch (the
+# marker line proves the file came from the fetched package) and record what
+# `tool install` was given. The fetch branch sits BEFORE the generic
+# `pip install` branch, whose calls the propagation probe counts.
+OVERRIDES_MARKER = "# stub-published-package-overrides"
+
+_FETCH_STUB_BRANCH = (
+    'if [ "$1" = "pip" ] && [ "$2" = "install" ] && [[ " $* " == *" --target "* ]]; then\n'
+    '    echo "$@" >> "{fetch_argv_log}"\n'
+    '    N=$(grep -c x "{fetch_counter}" 2>/dev/null || echo 0)\n'
+    '    echo x >> "{fetch_counter}"\n'
+    '    if [ "$N" -lt {fetch_fail_count} ]; then\n'
+    "        echo '  x No solution found when resolving dependencies:' >&2\n"
+    "        echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
+    "        exit 1\n"
+    "    fi\n"
+    '    T=""; PREV=""\n'
+    '    for A in "$@"; do [ "$PREV" = "--target" ] && T="$A"; PREV="$A"; done\n'
+    '    mkdir -p "$T/nexus/_install"\n'
+    f'    printf "%s\\nopencv-python; sys_platform == \'never\'\\n" "{OVERRIDES_MARKER}" > "$T/nexus/_install/overrides.txt"\n'
+    "    exit 0\n"
+    "fi\n"
+)
+
+_RECORD_OVERRIDES_STUB = (
+    '    PREV=""\n'
+    '    for A in "$@"; do\n'
+    '        if [ "$PREV" = "--overrides" ] && [ -f "$A" ]; then cat "$A" >> "{overrides_seen_log}"; fi\n'
+    '        PREV="$A"\n'
+    "    done\n"
+)
+
+
 def _run_propagation_branch(
     tmp_path,
     extra_env: dict[str, str],
     probe_fail_count: int,
     install_fail_count: int,
     tag_verdict: str = "yes",
+    fetch_fail_count: int = 0,
 ) -> tuple:
     """Drive the rewritten propagation branch (nexus-tt5vm, 2026-09-24
     decision) with no real network and no real sleeping: a stub `uv`
@@ -470,11 +513,20 @@ def _run_propagation_branch(
     stub_dir = tmp_path / "stub-bin"
     stub_dir.mkdir()
     stub_uv = stub_dir / "uv"
+    fetch_counter = tmp_path / "fetch-calls.txt"
+    fetch_argv_log = tmp_path / "fetch-argv.log"
+    overrides_seen_log = tmp_path / "install-overrides-content.log"
     stub_uv.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        + _FETCH_STUB_BRANCH.format(
+            fetch_argv_log=fetch_argv_log,
+            fetch_counter=fetch_counter,
+            fetch_fail_count=fetch_fail_count,
+        )
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         f'    echo "$@" >> "{install_argv_log}"\n'
-        f'    N=$(grep -c x "{install_counter}" 2>/dev/null || echo 0)\n'
+        + _RECORD_OVERRIDES_STUB.format(overrides_seen_log=overrides_seen_log)
+        + f'    N=$(grep -c x "{install_counter}" 2>/dev/null || echo 0)\n'
         f'    echo x >> "{install_counter}"\n'
         f'    if [ "$N" -ge {install_fail_count} ]; then\n'
         "        exit 0\n"
@@ -821,7 +873,12 @@ def test_propagation_probe_argv_loses_no_cache_would_fail_this_test(tmp_path) ->
     # (the assertion only needs ONE recorded probe call).
     stub_uv.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        + _FETCH_STUB_BRANCH.format(
+            fetch_argv_log=tmp_path / "fetch-argv.log",
+            fetch_counter=tmp_path / "fetch-calls.txt",
+            fetch_fail_count=0,
+        )
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
         "    echo '  x No solution found when resolving dependencies:' >&2\n"
         "    echo '  ... Because there is no version of conexus==1.2.3 ...' >&2\n"
         "    exit 1\n"
@@ -883,3 +940,115 @@ def test_propagation_install_argv_is_pinned(tmp_path) -> None:
             assert "conexus==1.2.3" in argv
     finally:
         _cleanup_preserved_evidence(result)
+
+
+# ── nexus-11x9o: the registry install applies the PUBLISHED package's overrides
+# (a bare `uv tool install conexus[pdf]` ignores src/nexus/_install/overrides.txt,
+# so opencv-python and opencv-python-headless both landed, the non-headless cv2
+# won 6/6 on chas, and MinerU's formula leg died on a libGL-less Linux box).
+
+
+def test_published_install_passes_the_published_packages_overrides(tmp_path) -> None:
+    """`uv tool install` carries `--overrides FILE`, and FILE holds exactly the
+    overrides.txt of the fetched PUBLISHED package (the stub's marker line), not
+    this checkout's copy: the harness tests published bytes."""
+    result, _probe_calls, _install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=0, install_fail_count=0,
+    )
+    try:
+        argv = _last_argv_line(tmp_path / "install-argv.log")
+        assert "--overrides" in argv, (
+            f"`uv tool install` carries no --overrides: a bare registry install "
+            f"leaves both opencv wheels in one cv2/ (nexus-11x9o): {argv}"
+        )
+        seen = (tmp_path / "install-overrides-content.log").read_text()
+        assert OVERRIDES_MARKER in seen, (
+            f"the --overrides file is not the fetched package's overrides.txt: {seen!r}"
+        )
+        fetch = _last_argv_line(tmp_path / "fetch-argv.log")
+        for flag in ("--no-deps", "--no-cache", "--target"):
+            assert flag in fetch, f"overrides fetch argv missing {flag}: {fetch}"
+        assert "conexus==1.2.3" in fetch, f"fetch is not pinned to the version under test: {fetch}"
+        assert not any(a.startswith("--index") for a in fetch), fetch
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_published_install_without_overrides_flag_would_fail_this_test(tmp_path) -> None:
+    """Falsification control: a copy of the script with `--overrides` stripped
+    from the `uv tool install` call records an argv without it, which is what
+    test_published_install_passes_the_published_packages_overrides rejects."""
+    import os
+
+    patched = tmp_path / "fresh-install-mvv-patched.sh"
+    text = SCRIPT.read_text()
+    needle = '--overrides "$OVERRIDES_FILE"'
+    assert needle in text, "install invocation shape changed; update this control's needle"
+    text = text.replace(needle, "", 1)
+    repo_root_line = 'REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"'
+    assert repo_root_line in text
+    text = text.replace(repo_root_line, f'REPO_ROOT="{REPO_ROOT}"', 1)
+    py_line = 'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/python.sh"'
+    assert py_line in text
+    text = text.replace(py_line, f'source "{REPO_ROOT}/tests/e2e/lib/python.sh"', 1)
+    patched.write_text(text)
+    patched.chmod(0o755)
+
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    install_log = tmp_path / "install-argv.log"
+    (stub_dir / "uv").write_text(
+        "#!/bin/bash\n"
+        + _FETCH_STUB_BRANCH.format(
+            fetch_argv_log=tmp_path / "fetch-argv.log",
+            fetch_counter=tmp_path / "fetch-calls.txt",
+            fetch_fail_count=0,
+        )
+        + 'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then\n'
+        f'    echo "$@" >> "{install_log}"\n'
+        "    exit 0\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    (stub_dir / "uv").chmod(0o755)
+    _write_stub_git(stub_dir, "yes")
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env.get('PATH', '')}"
+    result = subprocess.run(
+        [str(patched), "--published", "1.2.3"],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    try:
+        assert "--overrides" not in _last_argv_line(install_log), (
+            "control setup failed: the patch did not remove --overrides"
+        )
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_overrides_fetch_miss_enters_the_propagation_wait_not_a_hard_fail(tmp_path) -> None:
+    """The overrides fetch is the first resolver call of a published run, so a
+    just-published version that the index does not serve yet fails THERE. That
+    must enter the same propagation wait as a failed `uv tool install`, and the
+    retried install must then carry the overrides."""
+    result, probe_calls, install_calls = _run_propagation_branch(
+        tmp_path, _FAST_PROPAGATION_ENV, probe_fail_count=1, install_fail_count=0,
+        fetch_fail_count=1,
+    )
+    try:
+        assert "waiting on uv's own resolution" in result.stdout, result.stdout + result.stderr
+        assert probe_calls >= 2, "the propagation probe never ran after the fetch miss"
+        assert install_calls >= 1
+        assert "--overrides" in _last_argv_line(tmp_path / "install-argv.log")
+    finally:
+        _cleanup_preserved_evidence(result)
+
+
+def test_local_wheel_install_applies_the_wheels_own_overrides() -> None:
+    """The local-wheel leg stays consistent with the published one (nexus-11x9o):
+    its `uv pip install` carries `--overrides` read out of the wheel under test."""
+    text = _text()
+    local_block = text[text.index('Build the wheel under test ──"'):]
+    local_block = local_block[: local_block.index("MCP entry-point handshake")]
+    assert 'nexus/_install/overrides.txt' in local_block
+    assert '--overrides "$OVERRIDES_FILE" "$WHEEL"' in local_block

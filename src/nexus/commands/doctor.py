@@ -2042,6 +2042,24 @@ def _run_check_mineru_parse() -> None:
         click.echo(_check("MinerU parse", True, "parsed a synthesized one-page probe PDF"))
 
 
+def _cv2_import_error() -> str | None:
+    """None when ``import cv2`` works in this interpreter (the one MinerU runs
+    in), else the error as ``ExceptionClass: message`` (credentials redacted)."""
+    import importlib  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        importlib.import_module("cv2")
+    except Exception as exc:  # noqa: BLE001 — any load failure (ImportError for libGL.so.1, OSError, a broken wheel) is the finding
+        return _exc_detail(exc, with_type=True)
+    return None
+
+
+def _cv2_version() -> str:
+    import sys  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    return str(getattr(sys.modules.get("cv2"), "__version__", "")) or "version unknown"
+
+
 def _run_check_mineru() -> None:
     """Verify MinerU is importable and a real one-page parse succeeds.
 
@@ -2096,13 +2114,28 @@ def _run_check_mineru() -> None:
 
     click.echo(_check("MinerU import", True, "mineru.cli.common.do_parse OK"))
 
-    if not _mineru_pipeline_model_dir_configured():
+    # nexus-11x9o: MinerU imports cv2 lazily, so the do_parse import above
+    # succeeds on a box whose cv2 cannot load (a Linux box without libGL.so.1
+    # where the non-headless opencv-python won the shared cv2/ directory).
+    cv2_error = _cv2_import_error()
+    if cv2_error is not None:
+        click.echo(_check("MinerU cv2 import", False, cv2_error))
         click.echo(
-            "  (MinerU pipeline model weights not downloaded; real-parse "
-            "check skipped — run `mineru-models-download`)"
+            "  ↳ MinerU needs a cv2 that loads. The non-headless opencv-python needs a system "
+            "libGL (libGL.so.1) that this box lacks; the headless build does not, and the "
+            "release's overrides keep only the headless one. Reinstall through "
+            f"`{pdf_stack.INSTALL_COMMAND}` to get it. Real-parse check skipped: it "
+            "would fail on the same import."
         )
     else:
-        _run_check_mineru_parse()
+        click.echo(_check("MinerU cv2 import", True, f"cv2 {_cv2_version()} loads"))
+        if not _mineru_pipeline_model_dir_configured():
+            click.echo(
+                "  (MinerU pipeline model weights not downloaded; real-parse "
+                "check skipped — run `mineru-models-download`)"
+            )
+        else:
+            _run_check_mineru_parse()
 
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.

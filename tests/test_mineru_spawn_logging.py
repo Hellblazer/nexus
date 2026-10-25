@@ -124,9 +124,11 @@ def test_worker_subprocess_keeps_devnull_carveout() -> None:
     import nexus.pdf_extractor as ext_mod
 
     src = Path(ext_mod.__file__).read_text()
-    # The short-lived per-batch worker is a deliberate DEVNULL carve-out.
+    # The short-lived per-batch worker is a deliberate carve-out: stdin and
+    # stdout stay DEVNULL; since nexus-11x9o its stderr goes to a file whose
+    # tail rides on mineru_subprocess_failed (tests/test_mineru_worker_stderr_tail.py).
     assert "Gap 4 carve-out" in src, (
-        "the per-batch worker DEVNULL choice must stay documented as a "
+        "the per-batch worker stdio choice must stay documented as a "
         "judged carve-out, not an oversight."
     )
     assert "_MINERU_WORKER_SCRIPT" in src

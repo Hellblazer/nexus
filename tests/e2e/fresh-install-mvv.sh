@@ -402,10 +402,13 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     # installs the extra up front.
     _PKG_EXTRAS=""
     [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ] && _PKG_EXTRAS="[pdf]"
+    # PKG_BASE_SPEC: the same pin without the extra, for the overrides fetch.
     if [ -n "$PUBLISHED_VERSION" ]; then
         PKG_SPEC="conexus${_PKG_EXTRAS}==$PUBLISHED_VERSION"
+        PKG_BASE_SPEC="conexus==$PUBLISHED_VERSION"
     else
         PKG_SPEC="conexus${_PKG_EXTRAS}"
+        PKG_BASE_SPEC="conexus"
     fi
     echo "================================================================"
     echo " FRESH-INSTALL MVV — PUBLISHED artifact (uv-tool resolution layer)"
@@ -608,8 +611,37 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
         # so the documented command there has no flag and neither does this.
         local torch_flag=()
         [ "$(uname -s)" = "Linux" ] && torch_flag=(--torch-backend cpu)
-        _uv_sandboxed tool install --python 3.12 --no-cache "$PKG_SPEC" "${torch_flag[@]+"${torch_flag[@]}"}" \
+        # nexus-11x9o: apply the release's own overrides, as every documented
+        # route does (install.sh/ps1, setup, nx self install, the on-demand
+        # PDF install, the .mcpb's uv sync). A bare `uv tool install` never
+        # reads src/nexus/_install/overrides.txt, so opencv-python and
+        # opencv-python-headless both landed in one cv2/, the non-headless one
+        # won 6/6 on chas, and MinerU's `import cv2` died on libGL.so.1 there.
+        # The file is the PUBLISHED package's, fetched below, never this
+        # checkout's, so the run tests the bytes users get.
+        _fetch_published_overrides || return 1
+        _uv_sandboxed tool install --python 3.12 --no-cache --overrides "$OVERRIDES_FILE" "$PKG_SPEC" "${torch_flag[@]+"${torch_flag[@]}"}" \
             >"$LOGS/install.log" 2>&1
+    }
+    # Fetch the conexus wheel ALONE (--no-deps: ~4 MB, no dependency resolve)
+    # into a scratch --target dir and keep its nexus/_install/overrides.txt.
+    # This is the first resolver call of a published run, so a version the
+    # index does not serve yet fails HERE with uv's own "no solution" text in
+    # install.log, which _is_propagation_miss and the propagation wait below
+    # handle exactly as they do a failed `uv tool install`. Done once per run.
+    OVERRIDES_FILE="$WORK/published-overrides.txt"
+    _fetch_published_overrides() {
+        [ -s "$OVERRIDES_FILE" ] && return 0
+        local fetch_dir="$WORK/published-conexus-wheel"
+        rm -rf "$fetch_dir"
+        _uv_sandboxed pip install --python 3.12 --no-cache --no-deps \
+            --target "$fetch_dir" "$PKG_BASE_SPEC" \
+            >"$LOGS/install.log" 2>&1 || return 1
+        if [ ! -s "$fetch_dir/nexus/_install/overrides.txt" ]; then
+            echo "the published conexus package carries no nexus/_install/overrides.txt; the harness cannot apply the release's overrides" >>"$LOGS/install.log"
+            return 1
+        fi
+        cp "$fetch_dir/nexus/_install/overrides.txt" "$OVERRIDES_FILE"
     }
     # The one propagation-signature test, shared by the retry trigger and
     # the bounded retry loop below. Signature set kept in parity with
@@ -830,7 +862,20 @@ else
     # resolution at a mirror (the nexus-l2ku5 resolver-drift class) while
     # the sandboxed layer resolved the real index. Same helper both layers.
     _uv_sandboxed venv --python 3.12 -q "$VENV"
-    _uv_sandboxed pip install -q --python "$VENV/bin/python" "$WHEEL"
+    # nexus-11x9o: same overrides the published layer applies, taken from the
+    # wheel under test (its own bytes, not a second copy in the checkout).
+    OVERRIDES_FILE="$WORK/wheel-overrides.txt"
+    "$E2E_PYTHON" -I -c '
+import sys, zipfile
+wheel, out = sys.argv[1:3]
+with zipfile.ZipFile(wheel) as z:
+    data = z.read("nexus/_install/overrides.txt")
+if not data.strip():
+    sys.exit("wheel carries an empty nexus/_install/overrides.txt")
+open(out, "wb").write(data)
+' "$WHEEL" "$OVERRIDES_FILE" \
+        || _fail "wheel under test carries no usable nexus/_install/overrides.txt"
+    _uv_sandboxed pip install -q --python "$VENV/bin/python" --overrides "$OVERRIDES_FILE" "$WHEEL"
     BIN_DIR="$VENV/bin"
     PROBE_PYTHON="$VENV/bin/python"
     _nx --version

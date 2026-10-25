@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`nx doctor --check-mineru` now catches a cv2 that cannot load, and a failed MinerU page worker says why** (nexus-11x9o). MinerU imports `cv2` lazily, so the existing `do_parse` import stayed green on a Linux box without `libGL.so.1` where the non-headless `opencv-python` had won the shared `cv2/` directory, while every formula PDF failed (the MinerU server answered 409, the per-page fallback exited 1). The check now imports `cv2`, goes red with the error and the repair (`nx self install --extras pdf`, which applies the release's overrides and keeps only `opencv-python-headless`), and skips the real-parse probe that would fail on the same import. The per-page worker's stderr was discarded; `mineru_subprocess_failed` now carries its last 2 KB as `stderr_tail`. Only the undocumented bare `uv tool install "conexus[pdf]"` route could land both OpenCV builds; install.sh/ps1, setup, `nx self install`, the on-demand PDF install and the `.mcpb` already applied the overrides. `tests/e2e/fresh-install-mvv.sh` now does too: it fetches the published package's `nexus/_install/overrides.txt` (the local-wheel leg reads the wheel's) and passes it as `--overrides`, so the formula-PDF leg of the published-artifact run resolves the way users' routes do.
+
 ## [7.86.0] - 2026-10-25
 
 Pairs with engine-service-v0.1.164 (`REQUIRED_ENGINE_VERSION` unchanged from 7.85.0), already deployed to the managed service; no engine changesets. On Windows, PDF support needs Microsoft's Visual C++ redistributable on this engine: 0.1.164 does not carry `msvcp140_atomic_wait.dll`, so a machine without it installs without PDF support and says so (see Fixed, nexus-vyy65).
