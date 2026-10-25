@@ -704,7 +704,7 @@ def test_the_closing_refrain_is_never_an_edit_and_a_query_about_it_passes() -> N
 
 
 ALWAYS_LINDA = ("Not a parallel programming model, but a coordination substrate",
-                "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`", "A report is owed until a report tuple exists")
+                "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`", "A message waits in its mailbox until it is taken, whether or not its reader remembered to look.")
 ALWAYS_XANADU = ("Not a hypertext system, but a linking substrate", "There is no way to say that a research finding")
 CARD_LINDA = "Devices: the tricolon 'easier to build correctly, easier to analyze, and easier to compose'; 'small, well-studied, and already half-built'."
 CARD_XANADU = "Devices: 'simple, well-studied, and easy to implement'; the list 'RDF triples, property graphs, or ad-hoc foreign keys'."
