@@ -26,6 +26,17 @@
       },
       "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook.",
       "version": "7.86.2"
+    },
+    {
+      "name": "conexus-tool-spill",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/Hellblazer/nexus.git",
+        "path": "tool-spill",
+        "ref": "v7.86.2"
+      },
+      "description": "Opt-in Claude Code mod: a main-session tool result over a size limit is written to a file, and the model sees the head and the path instead of all of it.",
+      "version": "7.86.2"
     }
   ]
 }

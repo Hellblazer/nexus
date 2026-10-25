@@ -1,0 +1,25 @@
+{
+  "name": "conexus-tool-spill",
+  "version": "7.86.1",
+  "description": "Opt-in: main-session tool results over a size limit are written to a file; the model sees the head and the path, so a big read costs a few KB of context instead of all of it.",
+  "author": {
+    "name": "Hal Hildebrand",
+    "url": "https://github.com/Hellblazer"
+  },
+  "repository": "https://github.com/Hellblazer/nexus",
+  "license": "AGPL-3.0-or-later",
+  "userConfig": {
+    "limit": {
+      "type": "number",
+      "title": "Spill limit (bytes)",
+      "description": "A main-session tool result larger than this many bytes is cut. Results at or under it pass unchanged.",
+      "default": 4000
+    },
+    "head": {
+      "type": "number",
+      "title": "Head kept (bytes)",
+      "description": "How many bytes of a cut result the model still sees, trimmed back to a line end. Capped at the spill limit.",
+      "default": 2000
+    }
+  }
+}

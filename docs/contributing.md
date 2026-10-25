@@ -398,9 +398,10 @@ This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first 
 | `uv.lock` | auto-updated by `uv sync` — **must be committed** |
 | `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
 | `conexus/CHANGELOG.md` | add `[X.Y.Z]` entry |
-| `.claude-plugin/marketplace.json` | bump both `plugins[].version` (nx + sn) **and both `plugins[].source.ref` to `vX.Y.Z`** (parity-tested) |
+| `.claude-plugin/marketplace.json` | bump `plugins[].version` for every plugin listed (conexus, sn, conexus-tool-spill) **and every `plugins[].source.ref` to `vX.Y.Z`** (parity-tested) |
 | `conexus/.claude-plugin/plugin.json` | bump `"version"` to match — **controls nx cache refresh** |
 | `sn/.claude-plugin/plugin.json` | bump `"version"` to match — **controls sn cache refresh** |
+| `tool-spill/.claude-plugin/plugin.json` | bump `"version"` to match — **controls conexus-tool-spill cache refresh** |
 | `docs/cli-reference.md` | new/changed CLI flags and subcommands |
 | `docs/architecture.md` | new/changed modules |
 | `docs/repo-indexing.md` | indexing pipeline changes |

@@ -39,3 +39,12 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 ---
+
+## Awaiting the next release or plugin cut (pinned: v7.86.2)
+
+ONE PATH PER BULLET, on the bullet's FIRST line.
+
+- `tool-spill/hooks/register.ts` (nexus-121ke): new opt-in plugin conexus-tool-spill. A main-session tool result over `limit` bytes (default 4000) is written to `<temp dir>/claude-tool-spill/<tool_use_id>.txt` and the model sees the first `head` bytes (default 2000) with a note naming the file. Install with `/plugin install conexus-tool-spill@nexus-plugins`; nothing changes for anyone who does not.
+- `tool-spill/hooks/hooks.json` (nexus-121ke): names the hooks module of conexus-tool-spill.
+- `tool-spill/.claude-plugin/plugin.json` (nexus-121ke): manifest of conexus-tool-spill, with the `limit` and `head` userConfig options.
+- `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-121ke): the fallback plugin set, used only when no marketplace.json is reachable, now names conexus-tool-spill too, so an installed copy of it is kept in version lockstep on that path.
