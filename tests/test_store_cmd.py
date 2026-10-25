@@ -256,6 +256,34 @@ def test_store_put_strips_a_leading_utf8_bom(runner, mock_store, tmp_path, monke
     assert seen == ["hello bom", "hello bom"]
 
 
+def test_store_put_stdin_is_read_as_utf8_whatever_the_locale(mock_store, monkeypatch):
+    """On Windows a piped stdin decodes with the ANSI code page (cp1252): the BOM came through
+    as U+00EF U+00BB U+00BF and an e-acute as two characters (7.86.1 shakeout, Windows leg)."""
+    import click  # noqa: PLC0415
+    from click.testing import CliRunner  # noqa: PLC0415
+
+    seen: list[str] = []
+
+    def fake_put_note(*, content, **_kw):
+        seen.append(content)
+        raise click.ClickException("stop here")
+
+    monkeypatch.setattr("nexus.catalog.note_write.put_note", fake_put_note)
+    runner = CliRunner(charset="cp1252")
+    runner.invoke(
+        main, ["store", "put", "--collection", "fixture-subject", "-", "--title", "t"],
+        input="\ufeffcaf\u00e9".encode("utf-8"),
+    )
+    assert seen == ["caf\u00e9"]
+
+
+def test_store_put_stdin_that_is_not_utf8_says_so(runner, mock_store):
+    result = runner.invoke(
+        main, ["store", "put", "--collection", "fixture-subject", "-", "--title", "t"], input=b"caf\xe9",
+    )
+    assert result.exit_code != 0 and "stdin is not valid UTF-8" in result.output
+
+
 def test_store_put_invalid_ttl_shows_error(runner, mock_store, tmp_path):
     src = tmp_path / "f.txt"
     src.write_text("content")
