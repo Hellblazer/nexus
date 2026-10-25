@@ -2,12 +2,12 @@
 title: "nx_answer Answer-Shape Eligibility and Evidence Sufficiency"
 id: RDR-232
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-10-23
-accepted_date:
+accepted_date: 2026-10-25
 related_issues: [nexus-l2vam, nexus-tko2w]
 related: [RDR-078, RDR-080, RDR-091, RDR-097, RDR-189, RDR-196, RDR-200, RDR-203]
 ---
@@ -1664,3 +1664,4 @@ remain coherent without it.
   requires a Java engine release, capability negotiation, and a separate
   500-node proof. RDR-189 now carries the matching shared-contract section.
 - 2026-10-25: Gate round 1 — BLOCKED (2 Critical, 8 Significant, 2 ship-blocker(s)); commit `6b2f94e66`; critique `nexus_rdr/232-gate-critique-2026-10-25-r1`.
+- 2026-10-25: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `44a11f3fa`; critique `nexus_rdr/232-gate-critique-2026-10-25-r2`.
