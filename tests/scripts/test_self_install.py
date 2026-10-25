@@ -758,8 +758,8 @@ def test_a_post_split_install_without_pdf_is_not_gated_by_the_windows_runtime(be
 def test_bootstrap_with_extras_pdf_builds_slim_on_a_runtime_gap_and_the_receipt_has_no_pdf(
     bed, monkeypatch, tmp_path, capsys,
 ) -> None:
-    """The plugin's setup and the installers run `nx self install --bootstrap --extras pdf`
-    by default. On a box without the runtime that first install is slim, with one line."""
+    """The plugin's setup (and the stand-in's repair command) run `nx self install
+    --bootstrap --extras pdf` by default. On a box without the runtime that first install is slim, with one line."""
     tools, bin_dir, _src = bed
     _windows_box_without_atomic_wait(monkeypatch, tmp_path)
     monkeypatch.setattr("nexus.commands.self_cmd._flip_and_shim", lambda *a, **k: None)

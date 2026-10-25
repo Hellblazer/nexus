@@ -259,11 +259,11 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     # MinerU restart in upgrade_finish never has a stack-less generation to
     # start). It needs the layout the takeover repair above just settled.
     #
-    # nexus-2k66t.4.7: the VC++ runtime goes first. On Windows the carry refuses
-    # (it returns a line, builds nothing) when the DLLs the stack's extension
-    # modules load are missing, and this step is the only thing that provisions
-    # them on a cloud-mode box; run after the carry, the first upgrade would
-    # always be refused and the stack wait for the next one.
+    # nexus-2k66t.4.7, nexus-vyy65: the VC++ runtime goes first. On Windows the
+    # carry builds slim (and says so) when the DLLs the stack's extension modules
+    # load are missing, and this step is the only thing that provisions them on a
+    # cloud-mode box; run after the carry, the first upgrade would always go slim
+    # and the stack wait for the next one.
     _converge_vc_runtime(auto_mode=auto_mode)
     _converge_pdf_stack(auto_mode=auto_mode, skip_t3=skip_t3)
     _converge_installer_rebuild(auto_mode=auto_mode, skip_t3=skip_t3)

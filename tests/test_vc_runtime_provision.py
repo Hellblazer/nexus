@@ -719,28 +719,26 @@ def test_the_search_adds_a_vcrt_that_holds_the_whole_set_over_a_base_only_system
     assert _search(cfg, sysdir) == [str(cfg / "vcrt")]
 
 
-# ── the bundle read stops once the required pair is in hand ─────────────────
+# ── nx init's failure line says what the missing DLLs are for ────────────────
 
 
-def test_the_extraction_stops_at_the_end_of_bin_instead_of_reading_postgresql(tmp_path: Path) -> None:
-    """The members after ``bundle/bin/`` sit in an xz stream cut short. Reading on to them
-    raises; an extraction that stops at the end of ``bin/`` never gets there. Checked by
-    deleting the early exit: this test then fails with BinaryVerificationError."""
-    raw = io.BytesIO()
-    with tarfile.open(fileobj=raw, mode="w") as tf:
-        for name in ("postgres.exe", *_DLLS):
-            ti = tarfile.TarInfo(f"bundle/bin/{name}")
-            ti.size = len(_BODY[name])
-            tf.addfile(ti, io.BytesIO(_BODY[name]))
-        filler = os.urandom(400_000)
-        for member in ("bundle/share/a.bin", "bundle/share/b.bin"):
-            ti = tarfile.TarInfo(member)
-            ti.size = len(filler)
-            tf.addfile(ti, io.BytesIO(filler))
-    packed = lzma.compress(raw.getvalue(), preset=0)
-    archive = tmp_path / "cut.txz"
-    archive.write_bytes(packed[: len(packed) // 2])  # cut inside the filler
-    dest = tmp_path / "out"
-    digests = b._extract_vc_runtime(archive, dest, _DLLS, optional=(_ATOMIC_WAIT,))
-    assert set(digests) == set(_DLLS)  # an older bundle: no optional DLL, and no read to the end
-    assert sorted(p.name for p in dest.iterdir()) == sorted(_DLLS)
+@pytest.mark.parametrize(
+    ("detail", "embedding_named"),
+    [
+        ("msvcp140_atomic_wait.dll (PDF support needs it) could not be placed: OSError: boom", False),
+        ("OSError: boom", True),
+    ],
+)
+def test_the_init_failure_line_names_local_embedding_only_when_the_base_pair_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    detail: str, embedding_named: bool,
+) -> None:
+    import nexus.daemon.binary_install as bi
+    from nexus.commands.init import _provision_vc_runtime_step
+
+    monkeypatch.setattr(bi, "ensure_vc_runtime", lambda *a, **k: bi.VcRuntimeResult("failed", detail))
+    _provision_vc_runtime_step(tmp_path)
+    err = capsys.readouterr().err
+    assert detail in err
+    assert ("local embedding" in err) is embedding_named
+    assert "vc_redist.x64.exe" in err

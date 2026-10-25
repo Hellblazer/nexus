@@ -1065,12 +1065,6 @@ def _extract_vc_runtime(
             with tarfile.open(archive, "r:xz") as tf:
                 for member in tf:
                     key = member.name[2:] if member.name.startswith("./") else member.name
-                    if not key.startswith(_PG_BUNDLE_BIN_PREFIX) and all(n in digests for n in names):
-                        # ``tf.add`` writes a directory's files contiguously: once the
-                        # required pair is in hand, the first member outside ``bin/`` ends
-                        # the search, so an older bundle with no optional DLL is not read
-                        # to its end (PostgreSQL itself is the rest of the archive).
-                        break
                     name = wanted.get(key)
                     if name is None or name in digests or not member.isreg():
                         continue

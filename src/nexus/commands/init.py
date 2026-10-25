@@ -275,9 +275,11 @@ def _provision_vc_runtime_step(config_dir: Path) -> None:
         click.echo(f"  VC++ runtime for PDF extraction and local embedding: {result.detail}")
     elif result.status == "failed":
         click.echo(
-            f"  Could not place the VC++ runtime DLLs ({result.detail}). PDF extraction "
-            "and local embedding need them: re-run `nx init`, or install Microsoft's "
-            "redistributable from https://aka.ms/vs/17/release/vc_redist.x64.exe",
+            f"  Could not place the VC++ runtime DLLs ({result.detail}). "
+            # A top-up failure names only the PDF DLL and already says what needs it.
+            + ("" if "(PDF support needs it)" in result.detail else "PDF extraction and local embedding need them: ")
+            + "re-run `nx init`, or install Microsoft's redistributable from "
+            "https://aka.ms/vs/17/release/vc_redist.x64.exe",
             err=True,
         )
 
