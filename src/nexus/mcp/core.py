@@ -7257,7 +7257,7 @@ def plan_save(
         # questions via FTS and is un-runnable by the retrieval plan runner.
         # Every legitimate writer (nx_answer's grow path, seeds) sets a verb.
         if not verb.strip():
-            return (
+            return _fail(
                 "Plan not saved: a 'verb' is required (a retrieval verb such as "
                 "research / analyze / query / review / debug / document). Verb-less "
                 "plans pollute the verb-dimensional retrieval-plan-match library. "
@@ -7273,14 +7273,14 @@ def plan_save(
         try:
             parsed_plan = json.loads(plan_json)
         except (TypeError, ValueError) as exc:
-            return (
+            return _fail(
                 f"Plan not saved: plan_json is not valid JSON ({exc}). The "
                 "plan library stores executable retrieval plans only."
             )
         try:
             validate_plan_steps(parsed_plan, require_steps=True)
         except PlanTemplateSchemaError as exc:
-            return (
+            return _fail(
                 f"Plan not saved: {exc}. The plan library stores executable "
                 "retrieval plans (a non-empty steps list, each step with a "
                 "tool); implementation / phased plans belong in beads + T2 "
@@ -8808,8 +8808,9 @@ def traverse(
     the reachable document tumblers, the chunk ids (chashes) of those
     documents' manifests, and their collections (sorted). `$stepN.ids` with
     `$stepN.collections` hydrates through `store_get_many`. When `purpose`
-    does not resolve to a known name the result is
-    `{"tumblers": [...], "ids": [...], "collections": [...], "warning": "..."}`.
+    does not resolve to a known name the call fails with
+    `{"tumblers": [...], "ids": [...], "collections": [...], "warning": "..."}`
+    as an error result.
 
     Constraints:
     - `ids` is capped at 300 (a two-hop walk from one note reached 1,196
@@ -8834,10 +8835,13 @@ def traverse(
     if purpose:
         resolved = resolve_purpose(purpose)
         if not resolved:
-            return {
+            # nexus-4jwr0 (Sam, 2026-10-25): an unknown purpose is a failure,
+            # not an empty walk; the client sees isError, in-process callers
+            # the same dict.
+            return _fail({
                 "tumblers": [], "ids": [], "collections": [],
                 "warning": f"traverse: unknown purpose {purpose!r}",
-            }
+            })
         effective_types: list[str] = resolved
     elif link_types:
         effective_types = list(link_types)

@@ -240,6 +240,25 @@ def test_a_real_core_tool_fails_as_an_error_result() -> None:
     assert core.store_get(doc_id="") == "Error: doc_id is required"
 
 
+def test_traverse_with_an_unknown_purpose_fails() -> None:
+    """nexus-4jwr0 (Sam, 2026-10-25): an unknown purpose is a failure, not an empty walk."""
+    result = _call(core.mcp, "traverse", {"seeds": ["1.1.1"], "purpose": "no-such-purpose"})
+    assert isinstance(result, CallToolResult) and result.isError is True
+    assert "traverse: unknown purpose 'no-such-purpose'" in result.content[0].text
+    plain = core.traverse(seeds=["1.1.1"], purpose="no-such-purpose")
+    assert plain == {
+        "tumblers": [], "ids": [], "collections": [],
+        "warning": "traverse: unknown purpose 'no-such-purpose'",
+    }
+
+
+def test_plan_save_refusal_fails() -> None:
+    """nexus-4jwr0: a refused save is a failure; the text is unchanged."""
+    result = _call(core.mcp, "plan_save", {"query": "q", "plan_json": "{}", "verb": ""})
+    assert isinstance(result, CallToolResult) and result.isError is True
+    assert result.content[0].text.startswith("Plan not saved: a 'verb' is required")
+
+
 def test_a_real_catalog_list_tool_fails_as_an_error_result() -> None:
     """A catalog list tool's failure is isError, so [] means only no results.
 
