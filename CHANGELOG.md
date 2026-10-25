@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`conexus-tool-spill`, an opt-in Claude Code mod in the `nexus-plugins` marketplace** (nexus-121ke). A third plugin beside `conexus` and `sn`, installed with `/plugin install conexus-tool-spill@nexus-plugins`; nothing changes for anyone who does not. In the main conversation, a tool result over `limit` bytes (default 4000) is written to `<temp dir>/claude-tool-spill/<tool_use_id>.txt` and the model sees the first `head` bytes (default 2000, cut at a line end) with a note naming the file; `Read` results are cut in place with the next offset, and any other tool's result is withheld with the same head and path. Subagent calls and `Agent`, `Task`, `TodoWrite`, `AskUserQuestion`, `Edit`, `Write`, `NotebookEdit` are never touched. `limit` and `head` are plugin options. The directory is `tool-spill/` (README there); the plugin channel's allowlist, the drift ledger and `scripts/cut_plugin_release.py` know it, and the cut now accepts a plugin the base marketplace does not list yet. The plugin's tests run with `claude plugin test tool-spill`, by hand: no workflow installs the `claude` CLI.
+
 ### Fixed
 - **A re-embed resume, and the `kept_tombstoned` re-entry, are refused with the missing piece named when the engine cannot embed for the target's model** (nexus-6zchp, follow-up to nexus-q6t89; engine change, local engine only). A start already refused this; a resume with the target present, and the re-entry, skipped the check and ran into another failed batch. A resume whose target is gone is unchanged. Held off 7.86.2: the change is in the engine, and engine-service-v0.1.164 does not carry it; it ships with the next engine tag.
 

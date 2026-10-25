@@ -6,6 +6,7 @@ paths:
   - ".claude-plugin/**"
   - "conexus/.claude-plugin/**"
   - "sn/.claude-plugin/**"
+  - "tool-spill/.claude-plugin/**"
   - "CHANGELOG.md"
   - "conexus/PENDING_RELEASE.md"
   - "service/**"
@@ -32,7 +33,7 @@ Full text: [release-cadence](../../docs/agents/release-cadence.md).
 
 ## Independent plugin release channel (RDR-197)
 
-Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `.claude-plugin/marketplace.json`) ships without a client release via an anchored tag `plugin-v{X.Y.Z}-{n}`. The cut is `scripts/cut_plugin_release.py`; the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`, never a bare merge. Never cut while a release PR is open; batch related plugin work. **Rehearse before every real cut:** `tests/e2e/plugin-cut-rehearsal/run.sh` must end `PLUGIN-CUT REHEARSAL PASSED`.
+Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `tool-spill/` for the opt-in `conexus-tool-spill`, `.claude-plugin/marketplace.json`) ships without a client release via an anchored tag `plugin-v{X.Y.Z}-{n}`. The cut is `scripts/cut_plugin_release.py`; the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`, never a bare merge. Never cut while a release PR is open; batch related plugin work. **Rehearse before every real cut:** `tests/e2e/plugin-cut-rehearsal/run.sh` must end `PLUGIN-CUT REHEARSAL PASSED`.
 
 ## Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
 

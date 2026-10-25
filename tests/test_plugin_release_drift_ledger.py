@@ -83,6 +83,11 @@ MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 #: Each plugin's .mcp.json is on the surface too (nexus-jbt5x): the MCP
 #: server spec is loaded from the pinned tag exactly like a hook, and a
 #: server pin that changes on develop is inert until the ref advances.
+#:
+#: conexus-tool-spill (installed from tool-spill/) is an opt-in mod: its hooks
+#: module is the behaviour, and its plugin.json is on the surface because the
+#: userConfig defaults (the limit and head sizes) live there and the module
+#: reads them at load. Its README and tests are not behaviour.
 SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
     "conexus": (
         "conexus/hooks/",
@@ -97,6 +102,10 @@ SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
     "sn": (
         "sn/hooks/",
         "sn/.mcp.json",
+    ),
+    "conexus-tool-spill": (
+        "tool-spill/hooks/",
+        "tool-spill/.claude-plugin/plugin.json",
     ),
 }
 

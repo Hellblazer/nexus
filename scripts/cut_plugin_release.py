@@ -26,7 +26,9 @@ produces exactly the state they admit:
   what the cut ships; ``SURFACE_BY_PLUGIN`` is what the loader reads and
   is narrower. A cut carrying only ``conexus/evals/`` ships real content
   and must move the ref.
-- No version field moves, and no counter file is created.
+- No version field moves, and no counter file is created. A plugin the
+  base marketplace does not list yet may enter (``_check_new_plugin_entry``):
+  its version is the client version and its ref is the cut's tag.
 - The script pushes nothing and tags nothing: it prints the PR, merge,
   tag and back-merge commands, and the human cuts the release. The
   back-merge is ``scripts/plugin_cut_back_merge.sh``, not a bare merge:
@@ -947,6 +949,42 @@ def _run_real_battery(repo: Path) -> None:
             )
 
 
+def _check_new_plugin_entry(
+    repo: Path, plugin: dict, version: str, moved: list[str]
+) -> None:
+    """A plugin that origin/main's marketplace does not list yet may enter
+    through a cut (an opt-in plugin such as conexus-tool-spill), under the
+    rules an existing entry already meets, stated for an entry with nothing
+    to compare against:
+
+    - its ``version`` is the CURRENT client version, the value the
+      parity tests hold every entry to, not a number the cut chose;
+    - its ref moved to the cut's tag, because its directory is new on the
+      branch and so inside ``changed``: an entry left on the client tag
+      would point at a tag that does not contain its directory;
+    - its source path holds a manifest on the cut branch, so the tag
+      this cut makes contains what the entry installs.
+    """
+    name = plugin.get("name")
+    if plugin.get("version") != version:
+        raise CutRefused(
+            f"new plugin {name} carries version {plugin.get('version')!r}, "
+            f"not the client version {version!r}"
+        )
+    if name not in moved:
+        raise CutRefused(
+            f"new plugin {name} is not listed on origin/main and no path "
+            f"under its prefix changed, so its ref was not moved to the "
+            f"cut's tag; it would pin a tag that does not hold its files"
+        )
+    path = plugin.get("source", {}).get("path", "")
+    if not path or not (repo / path / ".claude-plugin" / "plugin.json").is_file():
+        raise CutRefused(
+            f"new plugin {name}: source.path {path!r} has no "
+            f".claude-plugin/plugin.json on the cut branch"
+        )
+
+
 def perform_cut(
     repo: Path,
     base_tag: str,
@@ -1092,9 +1130,13 @@ def perform_cut(
         raise CutRefused("marketplace metadata.version moved; a cut moves no version field")
     main_versions = {p.get("name"): p.get("version") for p in main_marketplace.get("plugins", [])}
     for plugin in data.get("plugins", []):
-        if plugin.get("version") != main_versions.get(plugin.get("name")):
+        name = plugin.get("name")
+        if name not in main_versions:
+            _check_new_plugin_entry(repo, plugin, version, moved)
+            continue
+        if plugin.get("version") != main_versions[name]:
             raise CutRefused(
-                f"plugin {plugin.get('name')} version field moved; a cut "
+                f"plugin {name} version field moved; a cut "
                 f"moves no version field"
             )
     stray = [

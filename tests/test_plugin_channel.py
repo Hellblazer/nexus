@@ -433,6 +433,30 @@ def test_the_prefix_mapping_covers_every_marketplace_plugin() -> None:
     assert set(PLUGIN_BY_ALLOWLIST_PREFIX.values()) == plugins
 
 
+def test_every_marketplace_plugins_directory_is_in_the_allowlist_under_its_own_name() -> None:
+    """The name is not always the directory (conexus-tool-spill installs from
+    tool-spill/). A plugin whose source.path is outside ALLOWED_PREFIXES
+    could never ship through a cut, and one mapped to another name would move
+    the wrong ref."""
+    marketplace = json.loads(
+        (REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    problems = []
+    for plugin in marketplace["plugins"]:
+        prefix = plugin["source"]["path"].rstrip("/") + "/"
+        if prefix not in ALLOWED_PREFIXES:
+            problems.append(f"{plugin['name']}: {prefix} is not in ALLOWED_PREFIXES")
+        elif PLUGIN_BY_ALLOWLIST_PREFIX.get(prefix) != plugin["name"]:
+            problems.append(
+                f"{plugin['name']}: {prefix} maps to "
+                f"{PLUGIN_BY_ALLOWLIST_PREFIX.get(prefix)!r}"
+            )
+    assert not problems, problems
+    assert set(ALLOWED_PREFIXES) == set(PLUGIN_BY_ALLOWLIST_PREFIX)
+
+
 def test_nothing_under_src_imports_the_channel_module() -> None:
     """Acceptance pin: the channel is repo machinery, never wheel code.
 
