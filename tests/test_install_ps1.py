@@ -1077,6 +1077,16 @@ def test_uv_installed_into_uv_install_dir_is_found(box: Box) -> None:
 
 
 @needs_pwsh
+def test_uv_installed_into_the_default_directory_is_found_when_nx_bin_dir_is_elsewhere(box: Box) -> None:
+    box.extra_env["NX_BIN_DIR"] = str(box.root / "nxbin")
+    result = box.run("--cli-only")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "uv was installed but" not in result.stdout + result.stderr
+    assert (box.home / ".local" / "bin" / f"uv{EXT}").exists()
+    assert BOOTSTRAP in box.calls()
+
+
+@needs_pwsh
 def test_a_failing_uv_installer_stops_the_script_and_leaves_no_file(box: Box) -> None:
     box.failing("uv-installer")
     result = box.run("--cli-only")

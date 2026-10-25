@@ -229,6 +229,10 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             if ($env:XDG_BIN_HOME) { $dirs += $env:XDG_BIN_HOME }
             if ($env:UV_INSTALL_DIR) { $dirs += $env:UV_INSTALL_DIR }
             $dirs += $binDir
+            # uv's own installer writes to ~/.local/bin whatever NX_BIN_DIR says (install.sh
+            # checks it too); without it an NX_BIN_DIR elsewhere stopped the script right after
+            # installing uv (7.86.1 shakeout, Windows leg).
+            $dirs += (Join-Path (Join-Path $homeDir '.local') 'bin')
             $dirs += (Join-Path (Join-Path $homeDir '.cargo') 'bin')
             foreach ($dir in $dirs) {
                 if (Find-In $dir 'uv') { $env:PATH = $dir + $sep + $env:PATH; return $true }
