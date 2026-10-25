@@ -1,11 +1,12 @@
 # Tuple space runbook
 
-Operator's guide to `nx doctor`'s three RDR-205 tuple-space rows, the sweep's
+Operator's guide to `nx doctor`'s tuple-space rows, the sweep's
 own log record, dead-letter triage, and what survives a restore. Background
 and the full operational reference: [Tuple Space](../tuple-space.md);
 scenario diagrams: [Tuple Space Walkthroughs](../tuple-space-walkthroughs.md).
 
-All three doctor rows below are gated the same way against the engine
+The three RDR-205 doctor rows below (`oldest_unclaimed`, `dead_tuple_ratio`,
+`sweep_freshness`) are gated the same way against the engine
 floor that first serves `/v1/tuples` (`engine-service-v0.1.114`, the
 pinned floor since conexus 7.41.0): an install pinned below that floor
 (any release before 7.41.0) reports the row as informational, never a
@@ -26,7 +27,7 @@ template disables `take` (`ledger/<session_id>`) are skipped outright —
 
 **Action**: `nx tuple rd <subspace>` to see what's sitting there, then check
 whether the expected consumer is running. For `mailbox/<address>`, confirm
-the addressed agent or instance is still alive and draining with `tuple_in`.
+the addressed agent or session is still alive and draining with `tuple_in`.
 
 ## `tuples.lock_held`
 
@@ -105,6 +106,18 @@ state (nothing was expired or lapsed) — it is a run that never logs at all,
 or a run whose `oldest_last_swept_at` keeps growing across several checks,
 that is the actual failure.
 
+## `tuples.park_slots`, `tuples.queue_depth`, `tuples.channel_delivery`
+
+The three RDR-211 rows. Each has its own gate and threshold, described in
+[Tuple Space § Client surface](../tuple-space.md#client-surface). In short:
+`tuples.park_slots` warns at 75% of the engine's global park cap, and the
+remedy is to find the callers holding parks open (`nx tuple stats`);
+`tuples.queue_depth` warns above 1,000 available tasks on a `queue/<name>`
+subspace or at any dead-lettered task, so triage as under "Dead-letter triage"
+below; `tuples.channel_delivery` warns when this session's push waiter is not
+alive or last woke more than 75 s ago, and the fix is `/mcp` to restart the
+server (the drain hook still delivers at the next prompt).
+
 ## Dead-letter triage
 
 A row reaches `claim_state='dead'` at the template's `max_attempts` (3 for
@@ -159,9 +172,9 @@ ORDER BY created_at;
 
 ## Templates change with an engine release, not with a data changeset
 
-The six templates (`ledger/<session_id>`, `mailbox/<address>`,
-`directory/<name>`, and, since RDR-211, `board/<topic>`, `queue/<name>`,
-`lock/<resource>`) ship as YAML in engine resources
+The seven templates (`ledger/<session_id>`, `mailbox/<address>`,
+`directory/<name>`, since RDR-211 `board/<topic>`, `queue/<name>`,
+`lock/<resource>`, and since RDR-220 `board/ci/<topic>`) ship as YAML in engine resources
 (`service/src/main/resources/tuples/templates/`), loaded and validated at
 boot; a breach fails boot with the file and field
 named. Changing a template's shape is an engine-release event — the same

@@ -8,11 +8,11 @@ But "contamination" lumps together three structurally different situations. Know
 
 ### Axis 1: true cross-project leak
 
-A document genuinely registered in the wrong collection. The 2026-05-08 prod probe's canonical example: tumbler `1.653.2` (`SOVEREIGN2-Grossberg2019.pdf`, content_type=paper, owner=papers curator) registered into `knowledge__knowledge` instead of `knowledge__art-grossberg-papers__voyage-context-3__v1`. `knowledge__knowledge` is reserved for MCP-stored knowledge notes (content_type=knowledge); a paper row there violates the content-type-vs-collection invariant.
+A document genuinely registered in the wrong collection. The 2026-05-08 prod probe's canonical example: tumbler `1.653.2` (`SOVEREIGN2-Grossberg2019.pdf`, content_type=paper, owner=papers curator) registered into `knowledge__knowledge` instead of `knowledge__art-grossberg-papers__voyage-context-3__v1`. `knowledge__knowledge` is a legacy placeholder collection for MCP-stored knowledge notes (content_type=knowledge; `knowledge` is now a refused placeholder subject, see [collections.md](../collections.md)); a paper row there violates the content-type-vs-collection invariant.
 
 **Detection signal**: a single document whose `physical_collection` doesn't match the curator's owned collection. The audit shows the collection as having 2+ homes when "homes" is computed at the source-URI / repo-root level.
 
-**Action**: `nx catalog show <tumbler>` to confirm; `nx catalog delete <tumbler>` (4.29.1 backup-before-delete makes this reversible); re-index the source into the right collection. Add a regression test asserting the invariant (e.g. `tests/test_catalog_papers_curator_isolation.py` for the papers/knowledge case).
+**Action**: `nx catalog show <tumbler>` to confirm; `nx catalog delete <tumbler>` (a soft tombstone, reversible until `purge-trash`; see Axis 2); re-index the source into the right collection. Add a regression test asserting the invariant (e.g. `tests/test_catalog_papers_curator_isolation.py` for the papers/knowledge case).
 
 ### Axis 2: self-marker noise
 
@@ -39,7 +39,7 @@ For each collection the audit flags:
 
 1. Open the collection's documents:
    ```
-   nx catalog list --collection <name>
+   nx catalog list --json -n 100000 | jq '.[] | select(.physical_collection=="<name>")'
    ```
 2. Check the home of each: count distinct `source_uri` after collapsing DEVONthink UUIDs (per `nexus-n3md` the `_DEVONTHINK_HOME_KEY` sentinel does this) and excluding the empty-URI bucket.
 3. If any document has `chunk_count=0` AND empty `source_uri`: axis 2, delete it.

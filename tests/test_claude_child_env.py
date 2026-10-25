@@ -142,3 +142,35 @@ def test_existing_token_wins_and_logs_nothing() -> None:
     with capture_logs() as logs:
         apply_harness_oauth_grant(base)
     assert logs == []
+
+
+def test_the_openai_compat_key_never_reaches_a_claude_child() -> None:
+    # Every claude launch site (dispatch and the aspect extractor's isolated
+    # runner) builds its env through this helper (nexus-2k66t.3).
+    out = apply_harness_oauth_grant({"NX_LLM_OPENAI_API_KEY": "fake-openai-key", "PATH": "/bin"})
+    assert "NX_LLM_OPENAI_API_KEY" not in out
+    assert out["PATH"] == "/bin"
+
+
+def test_the_aspect_extractors_claude_child_gets_no_openai_compat_key(monkeypatch) -> None:
+    import nexus.aspect_extractor as ax
+    from tests._module_seam import setattr_in
+
+    captured: dict = {}
+
+    class _Reaped:
+        args = ["python"]
+        returncode = 0
+
+        def communicate(self, *a, **k):
+            return ("", "")
+
+    def _spy_popen(argv, **kw):
+        captured.update(kw.get("env") or {})
+        return _Reaped()
+
+    monkeypatch.setenv("NX_LLM_OPENAI_API_KEY", "fake-openai-key")
+    setattr_in(monkeypatch, ax, "subprocess.Popen", _spy_popen)
+    ax._run_claude_isolated("x", timeout=1, _argv=["python", "-c", "pass"])
+    assert captured, "the spawn was not reached"
+    assert "NX_LLM_OPENAI_API_KEY" not in captured

@@ -3139,6 +3139,20 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         # own monkeypatch, which (per the ordering contract documented
         # above) lands after this delenv and wins.
         "NX_MINT_TOKEN",
+        # nexus-2k66t.3: the LLM backend override. An exported shell value
+        # (NX_LLM_BACKEND=anthropic) would make every claude_dispatch in the
+        # suite raise or reroute. Tests that want it setenv it themselves.
+        "NX_LLM_BACKEND",
+        # nexus-2k66t.3 P2: every other input of backend selection and of the
+        # direct backends. An exported ANTHROPIC_API_KEY would make a box with no
+        # claude on PATH "have a backend" and flip every availability probe; the
+        # openai_compat endpoint and the two limits would redirect or reshape calls.
+        "ANTHROPIC_API_KEY",
+        "NX_LLM_OPENAI_API_KEY",
+        "NX_LLM_OPENAI_BASE_URL",
+        "NX_LLM_OPENAI_MODEL",
+        "NX_LLM_MAX_TOKENS",
+        "NX_LLM_MAX_CONCURRENCY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -3817,7 +3831,7 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # AuthenticationError). Their mode declaration is the requires-key
     # gating plus the `keyed_local_voyage` fixture (local mode, a Voyage
     # local.embed_model). Since nexus-8errq the local-service gate deselects
-    # them (`cloud_mode` marker) and tests/e2e/dual-embedder-gate.sh runs
+    # them (`keyed_voyage` marker) and tests/e2e/dual-embedder-gate.sh runs
     # them on a keyed, Voyage-profile engine substrate. A documented,
     # permanent floor, not a burn-down target.
     "tests/test_integration.py::test_voyage_code3_index_and_query",

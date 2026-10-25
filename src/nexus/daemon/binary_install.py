@@ -50,6 +50,7 @@ import structlog
 from nexus._winsec import grant_user_tree_access
 from nexus.daemon.binary_lifecycle import (
     WINDOWS_ENGINE_EXE,  # noqa: F401 - part of this module's asset contract, read by the Windows release leg's tests
+    WINDOWS_OPTIONAL_RUNTIME_DLLS,
     WINDOWS_RUNTIME_DLLS,
     well_known_binary_path,
 )
@@ -758,6 +759,7 @@ def _place_engine_archive(
     exe_dest: Path,
     *,
     support_names: tuple[str, ...] = WINDOWS_RUNTIME_DLLS,
+    optional_names: tuple[str, ...] | None = None,
     platform: str | None = None,
     guard: AbstractContextManager[object] | None = None,
 ) -> dict:
@@ -783,9 +785,16 @@ def _place_engine_archive(
     hashing and extracting the ~190 MB archive happen before it, with the
     service still running (nexus-f9bgu.49). Returns the receipt fields
     ``installed_sha256`` (exe), ``support_files`` (DLL digests) and ``layout``.
+
+    *optional_names* (default: :data:`WINDOWS_OPTIONAL_RUNTIME_DLLS` when there are
+    *support_names*, none otherwise) are placed when the archive carries them and skipped
+    when it does not, so an older pinned archive keeps installing (nexus-vyy65). A placed
+    one is recorded in ``support_files`` and verified like the rest.
     """
     exe_name = exe_dest.name
     required = (exe_name, *support_names)
+    if optional_names is None:
+        optional_names = WINDOWS_OPTIONAL_RUNTIME_DLLS if support_names else ()
     exe_dest.parent.mkdir(parents=True, exist_ok=True)
     _grant_user_ace(exe_dest.parent, platform)
     stage = Path(tempfile.mkdtemp(dir=exe_dest.parent, prefix=".nx_stage_"))
@@ -817,7 +826,7 @@ def _place_engine_archive(
                             f"unsafe archive: duplicate member {name!r}"
                         )
                     seen.add(name)
-                    if name not in required:
+                    if name not in required and name not in optional_names:
                         _log.debug("service_binary_archive_extra_member_ignored", member=name)
                         continue
                     src = tf.extractfile(member)
@@ -843,10 +852,11 @@ def _place_engine_archive(
                 f"{', '.join(missing)}; not installing."
             )
 
+        placed_optional = tuple(n for n in optional_names if n in digests)
         os.chmod(stage / exe_name, 0o755)
         with guard if guard is not None else contextlib.nullcontext():
             place_set_with_rollback(
-                stage, exe_dest.parent, (*support_names, exe_name),
+                stage, exe_dest.parent, (*support_names, *placed_optional, exe_name),
                 platform=platform,
             )
     finally:
@@ -855,7 +865,7 @@ def _place_engine_archive(
     return {
         "layout": "archive",
         "installed_sha256": digests[exe_name],
-        "support_files": {name: digests[name] for name in support_names},
+        "support_files": {name: digests[name] for name in (*support_names, *placed_optional)},
     }
 
 
@@ -1029,8 +1039,16 @@ class VcRuntimeResult:
         return self.status != "failed"
 
 
-def _extract_vc_runtime(archive: Path, dest_dir: Path, names: tuple[str, ...]) -> dict[str, str]:
-    """Copy exactly *names* out of the verified PG-bundle *archive* into *dest_dir*.
+def _extract_vc_runtime(
+    archive: Path, dest_dir: Path, names: tuple[str, ...], optional: tuple[str, ...] = (),
+) -> dict[str, str]:
+    """Copy exactly *names* (and any of *optional* the archive carries) out of the
+    verified PG-bundle *archive* into *dest_dir*.
+
+    *optional* names are copied when present and left out when not: a bundle from an
+    engine release before the one that ships ``msvcp140_atomic_wait.dll`` (nexus-vyy65)
+    is still a valid source for the base pair. The caller reads which came back from the
+    returned digests.
 
     Members stream out of the tar (no ``extractall``): a member's name is only
     compared against ``bundle/bin/<name>`` and never reaches the filesystem, and
@@ -1039,7 +1057,7 @@ def _extract_vc_runtime(archive: Path, dest_dir: Path, names: tuple[str, ...]) -
     DLL. Returns ``{name: sha256}``; raises :class:`BinaryVerificationError` when
     the archive is unreadable or lacks a name.
     """
-    wanted = {f"{_PG_BUNDLE_BIN_PREFIX}{n}": n for n in names}
+    wanted = {f"{_PG_BUNDLE_BIN_PREFIX}{n}": n for n in (*names, *optional)}
     digests: dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="nx_vcrt_") as td:
         stage = Path(td)
@@ -1071,9 +1089,127 @@ def _extract_vc_runtime(archive: Path, dest_dir: Path, names: tuple[str, ...]) -
                 f"PG bundle {archive.name} has no {_PG_BUNDLE_BIN_PREFIX}"
                 f"{', '.join(missing)}; not installing."
             )
-        for name in names:
+        for name in (*names, *(n for n in optional if n in digests)):
             _atomic_copy(stage / name, dest_dir / name, executable=False)
     return digests
+
+
+#: Provenance key: the pinned engine tag whose PG bundle was last read for the PDF-only
+#: DLLs (:data:`nexus._vcrt.PDF_ONLY_DLLS`), whether or not it carried them. An older
+#: bundle without the DLL is therefore fetched once per tag, not on every ``nx init`` /
+#: ``nx upgrade --auto``; a new pinned tag rechecks (nexus-vyy65).
+_PDF_DLL_CHECKED_KEY = "pdf_dll_checked_tag"
+
+
+def _activate_vc_runtime_dirs(config_dir: Path, platform: str | None, system_dir: str | None) -> None:
+    """Put ``<config>/vcrt`` (and any other qualifying app-local directory) on THIS
+    process's DLL search path. Later processes pick it up at import regardless."""
+    try:
+        import nexus  # noqa: PLC0415 - the DLL search path of THIS process
+
+        nexus._add_vc_runtime_dirs(platform=platform, config_dir=str(config_dir), system_dir=system_dir)
+    except Exception as exc:  # noqa: BLE001 - later processes pick it up at import regardless
+        _log.debug("vc_runtime_activate_failed", error=str(exc))
+
+
+def _read_vcrt_sidecar(dest_dir: Path) -> dict:
+    try:
+        data = json.loads((dest_dir / _VCRT_SIDECAR_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _top_up_pdf_runtime(
+    config_dir: Path,
+    present: VcRuntimeResult,
+    *,
+    platform: str | None,
+    system_dir: str | None,
+    tag: str | None,
+    installed_by: str,
+    checker: _SignatureChecker | None,
+    download_dir: Path | None,
+    failure_backoff_s: float,
+    fetch: Callable[[str, str, Path, _SignatureChecker | None], tuple[Path, str, str]] | None,
+) -> VcRuntimeResult:
+    """The base pair is reachable (*present*) but ``msvcp140_atomic_wait.dll`` is not
+    beside it (nexus-vyy65): fetch the pinned PG bundle and, when it carries the DLL, place
+    the PDF stack's whole set that ``<config>/vcrt`` lacks, so an engine release that
+    carries the DLL ends the need for the redistributable on every mode.
+
+    Only files ``<config>/vcrt`` does not already hold are written: a base-pair DLL
+    already there may be loaded by this very process, and replacing a loaded DLL fails on
+    Windows. The tag read is recorded in the vcrt provenance whether or not the bundle had
+    the DLL. Returns *present* when there is nothing to do (tag already checked, recent
+    failure under a backoff, no pinned tag, bundle without the DLL), ``provisioned`` when
+    the DLL was placed, ``failed`` when the fetch or placement failed. Never raises."""
+    from nexus import _vcrt  # noqa: PLC0415 - cheap; keeps this module's import graph unchanged
+
+    dest_dir = config_dir / _vcrt.VCRT_SUBDIR
+    sentinel = config_dir / _VCRT_FAILED_SENTINEL
+    placed: dict[str, str] = {}
+    try:
+        tag = tag if tag is not None else resolve_service_tag()
+        if not tag:
+            return present
+        _validate_tag(tag)
+        sidecar = _read_vcrt_sidecar(dest_dir)
+        if sidecar.get(_PDF_DLL_CHECKED_KEY) == tag:
+            return present
+        if failure_backoff_s > 0:
+            try:
+                age = time.time() - sentinel.stat().st_mtime
+            except OSError:
+                age = None
+            if age is not None and age < failure_backoff_s:
+                return present
+        name = pg_bundle_asset_name(_WINDOWS_PLATFORM_TAG)
+        from nexus._winsec import make_user_dir  # noqa: PLC0415 - deferred, Windows ACL helper
+
+        make_user_dir(dest_dir)
+        with tempfile.TemporaryDirectory(
+            dir=str(download_dir) if download_dir else None, prefix="nx_vcrt_dl_"
+        ) as td:
+            asset, digest, asset_url = (fetch or _fetch_verified)(tag, name, Path(td), checker)
+            stage = Path(td) / "stage"
+            stage.mkdir()
+            digests = _extract_vc_runtime(
+                asset, stage, _vcrt.VC_RUNTIME_DLLS, optional=_vcrt.PDF_ONLY_DLLS,
+            )
+            if all(n in digests for n in _vcrt.PDF_ONLY_DLLS):
+                for n in _vcrt.PDF_STACK_DLLS:
+                    if not (dest_dir / n).is_file():
+                        _atomic_copy(stage / n, dest_dir / n, executable=False)
+                        placed[n] = digests[n]
+        if not sidecar.get("tag"):
+            sidecar = _provenance(tag, name, digest, asset_url, installed_by)
+        sidecar["dlls"] = {**(sidecar.get("dlls") or {}), **placed}
+        sidecar[_PDF_DLL_CHECKED_KEY] = tag
+        try:
+            _atomic_write_json(dest_dir / _VCRT_SIDECAR_NAME, sidecar)
+        except OSError as exc:  # informational, like the other sidecars
+            _log.warning("vc_runtime_sidecar_write_failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - the contract: never raise to the caller
+        _log.warning("vc_runtime_topup_failed", error_type=type(exc).__name__, error=str(exc))
+        with contextlib.suppress(OSError):
+            sentinel.touch()
+        return VcRuntimeResult(
+            "failed",
+            f"{', '.join(_vcrt.PDF_ONLY_DLLS)} (PDF support needs it) could not be placed: "
+            f"{type(exc).__name__}: {exc}",
+        )
+    with contextlib.suppress(OSError):
+        sentinel.unlink(missing_ok=True)
+    if not placed:
+        # Not an error: the engine release this build pins predates the one that ships it.
+        _log.info("vc_runtime_topup_bundle_lacks_dll", tag=tag, dlls=list(_vcrt.PDF_ONLY_DLLS))
+        return present
+    _activate_vc_runtime_dirs(config_dir, platform, system_dir)
+    _log.info("vc_runtime_topped_up", dest=str(dest_dir), tag=tag, placed=sorted(placed))
+    return VcRuntimeResult(
+        "provisioned", f"{', '.join(placed)} placed in {dest_dir} (PDF support needs it)", dest_dir,
+    )
 
 
 def ensure_vc_runtime(
@@ -1093,9 +1229,14 @@ def ensure_vc_runtime(
 
     Does nothing off Windows, when the system has ``msvcp140.dll`` and
     ``msvcp140_1.dll``, or when the engine dir, the PG bundle's ``bin`` or
-    ``<config>/vcrt`` already holds both. Otherwise it downloads the PG bundle
+    ``<config>/vcrt`` already holds both, with one exception: the PDF stack also needs
+    ``msvcp140_atomic_wait.dll`` (nexus-vyy65), and a box that has the base pair but not
+    that DLL in System32 or together in one app-local directory gets it topped up into
+    ``<config>/vcrt`` from the pinned bundle (:func:`_top_up_pdf_runtime`), at most once per
+    pinned engine tag. Otherwise it downloads the PG bundle
     asset for the pinned engine tag through the same sha256 + sigstore gates
-    :func:`install_pg_bundle` uses, and copies ONLY those two DLLs into
+    :func:`install_pg_bundle` uses, and copies ONLY those two DLLs, plus
+    ``msvcp140_atomic_wait.dll`` when that bundle carries it, into
     ``<config_dir>/vcrt`` (PostgreSQL is not provisioned or started). The bundle
     is the signed asset Sam's licensing reading covers (app-local, unmodified).
 
@@ -1115,10 +1256,23 @@ def ensure_vc_runtime(
         kind, where = _vcrt.runtime_source(platform, str(config_dir), system_dir)
         if kind == _vcrt.NOT_APPLICABLE:
             return VcRuntimeResult("not_applicable")
-        if kind == _vcrt.SYSTEM:
-            return VcRuntimeResult("present_system", f"found in {where}", Path(where) if where else None)
-        if kind == _vcrt.APP_LOCAL:
-            return VcRuntimeResult("present_app_local", f"found in {where}", Path(where) if where else None)
+        if kind in (_vcrt.SYSTEM, _vcrt.APP_LOCAL):
+            present = VcRuntimeResult(
+                "present_system" if kind == _vcrt.SYSTEM else "present_app_local",
+                f"found in {where}",
+                Path(where) if where else None,
+            )
+            pdf_kind, _pdf_where = _vcrt.runtime_source(
+                platform, str(config_dir), system_dir, _vcrt.PDF_STACK_DLLS,
+            )
+            if pdf_kind != _vcrt.MISSING:
+                return present
+            return _top_up_pdf_runtime(
+                config_dir, present,
+                platform=platform, system_dir=system_dir, tag=tag, installed_by=installed_by,
+                checker=checker, download_dir=download_dir,
+                failure_backoff_s=failure_backoff_s, fetch=fetch,
+            )
 
         sentinel = config_dir / _VCRT_FAILED_SENTINEL
         if failure_backoff_s > 0:
@@ -1143,9 +1297,12 @@ def ensure_vc_runtime(
             dir=str(download_dir) if download_dir else None, prefix="nx_vcrt_dl_"
         ) as td:
             asset, digest, asset_url = (fetch or _fetch_verified)(tag, name, Path(td), checker)
-            digests = _extract_vc_runtime(asset, dest_dir, _vcrt.VC_RUNTIME_DLLS)
+            digests = _extract_vc_runtime(
+                asset, dest_dir, _vcrt.VC_RUNTIME_DLLS, optional=_vcrt.PDF_ONLY_DLLS,
+            )
         provenance = _provenance(tag, name, digest, asset_url, installed_by)
         provenance["dlls"] = digests
+        provenance[_PDF_DLL_CHECKED_KEY] = tag  # this bundle was read: no top-up fetch for this tag
         try:
             _atomic_write_json(dest_dir / _VCRT_SIDECAR_NAME, provenance)
         except OSError as exc:  # informational, like the engine and bundle sidecars
@@ -1158,11 +1315,13 @@ def ensure_vc_runtime(
 
     with contextlib.suppress(OSError):
         (config_dir / _VCRT_FAILED_SENTINEL).unlink(missing_ok=True)
-    try:
-        import nexus  # noqa: PLC0415 - the DLL search path of THIS process
-
-        nexus._add_vc_runtime_dirs(platform=platform, config_dir=str(config_dir), system_dir=system_dir)
-    except Exception as exc:  # noqa: BLE001 - later processes pick it up at import regardless
-        _log.debug("vc_runtime_activate_failed", error=str(exc))
+    _activate_vc_runtime_dirs(config_dir, platform, system_dir)
     _log.info("vc_runtime_provisioned", dest=str(dest_dir), tag=tag, sha256=digest[:12])
-    return VcRuntimeResult("provisioned", f"{', '.join(_vcrt.VC_RUNTIME_DLLS)} placed in {dest_dir}", dest_dir)
+    placed = [n for n in (*_vcrt.VC_RUNTIME_DLLS, *_vcrt.PDF_ONLY_DLLS) if n in digests]
+    absent = [n for n in _vcrt.PDF_ONLY_DLLS if n not in digests]
+    detail = f"{', '.join(placed)} placed in {dest_dir}"
+    if absent:
+        # Not an error: the engine release this build pins predates the one that ships it.
+        # The base pair is enough for everything but the PDF stack (nexus-vyy65).
+        detail += f"; {', '.join(absent)} was not in that bundle (PDF support needs it or Microsoft's redistributable)"
+    return VcRuntimeResult("provisioned", detail, dest_dir)

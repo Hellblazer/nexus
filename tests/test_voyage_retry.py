@@ -169,6 +169,23 @@ def test_retry_accumulator_tracks_chroma_backoff_seconds() -> None:
     reset_retry_stats()
 
 
+def test_retry_summary_labels_vector_writes_not_chroma(capsys) -> None:
+    """The vector-write leg is labelled for what it is (the T3 vector store),
+    not by the retired chroma substrate."""
+    from nexus.commands._helpers import emit_retry_summary
+    from nexus.retry import _add_vector_retry, reset_retry_stats
+
+    reset_retry_stats()
+    _add_vector_retry(3.0)
+    try:
+        emit_retry_summary()
+    finally:
+        reset_retry_stats()
+    err = capsys.readouterr().err
+    assert "vector store 3.0s over 1 retries" in err
+    assert "chroma" not in err.lower()
+
+
 def test_retry_accumulator_reset_zeros_all_counters() -> None:
     from nexus.retry import (
         _add_vector_retry,

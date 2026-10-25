@@ -51,6 +51,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -399,8 +400,21 @@ def _off_cwd(argv: list[str], platform: str | None = None) -> list[str]:
     raise FileNotFoundError(f"{argv[0]}: not found on PATH outside the working directory")
 
 
-def _run(argv: list[str], run, what: str) -> str:
-    """Run one command; return its stdout, or raise with what it said."""
+#: Seconds of silence after which a progress-mode build prints a heartbeat line
+#: (and between repeats). uv writes no progress when its stderr is a pipe, so a
+#: multi-minute download would otherwise leave the operator facing a hang.
+HEARTBEAT_S: float = 20.0
+
+
+def _run(argv: list[str], run, what: str, *, progress: bool = False) -> str:
+    """Run one command; return its stdout, or raise with what it said.
+
+    With *progress* (and the real ``subprocess``, not the *run* test seam) the
+    command's stderr is written through to this process's stderr as it arrives
+    and a heartbeat line is printed after :data:`HEARTBEAT_S` seconds of
+    silence, instead of capturing everything until the command exits
+    (nexus-2k66t.4.7). The failure text is read from the same captured output
+    either way."""
     # utf-8 with replacement, not ``text=True``: that decodes with the console
     # code page on Windows, and uv prints non-ASCII progress glyphs; a
     # UnicodeDecodeError out of the reader thread would replace the build's own
@@ -412,6 +426,11 @@ def _run(argv: list[str], run, what: str) -> str:
         # hides the call from the bounded-subprocess lint's AST scan.
         if run is not None:
             done = run(argv, capture_output=True, encoding="utf-8", errors="replace", check=False)
+        elif progress:
+            proc = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+            )
+            done = _stream_until_exit(proc, argv, what)
         else:
             done = subprocess.run(  # noqa: S603 -- fixed argv, no shell
                 argv, capture_output=True, encoding="utf-8", errors="replace", check=False,
@@ -427,6 +446,129 @@ def _run(argv: list[str], run, what: str) -> str:
         detail = (done.stderr or "").strip() or (done.stdout or "").strip()
         raise GenerationError(detail or f"{what} exited {done.returncode}")
     return done.stdout or ""
+
+
+#: Smallest wait between checks, and the tolerance when comparing a silence to
+#: :data:`HEARTBEAT_S`. Windows' monotonic clock ticks about every 15.6 ms, so a
+#: wait can return a tick early; without the tolerance that heartbeat slips a
+#: whole extra wait.
+_MIN_WAIT_S: float = 0.05
+_CLOCK_SLOP_S: float = 0.03
+
+
+def _write_stderr(text: str) -> None:
+    """Write *text* to this process's stderr, best effort. A closed pipe, a
+    ``ValueError`` from a closed file, or ``sys.stderr is None`` (a ``pythonw``
+    process has none) must not turn the build's own result into an error, or stop
+    the reader that keeps uv's pipe drained (nexus-2k66t.4.7)."""
+    try:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _kill_best_effort(proc: "subprocess.Popen[str]") -> None:
+    """Kill *proc* first, then wait a bounded time for it. The kill is already
+    sent when a second Ctrl-C lands in the wait, so that interrupt cannot leave
+    the child running. Grandchildren uv started are not reached."""
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except BaseException:  # noqa: BLE001 -- a second interrupt or a stuck wait; the kill was sent
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _stream_until_exit(
+    proc: "subprocess.Popen[str]", argv: list[str], what: str,
+) -> "subprocess.CompletedProcess[str]":
+    """Wait for *proc* while copying its stderr to ours and printing a heartbeat
+    line whenever it has been silent for :data:`HEARTBEAT_S`. Both pipes are
+    drained on threads so a full pipe cannot stall the child, whatever our own
+    stderr does. The child is killed if this raises (Ctrl-C included) and its
+    pipes are closed on every path. Returns what
+    ``subprocess.run(capture_output=True)`` would."""
+    out: list[str] = []
+    err: list[str] = []
+    last = [time.monotonic()]
+
+    def _pump(stream, sink: list[str], tee: bool) -> None:
+        try:
+            for chunk in iter(stream.readline, ""):
+                sink.append(chunk)
+                last[0] = time.monotonic()
+                if tee:
+                    _write_stderr(chunk)
+        except (OSError, ValueError):
+            pass  # the stream was closed under us: this pump is done
+
+    pumps = [
+        (threading.Thread(target=_pump, args=(proc.stdout, out, False), daemon=True), proc.stdout),
+        (threading.Thread(target=_pump, args=(proc.stderr, err, True), daemon=True), proc.stderr),
+    ]
+    for t, _ in pumps:
+        t.start()
+    started = time.monotonic()
+    try:
+        while True:
+            # Wait for what is LEFT of the silence window, not a fresh one: output
+            # that lands just after a check must not push the next heartbeat out
+            # by a whole window (silence would reach twice HEARTBEAT_S).
+            wait = max(_MIN_WAIT_S, HEARTBEAT_S - (time.monotonic() - last[0]))
+            try:
+                proc.wait(timeout=wait)
+                break
+            except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                if now - last[0] >= HEARTBEAT_S - _CLOCK_SLOP_S:
+                    _emit([
+                        f"install_generation: {what} still running ({int(now - started)}s elapsed); "
+                        "uv prints no progress when its output is not a terminal, so this line "
+                        "repeats while it works"
+                    ])
+                    last[0] = now
+    except BaseException:
+        _kill_best_effort(proc)
+        raise
+    finally:
+        try:
+            for t, _ in pumps:
+                t.join(timeout=5)
+        finally:
+            # Close a pipe only when its reader is done: closing one a thread is
+            # still blocked in (a grandchild holding it open) would block here.
+            for t, stream in pumps:
+                if not t.is_alive() and stream is not None:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+    return subprocess.CompletedProcess(argv, proc.returncode, "".join(out), "".join(err))
+
+
+#: Where a wheel's ``nexus/_install/constraints.txt`` lands in a venv:
+#: ``Lib/site-packages`` on Windows, ``lib/pythonX.Y/site-packages`` elsewhere.
+_SHIPPED_CONSTRAINTS_GLOBS = (
+    "Lib/site-packages/nexus/_install/constraints.txt",
+    "lib/python*/site-packages/nexus/_install/constraints.txt",
+)
+
+
+def _shipped_constraints(gen: Path) -> Path | None:
+    """The constraints file the package just installed into *gen* ships, or None
+    when it predates the file. Globbed, not asked of the venv's interpreter: the
+    layout is fixed and this must work before anything in the venv can run."""
+    for pattern in _SHIPPED_CONSTRAINTS_GLOBS:
+        for hit in sorted(gen.glob(pattern)):
+            if hit.is_file():
+                return hit
+    return None
 
 
 def _pyvenv_value(text: str, key: str) -> str:
@@ -456,7 +598,7 @@ def _absolute_directory_source(source: str, platform: str | None) -> str:
 def build_generation(
     source: str, *, version: str = "", extras=(), python_version: str = "3.12",
     constraints: str = "", tools: Path | None = None, run=None,
-    platform: str | None = None, now=None,
+    platform: str | None = None, now=None, progress: bool = False,
 ) -> Path:
     """Build ONE generation at ``<tools>/gen-<stamp>`` and write its receipt.
 
@@ -468,7 +610,9 @@ def build_generation(
     removes an unfinished tree is tidiness, not the guarantee.
 
     *run* replaces ``subprocess.run`` (a test seam, called with capture options)
-    and *now* the clock. Returns the generation directory.
+    and *now* the clock. *progress* (nexus-2k66t.4.7) streams uv's stderr to this
+    process's stderr and prints a heartbeat line while uv is silent, as the POSIX
+    build does for the on-demand PDF install. Returns the generation directory.
     """
     layout = _layout()
     if not source:
@@ -513,16 +657,47 @@ def build_generation(
         (gen / layout.BUILDING_MARKER_NAME).touch()
         _run(
             ["uv", "venv", "--allow-existing", "--python", python_version, str(gen)],
-            run, "uv venv",
+            run, "uv venv", progress=progress,
         )
         (gen / layout.BUILDING_MARKER_NAME).touch()  # each phase gets the full claim window
-        install = [
-            "uv", "pip", "install", "--python", str(layout.venv_python(gen, platform=platform)),
-            "--overrides", str(overrides),
-        ]
+        python = str(layout.venv_python(gen, platform=platform))
+        # What the receipt records about the lock (nexus-au0s3), the twin of
+        # install_generation.sh's CONSTRAINTS_STATE.
+        constraints_state = layout.CONSTRAINTS_NONE
+        if not constraints and os.environ.get("NX_INSTALL_UNPINNED") == "1":
+            constraints_state = layout.CONSTRAINTS_UNPINNED
+            # The opt-out (the twin of install_generation.sh's): resolve fresh,
+            # which is how an operator takes a transitive security fix ahead of
+            # a release. An explicit *constraints* file still wins. A WARNING
+            # line so `nx self install` and the console show it.
+            _emit([
+                "install_generation: WARNING: NX_INSTALL_UNPINNED=1 is set; this install is "
+                "not pinned to the release's uv.lock, its dependencies resolve fresh from "
+                "the package index"
+            ])
+        elif not constraints:
+            # nexus-2k66t.4.1, the twin of install_generation.sh: the constraints
+            # belong to the package being INSTALLED. Fetch it alone, read the
+            # constraints.txt it ships out of the new venv, then install with
+            # the dependencies under it. The file cannot come from the nexus
+            # running this code: on an upgrade that is the OLD release.
+            _run(["uv", "pip", "install", "--python", python, "--no-deps", spec], run, "uv pip install", progress=progress)
+            (gen / layout.BUILDING_MARKER_NAME).touch()
+            shipped = _shipped_constraints(gen)
+            if shipped is not None:
+                constraints = str(shipped)
+            else:
+                _emit([
+                    f"install_generation: WARNING: no nexus/_install/constraints.txt was found in the "
+                    f"installed {spec} package (a release that predates it, or an unexpected venv "
+                    "layout); its dependencies are resolved UNCONSTRAINED from the package index, "
+                    "so versions may differ from the release's uv.lock"
+                ])
+        install = ["uv", "pip", "install", "--python", python, "--overrides", str(overrides)]
         if constraints:
+            constraints_state = layout.CONSTRAINTS_APPLIED
             install += ["--constraints", constraints]
-        _run([*install, spec], run, "uv pip install")
+        _run([*install, spec], run, "uv pip install", progress=progress)
 
         cfg = (gen / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
         base_interpreter = _pyvenv_value(cfg, "home")
@@ -540,6 +715,7 @@ def build_generation(
         rendered = layout._cli_render_receipt(
             version, spec, kind, source, ",".join(extras_list), python_full,
             base_interpreter, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock)),
+            constraints_state,
         )
         tmp = gen / ".nexus-install.json.tmp"
         tmp.write_text(rendered + "\n", encoding="utf-8")
@@ -588,7 +764,7 @@ def uv_tool_dir(run=None) -> Path:
 
 def _emit(lines: list[str]) -> None:
     for line in lines:
-        sys.stderr.write(line + "\n")
+        _write_stderr(line + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -1062,7 +1238,8 @@ def migrate_legacy(
     legacy_venv: Path | str | None = None, tools: Path | None = None, run=None,
     ops: LinkOps | None = None, platform: str | None = None,
     store: UserPathStore | None = None, uv_bin: Path | str | None = None,
-    environ=None, on_path=None,
+    environ=None, on_path=None, progress: bool = False, verify=None,
+    without_pdf: bool = False,
 ) -> Path | None:
     """Converge a legacy ``uv tool install conexus`` tree onto the generation layout.
 
@@ -1074,7 +1251,13 @@ def migrate_legacy(
     (which deletes the tree every live holder is running from). A failure after
     the flip is finished by :func:`repair_layout`, not rebuilt.
 
-    *on_path* receives the :class:`PathResult`. Returns the new generation, or
+    *on_path* receives the :class:`PathResult`. *progress* is :func:`build_generation`'s
+    (nexus-2k66t.4.7). *verify* (nexus-lvvhm) is called with the built generation AFTER the
+    build and BEFORE the flip; whatever it raises propagates and ``current`` is untouched.
+    The caller is the one who knows which receipt reader matters: this module may be a
+    TARGET release's copy, older than the nx running it, and the steps after the flip are
+    read by that nx. *without_pdf* (nexus-vyy65) leaves the PDF stack out of the new generation
+    (the caller has said why: the machine cannot load it). Returns the new generation, or
     ``None`` when uv resolves and there is no legacy tree to migrate.
     """
     layout = _layout()
@@ -1091,10 +1274,19 @@ def migrate_legacy(
         raise GenerationError(f"could not create the generation root {root}: {exc}") from exc
 
     extras = legacy_extras(legacy)
+    # nexus-2k66t.4.2: a legacy uv tree predates the PDF split, so an existing
+    # install carries the stack forward (twin of migrate_legacy.sh).
+    if without_pdf:
+        extras = [e for e in extras if e != "pdf"]
+    elif "pdf" not in extras:
+        extras = sorted([*extras, "pdf"])
     gen = build_generation(
         source, version=version, extras=extras,
         python_version=python_version or "3.12", tools=root, run=run, platform=platform,
+        progress=progress,
     )
+    if verify is not None:
+        verify(gen)
     flip_current(gen, root, ops=ops, platform=platform)
     result = ensure_user_path(
         current_launcher_dir(root), uv_bin=uv_bin, store=store, environ=environ, run=run,

@@ -14,7 +14,8 @@ A  local        session start (state 6, the one question); the stand-in server a
                 the same entry gets the real server and one storage call succeeds.
 B  pruned       the generation A built, pruned the way ``uv`` prunes a managed CPython: session
                 start gives state 2; the stand-in says "installed but cannot start; setup repairs
-                it"; ``setup`` with mode ``cli-only`` builds a new generation beside the old one;
+                it"; ``setup`` with mode ``cli-only`` builds a new generation and the bootstrap reaps the
+                unstartable one it replaced (nexus-5kvjb: same version as the build, interpreter gone);
                 after reconnect the real server answers; the session start is one quiet line.
 C  legacy       a ``uv tool install conexus`` tree whose Python is pruned: the same, and the build
                 runs (``nx self install --bootstrap`` no longer calls that tree a complete install).
@@ -857,12 +858,15 @@ def journey_b_pruned_generation(box: Sandbox, proxy: RefusingProxy | None) -> No
         expect(conn.tools == SETUP_TOOL_NAMES, f"B: stand-in tools {sorted(conn.tools)}")
         expect(BROKEN_PHRASE in conn.instructions, "B: the instructions lack the statement")
         expect(BROKEN_PHRASE in answers[0] and "did not repair" in answers[0], f"B: setup_status over a stale done: {answers[0][:300]!r}")
-    with Step("B4 setup mode cli-only: builds a new generation beside the old one"):
+    with Step("B4 setup mode cli-only: builds a new generation; the pruned one it replaced is reaped"):
         follow_setup(box, "cli-only", autostart=False, budget_s=1800, stand_in="nexus-installed-cannot-start")
         after = generations(box.tools)
         new = [g for g in after if g.name not in before]
         expect(len(new) == 1, f"B: expected one new generation beside {sorted(before)}, found {[g.name for g in after]}")
-        expect(old.is_dir(), "B: the pruned generation was removed instead of left beside the new one")
+        # The bootstrap's reap (nexus-5kvjb) removes the outgoing current when it is the running version's
+        # leftover or cannot start; B1 pruned its Python and stopped the service, so nothing holds it.
+        expect(not old.exists(), "B: the pruned generation the bootstrap replaced was left on disk")
+        expect([g.name for g in after] == [new[0].name], f"B: expected only the new generation, found {[g.name for g in after]}")
         expect(Path(os.path.realpath(box.current())) == new[0].resolve(), "B: current does not name the new generation")  # type: ignore[arg-type]
         tree_wheel_is_installed(box, new[0])
         check_lockstep_marker(box)

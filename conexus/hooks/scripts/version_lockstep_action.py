@@ -21,6 +21,13 @@ Flow:
           the 5.6.2 local-search P0 -- never use them).
        b. ``nx upgrade``               (migrations only, RDR-076;
           idempotent + flock-serialized; does NOT touch the binary).
+          Started DETACHED by this script (nexus-qytet): an upgrade-time
+          rebuild (the PDF carry-forward, the installer rebuild rung, about
+          0.8 GB) outlasts any subprocess timeout, and a kill mid-build
+          wastes the download. PLAIN ``nx upgrade``, not ``--auto``: --auto
+          skips plugin convergence, the generated-agent and hooks refresh,
+          the repos.json migration, beads PRIME and the engine install, and
+          this action is where those run. See :func:`start_background_upgrade`.
   4. Marker on confirmed success only: re-read ``nx --version`` and write
      the marker iff it now equals the target. Any failure leaves the
      marker stale so the next session re-nudges and retries.
@@ -73,6 +80,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import IO
 
 # PATH-only lookup (finding A, nexus-f9bgu.36): on Windows a bare name is
 # searched in the cwd first, and this detached action inherits the project cwd.
@@ -111,7 +119,42 @@ def _env_int(name: str, default: int) -> int:
 # uv tool upgrade can be network-bound; it runs detached so a long wait is
 # harmless, but bound it. nx upgrade is migration-only and fast.
 _UV_TIMEOUT = _env_int("NX_LOCKSTEP_UV_TIMEOUT", 300)
+#: Step 3a's ``nx self install`` under the generation layout. A first install
+#: downloads about 0.8 GB, which a slow link does not finish in
+#: ``_UV_TIMEOUT``. It is bounded, not detached, because step 4 needs its
+#: result (the binary must be there to confirm the version). The action itself
+#: runs detached from the session (``version_lockstep_hook.dispatch_action``:
+#: Popen with ``start_new_session``), so a long wait blocks nothing. 1800 s is
+#: 0.8 GB at about 0.5 MB/s; beyond that the install is retried by the next
+#: session's nudge.
+_SELF_INSTALL_TIMEOUT = _env_int("NX_LOCKSTEP_SELF_INSTALL_TIMEOUT", 1800)
+#: The synchronous ``nx upgrade`` budget. Used only where the action needs the
+#: upgrade's output or its exit before it can go on: the ref-drift branch, and
+#: step 3's fallback when the detached child cannot be started. The normal
+#: step 3 no longer waits on ``nx upgrade`` (nexus-qytet).
 _NX_UPGRADE_TIMEOUT = _env_int("NX_LOCKSTEP_NX_TIMEOUT", 120)
+#: How long to wait for the detached ``nx upgrade`` before calling it started.
+#: A child that dies inside this window (an `nx` that rejects the invocation, a
+#: missing dependency) exits nonzero in well under a second; one still running
+#: after it is an upgrade in progress.
+_UPGRADE_START_WAIT_S = 2.0
+#: The child's log is rotated to ``<name>.1`` when a new child starts and finds
+#: it at this size.
+_UPGRADE_LOG_MAX_BYTES = 1024 * 1024
+#: Windows, decided once so a test can steer the spawn path without patching
+#: ``os.name`` (pathlib reads that on every ``Path()``).
+_IS_WINDOWS = os.name == "nt"
+#: Windows creation flags, by value (the constants exist only in
+#: ``subprocess`` on Windows). Same set, same reasons as
+#: ``nexus.hooks.upgrade_auto``: CREATE_NO_WINDOW rather than DETACHED_PROCESS
+#: (a console grandchild of a detached process, e.g. ``nx.exe``'s trampoline,
+#: would flash a visible window; the two are mutually exclusive),
+#: CREATE_NEW_PROCESS_GROUP so a Ctrl-C aimed at this action stays off the
+#: child, CREATE_BREAKAWAY_FROM_JOB so a kill-on-close job does not end it.
+#: Untested on a real Windows host: the flags are pinned by a recording Popen.
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_NO_WINDOW = 0x08000000
+_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 #: nexus-konsk: the sentinel ``version_lockstep_hook.py`` passes as the
 #: "target version" argv for a ref-drift-only dispatch. Same literal
 #: under the same name in both files (the hook cannot import this module
@@ -343,12 +386,31 @@ def satisfies(installed: str | None, target: str) -> bool:
     return inst >= tgt
 
 
+#: Standard output of the last :func:`run_cmd` that exited 0 (empty after a failure), so the caller
+#: can read a line the command printed. Only ``nx self install``'s PDF line is read from it.
+_last_stdout: str = ""
+
+#: The start of the line `nx self install` prints when it builds without PDF support because this
+#: Windows machine cannot load the stack (nexus-vyy65; src/nexus/pdf_stack.py, drop_pdf_on_runtime_gap).
+_PDF_SLIM_PREFIXES: tuple[str, ...] = ("PDF support will not be installed", "PDF support will NOT be installed")
+
+
+def pdf_slim_line(stdout: str) -> str | None:
+    """The slim-build line in *stdout*, or None."""
+    for line in stdout.splitlines():
+        if line.strip().startswith(_PDF_SLIM_PREFIXES):
+            return line.strip()
+    return None
+
+
 def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
     """Run a command; return True on exit 0, False otherwise. Never raises.
 
     ``cmd[0]`` is resolved off the cwd and spawned by absolute path: ``nx`` by
     the launcher's lookup (:func:`resolve_nx`), anything else on PATH alone. A
     name that does not resolve is a failed command, never a cwd lookup."""
+    global _last_stdout
+    _last_stdout = ""
     exe = resolve_nx() if cmd[0] == "nx" else which_off_cwd(cmd[0])
     if exe is None:
         debug(f"{cmd[0]} not found")
@@ -362,12 +424,152 @@ def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
         if DEBUG and result.stdout:
             debug(f"{cmd[0]} stdout: {result.stdout[:500]}")
         if result.returncode != 0:
-            debug(f"{' '.join(cmd)} exited {result.returncode}: {result.stderr[:500]}")
+            debug(f"{' '.join(cmd)} exited {result.returncode}: {result.stderr[-500:]}")
             return False
+        _last_stdout = result.stdout or ""
         return True
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"{' '.join(cmd)} raised: {exc}")
         return False
+
+
+def upgrade_log_path() -> Path:
+    """``<config>/logs/lockstep-upgrade.log``: the detached ``nx upgrade``'s stderr.
+
+    Its own file rather than ``upgrade-auto-child.log``: that one is rotated by
+    ``nexus.hooks.upgrade_auto`` when ITS child starts, and two writers rotating
+    one file lose lines. The config dir is the one the CLI uses
+    (:func:`_endpoint_resolve.default_config_dir`)."""
+    return _endpoint_resolve.default_config_dir() / "logs" / "lockstep-upgrade.log"
+
+
+def _open_upgrade_log() -> IO[bytes] | None:
+    """Open :func:`upgrade_log_path` for append (rotating at 1 MiB); None when it
+    cannot be opened, so a log problem never stops the upgrade."""
+    try:
+        path = upgrade_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.stat().st_size >= _UPGRADE_LOG_MAX_BYTES:
+                os.replace(path, path.with_name(path.name + ".1"))
+        except FileNotFoundError:
+            pass
+        return path.open("ab")
+    except (OSError, RuntimeError):
+        return None
+
+
+#: The filesystem root (the current drive's root on Windows): where a detached
+#: child starts, by the nexus-x3m8e rule (``nexus/util/stable_cwd.py``; this file
+#: cannot import nexus). A session's cwd is often a disposable worktree, and a
+#: child that outlives it would fail every ``os.getcwd()`` once it is deleted.
+_STABLE_CWD: str = os.path.abspath(os.sep)
+
+#: How the last :func:`start_background_upgrade` call ended: ``running`` (the
+#: child outlived the start window) or ``finished`` (it exited 0 inside it).
+_last_start_state: str = ""
+
+
+def _stable_child_env(env: dict[str, str]) -> dict[str, str]:
+    """*env* for a child started in :data:`_STABLE_CWD`: a relative
+    ``NEXUS_CONFIG_DIR`` made absolute while this cwd still names it, and
+    ``NEXUS_REPO_ROOT`` set to this cwd (``config.load_config`` reads it where
+    it used to read the cwd), unless already set or the cwd is gone."""
+    out = dict(env)
+    raw = out.get("NEXUS_CONFIG_DIR", "").strip()
+    if raw and not os.path.isabs(raw):
+        try:
+            out["NEXUS_CONFIG_DIR"] = os.path.abspath(raw)
+        except OSError:
+            pass
+    if not out.get("NEXUS_REPO_ROOT"):
+        try:
+            out["NEXUS_REPO_ROOT"] = os.getcwd()
+        except OSError:
+            pass
+    return out
+
+
+def _popen_detached(argv: list[str], env: dict[str, str], stderr: IO[bytes] | int) -> subprocess.Popen:
+    """Popen *argv* outside this action's session (POSIX) or process group and
+    job (Windows). Raises OSError when no attempt could start it."""
+    # Binary pipes only (null device and a file), so there is no text decoding
+    # to name an encoding for. The kwargs are spelled out at each call: the
+    # subprocess-encoding census refuses a Popen it cannot read.
+    if not _IS_WINDOWS:
+        return subprocess.Popen(  # noqa: S603 -- argv list, resolved binary, no shell
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+            close_fds=True, env=env, start_new_session=True, cwd=_STABLE_CWD,
+        )
+    base = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP
+    try:
+        return subprocess.Popen(  # noqa: S603
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+            close_fds=True, env=env, creationflags=base | _CREATE_BREAKAWAY_FROM_JOB, cwd=_STABLE_CWD,
+        )
+    except OSError:
+        # A job that forbids breakaway refuses the flag; start without it.
+        return subprocess.Popen(  # noqa: S603
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr,
+            close_fds=True, env=env, creationflags=base, cwd=_STABLE_CWD,
+        )
+
+
+def start_background_upgrade() -> int | None:
+    """Start plain ``nx upgrade`` DETACHED; return its pid, or None when it did not start.
+
+    nexus-qytet: step 3b used to wait on ``nx upgrade`` under a 120 s timeout.
+    An upgrade-time rebuild (about 0.8 GB) does not fit, and the timeout KILLED
+    it mid-build; only the next SessionStart's detached ``nx upgrade --auto``
+    retried it, from scratch.
+
+    The child is PLAIN ``nx upgrade``, not ``--auto`` (which the SessionStart
+    hook runs): ``--auto`` skips plugin convergence, the generated-agent and
+    hooks refresh, the repos.json migration, beads PRIME, the dimension
+    advisory and the engine install, and this action is where those run. The
+    child gets a session of its own, stdin and stdout on the null device and
+    stderr appended to :func:`upgrade_log_path`. It starts in the filesystem
+    root with ``NEXUS_REPO_ROOT`` naming this process's cwd (nexus-x3m8e: a
+    child that outlives a deleted worktree cwd would fail; the old synchronous
+    run was short-lived and kept the cwd). The fresh install's ``bin`` leads its
+    ``PATH``, so a box whose application ``PATH`` lacks the install does not run
+    the child's own ``nx`` subcommands from an older tree.
+
+    "Started" is checked: the child is waited on for
+    :data:`_UPGRADE_START_WAIT_S`, and one that has exited NONZERO by then (it
+    rejected the invocation, or crashed on import) is not started. A child that
+    exited 0 inside the window already finished, which counts. None on a missing
+    ``nx``, a Popen ``OSError`` or an immediate nonzero exit: the caller falls
+    back to the bounded synchronous run.
+    """
+    nx = resolve_nx()
+    if nx is None:
+        debug("nx not found; cannot start a detached upgrade")
+        return None
+    global _last_start_state
+    _last_start_state = ""
+    env = _stable_child_env(dict(os.environ))
+    env["PATH"] = os.path.dirname(nx) + os.pathsep + env.get("PATH", "")
+    log = _open_upgrade_log()
+    try:
+        try:
+            proc = _popen_detached([nx, "upgrade"], env, log if log is not None else subprocess.DEVNULL)
+        except OSError as exc:
+            debug(f"detached nx upgrade could not start: {exc}")
+            return None
+    finally:
+        if log is not None:
+            log.close()  # the child holds its own descriptor
+    try:
+        rc = proc.wait(timeout=_UPGRADE_START_WAIT_S)
+    except subprocess.TimeoutExpired:
+        _last_start_state = "running"
+        return proc.pid  # still running: an upgrade in progress
+    if rc != 0:
+        debug(f"detached nx upgrade exited {rc} at once; not started (see {upgrade_log_path()})")
+        return None
+    _last_start_state = "finished"
+    return proc.pid
 
 
 def write_marker(version: str) -> None:
@@ -386,7 +588,13 @@ def _run_nx_upgrade_for_ref_drift(timeout: int) -> None:
     philosophy is that a failed plugin reinstall never fails ``nx
     upgrade`` itself (the reason is printed instead), so this is a
     durable record of the outcome, not a gate. No CLI binary upgrade and
-    no marker write: ref drift is not a CLI-version fact."""
+    no marker write: ref drift is not a CLI-version fact.
+
+    Synchronous under :data:`_NX_UPGRADE_TIMEOUT` (120 s) on purpose: it runs
+    plugin convergence and parses three markers out of the output, which a
+    detached child cannot give it. KNOWN GAP (nexus-qytet): an upgrade-time
+    carry or installer rebuild that is owed at that moment is cut off by the
+    cap and retried by the next SessionStart's ``nx upgrade --auto``."""
     nx = resolve_nx()
     try:
         if nx is None:
@@ -507,11 +715,34 @@ def main(argv: list[str]) -> None:
             ["nx", "self", "install"] if generation
             else ["uv", "tool", "upgrade", "conexus"]
         )
-        if not run_cmd(upgrade_cmd, timeout=_UV_TIMEOUT):
+        # `nx self install` of a first ~0.8 GB generation gets the long
+        # budget; the legacy `uv tool upgrade` keeps the short one.
+        step_timeout = _SELF_INSTALL_TIMEOUT if generation else _UV_TIMEOUT
+        if not run_cmd(upgrade_cmd, timeout=step_timeout):
             debug("uv tool upgrade failed; leaving marker stale for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="uv_upgrade_failed")
             return
-        if not run_cmd(["nx", "upgrade"], timeout=_NX_UPGRADE_TIMEOUT):
+        # nexus-vyy65: this build runs detached and its output is shown only under NX_HOOK_DEBUG, so a
+        # build that left PDF support out (a Windows machine that cannot load the stack) would be silent.
+        # Always log the line it printed.
+        slim_line = pdf_slim_line(_last_stdout) if generation else None
+        if slim_line is not None:
+            log_event("lockstep_pdf_slim", target=target, line=slim_line)
+        # 3b. The migrations and any upgrade-time rebuild run DETACHED
+        #     (nexus-qytet): this step must not be the timeout that kills a
+        #     ~0.8 GB rebuild. Step 4 below confirms the BINARY (3a installed
+        #     it); the marker means "binary confirmed", NOT "nx upgrade
+        #     finished". A migration that fails or does not finish is retried
+        #     by the next SessionStart's `nx upgrade --auto`. "Started" is
+        #     checked (the child survived its first seconds); if it cannot be
+        #     started, fall back to the bounded synchronous run, as before.
+        child_pid = start_background_upgrade()
+        if child_pid is not None:
+            log_event(
+                "lockstep_upgrade_background", target=target, state=_last_start_state or "started",
+                pid=str(child_pid), log=str(upgrade_log_path()),
+            )
+        elif not run_cmd(["nx", "upgrade"], timeout=_NX_UPGRADE_TIMEOUT):
             debug("nx upgrade failed; leaving marker stale for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="nx_upgrade_failed")
             return
@@ -523,6 +754,7 @@ def main(argv: list[str]) -> None:
             log_event(
                 "lockstep_upgrade_result", target=target, outcome="success",
                 installed=str(after),
+                upgrade="detached" if child_pid is not None else "finished",
             )
         else:
             debug("version still below target after upgrade; leaving marker stale")

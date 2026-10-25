@@ -60,12 +60,14 @@ The question has four choices:
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 to 3.1 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 2.1 to 2.3 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 2.1 to 2.3 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. Besides Claude itself and git, `uv` is the one prerequisite of route two. Route two is described under "First run" below, and the commands that both routes run for you are under "Install by hand" at the end of that section.
+These sizes include PDF support (docling, MinerU and torch), which the setup tool installs by default. The setup tool's `slim` option leaves it out (about 0.25 GB less down on macOS, 0.37 GB on Linux; 0.85 GB less on disk on macOS, 1.3 GB on Linux), and the first PDF you index then fetches it. The sizes are measured on 7.85.0 on macOS and Linux (2026-10-24): the download is the wheels in the lock, the Python and, for Local, the service and its models; the sizes on disk are the install itself. Windows was not measured.
+
+`uv` also keeps a download cache, about 2.1 GB on Linux and 1.8 GB on macOS after a first install (an earlier 7.81.0 measurement found 4.8 GB on Windows). On Linux the cache and the install together measured about 2.2 GB, not 4.2 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. Besides Claude itself and git, `uv` is the one prerequisite of route two. Route two is described under "First run" below, and the commands that both routes run for you are under "Install by hand" at the end of that section.
 
 On first session start with the CLI installed, the plugin's SessionStart hook runs `nx upgrade --auto` (converging any pending migration) plus a preflight check. **It installs no daemon** — the T2 daemon it used to auto-install is retired (`nexus-i711w`). The storage service is provisioned by `nx init` and managed with `nx daemon service start|status|stop`.
 
@@ -77,7 +79,7 @@ The plugin installs the Nexus CLI only after you answer the question, and the pl
 
 - **The CLI is installed and `nx init` has run.** The two Nexus servers start and connect, and the session-start hooks run. This is the working state.
 - **The CLI is installed and `nx init` has not run.** The servers start, and every tool that needs the service reports that it cannot reach it. Run `nx init`.
-- **The CLI is not installed.** Nothing is installed until you answer. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`. `setup` installs only after the model has asked you and acted on your answer (`local`, `cloud`, `cli-only` or `not-now`; `cloud` opens a page in your browser where you type the managed service's address, token and tenant yourself); it starts a background process, downloads up to about 1.3 GB, and `setup_status` follows it. Without the plugin's setup process, or on a host that cannot run it, the tools answer with the commands below and install nothing. One session-start message tells the model that Nexus is not installed. In a Desktop conversation the hooks run in a cloud workspace and that message is not sent; the stand-in's tool descriptions say it there. Every other command hook that needs the CLI writes one line to its error stream and does nothing; the lockstep hook says nothing; the hook that calls a server tool when a subagent starts finds no such tool on the stand-in, which Claude Code records in the subagent's transcript and does not show. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
+- **The CLI is not installed.** Nothing is installed until you answer. Each Nexus server entry starts a stand-in that connects and offers two tools, `setup` and `setup_status`. `setup` installs only after the model has asked you and acted on your answer (`local`, `cloud`, `cli-only` or `not-now`; `cloud` opens a page in your browser where you type the managed service's address, token and tenant yourself); it starts a background process, downloads up to about 0.8 GB (0.9 GB on Linux) for the local choice, PDF support included, and `setup_status` follows it. Without the plugin's setup process, or on a host that cannot run it, the tools answer with the commands below and install nothing. One session-start message tells the model that Nexus is not installed. In a Desktop conversation the hooks run in a cloud workspace and that message is not sent; the stand-in's tool descriptions say it there. Every other command hook that needs the CLI writes one line to its error stream and does nothing; the lockstep hook says nothing; the hook that calls a server tool when a subagent starts finds no such tool on the stand-in, which Claude Code records in the subagent's transcript and does not show. The 17 `/conexus:*` commands that run `nx` fail with the shell's "command not found".
 
 When setup is done, in Claude Code reconnect the `nexus` server (`/mcp`, the server, Reconnect) or start a new session. In Claude Desktop quit the app fully and open it again: Desktop keeps a plugin's server running across conversations and has no Reconnect, so a new conversation still talks to the stand-in. `/conexus:setup` runs the same question again for a user who answered Not now.
 
@@ -88,7 +90,7 @@ The plugin's three local servers and all of its command hooks start through `uv`
 When a route fails, or when you want each step yourself, the install is three terminal commands, then a reconnect of the `nexus` server or a new session:
 
 ```bash
-uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
+uv tool install conexus --python 3.12
 nx self install
 nx init
 ```
@@ -132,13 +134,13 @@ Pre-requisite: [uv](https://docs.astral.sh/uv/) on host PATH.
 
 - macOS: `brew install uv`
 - Linux: `pipx install uv` or `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Windows (from conexus 7.72.0, RDR-224; full path in [Installing nexus on Windows](windows-install.md)): `winget install astral-sh.uv`. The bundle's launcher resolves `uv` through `PATHEXT` (to `uv.exe`). Windows has no `exec`, so the launcher runs the MCP server as a child on its own stdin and stdout handles, waits for it, exits with its exit code, and ends the server with it if the host kills the launcher (a Job Object). The service itself still comes from `nx init --service`, which works on native Windows x64 (tested from PyPI on a clean Windows 11 guest at conexus 7.72.1). The `.mcpb` bundle itself has not been walked end to end on Windows (nexus-ijue9.21), so treat this path as untested; Windows is not yet declared supported. Tracked in RDR-224.
+- Windows (from conexus 7.72.0, RDR-224; full path in [Installing nexus on Windows](windows-install.md)): `winget install astral-sh.uv`. The bundle's launcher resolves `uv` through `PATHEXT` (to `uv.exe`). Windows has no `exec`, so the launcher runs the MCP server as a child on its own stdin and stdout handles, waits for it, exits with its exit code, and ends the server with it if the host kills the launcher (a Job Object). The service itself comes from `nx init`, which works on native Windows x64 (tested from PyPI on a clean Windows 11 guest at conexus 7.72.1). The `.mcpb` bundle is not a working route on Windows ([Installing nexus on Windows](windows-install.md#5-claude-desktop-chat-and-cowork) § 5); Windows 11 x64 itself is supported, through the account plugin.
 
 Install:
 
 1. Download `conexus.mcpb` from the [latest GitHub release](https://github.com/Hellblazer/nexus/releases/latest).
 2. Double-click the file. Claude Desktop registers it under Settings → Connectors → Desktop as "Conexus". On Windows the double-click does nothing: the Claude Desktop package registers only the `claude:` protocol and no `.mcpb` file type, and the Customize → Plugins upload dialog accepts zips and hides `.mcpb` files (measured 2026-10-11, Claude Desktop 1.24012.9.0). No working way to install the bundle on Windows has been found, so use the account plugin (Surface 2) there.
-3. First launch: uv resolves Nexus's dependency stack (pydantic-core, tree-sitter, numpy, torch, onnxruntime, and friends — `chromadb` was removed from the dependency set at RDR-155 P4b). Cold install ~20s on a warm network; warm restarts ~5s. If the install lands inside PyPI's post-release propagation window (~10-25 min where the download index does not yet serve a just-published version — nexus-r433b), the bundle's bootstrap retries the resolution with backoff for ~15 min, logging `[conexus-mcpb] PyPI has not finished propagating…` to the extension's log each attempt, before giving up with a try-again-shortly message. `NX_MCPB_SKIP_RESOLVE_RETRY=1` disables the retry.
+3. First launch: uv resolves Nexus's dependency stack (pydantic-core, tree-sitter, numpy, onnxruntime, and friends — `chromadb` was removed from the dependency set at RDR-155 P4b). Cold install ~20s on a warm network; warm restarts ~5s; the first start with Include PDF support on (below) downloads the PDF stack too and takes longer. If the install lands inside PyPI's post-release propagation window (~10-25 min where the download index does not yet serve a just-published version — nexus-r433b), the bundle's bootstrap retries the resolution with backoff for ~15 min, logging `[conexus-mcpb] PyPI has not finished propagating…` to the extension's log each attempt, before giving up with a try-again-shortly message. `NX_MCPB_SKIP_RESOLVE_RETRY=1` (or `true`) disables the retry, and with it the dependency lock: the launch then hands off to `uv run` with no step left to fall back unpinned, so it installs unpinned (nexus-puzdu).
 4. **First launch installs and starts nothing else.** `nx-mcp` used to auto-install the T2 daemon here; that path retired with the daemon (`nexus-i711w`). The extension expects the storage service to already exist on the host — provision it once with `nx init`. Without it, tools that reach T2 or T3 fail with an unresolvable-endpoint error rather than silently starting anything.
 
 Tool names: `mcp__conexus__*` (no `plugin_` infix — this is the .mcpb namespace, distinct from the Claude Code plugin's).
@@ -197,13 +199,22 @@ The check is non-fatal: a network failure, timeout, or unreachable PyPI never bl
 
 ## Updating the Desktop Extension
 
-The `.mcpb` does **not** auto-update, and the account plugin (Surface 2) is the recommended Desktop route, because it runs your installed `nx` and installs the CLI for you; the plugin copy itself is upgraded by removing and re-adding the marketplace (see Surface 2). If you stay on the `.mcpb`, the steps below are the only update path. MCPB v0.4 has no update mechanism, and the extension's Python environment is pinned at install time: Claude Desktop builds a `uv` venv under `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.<id>.conexus/.venv` from the bundle's `pyproject.toml` (`conexus>=X.Y.Z`), and every launch runs `uv run` against **that existing venv**. `uv run` reuses the resolved venv rather than re-resolving against PyPI, so a newer published conexus is not picked up until the bundle is re-installed and the venv is rebuilt.
+The `.mcpb` does **not** auto-update, and the account plugin (Surface 2) is the recommended Desktop route, because it runs your installed `nx` and installs the CLI for you; the plugin copy itself is upgraded by removing and re-adding the marketplace (see Surface 2). If you stay on the `.mcpb`, the steps below are the only update path. MCPB v0.4 has no update mechanism, and the extension's Python environment is pinned at install time: Claude Desktop builds a `uv` venv under `~/Library/Application Support/Claude/Claude Extensions/local.mcpb.<id>.conexus/.venv` from the bundle's `pyproject.toml` (`conexus>=X.Y.Z`), and every launch runs `uv run` against **that existing venv**. `uv run` reuses the resolved venv rather than re-resolving against PyPI, so a newer published conexus is not picked up until the bundle is re-installed and the venv is rebuilt. The venv is built under the release's dependency lock: the bundle carries the release's `constraints.txt` (the file the wheel and the installers ship) and `bootstrap.py` writes it into the bundle's `pyproject.toml` before `uv sync`, so a transitive dependency published after the release cannot reach the extension. The bundle also pins `conexus` itself to the release it was built from. If the sync cannot resolve with the pins in force (any failure other than the post-release PyPI lag), the launcher removes them, logs that to the extension's log, and installs once without them rather than failing the start; a bundle packed without the file installs unpinned and logs that too. Every launch re-applies the pins, so an extension that fell back repeats the failed pinned resolve first.
+
+To opt out of the lock (resolve every dependency fresh; versions may then differ from the release's lock), use any one of:
+
+- **The extension's setting.** The extension's settings in Claude Desktop (Settings → Connectors → Desktop → Conexus) list "Install the newest dependencies (unpinned)". It reaches the launcher as `NX_MCPB_INSTALL_UNPINNED=true`. Restart the extension.
+- **An environment variable the app can see**: `NX_INSTALL_UNPINNED=1`, the variable the CLI installers read. Desktop does not inherit a shell's environment, so on macOS run `launchctl setenv NX_INSTALL_UNPINNED 1` and quit and reopen Claude Desktop; on Windows set a user environment variable (System Properties → Environment Variables) and restart Claude Desktop. Only `1` and `true` count.
+- **`NX_MCPB_SKIP_RESOLVE_RETRY=1`**, which also skips the PyPI-propagation retry (above).
+- **Delete `constraints.txt`** from the extension directory (`~/Library/Application Support/Claude/Claude Extensions/local.mcpb.<id>.conexus/` on macOS). The launcher then installs unpinned and logs that the file is missing.
+
+**PDF support is opt-in for the extension** (nexus-dzc61). The bundle installs bare `conexus`, so PDF indexing is off unless you turn on "Include PDF support" in the extension's settings (Settings → Connectors → Desktop → Conexus) and restart the extension. It reaches the launcher as `NX_MCPB_INCLUDE_PDF=true`, and `bootstrap.py` rewrites the bundle's requirement to `conexus[pdf]` before the sync: about 0.25 GB more to download and 0.85 GB more on disk on macOS (the CLI's measured figures; on hellmini on 2026-10-24 the extension's venv went from 791 MB to 1.7 GB). The model weights follow on first use (about 0.5 GB, plus 1.2 GB for the first PDF with formulas). Turning it off writes the bare requirement back, and the next start's sync removes the PDF packages (77 of them in that measurement); downloaded model weights and uv's download cache stay. The sizes are macOS figures: on Linux the bundle takes PyPI's torch, which is the CUDA build and several GB larger (the CLI installers choose the CPU build there; the extension does not). The extra is not declared in the bundle's `pyproject.toml`, because `uv sync` resolves every declared extra on every start: with the setting off, a start resolves exactly what it did before the setting existed. If the sync fails with PDF support on, the launcher logs it, reverts to the bare requirement, re-applies the release's lock and syncs once more, so a PDF-only failure does not stop the extension starting (a failure that bare would hit too, such as PyPI's post-release lag outlasting the retries, still does). With `NX_MCPB_SKIP_RESOLVE_RETRY=1` the launcher does not sync and leaves the requirement as the last start wrote it. The first start after turning the setting on downloads the PDF stack before the server answers; on a slow connection Claude Desktop may report that the extension failed to start, and restarting it continues from uv's download cache. With the setting off, or after a fallback, indexing a PDF stops before writing anything (exit 69) and names the setting. The release's resolve gate (`scripts/check_mcpb_resolve.py`) resolves both variants.
 
 So the update is a manual, idempotent re-install:
 
 1. **Download** the new `conexus.mcpb` from the [latest release](https://github.com/Hellblazer/nexus/releases/latest) (the same asset attached to every GitHub release alongside the wheel and sdist).
 2. **Double-click it** (or Claude Desktop → Settings → Connectors → Desktop → install). Claude Desktop replaces the existing "Conexus" extension in place; you do not need to uninstall first.
-3. **First launch resolves the new version.** `uv` rebuilds the venv from the new manifest's `conexus>=X.Y.Z` pin (~20s cold, ~5s warm), pulling the new conexus from PyPI. The stale-install warning stops firing once installed == latest.
+3. **First launch resolves the new version.** `uv` rebuilds the venv from the new manifest's `conexus>=X.Y.Z` pin (~20s cold, ~5s warm; longer with Include PDF support on), pulling the new conexus from PyPI. The stale-install warning stops firing once installed == latest.
 4. **Verify** (optional): the installed version is the `version` field in the extension's `manifest.json`, and the resolved package is `<ext>/.venv/bin/python -c "from importlib.metadata import version; print(version('conexus'))"`.
 
 What the update does **not** touch: the host storage service (`nexus-service` + Postgres), the T3 store, the catalog, and all stored data are owned by the OS / user account and shared across the CLI, the Claude Code plugin, and the Desktop extension. Re-installing the bundle swaps only the bundle files and its venv. The service is not restarted by an extension update.
@@ -286,51 +297,9 @@ The host-side substrate round-trip is regression-tested by `tests/test_cowork_sd
 
 Both directions resolving the sentinel confirms the bridge shares one T2 with the host. A failure on step 1 points at the SDK transport (the VM never reached the host service); a failure on step 2 points at write-attribution or a stale read in the shared substrate — start with `nx daemon service status` then `nx memory list -p _cowork_test`.
 
-### Minimum Viable Validation (RDR-126 P6) — REMOVED
+### Validation of the Desktop surface
 
-**Both halves are deleted.** There is no automated or manual MVV for the Desktop
-surface right now. Disposition `nexus-uvn3t`, after the T2 daemon retirement
-(`nexus-i711w` Stage 2 sub-stage B). Recorded here because a missing gate that
-nobody knows is missing is worse than a red one.
-
-**P6-A** (`scripts/p6-clean-run.sh`, automated, pre-release) drove this repo's
-`nx-mcp` in a sandboxed `$HOME` with a shimmed `launchctl`/`systemctl` and
-asserted that the first MCP tool call wrote a `com.nexus.t2` LaunchAgent and
-emitted the first-run banner. Neither happens: the MCP first-run install path is
-gone (tombstone in `src/nexus/mcp/_first_run.py`), and the banner it was the sole
-producer of has no production caller. Dead by construction, and nothing in CI ran
-it, so it would have failed first at a release cut, by hand.
-
-**P6-B** (`scripts/p6-desktop-profile.sh`, manual, post-release) stood up an
-isolated Claude Desktop profile (`--user-data-dir`) as a fresh-account stand-in
-and walked: install the `.mcpb` -> banner -> `memory_put`/`memory_get`
-round-trip -> `daemon_uninstall`. Every step but the last is now dead, and the
-last one should not run casually:
-
-- the banner step has no producer, as above;
-- the **round-trip cannot pass on a fresh install**. It was chosen precisely
-  because it was cheap and credential-free — the deleted P6-A said so outright,
-  "`memory_*` is pure T2/SQLite, so no Voyage/Chroma creds are needed". RDR-152
-  flipped the hard default SQLITE -> SERVICE, so `memory_put` now needs the
-  engine + Postgres. Verified on a virgin `HOME` with a scrubbed env:
-  `storage_backend_for("memory")` resolves SERVICE and the write fails
-  `ServiceEndpointUnresolvableError`, because no lease exists and MCP boot
-  starts nothing. It passes only on a box that already has a working install —
-  which is not a fresh-account journey;
-- `daemon_uninstall` is the one step that still does something, and it is a
-  **host-level teardown**: both autostart units (the storage-service unit, and
-  any legacy `com.nexus.t2` from a pre-retirement install), the engine-service +
-  Postgres stack, and the first-run marker. The isolated profile scopes Claude
-  Desktop, not nexus state.
-
-Re-establishing Desktop MVV means deciding what a post-daemon first run is
-supposed to DO before writing a harness that asserts it. The banner subsystem's
-own fate (RDR-126 §3) was decided at nexus-37jha: deleted outright, since it
-had been producer-less since the deletion above and nothing re-points it at a
-service-mode first-run event. Re-establishing a service-mode first-run banner
-is a new capability, not a restoration — file it separately if the
-Desktop/plugin-first onboarding story wants one. Writing a new gate against
-today's unspecified behaviour would recreate exactly the rot deleted here.
+No automated or manual end-to-end check of the Desktop surface exists right now. The two RDR-126 P6 scripts were deleted after the T2 daemon retired (nexus-uvn3t): both asserted a first-run install and banner that no longer happen. A new check has to start from what a first run does today, which is nothing beyond `nx init` having provisioned the service.
 
 ## Failure modes
 

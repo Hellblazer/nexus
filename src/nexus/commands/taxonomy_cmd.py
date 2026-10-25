@@ -1647,10 +1647,11 @@ def links_cmd(collection: str, refresh: bool) -> None:
 
 
 def _claude_available() -> bool:
-    """Check if claude CLI is on PATH."""
-    import shutil  # noqa: PLC0415 - branch-local; deferred to call time
+    """Whether an LLM backend can label topics: delegates to
+    :func:`nexus.operators.llm_backend.llm_backend_available` (nexus-2k66t.3)."""
+    from nexus.operators.llm_backend import llm_backend_available  # noqa: PLC0415 - deferred: keeps CLI startup light
 
-    return shutil.which("claude") is not None
+    return llm_backend_available()
 
 
 _LABEL_SCHEMA: dict = {
@@ -2602,7 +2603,10 @@ def relabel_topics(
 def label_cmd(collection: str, relabel_all: bool) -> None:
     """Generate human-readable topic labels using Claude."""
     if not _claude_available():
-        click.echo("claude CLI not found. Install Claude Code to use LLM labeling.")
+        click.echo(
+            "No LLM backend is available. Install Claude Code, or run "
+            "`nx config set anthropic_api_key <key>`, to use LLM labeling."
+        )
         return
 
     with _T2Database(_default_db_path(), client=_command_shared_t2_client()) as db:

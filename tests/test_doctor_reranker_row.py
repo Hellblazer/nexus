@@ -56,7 +56,7 @@ def test_an_unavailable_reranker_warns_names_it_and_points_at_the_remedy() -> No
     assert r.ok is False and r.warn is True
     assert "ms-marco-minilm-l6-v2" in r.detail and "files are absent" in r.detail and "without rerank" in r.detail
     assert not any("restart" in s for s in r.fix_suggestions)
-    assert any("nx init --service" in s for s in r.fix_suggestions)
+    assert any("nx init" in s and "--service" not in s for s in r.fix_suggestions)
 
 
 def test_an_unavailable_reranker_with_no_name_still_warns() -> None:

@@ -442,6 +442,72 @@ else
   bad "pre-upgrade T1 row $PRE_ID did NOT survive (got: $PRE_CONTENT)"
 fi
 
+# ── Stage 6: the generation the upgrade builds holds the wheel's lock ────────
+#    (nexus-2k66t.4.1). Stage 4 moved the package with a bare `uv pip install`,
+#    which no product code controls; what the PRODUCT does on an upgrade is
+#    `nx self install`, i.e. install_generation.sh. NOTE the scope: in the field the
+#    running nx supplies that script, so the upgrade INTO the release that adds the
+#    pin is built by the OLDER installer and is unpinned; only later upgrades run
+#    this release's. This leg runs the NEW package's installer ON PURPOSE (it
+#    proves that installer pins; it does not prove the first upgrade across the
+#    change is pinned). Run that
+#    same builder here, from the upgraded package, on the upgrade-target wheel,
+#    into a scratch generation root, and compare what it installed with the
+#    constraints.txt the wheel ships (tests/e2e/lib/lock_check.py, staged into
+#    lib/ by run.sh). Last of the legs so a ~400 MB dependency install cannot
+#    disturb the engine convergence it follows.
+say "Stage 6 — the upgrade's generation build installs the versions the wheel's lock names"
+if "$HOME/nxenv/bin/python" -c "import sys,zipfile; sys.exit(0 if 'nexus/_install/constraints.txt' in zipfile.ZipFile(sys.argv[1]).namelist() else 1)" "$WHEEL"; then
+  ok "the upgrade-target wheel ships nexus/_install/constraints.txt"
+  LOCK_INSTALL_DIR="$("$HOME/nxenv/bin/python" -c 'from nexus.commands.self_cmd import packaged_install_dir; print(packaged_install_dir())' 2>&1 | tail -1)"
+  LOCK_TOOLS="$HOME/lock-check-tools"
+  mkdir -p "$LOCK_TOOLS"
+  # nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default): the generation is built the
+  # way `nx self install` rebuilds an existing install and both one-line installers build a new
+  # one, with the pdf extra, so the pdf-only lock witness (opencv-python-headless) is checked
+  # too. NX_REHEARSE_SLIM=1 builds the slim shape instead (a bare `uv tool install`, the .mcpb
+  # bundle, --slim); the release gate's fresh-install MVV covers that shape on every run.
+  LOCK_EXTRAS=(--extras pdf)
+  LOCK_WITNESSES="onnxruntime pymupdf mcp opencv-python-headless"
+  if [ "${NX_REHEARSE_SLIM:-0}" = "1" ]; then
+    LOCK_EXTRAS=()
+    LOCK_WITNESSES="onnxruntime pymupdf mcp"
+  fi
+  LOCK_OUT="$(NX_TOOLS_DIR="$LOCK_TOOLS" bash "$LOCK_INSTALL_DIR/install_generation.sh" --source "$WHEEL" ${LOCK_EXTRAS[@]+"${LOCK_EXTRAS[@]}"} 2>"$HOME/lock-check-build.log")"
+  LOCK_RC=$?
+  LOCK_GEN="${LOCK_OUT##*$'\n'}"
+  if [ "$LOCK_RC" -ne 0 ] || [ ! -d "$LOCK_GEN" ]; then
+    tail -15 "$HOME/lock-check-build.log" | sed 's/^/       /'
+    bad "the generation build from the upgrade target failed (rc=$LOCK_RC)"
+  else
+    ok "generation built from the upgrade target: $LOCK_GEN"
+    LOCK_FILE=""
+    for _f in "$LOCK_GEN"/lib/python*/site-packages/nexus/_install/constraints.txt; do
+      if [ -f "$_f" ]; then LOCK_FILE="$_f"; break; fi
+    done
+    if [ -z "$LOCK_FILE" ]; then
+      bad "the built generation holds no constraints.txt"
+    else
+      # LOCK_WITNESSES is a space-separated list of distribution names; it is split on purpose.
+      # shellcheck disable=SC2086
+      LOCK_REPORT="$("$LOCK_GEN/bin/python" "$HOME/lib/lock_check.py" "$LOCK_FILE" $LOCK_WITNESSES 2>&1)"
+      LOCK_CHECK_RC=$?
+      printf '%s\n' "$LOCK_REPORT" | sed 's/^/       /'
+      if [ "$LOCK_CHECK_RC" -eq 0 ]; then
+        ok "the generation's installed versions equal the wheel's lock ($LOCK_WITNESSES and every other pin that applies; the build asks for ${LOCK_EXTRAS[*]:-no extras})"
+      else
+        bad "the generation's installed versions DIFFER from the wheel's lock"
+      fi
+    fi
+  fi
+elif [ -n "$TARGET_RELEASE" ]; then
+  # A published release that predates the pin ships no file; naming that is
+  # accurate, failing the rehearsal of an older release is not.
+  note "published conexus $TARGET_RELEASE ships no constraints.txt (predates nexus-2k66t.4.1); lock leg not applicable"
+else
+  bad "the working-tree wheel ships no nexus/_install/constraints.txt: the installer has nothing to pin with"
+fi
+
 # nexus-wo6sc: the heartbeat census runs on EVERY exit path, pass included.
 # The supervisor log dies with the container, so a passing run that does not
 # report here reports nothing — and "no stall lines in the leg log" then

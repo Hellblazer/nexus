@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "conexus",
   "display_name": "Conexus",
-  "version": "7.85.0",
+  "version": "7.86.0",
   "description": "Three-tier semantic memory + knowledge management for Claude Desktop chat. Persistent code/docs/RDR indexing, plan-centric retrieval via nx_answer, and a Postgres-backed storage substrate that interoperates with the Claude Code plugin and the nx CLI on the same host.",
   "long_description": "Conexus is the Claude Desktop Extension form of Nexus. Same MCP tools and storage tiers as the Claude Code plugin and the nx CLI, packaged as a .mcpb bundle that uv resolves on first install. Persistent state is served by the storage service (Postgres), which `nx init` provisions — there is no separate daemon to install or talk to. State is shared with any other consumer on the same host (Claude Code plugin, nx CLI, Cowork via SDK bridge).",
   "author": {
@@ -40,7 +40,27 @@
         ">=3.12",
         "python",
         "src/bootstrap.py"
-      ]
+      ],
+      "env": {
+        "NX_MCPB_INSTALL_UNPINNED": "${user_config.install_unpinned}",
+        "NX_MCPB_INCLUDE_PDF": "${user_config.include_pdf}"
+      }
+    }
+  },
+  "user_config": {
+    "install_unpinned": {
+      "type": "boolean",
+      "title": "Install the newest dependencies (unpinned)",
+      "description": "Off by default: the extension installs the dependency versions this release was tested with. Turn on to resolve every dependency fresh from the package index instead (versions may differ from the release's lock). Takes effect the next time the extension starts.",
+      "required": false,
+      "default": false
+    },
+    "include_pdf": {
+      "type": "boolean",
+      "title": "Include PDF support",
+      "description": "Off by default. Turn on to install PDF indexing (docling, MinerU and torch) into the extension: about 0.25 GB more to download and 0.85 GB more on disk on macOS, plus about 0.5 GB of model weights on first use. Turning it off removes the packages; downloaded model weights stay in their cache. Takes effect the next time the extension starts, which takes longer that first time.",
+      "required": false,
+      "default": false
     }
   },
   "tools": [

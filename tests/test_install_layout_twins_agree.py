@@ -210,6 +210,7 @@ _CONSTANT_TWINS = {
     "NX_RECEIPT_NAME": "RECEIPT_NAME",
     "NX_BUILDING_MARKER_NAME": "BUILDING_MARKER_NAME",
     "NX_RECEIPT_SCHEMA": "RECEIPT_SCHEMA",
+    "NX_MIN_READABLE_RECEIPT_SCHEMA": "MIN_READABLE_RECEIPT_SCHEMA",
     "NX_INSTALLER_SCHEMA": "INSTALLER_SCHEMA",
     "NX_SHIM_NO_CURRENT_EXIT": "SHIM_NO_CURRENT_EXIT",
     "NX_LAYOUT_USAGE_EXIT": "LAYOUT_USAGE_EXIT",
@@ -610,6 +611,9 @@ _DISPATCHERS = {
     "nx_previous_link": "previous_link",
     "nx_root": "root",
     "nx_receipt_path": "receipt_path",
+    "nx_check_receipt": "check_receipt",
+    "nx_receipt_kind": "receipt_kind",
+    "nx_receipt_extras": "receipt_extras",
     "nx_render_shim": "render_shim",
     "nx_build_spec": "build_spec",
     "nx_render_receipt": "render_receipt",
@@ -714,7 +718,7 @@ def test_layout_sh_carries_no_implementation_helpers() -> None:
 
 
 def test_an_argument_swap_would_be_caught(tmp_path: Path) -> None:
-    """render_receipt takes EIGHT same-typed strings positionally.
+    """render_receipt takes NINE same-typed strings positionally.
 
     Nothing about the types stops the dispatcher passing them in the wrong
     order, and every wrong order still produces valid JSON. So each field is
@@ -729,10 +733,11 @@ def test_an_argument_swap_would_be_caught(tmp_path: Path) -> None:
         "python": "P-python",
         "base_interpreter": "B-base",
         "created_at": "C-created",
+        "constraints": "unpinned",
     }
     written = _shell_says(
         "nx_render_receipt '{version}' '{spec}' '{source_kind}' '{source}' "
-        "'' '{python}' '{base_interpreter}' '{created_at}'".format(**fields),
+        "'' '{python}' '{base_interpreter}' '{created_at}' '{constraints}'".format(**fields),
         {"HOME": str(tmp_path)},
     )
     parsed = json.loads(written)

@@ -30,7 +30,7 @@ The catalog is the connective tissue between Nexus's [storage tiers](../storage-
 
 **The [query planner](../querying-guide.md) uses the catalog to optimize search.** Instead of searching everything and hoping for relevance, the planner resolves matching documents in the catalog first, by author, content type, document subtree, or link relationships, then searches only their collections. For multi-step analytical queries, it composes graph traversal with search to maximize the quality of retrieved content: following citation chains, crossing collection boundaries, and scoping each step to the documents relevant to the question.
 
-**Link audit maintains graph health.** [`nx catalog link-audit`](../catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale. Existing collections can be backfilled with content hashes without re-embedding.
+**Link audit maintains graph health.** [`nx catalog link-audit`](../catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale (the command is hidden from `--help`). Every chunk's T3 id is already its content hash (RDR-108, RDR-180), so there is nothing to backfill.
 
 ## What we borrowed
 
@@ -60,7 +60,7 @@ Nexus doesn't implement full transclusion, but it does implement span-addressed 
 
 **Positional spans** (`42-57` for line ranges, `3:100-250` for chunk character ranges) are simple and human-readable, but they break when the document is re-indexed. If the content shifts, the line numbers point to the wrong text.
 
-**Content-addressed spans** (`chash:<sha256hex>`) identify a passage by the hash of its text. They survive re-indexing as long as the content doesn't change. Use these for any reference that needs to last. For sub-chunk precision, `chash:<sha256hex>:<start>-<end>` references a character range within the hashed chunk. The hash pins which chunk; the range pins where within it. Existing collections can be [backfilled](../cli-reference.md#nx-collection) without re-embedding.
+**Content-addressed spans** (`chash:<sha256hex>`) identify a passage by the hash of its text. They survive re-indexing as long as the content doesn't change. Use these for any reference that needs to last. For sub-chunk precision, `chash:<sha256hex>:<start>-<end>` references a character range within the hashed chunk. The hash pins which chunk; the range pins where within it. Every chunk's T3 id is already its content hash (RDR-108, RDR-180), so there is nothing to backfill.
 
 The [link audit](../catalog.md#link-health) system tracks both: positional spans that may have gone stale after re-indexing, and content-hash spans that no longer resolve. Content-addressed spans are validated when created. A hash that doesn't resolve in the collection is rejected immediately.
 
@@ -83,9 +83,9 @@ Nelson's Xanadu was a complete alternative to the file system. Nexus is a catalo
 ## Further reading
 
 - [Document Catalog guide](../catalog.md) — full user guide for the catalog system
-- [Querying Guide](../querying-guide.md) — `nx search` vs `query()` MCP vs `/conexus:query` skill
+- [Querying Guide](../querying-guide.md) — `nx search` vs the `query` MCP tool vs `nx_answer`
 - [Architecture](../architecture.md) — module map and design decisions
-- [RDR-049: Git-Backed Catalog](../rdr/rdr-049-git-backed-catalog.md) — catalog architecture design
+- [RDR-049: Git-Backed Catalog](../rdr/rdr-049-git-backed-catalog.md) — catalog architecture design (the git-backed JSONL store it describes was retired at RDR-158 P4; history)
 - [RDR-051: Link Lifecycle](../rdr/rdr-051-link-lifecycle.md) — full CRUD for typed links
 - [RDR-052: Catalog-First Query Routing](../rdr/rdr-052-catalog-first-query-routing.md) — three-path dispatch
 - [RDR-053: Xanadu Fidelity](../rdr/rdr-053-xanadu-fidelity.md) — tumbler arithmetic + content-addressed spans

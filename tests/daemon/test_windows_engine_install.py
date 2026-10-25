@@ -137,6 +137,36 @@ def test_install_places_exe_and_four_dlls_side_by_side(tmp_path, monkeypatch):
     assert prov["asset"] == _ASSET
 
 
+_ATOMIC_WAIT = "msvcp140_atomic_wait.dll"
+
+
+def test_an_archive_that_carries_atomic_wait_has_it_placed_and_receipted(tmp_path, monkeypatch):
+    """An engine release from the one that ships msvcp140_atomic_wait.dll (nexus-vyy65): torch
+    2.13 imports it, so it lands beside the exe and is verified like the other DLLs."""
+    payloads = {**_PAYLOADS, _ATOMIC_WAIT: b"MZ-atomic-wait\n"}
+    dest, prov = _install(tmp_path, monkeypatch, _txz(payloads))
+    assert (tmp_path / "service" / _ATOMIC_WAIT).read_bytes() == payloads[_ATOMIC_WAIT]
+    assert set(prov["support_files"]) == {*WINDOWS_RUNTIME_DLLS, _ATOMIC_WAIT}
+    assert b.verify_installed_binary(tmp_path, platform_tag=_WIN).ok
+    (tmp_path / "service" / _ATOMIC_WAIT).write_bytes(b"tampered")
+    assert not b.verify_installed_binary(tmp_path, platform_tag=_WIN).ok, "a placed optional DLL is verified"
+
+
+def test_an_older_archive_without_atomic_wait_still_installs(tmp_path, monkeypatch):
+    dest, prov = _install(tmp_path, monkeypatch, _txz(_PAYLOADS))
+    assert _ATOMIC_WAIT not in _service_files(tmp_path)
+    assert set(prov["support_files"]) == set(WINDOWS_RUNTIME_DLLS)
+    assert b.verify_installed_binary(tmp_path, platform_tag=_WIN).ok
+
+
+def test_atomic_wait_is_not_taken_from_a_posix_archive(tmp_path):
+    exe = tmp_path / "service" / "nexus-service"
+    archive = tmp_path / "a.txz"
+    archive.write_bytes(_txz({"nexus-service": b"ELF", _ATOMIC_WAIT: b"stray"}))
+    b._place_engine_archive(archive, exe, support_names=())
+    assert {p.name for p in (tmp_path / "service").iterdir()} == {"nexus-service"}
+
+
 def test_fetches_archive_sha256_and_bundle_by_asset_name(tmp_path, monkeypatch):
     archive = _txz(_PAYLOADS)
     urls: list[str] = []

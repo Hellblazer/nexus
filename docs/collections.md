@@ -77,7 +77,7 @@ Give the bare subject and let the catalog render the rest:
 
 ```bash
 nx store put paper.md --collection distributed-systems
-nx index md notes/*.md --collection vector-search
+nx index md notes/overview.md --collection vector-search
 nx index pdf --dir ~/papers/oracles --collection augur-oracle-papers
 ```
 
@@ -146,7 +146,7 @@ instead.
   `--title` (so a re-put replaces rather than duplicates) into the subject
   collection, with `--tags` for provenance.
 - **Code, repo docs, RDRs**: `nx index repo <path>`. Nothing else.
-- **DEVONthink imports**: `nx dt import` chooses the subject you give it;
+- **DEVONthink imports**: `nx dt index --collection <subject>` chooses the subject you give it;
   the same rules apply.
 - **Test and shakedown artifacts**: give them a TTL (`--ttl 7d`) or delete
   the collection when the run is over. `knowledge__shakedown` on a

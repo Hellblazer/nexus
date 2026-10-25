@@ -5,8 +5,11 @@ written and read by **nexus** — both halves of this relay's own record live
 in this one repo. Written by `scripts/list_data_effects.py --record-relay-
 attestation` (usually run manually, right after the table has been pasted
 into the conexus handoff); read by
-`scripts/list_data_effects.py --verify-relay-attestation`, which a release
-battery runs.
+`scripts/list_data_effects.py --verify-relay-attestation`
+(`verify_relay_attestation`), which `scripts/check_engine_release_floor.py`
+calls from `check_data_effect_relay`: the `--paired-deploy-auto` step in
+`.github/workflows/release.yml` and the engine deploy gate both run it.
+`tests/e2e/release-battery.sh` does not.
 
 Bead: `nexus-iu43o`. Follow-up from `nexus-f7dwp` (T2
 `nexus/f7dwp-critic-pass-2026-09-13`).
@@ -18,7 +21,7 @@ The engine-release skill's handoff step already says: run
 into the relay verbatim. That paste was a prose step with nothing checking
 it actually happened — a human could run the script, read the table, and
 still forget to include it in what conexus receives. This file is the
-mechanical record that it was included: a battery step refuses without it,
+mechanical record that it was included: the paired-deploy gate refuses without it,
 instead of trusting that a described procedure was followed.
 
 ## Shape
@@ -41,6 +44,12 @@ stale attestation (a later commit adds a new data-effecting changeset after
 this was recorded) is caught as a mismatch, not trusted. `from_tag` is
 checked too: an attestation recorded for a differently-scoped range that
 happens to share the same `engine_tag` name must not silently pass.
+
+An attestation written after the fact, by Sam's decision, also carries
+`"retroactive": true` and a `retroactive_note` naming the evidence that the
+table reached the relay (`engine-service-v0.1.129.json` is the one example).
+The verifier reads only `engine_tag`, `from_tag` and `changeset_ids`, so
+these two keys are for the human reader.
 
 `recorded_at` is UTC with a `Z` suffix, written but not currently bounded by
 age — this attestation is

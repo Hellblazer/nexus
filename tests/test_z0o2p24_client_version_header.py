@@ -214,7 +214,9 @@ _NOT_SENDERS: dict[str, str] = {
     "nexus/db/service_bge_model.py": "model download",
     "nexus/doctor_references.py": "third-party URLs (ETag)",
     "nexus/install_ping.py": "install ping, not the vector or T2 surface",
+    "nexus/operators/llm_api.py": "third party: the Anthropic or OpenAI-compatible LLM endpoint",
     "nexus/pdf_extractor.py": "MinerU server",
+    "nexus/pdf_stack.py": "runs uv to install the [pdf] extra; its curl/irm string is install advice shown to the user, never run",
 }
 
 _SRC = Path(__file__).resolve().parents[1] / "src"

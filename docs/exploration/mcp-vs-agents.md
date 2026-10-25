@@ -1,8 +1,8 @@
 # MCP tools vs agents
 
 > **Note**: despite living under `exploration/`, this is a LIVE normative rule:
-> architecture.md:1054 and querying-guide.md:224 delegate to it. Not a
-> candidate for archive.
+> the "See also" sections of architecture.md and querying-guide.md delegate
+> to it. Not a candidate for archive.
 
 When should a capability ship as an **MCP tool** versus a **Claude Code agent**?
 This page encodes the boundary rule from RDR-080.
@@ -117,17 +117,37 @@ ten operator functions, plan steps rather than MCP tools since nexus-ivi4s (`ope
 `operator_verify`) use a single primitive:
 `nexus.operators.dispatch.claude_dispatch`. Three of the ten
 (`operator_filter`, `operator_groupby`, `operator_aggregate`) also have a
-SQL fast path ahead of the LLM dispatch (see `src/nexus/mcp/operator_requests.py`).
+SQL fast path ahead of the LLM dispatch (see `src/nexus/operators/aspect_sql.py`;
+the prompt and schema builders are in `src/nexus/mcp/operator_requests.py`).
 
-`claude_dispatch` spawns `claude -p --output-format json --json-schema <schema>`,
-feeds the prompt via stdin, times out at a configurable limit (default 120s),
-and unwraps `structured_output` from claude's JSON result wrapper.  The
-subprocess authenticates via the caller's `~/.claude` and `~/.claude.json`, so
-nothing in the MCP server needs API keys.
+`claude_dispatch` is a thin front over a pluggable `LLMBackend`
+(`src/nexus/operators/llm_backend.py`). The setting is `NX_LLM_BACKEND`, then
+`llm.backend` in the global `~/.config/nexus/config.yml`, then `auto`. Three
+backends exist:
 
-Tools that need to reach Nexus storage during their reasoning (e.g.
-`nx_enrich_beads` searches the codebase) get the same set of nexus MCP
-tools via the subprocess inheriting `~/.claude`.
+- `cli` (the default): the `claude -p` subprocess, authenticated by Claude Code's
+  own login, so nothing in the MCP server needs an API key.
+- `anthropic`: the Messages API, which needs an `anthropic_api_key`.
+- `openai_compat`: Chat Completions for Ollama, vLLM or OpenRouter, which needs an
+  endpoint and, for hosted services, a key.
+
+`auto` picks `cli` when `claude` is on PATH, otherwise `anthropic` when a key
+resolves. The API backends serve tool-free calls only: a call that grants tools
+always goes to `cli`. The per-repo `.nexus.yml` is not read for this setting.
+
+On the `cli` backend, `claude_dispatch` spawns
+`claude -p --output-format stream-json --json-schema <schema>` (plus `--verbose`,
+`--no-session-persistence` and `--strict-mcp-config`), feeds the prompt via stdin,
+times out at a configurable limit (default 300s), and reads `structured_output`
+from the final result event of the stream.
+
+By default the child loads no MCP servers (`--strict-mcp-config` with no
+`--mcp-config`) and no settings-supplied hooks (`--setting-sources ""`), and it is
+started with `--tools ""`, so an operator call is tool-free. A tool that must reach
+Nexus storage during its reasoning (`nx_enrich_beads`, `nx_plan_audit`) gets an
+explicit grant instead: the `nx-mcp` and `nx-mcp-catalog` servers passed inline
+through `--mcp-config`, plus read-only `Read`, `Grep` and `Glob`
+(`_subprocess_tool_grant` in `src/nexus/mcp/core.py`).
 
 ## See also
 

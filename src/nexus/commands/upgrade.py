@@ -252,6 +252,22 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; a repair failure must not block the walk
         _log.warning("upgrade_uv_takeover_repair_failed", error=str(exc))
 
+    # nexus-2k66t.4.2: the PDF stack carry-forward builds a generation and flips
+    # `current`, so it runs BEFORE the process cycle below: the cycle then
+    # restarts the service and MinerU onto the generation that has the stack,
+    # not onto a slim one the carry replaces a minute later (and the stale
+    # MinerU restart in upgrade_finish never has a stack-less generation to
+    # start). It needs the layout the takeover repair above just settled.
+    #
+    # nexus-2k66t.4.7, nexus-vyy65: the VC++ runtime goes first. On Windows the
+    # carry builds slim (and says so) when the DLLs the stack's extension modules
+    # load are missing, and this step is the only thing that provisions them on a
+    # cloud-mode box; run after the carry, the first upgrade would always go slim
+    # and the stack wait for the next one.
+    _converge_vc_runtime(auto_mode=auto_mode)
+    _converge_pdf_stack(auto_mode=auto_mode, skip_t3=skip_t3)
+    _converge_installer_rebuild(auto_mode=auto_mode, skip_t3=skip_t3)
+
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         from nexus.upgrade_ladder.preconditions import converge_preconditions  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
@@ -272,7 +288,63 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the walk and T2 migration must not be blocked by a precondition probe failure
         _log.warning("upgrade_preconditions_failed", error=str(exc))
 
-    _converge_vc_runtime(auto_mode=auto_mode)
+
+def _converge_pdf_stack(*, auto_mode: bool, skip_t3: bool) -> None:
+    """nexus-2k66t.4.2: an existing install ALWAYS carries the PDF stack forward.
+
+    The old installer that moved this box to the first post-split release built
+    a slim generation, since the new package no longer requires docling or
+    MinerU and the old installer cannot know the rule. This is the first code of
+    the new release to run; it sees a receipt written before the split and
+    builds the generation that adds ``pdf``. Only a fresh install starts slim.
+    ``--skip-t3`` is the fast T2-only run and skips it, as it skips the engine
+    install: the download is minutes. On a Windows machine that cannot load the stack the
+    build goes slim and says so (nexus-vyy65): interactive ``nx upgrade`` prints the line,
+    ``nx upgrade --auto`` only logs it (``upgrade_pdf_stack``). Never raises."""
+    if skip_t3:
+        return
+    try:
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred to keep the CLI cold-start light
+
+        line = pdf_stack.carry_forward(auto_mode=auto_mode)
+    except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the ladder must not be blocked by it
+        _log.warning("upgrade_pdf_stack_failed", error=str(exc))
+        return
+    if line is None:
+        return
+    if auto_mode:
+        _log.info("upgrade_pdf_stack", detail=line)
+    else:
+        click.echo(f"PDF support: {line}")
+
+
+def _converge_installer_rebuild(*, auto_mode: bool, skip_t3: bool) -> None:
+    """nexus-au0s3: a generation built by an installer older than this package's
+    is rebuilt with this one, at the same version.
+
+    The hop out of a release whose installer is older (7.85.0 to the first release
+    that pins dependencies to the lock) is built by the OLD installer, which cannot
+    fetch the target's. This is the first code of the new release to run, and it
+    sees the receipt's installer_schema. One build with the running installer,
+    keeping extras, flipping, reaping by the normal keep-3 rule; the new receipt
+    is current, so it does not repeat. Not while the PDF carry-forward is owed
+    (that build is this one). ``--skip-t3`` skips it with the other downloads.
+    Never raises."""
+    if skip_t3:
+        return
+    try:
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred to keep the CLI cold-start light
+
+        line = pdf_stack.rebuild_stale_installer(auto_mode=auto_mode)
+    except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the ladder must not be blocked by it
+        _log.warning("upgrade_installer_rebuild_failed", error=str(exc))
+        return
+    if line is None:
+        return
+    if auto_mode:
+        _log.info("upgrade_installer_rebuild", detail=line)
+    else:
+        click.echo(f"Installer: {line}")
 
 
 #: How long ``nx upgrade --auto`` waits after a failed VC++ runtime download.
@@ -287,8 +359,14 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
     SessionStart ``nx upgrade --auto``, which runs detached with a limit on starting new
     ladder work (nexus-dcbof; this step is not bounded by it), so the download is never
     interrupted. A cheap three-directory stat on every run once
-    the DLLs are in place, a no-op off Windows. Runs after the engine axis so a
-    local-mode install gets the DLLs from its engine first. Never raises."""
+    the DLLs are in place, a no-op off Windows. It also tops up ``msvcp140_atomic_wait.dll``
+    (PDF support needs it, nexus-vyy65) from the pinned bundle onto a box that has the base
+    pair but not that file, at most once per pinned engine tag. Runs before the PDF
+    carry-forward (nexus-2k66t.4.7), which builds without PDF support when they are
+    missing (it never refuses), and so before the engine
+    axis: a local-mode box that would have taken the DLLs from its engine gets
+    them from this download instead, and the engine's copy is then redundant,
+    not missing. Never raises."""
     try:
         import nexus.config as _config  # noqa: PLC0415 — deferred to keep config import off the CLI's cold-start path; module attribute, not by-value (nexus-78blw ratchet)
         from nexus.daemon.binary_install import ensure_vc_runtime  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start

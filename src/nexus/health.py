@@ -128,7 +128,7 @@ def format_health_for_cli(
         else:
             lines.append(
                 "\nRun 'nx config init' to configure managed-service credentials, "
-                "or 'nx init --service' to provision a local service stack."
+                "or 'NX_LOCAL=1 nx init' to provision a local service stack."
             )
 
     return "\n".join(lines), failed
@@ -1123,7 +1123,7 @@ def _check_service_bge_model() -> list[HealthResult]:
             f"provisioned"
         ),
         fix_suggestions=[
-            "Provision it: nx init --service",
+            "Provision it: nx init",
             "Or stage the STANDARD fp32 export (Xenova/bge-base-en-v1.5 model.onnx "
             "+ tokenizer.json — NOT fastembed's model_optimized.onnx) at that path.",
         ],
@@ -2822,6 +2822,98 @@ def _check_docling_importable(
     )]
 
 
+def _check_pdf_support() -> list[HealthResult]:
+    """nexus-2k66t.4.2: the PDF stack is the ``pdf`` extra, installed on first
+    use. One row says where this box stands.
+
+    * present (every module resolves, every version is on its pin): a pass,
+      followed by the docling pipeline-module row, which is only meaningful
+      once the stack is here.
+    * not installed: informational, never red. A fresh install has no PDF
+      stack by design; the first PDF index installs it. The row names the
+      command that installs it now. When a refusing background run (the
+      post-commit hook) left PDFs un-indexed, the row counts them.
+    * broken (part of it missing, a version off its pin, or a receipt that
+      lists ``pdf`` over an empty tree): red, with the repair command.
+    """
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    st = pdf_stack.state()
+    if st.present:
+        # nexus-vyy65: on Windows the stack also needs msvcp140_atomic_wait.dll (torch 2.13);
+        # without it `import torch` fails, so the files being present is not health.
+        gap = pdf_stack._windows_runtime_gap()  # noqa: SLF001
+        if gap is not None:
+            return [HealthResult(
+                label="PDF support", ok=False,
+                detail=(
+                    f"broken: the stack is installed but cannot load. "
+                    f"{pdf_stack._windows_runtime_refusal(pdf_stack.install_plan(), gap, then='rerun nx doctor.')}"  # noqa: SLF001
+                ),
+                fix_suggestions=[f"Install Microsoft's Visual C++ redistributable: {pdf_stack.VCRT_URL}"],
+            )]
+        return [
+            HealthResult(label="PDF support", ok=True, detail=st.detail),
+            *_check_docling_importable(),
+        ]
+    plan = pdf_stack.install_plan()
+    held = pdf_stack.skipped_count()
+    held_note = (
+        f"; {held} PDF(s) a background run could not index are waiting for it" if held else ""
+    )
+    # nexus-2k66t.4.9 (F12): an existing install owed the stack by an upgrade says so, and says
+    # when the last attempt failed; a fresh slim install has neither and stays a plain pass.
+    owed = pdf_stack.carry_forward_note()
+    owed_note = f"; {owed}" if owed else ""
+    if st.status == "absent":
+        # nexus-vyy65: on a Windows box that cannot load the stack, "first use installs it" and
+        # the install command are both false (the first PDF index refuses, and the command builds
+        # slim again). Say why and what places the runtime instead.
+        gap = pdf_stack._windows_runtime_gap()  # noqa: SLF001
+        if gap is not None:
+            return [HealthResult(
+                label="PDF support", ok=True, warn=True,
+                detail=(
+                    f"not installed, and it cannot be installed yet. {pdf_stack._gap_sentence(gap)}"  # noqa: SLF001
+                    f"{pdf_stack._runtime_ways()} PDF support then installs on first use{held_note}{owed_note}"  # noqa: SLF001
+                ),
+                fix_suggestions=[
+                    f"Install Microsoft's Visual C++ redistributable: {pdf_stack.VCRT_URL}",
+                    "or run `nx upgrade` (places the runtime when the pinned engine carries it)",
+                ],
+            )]
+        return [HealthResult(
+            label="PDF support", ok=owed is None, warn=owed is not None,
+            detail=(
+                "not installed; indexing a PDF installs it on first use "
+                f"(to install now: {plan.command}){held_note}{owed_note}"
+            ),
+            fix_suggestions=[f"Install PDF support: {plan.command}"] if owed else [],
+        )]
+    return [HealthResult(
+        label="PDF support", ok=False,
+        detail=f"broken: {st.detail}{held_note}{owed_note}",
+        fix_suggestions=[f"Repair: {plan.command}"] + ([plan.why] if plan.why else []),
+    )]
+
+
+def _check_installer_rebuild() -> list[HealthResult]:
+    """nexus-au0s3: a generation built without the release's dependency lock is
+    rebuilt by ``nx upgrade``. This row says when that is owed or its last attempt
+    failed, and the command that retries it. A warning, never red: the install
+    works as built. Not applicable (no row) on a box that owes nothing: a virgin
+    box, a rebuilt one, one built unpinned on purpose, a checkout."""
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    note = pdf_stack.installer_rebuild_note()
+    if note is None:
+        return []
+    return [HealthResult(
+        label="Dependency lock", ok=True, warn=True, detail=note,
+        fix_suggestions=[f"Rebuild with the release's lock: {pdf_stack.REBUILD_RETRY_COMMAND}"],
+    )]
+
+
 def _check_mineru_server() -> list[HealthResult]:
     """nexus-far1c: report whether math PDFs will GET a MinerU server —
     not whether one happens to be running at this instant.
@@ -2844,6 +2936,13 @@ def _check_mineru_server() -> list[HealthResult]:
     permitted and equipped to perform. Only when NEITHER holds is the
     fallback claim true, and only then is this a failure.
     """
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    # nexus-2k66t.4.2: no PDF stack, no MinerU: not applicable, no row. The
+    # "PDF support" row above says why and how to install it.
+    if not pdf_stack.state().present:
+        return []
+
     from nexus.config import get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — heavy/optional dependency deferred to call time
     import httpx as _httpx  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
@@ -3073,8 +3172,9 @@ def _check_t2_schema_applied() -> list[HealthResult]:
     ``default_db_path()`` — the frozen SQLite migration source, per RDR-158
     P4 never the live store in ANY mode since T2 moved to Postgres — with
     no service-mode branch. On a legacy file present it validated a fossil
-    under the "T2 integrity" label; on a fresh PG-only box (the file never
-    exists) it returned ``ok=True, detail="not created yet"`` having
+    and reported it as the T2 row (this row, now labelled
+    :data:`_T2_SCHEMA_LABEL`, "T2 schema applied"); on a fresh PG-only box
+    (the file never exists) it returned ``ok=True, detail="not created yet"`` having
     examined nothing — a clean pass that measured nothing, permanently
     vacuous on every supported install shape (WAVE-2 finding, bead notes).
 
@@ -3525,6 +3625,82 @@ def _check_credential_persistence() -> list[HealthResult]:
             fatal=False,
         )
     ]
+
+
+def _check_llm_backend() -> list[HealthResult]:
+    """nexus-2k66t.3 P2: which backend runs the LLM steps (operators, aspect
+    extraction, taxonomy labels), and why. Never prints a key.
+
+    * A usable backend: a pass naming it and the reason (``claude is on PATH``,
+      ``claude is not on PATH; the anthropic API is used``, ...).
+    * ``auto`` with no ``claude`` and no key: not applicable, a pass. A box with
+      search and storage only is a supported state, not a fault.
+    * A setting that cannot be served (``llm.backend: anthropic`` with no key, an
+      unknown value, an ``openai_compat`` with no base_url): a soft warning that
+      carries the reason.
+    """
+    from nexus.operators.llm_backend import NO_BACKEND_MESSAGE, backend_status  # noqa: PLC0415 - deferred: keeps doctor startup light
+
+    label = "LLM backend"
+    try:
+        status = backend_status()
+    except Exception as exc:  # noqa: BLE001 - a doctor row must not crash `nx doctor`
+        return [HealthResult(label=label, ok=False, warn=True, detail=f"could not determine: {exc}")]
+    if status.available:
+        detail = f"{status.name}: {status.reason}"
+        if status.name != "cli" and shutil.which("claude") is None:
+            detail += "; nx_enrich_beads and nx_plan_audit need the Claude Code CLI (they use tools)"
+        return [HealthResult(label=label, ok=True, detail=detail)]
+    if status.reason == NO_BACKEND_MESSAGE:
+        return [HealthResult(
+            label=label,
+            ok=True,
+            detail="none (not applicable): no claude CLI and no anthropic_api_key; "
+                   "operator steps, aspect extraction and taxonomy labels are off, search and storage work",
+        )]
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=status.reason,
+        fix_suggestions=["nx config set anthropic_api_key <key>", "or set llm.backend in ~/.config/nexus/config.yml"],
+    )]
+
+
+def _check_llm_key_persistence() -> list[HealthResult]:
+    """nexus-2k66t.3 P2: warn when the LLM key in use lives in shell env only.
+
+    A GUI-spawned ``nx-mcp`` (Claude Desktop) does not see the interactive
+    shell's exports, so a key exported in ``.zshrc`` that was never persisted
+    with ``nx config set`` is absent there. Only fires when the env key is the one
+    the chosen backend would use (no ``claude`` on PATH, or ``llm.backend``
+    forces the API), so a Claude Code user who exports ``ANTHROPIC_API_KEY`` for
+    other reasons is not nagged. Never prints a value."""
+    from nexus.config import CREDENTIALS, get_global_config_section  # noqa: PLC0415 - deferred to avoid circular import
+    from nexus.operators.llm_backend import backend_status  # noqa: PLC0415 - deferred: keeps doctor startup light
+
+    try:
+        status = backend_status()
+        stored = get_global_config_section("credentials")
+    except Exception:  # noqa: BLE001 - best-effort row
+        return []
+    wanted = {"anthropic": "anthropic_api_key", "openai_compat": "openai_compat_api_key"}.get(status.name)
+    if not status.available or wanted is None:
+        return []
+    env_name = CREDENTIALS[wanted]
+    if not os.environ.get(env_name, "").strip() or str(stored.get(wanted, "")).strip():
+        return []
+    return [HealthResult(
+        label="LLM key persistence (GUI spawn)",
+        ok=False,
+        warn=True,
+        detail=f"{wanted} is set in shell env ({env_name}) only. GUI-spawned consumers "
+               "(Claude Desktop, Cowork) cannot see shell env vars, so LLM steps there have no key.",
+        fix_suggestions=[
+            f'nx config set {wanted} "${env_name}"',
+            "Then quit and relaunch Claude Desktop so the next nx-mcp spawn reads ~/.config/nexus/config.yml.",
+        ],
+    )]
 
 
 def _check_mint_token() -> list[HealthResult]:
@@ -4775,9 +4951,9 @@ def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Health
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=f"{which}, so searches are served without rerank",
-        fix_suggestions=["If the files are absent, run `nx init --service` to provision them. If a load failed, the "
+        fix_suggestions=["If the files are absent, run `nx init` to provision them. If a load failed, the "
                          "engine log's cross_encoder_reranker_init_failed event names the cause; for bad files, "
-                         "`nx init --service` again. Every rerank retries the load"],
+                         "`nx init` again. Every rerank retries the load"],
     )]
 
 
@@ -4870,7 +5046,7 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
         label=label, ok=False, warn=True,
         detail=(f"profile bge but the engine serves {served}: it booted degraded, and every bge collection "
                 "answers 422 (the engine found no bge model files)"),
-        fix_suggestions=["Run `nx init --service` to provision the bge model files, then restart the service: "
+        fix_suggestions=["Run `nx init` to provision the bge model files, then restart the service: "
                          f"`{_SERVICE_RESTART_COMMAND}`"],
     )]
 
@@ -6061,7 +6237,7 @@ def _check_migration_state(
                 f"(psql exit {proc.returncode}): {stderr_snip}"
             ),
             fix_suggestions=[
-                "Run `nx init --service` to apply migrations",
+                "Run `nx init` to apply migrations",
                 "Check that the Postgres cluster is running: nx service status",
             ],
             fatal=True,
@@ -6085,7 +6261,7 @@ def _check_migration_state(
             label="Schema migrations",
             ok=False,
             detail="databasechangelog exists but has 0 rows — migrations never ran",
-            fix_suggestions=["Run `nx init --service` to apply Liquibase migrations"],
+            fix_suggestions=["Run `nx init` to apply Liquibase migrations"],
             fatal=True,
         )]
 
@@ -6162,7 +6338,7 @@ def _check_migration_state(
             fix_suggestions=[
                 "Inspect: psql -c \"SELECT id,exectype FROM public.databasechangelog "
                 "WHERE exectype='FAILED'\"",
-                "Re-run: nx init --service to recover",
+                "Re-run: nx init to recover",
             ],
             fatal=True,
         )]
@@ -6218,7 +6394,7 @@ def _check_migration_state(
             fix_suggestions=[
                 "Inspect: psql -c \"SELECT id,md5sum FROM public.databasechangelog "
                 "WHERE exectype='EXECUTED' AND md5sum IS NULL\"",
-                "Re-run: nx init --service to re-apply and restore checksums",
+                "Re-run: nx init to re-apply and restore checksums",
             ],
             fatal=True,
         )]
@@ -6278,7 +6454,7 @@ def _check_migration_state(
             detail=(
                 "no nexus_diag diagnostic credentials (pre-P2.1 install) — "
                 "the pre-upgrade poison check could NOT run. Re-run "
-                "`nx init --service` to backfill the diagnostic role. Do NOT "
+                "`nx init` to backfill the diagnostic role. Do NOT "
                 "read this as a clean store."
             ),
             warn=True,
@@ -6388,7 +6564,7 @@ def _check_migration_state(
                     # yet the leg came back blank, so the deployed VIEW is
                     # stale (still per-dim shaped): view re-provisioning only
                     # happens via the chash-rekey rung's re-provision step or
-                    # `nx init --service`, never automatically after a bare
+                    # `nx init`, never automatically after a bare
                     # engine binary swap. This store IS measurable, just not
                     # through the stale view — fall through to the SAME
                     # direct unified-table statements used when the
@@ -6924,7 +7100,7 @@ ORDER BY tbl.schema_name, tbl.table_name;
                 + (f"; {tree_text}" if tree_text else "")
             ),
             fix_suggestions=[
-                "Re-run migrations: nx init --service",
+                "Re-run migrations: nx init",
                 "Verify the Liquibase changeset applied RLS: "
                 "check service/src/main/resources/db/changelog/",
                 *(_PARTITION_TREE_FIXES if tree_text else ()),
@@ -7202,7 +7378,7 @@ def _check_tenant_model_partitions(
                 + (f"; and {len(shown_m) - _PARTITION_GAPS_SHOWN} more" if len(shown_m) > _PARTITION_GAPS_SHOWN else "")
             ),
             fix_suggestions=[
-                "Run the engine's pending migrations: nx init --service (the changeset that registers a model "
+                "Run the engine's pending migrations: nx init (the changeset that registers a model "
                 "also creates its partitions)",
                 "As the migrating role, per missing pair: SELECT nexus.create_model_partition("
                 "'nexus.<parent>'::regclass, '<model>');",
@@ -7966,7 +8142,7 @@ def _check_tuple_lock_held(
                     detail=(
                         (over_text() + "; " if over else "")
                         + f"held: {holders}; hold duration not measured: no nexus_diag "
-                        "diagnostic credentials. Re-run `nx init --service` to "
+                        "diagnostic credentials. Re-run `nx init` to "
                         "backfill the diagnostic role."
                         + (f" Also {unresolved_note}." if unresolved else "")
                     ),
@@ -11603,6 +11779,8 @@ def run_health_checks(
     results.extend(_check_plugin_name())
     results.extend(_check_worktree_developer_agent())
     results.extend(_check_credential_persistence())
+    results.extend(_check_llm_backend())  # nexus-2k66t.3 P2
+    results.extend(_check_llm_key_persistence())  # nexus-2k66t.3 P2
     results.extend(_check_mint_token())
     results.extend(_check_static_service_token())  # nexus-xzeml
 
@@ -11694,7 +11872,8 @@ def run_health_checks(
     results.extend(_check_garbage())
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
-    results.extend(_check_docling_importable())
+    results.extend(_check_pdf_support())
+    results.extend(_check_installer_rebuild())
     results.extend(_check_mineru_server())
     results.extend(_check_t2_schema_applied())
     results.extend(_check_t2_dropped_writes())

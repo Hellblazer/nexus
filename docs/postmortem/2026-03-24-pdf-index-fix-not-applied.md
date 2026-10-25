@@ -4,6 +4,9 @@
 > reproduction against a version predating the PG17+pgvector substrate
 > (RDR-155/158). ChromaDB is not a live substrate in any mode today. For
 > current collection-naming rules see [`docs/collections.md`](../collections.md).
+>
+> Resolved by e54bdc874 (the `--collection` flag is normalized through
+> `t3_collection_name()`).
 
 **Date**: 2026-03-24
 **Severity**: High — believed-fixed bug still present in installed version

@@ -19,4 +19,4 @@ The single source of truth is `src/nexus/db/limits.py` (`QUOTAS: ServiceLimits`)
 | `where` predicates | ≤ 8 top-level | `QUOTAS.MAX_WHERE_PREDICATES` |
 | Embedding dims | ≤ 4096 | `QUOTAS.MAX_EMBEDDING_DIMENSIONS` |
 
-Voyage AI: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens, 1,000 inputs per request (`VoyageEmbedder.MAX_BATCH_TEXTS`). Use `nexus.retry._voyage_with_retry` for transient failures. Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in a loop. Provenance and the retired-client notes: [external-service-limits](docs/agents/external-service-limits.md).
+Voyage AI: `voyage-3` / `voyage-code-3` / `voyage-context-3` = 1024 dims, 32k tokens, 1,000 inputs per request (`VoyageEmbedder.MAX_BATCH_TEXTS`). Use `nexus.retry._voyage_with_retry` for transient failures. Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in a loop. Provenance and the retired-client notes: [external-service-limits](../../docs/agents/external-service-limits.md).

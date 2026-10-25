@@ -29,8 +29,9 @@ _PASS_LINE = {
     "pkgup": "PACKAGE-UPGRADE CONVERGENCE MVV PASSED",
     "mvv": "FRESH-INSTALL MVV PASSED",
     "dual": "DUAL-EMBEDDER GATE PASSED",
+    "resolve": "CONSTRAINTS RESOLVE GATE PASSED",
 }
-_GROUP = ("lsg", "pkgup", "mvv", "dual")
+_GROUP = ("lsg", "pkgup", "mvv", "dual", "resolve")
 
 
 class _Battery:
@@ -53,6 +54,7 @@ class _Battery:
             ("tests/e2e/fresh-install-mvv.sh", "mvv"),
             ("tests/e2e/migration-rehearsal/run.sh", "pkgup"),
             ("tests/e2e/dual-embedder-gate.sh", "dual"),
+            ("tests/e2e/constraints-resolve-gate.sh", "resolve"),
         ):
             self._stub(rel, f'k={key}\n{self._leg_body()}')
         subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)

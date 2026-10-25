@@ -7,7 +7,6 @@ Run with:
 """
 from __future__ import annotations
 
-import os
 import uuid
 
 import pytest
@@ -298,7 +297,7 @@ def test_nx_search_knowledge_corpus(runner):
 
 @pytest.fixture
 def keyed_local_voyage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The keyed local install the cloud_mode tests below describe (nexus-8errq): local
+    """The keyed local install the keyed_voyage tests below describe (nexus-8errq): local
     mode with a Voyage ``local.embed_model``, so the client mints voyage-* collections.
     They run on the suite's own engine substrate (every ``integration`` test gets a
     tenant on it), which must be keyed and on the Voyage profile: the substrate inherits
@@ -306,8 +305,21 @@ def keyed_local_voyage(monkeypatch: pytest.MonkeyPatch) -> None:
     tests/e2e/dual-embedder-gate.sh runs them that way. Selected anywhere else
     with a key present (a hand ``-m integration``), they run on the default bge
     substrate and fail loud on the engine's profile refusal; deselect them with
-    ``not cloud_mode``."""
+    ``not keyed_voyage``."""
     monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-context-3")
+
+
+def _assert_engine_embedded_with(db, collection: str, model: str) -> None:
+    """What the ENGINE reports for *collection*, not what the test stamped (nexus-48f3l):
+    its catalog row names *model* (the engine refuses to register a model its profile
+    does not serve) and the chunks it holds are 1024-dim, the Voyage width (bge is 768).
+    A test whose assertions only read back its own ``embedding_model`` metadata stays
+    green on any substrate; this one does not."""
+    # The raw stats rows, one per (collection, dim) the engine physically holds, each
+    # joined to the catalog row; list_collections merges them and drops ``dim``.
+    rows = [r for r in db.collection_stats() if r.get("name") == collection]
+    assert rows, f"the engine reports no stored chunks for {collection!r}"
+    assert {(r.get("embedding_model"), r.get("dim")) for r in rows} == {(model, 1024)}, rows
 
 
 def _write_owned_note(collection: str, title: str, content: str, metadata: dict) -> str:
@@ -350,7 +362,7 @@ def _write_owned_note(collection: str, title: str, content: str, metadata: dict)
 
 
 @pytest.mark.integration
-@pytest.mark.cloud_mode
+@pytest.mark.keyed_voyage
 @pytest.mark.usefixtures("keyed_local_voyage")
 @requires_voyage_key
 def test_voyage_code3_index_and_query():
@@ -386,6 +398,7 @@ def test_voyage_code3_index_and_query():
         results = db.search(query=f"user authentication JWT {uid}",
                             collection_names=[collection], n_results=3)
         assert results and any(uid in r.get("content", "") for r in results)
+        _assert_engine_embedded_with(db, collection, "voyage-code-3")
     finally:
         try:
             db.delete_collection(collection)
@@ -396,7 +409,7 @@ def test_voyage_code3_index_and_query():
 # ── CCE: voyage-context-3 ───────────────────────────────────────────────────
 
 @pytest.mark.integration
-@pytest.mark.cloud_mode
+@pytest.mark.keyed_voyage
 @pytest.mark.usefixtures("keyed_local_voyage")
 @requires_voyage_key
 def test_cce_query_retrieves_cce_indexed_markdown():
@@ -431,6 +444,7 @@ def test_cce_query_retrieves_cce_indexed_markdown():
                                 collection_names=[collection], n_results=5)
             assert results and any(uid in r.get("content", "") for r in results)
             assert results[0].get("embedding_model") == "voyage-context-3"
+            _assert_engine_embedded_with(db, collection, "voyage-context-3")
         finally:
             try:
                 db.delete_collection(collection)
@@ -439,7 +453,7 @@ def test_cce_query_retrieves_cce_indexed_markdown():
 
 
 @pytest.mark.integration
-@pytest.mark.cloud_mode
+@pytest.mark.keyed_voyage
 @pytest.mark.usefixtures("keyed_local_voyage")
 @requires_voyage_key
 def test_t3_put_embedding_model_in_search_metadata():
@@ -465,6 +479,7 @@ def test_t3_put_embedding_model_in_search_metadata():
         assert results
         matching = [r for r in results if uid in r.get("content", "")]
         assert matching and matching[0].get("embedding_model") == "voyage-context-3"
+        _assert_engine_embedded_with(db, collection, "voyage-context-3")
     finally:
         try:
             db.delete_collection(collection)

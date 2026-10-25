@@ -1,5 +1,7 @@
 # Ownerless-write refusal: cutover runbook (RDR-223 Phase 3 Step 2)
 
+> **EXECUTED.** The cloud engine was flipped to `enforce` on 2026-10-12 (nexus-z0o2p.40). The order of operations below, steps 1 to 4, is the record of how it was done. Step 5 (a writer turning up after the flip, and the rollback to `log-only`) and § Local-mode installs stay live guidance.
+
 The final engine cut (RDR-223 plus RDR-192, one tag) makes the engine refuse a chunk
 write that no document owns. This page is the order of operations for turning that on
 without breaking a client that has not been upgraded. Beads: nexus-20onx (this

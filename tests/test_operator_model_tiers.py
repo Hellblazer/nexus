@@ -403,6 +403,15 @@ class TestNotConsultedRepoWide:
         "plans/budget_default.py",
     })
 
+    #: nexus-2k66t.3 P2: the direct Anthropic backend maps a dispatch ``model``
+    #: alias to a Messages API id with ``resolve_api_model``. That is a lookup of
+    #: the model the CALLER already chose, not a tier decision: the backend never
+    #: consults the tier table. Held to its own guard,
+    #: ``test_api_alias_resolver_consumers_use_only_resolve_api_model``.
+    _API_ALIAS_RESOLVER_FILES = frozenset({
+        "operators/llm_anthropic.py",
+    })
+
     @staticmethod
     def _p2c_relpath(path) -> str:
         import pathlib
@@ -420,6 +429,7 @@ class TestNotConsultedRepoWide:
                 continue
             if self._p2c_relpath(path) in (
                 self._P2C_MEASUREMENT_ONLY_OPT_IN_FILES | self._TIER_READONLY_CONSUMER_FILES
+                | self._API_ALIAS_RESOLVER_FILES
             ):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -476,6 +486,7 @@ class TestNotConsultedRepoWide:
                 continue
             if self._p2c_relpath(path) in (
                 self._P2C_MEASUREMENT_ONLY_OPT_IN_FILES | self._TIER_READONLY_CONSUMER_FILES
+                | self._API_ALIAS_RESOLVER_FILES
             ):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -487,6 +498,29 @@ class TestNotConsultedRepoWide:
             f"only opt-in) until .p2d's deliberate default-tier flip: "
             f"{offenders}"
         )
+
+    def test_api_alias_resolver_consumers_use_only_resolve_api_model(self) -> None:
+        """A file exempted as an API-alias resolver imports exactly
+        ``resolve_api_model`` from the tier module and nothing else: no tier
+        table, no tier resolver. Also asserts each listed file exists and really
+        does the import (a stale or vacuous allowlist entry is a silent hole)."""
+        import ast
+        import pathlib
+
+        src_root = pathlib.Path(__file__).resolve().parent.parent / "src" / "nexus"
+        assert self._API_ALIAS_RESOLVER_FILES, "allowlist must not be empty-vacuous"
+        for rel in sorted(self._API_ALIAS_RESOLVER_FILES):
+            path = src_root / rel
+            assert path.exists(), f"stale API-alias resolver allowlist entry: {rel}"
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported = [
+                alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module == "nexus.operators.model_tiers"
+                for alias in node.names
+            ]
+            assert imported == ["resolve_api_model"], f"{rel} imports {imported} from model_tiers"
+            assert _resolve_model_call_lines(path.read_text(encoding="utf-8"), filename=str(path)) == []
 
     def test_readonly_tier_consumers_never_dispatch(self) -> None:
         """A file exempted as a READ-ONLY tier consumer must stay one:

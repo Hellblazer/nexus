@@ -78,7 +78,7 @@ search(query="extraction pipeline", topic="Math-aware PDF Extraction")
 | `topic` | string | `""` | Pre-filter to a named topic. Run `nx taxonomy list` for available topics |
 | `threshold` | float | per-corpus config | Override the distance threshold uniformly (raw cosine distance, lower = stricter; `inf` disables filtering — RDR-087) |
 | `lexical` | boolean | `false` | Also search the engine's exact-text indexes (full-text + trigram) and add those hits to the vector results, for a rare identifier or exact token a semantic search misses (measured 0.167 → 0.698 precision@10 on rare tokens). Lexical hits are exempt from the distance threshold. Unrelated to the CLI's `--hybrid`, which only re-ranks |
-| `structured` | boolean | `false` | Return `{ids, tumblers, distances, collections}` instead of the human-readable string (plan-runner use) |
+| `structured` | boolean | `false` | Return the structured dict instead of the human-readable string (plan-runner use); the keys are listed in [MCP Servers](mcp-servers.md) |
 
 ## query() MCP tool
 
@@ -95,7 +95,7 @@ query(question="database design", follow_links="cites", depth=1)  # + citation g
 | Parameter | Type | Description |
 |---|---|---|
 | `question` | string | Search query text (required) |
-| `corpus` | string | Collection prefix or comma-separated list (default `knowledge`; pass `all` for every corpus) |
+| `corpus` | string | Collection prefix or comma-separated list (default: every `knowledge__*` collection when no catalog parameter is set, otherwise the `content_type`'s own corpus; pass `all` for every corpus) |
 | `author` | string | Filter by document author (catalog lookup) |
 | `content_type` | string | `code`, `prose`, `rdr`, `paper`, `knowledge` |
 | `subtree` | string | Tumbler prefix — search only documents under this address |
@@ -121,11 +121,11 @@ Naming a collection explicitly — a full conformant name (`code__myrepo__voyage
 
 ### How catalog routing works
 
-Catalog params (`author`, `content_type`, `follow_links`, `subtree`) require service mode (pgvector) — a non-service T3 with any of these set returns a loud error naming the requirement, not a degraded local search.
+Catalog params (`author`, `content_type`, `follow_links`, `subtree`) run against the service-backed T3 (pgvector), which is the only T3 there is.
 
 1. If `author`, `content_type`, or `subtree` is set: query the catalog for matching documents, extract their `physical_collection` values, and search only those collections.
 2. If `follow_links` is set: find matching documents, BFS-traverse their link graph to `depth`, collect all linked collections.
-3. If no catalog parameters: fall through to corpus-based search (same as `nx search`) — this path works in both service and local/Chroma-shaped mode, and supports the full `where` operator set.
+3. If no catalog parameters: fall through to corpus-based search (same as `nx search`) — this path supports the full `where` operator set.
 
 `query(question="X", author="Fagin")` is faster and more precise than `query(question="X")` — fewer collections to search, hits constrained by the catalog before embedding.
 
@@ -220,7 +220,7 @@ Code chunks carry `section_type` too, set by the AST chunker at index time (`cla
 nx search "connection pooling" --where section_type!=imports
 ```
 
-A bare `nx search`/`nx query` call never filters `imports` automatically; add the `--where` filter yourself when you want it excluded. Only `nx_answer`'s plan-driven evidence-hydration path excludes an `imports`-stamped chunk on its own, for the operator auto-hydration steps inside a plan (`rank`, `compare`, `summarize`, ...), on both the chash-shaped (`store_get_many`) and tumbler-shaped (catalog manifest) hydration paths.
+A bare `nx search` call, or an MCP `query` call, never filters `imports` automatically; add the `--where` filter yourself when you want it excluded. Only `nx_answer`'s plan-driven evidence-hydration path excludes an `imports`-stamped chunk on its own, for the operator auto-hydration steps inside a plan (`rank`, `compare`, `summarize`, ...), on both the chash-shaped (`store_get_many`) and tumbler-shaped (catalog manifest) hydration paths.
 
 This is a per-chunk classification, based only on the chunk's own AST content, never a path prefix or a file/owner category. It is unrelated to the document-level `non_evidentiary` catalog stamp (`nx catalog update --meta '{"non_evidentiary": true}'`), which marks a whole DOCUMENT (e.g. a test-fixture file) as non-evidentiary and is honoured by the same evidence-hydration paths. `section_type="imports"` marks individual CHUNKS regardless of which document they belong to.
 
@@ -230,7 +230,7 @@ Knowledge, docs, and RDR collections fetch 4x the requested result count before 
 
 ### Rerank scores a capped candidate set
 
-`nx search` over more than one collection asks the engine to rerank. In local mode the engine scores the first `max(3 x n, 60)` candidates in vector order, where `n` is the number of results you asked for, not every candidate the over-fetch returned. The other candidates stay in the result, unscored and in vector order, behind the scored ones, so the result count and the page do not change shape. Local mode, where the cross-encoder (ms-marco-minilm-l6-v2) runs on the CPU, measured 3.5 to 4.9 s of a 4.0 to 5.4 s search scoring all 135 candidates; the cap scores 60 for a default `-n 10`. A cap of 30 was measured first and changed about a third of the page (6.5 of the uncapped top 10 kept, over 40 queries), and lost canonical answers; 60 keeps 9 of 10 and 90 matched uncapped. Cloud mode has no default cap and scores every candidate: the latency evidence is the local cross-encoder, and the page-quality measurement on file was taken in the cloud. A search that returns fewer candidates than the cap is scored in full. The cap is per request, so a search the client splits or batches into several requests scores up to the cap in each. Two cases are never capped: the lexical leg of `--lexical`, and any search whose filter runs after retrieval (`--path`, `--max-file-chunks`), where a cap would leave most of the surviving rows unscored. Set `search.rerank_max_candidates` in `.nexus.yml` to fix the cap in either mode (`0` scores every candidate); see [Configuration](configuration.md). An engine older than the field ignores it and scores every candidate.
+`nx search` over more than one collection asks the engine to rerank. In local mode the engine scores the first `max(3 x n, 60)` candidates in vector order, where `n` is the number of results you asked for, not every candidate the over-fetch returned. The other candidates stay in the result, unscored and in vector order, behind the scored ones, so the result count and the page do not change shape. Local mode, where the cross-encoder (ms-marco-minilm-l6-v2) runs on the CPU, measured 3.5 to 4.9 s of a 4.0 to 5.4 s search scoring all 135 candidates; the cap scores 60 for a default `-n 10`. A cap of 30 was measured first and changed about a third of the page (6.5 of the uncapped top 10 kept, over 40 queries), and lost canonical answers; 60 keeps 9 of 10 and 90 matched uncapped. Cloud mode has no default cap and scores every candidate: the latency evidence is the local cross-encoder, and the page-quality measurement on file was taken in the cloud. A search that returns fewer candidates than the cap is scored in full. The cap is per request, so a search the client splits or batches into several requests scores up to the cap in each. Two cases are never capped: the lexical leg of `--lexical`, and any search whose filter runs after retrieval (a `PATH` argument, `--max-file-chunks`), where a cap would leave most of the surviving rows unscored. Set `search.rerank_max_candidates` in `.nexus.yml` to fix the cap in either mode (`0` scores every candidate); see [Configuration](configuration.md). An engine older than the field ignores it and scores every candidate.
 
 ### Catalog pre-filtering
 

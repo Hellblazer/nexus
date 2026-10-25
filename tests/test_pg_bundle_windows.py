@@ -294,11 +294,23 @@ def test_a_released_visual_studio_is_taken(tmp_path: Path) -> None:
     assert bw.find_vs_install({"VS_INSTALL_PATH": "D:/x"}, _Capture("")) == Path("D:/x")
 
 
-def test_runtime_dlls_are_the_four_and_the_smoke_agrees() -> None:
+def test_runtime_dlls_are_the_four_plus_atomic_wait_and_the_smoke_agrees() -> None:
+    # torch 2.13 imports MSVCP140_ATOMIC_WAIT.dll (nexus-vyy65); it ships beside the base four.
     assert bw.VC_RUNTIME_DLLS == (
         "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll",
+        "msvcp140_atomic_wait.dll",
     )
     assert sm.VC_RUNTIME_DLLS == bw.VC_RUNTIME_DLLS
+    from nexus import _vcrt
+    assert set(_vcrt.PDF_STACK_DLLS) <= set(bw.VC_RUNTIME_DLLS), "the client's PDF set is all in the bundle"
+
+
+def test_redist_refuses_a_crt_folder_that_lacks_only_atomic_wait(tmp_path: Path) -> None:
+    """An older VS toolset's redist has the four and not the fifth; shipping a bundle without it
+    would put the PDF stack back to failing on a box without the redistributable."""
+    tree = _vs_tree(tmp_path, dlls=bw.VC_RUNTIME_DLLS[:4])
+    with pytest.raises(bw.BuildError, match="msvcp140_atomic_wait.dll"):
+        bw.find_redist(tree)
 
 
 def test_copy_runtime_ships_the_dlls_unmodified_with_the_notice(tmp_path: Path) -> None:
@@ -313,7 +325,7 @@ def test_copy_runtime_ships_the_dlls_unmodified_with_the_notice(tmp_path: Path) 
                    "reverse engineer", "separately", "aka.ms/vs/17/redistribution",
                    *bw.VC_RUNTIME_DLLS, *digests.values()):
         assert needle in notice, needle
-    # Only the four: nothing else from the CRT folder (concrt140 etc.) leaks in.
+    # Only the five: nothing else from the CRT folder (concrt140, msvcp140_2 etc.) leaks in.
     assert sorted(p.name for p in (bundle / "bin").iterdir()) == sorted(bw.VC_RUNTIME_DLLS)
 
 

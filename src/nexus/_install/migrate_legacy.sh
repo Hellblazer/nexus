@@ -103,6 +103,13 @@ mkdir -p "$TOOLS_DIR" || exit 1
 
 # ── 1. extras bridge, one last time ──────────────────────────────────────
 EXTRAS="$(nx_legacy_extras "$LEGACY")" || exit $?
+# nexus-2k66t.4.2 (Sam, 2026-10-23): an existing install carries the PDF stack
+# forward. A legacy uv tree predates the split by definition (docling, MinerU and
+# torch were default dependencies in every one), so its generation gets `pdf`.
+case ",$EXTRAS," in
+    *,pdf,*) ;;
+    *) EXTRAS="${EXTRAS:+$EXTRAS,}pdf" ;;
+esac
 
 _build_args=(--source "$SOURCE")
 [ -n "$VERSION" ] && _build_args+=(--version "$VERSION")
@@ -110,9 +117,27 @@ _build_args=(--source "$SOURCE")
 [ -n "$PYTHON_VERSION" ] && _build_args+=(--python "$PYTHON_VERSION")
 
 # ── 2. build side-by-side; the legacy tree is never touched ─────────────
-GEN="$("$_here/install_generation.sh" "${_build_args[@]}")" || exit $?
+# NX_MIGRATE_BUILD_SCRIPT names the install_generation.sh to build with: `nx self
+# install` sets it to the one the release being installed ships (nexus-2k66t.4.3),
+# so the lock pin in that release applies to this build. Unset, the sibling builds.
+if [ -n "${NX_MIGRATE_BUILD_SCRIPT:-}" ]; then
+    GEN="$(bash "$NX_MIGRATE_BUILD_SCRIPT" "${_build_args[@]}")" || exit $?
+else
+    GEN="$("$_here/install_generation.sh" "${_build_args[@]}")" || exit $?
+fi
 
-# ── 3. flip ───────────────────────────────────────────────────────────
+# ── 3. read the receipt back, then flip ──────────────────────────────────
+# The build ran the install_generation.sh of the release being installed
+# (NX_MIGRATE_BUILD_SCRIPT), which may write a receipt THIS release cannot
+# read, and every step after the flip reads it. Check with this release's
+# reader first: a refusal leaves `current`, `previous` and the shims untouched
+# (nexus-lvvhm). The built generation stays on disk for the reap to take.
+nx_check_receipt "$GEN" >/dev/null || {
+    echo "migrate_legacy: the generation $(basename "$GEN") was built, but this nx cannot read its receipt (above)." >&2
+    echo "  \`current\` was not moved; the install in use is unchanged. NX_INSTALL_RUNNING_INSTALLER=1 builds" >&2
+    echo "  with the installer of the running release instead." >&2
+    exit 64
+}
 nx_flip_current "$GEN" "$TOOLS_DIR" || exit $?
 
 # ── 4. shim takeover: uv-owned symlinks become nexus-owned files ────────

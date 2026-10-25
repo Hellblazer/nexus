@@ -141,10 +141,13 @@ def test_the_real_server_registers_both_tools_always(monkeypatch: pytest.MonkeyP
     assert set(core_mcp._tool_manager._tools) >= {"setup", "setup_status"}
 
 
-def test_the_schema_takes_a_mode_and_an_autostart_and_status_takes_nothing() -> None:
+def test_the_schema_takes_a_mode_an_autostart_and_a_slim_and_status_takes_nothing() -> None:
     tools = _tools()
     schema = tools["setup"].inputSchema
-    assert sorted(schema["properties"]) == ["autostart", "mode"]
+    assert sorted(schema["properties"]) == ["autostart", "mode", "slim"]
+    # nexus-w8ug5: tri-state, so no false default; null is "omitted".
+    assert schema["properties"]["slim"]["anyOf"] == [{"type": "boolean"}, {"type": "null"}]
+    assert schema["properties"]["slim"]["default"] is None
     assert schema["required"] == ["mode"]
     assert schema["properties"]["mode"]["type"] == "string"
     assert schema["properties"]["autostart"]["type"] == "boolean"
@@ -176,18 +179,20 @@ def test_the_descriptions_tell_the_model_to_ask_first_and_name_both_fixes() -> N
 def test_the_download_sizes_are_ceilings_not_promises() -> None:
     """A provisioned service downloads nothing: the description says "up to"."""
     text = _tools()["setup"].description
-    assert "up to about 1.3 GB" in text and "up to about 0.7 GB" in text
-    assert "about 1.3 GB to download" not in text.replace("up to about 1.3 GB", "")
+    assert "up to about 0.8 GB" in text and "up to about 0.45 GB" in text
+    assert "about 0.8 GB to download" not in text.replace("up to about 0.8 GB", "")
 
 
 def test_the_descriptions_give_the_disk_sizes_beside_the_download_sizes() -> None:
     """The Desktop question (Sam, 2026-10-14): the choice shows what it takes on disk as
-    well as what it downloads, as measured from nothing on macOS, Linux and Windows with conexus
-    7.81.0 (2.4 to 3.1 GB for local, 2.1 to 2.3 GB for the CLI alone; nexus-gxzfq), so the user
-    is not surprised after answering."""
+    well as what it downloads, (2.5 to 2.9 GB for local, 1.8 to 2.2 GB for the CLI alone), so the user is
+    not surprised after answering. The default install includes PDF support again since nexus-2k66t.4.9
+    (Sam, 2026-10-23); the figures are measured on 7.85.0 on macOS and Linux (nexus-2k66t.4.10)."""
     text = _tools()["setup"].description
-    assert "up to about 1.3 GB to download, 2.4 to 3.1 GB on disk" in text, text
-    assert "up to about 0.7 GB to download, 2.1 to 2.3 GB on disk" in text, text
+    assert "up to about 0.8 GB to download (0.9 GB on Linux), 2.5 to 2.9 GB on disk" in text, text
+    assert "up to about 0.45 GB to download (0.6 GB on Linux), 1.8 to 2.2 GB on disk" in text, text
+    assert "include PDF support" in text and "measured on 7.85.0 on macOS and Linux; Windows was not measured" in text, "what the sizes cover, and where from"
+    assert "slim true" in text, "the description offers the slim choice"
 
 
 # -- the instructions notice --------------------------------------------------------
@@ -263,7 +268,7 @@ def test_the_notice_gives_the_sizes_a_choice_takes(monkeypatch: pytest.MonkeyPat
     service: the sizes of the two ways to fix it, download and disk, in the table's words."""
     _service(monkeypatch, False)
     text = setup_tools.no_service_notice() or ""
-    assert "1.3 GB" in text and "2.4 to 3.1 GB on disk" in text and "0.7 GB" in text and "2.1 to 2.3 GB on disk" in text, text
+    assert "0.8 GB" in text and "2.5 to 2.9 GB on disk" in text and "0.45 GB" in text and "1.8 to 2.2 GB on disk" in text, text
 
 
 def _provision(config: Path, *, files: int = 3) -> None:
@@ -287,7 +292,7 @@ def test_a_provisioned_local_service_that_is_down_is_not_called_missing(
     text = setup_tools.no_service_notice() or ""
     assert "not running" in text and "/conexus:setup" in text and "setup tool" in text, text
     assert "act only on the user's answer" in text and "ask the user" not in text.lower()
-    assert "no service address is configured" not in text and "1.3 GB" not in text, text
+    assert "no service address is configured" not in text and "0.8 GB" not in text, text
 
 
 def test_a_partly_provisioned_service_is_still_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -295,7 +300,7 @@ def test_a_partly_provisioned_service_is_still_missing(monkeypatch: pytest.Monke
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     _provision(tmp_path, files=2)
     _service(monkeypatch, False)
-    assert "1.3 GB" in (setup_tools.no_service_notice() or "")
+    assert "0.8 GB" in (setup_tools.no_service_notice() or "")
 
 
 def _recorded(config: Path, **status: Any) -> None:
@@ -693,6 +698,43 @@ def test_setup_starts_the_script_with_the_mode_and_autostart_given(
     _service(monkeypatch, False)
     _call("setup", mode=mode, autostart=autostart)
     assert recorder.calls() == [argv]
+
+
+@pytest.mark.parametrize(
+    ("mode", "autostart", "argv"),
+    [
+        ("local", False, ["start", "--mode", "local", "--slim"]),
+        ("local", True, ["start", "--mode", "local", "--autostart", "--slim"]),
+        ("cloud", False, ["start", "--mode", "cloud", "--slim"]),
+        ("cli-only", False, ["start", "--mode", "cli-only", "--slim"]),
+    ],
+)
+def test_slim_reaches_the_script_for_every_mode_that_installs(
+    monkeypatch: pytest.MonkeyPatch, recorder: Recorder, mode: str, autostart: bool, argv: list[str],
+) -> None:
+    """nexus-2k66t.4.9: the default install carries PDF support; ``slim`` is how the user opts out."""
+    _service(monkeypatch, False)
+    _call("setup", mode=mode, autostart=autostart, slim=True)
+    assert recorder.calls() == [argv]
+
+
+def test_slim_is_omitted_when_not_given(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    _service(monkeypatch, False)
+    _call("setup", mode="cli-only")
+    assert recorder.calls() == [["start", "--mode", "cli-only"]]
+
+
+def test_an_explicit_false_slim_reaches_the_script_as_no_slim(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    """nexus-w8ug5: false is not omitted; the script uses the difference to leave an inherited slim run."""
+    _service(monkeypatch, False)
+    _call("setup", mode="cli-only", slim=False)
+    assert recorder.calls() == [["start", "--mode", "cli-only", "--no-slim"]]
+
+
+def test_a_null_slim_is_the_same_as_an_omitted_one(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
+    _service(monkeypatch, False)
+    _call("setup", mode="cli-only", slim=None)
+    assert recorder.calls() == [["start", "--mode", "cli-only"]]
 
 
 def test_autostart_is_false_when_not_given(monkeypatch: pytest.MonkeyPatch, recorder: Recorder) -> None:
@@ -1229,6 +1271,17 @@ def test_every_view_with_a_recorded_choice_shows_the_mode_and_the_autostart(
 
 
 @pytest.mark.parametrize("server", ["real", "stand-in"])
+@pytest.mark.parametrize("state", [s for s in sorted(VIEWS) if s not in ("none", "error")])
+def test_a_recorded_slim_choice_is_shown_and_passed_on_resume(standin_module: Any, state: str, server: str) -> None:
+    render = setup_tools.render if server == "real" else standin_module.render
+    text = render({**VIEWS[state], "slim": True})
+    assert "autostart no, slim." in text or "autostart yes, slim." in text, text
+    if state in ("failed", "interrupted", "doctor-failed"):
+        assert "slim true" in text, text
+    assert "slim" not in render({**VIEWS[state]}), "a run that was not slim says nothing about it"
+
+
+@pytest.mark.parametrize("server", ["real", "stand-in"])
 def test_a_view_with_no_recorded_choice_shows_none(standin_module: Any, server: str) -> None:
     render = setup_tools.render if server == "real" else standin_module.render
     for state in ("none", "error"):
@@ -1389,18 +1442,21 @@ def test_both_servers_answer_setup_status_alike_for_every_state(
 
 
 _SETUP_CASES = [
-    ("local", True, ["start", "--mode", "local", "--autostart"]),
-    ("local", False, ["start", "--mode", "local"]),
-    ("cli-only", True, ["start", "--mode", "cli-only"]),
-    ("not-now", False, ["not-now"]),
+    ("local", True, None, ["start", "--mode", "local", "--autostart"]),
+    ("local", False, None, ["start", "--mode", "local"]),
+    ("cli-only", True, None, ["start", "--mode", "cli-only"]),
+    ("not-now", False, None, ["not-now"]),
+    ("local", True, True, ["start", "--mode", "local", "--autostart", "--slim"]),
+    ("cli-only", False, True, ["start", "--mode", "cli-only", "--slim"]),
+    ("cli-only", False, False, ["start", "--mode", "cli-only", "--no-slim"]),
 ]
 
 
-@pytest.mark.parametrize(("mode", "autostart", "argv"), _SETUP_CASES)
+@pytest.mark.parametrize(("mode", "autostart", "slim", "argv"), _SETUP_CASES)
 @pytest.mark.parametrize("state", sorted(VIEWS))
 def test_both_servers_answer_setup_alike_for_every_state_and_start_the_same_command(
     monkeypatch: pytest.MonkeyPatch, recorder: Recorder, standin_with: Recorder, standin_module: Any,
-    state: str, mode: str, autostart: bool, argv: list[str],
+    state: str, mode: str, autostart: bool, slim: bool | None, argv: list[str],
 ) -> None:
     """Same recording script on both, same view for the command; the text and the
     command line each server produced are equal. Intentionally different, and not
@@ -1412,8 +1468,9 @@ def test_both_servers_answer_setup_alike_for_every_state_and_start_the_same_comm
     view = {**VIEWS[state], "started": state == "running"}
     for rec in (recorder, standin_with):
         rec.views(status=NONE, start=view, **{"not-now": view})
-    real = _answer(lambda: setup_tools.run_setup(mode, autostart))
-    standin = _answer(lambda: standin_module.run_setup({"mode": mode, "autostart": autostart}))
+    real = _answer(lambda: setup_tools.run_setup(mode, autostart, slim))
+    arguments = {"mode": mode, "autostart": autostart, **({} if slim is None else {"slim": slim})}
+    standin = _answer(lambda: standin_module.run_setup(arguments))
     assert real == standin, (real, standin)
     assert recorder.calls() == standin_with.calls() == [argv]
 

@@ -9,6 +9,10 @@
 #   truncated-model  both bge files present, model a few bytes: exits non-zero naming
 #                    the size floor (never "absent"), keyless AND keyed (Sam's ruling:
 #                    a both-files-present truncated model fails loud even with a key).
+#   zero-model       both bge files present, model 250 MB of zeros (past the size floor):
+#                    ONNX Runtime refuses it in createSession and the process ends on its own,
+#                    non-zero, naming the embedder (nexus-rc4pz; the JVM's counterpart is
+#                    MainBootEnvValidationIntegrationTest's anUncaughtBgeEmbedderFailure test).
 #
 # Every boot gets its own EMPTY NX_ORT_NATIVE_DIR and its own NX_ONNX_MODEL_DIR under
 # one per-run private scratch dir, and a clean env (env -i) so an ambient
@@ -46,6 +50,22 @@ cd "$SCRIPT_DIR" || exit 2
 
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WINLIKE=1 ;; *) WINLIKE=0 ;; esac
 
+# nexus-s5lfh: bounded docker calls, as native-smoke.sh bounds its own (nexus-ub4ge). GNU timeout on
+# Linux runners; gtimeout from Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call
+# runs unbounded as before.
+# --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
+# The INT trap below then stops the script: uutils timeout (coreutils 0.8.0 on chas) exits 2 on SIGINT
+# where GNU re-raises it, and bash goes on unless its child died by the signal. The trap re-raises, so
+# the script dies by SIGINT and a bash caller stops too; it is set at top level because bash resets
+# traps inside $(...).
+_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
+  else "$@"; fi
+}
+trap 'trap - INT; kill -INT $$' INT
+
 SHAPES_TMP=$(mktemp -d "${TMPDIR:-/tmp}/native-boot-shapes.XXXXXX") \
   || { echo "FAIL: cannot create scratch dir under ${TMPDIR:-/tmp}"; exit 2; }
 
@@ -59,7 +79,7 @@ leg_ok=0
 cleanup() {
   local rc=$?
   [ -n "$BOOT_PID" ] && kill -9 "$BOOT_PID" 2>/dev/null
-  [ "$OWN_PG" = "1" ] && docker rm -f "$PGC" >/dev/null 2>&1
+  [ "$OWN_PG" = "1" ] && _bounded 60 docker rm -f "$PGC" >/dev/null 2>&1
   if [ "$rc" = "0" ]; then
     rm -rf "$SHAPES_TMP"
   else
@@ -74,7 +94,7 @@ free_port() { python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0)
 if [ -z "$PGC" ]; then
   if [ -n "${NX_DB_URL:-}" ]; then
     echo "SKIP boot shapes: external NX_DB_URL cannot give each boot a clean database."
-    echo "     WARN the cloud shape and the two failure boots are NOT covered by this run."
+    echo "     WARN the cloud shape and the failure shapes are NOT covered by this run."
     # A gate that skip-passes when its dependency is absent needs a max-skip: a release
     # leg sets NATIVE_SMOKE_REQUIRE_SHAPES=1 so a skipped shapes block fails the run.
     if [ "${NATIVE_SMOKE_REQUIRE_SHAPES:-0}" = "1" ]; then
@@ -86,12 +106,12 @@ if [ -z "$PGC" ]; then
   OWN_PG=1
   PGC="nx-bootshapes-pg-$$"
   PGP=$(free_port)
-  docker rm -f "$PGC" >/dev/null 2>&1 || true
-  docker run -d --name "$PGC" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
+  _bounded 60 docker rm -f "$PGC" >/dev/null 2>&1 || true
+  _bounded 600 docker run -d --name "$PGC" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
     -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGP}:5432" pgvector/pgvector:pg17 >/dev/null \
     || { echo "FAIL: cannot start the throwaway pgvector container"; exit 2; }
-  for _ in $(seq 1 60); do docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
-  docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector never became ready"; exit 2; }
+  for _ in $(seq 1 60); do _bounded 10 docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
+  _bounded 10 docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector never became ready"; exit 2; }
   sleep 2
 fi
 [ -n "$PGP" ] || { echo "FAIL: BOOT_SHAPES_PG_CONTAINER set without BOOT_SHAPES_PG_PORT"; exit 2; }
@@ -107,8 +127,8 @@ boot_prepare() {
   BOOT_MODELS="$BOOT_DIR/onnx_models"
   BOOT_DB="bootshape_$(echo "$name" | tr -c 'a-zA-Z0-9' '_')"
   mkdir -p "$BOOT_DIR/jtmp" "$BOOT_DIR/home" "$BOOT_ORT" "$BOOT_MODELS"
-  docker exec "$PGC" psql -U nexus -d nexus -c "DROP DATABASE IF EXISTS $BOOT_DB;" >/dev/null 2>&1
-  docker exec "$PGC" psql -U nexus -d nexus -c "CREATE DATABASE $BOOT_DB;" >/dev/null 2>&1 \
+  _bounded 60 docker exec "$PGC" psql -U nexus -d nexus -c "DROP DATABASE IF EXISTS $BOOT_DB;" >/dev/null 2>&1
+  _bounded 60 docker exec "$PGC" psql -U nexus -d nexus -c "CREATE DATABASE $BOOT_DB;" >/dev/null 2>&1 \
     || { echo "FAIL: cannot create database $BOOT_DB in $PGC"; return 1; }
   BOOT_PORT=$(free_port)
 }
@@ -260,9 +280,34 @@ run_truncated_model() {
   done
 }
 
+# ── Shape (d): a zero model past the size floor (nexus-rc4pz) ─────────────────
+# The truncated model fails at the size floor; this one passes it, so the engine loads ONNX Runtime
+# and createSession refuses the bytes. Measured on engine-service-v0.1.164 linux-amd64 (2026-10-23):
+# ORT_INVALID_PROTOBUF from OrtSession.createSession, exit 1 within seconds. The file is sparse.
+run_zero_model() {
+  leg_ok=0
+  boot_prepare zero-model || { leg_ok=1; verdict "zero-model"; return; }
+  mkdir -p "$BOOT_MODELS/bge-base-en-v1.5/onnx"
+  printf '{}' > "$BOOT_MODELS/bge-base-en-v1.5/onnx/tokenizer.json"
+  python3 -c "import sys; open(sys.argv[1], 'wb').truncate(250000000)" "$BOOT_MODELS/bge-base-en-v1.5/onnx/model.onnx"
+  boot_start ""
+  wait_exit 90; EXIT_TIMEOUT=$?
+  ck "exits within the bound" 'echo "still running after 90 s; killed"' exited_in_bound
+  ck "exits non-zero, not a crash or a kill" 'echo "exit $EXIT_RC"' exited_with_failure
+  ck "never reaches service_ready" 'echo "service_ready was logged"' no_log 'event=service_ready'
+  ck "ONNX Runtime extracted (applyAtBoot ran)" 'grep -m1 ort_native_dir "$BOOT_LOG"' \
+    has_log 'event=ort_native_dir source=extracted'
+  ck "reached createSession (an OrtSession.createSession frame in the failure)" 'echo "no OrtSession.createSession frame"' \
+    has_log 'OrtSession.createSession'
+  ck "the failure is the embedder's" 'echo "no Bge768Embedder failure in the output"' \
+    has_log 'Failed to initialise Bge768Embedder'
+  verdict "zero-model (both files present, 250 MB of zeros: the embedder fails in createSession, the process ends on its own)"
+}
+
 echo "boot shapes (RDR-210 P2.2): $BIN"
 run_cloud_shape
 run_neither_family
 run_truncated_model
+run_zero_model
 
 if [ "$fail" = "0" ]; then echo "BOOT SHAPES PASS"; exit 0; else echo "BOOT SHAPES FAIL"; exit 1; fi

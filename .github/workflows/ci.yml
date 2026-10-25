@@ -18,20 +18,25 @@ on:
     branches: [main, develop]
 
 concurrency:
-  # One run at a time on develop, the newest push waiting (Sam, 2026-10-18,
-  # labrun RDR-001 F15, nexus-1wf1s). The 2026-10-17 goal stands: every
-  # develop commit is covered by a finished run. develop is linear, so the
-  # run of the newest pending push tests every commit before it; a running
-  # develop run is never cancelled, and a newer push replaces only the one
-  # pending run. Replayed over 69 develop pushes this kept one develop run
-  # (6 shards) in flight instead of 4-6 that queued against the 10-shard
-  # cap, at 72-81% of the run-minutes. Trade-off: a red run can cover
-  # several commits, so finding the culprit may take a rerun of an earlier
-  # one. Do not return to cancelling on develop: under continuous pushes it
-  # livelocked (verdict p90 45-52 min). On PRs and every other ref the
-  # 2026-07-06 CI-cost rule holds: a newer push cancels the run it
-  # supersedes. main is not a push trigger, and tags run another workflow.
-  group: ci-${{ github.ref }}
+  # Two develop runs at a time, each slot with the newest push waiting
+  # (nexus-cvtxu, 2026-10-23; replaces the 2026-10-18 one-at-a-time rule,
+  # labrun RDR-001 F15, nexus-1wf1s). One run in flight put develop's
+  # push-to-verdict p90 at 41 min on 10-21, mostly waiting behind the run
+  # ahead. A develop run lands in slot 0 or slot 1 by the parity of its run
+  # number (Actions expressions have no arithmetic, so the last digit is
+  # tested with endsWith); within a slot the 10-18 rule holds: a running run
+  # is never cancelled and a newer push replaces only that slot's pending
+  # run. So at most two develop runs (12 shards against the 10-runner
+  # lab-6c18g pool; the second run's last shards wait) and two pending. The
+  # run number counts PR runs too, so consecutive develop pushes can share a
+  # slot while the other is idle: the bound is the point, not the balance.
+  # Every develop commit is still covered by a finished run: the newest push
+  # is never replaced except by a newer one, whose run covers it. Do not go
+  # back to cancelling on develop (it livelocked, verdict p90 45-52 min) or
+  # to a per-commit group (4-6 runs piled onto the pool). On PRs and every
+  # other ref the 2026-07-06 CI-cost rule holds: a newer push cancels the run
+  # it supersedes. main is not a push trigger, and tags run another workflow.
+  group: ci-${{ github.ref }}${{ github.ref == 'refs/heads/develop' && ((endsWith(format('{0}', github.run_number), '0') || endsWith(format('{0}', github.run_number), '2') || endsWith(format('{0}', github.run_number), '4') || endsWith(format('{0}', github.run_number), '6') || endsWith(format('{0}', github.run_number), '8')) && '-slot0' || '-slot1') || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
 
 jobs:
@@ -1486,7 +1491,7 @@ jobs:
       NX_T2_SUBSTRATE_EXPECTED: "1"
       # Must equal LSG_PYTEST_MARK_EXPR in tests/e2e/lib/mandatory_pins.sh
       # (pinned by tests/scripts/test_select_affected_integration_tests.py).
-      INTEGRATION_MARK_EXPR: "integration and not lived_in and not cloud_mode and not mandatory_regression_pin"
+      INTEGRATION_MARK_EXPR: "integration and not lived_in and not keyed_voyage and not mandatory_regression_pin"
       INTEGRATION_FILES: ${{ needs.changes.outputs.integration_files }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
@@ -1702,7 +1707,7 @@ jobs:
     # condition for the exact same reason.
     name: pytest-gate
     if: always()
-    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected]
+    needs: [changes, test, test-lint, test-mode-census, test-docs-readers, release-ledger-gate, test-integration-affected, mcpb-resolve-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1718,6 +1723,7 @@ jobs:
           release_ledger_result="${{ needs.release-ledger-gate.result }}"
           integration_any="${{ needs.changes.outputs.integration_any }}"
           integration_result="${{ needs.test-integration-affected.result }}"
+          mcpb_result="${{ needs.mcpb-resolve-gate.result }}"
           event_name="${{ github.event_name }}"
           base_ref="${{ github.base_ref }}"
 
@@ -1811,6 +1817,23 @@ jobs:
                 exit 1
                 ;;
             esac
+          fi
+
+          # mcpb-resolve-gate (nexus-zzkko, Sam 2026-10-24: blocking for PRs
+          # into main). The job always runs and resolves the Desktop bundle's
+          # pins only when their inputs changed, so success covers both. On a
+          # PR into main (the release PR, the last stop before a tag) anything
+          # but success blocks; elsewhere a red is reported and does not block,
+          # since develop is pushed directly and release.yml blocks before
+          # publish anyway.
+          echo "mcpb-resolve-gate result: $mcpb_result"
+          if [ "$event_name" = "pull_request" ] && [ "$base_ref" = "main" ]; then
+            if [ "$mcpb_result" != "success" ]; then
+              echo "::error::PR targets main but mcpb-resolve-gate reported '$mcpb_result' instead of success — the Desktop bundle's pinned dependencies must resolve before a release PR can merge"
+              exit 1
+            fi
+          elif [ "$mcpb_result" != "success" ]; then
+            echo "::warning::mcpb-resolve-gate reported '$mcpb_result' (advisory off the release PR; release.yml blocks before publish)"
           fi
 
           # nexus-rpaat: the affected-integration job MUST succeed when the
@@ -2587,7 +2610,7 @@ jobs:
       # (service/pom.xml, jooq-inputs; a persistent checkout would otherwise keep the cache).
       NX_JOOQ_CACHE: "off"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
@@ -2769,3 +2792,66 @@ jobs:
           # manifest-rewrite-visibility core tests actually ran+passed, and no
           # prereq-skip vacuously cleared the run.
           uv run python scripts/assert_write_seam_ran.py write-seam.xml
+
+  mcpb-resolve-gate:
+    # nexus-zzkko — the Desktop .mcpb lock must RESOLVE, checked on the change
+    # that breaks it instead of after the release tag. release.yml's pack step
+    # runs scripts/check_mcpb_resolve.py against the built wheel; by then the
+    # tag is pushed, and a lock that cannot resolve costs a workflow_dispatch
+    # retry or a moved tag. This runs the same check against the checkout
+    # (conexus as a path source at this tree), resolve only, nothing installed.
+    #
+    # PATH GATE, same shape as write-seam-gate above: the job ALWAYS runs so
+    # the check reports on every PR, and the one expensive step (an index
+    # metadata resolve, seconds) runs only when an input of the resolve changed:
+    # the lock itself, uv.lock and the root pyproject (conexus's own dependency
+    # floors, which the pins must satisfy), the bundle's pyproject and launcher,
+    # and the two scripts. The non-vacuity step makes an unusable filter output
+    # fail the job instead of skipping the resolve under a green check.
+    name: mcpb lock resolve gate (nexus-zzkko)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
+
+      # SHA-pinned like the other filters in this file: a floating tag that
+      # always emitted mcpb='false' would skip the resolve under a green check.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
+        id: changes
+        with:
+          filters: |
+            mcpb:
+              - 'src/nexus/_install/constraints.txt'
+              - 'uv.lock'
+              - 'pyproject.toml'
+              - 'mcpb/pyproject.toml'
+              - 'mcpb/manifest.json'
+              - 'mcpb/src/bootstrap.py'
+              - 'scripts/check_mcpb_resolve.py'
+              - 'scripts/stage_mcpb_constraints.py'
+
+      - name: Verify the mcpb predicate is usable (fail loud, never default-skip)
+        run: |
+          set -euo pipefail
+          mcpb="${{ steps.changes.outputs.mcpb }}"
+          case "$mcpb" in
+            true|false) ;;
+            *)
+              echo "::error::paths-filter produced no usable mcpb output ('$mcpb') — cannot prove whether the .mcpb lock inputs changed, refusing to silently skip the resolve"
+              exit 1
+              ;;
+          esac
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        if: steps.changes.outputs.mcpb == 'true'
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Resolve the bundle under the staged lock (checkout, not a wheel)
+        if: steps.changes.outputs.mcpb == 'true'
+        run: |
+          set -euo pipefail
+          python3 scripts/check_mcpb_resolve.py

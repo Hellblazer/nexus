@@ -84,7 +84,7 @@ def test_a_bge_profile_without_bge_models_warns_and_points_at_the_files() -> Non
     r = _row({"embedding_profile": "bge", "embedding_models": ["voyage-model-a", "voyage-model-b"]})
     assert r.ok is False and r.warn is True
     assert "bge" in r.detail and "degraded" in r.detail
-    assert any("nx init --service" in s for s in r.fix_suggestions)
+    assert any("nx init" in s and "--service" not in s for s in r.fix_suggestions)
 
 
 def test_an_engine_serving_no_model_at_all_warns() -> None:

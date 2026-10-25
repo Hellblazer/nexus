@@ -11,7 +11,7 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 | `nexus` | `nx-mcp` | 46 | Storage tiers, retrieval, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
-The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`catalog_search`, `catalog_link`, etc.) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
+The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`search`, `link`, etc. on the `nexus-catalog` server) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
@@ -111,7 +111,7 @@ The plan verbs and what each does:
 
 | Tool | Purpose |
 |---|---|
-| `nx_answer` | Retrieval trunk: `plan_match` → `plan_run` → record. Plan-miss falls through to an inline `claude -p` planner. See [Querying Guide § nx_answer](querying-guide.md#conexusquery-skill--nx_answer-mcp-tool-analytical-queries) |
+| `nx_answer` | Retrieval trunk: `plan_match` → `plan_run` → record. Plan-miss falls through to an inline `claude -p` planner. See [Querying Guide § nx_answer](querying-guide.md#nx_answer-mcp-tool-analytical-queries) |
 | `nx_answer_report` | Report that an `nx_answer` continuation handoff (RDR-200) was completed by the caller. Appends a marker-paired report row keyed on the envelope's `continuation_id`, never mutating the handoff row, so `nx answer-runs` can report an honest unreported rate |
 | `nx_tidy` | Consolidate T3 knowledge entries on a topic |
 | `nx_enrich_beads` | Enrich a bead with execution context (file paths, test commands, constraints) |
@@ -189,7 +189,7 @@ Full tool names follow `mcp__plugin_conexus_nexus-catalog__<tool>`. No redundant
 |---|---|
 | `search` | Metadata search across the catalog (title, author, corpus, file path). The free-text `query` matches titles and metadata only, never document content; content search is the `nexus` server's `search` and `query`. A search with no rows returns a `note` entry saying so (at offset 0), or, past the last row, how many matches lie before that offset, instead of an empty list. `limit` below 1 or `offset` below 0 is refused |
 | `show` | Full metadata + all inbound/outbound links for a document |
-| `list` | Browse catalog entries with filters (type, subtree, owner) |
+| `list` | Browse catalog entries with filters (`owner`, `content_type`) and `limit`/`offset` |
 | `register` | Add a new document to the catalog |
 | `update` | Update metadata on an existing catalog entry |
 | `link` | Create a typed link between two documents |
@@ -284,7 +284,7 @@ Seven tools return paged results and accept `offset`: `search`, `store_list`, `m
 --- showing 41-57 of 57. (end)
 ```
 
-Pass `offset=N` back to the same tool to fetch the next page. Default page size: 20 for list-style tools; `search`'s page-size parameter is `limit` (default 10).
+Pass `offset=N` back to the same tool to fetch the next page. Default page size is 20 for `store_list`, `memory_search` and catalog `search`, 50 for catalog `list` and `link_query`, and 5 for `plan_search`; `search`'s page-size parameter is `limit` (default 10).
 
 ## Permission auto-approval
 

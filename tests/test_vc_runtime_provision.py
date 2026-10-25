@@ -29,15 +29,16 @@ from nexus.daemon import binary_install as b
 from tests._module_seam import setattr_in
 
 _DLLS = _vcrt.VC_RUNTIME_DLLS
-_BODY = {n: f"fake {n}".encode() for n in (*_DLLS, "vcruntime140.dll", "postgres.exe")}
+_ATOMIC_WAIT = "msvcp140_atomic_wait.dll"
+_BODY = {n: f"fake {n}".encode() for n in (*_DLLS, _ATOMIC_WAIT, "vcruntime140.dll", "postgres.exe")}
 
 
-def _bundle_bytes(*, omit: tuple[str, ...] = (), arcroot: str = "bundle") -> bytes:
+def _bundle_bytes(*, omit: tuple[str, ...] = (), arcroot: str = "bundle", atomic_wait: bool = False) -> bytes:
     """A txz laid out like scripts/build_pg_bundle_windows.py's: members under
     ``bundle/``, PostgreSQL first so an early break matters."""
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w") as tf:
-        for name in ("postgres.exe", "vcruntime140.dll", *_DLLS):
+        for name in ("postgres.exe", "vcruntime140.dll", *_DLLS, *((_ATOMIC_WAIT,) if atomic_wait else ())):
             if name in omit:
                 continue
             data = _BODY[name]
@@ -137,14 +138,14 @@ def test_off_windows_is_not_applicable_and_touches_nothing(cfg: Path, system: st
 
 
 def test_a_system_runtime_means_no_download(cfg: Path, tmp_path: Path, net: _Net) -> None:
-    sysdir = _put_dlls(tmp_path / "System32-with")
+    sysdir = _put_dlls(tmp_path / "System32-with", _vcrt.PDF_STACK_DLLS)
     r = _ensure(cfg, str(sysdir), net)
     assert r.status == "present_system" and net.urls == []
 
 
 @pytest.mark.parametrize("sub", [("service",), ("pg-bundle", "bundle", "bin"), ("vcrt",)])
-def test_an_app_local_directory_with_both_dlls_means_no_download(cfg: Path, system: str, net: _Net, sub) -> None:
-    where = _put_dlls(cfg.joinpath(*sub))
+def test_an_app_local_directory_with_the_whole_set_means_no_download(cfg: Path, system: str, net: _Net, sub) -> None:
+    where = _put_dlls(cfg.joinpath(*sub), _vcrt.PDF_STACK_DLLS)
     r = _ensure(cfg, system, net)
     assert r.status == "present_app_local" and r.dir == where and net.urls == []
 
@@ -171,6 +172,33 @@ def test_provisions_the_two_dlls_from_the_pinned_tags_pg_bundle(cfg: Path, syste
     meta = json.loads((cfg / "vcrt" / "vcrt.meta.json").read_text())
     assert meta["tag"] == pinned and set(meta["dlls"]) == set(_DLLS)
     assert meta["sha256"] == hashlib.sha256(net.content).hexdigest()
+
+
+def test_a_bundle_from_an_engine_without_atomic_wait_still_provisions_the_base_pair_and_says_so(
+    cfg: Path, system: str, net: _Net,
+) -> None:
+    """The default bundle here is the older one (no msvcp140_atomic_wait.dll). It is a valid
+    source for the base pair; the detail says the fifth DLL was not in it (nexus-vyy65)."""
+    r = _ensure(cfg, system, net)
+    assert r.status == "provisioned" and r.ok
+    assert _ATOMIC_WAIT not in _vcrt_files(cfg)
+    assert _ATOMIC_WAIT in r.detail and "was not in that bundle" in r.detail
+    assert _vcrt.runtime_source("win32", str(cfg), system, _vcrt.PDF_STACK_DLLS) == (_vcrt.MISSING, None)
+
+
+def test_a_bundle_that_carries_atomic_wait_provisions_it_too(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(b, "_download", _Net(_bundle_bytes(atomic_wait=True)))
+    r = _ensure(cfg, system, None)
+    assert r.status == "provisioned", r.detail
+    assert _vcrt_files(cfg) == sorted([*_DLLS, _ATOMIC_WAIT, "vcrt.meta.json"])
+    assert (cfg / "vcrt" / _ATOMIC_WAIT).read_bytes() == _BODY[_ATOMIC_WAIT]
+    assert "was not in that bundle" not in r.detail and _ATOMIC_WAIT in r.detail
+    assert _ATOMIC_WAIT in json.loads((cfg / "vcrt" / "vcrt.meta.json").read_text())["dlls"]
+    # the gate reads the disk: <config>/vcrt now satisfies the PDF stack's set
+    assert _vcrt.runtime_source("win32", str(cfg), system, _vcrt.PDF_STACK_DLLS) == (
+        _vcrt.APP_LOCAL, str(cfg / "vcrt"))
 
 
 def test_idempotent_second_call_finds_them_and_downloads_nothing(cfg: Path, system: str, net: _Net) -> None:
@@ -546,3 +574,171 @@ def test_upgrade_auto_reaches_the_precondition_stage_that_hosts_the_step() -> No
     src = inspect.getsource(up.upgrade.callback)
     assert "_converge_preconditions(auto_mode=auto_mode" in src
     assert "_converge_vc_runtime(auto_mode=auto_mode)" in inspect.getsource(up._converge_preconditions)
+
+
+# ── the PDF-only DLL is topped up from the bundle (nexus-vyy65) ─────────────
+#
+# A box whose System32 or <config>/vcrt already holds the base pair never took the
+# provisioning path, so an engine release carrying msvcp140_atomic_wait.dll could not end
+# its need for the redistributable. ensure_vc_runtime now tops the DLL up, at most once
+# per pinned tag.
+
+_PDF_SET = _vcrt.PDF_STACK_DLLS
+
+
+def _gap(cfg: Path, system: str):  # noqa: ANN202
+    from nexus.pdf_stack import _windows_runtime_gap
+
+    return _windows_runtime_gap("win32", str(cfg), system)
+
+
+def _new_bundle(monkeypatch: pytest.MonkeyPatch) -> _Net:
+    n = _Net(_bundle_bytes(atomic_wait=True))
+    monkeypatch.setattr(b, "_download", n)
+    return n
+
+
+def test_a_system_base_pair_is_topped_up_with_the_pdf_dll_from_a_bundle_that_carries_it(
+    cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    net = _new_bundle(monkeypatch)
+    assert _gap(cfg, sysdir) == ("base_only", sysdir)
+    r = _ensure(cfg, sysdir, net)
+    assert r.status == "provisioned" and r.ok and r.dir == cfg / "vcrt", r.detail
+    assert _ATOMIC_WAIT in r.detail
+    assert net.asset_fetches == 1
+    assert _vcrt_files(cfg) == sorted([*_PDF_SET, "vcrt.meta.json"])
+    assert (cfg / "vcrt" / _ATOMIC_WAIT).read_bytes() == _BODY[_ATOMIC_WAIT]
+    assert _gap(cfg, sysdir) is None, "the whole set is in one directory now: the gap is closed"
+    meta = json.loads((cfg / "vcrt" / "vcrt.meta.json").read_text())
+    assert meta["pdf_dll_checked_tag"] == b.resolve_service_tag() and _ATOMIC_WAIT in meta["dlls"]
+
+
+def test_a_stale_base_only_vcrt_is_topped_up_without_rewriting_its_base_pair(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    where = _put_dlls(cfg / "vcrt")  # what an earlier client provisioned: the base pair only
+    for n in _DLLS:
+        (where / n).write_bytes(b"EARLIER-" + n.encode())
+    net = _new_bundle(monkeypatch)
+    assert _gap(cfg, system) == ("base_only", str(where))
+    r = _ensure(cfg, system, net)
+    assert r.status == "provisioned", r.detail
+    for n in _DLLS:  # a loaded DLL cannot be replaced on Windows: the existing ones stay
+        assert (where / n).read_bytes() == b"EARLIER-" + n.encode()
+    assert (where / _ATOMIC_WAIT).read_bytes() == _BODY[_ATOMIC_WAIT]
+    assert _gap(cfg, system) is None
+
+
+def test_an_older_bundle_is_fetched_once_per_pinned_tag_not_on_every_call(
+    cfg: Path, tmp_path: Path, net: _Net,
+) -> None:
+    """`net` serves the older bundle (no msvcp140_atomic_wait.dll)."""
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    first = _ensure(cfg, sysdir, net, tag="engine-service-v9.9.1")
+    assert first.status == "present_system" and first.ok
+    assert net.asset_fetches == 1
+    assert _vcrt_files(cfg) == ["vcrt.meta.json"], "an older bundle places nothing"
+    assert _gap(cfg, sysdir) == ("base_only", sysdir)
+    for _ in range(2):
+        _ensure(cfg, sysdir, net, tag="engine-service-v9.9.1")
+    assert net.asset_fetches == 1, "the tag was recorded as checked: no refetch"
+    _ensure(cfg, sysdir, net, tag="engine-service-v9.9.2")
+    assert net.asset_fetches == 2, "a new pinned tag rechecks"
+
+
+def test_a_newer_tag_that_carries_the_dll_picks_it_up_after_an_older_one_was_recorded(
+    cfg: Path, tmp_path: Path, net: _Net, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    _ensure(cfg, sysdir, net, tag="engine-service-v9.9.1")
+    new = _new_bundle(monkeypatch)
+    r = _ensure(cfg, sysdir, new, tag="engine-service-v9.9.2")
+    assert r.status == "provisioned" and new.asset_fetches == 1
+    assert _gap(cfg, sysdir) is None
+    assert json.loads((cfg / "vcrt" / "vcrt.meta.json").read_text())["pdf_dll_checked_tag"] == "engine-service-v9.9.2"
+
+
+def test_a_full_provision_from_an_older_bundle_is_not_refetched_for_the_same_tag(
+    cfg: Path, system: str, net: _Net,
+) -> None:
+    assert _ensure(cfg, system, net).status == "provisioned"
+    assert _ensure(cfg, system, net).status == "present_app_local"
+    assert net.asset_fetches == 1
+
+
+def test_a_present_pdf_set_never_reaches_the_network(cfg: Path, tmp_path: Path, net: _Net) -> None:
+    sysdir = str(_put_dlls(tmp_path / "System32-full", _PDF_SET))
+    assert _ensure(cfg, sysdir, net).status == "present_system"
+    where = _put_dlls(cfg / "service", _PDF_SET)
+    r = _ensure(cfg, str(tmp_path / "empty"), net)
+    assert r.status == "present_app_local" and r.dir == where
+    assert net.urls == []
+
+
+def test_the_top_up_is_not_applicable_off_windows(cfg: Path, tmp_path: Path, net: _Net) -> None:
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    r = _ensure(cfg, sysdir, net, platform="darwin")
+    assert r.status == "not_applicable" and net.urls == [] and not (cfg / "vcrt").exists()
+
+
+def test_a_failed_top_up_is_a_result_stamps_the_failure_and_backs_off(
+    cfg: Path, tmp_path: Path, net: _Net, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    monkeypatch.setattr(b, "_download", _RaisesOnce(net))
+    r = _ensure(cfg, sysdir, None)
+    assert r.status == "failed" and _ATOMIC_WAIT in r.detail and "first attempt fails" in r.detail
+    assert (cfg / b._VCRT_FAILED_SENTINEL).exists()
+    deferred = _ensure(cfg, sysdir, None, failure_backoff_s=3600)
+    assert deferred.status == "present_system" and net.asset_fetches == 0, "no download inside the backoff"
+    assert _ensure(cfg, sysdir, None).status == "present_system"
+    assert net.asset_fetches == 1 and not (cfg / b._VCRT_FAILED_SENTINEL).exists()
+
+
+def test_a_top_up_puts_the_directory_on_this_processes_dll_path(
+    cfg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    net = _new_bundle(monkeypatch)
+    calls: list[dict] = []
+    monkeypatch.setattr(nexus, "_add_vc_runtime_dirs", lambda **kw: calls.append(kw) or [])
+    _ensure(cfg, sysdir, net)
+    assert calls and calls[0]["config_dir"] == str(cfg)
+
+
+def test_the_search_adds_a_vcrt_that_holds_the_whole_set_over_a_base_only_system32(
+    cfg: Path, tmp_path: Path,
+) -> None:
+    """The whole-set rule stays: a topped-up vcrt joins the path; a base-only one never does."""
+    sysdir = str(_put_dlls(tmp_path / "System32-base"))
+    _put_dlls(cfg / "vcrt")
+    assert _search(cfg, sysdir) == []
+    _put_dlls(cfg / "vcrt", _PDF_SET)
+    assert _search(cfg, sysdir) == [str(cfg / "vcrt")]
+
+
+# ── nx init's failure line says what the missing DLLs are for ────────────────
+
+
+@pytest.mark.parametrize(
+    ("detail", "embedding_named"),
+    [
+        ("msvcp140_atomic_wait.dll (PDF support needs it) could not be placed: OSError: boom", False),
+        ("OSError: boom", True),
+    ],
+)
+def test_the_init_failure_line_names_local_embedding_only_when_the_base_pair_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    detail: str, embedding_named: bool,
+) -> None:
+    import nexus.daemon.binary_install as bi
+    from nexus.commands.init import _provision_vc_runtime_step
+
+    monkeypatch.setattr(bi, "ensure_vc_runtime", lambda *a, **k: bi.VcRuntimeResult("failed", detail))
+    _provision_vc_runtime_step(tmp_path)
+    err = capsys.readouterr().err
+    assert detail in err
+    assert ("local embedding" in err) is embedding_named
+    assert "vc_redist.x64.exe" in err

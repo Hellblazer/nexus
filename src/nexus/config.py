@@ -600,6 +600,14 @@ CREDENTIALS: dict[str, str] = {
     # but it is NOT a secret -- see NON_SECRET_CREDENTIALS below, which
     # keeps `nx config get/list` from masking it.
     "mint_tenant":       "NX_MINT_TENANT",
+    # nexus-2k66t.3 P2: the direct LLM backends. Resolved env-then-global
+    # config.yml like every entry here, read ONLY by nexus.operators (never
+    # copied into os.environ or a CLI child's env, never logged). The
+    # openai_compat key has its own NX_ name on purpose: OPENAI_API_KEY is
+    # commonly exported for another purpose, and must never be sent to a
+    # server a config file names.
+    "anthropic_api_key":     "ANTHROPIC_API_KEY",
+    "openai_compat_api_key": "NX_LLM_OPENAI_API_KEY",
 }
 
 #: Entries in CREDENTIALS that are not actually secrets -- a tenant slug, a
@@ -1362,6 +1370,19 @@ def get_credential(name: str) -> str:
         data = _load_global_config(path)
         return data.get("credentials", {}).get(name, "")
     return ""
+
+
+def get_global_config_section(name: str) -> dict:
+    """One top-level section of the GLOBAL ``config.yml`` (cached, as
+    :func:`get_credential`), or ``{}`` when the file or section is absent or
+    not a mapping. Never reads the per-repo ``.nexus.yml``: use this, not
+    :func:`load_config`, for a setting a cloned repository must not control
+    (``llm.*``, nexus-2k66t.3). A malformed file raises, as the parse does."""
+    path = _global_config_path()
+    if not path.exists():
+        return {}
+    section = _load_global_config(path).get(name)
+    return dict(section) if isinstance(section, dict) else {}
 
 
 def get_service_url() -> str:

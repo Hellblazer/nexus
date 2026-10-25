@@ -273,9 +273,27 @@ jobs:
           # `npx @anthropic-ai/mcpb pack` zips the mcpb/ directory and
           # validates manifest.json against the v0.4 schema.
           npm install -g @anthropic-ai/mcpb
+          # nexus-2k66t.4.6: the bundle installs under the release's lock.
+          # Stage src/nexus/_install/constraints.txt (the file the wheel and
+          # every installer ship; pinned equal to uv.lock) into the bundle
+          # BEFORE packing; mcpb/src/bootstrap.py writes it into the bundle's
+          # pyproject before `uv sync`. The unzip check fails the release if
+          # the packed zip does not carry it. The stager also appends
+          # conexus==<this release>, so a bundle installs the release it was
+          # built from.
+          python3 scripts/stage_mcpb_constraints.py --conexus-version "$RELEASE_VERSION"
+          # Resolve-only gate (nothing installed): the bundle's pyproject plus
+          # the staged lock must RESOLVE, with conexus taken from the wheel just
+          # built (the release is not on PyPI before this job publishes). A lock
+          # that cannot resolve fails here, before publish, not on a Desktop
+          # user's machine.
+          python3 scripts/check_mcpb_resolve.py --conexus "$(ls dist/conexus-"$RELEASE_VERSION"-*.whl)" --conexus-version "$RELEASE_VERSION"
           cd mcpb
           mcpb pack . conexus.mcpb
           ls -la conexus.mcpb
+          unzip -l conexus.mcpb > mcpb-listing.txt
+          grep -q ' constraints\.txt$' mcpb-listing.txt || { echo "ERROR: conexus.mcpb does not carry constraints.txt"; exit 1; }
+          rm -f mcpb-listing.txt
           mkdir -p ../mcpb-dist && mv conexus.mcpb ../mcpb-dist/
 
       - name: Publish to PyPI

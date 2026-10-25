@@ -5,6 +5,7 @@
 > retired (nexus-i711w); T2 is now served by the nexus-service over HTTP
 > (`nx daemon service start|stop|status`), which has no such socket. Kept as
 > the forensic record of the bug class, not a live operator reference.
+> The primary bead, nexus-xmohw, has since closed.
 
 - **Date:** 2026-06-05
 - **Version under test:** conexus 5.10.3 (local + PyPI), branch `chore/reconcile-develop-with-main`

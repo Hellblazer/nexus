@@ -4,18 +4,40 @@
 # T2/T1 repo (migration + jOOQ CRUD + reads) plus embed init, then SIGTERMs so the
 # agent flushes traced metadata into META-INF/native-image/traced/.
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 JH="$HOME/.sdkman/candidates/java/25.0.3-graal"
 JAR=target/nexus-service-1.0-SNAPSHOT.jar
 TRACE_DIR=src/main/resources/META-INF/native-image/traced
 mkdir -p "$TRACE_DIR"
 
+# nexus-rc4pz: bounded docker calls, as native-smoke.sh bounds its own (nexus-ub4ge). GNU timeout on
+# Linux; gtimeout from Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call runs
+# unbounded as before, with a warning.
+# --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
+# The INT trap below then stops the script: uutils timeout (coreutils 0.8.0 on chas) exits 2 on SIGINT
+# where GNU re-raises it, and bash goes on unless its child died by the signal. The trap re-raises, so
+# the script dies by SIGINT and a bash caller stops too; it is set at top level because bash resets
+# traps inside $(...).
+_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
+  else "$@"; fi
+}
+trap 'trap - INT; kill -INT $$' INT
+command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 \
+  || echo "WARN: neither timeout nor gtimeout (brew install coreutils); every Docker call runs unbounded" >&2
+
 PGPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 SVCPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 echo "PGPORT=$PGPORT SVCPORT=$SVCPORT TRACE_DIR=$TRACE_DIR"
-docker rm -f lp2qo-pg >/dev/null 2>&1 || true
-docker run -d --name lp2qo-pg -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus -e POSTGRES_PASSWORD=nexus -p ${PGPORT}:5432 pgvector/pgvector:pg17 >/dev/null
-until docker exec lp2qo-pg pg_isready -U nexus >/dev/null 2>&1; do sleep 1; done; sleep 2; echo "PG ready"
+_bounded 60 docker rm -f lp2qo-pg >/dev/null 2>&1 || true
+_bounded 600 docker run -d --name lp2qo-pg -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus -e POSTGRES_PASSWORD=nexus -p ${PGPORT}:5432 pgvector/pgvector:pg17 >/dev/null
+# 90 attempts: 90 s when docker answers, about 9 min at most when every exec hangs to its 5 s bound.
+for _ in $(seq 1 90); do _bounded 5 docker exec lp2qo-pg pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
+_bounded 5 docker exec lp2qo-pg pg_isready -U nexus >/dev/null 2>&1 \
+  || { echo "FAIL: pgvector not ready after 90 attempts"; _bounded 60 docker rm -f lp2qo-pg >/dev/null 2>&1; exit 2; }
+sleep 2; echo "PG ready"
 
 export NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/nexus"
 export NX_DB_USER=nexus NX_DB_PASS=nexus
@@ -99,7 +121,7 @@ echo "--- SIGTERM for agent flush ---"
 kill -TERM $SVCPID 2>/dev/null
 for i in $(seq 1 20); do kill -0 $SVCPID 2>/dev/null || { echo "exited after ${i}s"; break; }; sleep 1; done
 kill -9 $SVCPID 2>/dev/null || true
-docker rm -f lp2qo-pg >/dev/null 2>&1 || true
+_bounded 60 docker rm -f lp2qo-pg >/dev/null 2>&1 || true
 echo "=== traced config files ==="
 ls -la "$TRACE_DIR" 2>/dev/null
 echo "DONE"

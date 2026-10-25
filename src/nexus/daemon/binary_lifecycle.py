@@ -35,6 +35,7 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "WINDOWS_ENGINE_EXE",
     "WINDOWS_RUNTIME_DLLS",
+    "WINDOWS_OPTIONAL_RUNTIME_DLLS",
     "engine_binary_name",
     "well_known_binary_path",
     "read_installed_provenance",
@@ -55,6 +56,11 @@ WINDOWS_RUNTIME_DLLS: tuple[str, ...] = (
     "msvcp140.dll",
     "msvcp140_1.dll",
 )
+
+#: Placed beside the exe when the archive carries it and skipped when it does not: an engine
+#: release from the one that ships ``msvcp140_atomic_wait.dll`` (nexus-vyy65) has it, and a
+#: pinned older archive must keep installing. torch 2.13 imports it.
+WINDOWS_OPTIONAL_RUNTIME_DLLS: tuple[str, ...] = ("msvcp140_atomic_wait.dll",)
 
 
 def engine_binary_name(platform_tag: str | None = None) -> str:

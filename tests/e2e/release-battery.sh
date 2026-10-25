@@ -3,14 +3,17 @@
 #
 #   tests/e2e/release-battery.sh [--max-parallel N] [--only a,b,c] [--skip-preflight] [--plan]
 #
-# Three legs and a preflight (cleanup step 11, nexus-0r1uz):
+# Five legs and a preflight (cleanup step 11, nexus-0r1uz; dual nexus-oc2bk; resolve nexus-2k66t.4.4):
 #   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant
 #   pkgup  tests/e2e/migration-rehearsal/run.sh --package-upgrade    package-upgrade convergence
 #   lsg    tests/e2e/local-service-gate.sh                            the local-service gate
+#   dual   tests/e2e/dual-embedder-gate.sh                            the keyed bge + Voyage engine (needs a key)
+#   resolve tests/e2e/constraints-resolve-gate.sh                     the shipped lock resolves on every supported
+#                                                                     target (uv pip compile, off-host; network)
 #
 # Serial first: tests/e2e/release-preflight.sh (the ci-evidence required-context
 # drift tests, the wire-contract ledger, the mandatory pins and the pin sweep).
-# Then the three legs in ONE parallel group, MAX_PARALLEL wide (default 4), each
+# Then the five legs in ONE parallel group, MAX_PARALLEL wide (default 4), each
 # leg in its own log, each verdict line captured verbatim with wall-clock
 # seconds. Reds never stop the battery; one table at the end; exit 1 on any
 # red. A leg that exits 0 without its verdict line is MISSING, never passed
@@ -168,6 +171,12 @@ define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2
 # nexus-oc2bk (RDR-210 P5.2): keyed bge + Voyage engine, release battery and by hand only, never nightly (Sam, Q3).
 # Needs the operator's Voyage key; an absent key fails the leg, it does not skip it.
 define_leg dual       group  "DUAL-EMBEDDER GATE (PASSED|FAILED)"       tests/e2e/dual-embedder-gate.sh
+# nexus-2k66t.4.4: the shipped constraints.txt + overrides.txt must RESOLVE on every
+# supported target: 22 compiles (Linux x86_64/aarch64 py3.12/3.13 on cpu, [pdf] also on
+# cu130 and cu126 GPU backends, Windows x64, macOS 14 arm64; default and [pdf]) plus a
+# macOS 13 negative control. Network, no install; release battery and by hand only,
+# never the default suite. Offline self-test: tests/e2e/constraints_resolve_gate_test.sh.
+define_leg resolve    group  "CONSTRAINTS RESOLVE GATE (PASSED|FAILED)" tests/e2e/constraints-resolve-gate.sh
 
 ONLY_SKIPPED=0
 if [ -n "$ONLY" ]; then

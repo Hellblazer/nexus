@@ -126,12 +126,12 @@ The operational details of each lifecycle step.
      │
      │ /conexus:rdr-close --reason implemented
      ▼
-[Implemented]
+  [Closed]   (close_reason: implemented · partial · reverted)
 
-Terminal states: Reverted · Abandoned · Superseded
+Other terminal statuses: Abandoned · Superseded
 ```
 
-Only **Create** and **Research** are required. Gate, Accept, and Close add formal validation and archival; use them when the decision is load-bearing.
+Create and Research are all a draft needs. The gate is optional only for an RDR that will close without acceptance (`nx rdr set-status NNN closed --reason "..."`, with a stated reason); acceptance requires a PASSED gate. Accept and Close add formal validation and archival; use them when the decision is load-bearing.
 
 ## Worked example
 
@@ -199,13 +199,13 @@ The decision point. The gate validates; acceptance is a deliberate human choice.
 
 Verifies that the gate passed, updates T2 status to Accepted, updates the file frontmatter to match, and regenerates the index. For multi-phase implementation plans, `/conexus:rdr-accept` optionally dispatches the planning chain: `strategic-planner` agent → `nx_plan_audit` MCP tool → `nx_enrich_beads` MCP tool, decomposing the work into trackable beads.
 
-If T2 and the file disagree on status, `/conexus:rdr-accept` self-heals by repairing the file to match T2.
+If T2 and the file disagree on status, `/conexus:rdr-accept` repairs whichever side lags: it updates T2 when the file already says accepted, and runs `nx rdr set-status` on the file when T2 says accepted and the file still says draft.
 
 ## Close (`/conexus:rdr-close`)
 
 Finalizes an Accepted RDR. Requires status Accepted; a draft that shipped without acceptance closes only through `nx rdr set-status NNN closed --reason "..."`.
 
-Close reasons: `implemented` · `reverted` · `abandoned` · `superseded`
+Close reasons: `implemented` · `partial` · `reverted`. (`abandoned` and `superseded` are statuses of their own, not close reasons.)
 
 Closing creates a post-mortem template for drift analysis, indexes the RDR into the `rdr__` collection for permanent semantic retrieval, and updates T2 with the close date and reason. If beads were created during accept, their status is displayed as an advisory. If the [catalog](catalog.md) is initialized, closing also creates typed links: `supersedes` for superseded RDRs, `cites` for referenced research papers.
 
@@ -256,7 +256,7 @@ Timestamps (`created`, `gated`, `accepted_date`, `closed`) let you reconstruct w
 
 ## T3: semantic search
 
-RDRs are indexed into `rdr__<repo>` collections using `voyage-context-3` embeddings. This happens two ways:
+RDRs are indexed into `rdr__<repo>` collections with the corpus's embedder (`voyage-context-3` in cloud mode, bge-768 in local mode by default). This happens two ways:
 
 - **`nx index repo`** auto-discovers `docs/rdr/*.md` and indexes them during normal repo indexing. Draft RDRs are findable immediately; no need to wait for `/conexus:rdr-close`.
 - **`/conexus:rdr-close`** indexes the RDR explicitly at close time as part of permanent archival.

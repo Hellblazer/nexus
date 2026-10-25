@@ -54,7 +54,11 @@ def test_with_no_resolver_given_it_asks_the_real_import_system() -> None:
 def test_the_row_is_part_of_the_default_doctor_run() -> None:
     import inspect
 
-    assert "_check_docling_importable()" in inspect.getsource(health.run_health_checks)
+    # nexus-2k66t.4.2: the default run asks the "PDF support" row, which returns
+    # the docling pipeline-module row too once the stack is present (and says
+    # "not installed" instead when it is not, so a slim install is not red).
+    assert "_check_pdf_support()" in inspect.getsource(health.run_health_checks)
+    assert "_check_docling_importable()" in inspect.getsource(health._check_pdf_support)
 
 
 def test_the_module_list_covers_what_the_table_model_imports() -> None:

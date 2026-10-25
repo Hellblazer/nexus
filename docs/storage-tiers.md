@@ -187,7 +187,7 @@ Merges run as a single transaction against the engine so UPDATE and DELETE are a
 
 **Relevance log (RDR-061 E2)**: T2 also holds a `relevance_log` table that records `(query, chunk_id, action)` triples when an agent acts on search results (`store_put`, `catalog_link`). This is internal telemetry, not exposed as an MCP tool. Purged by `T2Database.expire(relevance_log_days=90)` alongside memory TTL expiry.
 
-**Domain split (RDR-063, substrate cut over by RDR-158)**: T2 is implemented as **nine** service-backed domain stores under `src/nexus/db/t2/`: `HttpMemoryStore` (memory), `HttpPlanLibrary` (plans), `HttpTaxonomyStore` (topics + topic_assignments + taxonomy_meta + topic_links), `HttpTelemetryStore` (relevance_log + search/hook telemetry), `HttpChashIndex` (RDR-086; **retired by RDR-187**: the PG table is dropped as of engine v0.1.51, the class remains a shim until the final 410 flip), `HttpDocumentAspectsStore` (RDR-089), `HttpAspectQueue`, `HttpDocumentHighlightsStore` (RDR-139 Layer E), and `HttpTupleStore` (RDR-205 cross-agent tuple space; see the Tuple Space section below). The catalog is the engine's (`HttpCatalogClient`); the SQLite store classes and the local `.catalog.db` were deleted in RDR-158 P4 (nexus-i711w), and the `=sqlite` opt-out hard-errors (P3). **Backend routing (RDR-152/158):** every store routes through the `nexus-service` over Postgres. There is no other backend. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls work via delegation, and new code reaches the stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`, `db.chash_index`, `db.document_aspects`, `db.aspect_queue`, `db.document_highlights`, `db.tuples`, `db.catalog`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map and concurrency model.
+**Domain split (RDR-063, substrate cut over by RDR-158)**: T2 is implemented as **nine** service-backed domain stores under `src/nexus/db/t2/`: `HttpMemoryStore` (memory), `HttpPlanLibrary` (plans), `HttpTaxonomyStore` (topics + topic_assignments + taxonomy_meta + topic_links), `HttpTelemetryStore` (relevance_log + search/hook telemetry), `HttpChashIndex` (RDR-086; **retired by RDR-187**: the PG table is dropped as of engine v0.1.51, the class remains a shim until the final 410 flip), `HttpDocumentAspectsStore` (RDR-089), `HttpAspectQueue`, `HttpDocumentHighlightsStore` (RDR-139 Layer E), and `HttpTupleStore` (RDR-205 cross-agent tuple space; see the Tuple Space section below). The catalog is the engine's (`HttpCatalogClient`); the SQLite store classes and the local `.catalog.db` were deleted in RDR-158 P4 (nexus-i711w), and the `=sqlite` opt-out hard-errors (P3). **Backend routing (RDR-152/158):** every store routes through the `nexus-service` over Postgres. There is no other backend. `T2Database` is a composing facade: existing `db.put(...)`, `db.search(...)`, `db.save_plan(...)` calls work via delegation, and new code reaches the stores directly as `db.memory`, `db.plans`, `db.taxonomy`, `db.telemetry`, `db.chash_index`, `db.document_aspects`, `db.aspect_queue`, `db.document_highlights`, `db.tuples`. See [Architecture — T2 Domain Stores](architecture.md#t2-domain-stores) for the full map.
 
 **Topic taxonomy**: `HttpTaxonomyStore` (`db.taxonomy`; `CatalogTaxonomy` is the retired pre-RDR-158 name still visible in a few historical comments) discovers topics from T3 collection embeddings using HDBSCAN, labels them automatically with Claude Haiku (`nx taxonomy label`), and uses them for search grouping and relevance boosting. Topics are discovered automatically after `nx index repo`. Operator-curated labels are preserved across re-discovery runs. See [CLI Reference — nx taxonomy](cli-reference.md#nx-taxonomy) for the full command set and [Architecture — Taxonomy](architecture.md#taxonomy) for architecture details.
 
@@ -198,7 +198,7 @@ The taxonomy spans two storage tiers:
 | Table | Purpose |
 |-------|---------|
 | `topics` | One row per discovered or manually-created topic, including label, parent, collection, curation state, and top keywords |
-| `topic_assignments` | Maps documents to topics. Columns: `doc_id`, `topic_id`, `assigned_by` (`hdbscan` / `manual` / `centroid` / `projection` / `auto-matched` / `split`). Projection rows (RDR-077) additionally carry `similarity` (raw cosine — ICF is applied at query time, never stored), `assigned_at` (ISO-8601), and `source_collection` (origin of the projected chunk; required for ICF aggregation). Projection rows use a prefer-higher UPSERT; other provenance keeps `INSERT OR IGNORE` idempotency. See [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md). |
+| `topic_assignments` | Maps documents to topics. Columns: `doc_id`, `topic_id`, `assigned_by` (`hdbscan` / `manual` / `centroid` / `projection` / `auto-matched` / `split`). Projection rows (RDR-077) additionally carry `similarity` (raw cosine — ICF is applied at query time, never stored), `assigned_at` (ISO-8601), and `source_collection` (origin of the projected chunk; required for ICF aggregation). Projection rows use a prefer-higher UPSERT; other provenance keeps insert-if-absent idempotency (`ON CONFLICT DO NOTHING`). See [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md). |
 | `taxonomy_meta` | Per-collection watermark used to decide whether re-discovery is needed |
 | `topic_links` | Aggregated link counts between topics, derived from the catalog link graph |
 
@@ -272,7 +272,7 @@ Conformant collection names (RDR-103) follow a 4-segment shape:
 
 **Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new collections use the 4-segment shape above.
 
-A collection is indexed and queried under the same embedding model: mixing models across one vector space produces near-random similarity scores. The voyage-capability gate in the ladder's substrate rung refuses to migrate genuine voyage-model collections onto a bge-only service for this reason. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
+A collection is indexed and queried under the same embedding model: mixing models across one vector space produces near-random similarity scores. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 
 **TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
 
@@ -316,11 +316,15 @@ nx store import myrepo-backup.nxexp --collection code__newname
 
 ## Tuple Space (RDR-205)
 
-The tuple space is the ninth T2 store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a dispatch ledger), not for notes or search hits. Three templates ship today:
+The tuple space is the ninth T2 store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a dispatch ledger), not for notes or search hits. Seven templates ship today:
 
-- **`mailbox/<address>`**: agent/instance/session messages, 7-day retention.
+- **`mailbox/<address>`**: messages to an agent id or a session id, 7-day retention.
 - **`ledger/<session_id>`**: read-only session-lifecycle rows (`kind` in `start`/`report`), 90-day retention.
 - **`directory/<name>`** (RDR-208 Phase 1 Step 1): read-only session-directory lease entries, 7-day retention.
+- **`board/<topic>`**, **`queue/<name>`** and **`lock/<resource>`** (RDR-211): a broadcast board (7 days), a shared work queue (2 days) and a mutual-exclusion lock (7 days when idle).
+- **`board/ci/<topic>`** (RDR-220): CI status posts, 3-day retention.
+
+See [Tuple space](tuple-space.md) for the full template table.
 
 Every tuple's `expires_at` is `now + ttl_seconds`, defaulting to and capped at the template's `retention_seconds`: a caller cannot ask for a longer-lived row than the template allows. A resend (`out` on an existing key) sets `expires_at` from the resend's own `ttl_seconds`, never past the row's original `created_at + retention_seconds`; a resend with a shorter explicit `ttl_seconds` than the row's remaining lifetime moves `expires_at` backward, not just forward. Expired rows are invisible to reads (`expires_at > now` is part of every read predicate); consumed rows stay in place, visible to audits, until the same expiry passes. The engine's sweep runs every 6 hours, deleting expired tuple rows and, alongside them, claim-log rows older than `NX_TUPLE_CLAIM_LOG_TTL_DAYS` (default 180).
 
@@ -352,7 +356,7 @@ T3 has no separate `expires_at` field: expiry is computed client-side as `indexe
 | NULL (permanent) | `None` |
 | N days | The *remaining* window, not a reset N: computed from the entry's original timestamp so a promote does not silently extend its life |
 
-`ttl_days=0` is rejected outright by `T3Database.put` and, until nexus-nt76j retired it, `HttpVectorClient.put` (RDR-194 D5, nexus-tk070.p6b); there is no coercion of 0 to "permanent" anywhere in this path.
+`ttl_days=0` is rejected outright by `T3Database.put` (the test facade) and, until nexus-nt76j retired it, `HttpVectorClient.put`, the live writer (RDR-194 D5, nexus-tk070.p6b); there is no coercion of 0 to "permanent" anywhere in this path.
 
 ## When to Use Each Tier
 

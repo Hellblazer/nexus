@@ -21,7 +21,7 @@ paths:
 
 ## Release cadence policy (nexus-mkj6u)
 
-Full text: [release-cadence](docs/agents/release-cadence.md).
+Full text: [release-cadence](../../docs/agents/release-cadence.md).
 
 1. **Releases are hand-cut.** CI does not publish on merge; a tag push publishes.
 2. **`source.ref` only ever points at immutable release tags.** Never a branch, never main HEAD.
@@ -32,11 +32,11 @@ Full text: [release-cadence](docs/agents/release-cadence.md).
 
 ## Independent plugin release channel (RDR-197)
 
-Full text: [plugin-release-channel](docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `.claude-plugin/marketplace.json`) ships without a client release via an anchored tag `plugin-v{X.Y.Z}-{n}`. The cut is `scripts/cut_plugin_release.py`; the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`, never a bare merge. Never cut while a release PR is open; batch related plugin work. **Rehearse before every real cut:** `tests/e2e/plugin-cut-rehearsal/run.sh` must end `PLUGIN-CUT REHEARSAL PASSED`.
+Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `.claude-plugin/marketplace.json`) ships without a client release via an anchored tag `plugin-v{X.Y.Z}-{n}`. The cut is `scripts/cut_plugin_release.py`; the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`, never a bare merge. Never cut while a release PR is open; batch related plugin work. **Rehearse before every real cut:** `tests/e2e/plugin-cut-rehearsal/run.sh` must end `PLUGIN-CUT REHEARSAL PASSED`.
 
 ## Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
 
-**Authority and the full incident archive: [engine-service-release](docs/agents/engine-service-release.md)** (moved verbatim; it is not a summary). Invoke the `engine-release` skill as the executable checklist.
+**Authority and the full incident archive: [engine-service-release](../../docs/agents/engine-service-release.md)** (the full text, not a summary). Invoke the `engine-release` skill as the executable checklist.
 
 - The Java engine-service binary is cut by an `engine-service-vX.Y.Z` tag, separate from the PyPI release and not gated by it. **Prep is AI, the tag push is human (Sam).** Version is tag-stamped; there is no manifest to bump.
 - Build or test the engine only through `scripts/mvnw-leased.sh`, never a bare `./mvnw`/`mvn` (one builder at a time). On a lab pool host pass `--lab-run <class>` rather than wrapping it in `lab-run`: the lease comes before the grant, so a build waiting its turn holds no cores (nexus-iqmih).
@@ -47,7 +47,7 @@ Full text: [plugin-release-channel](docs/agents/plugin-release-channel.md). Plug
 
 ## Cutting a release (version bump + tag-push to PyPI)
 
-**The `release` skill is the authority and the executable checklist.** Invoke it (`/conexus:release`, or `Skill` on `release`); this section is a pointer. `docs/contributing.md#release-process` is the long form for rollback and one-time setup. Full text: [cutting-a-release](docs/agents/cutting-a-release.md).
+**The `release` skill is the authority and the executable checklist.** Invoke it (`/conexus:release`, or `Skill` on `release`); this section is a pointer. `docs/contributing.md#release-process` is the long form for rollback and one-time setup. Full text: [cutting-a-release](../../docs/agents/cutting-a-release.md).
 
 **Step 0 stays here because other sections cite it.** The engine-freshness gate is BLOCKING and is a command, not a prose eyeball-check (nexus-i5c2u):
 

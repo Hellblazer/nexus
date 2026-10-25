@@ -399,6 +399,56 @@ class TestRestartStale:
         sp.assert_not_called()
         assert any("gone or recycled" in a for a in actions)
 
+    def _stale_mineru(self):
+        r = SkewReport(installed_version="6.7.1")
+        r.stale = [StaleProcess(pid=300, kind="mineru", command="mineru-api", age_s=99)]
+        return r
+
+    def test_mineru_cycle_leaves_a_stale_server_alone_when_the_pdf_stack_is_not_installed(self):
+        """nexus-2k66t.4.2: `nx mineru start` ensures the stack, and on a box without it
+        that is a download inside a 300 s cap. No stop, no start; the action line says how
+        to finish."""
+        from nexus import pdf_stack  # noqa: PLC0415 — file pattern: deferred imports
+
+        with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows", return_value=True), \
+                patch("nexus.upgrade_finish.process_command", return_value="mineru-api --host 127.0.0.1"), \
+                patch.object(pdf_stack, "state", return_value=pdf_stack.StackState("absent", "")), \
+                patch.object(pdf_stack, "current_generation_has_stack", return_value=False), \
+                patch("nexus.upgrade_finish.run_bounded") as sp:
+            actions = restart_stale(self._stale_mineru())
+        sp.assert_not_called()
+        assert any("left running" in a and "nx self install --extras pdf" in a for a in actions), actions
+
+    def test_mineru_cycle_goes_ahead_when_current_has_the_stack_and_never_downloads(self):
+        from unittest.mock import MagicMock  # noqa: PLC0415 — file pattern: deferred imports
+
+        from nexus import pdf_stack  # noqa: PLC0415
+
+        with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows", return_value=True), \
+                patch("nexus.upgrade_finish.process_command", return_value="mineru-api --host 127.0.0.1"), \
+                patch.object(pdf_stack, "state", return_value=pdf_stack.StackState("absent", "")), \
+                patch.object(pdf_stack, "current_generation_has_stack", return_value=True), \
+                patch("nexus.upgrade_finish.run_bounded", return_value=MagicMock(returncode=0)) as sp:
+            actions = restart_stale(self._stale_mineru())
+        assert sp.call_count == 2
+        start_kwargs = sp.call_args_list[1].kwargs
+        assert start_kwargs["env"]["NX_PDF_STACK"] == "refuse", "a restart pass must never install"
+        assert any("cycled MinerU" in a for a in actions)
+
+    def test_mineru_start_refused_with_69_is_reported_not_called_a_cycle(self):
+        from unittest.mock import MagicMock  # noqa: PLC0415
+
+        from nexus import pdf_stack  # noqa: PLC0415
+
+        results = iter([MagicMock(returncode=0), MagicMock(returncode=69)])
+        with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows", return_value=True), \
+                patch("nexus.upgrade_finish.process_command", return_value="mineru-api --host 127.0.0.1"), \
+                patch.object(pdf_stack, "state", return_value=pdf_stack.StackState("present", "")), \
+                patch("nexus.upgrade_finish.run_bounded", side_effect=lambda *a, **k: next(results)):
+            actions = restart_stale(self._stale_mineru())
+        assert not any("cycled MinerU" in a for a in actions), actions
+        assert any("not restarted" in a for a in actions)
+
 
 class TestVersionTransition:
     def test_first_run_stamps_quietly(self, tmp_path):

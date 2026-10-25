@@ -385,7 +385,7 @@ def fetch_service_bge_onnx(
             f"failed to provision the standard bge-768 ONNX for the service "
             f"(download or verification failed): {exc}. The Java service embeds local "
             f"collections with bge-768 and will not boot without "
-            f"{model_dest}. Re-run `nx init --service` when back online, or set "
+            f"{model_dest}. Re-run `nx init` when back online, or set "
             f"{_ENV_DIR} to a directory holding model.onnx + tokenizer.json "
             f"(STANDARD fp32 export — NOT fastembed's model_optimized.onnx)."
         ) from exc

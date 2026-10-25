@@ -18,7 +18,7 @@ unexpected failure prints an object whose ``state`` is ``error`` and whose
 ``message`` carries the error text, never a traceback. Exit 2 means the arguments
 were wrong (argparse's own usage message on standard error and no object)::
 
-    nx_setup.py start --mode local|cloud|cli-only|not-now [--autostart]
+    nx_setup.py start --mode local|cloud|cli-only|not-now [--autostart] [--slim|--no-slim]
     nx_setup.py status
     nx_setup.py not-now
 
@@ -59,7 +59,11 @@ then saves the pair the page accepted and verifies; it downloads no service file
 ``autostart`` is false unless given (and is ignored by ``cloud``), so the
 login unit is never registered without an explicit yes. When it is given and a
 usable service is already running, the run does not register the unit and its
-final message says so and how to do it.
+final message says so and how to do it. ``slim`` (nexus-2k66t.4.9) is tri-state (nexus-w8ug5): the
+build installs everything, PDF support included (``--extras pdf``), and ``--slim`` leaves it out.
+Omitted, it follows an unfinished slim run of the same mode (a resume passes the same choice);
+``--no-slim`` is the explicit full install and does not follow it. The status records ``slim``
+only when the run is slim.
 
 **The credentials page** (mode ``cloud``; :class:`CredentialsPage`). A cloud token must reach the
 config file without passing through the model, the conversation or a tool argument. The run binds
@@ -134,7 +138,7 @@ file's own history alone:
    pruned; Sam, 2026-10-14) is not asked anything and the build runs, and
    ``nx self install --bootstrap`` replaces the generation that cannot run. The build
    is ``uv tool run --python 3.12 --from conexus==<plugin version> nx self install
-   --bootstrap``. The version is the ``plugin.json`` beside this script. There is
+   --bootstrap --extras pdf`` (without ``--extras pdf`` under ``--slim``). The version is the ``plugin.json`` beside this script. There is
    no fallback to the two documented commands: they run the cache prune and leave
    two copies. After the build ``nx`` is found by the same lookup, layout first,
    so an application started before the install needs no restart for this process.
@@ -284,6 +288,18 @@ RECONNECT_NEXT: str = (
     "Reconnect the nexus server: in Claude Code, /mcp or a new session; in Claude Desktop, quit the app "
     "fully and open it again, because a new chat keeps the running server."
 )
+
+#: What a slim run (nexus-2k66t.4.9) adds to its done message, and how a next step names the choice
+#: so the model that resumes the run does not drop it.
+SLIM_DONE_NOTE: str = "PDF support was left out (slim); `nx self install --extras pdf` adds it, and the first PDF indexed installs it."
+SLIM_WORDS: str = " and slim true"
+#: The start of the line `nx self install --bootstrap` prints when it leaves PDF support out because this
+#: Windows machine cannot load the stack (nexus-vyy65, `drop_pdf_on_runtime_gap` in src/nexus/pdf_stack.py;
+#: tests/hooks/test_nx_setup.py ties the two). The build output goes to the setup log, so the run copies the
+#: line into its done message: a user who never opens the log still hears it.
+PDF_SLIM_LINE_PREFIX: str = "PDF support will not be installed by this build."
+#: Appended to a slim run's resume text: a resume inherits slim, so the way out has to be said.
+FULL_WORDS: str = " To switch to the full install (PDF support included), pass slim false instead."
 
 #: What the status file records about ``nx init``, across runs.
 INIT_BEGUN = "begun"
@@ -1775,14 +1791,19 @@ class _Run:
     """The detached process's state: the status it keeps current, the log it
     appends to, and the heartbeat that holds the lock."""
 
-    def __init__(self, setup: Path, mode: str, autostart: bool, heartbeat: _Heartbeat) -> None:
+    def __init__(self, setup: Path, mode: str, autostart: bool, heartbeat: _Heartbeat, slim: bool = False) -> None:
         self.setup = setup
         self.mode = mode
         self.autostart = autostart
+        self.slim = slim
         self.heartbeat = heartbeat
         self.log_path = setup / _LOG
         self.data: dict[str, Any] = read_status(setup) or {}
         self.data.update(state=RUNNING, mode=mode, autostart=autostart, log=str(self.log_path), pid=os.getpid())
+        if slim:
+            self.data["slim"] = True
+        else:
+            self.data.pop("slim", None)
         self.steps_done: list[str] = []
         self.stage = "starting"
         self.notes: list[str] = []
@@ -1859,6 +1880,8 @@ class _Run:
     def end(self, state: str, message: str, next_step: str, **fields: Any) -> int:
         """Write the terminal status and return the exit code. Never raises."""
         text = " ".join([message, *self.notes])
+        if state == DONE and self.slim:
+            text = f"{text} {SLIM_DONE_NOTE}"
         if self.page is not None:
             self.close_page()  # a terminal status means the listener is closed and the opener file is gone
             if self.page.state == CRED_ACCEPTED and state != DONE:
@@ -1895,7 +1918,8 @@ class _Run:
     def fail(self, step: str, message: str) -> int:
         return self.end(
             FAILED, message,
-            f"If the user agrees, call setup again: it resumes at the {step} step. Log: {self.log_path}",
+            f"If the user agrees, call setup again{' with slim true' if self.slim else ''}: it resumes at the {step} step."
+            f"{FULL_WORDS if self.slim else ''} Log: {self.log_path}",
             failed_step=step,
         )
 
@@ -2169,6 +2193,15 @@ def build_env(platform: str | None = None, environ: dict[str, str] | None = None
     return env
 
 
+def pdf_slim_note(output: str) -> str | None:
+    """The line the bootstrap build printed to say it left PDF support out (:data:`PDF_SLIM_LINE_PREFIX`), or
+    ``None`` when it printed none."""
+    for line in output.splitlines():
+        if line.strip().startswith(PDF_SLIM_LINE_PREFIX):
+            return line.strip()
+    return None
+
+
 def _execute(run: _Run) -> int:
     if run.mode == MODE_CLOUD and not (run.data.get(CLOUD_SAVED) and _credentials_saved(config_dir())):
         failed = run.open_page()  # at the start of the run, so the user is asked while the build goes on
@@ -2184,12 +2217,19 @@ def _execute(run: _Run) -> int:
         if version is None:
             return run.fail("build", "the plugin's version could not be read from its plugin.json.")
         build = [uv, "tool", "run", "--python", "3.12", "--from", f"conexus=={version}", "nx", "self", "install", "--bootstrap"]
+        if not run.slim:
+            # The default install is everything (nexus-2k66t.4.9): the GENERATION gets the pdf extra; the
+            # throwaway environment that runs --bootstrap stays slim.
+            build += ["--extras", "pdf"]
         try:
-            code, _ = run.cmd(build, env=build_env())
+            code, built = run.cmd(build, env=build_env())
         except OSError as exc:
             return run.fail("build", f"the build could not start: {exc}")
         if code != 0:
             return run.fail("build", "the build timed out." if code is None else f"the build exited {code}.")
+        slim_line = pdf_slim_note(built)
+        if slim_line is not None:
+            run.notes.append(slim_line)
         nx = _nx_after_build(run)
         if nx is None:
             layout = _layout_nx()
@@ -2359,7 +2399,7 @@ def _service(run: _Run, nx: str, config: Path) -> int | None:
     return None
 
 
-def run_setup(mode: str, autostart: bool, token: str) -> int:
+def run_setup(mode: str, autostart: bool, token: str, slim: bool = False) -> int:
     """The detached process: hold the lock, do the steps, leave a terminal status
     and no lock (a run that lost the lock leaves the new holder's alone and writes
     no status)."""
@@ -2379,7 +2419,7 @@ def run_setup(mode: str, autostart: bool, token: str) -> int:
                 previous[name] = signal.signal(getattr(signal, name), on_term)
     heartbeat = _Heartbeat(lock, token)
     heartbeat.start()
-    run = _Run(setup, mode, autostart, heartbeat)
+    run = _Run(setup, mode, autostart, heartbeat, slim)
     try:
         try:
             run.at("starting", "setup is starting")
@@ -2604,13 +2644,15 @@ def status_view(setup: Path, *, read_budget_s: float | None = None) -> dict[str,
         )
     elif state == RUNNING and not live:
         state = INTERRUPTED
-        data["next"] = f"Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. Log: {setup / _LOG}"
+        again = f"with the same mode{SLIM_WORDS if data.get('slim') else ''}"
+        full = FULL_WORDS if data.get("slim") else ""
+        data["next"] = f"Setup was interrupted. If the user agrees, call setup again {again}: it resumes.{full} Log: {setup / _LOG}"
         if data.get("mode") == MODE_CLOUD and data.get("credentials") == CRED_ACCEPTED:
             # The accepted pair was in the dead run's memory only: the field is dropped and the words say it.
             data.pop("credentials")
             data["message"] = f"{data.get('message', '')} {_LOST_INTERRUPTED}".strip()
             data["next"] = (
-                f"Setup was interrupted. If the user agrees, call setup again with the same mode: it resumes. {_LOST_NEXT} "
+                f"Setup was interrupted. If the user agrees, call setup again {again}: it resumes.{full} {_LOST_NEXT} "
                 f"Log: {setup / _LOG}"
             )
     if state == DOCTOR_FAILED and only_git_failed(data.get("doctor_failing")):
@@ -2635,17 +2677,17 @@ def _error_view(message: str) -> dict[str, Any]:
     }
 
 
-def start(mode: str, autostart: bool) -> dict[str, Any]:
+def start(mode: str, autostart: bool, slim: bool | None = None) -> dict[str, Any]:
     """The one way to start a run. Returns the status, with ``started``; an object
     whose ``state`` is ``error`` when the setup directory cannot be used."""
     setup = setup_dir()
     try:
-        return _start(setup, mode, autostart)
+        return _start(setup, mode, autostart, slim)
     except OSError as exc:
         return _error_view(f"setup could not start: {type(exc).__name__}: {exc}")
 
 
-def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
+def _start(setup: Path, mode: str, autostart: bool, slim: bool | None = None) -> dict[str, Any]:
     os.makedirs(setup, mode=0o700, exist_ok=True)
     marker = setup / _MARKER
     if mode == MODE_NOT_NOW:
@@ -2673,12 +2715,21 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
         with contextlib.suppress(FileNotFoundError):
             (setup / _ERROR_FILE).unlink()
         prior = read_status(setup) or {}
+        if slim is None:
+            # Omitted: a resume of an unfinished slim run is slim, so a caller that does not repeat the choice
+            # does not silently turn the install into the default one. A finished run, or another mode, starts
+            # afresh. An explicit false (``--no-slim``) is the way out of an inherited slim run (nexus-w8ug5).
+            slim = bool(
+                prior.get("slim") and prior.get("mode") == mode and prior.get("state") in (RUNNING, FAILED)
+            )
         log_path = setup / _LOG
         base: dict[str, Any] = {
             "state": RUNNING, "stage": "starting", "mode": mode, "autostart": autostart, "log": str(log_path),
             "started_at": _now(), "updated_at": _now(), "message": "setup is starting",
             "next": "Call setup_status to follow it.",
         }
+        if slim:
+            base["slim"] = True
         if "init" in prior:
             base["init"] = prior["init"]
         if (
@@ -2691,7 +2742,7 @@ def _start(setup: Path, mode: str, autostart: bool) -> dict[str, Any]:
             # starts nothing while a service answers, so replacing a saved credential is `nx config init`.
             base[CLOUD_SAVED] = True
         write_status(setup, base)
-        argv = ["run", "--mode", mode, "--token", token] + (["--autostart"] if autostart else [])
+        argv = ["run", "--mode", mode, "--token", token] + (["--autostart"] if autostart else []) + (["--slim"] if slim else [])
         try:
             detach(argv, log_path)
         except DetachUnsupported as exc:
@@ -2722,16 +2773,22 @@ def main(argv: list[str]) -> int:
     start_p = sub.add_parser("start", help="start a run")
     start_p.add_argument("--mode", choices=MODES, required=True)
     start_p.add_argument("--autostart", action="store_true", help="register the login unit (local mode)")
+    start_p.add_argument(
+        "--slim", action=argparse.BooleanOptionalAction, default=None,
+        help="--slim leaves PDF support out of the install; --no-slim installs it even over an unfinished slim run; "
+        "omitted follows an unfinished slim run",
+    )
     sub.add_parser("status", help="print the status")
     sub.add_parser(MODE_NOT_NOW, help="write the not-now marker")
     run_p = sub.add_parser("run", help=argparse.SUPPRESS)
     run_p.add_argument("--mode", choices=MODES, required=True)
     run_p.add_argument("--autostart", action="store_true")
+    run_p.add_argument("--slim", action="store_true")
     run_p.add_argument("--token", required=True)
     args = parser.parse_args(argv)
     if args.command == "run":
         try:
-            return run_setup(args.mode, args.autostart, args.token)
+            return run_setup(args.mode, args.autostart, args.token, args.slim)
         except Exception as exc:  # noqa: BLE001 -- the log is the only place this process can speak
             sys.stderr.write(f"setup: {type(exc).__name__}: {exc}\n")
             return 1
@@ -2741,7 +2798,7 @@ def main(argv: list[str]) -> int:
         elif args.command == MODE_NOT_NOW:
             out = start(MODE_NOT_NOW, False)
         else:
-            out = start(args.mode, args.autostart)
+            out = start(args.mode, args.autostart, args.slim)
     except Exception as exc:  # noqa: BLE001 -- every command prints one object, whatever happened
         out = _error_view(f"{type(exc).__name__}: {exc}")
     with contextlib.suppress(OSError):  # a caller that closed the pipe has stopped reading

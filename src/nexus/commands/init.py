@@ -235,7 +235,7 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
         click.echo(
             "\n  No native service binary is installed and no service tag is "
             "pinned for this build.\n"
-            "  Install one explicitly, then re-run `nx init --service`:\n"
+            "  Install one explicitly, then re-run `nx init`:\n"
             "    nx daemon service install-binary engine-service-vX.Y.Z\n"
             "  (or set NEXUS_SERVICE_TAG=engine-service-vX.Y.Z)."
         )
@@ -262,7 +262,8 @@ def _provision_vc_runtime_step(config_dir: Path) -> None:
     """Windows without Microsoft's VC++ redistributable: put ``msvcp140.dll`` and
     ``msvcp140_1.dll`` where the client's extension modules find them
     (nexus-lqjll). A no-op everywhere else and whenever the DLLs are already
-    reachable. Runs on the cloud-mode branches, which never download the engine or
+    reachable, except that a box with the base pair but not ``msvcp140_atomic_wait.dll``
+    (PDF support needs it, nexus-vyy65) has it topped up from the pinned bundle. Runs on the cloud-mode branches, which never download the engine or
     PG bundle that otherwise carry them; ``nx upgrade --auto`` does the same for
     installs that predate this step. Reports a failure with its remedy and never
     stops init: the install is otherwise complete and the DLLs are retried by
@@ -274,9 +275,11 @@ def _provision_vc_runtime_step(config_dir: Path) -> None:
         click.echo(f"  VC++ runtime for PDF extraction and local embedding: {result.detail}")
     elif result.status == "failed":
         click.echo(
-            f"  Could not place the VC++ runtime DLLs ({result.detail}). PDF extraction "
-            "and local embedding need them: re-run `nx init`, or install Microsoft's "
-            "redistributable from https://aka.ms/vs/17/release/vc_redist.x64.exe",
+            f"  Could not place the VC++ runtime DLLs ({result.detail}). "
+            # A top-up failure names only the PDF DLL and already says what needs it.
+            + ("" if "(PDF support needs it)" in result.detail else "PDF extraction and local embedding need them: ")
+            + "re-run `nx init`, or install Microsoft's redistributable from "
+            "https://aka.ms/vs/17/release/vc_redist.x64.exe",
             err=True,
         )
 

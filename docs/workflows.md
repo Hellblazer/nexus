@@ -18,7 +18,7 @@ review, a migration) — written as code instead of delegated turn by turn.
   from the 2026-08-19 engine dead-wire census (T2 `nexus/engine-dead-wire-census-2026-08-19`,
   `nexus/dead-wire-census-dispositions-2026-08-19`).
 
-Bead: nexus-hhqli (epic nexus-qkbo7, "ship named Workflows in the plugin").
+History: built under nexus-hhqli (epic nexus-qkbo7, "ship named Workflows in the plugin"), both closed.
 
 ## How to invoke
 
@@ -92,7 +92,7 @@ and the cap never fired once (bead nexus-xeoa0).
   2026-08-22. Until that is confirmed one way or the other, treat these as
   repo-local tools, not something the `conexus` plugin currently exports.
 - **Both scripts were broken from their first commit until 2026-09-21, and
-  only one of them has since been run for real.** They were authored in
+  both have since been run for real.** They were authored in
   2026-08 against a description of the contract rather than the contract
   itself, and both failed the same way: each passed its stage functions as
   `pipeline`'s ITEMS array and a seed object as its only stage, so nothing
@@ -109,13 +109,13 @@ and the cap never fired once (bead nexus-xeoa0).
   conditional verify stage dispatching only for candidates, and that `log()`
   and agent()'s label/phase/schema/effort opts behave as documented.
 
-  **`pressure-test.js` has NOT been run** (bead nexus-wvquh). It shares the
-  repaired idioms, and
-  `tests/scripts/test_claude_workflows.py` exercises both bodies against stub
-  primitives, but a stub can only confirm the reading of the reference the
-  scripts were written from. Treat its first invocation as its first real
-  evidence, and fix its header's signature block and its call sites together
-  if anything differs.
+  `pressure-test.js` had its real run on 2026-09-24 (bead nexus-wvquh, closed):
+  16 agents, no errors, `votesPerFinding` 1, over a small low-stakes diff. The
+  args refusal path and `parallel()` as a barrier over live thunks held. The
+  dead-thunk (null element) case and the FIFO ordering of excess calls were not
+  exercised by that run's width, so they stay covered by the stub tests in
+  `tests/scripts/test_claude_workflows.py` only. A stub can only confirm the
+  reading of the reference the scripts were written from.
 - **A "dead" verdict is not a delete order.** Both the source pattern and
   `dead-wire-census.js` end with an evidence table, not an action. The real
   2026-08-19 census that this workflow is built from produced three

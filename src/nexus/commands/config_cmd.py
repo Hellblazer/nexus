@@ -345,8 +345,8 @@ def config_init() -> None:
     Skips any credential already present in the environment. Saves to
     ~/.config/nexus/config.yml.
 
-    Local mode does not use this wizard: run ``nx init`` to choose a local
-    embedder, or ``nx init --service`` to provision the local service stack.
+    Local mode does not use this wizard: run ``nx init`` to provision the
+    local service stack.
     """
     config_path = _global_config_path()
     click.echo("Nexus managed-service setup wizard\n")

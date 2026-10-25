@@ -278,7 +278,7 @@ def test_prose_fence_read_itself_unreadable_fails_open_and_warns(monkeypatch, ca
 # ── the same decision helper, driven through `index_pdf` (PDF gate) ─────────
 
 
-def _run_pdf_gate(monkeypatch, entry: _Entry, *, content_hash: str = CONTENT_HASH,
+def _run_pdf_gate(monkeypatch, tmp_path: Path, entry: _Entry, *, content_hash: str = CONTENT_HASH,
                    verify_result=None, verify_exc=None):
     monkeypatch.setattr("nexus.doc_indexer._sha256", lambda path: content_hash)
     cat = _FakeCat(entry, verify_result=verify_result, verify_exc=verify_exc)
@@ -294,11 +294,11 @@ def _run_pdf_gate(monkeypatch, entry: _Entry, *, content_hash: str = CONTENT_HAS
     # apply) -- unlike the prose gate above (which calls
     # _index_document, a level below index_markdown's own guard), the
     # PDF gate is driven through index_pdf itself, so the fake path
-    # must actually exist with non-zero size.
-    pdf_path = Path("/tmp/nexus-5xn3k-threeway/doc.pdf")
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    if not pdf_path.exists():
-        pdf_path.write_bytes(b"%PDF-1.4 fixture content for the staleness-gate test\n")
+    # must actually exist with non-zero size. It lives under tmp_path: a
+    # fixed /tmp path is shared by every user on a pool runner, and one
+    # left by another user is unwritable here.
+    pdf_path = tmp_path / "doc.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fixture content for the staleness-gate test\n")
 
     result = index_pdf(
         pdf_path, "testowner", t3,
@@ -308,31 +308,31 @@ def _run_pdf_gate(monkeypatch, entry: _Entry, *, content_hash: str = CONTENT_HAS
     return result, pdf_chunks_mock, cat
 
 
-def test_pdf_complete_and_hash_match_skips_no_probe(monkeypatch) -> None:
+def test_pdf_complete_and_hash_match_skips_no_probe(monkeypatch, tmp_path) -> None:
     entry = _Entry("1.1.1", "complete", CONTENT_HASH)
-    result, pdf_chunks_mock, cat = _run_pdf_gate(monkeypatch, entry)
+    result, pdf_chunks_mock, cat = _run_pdf_gate(monkeypatch, tmp_path, entry)
     assert pdf_chunks_mock.call_count == 0
     assert cat.manifest_verify_calls == 0
 
 
-def test_pdf_indexing_is_stale_no_probe(monkeypatch) -> None:
+def test_pdf_indexing_is_stale_no_probe(monkeypatch, tmp_path) -> None:
     entry = _Entry("1.1.1", "indexing", CONTENT_HASH)
-    result, pdf_chunks_mock, cat = _run_pdf_gate(monkeypatch, entry)
+    result, pdf_chunks_mock, cat = _run_pdf_gate(monkeypatch, tmp_path, entry)
     assert pdf_chunks_mock.call_count == 1
     assert cat.manifest_verify_calls == 0
 
 
-def test_pdf_failed_is_stale_no_probe(monkeypatch) -> None:
+def test_pdf_failed_is_stale_no_probe(monkeypatch, tmp_path) -> None:
     entry = _Entry("1.1.1", "failed", CONTENT_HASH)
-    result, pdf_chunks_mock, cat = _run_pdf_gate(monkeypatch, entry)
+    result, pdf_chunks_mock, cat = _run_pdf_gate(monkeypatch, tmp_path, entry)
     assert pdf_chunks_mock.call_count == 1
     assert cat.manifest_verify_calls == 0
 
 
-def test_pdf_unknown_falls_through_to_verify_clean_skips(monkeypatch) -> None:
+def test_pdf_unknown_falls_through_to_verify_clean_skips(monkeypatch, tmp_path) -> None:
     entry = _Entry("1.1.1", None, "")
     result, pdf_chunks_mock, cat = _run_pdf_gate(
-        monkeypatch, entry, verify_result={"referenced": 2, "present": 2, "missing": 0},
+        monkeypatch, tmp_path, entry, verify_result={"referenced": 2, "present": 2, "missing": 0},
     )
     assert pdf_chunks_mock.call_count == 0
     assert cat.manifest_verify_calls == 0, (
@@ -342,14 +342,14 @@ def test_pdf_unknown_falls_through_to_verify_clean_skips(monkeypatch) -> None:
 
 
 def test_pdf_unknown_falls_through_no_longer_re_indexes_on_a_stale_verify_result(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     """RDR-191 Phase 6 rebase (nexus-o8dil.33) of the former
     test_pdf_unknown_falls_through_to_verify_missing_is_stale — mirrors the
     prose-gate sibling test's rebase rationale."""
     entry = _Entry("1.1.1", None, "")
     result, pdf_chunks_mock, cat = _run_pdf_gate(
-        monkeypatch, entry, verify_result={"referenced": 3, "present": 1, "missing": 2},
+        monkeypatch, tmp_path, entry, verify_result={"referenced": 3, "present": 1, "missing": 2},
     )
     assert pdf_chunks_mock.call_count == 0, (
         "the FK makes 'missing' unreachable; the document now always "
@@ -358,10 +358,10 @@ def test_pdf_unknown_falls_through_no_longer_re_indexes_on_a_stale_verify_result
     assert cat.manifest_verify_calls == 0
 
 
-def test_pdf_unknown_verify_unreachable_no_longer_touches_the_catalog(monkeypatch) -> None:
+def test_pdf_unknown_verify_unreachable_no_longer_touches_the_catalog(monkeypatch, tmp_path) -> None:
     entry = _Entry("1.1.1", None, "")
     result, pdf_chunks_mock, cat = _run_pdf_gate(
-        monkeypatch, entry, verify_exc=RuntimeError("engine unreachable"),
+        monkeypatch, tmp_path, entry, verify_exc=RuntimeError("engine unreachable"),
     )
     assert pdf_chunks_mock.call_count == 0, "the document reads as fresh and skips unconditionally"
     assert cat.manifest_verify_calls == 0

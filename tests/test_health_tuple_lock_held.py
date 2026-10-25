@@ -183,7 +183,7 @@ class TestLockHeldMeasured:
         r = _run(monkeypatch, store, creds_path=tmp_path / "absent")
         assert r.ok is False and r.warn is True
         assert "lock/push by sess-a" in r.detail
-        assert "nx init --service" in r.detail
+        assert "`nx init`" in r.detail and "--service" not in r.detail
 
     def test_claimed_subspace_with_no_template_is_named_not_dropped(self, monkeypatch) -> None:
         store = _Store([_Census("lock2/mystery", 1)])

@@ -6,11 +6,12 @@ Start on the site, then find your section below by what you're trying to do.
 - [Getting started](https://hellblazer.github.io/nexus/getting-started.html) — twelve lessons inside Claude Code: your first search, memory, scratch, knowledge, RDRs, and push delivery
 - [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) — the RDR lifecycle as it's practised, in eight lessons
 
-`docs/*.md` is living reference documentation — kept current with the codebase and safe to trust as-is. `docs/rdr/*.md` is a different thing entirely: an append-only historical decision log (227+ RDR files, plus per-RDR post-mortems) capturing the reasoning behind past design choices, some since superseded. If you're looking for a how-to or a current design reference, stay in `docs/`; only dig into `docs/rdr/` when you need the "why" behind a decision.
+`docs/*.md` is living reference documentation — kept current with the codebase and safe to trust as-is. `docs/rdr/*.md` is a different thing entirely: an append-only historical decision log (230+ RDR files, plus per-RDR post-mortems) capturing the reasoning behind past design choices, some since superseded. If you're looking for a how-to or a current design reference, stay in `docs/`; only dig into `docs/rdr/` when you need the "why" behind a decision.
 
 ## New user
 
 - [Getting Started](getting-started.md) — Install, first index + search, the Claude Code plugin, troubleshooting
+- [Installing on Windows](windows-install.md): Windows 11 x64, prerequisites, the step-by-step path, signing and application-control limits
 - [Desktop Deployment](desktop-deployment.md) — All three Claude surfaces (chat, Cowork, Code) and the host daemon lifecycle
 - [MCP Hosts](mcp-hosts.md): run the stdio MCP server in Cursor, Codex CLI, Gemini CLI, VS Code Copilot or another host, and what stays Claude-only
 - [Managed Onboarding](managed-onboarding.md) — Use the hosted managed service instead of a local stack
@@ -28,21 +29,21 @@ Start on the site, then find your section below by what you're trying to do.
 
 - [Configuration](configuration.md) — Config hierarchy, `.nexus.yml`, environment variables, logging
 - [Container Integration](container-integration.md) — Daemon model for containers and Cowork
-- [Agent Lifecycle & Operations](operations/agent-lifecycle.md) — Install → provision → run → upgrade → uninstall: the state model + the three walkthroughs
+- [Agent Lifecycle & Operations](operations/agent-lifecycle.md) — Install → provision → run → upgrade → uninstall: the state model, then each stage in turn
 - [Migration Runbook](migration-runbook.md) — Operator's manual order of operations, quiescence, rollback, and the deprecation window
 - [Privacy Policy](privacy-policy.md) — What data nexus stores and where
-- [`operations/`](operations/) — Operator runbooks: [Apple code signing](operations/apple-code-signing.md), [audit-membership interpretation](operations/audit-membership-interpretation.md), [T3 health checks (historical template)](operations/t3-health.md), [Tuple space](operations/tuple-space.md) — the three `nx doctor` rows, dead-letter triage, sweep reading
-- [`runbooks/`](runbooks/) — One-off operational runbooks for specific incidents/phases: [RDR-191 Phase 5 cloud FK runbook](runbooks/rdr-191-phase5-cloud-fk.md), [RDR-225 cloud deploy and abort runbook](runbooks/rdr-225-cloud-deploy.md)
+- [`operations/`](operations/) — Operator runbooks: [Apple code signing](operations/apple-code-signing.md), [audit-membership interpretation](operations/audit-membership-interpretation.md), [T3 health checks (historical template)](operations/t3-health.md), [engine reaper](operations/engine-reaper.md), [ownerless-write cutover](operations/ownerless-write-cutover.md) (executed 2026-10-12; kept as the record), [Tuple space](operations/tuple-space.md) — the seven `nx doctor` tuple rows, dead-letter triage, sweep reading
+- [`runbooks/`](runbooks/) — One-off operational runbooks for specific incidents/phases: [RDR-191 Phase 5 cloud FK runbook](runbooks/rdr-191-phase5-cloud-fk.md), [RDR-225 cloud deploy and abort runbook](runbooks/rdr-225-cloud-deploy.md) (executed 2026-10-07), [RDR-225 tenant removal](runbooks/rdr-225-tenant-removal.md)
 
 ## Contributor reference
 
 - [Contributing](contributing.md) — Dev setup, testing, code style, release process
 - [Architecture](architecture.md) — Reference architecture, module map, design decisions
+- [Named workflows](workflows.md): the repo-local Workflow-tool scripts in `.claude/workflows/` (pressure test, dead-wire census)
 - [Benchmarking](benchmarking.md) — `scripts/bench/` harnesses: retrieval-quality scoring (RDR-090) and the operator quality proxy (RDR-196 .p2a)
 - [Wire Contract Pending](wire-contract-pending.md) — Ledger of engine/client wire-contract pairings deployed ahead of their client half (nexus-1vogq tripwire)
 - [Tuple Space](tuple-space.md) — reference for the RDR-205 coordination substrate: engine and client (`nx tuple`, the `tuple_*` MCP tools) shipped together in conexus 7.41.0, paired with `engine-service-v0.1.114`; [walkthroughs](tuple-space-walkthroughs.md)
 - [`testing/`](testing/) — [6.0.0 plugin surface coverage matrix](testing/6.0.0-plugin-surface-coverage-matrix.md)
-- [`tutorial/`](tutorial/) — **In progress, not on `main`.** The tutorial-recording pipeline lives on the `wip/tutorial` branch; this directory on `main` is a placeholder.
 
 ## Reference
 
@@ -61,8 +62,8 @@ Start on the site, then find your section below by what you're trying to do.
 Historical and exploratory material — design reasoning, forensic records, and proposals that are not live reference docs. Read for context, not as current behavior.
 
 - [`rdr/`](rdr/) — All accepted and historical RDRs; [`rdr/README.md`](rdr/README.md) is the RDR index. [`rdr/post-mortem/`](rdr/post-mortem/) holds per-RDR post-mortems (drift between an RDR's decision and what shipped) — not to be confused with [`postmortem/`](postmortem/) below, which covers incident post-mortems unrelated to any single RDR.
-- [`postmortem/`](postmortem/) — Incident post-mortems (production bugs, forensics investigations), e.g. [PDF index collection mismatch](postmortem/2026-03-23-pdf-index-collection-mismatch.md), [daemon concurrency forensics](postmortem/2026-06-05-daemon-concurrency-forensics.md), [RDR-110/113 remediation chain](postmortem/2026-05-16-rdr110-113-remediation-chain.md) (reads live atop scrapped RDR-110..119 — successor is RDR-127).
-- [`exploration/`](exploration/) — Internal design exploration, surveys, draft proposals. Two entries are normative despite the folder name: [MCP Tools vs Agents](exploration/mcp-vs-agents.md) (why `nx_answer` replaced the agent pair, cited from [Querying Guide](querying-guide.md#see-also)) and [Taxonomy Projection Tuning](exploration/taxonomy-projection-tuning.md) (cited from [Storage Tiers](storage-tiers.md#t2----memory-bank)). The rest — [agentic-cockpit](exploration/agentic-cockpit.md), [a2ui-summary](exploration/a2ui-summary.md), [workflow-engine brainstorm/README/synthesis](exploration/workflow-engine-brainstorm.md) — read atop scrapped RDR-110..119; successor pointer is RDR-127 (accepted). [metadata-consistency-matrix.md](exploration/metadata-consistency-matrix.md) is the template for historical-banner framing used across this tree.
+- [`postmortem/`](postmortem/) — Incident post-mortems (production bugs, forensics investigations), e.g. [PDF index collection mismatch](postmortem/2026-03-23-pdf-index-collection-mismatch.md), [daemon concurrency forensics](postmortem/2026-06-05-daemon-concurrency-forensics.md), [RDR-110/113 remediation chain](postmortem/2026-05-16-rdr110-113-remediation-chain.md) (reads live atop abandoned RDR-110..119; successor is RDR-127).
+- [`exploration/`](exploration/) — Internal design exploration, surveys, draft proposals. Two entries are normative despite the folder name: [MCP Tools vs Agents](exploration/mcp-vs-agents.md) (why `nx_answer` replaced the agent pair, cited from [Querying Guide](querying-guide.md#see-also)) and [Taxonomy Projection Tuning](exploration/taxonomy-projection-tuning.md) (cited from [Storage Tiers](storage-tiers.md#t2----memory-bank)). Subsystem essays, kept true to the code: [Xanadu in Nexus](exploration/xanadu-in-nexus.md), [Linda in Nexus](exploration/linda-in-nexus.md), [Research in Nexus](exploration/research-in-nexus.md). Historical records: [agentic-cockpit](exploration/agentic-cockpit.md) and [a2ui-summary](exploration/a2ui-summary.md) read atop abandoned RDR-110..119, with successor RDR-127 (closed); the May 2026 workflow-engine set ([README](exploration/workflow-engine-README.md), [brainstorm](exploration/workflow-engine-brainstorm.md), [synthesis](exploration/workflow-engine-synthesis.md), [design](exploration/workflow-engine-with-ext-apps.md)) is an exploration that no RDR adopted. [metadata-consistency-matrix.md](exploration/metadata-consistency-matrix.md) is the template for historical-banner framing used across this tree.
 - [`migration/`](migration/) — Version-specific upgrade notes, all historical: no guide in this directory is a live, followable procedure. [`migration/README.md`](migration/README.md) indexes [Upgrading to 4.34.x](migration/upgrading-to-4.34.md) (the pre-6.0 RDR-120 daemon split; superseded once T3 moved onto the native nexus-service) and the frozen RDR-101 event-sourced-catalog migration forensics (Phases 0-6, complete; the verbs those docs reference were retired in nexus-iftc). For the current upgrade path, see [Migration Runbook](migration-runbook.md) and [`nx upgrade`](cli-reference.md#nx-upgrade).
 - [`plans/`](plans/) — Historical implementation plans, e.g. [RDR-078 plan-centric retrieval](plans/2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md), [RDR-079 operator dispatch](plans/2026-04-15-rdr-079-operator-dispatch-plan.md), [RDR-080 migration scope](plans/2026-04-15-rdr-080-migration-scope.md).
 - [`field-reports/`](field-reports/) — Production shakeout reports, e.g. [architecture-as-code from ART](field-reports/2026-04-15-architecture-as-code-from-art.md).
@@ -76,4 +77,4 @@ Historical and exploratory material — design reasoning, forensic records, and 
 
 ## Origins
 
-Nexus synthesizes patterns from mgrep (UX, citation format), SeaGOAT (git frecency scoring, hybrid search), Arcaneum (PDF extraction pipeline), and Mixedbread (cloud vector store, succeeded by self-hosted ChromaDB and now by the native nexus-service over Postgres 17 + pgvector). Three storage tiers, no raw content storage outside the source repos, and a specification-before-code workflow recorded across 227+ RDRs.
+Nexus synthesizes patterns from mgrep (UX, citation format), SeaGOAT (git frecency scoring, hybrid search), Arcaneum (PDF extraction pipeline), and Mixedbread (cloud vector store, succeeded by self-hosted ChromaDB and now by the native nexus-service over Postgres 17 + pgvector). Three storage tiers, no raw content storage outside the source repos, and a specification-before-code workflow recorded across 230+ RDRs.

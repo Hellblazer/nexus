@@ -46,7 +46,8 @@ class FakeUv:
     def __init__(
         self, *, scripts=("nx", "nx-mcp"), home="C:\\py\\cpython-3.12", cfg_version="",
         fail_install: str | None = None, tool_dir: Path | None = None,
-        uv_bin: Path | None = None,
+        uv_bin: Path | None = None, ships_constraints: bool = True,
+        fail_constrained: str | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self.scripts = scripts
@@ -55,6 +56,12 @@ class FakeUv:
         self.fail_install = fail_install
         self.tool_dir = tool_dir
         self.uv_bin = uv_bin
+        # nexus-2k66t.4.1: whether the installed package ships
+        # nexus/_install/constraints.txt (a release that predates it does not).
+        self.ships_constraints = ships_constraints
+        # Fail ONLY the install that carries --constraints (the second step of a
+        # pinned build); the --no-deps fetch before it succeeds.
+        self.fail_constrained = fail_constrained
 
     def __call__(self, argv, **_kw):
         self.calls.append(list(argv))
@@ -78,14 +85,26 @@ class FakeUv:
         if argv[:3] == ["uv", "pip", "install"]:
             if self.fail_install is not None:
                 return subprocess.CompletedProcess(argv, 1, "", self.fail_install)
+            if self.fail_constrained is not None and "--constraints" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", self.fail_constrained)
             python = Path(argv[argv.index("--python") + 1])
             scripts = python.parent
+            if "--no-deps" in argv and self.ships_constraints:
+                shipped = scripts.parent / "Lib" / "site-packages" / "nexus" / "_install"
+                shipped.mkdir(parents=True, exist_ok=True)
+                (shipped / "constraints.txt").write_text("mcp==1.2.3\n")
             python.write_text("#!/bin/sh\nprintf '%s\\n' " + " ".join(self.scripts) + "\n")
             python.chmod(python.stat().st_mode | stat.S_IXUSR)
             for name in self.scripts:
                 (scripts / f"{name}.exe").write_bytes(f"#!{python}\nlauncher:{name}".encode())
             return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(f"unexpected command {argv}")
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_unpinned_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator's NX_INSTALL_UNPINNED must not turn a pinned-build test unpinned."""
+    monkeypatch.delenv("NX_INSTALL_UNPINNED", raising=False)
 
 
 @pytest.fixture
@@ -123,8 +142,9 @@ class TestBuildGeneration:
     def test_the_commands_name_the_windows_interpreter_and_the_packaged_overrides(self, tools: Path) -> None:
         uv = FakeUv()
         gen = _build(tools, uv, python_version="3.12")
-        venv, install = uv.calls
+        venv, fetch, install = uv.calls
         assert venv == ["uv", "venv", "--allow-existing", "--python", "3.12", str(gen)]
+        assert fetch[:3] == ["uv", "pip", "install"] and "--no-deps" in fetch
         assert install[:3] == ["uv", "pip", "install"]
         assert install[install.index("--python") + 1] == str(gen / "Scripts" / "python.exe")
         overrides = Path(install[install.index("--overrides") + 1])
@@ -136,9 +156,67 @@ class TestBuildGeneration:
         pins = tmp_path / "pins.txt"
         pins.write_text("x==1\n")
         uv = FakeUv()
-        _build(tools, uv, constraints=str(pins))
+        gen = _build(tools, uv, constraints=str(pins))
+        assert lc.read_receipt(gen).constraints == "applied"
+        # An explicit file is the whole answer: one install, no fetch step.
+        assert len(uv.calls) == 2
         install = uv.calls[1]
         assert install[install.index("--constraints") + 1] == str(pins)
+        assert "--no-deps" not in install
+
+    def test_the_constraints_the_package_ships_are_used_when_none_is_given(
+        self, tools: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """nexus-2k66t.4.1, the Windows twin of install_generation.sh: fetch the
+        package alone, read ITS constraints.txt out of the new venv, install with
+        the dependencies under it. The running nexus's own file would pin an
+        upgrade to the old release's lock."""
+        uv = FakeUv()
+        gen = _build(tools, uv)
+        _venv, fetch, install = uv.calls
+        assert "--no-deps" in fetch and "--constraints" not in fetch
+        shipped = gen / "Lib" / "site-packages" / "nexus" / "_install" / "constraints.txt"
+        assert shipped.is_file()
+        assert install[install.index("--constraints") + 1] == str(shipped)
+        assert "--no-deps" not in install
+        assert "UNCONSTRAINED" not in capsys.readouterr().err
+        assert lc.read_receipt(gen).constraints == "applied"
+
+    def test_install_unpinned_skips_the_constraints_step_and_says_so(
+        self, tools: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_INSTALL_UNPINNED", "1")
+        uv = FakeUv()
+        gen = _build(tools, uv)
+        assert lc.read_receipt(gen).constraints == "unpinned", "a deliberate opt-out is recorded as such"
+        installs = [c for c in uv.calls if c[:3] == ["uv", "pip", "install"]]
+        assert len(installs) == 1, installs
+        assert "--constraints" not in installs[0] and "--no-deps" not in installs[0]
+        err = capsys.readouterr().err
+        assert "install_generation: WARNING: NX_INSTALL_UNPINNED=1" in err and "not pinned" in err
+
+    def test_install_unpinned_does_not_override_an_explicit_constraints_file(
+        self, tools: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_INSTALL_UNPINNED", "1")
+        pins = tools / "pins.txt"
+        pins.write_text("x==1\n")
+        uv = FakeUv()
+        gen = _build(tools, uv, constraints=str(pins))
+        assert uv.calls[-1][uv.calls[-1].index("--constraints") + 1] == str(pins)
+        assert lc.read_receipt(gen).constraints == "applied"
+
+    def test_a_package_without_the_file_installs_unconstrained_and_says_so(
+        self, tools: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        uv = FakeUv(ships_constraints=False)
+        gen = _build(tools, uv)
+        install = uv.calls[-1]
+        assert "--constraints" not in install
+        assert lc.read_receipt(gen).constraints == "none", "the receipt must not claim a lock that was not applied"
+        err = capsys.readouterr().err
+        assert "UNCONSTRAINED" in err and "constraints.txt" in err
+        assert "was found in the installed" in err and "ships no" not in err
 
     def test_a_windows_build_fills_a_launcher_dir_with_copies_of_its_own_launchers(self, tools: Path) -> None:
         """<gen>\\bin holds a byte copy of each owned Scripts launcher, so each
@@ -226,6 +304,22 @@ class TestBuildGeneration:
         with pytest.raises(gen_core.GenerationError, match="No solution found"):
             _build(tools, FakeUv(fail_install="x No solution found when resolving"))
         assert list(tools.iterdir()) == []
+
+    def test_a_failed_constrained_install_raises_and_leaves_no_tree_and_no_current(
+        self, tools: Path,
+    ) -> None:
+        """nexus-2k66t.4.1 made the build two installs. Failing only the SECOND
+        (the one carrying --constraints) must leave neither a generation directory
+        nor a `current` link: the fetch succeeded, so a build that kept its tree
+        here would be left half-made. fail_install fails the fetch and never
+        reaches this step."""
+        uv = FakeUv(fail_constrained="x No solution found when resolving")
+        with pytest.raises(gen_core.GenerationError, match="No solution found"):
+            _build(tools, uv)
+        installs = [c for c in uv.calls if c[:3] == ["uv", "pip", "install"]]
+        assert len(installs) == 2 and "--constraints" in installs[1], installs
+        assert list(tools.iterdir()) == []
+        assert not (tools / "current").exists()
 
     def test_a_missing_uv_says_so_and_leaves_no_tree(self, tools: Path) -> None:
         def no_uv(argv, **_kw):
@@ -856,7 +950,8 @@ class TestMigrateLegacy:
     ) -> None:
         legacy = self._legacy(tmp_path)
         gen, store, paths = self._migrate(tools, tmp_path, legacy)
-        assert gen is not None and lc.read_receipt(gen).extras == ["local"]
+        # nexus-2k66t.4.2: a legacy uv tree predates the PDF split, so the move carries it.
+        assert gen is not None and lc.read_receipt(gen).extras == ["local", "pdf"]
         assert os.readlink(tools / "current") == str(gen)
         assert sorted(p.name for p in gen_core.launcher_dir(gen).iterdir()) == ["nx-mcp.exe", "nx.exe"]
         entry = str(tools / "current" / "bin")
@@ -865,6 +960,38 @@ class TestMigrateLegacy:
         assert os.readlink(tools / "gen-legacy-uv-tool") == str(legacy)
         # Never uninstalled, never reaped, and no file written into uv's bin dir.
         assert (legacy / "Scripts" / "nx.exe").read_bytes() == b"uv's launcher"
+
+    def test_without_pdf_leaves_the_stack_out_of_the_migrated_generation(
+        self, tools: Path, tmp_path: Path,
+    ) -> None:
+        """nexus-vyy65: the caller has said the machine cannot load the PDF stack."""
+        legacy = self._legacy(tmp_path)
+        gen, _store, _paths = self._migrate(tools, tmp_path, legacy, without_pdf=True)
+        assert gen is not None and lc.read_receipt(gen).extras == ["local"]
+
+    def test_without_pdf_also_drops_a_pdf_the_legacy_receipt_named(self, tools: Path, tmp_path: Path) -> None:
+        legacy = self._legacy(tmp_path, extras='"local", "pdf"')
+        gen, _store, _paths = self._migrate(tools, tmp_path, legacy, without_pdf=True)
+        assert gen is not None and lc.read_receipt(gen).extras == ["local"]
+
+    def test_a_verify_that_refuses_stops_the_convergence_before_the_flip(
+        self, tools: Path, tmp_path: Path,
+    ) -> None:
+        """nexus-lvvhm: `verify` runs on the built generation after the build and before `current`
+        moves; what it raises propagates, and nothing after the build has happened."""
+        legacy = self._legacy(tmp_path)
+        seen: list[Path] = []
+
+        def refuse(gen: Path) -> None:
+            seen.append(gen)
+            raise gen_core.GenerationError("cannot read the receipt")
+
+        with pytest.raises(gen_core.GenerationError, match="cannot read the receipt"):
+            self._migrate(tools, tmp_path, legacy, verify=refuse)
+        assert len(seen) == 1 and seen[0].name.startswith("gen-")
+        assert not (tools / "current").exists() and not (tools / "current").is_symlink()
+        assert not (tools / "gen-legacy-uv-tool").exists(), "the legacy tree was not registered"
+        assert (tmp_path / "userpath.txt").read_text().strip() == "C:\\Windows;C:\\uvbin", "the PATH entry was not added"
 
     def test_no_legacy_tree_is_a_clean_no_op(self, tools: Path, tmp_path: Path) -> None:
         uv = FakeUv()

@@ -100,7 +100,7 @@ DEVICES: dict[str, tuple[str, ...]] = {
         "Not a parallel programming model, but a coordination substrate",
         "a work queue, a mailbox, a lock, a barrier, and a request with its reply",
         "`SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1`",
-        "A report is owed until a report tuple exists",
+        "A message waits in its mailbox until it is taken, whether or not its reader remembered to look.",
         "A message reaches exactly one reader, whether or not two raced for it.",
         "A request stays open, with an age you can see, until its ack exists, whether or not anyone is watching.",
         "An agent's report had to be something an orchestrator could wait for and something a later session could count.",

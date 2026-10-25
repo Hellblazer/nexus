@@ -32,6 +32,7 @@ import click
 import pytest
 
 from _generation_harness import SAFE_BASE_PATH, stub_uv
+from nexus import _vcrt, install_layout, pdf_stack
 from tests._module_seam import setattr_in
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -172,7 +173,9 @@ def test_extras_flag_adds_to_an_existing_install(bed, monkeypatch) -> None:
     new = (tools / "current").resolve()
     receipt = json.loads((new / "nexus-install.json").read_text())
     # The builder normalizes receipt order; BOTH surviving is the contract.
-    assert sorted(receipt["extras"]) == ["dt", "local"], receipt["extras"]
+    # nexus-2k66t.4.2: this fixture's receipt is installer_schema 1, written before
+    # `pdf` became an extra, so the rebuild also carries the PDF stack forward.
+    assert sorted(receipt["extras"]) == ["dt", "local", "pdf"], receipt["extras"]
 
 
 def test_extras_flag_dry_run_shows_the_merged_set(bed, monkeypatch, capsys) -> None:
@@ -307,10 +310,9 @@ def test_it_does_not_run_the_migration_ladder(bed, monkeypatch) -> None:
 
     _run_self_install()
 
-    joined = [" ".join(c) for c in calls]
-    assert not any("upgrade" in j and "nx" in j for j in joined), (
-        f"the self-install invoked the migration ladder: {joined}"
-    )
+    # Match argv tokens, not substrings: a worktree path containing "upgrade" or "nx" is not a call.
+    ladder = [c for c in calls if Path(c[0]).name in ("nx", "nx.exe") and "upgrade" in c[1:]]
+    assert not ladder, f"the self-install invoked the migration ladder: {ladder}"
 
 
 def test_the_builder_claims_its_tree_and_the_receipt_supersedes_it(bed, monkeypatch) -> None:
@@ -511,6 +513,49 @@ def test_converge_failure_surfaces_stderr(bed, monkeypatch, tmp_path) -> None:
     assert "uv not resolvable" in str(exc.value)
 
 
+def test_converge_re_echoes_the_builders_warning_on_success(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    """nexus-2k66t.4.1 review blocker: the legacy path captured migrate_legacy.sh's
+    stderr and printed it only on failure, so the UNCONSTRAINED warning (a package
+    that ships no constraints.txt) vanished on a SUCCESSFUL convergence. The
+    WARNING lines surface; uv's progress noise does not."""
+    tools, _, _ = bed
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    warning = (
+        "install_generation: WARNING: no nexus/_install/constraints.txt was found in the "
+        "installed conexus==7.0.0 package; its dependencies are resolved UNCONSTRAINED"
+    )
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 0, stdout=f"{tools}/gen-20260827T000000Z\n",
+            stderr=f"Resolved 12 packages in 3ms\n{warning}\nInstalled 12 packages\n"),
+    )
+    assert _run_self_install() is not None
+    err = capsys.readouterr().err
+    assert warning in err
+    assert "Resolved 12 packages" not in err
+
+
+def test_converge_failure_on_macos_names_the_floor(bed, monkeypatch, tmp_path) -> None:
+    """A platform-tag resolve failure on darwin reads like a nexus fault; the
+    message says macOS 14+ on Apple Silicon is required."""
+    _not_a_generation(tmp_path, monkeypatch)
+    _set_site_kind(monkeypatch, packaged=True)
+    monkeypatch.setattr("nexus.commands.self_cmd._host_system", lambda: "darwin")
+    setattr_in(monkeypatch, "nexus.commands.self_cmd", "subprocess.run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 1, stdout="", stderr=(
+                "error: onnxruntime==1.24.2 has no wheels with a matching platform tag "
+                "(e.g., `macosx_13_0_arm64`)")),
+    )
+    with pytest.raises(click.ClickException) as exc:
+        _run_self_install()
+    assert "macOS 14 or later on Apple Silicon" in str(exc.value)
+    assert "macosx_13_0_arm64" in str(exc.value)  # uv's own words stay
+
+
 def test_converge_dry_run_builds_no_generation(bed, monkeypatch, tmp_path) -> None:
     _not_a_generation(tmp_path, monkeypatch)
     _set_site_kind(monkeypatch, packaged=True)
@@ -594,3 +639,165 @@ def test_no_packaging_rule_can_drop_a_file_from_the_install_directory() -> None:
         f"install directory. Every file there is reachable from the install "
         f"path at runtime, and the failure appears only after release."
     )
+
+
+# ── nx self install builds SLIM and says so when a Windows box cannot load the PDF stack (nexus-vyy65) ──
+
+
+def _windows_box_without_atomic_wait(monkeypatch, tmp_path, *, whole: bool = False) -> None:
+    sysdir = tmp_path / "System32"
+    sysdir.mkdir(exist_ok=True)
+    if whole:
+        for n in _vcrt.PDF_STACK_DLLS:
+            (sysdir / n).write_bytes(b"MZ")
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: True)
+    monkeypatch.setattr(_vcrt, "system_dir", lambda: str(sysdir))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+
+
+def _generation_bed(bed, monkeypatch, **kw):
+    tools, _, src = bed
+    kw.setdefault("source", str(src))
+    host = _hosting_generation(tools, "20260101T000000Z", **kw)
+    (tools / "current").symlink_to(host)
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
+    return tools, host
+
+
+def _extras_of(generation: Path) -> list[str]:
+    return json.loads((generation / "nexus-install.json").read_text())["extras"]
+
+
+def test_an_explicit_extras_pdf_builds_slim_on_a_runtime_gap_and_says_it_was_not_installed(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    _run_self_install(add_extras=("pdf",))
+    new = (tools / "current").resolve()
+    assert new != host.resolve(), "a generation was built and flipped to"
+    assert "pdf" not in _extras_of(new) and "local" in _extras_of(new)
+    out = capsys.readouterr().out
+    assert out.count("PDF support will NOT be installed") == 1, "one line, and it does not ignore the flag silently"
+    assert pdf_stack.VCRT_URL in out and "no Microsoft Visual C++ runtime" in out
+
+
+def test_a_receipt_that_lists_pdf_builds_slim_on_a_runtime_gap_with_one_line(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local", "pdf"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    _run_self_install()
+    new = (tools / "current").resolve()
+    assert new != host.resolve()
+    assert _extras_of(new) == ["local"], "the new receipt does not list pdf, so later upgrades are not gated"
+    out = capsys.readouterr().out
+    assert out.count("PDF support will not be installed by this build") == 1
+    assert pdf_stack.VCRT_URL in out and "installs on first use" in out
+
+
+def test_the_carry_forward_of_a_pre_split_receipt_is_dropped_too_and_does_not_repeat(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    """installer_schema 1 means pdf is carried forward; on a gap box that build is slim, and
+    its (current-schema) receipt owes no carry, so the next install is silent."""
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    _run_self_install()
+    first = (tools / "current").resolve()
+    assert "pdf" not in _extras_of(first)
+    assert "PDF support will not be installed by this build" in capsys.readouterr().out
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(first))
+    _run_self_install()
+    assert "PDF support" not in capsys.readouterr().out, "nothing is owed, nothing is said"
+    assert "pdf" not in _extras_of((tools / "current").resolve())
+
+
+def test_a_dry_run_shows_the_slim_build_and_the_line(bed, monkeypatch, tmp_path, capsys) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    assert _run_self_install(add_extras=("pdf",), dry_run=True) is None
+    out = capsys.readouterr().out
+    assert "PDF support will NOT be installed" in out
+    argv = [ln for ln in out.splitlines() if ln.startswith("bash ")]
+    assert len(argv) == 1 and argv[0].endswith("--extras local"), out
+    assert (tools / "current").resolve() == host.resolve()
+
+
+def test_extras_pdf_builds_when_the_windows_runtime_is_whole(bed, monkeypatch, tmp_path, capsys) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path, whole=True)
+    _run_self_install(add_extras=("pdf",))
+    new = (tools / "current").resolve()
+    assert new != host.resolve()
+    assert "pdf" in _extras_of(new)
+    assert "PDF support" not in capsys.readouterr().out
+
+
+def test_off_windows_extras_pdf_builds_as_before(bed, monkeypatch, tmp_path, capsys) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: False)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    _run_self_install(add_extras=("pdf",))
+    assert "pdf" in _extras_of((tools / "current").resolve())
+    assert "PDF support" not in capsys.readouterr().out
+
+
+def test_a_post_split_install_without_pdf_is_not_gated_by_the_windows_runtime(bed, monkeypatch, tmp_path) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    receipt = json.loads((host / "nexus-install.json").read_text())
+    receipt["installer_schema"] = install_layout.INSTALLER_SCHEMA  # written after the PDF split: stays slim
+    (host / "nexus-install.json").write_text(json.dumps(receipt))
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    _run_self_install(add_extras=("dt",))
+    new = (tools / "current").resolve()
+    assert new != host.resolve()
+    assert "pdf" not in json.loads((new / "nexus-install.json").read_text())["extras"]
+
+
+def test_bootstrap_with_extras_pdf_builds_slim_on_a_runtime_gap_and_the_receipt_has_no_pdf(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    """The plugin's setup (and the stand-in's repair command) run `nx self install
+    --bootstrap --extras pdf` by default. On a box without the runtime that first install is slim, with one line."""
+    tools, bin_dir, _src = bed
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    monkeypatch.setattr("nexus.commands.self_cmd._flip_and_shim", lambda *a, **k: None)
+    generation = _run_self_install(bootstrap=True, add_extras=("pdf", "local"))
+    assert generation is not None and _extras_of(generation) == ["local"]
+    out = capsys.readouterr().out
+    assert out.count("PDF support will not be installed by this build") == 1 and pdf_stack.VCRT_URL in out
+
+
+def test_bootstrap_with_extras_pdf_builds_pdf_when_the_runtime_is_whole(bed, monkeypatch, tmp_path, capsys) -> None:
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path, whole=True)
+    monkeypatch.setattr("nexus.commands.self_cmd._flip_and_shim", lambda *a, **k: None)
+    generation = _run_self_install(bootstrap=True, add_extras=("pdf",))
+    assert generation is not None and "pdf" in _extras_of(generation)
+    assert "PDF support" not in capsys.readouterr().out
+
+
+def test_the_carry_forward_builds_a_slim_generation_on_a_runtime_gap_and_stops_being_owed(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    """`nx upgrade` carries pdf into a pre-split install. On a box without the runtime that
+    build is slim, the account is the one line, and the new receipt owes no carry."""
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"], source="conexus", source_kind="registry")
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    assert pdf_stack.carry_forward_pending()
+    line = pdf_stack.carry_forward()
+    assert line is not None and line.startswith("PDF support will not be installed by this build") and pdf_stack.VCRT_URL in line
+    new = (tools / "current").resolve()
+    assert new != host.resolve() and _extras_of(new) == ["local"]
+    assert "PDF support will not be installed by this build" not in capsys.readouterr().out, "the line is returned once, not also echoed"
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(new))
+    assert not pdf_stack.carry_forward_pending()
+    assert pdf_stack.carry_forward() is None
+
+
+def test_the_carry_forward_builds_pdf_when_the_runtime_is_whole(bed, monkeypatch, tmp_path) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"], source="conexus", source_kind="registry")
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path, whole=True)
+    line = pdf_stack.carry_forward()
+    assert line is not None and "carried forward" in line
+    assert "pdf" in _extras_of((tools / "current").resolve())

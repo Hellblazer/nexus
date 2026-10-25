@@ -13127,11 +13127,12 @@ def daemon_uninstall(
 async def setup(
     mode: Annotated[str, Field(description=_setup_tools.MODE_DESCRIPTION)],
     autostart: Annotated[bool, Field(description=_setup_tools.AUTOSTART_DESCRIPTION)] = False,
+    slim: Annotated[bool | None, Field(description=_setup_tools.SLIM_DESCRIPTION)] = None,
 ) -> str:
     import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
     try:
-        return await asyncio.to_thread(_setup_tools.run_setup, mode, autostart)
+        return await asyncio.to_thread(_setup_tools.run_setup, mode, autostart, slim)
     except _setup_tools.SetupError as exc:
         raise ToolError(str(exc)) from exc
 

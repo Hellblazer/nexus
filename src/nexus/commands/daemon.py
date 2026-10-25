@@ -1636,7 +1636,7 @@ def _probe_pg(creds_path: Path) -> dict:
     """
     out: dict = {}
     if not creds_path.exists():
-        out["pg"] = "not provisioned (run: nx init --service)"
+        out["pg"] = "not provisioned (run: nx init)"
         return out
     from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         _port_accepting,

@@ -84,13 +84,21 @@ PYEOF
 fi
 if [[ "$1" == "pip" && "$2" == "install" ]]; then
     py=""
+    no_deps=0
     shift 2
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --python) py="$2"; shift 2 ;;
+            --no-deps) no_deps=1; shift ;;
             *) shift ;;
         esac
     done
+    if [[ -n "$py" && "$no_deps" -eq 1 && ! -e "{bin_dir}/no-packaged-constraints" ]]; then
+        # nexus-2k66t.4.1: the fetch step; the wheel ships its constraints.
+        site="$(dirname "$(dirname "$py")")/lib/python3.12/site-packages/nexus/_install"
+        mkdir -p "$site"
+        printf 'mcp==1.2.3\\n' > "$site/constraints.txt"
+    fi
     if [[ -n "$py" ]]; then
         gen_bin="$(dirname "$py")"
         for name in {script_loop}; do
@@ -184,8 +192,124 @@ requirements = [
     assert result.returncode == 0, result.stderr
     gen = Path(result.stdout.strip().splitlines()[-1])
     payload = json.loads((gen / "nexus-install.json").read_text())
-    assert payload["extras"] == ["local"], "the [local] extra did not survive the bridge"
-    assert payload["spec"] == "conexus[local]==7.18.0"
+    # nexus-2k66t.4.2: a legacy tree predates the PDF split, so `pdf` joins the bridged extras.
+    assert payload["extras"] == ["local", "pdf"], "the [local] extra did not survive the bridge"
+    assert payload["spec"] == "conexus[local,pdf]==7.18.0"
+
+
+def test_the_bridge_build_is_constrained_to_the_lock_the_package_ships(scaffold) -> None:
+    """nexus-2k66t.4.1: the legacy convergence is an install path too. It goes
+    through install_generation.sh, so its dependencies must be held to the
+    constraints the fetched package ships, exactly as `nx self install` does."""
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    legacy = _legacy_tree(tmp_path, receipt="""
+[tool]
+requirements = [
+    { name = "conexus" },
+]
+""")
+    result = _run(
+        env(), "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy),
+    )
+    assert result.returncode == 0, result.stderr
+    gen = Path(result.stdout.strip().splitlines()[-1])
+    installs = [ln for ln in argv_log.read_text().splitlines() if ln.startswith("pip install")]
+    assert len(installs) == 2, installs
+    shipped = gen / "lib" / "python3.12" / "site-packages" / "nexus" / "_install" / "constraints.txt"
+    assert shipped.is_file()
+    assert "--no-deps" in installs[0] and "--constraints" not in installs[0]
+    assert f"--constraints {shipped}" in installs[1] and "--no-deps" not in installs[1]
+
+
+def test_the_build_script_can_be_named_by_the_caller(scaffold) -> None:
+    """nexus-2k66t.4.3: `nx self install` hands the script the install_generation.sh the
+    release being installed ships (NX_MIGRATE_BUILD_SCRIPT), so that release's lock pin
+    applies. The named script builds, in place of the sibling."""
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    legacy = _legacy_tree(tmp_path, receipt="[tool]\nrequirements = [ { name = \"conexus\" } ]\n")
+    ran = tmp_path / "alt-ran"
+    alt = tmp_path / "alt_install_generation.sh"
+    sibling = _MIGRATE.parent / "install_generation.sh"
+    alt.write_text(f'#!/usr/bin/env bash\necho "$@" > "{ran}"\nexec bash "{sibling}" "$@"\n')
+    result = _run(
+        env({"NX_MIGRATE_BUILD_SCRIPT": str(alt)}),
+        "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy),
+    )
+    assert result.returncode == 0, result.stderr
+    assert ran.read_text().split() == ["--source", "conexus", "--version", "7.18.0", "--extras", "pdf"]
+    assert Path(result.stdout.strip().splitlines()[-1]).name.startswith("gen-")
+
+
+def _build_script_that_rewrites_the_receipt(tmp_path: Path, mutation: str) -> Path:
+    """A caller-named build script: the real install_generation.sh, then *mutation* (python,
+    given ``doc``, the receipt as a dict) applied to the receipt it wrote."""
+    sibling = _MIGRATE.parent / "install_generation.sh"
+    alt = tmp_path / "mutating_install_generation.sh"
+    alt.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -e\n"
+        f'gen="$(bash "{sibling}" "$@")"\n'
+        'python3 - "$gen/nexus-install.json" <<\'PY\'\n'
+        "import json, sys\n"
+        "path = sys.argv[1]\n"
+        "doc = json.load(open(path))\n"
+        f"{mutation}\n"
+        "json.dump(doc, open(path, 'w'))\n"
+        "PY\n"
+        'echo "$gen"\n'
+    )
+    return alt
+
+
+def test_a_receipt_this_release_cannot_read_stops_the_legacy_convergence_before_the_flip(scaffold) -> None:
+    """nexus-lvvhm: migrate_legacy.sh flipped `current` itself right after the build. The
+    build is the TARGET release's, so its receipt is read back first: a refusal leaves
+    `current`, `previous` and the shims untouched."""
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    legacy = _legacy_tree(tmp_path, receipt="[tool]\nrequirements = [ { name = \"conexus\" } ]\n")
+    alt = _build_script_that_rewrites_the_receipt(tmp_path, 'doc["schema"] = 0')
+    result = _run(
+        env({"NX_MIGRATE_BUILD_SCRIPT": str(alt)}),
+        "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy),
+    )
+    assert result.returncode == 64, result.stderr
+    assert "cannot read its receipt" in result.stderr and "NX_INSTALL_RUNNING_INSTALLER=1" in result.stderr
+    assert not (tools / "current").exists() and not (tools / "current").is_symlink(), "current was not created"
+    assert not (tools / "previous").is_symlink()
+    assert not list(bin_dir.iterdir()), "no shim was written"
+    assert result.stdout.strip() == "", "no generation is announced as the result"
+
+
+def test_a_receipt_from_a_newer_installer_is_read_and_the_convergence_completes(scaffold) -> None:
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    legacy = _legacy_tree(tmp_path, receipt="[tool]\nrequirements = [ { name = \"conexus\" } ]\n")
+    alt = _build_script_that_rewrites_the_receipt(
+        tmp_path, 'doc["schema"] = 7\ndoc["a_field_from_the_future"] = {"x": [1]}',
+    )
+    result = _run(
+        env({"NX_MIGRATE_BUILD_SCRIPT": str(alt)}),
+        "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy),
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tools / "current").is_symlink()
+
+
+def test_a_package_without_the_file_warns_in_the_line_self_install_re_echoes(scaffold) -> None:
+    """The real migrate_legacy.sh, a package that ships no constraints.txt: the
+    UNCONSTRAINED warning is on its stderr and starts with the prefix
+    ``self_cmd._echo_build_warnings`` re-echoes. Pins the two halves together; the
+    other half (self install printing it on success) is in test_self_install.py."""
+    from nexus.commands.self_cmd import _BUILD_WARNING_PREFIX
+
+    tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
+    (stub_bin / "no-packaged-constraints").write_text("")
+    legacy = _legacy_tree(tmp_path, receipt="[tool]\nrequirements = [ { name = \"conexus\" } ]\n")
+    result = _run(env(), "--source", "conexus", "--version", "7.18.0", "--legacy-venv", str(legacy))
+    assert result.returncode == 0, result.stderr
+    warnings = [ln for ln in result.stderr.splitlines() if ln.startswith(_BUILD_WARNING_PREFIX)]
+    assert len(warnings) == 1 and "UNCONSTRAINED" in warnings[0], result.stderr
+    installs = [ln for ln in argv_log.read_text().splitlines() if ln.startswith("pip install")]
+    assert "--constraints" not in installs[-1]
 
 
 def test_mineru_is_dropped_from_the_bridge(scaffold) -> None:
@@ -208,10 +332,12 @@ requirements = [
     assert result.returncode == 0, result.stderr
     gen = Path(result.stdout.strip().splitlines()[-1])
     payload = json.loads((gen / "nexus-install.json").read_text())
-    assert payload["extras"] == ["local"]
+    assert payload["extras"] == ["local", "pdf"]  # mineru dropped; pdf carried (nexus-2k66t.4.2)
 
 
-def test_no_receipt_bridges_to_no_extras(scaffold) -> None:
+def test_no_receipt_bridges_to_the_pdf_stack_alone(scaffold) -> None:
+    """No legacy receipt means no extras to bridge; the box is still a legacy
+    tree that had the PDF stack in every install (nexus-2k66t.4.2)."""
     tmp_path, tools, bin_dir, stub_bin, argv_log, env = scaffold
     legacy = _legacy_tree(tmp_path, receipt=None)
 
@@ -223,8 +349,8 @@ def test_no_receipt_bridges_to_no_extras(scaffold) -> None:
     assert result.returncode == 0, result.stderr
     gen = Path(result.stdout.strip().splitlines()[-1])
     payload = json.loads((gen / "nexus-install.json").read_text())
-    assert payload["extras"] == []
-    assert payload["spec"] == "conexus==7.18.0"
+    assert payload["extras"] == ["pdf"]
+    assert payload["spec"] == "conexus[pdf]==7.18.0"
 
 
 # --------------------------------------------------------------------------

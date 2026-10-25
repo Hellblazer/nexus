@@ -2727,6 +2727,14 @@ def index_pdf(
             f"{pdf_path} is empty (0 bytes) and cannot be chunked"
         )
 
+    # nexus-2k66t.4.2, the library backstop: the PDF stack (docling, MinerU,
+    # torch) is an on-demand extra, and a slim install lacks it. Refuse HERE,
+    # before the collection is created and before the pre-flight registration
+    # below mints a catalog row, so a caller that skipped the CLI gates
+    # (pdf_stack.ensure_or_exit) leaves nothing to roll back. Never installs.
+    from nexus import pdf_stack  # noqa: PLC0415 — circular-dep avoidance, deferred
+
+    pdf_stack.require("index_pdf")
     content_hash = _sha256(pdf_path)
     # RDR-152 Seam B: resolve the write client BEFORE the collection-name
     # fallback below (moved up, nexus-o5x2c) — see _index_document /

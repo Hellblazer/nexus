@@ -121,6 +121,12 @@ things to avoid carefully; they are impossible.
    expiry; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape when the
    tuple space is unreachable.
 
+   **Batch develop pushes** (Sam, 2026-10-21, nexus-cvtxu): develop CI runs
+   one run at a time, so each push waits for the one before it. Hold green
+   commits and push them together, alone only for a develop red or a peer
+   who is waiting. A push within 30 minutes of the worktree's last one
+   prints `PUSH_BATCH_HINT` on stderr.
+
 9. **Whoever pushes to `develop` fast-forwards the primary in the same
    breath.** `cd` to the primary and `git merge --ff-only origin/develop`.
    Rule 2 makes the primary the reference checkout — the one place to read
@@ -182,10 +188,14 @@ things to avoid carefully; they are impossible.
     `~/src/nexus` (primary on `develop`, never edited) with worktrees in
     `~/src/nexus-wt/`. Its leases live in that clone's git common dir. Push
     with `git push chas HEAD:refs/heads/<unique-ref>` (laptop remote `chas`)
-    and add a worktree at that ref. `-n auto` there means 32 workers
-    (`PYTEST_XDIST_AUTO_NUM_WORKERS`); 32 workers peak at about 95 of 123 GB,
-    so do not raise it. Measured 2026-10-08 on develop 14fb28184: the Python
-    suite in about 11 min, `scripts/mvnw-leased.sh test` in 9 min. Detach a long
+    and add a worktree at that ref. Unwrapped, `-n auto` there
+    meant 32 workers (`PYTEST_XDIST_AUTO_NUM_WORKERS`); 32 workers peak at
+    about 95 of 123 GB, so do not raise it. Measured 2026-10-08 on develop
+    14fb28184: the Python suite in about 11 min, `scripts/mvnw-leased.sh
+    test` in 9 min. Since the lab-run grants (2026-10-17) a full suite runs
+    inside a grant and `-n auto` follows it, clamped to the grant's memory
+    (`tests/_xdist_cap.py`): lab-l runs 15 workers, 28,085 tests in 1317 s
+    on 7.82.0. Detach a long
     run with `setsid -f`, not `nohup ... &`: a backgrounded process inherits
     SIGINT ignored, and one test reads that (nexus-jo8za). Details: T2
     `nexus/chas-test-host-howto`.

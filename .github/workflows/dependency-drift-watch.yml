@@ -13,7 +13,15 @@ name: Dependency drift watch (weekly)
 # red and bury other workflows' signal. A refused version is acknowledged in
 # the script's SHAPE_SENSITIVE_ACKNOWLEDGED map, which is what clears a red.
 #
-# CI-cost discipline (CLAUDE.md DIRECTIVES): one ubuntu job, no build, no
+# The second job (nexus-2k66t.4.5) audits the SHIPPED install lock,
+# src/nexus/_install/constraints.txt, with pip-audit: since nexus-2k66t.4.1
+# every install is pinned to it, so a transitive security fix reaches users
+# only through a nexus release, and this is what prompts that release. Red
+# only for an advisory that has a fixed version and is not acknowledged in
+# scripts/audit_install_lock.py ACKNOWLEDGED (with its reason); an advisory
+# with no fix is shown and never fails.
+#
+# CI-cost discipline (CLAUDE.md DIRECTIVES): two ubuntu jobs, no build, no
 # tests, seconds of runtime. Weekly + manual dispatch only.
 
 on:
@@ -47,4 +55,30 @@ jobs:
           set -e
           cat drift.txt
           { echo '```'; cat drift.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  lock-audit:
+    name: install-lock vulnerability audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Audit the shipped install lock with pip-audit
+        run: |
+          set -uo pipefail
+          # The script's exit code is the verdict; capture it without a pipe
+          # (tests/test_workflow_run_pipefail_lint.py) and without -e.
+          set +e
+          uvx --quiet pip-audit -r src/nexus/_install/constraints.txt --no-deps --disable-pip \
+            --progress-spinner off --format json -o audit.json > pip-audit.log 2>&1
+          audit_rc=$?
+          python3 scripts/audit_install_lock.py audit.json > audit.txt 2>&1
+          rc=$?
+          set -e
+          cat pip-audit.log audit.txt
+          { echo '```'; cat audit.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # pip-audit exits 1 when it finds anything; the verdict is the script's.
+          # A pip-audit that wrote no report is caught by the script (exit 2).
+          echo "pip-audit exit $audit_rc"
           exit "$rc"

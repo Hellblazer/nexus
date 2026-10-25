@@ -361,6 +361,8 @@ print(h.hexdigest())
   # and the stall attribution is silently absent from exactly the failure
   # report it exists to annotate (measured 2026-09-13, battery at ef6d9c466).
   cp -R "$HERE/lib" "$STAGE/lib"
+  # nexus-2k66t.4.1: Stage 6 runs the lock check from lib/ inside the image.
+  cp tests/e2e/lib/lock_check.py "$STAGE/lib/lock_check.py"
 else
   # nexus-1ddsy: a bare-box image — nothing the service needs is staged,
   # because acquiring it from the PUBLISHED release IS the thing under test.

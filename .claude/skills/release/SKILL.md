@@ -38,7 +38,7 @@ expensive legs, so they build and gate the tree that actually ships.
 
 ### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
 
-The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release pins ONE engine IDENTITY, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — the engine the release was built and gated with, installed on EVERY path (fresh init AND upgrade). It is NOT a compatibility minimum and NOT a range (Hal directive 2026-07-15). `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init --service` install downloads) is DERIVED from it, not an independently hand-typed literal — there is no floor/exact split to reason about, bumping the one constant moves both together, by construction.
+The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release pins ONE engine IDENTITY, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — the engine the release was built and gated with, installed on EVERY path (fresh init AND upgrade). It is NOT a compatibility minimum and NOT a range (Hal directive 2026-07-15). `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init` install downloads) is DERIVED from it, not an independently hand-typed literal — there is no floor/exact split to reason about, bumping the one constant moves both together, by construction.
 
 **This is a BLOCKING command, not a prose eyeball-check** (nexus-i5c2u — the prior prose-only version of this step was routinely skipped, letting the cloud engine sit at v0.1.17 for 9+ days across releases while the floor moved to v0.1.34; the pin then independently drifted the identical way in 2026-07-12, sitting at v0.1.36 two tags behind a verified, cloud-deployed fix — which is why the pin is no longer a second hand-typed constant at all):
 
@@ -128,6 +128,7 @@ uv run pytest -n auto && uv run pytest -m lint   # unit suite and the lint bucke
 tests/e2e/local-service-gate.sh      # leg lsg: integration incl. the local-service functional gate
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine convergence MVV (nexus-cfgo9)
 tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs) — see below
+tests/e2e/constraints-resolve-gate.sh   # leg resolve: the shipped constraints.txt + overrides.txt RESOLVE (uv pip compile, no install): 22 compiles on Linux x86_64/aarch64 py3.12/3.13 (cpu; [pdf] also cu130 and cu126), Windows x64 and macOS 14 arm64, default and [pdf], plus a macOS 13 negative control (nexus-2k66t.4.4); network; needs a uv that knows --torch-backend cu130 and cu126 (the gate probes and says so); offline self-test tests/e2e/constraints_resolve_gate_test.sh
 tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); standalone since cleanup step 11, no longer a battery leg
 ```
 
@@ -227,13 +228,13 @@ at self-provisioned substrates the suite manages itself; `NX_SERVICE_HOST`/
 
 The gate runs the local service **keyless** since nexus-w6h2m (2026-07-28): no
 `NX_VOYAGE_API_KEY` reaches it, so it embeds every collection with bge-768 and
-`cloud_mode` tests are deselected — the gate needs no `VOYAGE_API_KEY` for its
+`keyed_voyage` tests are deselected — the gate needs no `VOYAGE_API_KEY` for its
 own corpus. This is a posture choice, not the engine's ceiling: a keyed local
 service embeds with Voyage instead (nexus-umm29 carve-out), but nothing in this
 gate, or anywhere else in the release battery, boots the local service keyed —
 that combination is untested by any gate. Two markers carve tests out, each
 with an exact-count guard: `lived_in` (excludes tests that dispatch real
-`claude -p` or need seeded lived-in corpora) and `cloud_mode`. A guard trip or
+`claude -p` or need seeded lived-in corpora) and `keyed_voyage`. A guard trip or
 any new hard failure is real signal — compensate with live validation of the
 release's changed paths (the v6.3.5/v6.3.6 pattern: exercise the advertised
 claims against the real deployment).
@@ -258,7 +259,7 @@ Update any drift before bumping version. Doc audit is what catches "we changed t
 
 CI enforces parity on all but one of these (`conexus/PENDING_RELEASE.md` is a drift
 ledger, not a version field — see `.claude/rules/releases-and-engine.md` § Release cadence policy rule 6 and
-`docs/contributing.md` § Release Process Step 7 for the exact enumeration these
+Step 3 below for the exact enumeration these
 agree on, nexus-smsau 2026-09-27). Missing any one of the seven CI-enforced ones
 fails the marketplace-version-matches-pyproject test, the
 marketplace-source-ref-matches-pyproject test, the
@@ -338,6 +339,20 @@ uv sync
 ```
 
 The lock file MUST be committed. CI also checks this.
+
+Then regenerate the constraints the wheel ships (nexus-2k66t.4.1) and commit them
+with the lock:
+
+```bash
+scripts/regen-install-constraints.sh   # rewrites src/nexus/_install/constraints.txt
+```
+
+Every install path hands `src/nexus/_install/constraints.txt` to `uv pip install
+--constraints`, so a stale file means users install versions the release did not
+lock. A bare version bump leaves it unchanged (the project itself is not
+constrained); a dependency change in the cycle does not.
+`tests/test_install_constraints_pin.py` fails the default suite, and so the
+release battery, while the file and `uv.lock` disagree.
 
 ### 6d. Migration-release branch (CONDITIONAL — this release ships a data migration)
 
@@ -500,7 +515,7 @@ Do NOT run `uv publish` or `twine upload` manually: the Release workflow handles
 ### 10. Watch and verify the Release workflow
 
 ```bash
-gh run watch                                   # wait for Release workflow green
+gh api repos/Hellblazer/nexus/commits/<merge-sha>/check-runs --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'   # read once; re-read later, never `gh run watch` or a polling loop (AGENTS.md worktree rule 7)
 ```
 
 One job must complete: `Build and publish to PyPI`. (2026-07-06 CI-cost
@@ -614,7 +629,7 @@ Local-mode boxes skip this gate — their engine converges from
 `PINNED_SERVICE_TAG` at reinstall.
 
 ```bash
-scripts/reinstall-tool.sh    # preserves [local] and other extras (mineru is now a default dep)
+scripts/reinstall-tool.sh    # preserves [local] and other extras; the PDF stack (mineru, docling, torch) is the on-demand [pdf] extra: NX_REINSTALL_EXTRAS=pdf scripts/reinstall-tool.sh keeps it
 nx --version                 # must print X.Y.Z
 ```
 
@@ -636,7 +651,7 @@ nx --version                 # must print X.Y.Z
 ## See also
 
 - `.claude/rules/releases-and-engine.md` § Cutting a release (a pointer to this file; this file is canonical for the procedure)
-- `docs/contributing.md#release-process` (long form — Step-by-step checklist, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
+- `docs/contributing.md#release-process` (long form: the plugin channel cut, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
 - `feedback_invoke_release_skill.md` (memory entry: invoke this skill, do not freehand)
 - `feedback_post_release_reinstall.md` (memory entry: reinstall after tag)
 - `feedback_release_discipline.md` (memory entry: full suite before tag, not after)

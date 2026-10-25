@@ -550,11 +550,18 @@ class TestCorpusAndQueries:
             assert len(c.files) == len(pinned[kind])
             assert c.n_chunks > 0
 
-    def test_selection_is_deterministic_and_matches_the_pin(self, world):
+    def test_selection_is_deterministic_and_the_pin_still_resolves(self, world):
+        # The pin is the corpus of record; the live selection is not compared to it. Any new
+        # small file under src/nexus or docs can displace a pinned one (the order key is a hash
+        # of the path), and the queries target pinned files, so re-pinning would orphan them.
+        # Content drift is already tolerated by build_corpus; membership drift is the same class.
         pinned, _, _ = world
         for kind in corp.KINDS:
-            assert corp.select_files(REPO, kind) == [e["path"] for e in pinned[kind]]
             assert corp.select_files(REPO, kind) == corp.select_files(REPO, kind)
+            paths = [e["path"] for e in pinned[kind]]
+            assert paths == sorted(set(paths))
+            missing = [rel for rel in paths if not (REPO / rel).is_file()]
+            assert not missing, f"pinned {kind} files no longer exist: {missing}"
 
     def test_chunks_respect_the_cap_and_hash_is_stable(self, world):
         _, corpora, _ = world

@@ -12,9 +12,27 @@ NET=lp2qo-net
 PG=lp2qo-lin-pg
 BUILDER=lp2qo-lin-build
 
+# nexus-rc4pz: bounded docker calls, as native-smoke.sh bounds its own (nexus-ub4ge). GNU timeout on
+# Linux; gtimeout from Homebrew coreutils on a Mac; neither on a vanilla Mac, where the call runs
+# unbounded as before, with a warning.
+# --foreground keeps the command in the shell's process group, so a terminal's Ctrl-C reaches it (nexus-rc4pz).
+# The INT trap below then stops the script: uutils timeout (coreutils 0.8.0 on chas) exits 2 on SIGINT
+# where GNU re-raises it, and bash goes on unless its child died by the signal. The trap re-raises, so
+# the script dies by SIGINT and a bash caller stops too; it is set at top level because bash resets
+# traps inside $(...).
+_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout --foreground "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout --foreground "$secs" "$@"
+  else "$@"; fi
+}
+trap 'trap - INT; kill -INT $$' INT
+command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 \
+  || echo "WARN: neither timeout nor gtimeout (brew install coreutils); every Docker call runs unbounded" >&2
+
 cleanup() {
-  docker rm -f "$PG" "$BUILDER" >/dev/null 2>&1 || true
-  docker network rm "$NET" >/dev/null 2>&1 || true
+  _bounded 60 docker rm -f "$PG" "$BUILDER" >/dev/null 2>&1 || true
+  _bounded 60 docker network rm "$NET" >/dev/null 2>&1 || true
   build_lease_release service 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -34,19 +52,22 @@ build_lease_acquire_wait service "${NX_BUILD_LEASE_WAIT:-3600}" linux-native-ver
 . "$REPO/scripts/lib/gate-jar-cache.sh"
 gate_jar_cache_unshare "$REPO/service/target/nexus-service-1.0-SNAPSHOT.jar"
 
-docker network create "$NET" >/dev/null
-docker run -d --name "$PG" --network "$NET" \
+_bounded 60 docker network create "$NET" >/dev/null
+_bounded 600 docker run -d --name "$PG" --network "$NET" \
   -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus -e POSTGRES_PASSWORD=nexus \
   pgvector/pgvector:pg17 >/dev/null
 echo "waiting for pg..."
-until docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1; do sleep 1; done
+# 90 attempts: 90 s when docker answers, about 9 min at most when every exec hangs to its 5 s bound.
+for _ in $(seq 1 90); do _bounded 5 docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
+_bounded 5 docker exec "$PG" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector not ready after 90 attempts"; exit 2; }
 sleep 2; echo "pg ready"
 
 # Build + smoke inside the linux/arm64 GraalVM container. Docker socket + host
 # override let the jOOQ codegen runner (service/src/build/java/JooqCodegen.java)
 # reach the host daemon; the smoke
 # pgvector is reached by container name on $NET. ONNX model mounted from host cache.
-docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
+# Two hours bound the native build and smoke; a timeout leaves the container to cleanup()'s rm -f.
+_bounded 7200 docker run --rm --name "$BUILDER" --platform linux/arm64 --network "$NET" \
   -v "$REPO:$REPO" -w "$REPO/service" \
   -v "$HOME/.m2:/root/.m2" \
   -v "$HOME/.cache/nexus/onnx_models:/root/.cache/nexus/onnx_models" \

@@ -198,11 +198,36 @@ def test_a_newer_uv_tree_means_the_user_meant_to_upgrade(bed) -> None:
     assert new_current != current.resolve(), "no generation was built for the newer version"
     receipt = install_layout.read_receipt(new_current)
     assert receipt.version == "7.21.0", receipt
-    assert receipt.extras == ["local"], "the extras came from uv's rebuilt receipt, not current's"
+    # nexus-2k66t.4.2: current's receipt is installer_schema 1 (pre-split), so the
+    # rebuild also carries `pdf`; the point of the assertion is unchanged: no
+    # extra came from uv's rebuilt receipt.
+    assert receipt.extras == ["local", "pdf"], "the extras came from uv's rebuilt receipt, not current's"
     assert _shims_are_nexus_owned(bin_dir, tools)
     assert os.readlink(install_layout.legacy_generation_link(tools=tools)) == str(legacy)
     assert any("newer than current" in line for line in lines), lines
     assert current.is_dir(), "the repair must not reap; that is the next install's pass"
+
+
+def test_the_takeover_rebuild_goes_slim_and_says_so_on_a_windows_runtime_gap(bed, monkeypatch, tmp_path) -> None:
+    """nexus-vyy65: the same slim-and-say-so rule as every other build."""
+    from nexus import _vcrt, pdf_stack
+
+    sysdir = tmp_path / "System32"
+    sysdir.mkdir()
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: True)
+    monkeypatch.setattr(_vcrt, "system_dir", lambda: str(sysdir))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    tools, bin_dir, uv_tools, current, versions = bed
+    legacy = _uv_tree(uv_tools, extras_in_uv_receipt="")
+    versions[str(legacy)] = "7.21.0"
+    _take_shims(bin_dir, legacy)
+
+    lines = repair_uv_takeover()
+
+    receipt = install_layout.read_receipt((tools / "current").resolve())
+    assert receipt.extras == ["local"], "pdf was carried by the rule and dropped by the gap"
+    said = [ln for ln in lines if ln.startswith("PDF support will not be installed by this build")]
+    assert len(said) == 1 and pdf_stack.VCRT_URL in said[0], lines
 
 
 def test_a_rebuilt_tree_without_taken_shims_is_still_registered(bed) -> None:
@@ -254,7 +279,28 @@ def test_self_install_from_uvs_tree_repairs_instead_of_migrating(bed, monkeypatc
     assert result is None, "the repair path returns None; the build path returns the generation"
     new_current = (tools / "current").resolve()
     assert new_current != current.resolve()
-    assert install_layout.read_receipt(new_current).extras == ["local"], (
+    assert install_layout.read_receipt(new_current).extras == ["local", "pdf"], (
         "extras were bridged from uv's rebuilt receipt -- the exact way [local] is lost"
     )
     assert _shims_are_nexus_owned(bin_dir, tools)
+
+
+@pytest.mark.parametrize("tty", [True, False])
+def test_the_upgrade_build_streams_only_when_a_person_is_watching(bed, monkeypatch, tty: bool) -> None:
+    """nexus-2k66t.4.7: interactive `nx upgrade` waits on the takeover's rebuild, so it streams
+    uv's output on a terminal; the hook's background --auto run has none and stays captured."""
+    tools, bin_dir, uv_tools, current, versions = bed
+    legacy = _uv_tree(uv_tools, extras_in_uv_receipt="")
+    versions[str(legacy)] = "7.21.0"
+    _take_shims(bin_dir, legacy)
+    seen: list[bool] = []
+    real = self_cmd._build_flip_shims
+
+    def spy(*a, progress=False, **kw):
+        seen.append(progress)
+        return real(*a, progress=progress, **kw)
+
+    monkeypatch.setattr(self_cmd, "_build_flip_shims", spy)
+    monkeypatch.setattr(self_cmd, "_stderr_is_a_terminal", lambda: tty)
+    repair_uv_takeover()
+    assert seen == [tty]

@@ -349,4 +349,42 @@ class MainBootEnvValidationIntegrationTest {
         assertThat(lines(boot, "event=engine_singleton_lock_env_invalid")).as(boot.output()).hasSize(1);
         assertThat(lines(boot, "event=engine_singleton_lock_env_invalid").get(0)).contains("NX_ENGINE_SINGLETON_LOCK");
     }
+
+    /**
+     * nexus-s5lfh: an exception from {@code new Bge768Embedder()} that Main does not catch (only
+     * ShutdownInProgressException is) ends the JVM on its own, because no non-daemon thread is alive by then
+     * (Hikari's pool threads are daemons). The bge files are present, so the boot plan builds the embedder,
+     * and the model is a sparse file of zeros past the size floor, so ONNX Runtime refuses it in
+     * createSession. A process that stayed up would trip bootWith's 120 s "did not exit" assertion; the
+     * native smoke would read that as a 60 s "never became healthy" FAIL, never a pass.
+     * Scope: this runs Main on the JVM. On the native image, native-boot-shapes-smoke.sh covers both sides:
+     * its truncated-model shape throws before OrtInitGate.enter (the size floor), and its zero-model shape
+     * reaches createSession with this same 250 MB file (nexus-rc4pz; engine-service-v0.1.164 linux-amd64
+     * exited 1 on ORT_INVALID_PROTOBUF within seconds, 2026-10-23). That shape runs at engine release.
+     */
+    @Test
+    void anUncaughtBgeEmbedderFailure_endsTheProcessOnItsOwn() throws Exception {
+        Path root = java.nio.file.Files.createTempDirectory("nx-s5lfh-onnx");
+        try {
+            Path onnx = java.nio.file.Files.createDirectories(root.resolve("bge-base-en-v1.5").resolve("onnx"));
+            try (var model = new java.io.RandomAccessFile(onnx.resolve("model.onnx").toFile(), "rw")) {
+                model.setLength(250_000_000L); // over Bge768Embedder.MIN_MODEL_BYTES, all zeros: not an ONNX model
+            }
+            java.nio.file.Files.writeString(onnx.resolve("tokenizer.json"), "{}");
+            long t0 = System.nanoTime();
+            Boot boot = bootWith(java.util.Map.of("NX_ONNX_MODEL_DIR", root.toString()), "event=never-logged-s5lfh");
+            long seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - t0);
+
+            assertThat(boot.output()).as("the failure is the embedder's").contains("Failed to initialise Bge768Embedder");
+            assertThat(boot.output()).as("it escaped main").contains("Exception in thread \"main\"");
+            assertThat(boot.logged("event=service_ready")).as(boot.output()).isFalse();
+            assertThat(boot.exitCode()).as(boot.output()).isNotZero();
+            assertThat(seconds).as("the process ended on its own, well inside the smoke's 60 s health wait")
+                .isLessThan(60);
+        } finally {
+            try (var walk = java.nio.file.Files.walk(root)) {
+                walk.sorted(java.util.Comparator.reverseOrder()).forEach(q -> q.toFile().delete());
+            }
+        }
+    }
 }

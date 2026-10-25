@@ -4,9 +4,9 @@ The catalog is a Xanadu-inspired document registry that tracks *what* is indexed
 
 ## Core concepts
 
-- **Tumbler** — hierarchical address (`1.2.5`) identifying a document. Every entry has one. `tumbler.py` provides depth, ancestors, lca, JSONL readers.
+- **Tumbler** — hierarchical address (`1.2.5`) identifying a document. Every entry has one. `tumbler.py` provides depth, ancestors, lca, and JSONL readers (migration-source and recovery-bundle use only; the JSONL catalog is deleted).
 - **Owner** — the top-level tumbler segment. Repos use `owner_type='repo'` with a `repo_hash`; humans use `'curator'`. Repo owners without a hash are rejected (the shadow-registration bug class).
-- **Source URI** — persistent identity. Validated at register time against `_KNOWN_URI_SCHEMES = {file, chroma, https, nx-scratch, x-devonthink-item}`. Bare paths normalize to `file://<abspath>` (`types.py:_normalize_source_uri`).
+- **Source URI** — persistent identity. Validated at register time against `_KNOWN_URI_SCHEMES = {file, chroma, https, nx-scratch, x-devonthink-item, nx-orphan-backfill}`. Bare paths normalize to `file://<abspath>` (`types.py:_normalize_source_uri`).
 - **Link** — typed edge between documents. Built-in types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`, plus custom. Every link carries `created_by` provenance.
 
 ## Three link-creation paths
@@ -22,7 +22,7 @@ The catalog is a Xanadu-inspired document registry that tracks *what* is indexed
 
 The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtree`, `follow_links`, `depth`. Example: `query("how does path resolution work", follow_links="implements", subtree="1.1")`.
 
-## Files
+## Key files
 
 | File | Purpose |
 |---|---|
@@ -30,7 +30,7 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 | `catalog_protocol.py` | `CatalogReader` / `CatalogWriter` Protocols + `CATALOG_WRITE_OPS` (the tooling-enforced write whitelist). Annotate consumers with these, never a concrete class. |
 | `factory.py` | `make_catalog_reader()` / `make_catalog_writer()` — the only sanctioned construction path (shared process-lifetime service client, nexus-5en9j). |
 | `types.py` | Substrate-neutral value types: `CatalogEntry`, `CatalogLink`, `ManifestRow`, `make_relative`, `_normalize_source_uri`, `_default_registry_path`. |
-| `tumbler.py` | `Tumbler` dataclass + `parse`, hierarchy helpers, JSONL readers with resilience (truncated rows, bad JSON). |
+| `tumbler.py` | `Tumbler` dataclass + `parse`, hierarchy helpers, JSONL readers with resilience (truncated rows, bad JSON); migration-source and recovery-bundle use only. |
 | `auto_linker.py` | Storage-boundary auto-linking from T1 scratch link-context. Hook firing site is `mcp/core.py`. |
 | `link_generator.py` | Post-hoc batch linkers (citation, RDR↔file-path, prose↔file-path, pdf same-as via shared file-content hash, never `head_hash`, which is the indexing commit for repo files: nexus-utkop). |
 | `catalog_spans.py`, `store_hook.py`, `orphan_backfill.py`, `manifest_backfill.py` | Span resolution, post-store registration hook, backfill tooling. |
@@ -40,6 +40,8 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 | `collection_name.py` | `CollectionName` value object (RDR-103 Phase 1) — the four-segment `(content_type, owner_id, embedding_model, model_version)` tuple rendered as `<content_type>__<owner_id>__<embedding_model>__v<n>`; `parse` is strict. |
 | `rdr_canonical.py` | RDR-201 Phase 3.1 (nexus-j9z30.20) canonical-tumbler resolution — see § RDR canonical-tumbler rule below. |
 | `owner_scope.py` | Resolves a scope argument that may be an owner NAME to its tumbler prefix, so `query(subtree=...)`, `nx_answer(scope=...)`, `catalog_resolve(owner=...)`, and `nx search --repo` all accept either form (GH #1527, nexus-qiah5). |
+| `multi_batch_write.py`, `multi_document_write.py`, `note_write.py`, `metadata_merging_catalog.py`, `write_outcome.py` | The RDR-223 writers: one document in N batches, many documents page by page (import), a note's pieces and manifest in one request, the metadata-merging catalog wrapper the per-file writers share, and the one rule for "did this failed request possibly change the engine". Every chunk lands together with its owner row. |
+| `membership.py`, `tombstones.py`, `path_ambiguity.py` | Known-vs-unknown collection check for maintenance verbs; tombstoned-document views for the same verbs; the warning when a writer mints a second document for one path (several documents per `file_path` is normal, not damage). |
 | `recovery_bundle.py` | Export/import for the catalog link graph and `store_put`-origin knowledge content across a reinstall, as one human-inspectable JSONL bundle (nexus-xn3fr, GH #1419 Issue 9). |
 
 Deleted in nexus-i711w (RDR-158 P4 terminal deletion): `catalog.py` (the local `Catalog` class), `catalog_db.py`, `event_log.py`, `projector.py`, `events.py`, `catalog_owners.py`, `catalog_sync.py`, `catalog_links.py`, `catalog_docs.py`, `catalog_backup.py`, `catalog_git.py`, `catalog_writes.py` (ManifestRow relocated to `types.py`), `consolidation.py`, `collections_owner_backfill.py`, `synthesizer.py`.
@@ -127,7 +129,7 @@ construction, so there was nothing for it to do.
 
 ## Adding a new source-URI scheme
 
-The bar is **register a reader first, then add to the allow-list**. New schemes that have no reader cause silent register-success-but-extract-failure.
+The bar is **register a reader first, then add to the allow-list**. New schemes that have no reader cause silent register-success-but-extract-failure. The one documented exception is a marker scheme with no reader by design (`nx-orphan-backfill`, whose underlying source is genuinely unavailable; consumers get `scheme_unknown` and skip).
 
 1. Add a `_read_<scheme>_uri()` function to `src/nexus/aspect_readers.py` returning `ReadOk` / `ReadFail`.
 2. Register it in `_READERS` dict.

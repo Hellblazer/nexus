@@ -27,12 +27,33 @@ was not measured, it says so.
   from Windows' default example refuses the same programs (2026-10-15). An
   administrator has to allow them first; [Application control](#application-control)
   lists the rules that were enough for each.
-- **No Visual C++ redistributable install is needed.** The engine and the
-  PostgreSQL bundle carry the runtime DLLs beside their executables, and nx
-  points its own Python modules (PDF extraction, local embedding) at those
-  copies when the system has none (nexus-lqjll). A cloud-mode install, which
-  never downloads the local engine, still needs the redistributable for PDF
-  extraction.
+- **PDF support needs three Visual C++ runtime DLLs, and installs without them
+  only as a build without PDF support.** torch imports
+  `msvcp140_atomic_wait.dll` as well as `msvcp140.dll` and `msvcp140_1.dll`. The
+  engine and the PostgreSQL bundle carry the first two beside their executables
+  (nexus-lqjll). Once the engine release this nx pins carries the third
+  (nexus-vyy65), `nx init` and `nx upgrade` place all three where nexus finds
+  them, in every mode, and PDF support needs nothing installed. Before that, and
+  on a machine that has none of them yet, PDF support needs Microsoft's
+  redistributable, which needs administrator rights. In that case nexus installs
+  without PDF support and says so, and never refuses an install or an upgrade:
+  `nx self install` (including `--bootstrap`), `nx upgrade`, and the carry-forward of PDF
+  support into an upgraded install each build the generation without the PDF
+  stack, and the new install records no `pdf` extra, so no upgrade is held back
+  by it. Typing `nx self install --extras pdf` does the same and says PDF support
+  will not be installed. A machine that installs before `nx init` has placed
+  anything is in this case at first; PDF support then installs on first use once
+  the DLLs are in place. Where the line appears: interactive `nx self install` and
+  `nx upgrade` print it; the Claude Code plugin setup repeats it in its done
+  message (it is the one caller that asks for PDF support by default;
+  `web/install.ps1` and `web/install.sh` pass no extras, so what they build has no
+  PDF support on any machine, and they print nothing about it); `nx upgrade --auto`
+  and the session-start lockstep upgrade write it to their logs only
+  (`lockstep.log` for the second). The first PDF index
+  stops with the link too. `nx doctor` shows "PDF support" red on an install that
+  has the stack but not the DLL, and amber, with the same remedies, on one that has
+  neither. The base client, local embedding and the engine do not need the third
+  DLL.
 - **The binaries are unsigned** (signing is deferred, nexus-dj01b). See
   [Signing and SmartScreen](#signing-and-smartscreen).
 
@@ -67,12 +88,12 @@ When the install finishes, run `/reload-plugins` or start a new session. In that
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 to 3.1 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 2.1 to 2.3 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 2.1 to 2.3 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The macOS and Windows cache figures were measured on 2026-10-16 with conexus 7.81.0.
+These sizes include PDF support (docling, MinerU and torch), which the script and the setup tool install by default. The script's `--slim` and the setup tool's `slim` leave it out (about 0.25 GB less down on macOS, 0.37 GB on Linux; 0.85 GB less on disk on macOS, 1.3 GB on Linux), and the first PDF you index then fetches it. The sizes are measured on 7.85.0 on macOS and Linux (2026-10-24); Windows was not measured. The download is the wheels in the lock, the Python and, for Local, the service and its models; the sizes on disk are the install itself. `uv` also keeps a download cache, about 2.1 GB on Linux and 1.8 GB on macOS after a first install (an earlier 7.81.0 measurement found 4.8 GB on Windows). On Linux the cache and the install together measured about 2.2 GB, not 4.2 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share.
 
 ## Install by hand
 
@@ -155,13 +176,11 @@ together with uv's `nx.exe` launchers in `.local\bin`. Until then `nx doctor`
 shows one ⚠ row, "Orphan uv install", which is expected.
 
 Measured on the clean machine on 2026-10-07 with a test build of the branch
-that carries the Windows layout (not yet a release): `nx self install` took
+that carried the Windows layout (it has since shipped): `nx self install` took
 35 s and downloaded nothing new, the new window resolved `nx` to
 `tools\current\bin\nx.exe`, `nx init` registered the logon task against the new
 layout, `nx doctor` ended "All checks passed" (with the ⚠ row above), store and
-search worked, and `nx self gc` then removed the uv copy and its launchers. The
-installed version has no `av` and no `opencv-python` package, which a plain
-`uv tool install` still pulls in.
+search worked, and `nx self gc` then removed the uv copy and its launchers.
 
 `nx self install` ends with a line about `nx upgrade` that applies only when it
 upgraded an existing install. On the fresh install in this page you do not run
@@ -207,8 +226,8 @@ some files twice: uv installs packages as hardlinks to the copies in its cache
 (`%LOCALAPPDATA%\uv\cache`, about 4.8 GB after a first install), so the
 environment is mostly the same data under a second name. That sharing was not
 measured with a hardlink-aware tool on Windows. The same kind of install on
-Linux (CLI only, conexus 7.81.0) shows the effect: 2.4 GB in uv's cache and
-2.0 GB in the install occupy 2.4 GB together.
+Linux (CLI only, conexus 7.85.0, PDF support included) shows the effect: 2.1 GB in uv's cache and
+2.1 GB in the install occupy 2.2 GB together.
 
 ## 4. Claude Code and the plugin
 

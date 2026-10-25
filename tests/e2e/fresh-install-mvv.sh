@@ -73,6 +73,14 @@
 #                       A/B/C) against synthetic fixtures only — no wheel
 #                       build, no venv, no engine, no network. Safe anywhere.
 #
+# Legs 9 and 9b (nexus-2k66t.4.9, Sam 2026-10-23: install everything by default): leg 9
+# builds a GENERATION the way both one-line installers and the plugin's setup do, with the
+# `pdf` extra (so the probe's pdf branches run: the opencv lock witness, the pdftext/pypdfium2
+# bound on the generation, the receipt's extras). Leg 9b builds the SLIM generation (a bare
+# `uv tool install conexus`, the .mcpb bundle, `--slim`) in its own virgin home. Set
+# NX_MVV_SKIP_SLIM_LEG=1 to skip 9b; the run then says so. Legs 1-8 install the checkout's
+# wheel bare (the venv layer), which is slim by design and is what leg 8c asserts.
+#
 # Leg 8c (always-on, every mode, no NX_MVV_FORMULA_PDF_CHECK needed): a
 # fresh resolve's own pdftext/pypdfium2 versions are asserted below the
 # GH #1533 bound directly against $PROBE_PYTHON -- no model weights, so
@@ -387,10 +395,17 @@ if [ "$SELF_TEST" = 1 ]; then
 fi
 
 if [ "$PUBLISHED_MODE" = 1 ]; then
+    # nexus-2k66t.4.2: a plain `conexus` is SLIM (docling, MinerU, torch,
+    # torchvision and pdftext are the on-demand `pdf` extra). The opt-in formula
+    # check parses a real PDF through MinerU on THIS uv-tool layer, which an
+    # on-demand install cannot reach (it builds a generation), so that run
+    # installs the extra up front.
+    _PKG_EXTRAS=""
+    [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ] && _PKG_EXTRAS="[pdf]"
     if [ -n "$PUBLISHED_VERSION" ]; then
-        PKG_SPEC="conexus==$PUBLISHED_VERSION"
+        PKG_SPEC="conexus${_PKG_EXTRAS}==$PUBLISHED_VERSION"
     else
-        PKG_SPEC="conexus"
+        PKG_SPEC="conexus${_PKG_EXTRAS}"
     fi
     echo "================================================================"
     echo " FRESH-INSTALL MVV — PUBLISHED artifact (uv-tool resolution layer)"
@@ -1104,10 +1119,30 @@ echo "── 8c/10 always-on resolver bound: pdftext/pypdfium2 (nexus-gqrg0 roun
 # generation -- see generation_install_probe.py's matching assertion
 # (pattern: its own av-absence check) for the SAME bound checked a second
 # time against the GENERATION's python once leg 9 creates it.
-RESOLVER_BOUND_OUT="$("$PROBE_PYTHON" -c '
-import sys
+# nexus-2k66t.4.2: on a SLIM install (the default since the pdf extra went
+# on-demand) pdftext is not installed, so there is no resolve to bound. The leg
+# then asserts the slim shape instead -- none of the five stack modules is
+# present -- and says SLIM in its output. It is never a quiet pass: a partial
+# stack fails, and the opt-in formula check (which installs conexus[pdf])
+# requires the stack to be present.
+RESOLVER_BOUND_OUT="$(EXPECT_PDF_STACK="${NX_MVV_FORMULA_PDF_CHECK:-0}" "$PROBE_PYTHON" -c '
+import importlib.util, os, sys
 from importlib.metadata import version
 from packaging.version import Version
+
+MODS = ("docling", "mineru", "torch", "torchvision", "pdftext")
+found = [m for m in MODS if importlib.util.find_spec(m)]
+if len(found) == len(MODS):
+    pass
+elif not found:
+    if os.environ.get("EXPECT_PDF_STACK") == "1":
+        print("expected the pdf extra (NX_MVV_FORMULA_PDF_CHECK=1) but none of the stack is installed")
+        sys.exit(1)
+    print("SLIM install: none of docling/mineru/torch/torchvision/pdftext is installed (pdf extra on demand); pdftext/pypdfium2 bound not applicable bound_ok=n/a")
+    sys.exit(0)
+else:
+    print(f"PARTIAL PDF stack {found} -- a broken install, neither slim nor pdf")
+    sys.exit(1)
 
 pdftext_v = Version(version("pdftext"))
 pypdfium2_v = Version(version("pypdfium2"))
@@ -1119,7 +1154,7 @@ RESOLVER_BOUND_RC=$?
 echo "  $RESOLVER_BOUND_OUT" | tee "$LOGS/resolver-bound.log" >/dev/null
 echo "  $RESOLVER_BOUND_OUT"
 if [ "$RESOLVER_BOUND_RC" -ne 0 ]; then
-    _fail "resolved pdftext/pypdfium2 above the GH #1533 bound in $PROBE_PYTHON -- $RESOLVER_BOUND_OUT"
+    _fail "the PDF-stack resolver leg failed in $PROBE_PYTHON (pdftext/pypdfium2 above the GH #1533 bound, a partial stack, or a missing expected pdf extra) -- $RESOLVER_BOUND_OUT"
 fi
 
 # ── formula-PDF index (opt-in, --published mode only; nexus-gqrg0 / GH #1533) ──
@@ -1243,13 +1278,22 @@ else
     GEN_SOURCE="$WHEEL"
 fi
 echo "  source: $GEN_SOURCE"
+# nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default): the generation is built
+# the way both one-line installers and the plugin's setup build it, with the `pdf` extra, so
+# the probe's pdf branches (the opencv witness, the pdftext/pypdfium2 bound on the
+# GENERATION, the receipt's extras) run in this gate. A slim leg follows (below) so the path
+# a bare `uv tool install conexus`, the .mcpb bundle and `--slim` take stays covered.
+GEN_EXTRAS="pdf"
 # Streamed with tee, not redirected then cat'd at the end: a propagation wait
 # here can run for up to the ceiling (nexus-qfeez) and a silent leg reads as a
 # hang. `-u` keeps the probe's lines unbuffered through the pipe; pipefail
 # (set above) carries the probe's own exit status past tee.
 if ! "$PROBE_PYTHON" -u "$REPO_ROOT/tests/e2e/lib/generation_install_probe.py" \
-        "$HOME_DIR" "$GEN_SOURCE" 2>&1 | tee "$LOGS/generation-install.log"; then
+        "$HOME_DIR" "$GEN_SOURCE" "$GEN_EXTRAS" 2>&1 | tee "$LOGS/generation-install.log"; then
     _fail "the generation install path failed on a virgin HOME — see the assertions above (nexus-utpuw.19)"
+fi
+if ! grep -q 'the generation.s PDF stack is pdf and the source spec asks for the pdf extra' "$LOGS/generation-install.log"; then
+    _fail "the default generation leg did not prove a full install (the probe never reported a pdf stack) -- see $LOGS/generation-install.log (nexus-2k66t.4.9)"
 fi
 # Fold leg 9's propagation wait (if it waited at all) into the same datum leg
 # 1 reports, so a release's wait distribution is not under-counted.
@@ -1257,6 +1301,33 @@ GEN_WAIT_S="$(sed -n 's/^generation install propagation wait: \([0-9][0-9]*\)s .
 GEN_WAIT_S="${GEN_WAIT_S%%$'\n'*}"
 if [ -n "$GEN_WAIT_S" ]; then
     PROPAGATION_WAIT_S=$(( ${PROPAGATION_WAIT_S:-0} + GEN_WAIT_S ))
+fi
+
+# ── leg 9b: the SLIM generation (nexus-2k66t.4.9) ──
+# The default above installs everything; a bare `uv tool install conexus`, the .mcpb bundle
+# and `--slim` arrive without the PDF stack and fetch it on the first PDF index. This builds
+# that shape in its OWN virgin home (the probe flips `current` and writes shims, which must
+# not disturb the home the journey used) and asserts the probe's slim branch: none of the
+# five stack modules, no pdftext bound, the slim lock witnesses, a receipt without `pdf`.
+# NX_MVV_SKIP_SLIM_LEG=1 skips it (a quick local rerun); the summary line just before the
+# PASSED sentinel (which stays the last line) names the skip, so a skipped leg can never read
+# as a covered one.
+SLIM_LEG="ran"
+if [ "${NX_MVV_SKIP_SLIM_LEG:-0}" = "1" ]; then
+    SLIM_LEG="SKIPPED (NX_MVV_SKIP_SLIM_LEG=1)"
+    echo "── 9b slim generation: SKIPPED (NX_MVV_SKIP_SLIM_LEG=1) ──"
+else
+    echo "── 9b slim generation (a bare install / --slim: no pdf extra) ──"
+    SLIM_HOME="$WORK/slim-home"
+    mkdir -p "$SLIM_HOME"
+    GEN_EXTRAS=""
+    if ! "$PROBE_PYTHON" -u "$REPO_ROOT/tests/e2e/lib/generation_install_probe.py" \
+            "$SLIM_HOME" "$GEN_SOURCE" "$GEN_EXTRAS" 2>&1 | tee "$LOGS/generation-install-slim.log"; then
+        _fail "the SLIM generation install path failed on a virgin HOME — see the assertions above (nexus-2k66t.4.9)"
+    fi
+    if ! grep -q 'the generation.s PDF stack is slim and the source spec does not ask for the pdf extra' "$LOGS/generation-install-slim.log"; then
+        _fail "the slim generation leg did not prove a slim install (the probe never reported a slim stack) -- see $LOGS/generation-install-slim.log (nexus-2k66t.4.9)"
+    fi
 fi
 
 echo "── 10/10 non-vacuity ──"
@@ -1269,6 +1340,7 @@ echo "── 10/10 non-vacuity ──"
 # _leg_log_is_substantive instead, which adds the one thing `-s` cannot: no
 # unhandled Python traceback anywhere in the leg's own log.
 LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log resolver-bound.log generation-install.log"
+[ "$SLIM_LEG" = "ran" ] && LEGS_TO_CHECK="$LEGS_TO_CHECK generation-install-slim.log"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"
 else
@@ -1321,6 +1393,7 @@ VERSION_STRING="${VERSION_ALL%%$'\n'*}"
 # branch fired, and omitted (not a fabricated "0s") when it never ran.
 PROPAGATION_WAIT_SUFFIX=""
 [ -n "$PROPAGATION_WAIT_S" ] && PROPAGATION_WAIT_SUFFIX=" [PROPAGATION_WAIT_S=$PROPAGATION_WAIT_S]"
+echo "FRESH-INSTALL MVV leg 9b (slim generation): $SLIM_LEG"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     echo "FRESH-INSTALL MVV PASSED — conexus $VERSION_STRING (PUBLISHED artifact, uv-tool resolution layer)$PROPAGATION_WAIT_SUFFIX"
 else

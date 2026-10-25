@@ -1414,7 +1414,7 @@ class StorageServiceSupervisor:
             return creds_tok
         raise StorageServiceStartError(
             "NX_SERVICE_TOKEN is absent from both the environment and "
-            "pg_credentials. Run 'nx init --service' to provision the cluster "
+            "pg_credentials. Run 'nx init' to provision the cluster "
             "and persist the root token."
         )
 
@@ -2841,7 +2841,7 @@ class StorageServiceSupervisor:
                 if not pg_data_str:
                     raise StorageServiceStartError(
                         "PG_DATA not found in pg_credentials. "
-                        "Re-run 'nx init --service' to reprovision."
+                        "Re-run 'nx init' to reprovision."
                     )
                 pgdata = Path(pg_data_str)
                 bins = discover_pg_binaries()
@@ -3244,7 +3244,7 @@ def _load_credentials(config_dir: Path) -> dict[str, str]:
     if not creds_path.exists():
         raise StorageServiceStartError(
             f"pg_credentials not found at {creds_path}. "
-            "Run 'nx init --service' to provision Postgres and write credentials."
+            "Run 'nx init' to provision Postgres and write credentials."
         )
     creds = _read_pg_credentials(creds_path)
     # Self-heal upgraded clusters (gmiaf.32.5): a cluster provisioned before the
@@ -3282,7 +3282,7 @@ def start_storage_service(
     if not pg_port_str.isdigit():
         raise StorageServiceStartError(
             f"PG_PORT in pg_credentials is not a valid integer: {pg_port_str!r}. "
-            "Re-run 'nx init --service'."
+            "Re-run 'nx init'."
         )
     pg_port = int(pg_port_str)
 

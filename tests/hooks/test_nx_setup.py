@@ -269,8 +269,10 @@ class Box:
             timeout=timeout, check=False, encoding=PYTHON_CHILD_ENCODING
         )
 
-    def start(self, mode: str, autostart: bool | None = None, **extra: str) -> dict[str, Any]:
-        args = ["start", "--mode", mode] + (["--autostart"] if autostart else [])
+    def start(self, mode: str, autostart: bool | None = None, *, slim: bool | None = None, **extra: str) -> dict[str, Any]:
+        """*slim* is tri-state (nexus-w8ug5): ``None`` omits the flag, ``True`` is ``--slim``, ``False`` is ``--no-slim``."""
+        args = ["start", "--mode", mode] + (["--autostart"] if autostart else []) + (
+            ["--slim"] if slim else ["--no-slim"] if slim is False else [])
         r = self.cli(*args, **extra)
         assert r.returncode == 0, f"start failed: rc={r.returncode} stderr={r.stderr!r} stdout={r.stdout!r}"
         return json.loads(r.stdout)
@@ -408,7 +410,9 @@ def _make_stale_lock(setup: Path, *, age: float = 120.0, owner: str = "dead-owne
     os.utime(heartbeat, (old, old))
 
 
-_BUILD = ["tool", "run", "--python", "3.12", "--from", f"conexus=={_PLUGIN_VERSION}", "nx", "self", "install", "--bootstrap"]
+_BUILD_SLIM = ["tool", "run", "--python", "3.12", "--from", f"conexus=={_PLUGIN_VERSION}", "nx", "self", "install", "--bootstrap"]
+#: The default build installs everything: the GENERATION gets the pdf extra (nexus-2k66t.4.9, Sam 2026-10-23).
+_BUILD = [*_BUILD_SLIM, "--extras", "pdf"]
 
 
 # -- standard library only, no nexus ---------------------------------------------------
@@ -507,6 +511,183 @@ def test_cli_only_builds_and_downloads_no_service_files(box: Box) -> None:
         "a build records its version as in lockstep, so the next session dispatches no upgrade"
     )
     assert box.probes() == [["built", "--version"]], "the marker follows one `nx --version` of the CLI the build left"
+
+
+def test_the_default_build_installs_the_pdf_extra(box: Box) -> None:
+    """nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default): the plugin's setup builds
+    the GENERATION with ``--extras pdf``; the throwaway ``uv`` environment that runs ``--bootstrap`` is not
+    asked for it."""
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done", box.read_log()
+    assert box.argvs() == [["uv", *_BUILD_SLIM, "--extras", "pdf"]]
+    assert "slim" not in done, "a default run records no slim choice"
+
+
+def _the_slim_line() -> str:
+    """The line the real build prints, made by the real function on a faked runtime gap."""
+    from nexus import pdf_stack  # noqa: PLC0415 -- the one place this file reaches into nexus
+
+    real = pdf_stack._windows_runtime_gap  # noqa: SLF001
+    pdf_stack._windows_runtime_gap = lambda *a, **k: ("none", None)  # noqa: SLF001
+    try:
+        _kept, line = pdf_stack.drop_pdf_on_runtime_gap(["pdf"])
+    finally:
+        pdf_stack._windows_runtime_gap = real  # noqa: SLF001
+    assert line is not None
+    return line
+
+
+def test_the_slim_line_prefix_is_the_one_the_real_build_prints() -> None:
+    """The setup script copies a line by its start; this ties that start to src/nexus/pdf_stack.py (nexus-vyy65)."""
+    line = _the_slim_line()
+    mod = _load_module()
+    assert line.startswith(mod.PDF_SLIM_LINE_PREFIX)
+    assert mod.pdf_slim_note(f"installing...\n{line}\nbuilding\n") == line
+    assert mod.pdf_slim_note("installing...\ndone\n") is None
+
+
+def test_a_build_that_left_pdf_support_out_says_so_in_the_done_message(box: Box) -> None:
+    """The build's output goes to the setup log; the slim line has to reach the done message as well, or
+    a plugin-setup user on a Windows box that cannot load the PDF stack gets no word of it (nexus-vyy65)."""
+    line = _the_slim_line()
+    rule = box.uv_builds_nx()
+    rule["out"] = f"resolving\n{line}\nbuilt\n"
+    box.behave([rule, _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done", box.read_log()
+    assert line in done["message"]
+
+
+def test_a_build_that_printed_no_slim_line_adds_nothing_about_pdf(box: Box) -> None:
+    rule = box.uv_builds_nx()
+    rule["out"] = "resolving\nbuilt\n"
+    box.behave([rule, _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done" and "PDF support" not in done["message"]
+
+
+@pytest.mark.parametrize("mode", ["cli-only", "local"])
+def test_slim_builds_without_the_pdf_extra_and_records_the_choice(box: Box, mode: str) -> None:
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    started = box.start(mode, slim=True)
+    assert started.get("slim") is True, "the status the start returns names the choice"
+    box.wait_terminal()
+    assert box.argvs()[0] == ["uv", *_BUILD_SLIM]
+    assert "--extras" not in box.argvs()[0]
+    assert box.status().get("slim") is True
+
+
+def test_a_later_run_without_slim_forgets_an_earlier_slim_choice(box: Box) -> None:
+    """The record is of the LAST run: a run that does not repeat ``--slim`` is a default run, and the status
+    stops saying slim (a stale ``slim`` would make a resume pass a choice the user did not repeat)."""
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only", slim=True)
+    box.wait_terminal()
+    assert box.status().get("slim") is True
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only")
+    box.wait_terminal()
+    assert "slim" not in box.status()
+
+
+def test_a_resume_of_a_failed_slim_run_stays_slim_without_repeating_the_choice(box: Box) -> None:
+    box.behave([box.uv_builds_nx(exit=1)])
+    box.start("cli-only", slim=True)
+    failed = box.wait_terminal()
+    assert failed["failed_step"] == "build" and failed.get("slim") is True
+    assert "slim true" in failed["next"], "the next step names the choice so the model repeats it"
+    assert "slim false" in failed["next"], "and names the way to the full install, since a resume inherits slim"
+
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    resumed = box.start("cli-only")  # the caller did not repeat slim
+    assert resumed.get("slim") is True
+    done = box.wait_terminal()
+    assert done["state"] == "done" and done.get("slim") is True
+    assert "--extras" not in box.argvs()[-1], "the resumed build must stay slim"
+
+
+def test_an_explicit_no_slim_after_a_failed_slim_run_switches_to_the_full_install(box: Box) -> None:
+    """nexus-w8ug5: omitted inherits (the test above); an explicit false does not."""
+    box.behave([box.uv_builds_nx(exit=1)])
+    box.start("cli-only", slim=True)
+    assert box.wait_terminal()["failed_step"] == "build"
+
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    resumed = box.start("cli-only", slim=False)
+    assert "slim" not in resumed, "the status the start returns drops the slim choice"
+    done = box.wait_terminal()
+    assert done["state"] == "done" and "slim" not in done
+    last_build = [a for a in box.argvs() if a[0] == "uv"][-1]
+    assert last_build[-2:] == ["--extras", "pdf"], last_build
+    assert "left out" not in done["message"]
+
+
+def test_an_explicit_no_slim_also_overrides_an_interrupted_slim_run(box: Box) -> None:
+    """The RUNNING branch of the inheritance: a killed slim run (stale lock) is resumed slim when slim is
+    omitted and full when slim is false."""
+    box.layout()
+    _make_stale_lock(box.setup)
+    (box.setup / "status.json").write_text(
+        json.dumps({"state": "running", "stage": "init", "mode": "cli-only", "slim": True}), encoding="utf-8")
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    started = box.start("cli-only", slim=False)
+    assert "slim" not in started
+
+
+def test_a_run_started_with_slim_omitted_still_inherits_an_interrupted_slim_run(box: Box) -> None:
+    box.layout()
+    _make_stale_lock(box.setup)
+    (box.setup / "status.json").write_text(
+        json.dumps({"state": "running", "stage": "init", "mode": "cli-only", "slim": True}), encoding="utf-8")
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    assert box.start("cli-only").get("slim") is True
+
+
+def test_a_failed_slim_run_does_not_make_another_mode_slim(box: Box) -> None:
+    box.behave([box.uv_builds_nx(exit=1)])
+    box.start("cli-only", slim=True)
+    assert box.wait_terminal()["failed_step"] == "build"
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    box.start("local")
+    box.wait_terminal()
+    last_build = [a for a in box.argvs() if a[0] == "uv"][-1]
+    assert last_build[-2:] == ["--extras", "pdf"], last_build
+    assert "slim" not in box.status()
+
+
+def test_an_interrupted_slim_run_names_slim_in_its_next_step(box: Box) -> None:
+    box.layout()
+    _make_stale_lock(box.setup)
+    (box.setup / "status.json").write_text(
+        json.dumps({"state": "running", "stage": "init", "mode": "local", "slim": True}), encoding="utf-8")
+    view = box.status()
+    assert view["state"] == "interrupted" and "slim true" in view["next"]
+    assert "slim false" in view["next"], "the interrupted text names the way to the full install"
+
+
+def test_a_default_runs_resume_text_does_not_offer_slim_false(box: Box) -> None:
+    box.behave([box.uv_builds_nx(exit=1)])
+    box.start("cli-only")
+    failed = box.wait_terminal()
+    assert failed["failed_step"] == "build" and "slim" not in failed["next"]
+
+
+def test_a_slim_done_message_says_pdf_support_was_left_out_and_how_to_add_it(box: Box) -> None:
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only", slim=True)
+    done = box.wait_terminal()
+    assert done["state"] == "done"
+    assert "PDF support was left out" in done["message"] and "nx self install --extras pdf" in done["message"]
+
+
+def test_a_default_done_message_does_not_mention_leaving_pdf_support_out(box: Box) -> None:
+    box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only")
+    assert "left out" not in box.wait_terminal()["message"]
 
 
 @pytest.mark.parametrize("answer", [
@@ -725,7 +906,7 @@ _GIT_FAILED_OUT = "  ✗ git: not found on PATH\n    Fix: brew install git\n"
 _LOCAL_FOOTER = "\nSome checks failed. Run 'nx doctor' again after fixing the issues above.\n"
 _CLOUD_FOOTER = (
     "\nRun 'nx config init' to configure managed-service credentials, "
-    "or 'nx init --service' to provision a local service stack.\n"
+    "or 'NX_LOCAL=1 nx init' to provision a local service stack.\n"
 )
 
 

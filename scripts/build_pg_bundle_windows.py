@@ -22,7 +22,7 @@ by the release workflow, as for the other platforms.
 Subcommands::
 
     build            compile PG + pgvector into --prefix, add the VC++ runtime
-    refresh-runtime  re-copy the four VC++ DLLs + notice into an existing
+    refresh-runtime  re-copy the five VC++ DLLs + notice into an existing
                      (e.g. cache-restored) prefix from the CURRENT redist
     verify           assert the prefix holds the complete bundle layout
     package          prefix -> nexus-pg-windows-x64.txz (+ .sha256)
@@ -47,8 +47,9 @@ Hazards found by the spike, each handled below:
     layout: INCLUDEDIR, INCLUDEDIR_SERVER, PKGLIBDIR, SHAREDIR and LIBDIR come
     from ``pg_config``.
   * postgres.exe and initdb.exe exit 0xC0000135 on a machine without the VC++
-    runtime: the four DLLs ship in ``bin``, unmodified, from the released
-    toolset's redist folder.
+    runtime: the five DLLs ship in ``bin``, unmodified, from the released
+    toolset's redist folder (the fifth, ``msvcp140_atomic_wait.dll``, is what torch
+    2.13 imports, nexus-vyy65).
 
 Environment (flags win): BUNDLE_PREFIX, PG_VERSION, PGVECTOR_VERSION,
 WORK_DIR, PG_BUNDLE_RUNNER, VS_INSTALL_PATH, WIN_FLEX_BISON_DIR, RUNNER_TEMP.
@@ -105,12 +106,17 @@ ASSET_NAME = f"nexus-pg-{ARCH}.txz"
 #: The one top-level directory of the archive (client: ``<root>/bundle/bin``).
 ARCHIVE_ROOT = "bundle"
 
-#: The four app-local runtime DLLs (RDR-224 Key Discoveries, T2 224-research-13).
+#: The app-local runtime DLLs (RDR-224 Key Discoveries, T2 224-research-13): the four the
+#: engine and PostgreSQL need, plus ``msvcp140_atomic_wait.dll``, which torch 2.13 imports
+#: (nexus-vyy65). The fifth lives in the same ``Microsoft.VC*.CRT`` redist folder as the
+#: rest (measured on VS 2022 BuildTools 14.44.35112, Valid Microsoft signature), so
+#: :func:`find_redist` needs no new search.
 VC_RUNTIME_DLLS: tuple[str, ...] = (
     "vcruntime140.dll",
     "vcruntime140_1.dll",
     "msvcp140.dll",
     "msvcp140_1.dll",
+    "msvcp140_atomic_wait.dll",
 )
 NOTICE_NAME = "THIRD-PARTY-NOTICES.txt"
 LICENSES_DIR = "licenses"
@@ -396,7 +402,7 @@ def notice_text(redist: Redist, digests: Mapping[str, str], pins: Pins) -> str:
 
 1. Microsoft Visual C++ runtime (bin/{', bin/'.join(VC_RUNTIME_DLLS)})
 
-   These four files are Microsoft's. They are NOT covered by the AGPL-3.0 that
+   These files are Microsoft's. They are NOT covered by the AGPL-3.0 that
    covers nexus. They are copied unmodified from Visual Studio 2022's
    redistributable folder (VC redist {redist.version}) and are distributed with
    this program under the Distributable Code terms of the Microsoft Visual
@@ -412,7 +418,7 @@ def notice_text(redist: Redist, digests: Mapping[str, str], pins: Pins) -> str:
 """
 
 
-#: The organisation the four runtime files must be signed by (nexus-f9bgu.27, code review S4). Measured
+#: The organisation the runtime files must be signed by (nexus-f9bgu.27, code review S4). Measured
 #: on the real VS 2022 redist (14.44.35112, qwentescence, 2026-10-05): Status Valid, subject
 #: ``CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US``. The organisation is
 #: the signer; the CN is the certificate's own name (here the Windows-component one), so it is held only
@@ -504,7 +510,7 @@ def copy_runtime_dlls(
     signature_reader: SignatureReader | None = None,
     emit: Callable[[str], None] = print,
 ) -> dict[str, str]:
-    """Copy the four VC++ runtime DLLs unmodified into *dest_dir*; return name -> sha256.
+    """Copy the VC++ runtime DLLs unmodified into *dest_dir*; return name -> sha256.
 
     The one copy routine for every Windows artifact that ships the runtime (the PG
     bundle's bin, the engine archive's staging directory, nexus-f9bgu.9), so the
@@ -535,7 +541,7 @@ def copy_runtime(
     extra_notice: str = "",
     signature_reader: SignatureReader | None = None,
 ) -> dict[str, str]:
-    """Copy the four DLLs unmodified into bundle/bin and write the notice.
+    """Copy the DLLs unmodified into bundle/bin and write the notice.
     Idempotent: re-running replaces them from the redist it is given."""
     digests = copy_runtime_dlls(bundle / "bin", redist, signature_reader=signature_reader)
     (bundle / NOTICE_NAME).write_text(notice_text(redist, digests, pins) + extra_notice)

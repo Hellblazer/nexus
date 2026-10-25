@@ -243,30 +243,30 @@ grep -qE 'exit[[:space:]]+1' <<<"$tally_body" && ok "a short tally exits 1" || b
 grep -qE '^DG_PASSES=2[[:space:]]*$' "$GATE" && ok "DG_PASSES is pinned at 2 (before and after the restart)" \
   || bad "DG_PASSES=2 not found"
 
-# The cloud_mode leg (nexus-8errq) runs after the tally and before the banner, demands exactly the
+# The keyed_voyage leg (nexus-8errq) runs after the tally and before the banner, demands exactly the
 # count the local-service gate deselects, and exits 1 on a short count.
-cm_line="$(line_of "$GATE" '^dg_run_cloud_mode_tests[[:space:]]*$')"
-[[ -n "$cm_line" ]] || fail_loud_and_exit "anchor for the cloud_mode leg matched nothing; this test needs updating, not a silent pass"
+cm_line="$(line_of "$GATE" '^dg_run_keyed_voyage_tests[[:space:]]*$')"
+[[ -n "$cm_line" ]] || fail_loud_and_exit "anchor for the keyed_voyage leg matched nothing; this test needs updating, not a silent pass"
 [[ "$tally_line" -lt "$cm_line" && "$cm_line" -lt "$banner_line" ]] \
-  && ok "order: tally ($tally_line) < cloud_mode leg ($cm_line) < banner ($banner_line)" \
-  || bad "the cloud_mode leg is not between the tally and the banner: tally=$tally_line leg=$cm_line banner=$banner_line"
-dg_cm="$(sed -n 's/^DG_CLOUD_MODE_EXPECTED=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$GATE")"
-lsg_cm="$(sed -n 's/^CLOUD_MODE_EXPECTED=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$REPO_ROOT/tests/e2e/local-service-gate.sh")"
+  && ok "order: tally ($tally_line) < keyed_voyage leg ($cm_line) < banner ($banner_line)" \
+  || bad "the keyed_voyage leg is not between the tally and the banner: tally=$tally_line leg=$cm_line banner=$banner_line"
+dg_cm="$(sed -n 's/^DG_KEYED_VOYAGE_EXPECTED=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$GATE")"
+lsg_cm="$(sed -n 's/^KEYED_VOYAGE_EXPECTED=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$REPO_ROOT/tests/e2e/local-service-gate.sh")"
 [[ -n "$dg_cm" && "$dg_cm" == "$lsg_cm" ]] \
-  && ok "DG_CLOUD_MODE_EXPECTED ($dg_cm) equals local-service-gate.sh's CLOUD_MODE_EXPECTED" \
-  || bad "DG_CLOUD_MODE_EXPECTED='$dg_cm' and local-service-gate.sh CLOUD_MODE_EXPECTED='$lsg_cm' disagree"
-cm_body="$(code_of "$GATE" | sed -n '/^dg_run_cloud_mode_tests()[[:space:]]*{/,/^}/p')"
-[[ -n "$cm_body" ]] || fail_loud_and_exit "dg_run_cloud_mode_tests() body anchor matched nothing; this test needs updating"
-grep -qE -- '-m "integration and cloud_mode"' <<<"$cm_body" && grep -qE 'NX_EMBED_PROFILE=voyage' <<<"$cm_body" \
+  && ok "DG_KEYED_VOYAGE_EXPECTED ($dg_cm) equals local-service-gate.sh's KEYED_VOYAGE_EXPECTED" \
+  || bad "DG_KEYED_VOYAGE_EXPECTED='$dg_cm' and local-service-gate.sh KEYED_VOYAGE_EXPECTED='$lsg_cm' disagree"
+cm_body="$(code_of "$GATE" | sed -n '/^dg_run_keyed_voyage_tests()[[:space:]]*{/,/^}/p')"
+[[ -n "$cm_body" ]] || fail_loud_and_exit "dg_run_keyed_voyage_tests() body anchor matched nothing; this test needs updating"
+grep -qE -- '-m "integration and keyed_voyage"' <<<"$cm_body" && grep -qE 'NX_EMBED_PROFILE=voyage' <<<"$cm_body" \
   && grep -qE 'dg_with_key uv run pytest' <<<"$cm_body" && grep -qE 'exit[[:space:]]+1' <<<"$cm_body" \
-  && ok "the cloud_mode leg selects the marker with the key and the Voyage profile and exits 1 on a short count" \
-  || bad "the cloud_mode leg lost its marker selection, its key, its Voyage profile or its exit 1"
+  && ok "the keyed_voyage leg selects the marker with the key and the Voyage profile and exits 1 on a short count" \
+  || bad "the keyed_voyage leg lost its marker selection, its key, its Voyage profile or its exit 1"
 # The count itself: both the passed and the total comparisons against the expected count.
-cm_compares() { grep -oE -- '-ne "\$DG_CLOUD_MODE_EXPECTED"' <<<"$1" | wc -l | tr -d ' '; }
+cm_compares() { grep -oE -- '-ne "\$DG_KEYED_VOYAGE_EXPECTED"' <<<"$1" | wc -l | tr -d ' '; }
 [[ "$(cm_compares "$cm_body")" -eq 2 ]] \
-  && ok "the cloud_mode leg compares both the passed and the total count with DG_CLOUD_MODE_EXPECTED" \
-  || bad "the cloud_mode leg compares $(cm_compares "$cm_body") of 2 counts with DG_CLOUD_MODE_EXPECTED"
-mut_body="$(sed 's/ || \[ "\$passed" -ne "\$DG_CLOUD_MODE_EXPECTED" \]//' <<<"$cm_body")"
+  && ok "the keyed_voyage leg compares both the passed and the total count with DG_KEYED_VOYAGE_EXPECTED" \
+  || bad "the keyed_voyage leg compares $(cm_compares "$cm_body") of 2 counts with DG_KEYED_VOYAGE_EXPECTED"
+mut_body="$(sed 's/ || \[ "\$passed" -ne "\$DG_KEYED_VOYAGE_EXPECTED" \]//' <<<"$cm_body")"
 [[ "$(cm_compares "$mut_body")" -eq 1 ]] \
   && ok "a leg with the passed-count comparison removed reads as 1 of 2 (positive control)" \
   || bad "the count-comparison pin does not notice a removed comparison"
@@ -436,6 +436,13 @@ expect_fail "a 503 that never clears fails" "CHECK FAILED: GET /health (code=503
 [[ "$(( $(grep -c 'GET /health' "$REQS") - health_before ))" -eq 5 ]] \
   && ok "a 503 is retried to five tries in all" || bad "a 503 was sent $(( $(grep -c 'GET /health' "$REQS") - health_before )) times, not 5"
 rm -f "$SCEN/GET_health.code"
+
+# The keyed_voyage pytest run waits for the build lease (the release battery runs this gate beside
+# local-service-gate.sh, which holds it while it stamps release.properties; 7.85.0 battery).
+cloud_call="$(grep -A1 'NX_BUILD_LEASE_WAIT="\${NX_BUILD_LEASE_WAIT:-' "$GATE" || true)"
+[[ "$cloud_call" =~ NX_BUILD_LEASE_WAIT=\"\$\{NX_BUILD_LEASE_WAIT:-[0-9]+\}\" && "$cloud_call" == *"pytest tests/test_integration.py"* ]] \
+  && ok "the keyed_voyage pytest run waits for the build lease" \
+  || bad "the keyed_voyage pytest run does not set NX_BUILD_LEASE_WAIT, so a parallel lease holder makes it refuse"
 
 echo
 echo "dual_embedder_gate_guard_test.sh: $PASS passed, $FAIL failed"

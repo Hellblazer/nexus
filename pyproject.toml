@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.85.0"
+version = "7.86.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -102,39 +102,6 @@ dependencies = [
     # (PG bundle, engine, models) failed CERTIFICATE_VERIFY_FAILED on a new
     # machine (measured on a clean Win11 guest). Activated in nexus/__init__.py.
     "truststore>=0.10,<0.11; sys_platform == 'win32'",
-    # Same discipline as mineru: docling is the formula screen and the fallback
-    # extractor for every PDF; its output shape is gated, so the cap sits at the
-    # locked minor.
-    # nexus-jpsn1: the slim distribution with only what nexus's PDF path
-    # exercises (PDF format, local models, the convert core that owns
-    # rtree). `docling` itself is a meta-package pulling
-    # docling-slim[standard]: rapidocr (nexus sets do_ocr=False), faker and
-    # polyfactory (test-data factories), 17 dists and 53 MB nothing here
-    # imports. Same import name, same locked minor. Dropped beside it:
-    # python-pptx (nexus never imports pptx; mineru's own pypptx-with-oxml
-    # owns the same `pptx/` tree, and two dists owning one package is the
-    # opencv collision shape again — a venv that had both needs
-    # `uv sync --reinstall-package pypptx-with-oxml` once, or `nx doctor`
-    # reports "cannot import name 'Presentation' from 'pptx'"),
-    # opencv-python-headless (zero `import cv2` here, and mineru requires
-    # the non-headless build unconditionally) and uuid7-standard (nothing
-    # references it).
-    "docling-slim[convert-core,format-pdf,models-local]>=2.125.0,<2.125.1",
-    # nexus-mt1tj: torch and torchvision are transitive (mineru[pipeline],
-    # docling) and nexus never imports them; they are declared here ONLY so
-    # that [tool.uv.sources] below can route the Linux resolution to the
-    # CPU index — uv applies sources to direct dependencies, never to
-    # transitive ones. Bounds follow what the lock already resolved.
-    # Linux pins the exact minor the lock already ran (2.8.0+cpu from the CPU
-    # index); every other platform keeps PyPI's resolution unchanged, so a
-    # macOS py3.13 box stays on the torch it had (2.10) rather than being
-    # dragged down by a Linux-motivated cap.
-    "torch>=2.8,<2.9; sys_platform == 'linux'",
-    "torch>=2.8,<2.9; sys_platform != 'linux' and python_version < '3.13'",
-    "torch>=2.10,<2.11; sys_platform != 'linux' and python_version >= '3.13'",
-    "torchvision>=0.23,<0.24; sys_platform == 'linux'",
-    "torchvision>=0.23,<0.24; sys_platform != 'linux' and python_version < '3.13'",
-    "torchvision>=0.25,<0.26; sys_platform != 'linux' and python_version >= '3.13'",
     "httpx>=0.27,<1.0",
     # RDR-161: pure-Python keyless-signature verification for
     # `nx daemon service install-binary`. Replaces a ~130MB/platform cosign
@@ -163,6 +130,85 @@ dependencies = [
     # / uvloop / websockets serve nothing here and watchfiles alone cost
     # 115 ms on every MCP server spawn.
     "uvicorn>=0.41,<1.0",
+]
+[project.optional-dependencies]
+# nexus-oqh4s (7.45.0 pre-release audit, the nexus-l2ku5 class in the
+# extras table): was unbounded; a fresh resolve of conexus[local] landed on
+# fastembed 0.8.0 (2026-03-23), untested here, while uv.lock stayed on
+# 0.7.4. 0.x under semver licenses a minor bump to break, so the cap sits
+# at the next minor, not the next major -- see
+# tests/test_dependency_bounds_lint.py's extras gate.
+# nexus-13z79 (2026-10-24): was <0.8. fastembed 0.7.x requires pillow<12 and
+# pinned the shipped lock to pillow 11.3.0 (71 advisories, 35 of them fixed in
+# 12.1.1-12.3.0). 0.8.1 admits pillow<13. 0.8.0 is skipped (the nexus-oqh4s
+# incident release); embedding output for BAAI/bge-base-en-v1.5 was compared
+# 0.7.4 vs 0.8.1, with onnxruntime also moving 1.24.2 -> 1.31.0: max abs diff
+# 1.3e-4, min cosine 0.9999996 (not bit-identical; stored vectors come from the
+# engine's own ONNX runtime, which is unaffected, so nothing re-embeds). pillow 13
+# stays out of reach: every fastembed through 0.9.0 and docling-slim cap
+# pillow<13.
+local = ["fastembed>=0.8.1,<0.9"]
+# nexus-2k66t.4.2 (Sam, 2026-10-23): the PDF stack is an extra, fetched on demand.
+# docling, mineru, torch, torchvision and pdftext were 57-65% of the download and
+# 49% of the installed size (T2 nexus/install-weight-measurement-2026-10-23), and
+# search and store never import them. A fresh install goes without them; the first
+# `nx index pdf` (or a PDF met by `nx index repo` / `nx dt index`) builds a new
+# generation with this extra, through nexus.pdf_stack. An EXISTING install carries
+# the stack forward on its first post-split upgrade (receipt installer_schema < 2).
+# pymupdf stays in the core dependencies: the formula screen and the doc indexer
+# use it. The dev dependency group includes this extra, so `uv sync`, CI and the
+# unit suite keep the stack. The comments below are the ones the same lines carried
+# as direct dependencies; nexus-2fyb's "default-on" reasoning is superseded by the
+# on-demand install, which refuses or installs and never degrades silently.
+pdf = [
+    # Same discipline as mineru: docling is the formula screen and the fallback
+    # extractor for every PDF; its output shape is gated, so the cap sits at the
+    # locked minor.
+    # nexus-13z79 (2026-10-24): 2.125.0 -> 2.132.0, still an exact patch. Seven
+    # advisories on 2.125.0 (PYSEC-2026-4209..4214, 4216; fixed in 2.131.0 and
+    # 2.132.0) sit in backends nexus never calls (HTML, JATS, METS-GBS, LaTeX,
+    # JSON_DOCLING input, external plugins), but the shipped lock should not
+    # carry them. Gated on torch 2.13 + mineru 3.1.11: the docling extraction
+    # tests (304 passed, none skipped), scripts/ci_warm_docling.py
+    # (extraction_method=docling) and both -m slow MinerU fixtures with their
+    # exact locked values. The MVV and the release shakedown still run at the
+    # release; they are the final gate for this bump.
+    # nexus-jpsn1: the slim distribution with only what nexus's PDF path
+    # exercises (PDF format, local models, the convert core that owns
+    # rtree). `docling` itself is a meta-package pulling
+    # docling-slim[standard]: rapidocr (nexus sets do_ocr=False), faker and
+    # polyfactory (test-data factories), 17 dists and 53 MB nothing here
+    # imports. Same import name, same locked minor. Dropped beside it:
+    # python-pptx (nexus never imports pptx; mineru's own pypptx-with-oxml
+    # owns the same `pptx/` tree, and two dists owning one package is the
+    # opencv collision shape again — a venv that had both needs
+    # `uv sync --reinstall-package pypptx-with-oxml` once, or `nx doctor`
+    # reports "cannot import name 'Presentation' from 'pptx'"),
+    # opencv-python-headless (zero `import cv2` here, and mineru requires
+    # the non-headless build unconditionally) and uuid7-standard (nothing
+    # references it).
+    "docling-slim[convert-core,format-pdf,models-local]>=2.132.0,<2.132.1",
+    # nexus-mt1tj: torch and torchvision are transitive (mineru[pipeline],
+    # docling) and nexus never imports them; they are declared here ONLY so
+    # that [tool.uv.sources] below can route the Linux resolution to the
+    # CPU index — uv applies sources to direct dependencies, never to
+    # transitive ones.
+    # nexus-13z79 (2026-10-24): the bounds moved from the minors the lock
+    # already ran (Linux 2.8, macOS/Windows py<3.13 2.8, macOS py3.13 2.10 --
+    # "follow what the lock resolved", no compatibility ceiling) to 2.13.
+    # torch 2.8.0 carried eight advisories (PYSEC-2025-203/204/206 and
+    # 2026-2286 fixed in 2.9/2.10, PYSEC-2025-193/195 in 2.9.1/2.10, and
+    # PYSEC-2025-194 torch.jit.script only in 2.13.0); 2.13 is the first minor
+    # with no advisory that has a fix. mineru (torch>=2.6,<3) and docling
+    # (torch>=2.2.2,<3) both admit it. One range on every platform: the
+    # per-platform split existed only to keep each platform on its old minor.
+    # Linux still resolves from the CPU index (+cpu). GPU opt-in
+    # (NX_TORCH_BACKEND): torch 2.13 has no cu128 build, so cu128 no longer
+    # resolves; cpu, cu126, cu129, cu130 and cu132 do, on x86_64 and aarch64
+    # (cu128 had already failed on aarch64, which had no 2.8.0+cu128 wheel).
+    # Checked 2026-10-24 with uv pip compile --python-platform, py3.12 and 3.13.
+    "torch>=2.13,<2.14",
+    "torchvision>=0.28,<0.29",
     # nexus-2fyb: MinerU is the formula-aware PDF extractor required by
     # auto-mode whenever a PDF contains math. Previously gated behind a
     # [mineru] extra; the extras game produced silent formula loss for
@@ -200,6 +246,13 @@ dependencies = [
     # splits "aggregation"). Even a patch changes the output shape, so the cap
     # is the exact patch. Bump deliberately, with the -m slow MinerU tests,
     # the MVV and the shakedown, never by widening this cap.
+    # nexus-13z79 (2026-10-24): mineru[pipeline] declares transformers<5, so the
+    # lock stays on transformers 4.57.6. Nine advisories remain on it (three
+    # have no fixed release; the rest are fixed only in 5.x), so they stay
+    # until a mineru release both admits transformers 5 and passes the gates
+    # above. Pillow stays on 12.3.0 for a different reason: every fastembed
+    # through 0.9.0 and docling-slim cap pillow<13, and 13.0.0 (2026-10-16) is
+    # the only release that fixes the 37 advisories left on 12.3.0.
     "mineru[pipeline]>=3.1.11,<3.1.12",
     # nexus-gqrg0 (GH #1533) round 2: the override below only reaches an
     # invoking-project resolve (uv sync in this checkout, or a generation
@@ -222,15 +275,6 @@ dependencies = [
     # with tests/test_dependency_bounds_lint.py.
     "pdftext>=0.6.3,<0.7",
 ]
-
-[project.optional-dependencies]
-# nexus-oqh4s (7.45.0 pre-release audit, the nexus-l2ku5 class in the
-# extras table): was unbounded; a fresh resolve of conexus[local] landed on
-# fastembed 0.8.0 (2026-03-23), untested here, while uv.lock stayed on
-# 0.7.4. 0.x under semver licenses a minor bump to break, so the cap sits
-# at the next minor, not the next major -- see
-# tests/test_dependency_bounds_lint.py's extras gate.
-local = ["fastembed>=0.7.0,<0.8"]
 
 [project.urls]
 Homepage = "https://hellblazer.github.io/nexus/"
@@ -324,7 +368,7 @@ markers = [
     "no_service_jar: integration test that drives PostgreSQL directly and is exempt from the service-jar freshness gate",
     "needs_stamped_jar: integration test that constructs a vector client, so its service jar must carry a release_version (build with scripts/build-gate-jar.sh) — nexus-ao29z",
     "lived_in: integration test that dispatches real claude -p or requires seeded lived-in corpora (deselect with '-m \"integration and not lived_in\"')",
-    "cloud_mode: integration test that needs the SERVICE embedding voyage-* collections: a keyed engine on the Voyage profile. The keyless local-service gate deselects it ('-m \"integration and not cloud_mode\"'); tests/e2e/dual-embedder-gate.sh runs it (nexus-8errq)",
+    "keyed_voyage: integration test that needs the SERVICE embedding voyage-* collections: a keyed engine on the Voyage profile. The keyless local-service gate deselects it ('-m \"integration and not keyed_voyage\"'); tests/e2e/dual-embedder-gate.sh runs it (nexus-8errq)",
     "real_managed_default: opt OUT of the unit suite's black-holed default managed endpoint (nexus-d5aye) — for tests that assert DEFAULT_MANAGED_SERVICE_URL's own value; they must still not reach the network",
     "lint: repo-structure/meta lint tests (AST-scan the whole src tree, walk conexus/ agent-skill-command markdown, RDR frontmatter, marker-selection coverage) rather than exercising src behavior. Excluded from default addopts; runs in the dedicated CI lint leg — see .github/workflows/ci.yml's test-lint job, 'pytest (lint markers, group N/2)' (test-suite-compression P0, nexus-test-cleanup 2026-08-05).",
     "scenario: cross-verb CLI journey against the real per-process engine substrate (tests/conftest.py::t2_service_env) — observes a write through a DIFFERENT verb/store handle than the one that made it. Runs in the DEFAULT loop (deliberately NOT added to addopts' deselection) — see tests/test_scenario_journeys.py and the pytest_sessionfinish non-vacuity guard in tests/conftest.py (test-suite-compression P2-reduced, nexus-test-cleanup 2026-08-05).",
@@ -337,6 +381,9 @@ markers = [
 
 [dependency-groups]
 dev = [
+    # nexus-2k66t.4.2: the PDF stack is an extra now (see [project.optional-
+    # dependencies] pdf); the suite, CI and `uv sync` keep it.
+    "conexus[pdf]",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=7.0.0",

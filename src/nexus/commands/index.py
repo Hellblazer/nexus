@@ -14,7 +14,16 @@ from tqdm import tqdm
 
 from nexus.bounded_subprocess import run_bounded
 
+from nexus import pdf_stack
+
 _log = structlog.get_logger()
+
+
+class _PdfStackHeldFailure(click.ClickException):
+    """``nx index repo`` ended with PDFs held back (PDF support missing, install
+    refused): exit 69 (EX_UNAVAILABLE), after code and prose were indexed."""
+
+    exit_code = pdf_stack.EXIT_REFUSED
 
 
 def _registry_path() -> Path:
@@ -1593,6 +1602,12 @@ def index_repo_cmd(
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers,
                                      client=_t2_client) or {}
+        except pdf_stack.RerunRequired:
+            # nexus-2k66t.4.2: the walk found PDFs and installed the PDF stack
+            # into a new generation. index_repository has released its index
+            # lock (the unwind ran its `finally`), so the same command now
+            # runs again inside that generation and its exit status is ours.
+            raise SystemExit(pdf_stack.rerun_command()) from None
         except VectorUpsertTimeoutError as e:
             # nexus-8hdg9 phase 1 critique (Significant-2): defense in depth.
             # indexer.py's _contain_transient_upsert now defers a per-file
@@ -1829,6 +1844,10 @@ def index_repo_cmd(
         # of the run's useful work still completes before the non-zero
         # exit.
         pdf_quality_gate_failed = (stats or {}).get("pdf_quality_gate_failed", 0)
+        # nexus-2k66t.4.2: PDFs held back because the PDF stack is missing and
+        # the install was refused (the post-commit hook's NX_PDF_STACK=refuse).
+        # Code and prose were indexed; the run still ends 69, naming the command.
+        pdf_stack_held = (stats or {}).get("pdf_stack_held", 0)
         # nexus-deyd5: files skipped because they could not be extracted
         # (nexus.errors.UnextractableContentError, caught per-file by
         # indexer_utils.run_file_loop — never raises). Reported
@@ -1892,6 +1911,13 @@ def index_repo_cmd(
         # lines of the checks after it, so a run with a deferred file AND another failure named
         # only one of them.
         _run_failure: click.ClickException | None = None
+        if pdf_stack_held:
+            _run_failure = _PdfStackHeldFailure(
+                f"{pdf_stack_held} PDF(s) were NOT indexed: PDF support is not installed and "
+                f"{pdf_stack.POLICY_ENV}=refuse (or pdf_stack.auto_install: false) forbids "
+                f"installing it here. Code and prose were indexed. "
+                f"Run: {pdf_stack.INSTALL_COMMAND}   then re-run `nx index repo`."
+            )
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             # nexus-wbfpw.29 round 3 (round 6: same VERIFIED set the
@@ -3124,6 +3150,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             "re-embed."
         )
 
+    # nexus-2k66t.4.2: the PDF stack is the `pdf` extra. Make sure it is here
+    # BEFORE any catalog or T3 write: installed now (and this command re-run in
+    # the new generation), or the command stops with exit 69/75/70 and the exact
+    # command to run. Never a quiet fallback to a plainer extractor. A --dir run
+    # asks after it knows there is at least one PDF to index.
+    if dir_path is None:
+        pdf_stack.ensure_or_exit("nx index pdf")
+
     # ── Batch mode (--dir) ──────────────────────────────────────────────
     if dir_path is not None:
         from nexus.indexer_utils import (  # noqa: PLC0415 — deliberate function-local import (rare branch: --dir batch mode only)
@@ -3165,6 +3199,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         skipped = len(raw_pdfs) - len(pdfs)
         if skipped:
             click.echo(f"Filtered {skipped} PDF(s) via gitignore/.nexus.yml patterns")
+
+        pdf_stack.ensure_or_exit("nx index pdf --dir")
 
         if collection is not None:
             # nexus-hmxi note: this call site intentionally does NOT

@@ -58,7 +58,7 @@ import re
 import subprocess
 import sys
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -146,10 +146,13 @@ def _is_generation_name(name: str) -> bool:
 class _WindowsBuild:
     """What a Windows generation build needs: there is no bash argv to hand over."""
 
-    def __init__(self, source: str, extras: list[str], version: str | None) -> None:
+    def __init__(self, source: str, extras: list[str], version: str | None, core=None) -> None:
         self.source = source
         self.extras = extras
         self.version = version
+        #: The TARGET release's ``generation_core`` when it supplies the build
+        #: (nexus-2k66t.4.3); ``None`` builds with the running one.
+        self.core = core
 
     def describe(self) -> str:
         parts = ["generation_core.build_generation", "--source", self.source]
@@ -162,9 +165,17 @@ class _WindowsBuild:
 
 def perform_self_install(
     *, keep: int = 3, version: str | None = None, dry_run: bool = False,
-    add_extras: tuple[str, ...] = (), bootstrap: bool = False,
+    add_extras: tuple[str, ...] = (), bootstrap: bool = False, progress: bool = False,
+    exact_extras: tuple[str, ...] | None = None,
+    after_flip: Callable[[Path], None] | None = None,
+    pdf_asked: bool | None = None, pdf_note: list[str] | None = None,
 ) -> Path | None:
     """Build a new generation from the running one's receipt, flip, reap.
+
+    *progress* (nexus-2k66t.4.2) passes the builder's stderr (uv's download
+    progress) through to this process's stderr while it runs, for the
+    on-demand PDF install, where a 370 MB fetch with no output reads as a hang.
+    Failure diagnosis reads the same captured text either way.
 
     *add_extras* (nexus-pffc4) MERGES with the receipt's existing extras —
     never replaces them — so ``nx self install --extras local`` is the
@@ -174,23 +185,53 @@ def perform_self_install(
     set travels through ``install_generation.sh --extras`` and is rendered
     by ``install_layout.build_spec``, so spec and extras cannot disagree.
 
+    *exact_extras* (nexus-au0s3) builds with EXACTLY these extras: no merge with the
+    running generation's receipt and no PDF carry-forward. The installer-rebuild
+    rung rebuilds ``current``, whose extras are the ones to keep, and the process
+    running the rebuild may be a different generation with different ones.
+
+    *after_flip* (nexus-ff366) is called with the new generation once ``current`` points at it
+    and BEFORE the reap. What it raises propagates, after the reap has run. The caller that
+    checks the result of a build and puts the old pointers back (the installer-rebuild rung)
+    needs this ordering: a reap that ran first could remove the generation ``previous`` named
+    before the flip, which that rollback then cannot restore.
+
+    *pdf_asked* and *pdf_note* (nexus-vyy65): on a Windows machine that cannot load the PDF
+    stack, every path here builds SLIM and says so (:func:`nexus.pdf_stack.drop_pdf_on_runtime_gap`):
+    the resolved extras lose ``pdf``, so an install or upgrade is never refused by it and the
+    new receipt does not list it. *pdf_asked* is whether the user typed ``--extras pdf`` (default:
+    whether *add_extras* names it); the line then says PDF support was not installed. The line is
+    echoed, or appended to *pdf_note* when a caller wants to report it in its own account.
+
     *bootstrap* (RDR-228, nexus-sv2wx.14) is the explicit first-install path:
     see :func:`_bootstrap_install`. It is the only way into that path; nothing
     is inferred from where this process runs, and without it every refusal
     below is unchanged.
+
+    The build runs the installer of the release being installed (nexus-2k66t.4.3),
+    so its lock pin applies: see :mod:`nexus.target_installer`. That covers
+    upgrades FROM a release that carries this code; the hop out of one that does
+    not is built by that release's installer. ``--dry-run`` prints the RUNNING
+    installer's argv (reading the target's would be a fetch).
 
     Returns the new generation, or ``None`` on a dry run.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     new_extras = _normalize_extras(add_extras)
+    if pdf_asked is None:
+        pdf_asked = "pdf" in new_extras
 
     install_dir = packaged_install_dir()
     tools = install_layout.tools_dir()
     bin_dir = install_layout.bin_dir()
     if bootstrap:
+        # The plugin's setup (conexus/launch/nx_setup.py) and the stand-in's REPAIR_COMMAND pass
+        # `--extras pdf` by default (not a user's request for it on this machine), so a bootstrap
+        # is never "asked". web/install.ps1 and web/install.sh pass no extras.
         return _bootstrap_install(
             install_dir, tools, bin_dir, version=version, extras=new_extras, dry_run=dry_run,
+            progress=progress, pdf_note=pdf_note,
         )
     host = running_generation()
 
@@ -259,19 +300,58 @@ def perform_self_install(
     # WHAT TO INSTALL comes from the receipt of the generation we are running
     # from, not from `current`: a self-install reproduces THIS process's
     # install, and on a box whose current has already moved those differ.
-    receipt = install_layout.read_receipt(host)
-    extras = _merge_extras(receipt.extras, new_extras)
-    build = _build_request(install_dir, receipt, version=version, extras=extras)
+    try:
+        receipt = install_layout.read_receipt(host)
+    except install_layout.InstallLayoutError as exc:
+        raise click.ClickException(
+            f"this nx cannot read the receipt of the generation it runs from ({host.name}): {exc}"
+        ) from exc
+    if exact_extras is not None:
+        if new_extras:
+            raise click.ClickException("exact_extras and add_extras cannot both be given")
+        extras = _normalize_extras(exact_extras)
+    else:
+        extras = _merge_extras(receipt.extras, new_extras)
+    # nexus-2k66t.4.2, Sam 2026-10-23: an EXISTING install always carries the
+    # PDF stack forward. A receipt written before `pdf` became an extra
+    # (installer_schema < 2) belongs to a box that has had docling and MinerU
+    # in every generation; the installer this process runs may be the new one
+    # building the first post-split generation. Only a fresh install goes slim.
+    if exact_extras is None:
+        extras = _carry_pdf_forward(receipt, extras)
+    # nexus-vyy65: AFTER the merge and the carry-forward (the merge never removes an extra),
+    # and only for this one case: pdf asked for, or inherited, on a Windows machine that cannot
+    # load the stack. Build slim and say so; never refuse, so an upgrade is not frozen by it.
+    extras = _slim_on_runtime_gap(extras, asked=pdf_asked, note=pdf_note)
     if dry_run:
+        # The argv shown is the RUNNING installer's. The real run reads the
+        # target release's installer first (a fetch, so not done here) and uses
+        # that one when it can (nexus-2k66t.4.3).
+        build = _build_request(install_dir, receipt, version=version, extras=extras)
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
-    generation = _build_flip_shims(build, install_dir=install_dir, tools=tools, bin_dir=bin_dir)
+    # nexus-2k66t.4.3: the build runs the installer of the release being
+    # installed, so an upgrade into a release that changed the installer (the
+    # lock pin) is built by it. The flip, shims and reap below stay ours.
+    with _target_installer(receipt.source, version=version, extras=extras) as staged:
+        build = _build_request(
+            staged.install_dir or install_dir, receipt, version=version, extras=extras, core=staged.core,
+        )
+        generation = _build_flip_shims_or_fall_back(
+            staged, build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, progress=progress,
+            running_build=lambda: _build_request(install_dir, receipt, version=version, extras=extras),
+        )
+        _warn_on_version_skew(staged, generation)
 
     # RULE (d) IS PASSED HERE. --self names the generation hosting this very
     # process; without it the reap below is free to delete the tree these
     # lines are executing from.
-    for line in _reap_generations(install_dir, tools, keep=keep, self_generation=host):
-        click.echo(line)
+    try:
+        if after_flip is not None:
+            after_flip(generation)
+    finally:
+        for line in _reap_generations(install_dir, tools, keep=keep, self_generation=host):
+            click.echo(line)
 
     # A HYBRID BOX CONVERGES HERE, NOT IN THE elif ABOVE. A generation layout
     # beside a legacy `uv tool install` tree takes the generation branch every
@@ -296,9 +376,10 @@ def perform_self_install(
 @dataclass(frozen=True)
 class _RegistryReceipt:
     """What a bootstrap build asks for, in the shape :func:`_build_request`
-    reads from a receipt: the distribution name from the package index, and no
-    extras (the documented first install records none; local mode's embedding
-    model belongs to the service, which ``nx init`` provisions)."""
+    reads from a receipt: the distribution name from the package index, and the
+    extras the caller named (``--extras``; none when it named none, which is the
+    slim install. Local mode's embedding model belongs to the service, which
+    ``nx init`` provisions, so it is not an extra here)."""
 
     source: str = "conexus"
     extras: tuple[str, ...] = ()
@@ -501,22 +582,38 @@ def _shim_names_of(generation: Path) -> list[str]:
     return sorted(install_layout.owned_shim_names(generation, platform=_plat()))
 
 
-def _unfinished_generation(tools: Path, running: str) -> Path | None:
+def _extras_key(names) -> frozenset[str]:
+    """PEP 685-normalized extras as a set, so spelling and order do not matter
+    when a leftover's receipt is compared with the extras a caller asked for."""
+    return frozenset(re.sub(r"[-_.]+", "-", str(n).lower()) for n in names)
+
+
+def _unfinished_generation(
+    tools: Path, running: str, extras: tuple[str, ...] = (),
+) -> Path | None:
     """The generation a bootstrap that died after its build can finish, or ``None``.
 
     Reached only when no complete install exists. The candidates are the
     generation ``current`` names (a run that died after the flip) or, when it
     names none, every receipted generation, newest first. A candidate is
     finished only when it is what a fresh build would produce: its receipt says
-    *running* and its interpreter answers the shim step's lookup. Otherwise the
-    caller builds afresh, which is safe because nothing complete is replaced."""
+    *running*, lists EXACTLY the requested *extras* (a slim generation is not
+    finished for a caller that asked for ``pdf``, which would end "done" with no
+    PDF support; a pdf generation is not finished for a caller that asked for
+    nothing, which would silently flip in what ``--slim`` left out) and its
+    interpreter answers the shim step's lookup. Otherwise the caller builds
+    afresh, which is safe because nothing complete is replaced."""
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     current = _current_generation_dir(tools)
     candidates = [current] if current is not None else list(reversed(install_layout.list_generations(tools=tools)))
     for generation in candidates:
         receipt = _read_receipt_or_none(generation)
-        if receipt is not None and receipt.version == running and _generation_answers_for_its_shims(generation):
+        if (
+            receipt is not None and receipt.version == running
+            and _extras_key(extras) == _extras_key(receipt.extras)
+            and _generation_answers_for_its_shims(generation)
+        ):
             return generation
     return None
 
@@ -588,13 +685,14 @@ def _refuse_a_foreign_program_in_the_bin_directory(
 
 def _bootstrap_install(
     install_dir: Path, tools: Path, bin_dir: Path, *, version: str | None,
-    extras: list[str], dry_run: bool,
+    extras: list[str], dry_run: bool, progress: bool = False, pdf_note: list[str] | None = None,
 ) -> Path | None:
     """The first install of the CLI, in one command and one generation (RDR-228
     Phase 2 Step 1, nexus-sv2wx.14).
 
     Reached ONLY through ``--bootstrap``. Installs the released package, at the
-    running program's own version and with no extras, from the package index
+    running program's own version and with the *extras* named (none by default;
+    the plugin's setup names ``pdf``, nexus-2k66t.4.9; web/install.* name none), from the package index
     into a new ``gen-<stamp>``, points ``current`` at it and writes the command
     shims. It is what ``uv tool run --python 3.12 --from conexus==<v> nx self
     install --bootstrap`` runs, from a throwaway ``uv`` environment that
@@ -605,8 +703,9 @@ def _bootstrap_install(
     * No cache prune. The plain command prunes ``uv``'s shared cache at its end
       (23.4 GiB from a developer's cache in the CA-3 test); this path never
       calls :func:`prune_uv_cache`.
-    * No reap and no legacy-tree registration: with an existing install it
-      refuses, so there is nothing older to reap.
+    * No legacy-tree registration, and no reap of anything but the leftovers a
+      fresh build supersedes (:func:`_reap_superseded`, nexus-5kvjb): with an
+      existing install it refuses, so there is no older install to reap.
     * No fallback to ``uv tool install`` then ``nx self install``: that runs the
       prune and leaves two copies on disk.
 
@@ -626,16 +725,18 @@ def _bootstrap_install(
     other leftover falls through to a fresh build.
     Two bootstraps at once are P2.2's lock, not this command's.
     """
-    if version or extras:
+    if version:
         raise click.ClickException(
-            "--bootstrap installs the version of the running nx with no extras, so it "
-            "takes neither --version nor --extras. Nothing was changed."
+            "--bootstrap installs the version of the running nx, so it takes no "
+            "--version. Nothing was changed."
         )
     existing = _existing_install(tools, bin_dir)
     if existing is not None:
+        add = f" --extras {','.join(extras)}" if extras else ""
         raise click.ClickException(
             f"--bootstrap is for a first install and {existing} is already installed. "
-            "Run `nx self install` to update it. Nothing was changed."
+            f"Run `nx self install{add}` to update it"
+            f"{' and add the extras' if extras else ''}. Nothing was changed."
         )
     current = _current_generation_dir(tools)
     if current is not None and _read_receipt_or_none(current) is None:
@@ -648,8 +749,11 @@ def _bootstrap_install(
             f"--bootstrap will not move `current`: it names {current}, whose receipt is missing "
             f"or unreadable. Repair it with `{nx} self install`. Nothing was changed."
         )
+    # nexus-vyy65: a first install on a Windows machine that cannot load the PDF stack goes
+    # slim and says so, before the leftover check so a leftover is matched on what would be built.
+    extras = _slim_on_runtime_gap(extras, note=pdf_note)
     running = _running_version()
-    unfinished = _unfinished_generation(tools, running)
+    unfinished = _unfinished_generation(tools, running, tuple(extras))
     _refuse_a_foreign_program_in_the_bin_directory(tools, bin_dir, unfinished)
     if unfinished is not None:
         # An earlier bootstrap built this generation and died before `current`
@@ -657,7 +761,8 @@ def _bootstrap_install(
         # `nx` here to run, so the same command finishes the job, with no
         # rebuild. Only a generation at the running version that answers the
         # shim lookup is finished; any other leftover falls through to a build.
-        what = f"{unfinished.name} (conexus {running}) is already built"
+        shown = ",".join(extras) if extras else "no extras"
+        what = f"{unfinished.name} (conexus {running}, extras: {shown}) is already built"
         if dry_run:
             click.echo(f"would finish the interrupted install: {what} (no rebuild); "
                        "would set `current` and write the command shims")
@@ -666,13 +771,146 @@ def _bootstrap_install(
                    "setting `current` and the command shims")
         _flip_and_shim(unfinished, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=True)
         return unfinished
-    build = _build_request(install_dir, _RegistryReceipt(), version=running)
+    build = _build_request(install_dir, _RegistryReceipt(extras=tuple(extras)), version=running)
     if dry_run:
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
-    return _build_flip_shims(
+    outgoing = current
+    prior_previous = _previous_target(tools)
+    generation = _build_flip_shims(
         build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=True,
+        progress=progress,
     )
+    _reap_superseded(
+        install_dir, tools, outgoing=outgoing, built_version=running, prior_previous=prior_previous,
+    )
+    return generation
+
+
+def _previous_target(tools: Path) -> str | None:
+    """What ``previous`` names before a flip moves it, or None (no link, unreadable)."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    platform = _plat()
+    link = install_layout.previous_link(tools=tools)
+    try:
+        if install_layout.is_link(link, platform=platform):
+            return install_layout.read_link(link, platform=platform)
+    except OSError:
+        return None
+    return None
+
+
+def restore_current_generation(generation: Path, *, previous: str | None) -> None:
+    """Undo a flip, as far as it can be undone: ``current`` back on *generation*
+    and ``previous`` back on what it named before the flip (*previous*, from
+    :func:`_previous_target` taken before the flip; ``None`` removes the link)
+    (nexus-ff366).
+
+    The flip helpers do the moving, so a POSIX symlink swap stays atomic and a
+    Windows junction goes through ``generation_core`` (and the logon task is
+    retargeted with it). Order: ``current`` first, onto a generation that still
+    exists; the flip then records the one it leaves as ``previous``, which is put
+    right afterwards. Neither pointer ever names a directory that is not there:
+    *generation* is checked before anything moves, and *previous* is restored
+    only while it is still a directory. When it is not (something removed it
+    since the flip), ``previous`` is dropped rather than left on the generation
+    the flip put there; this function does not report that, so a caller that
+    words the result re-reads both pointers. No shims are rewritten: they
+    resolve ``current`` at spawn. Raises ``click.ClickException`` when it cannot
+    move ``current``, with ``current`` where it was."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+    from nexus._install import layout_core  # noqa: PLC0415 — deferred import
+
+    if not generation.is_dir():
+        raise click.ClickException(f"{generation} is gone; `current` stays where it is")
+    tools = install_layout.tools_dir()
+    link = install_layout.previous_link(tools=tools)
+    keep_previous = previous is not None and Path(previous).is_dir()
+    if _is_windows():
+        _windows_flip_and_path(generation, tools=tools)
+        if keep_previous:
+            try:
+                _generation().swap_link(str(previous), link)
+            except _generation().GenerationError as exc:
+                raise click.ClickException(f"could not restore `previous`:\n{exc}") from exc
+    else:
+        install_dir = packaged_install_dir()
+        _sh(install_dir, f'nx_flip_current "{generation}" "{tools}"')
+        if keep_previous:
+            _sh(install_dir, f'_nx_symlink_swap "{previous}" "{link}"')
+    if not keep_previous and install_layout.is_link(link, platform=_plat()):
+        try:
+            layout_core.remove_link(link)
+        except (OSError, layout_core.LayoutError) as exc:
+            raise click.ClickException(f"could not drop `previous`:\n{exc}") from exc
+
+
+def _reap_superseded(
+    install_dir: Path, tools: Path, *, outgoing: Path | None, built_version: str,
+    prior_previous: str | None = None,
+) -> None:
+    """After a bootstrap build and flip, reap the leftovers it superseded
+    (nexus-5kvjb): a slim generation rebuilt with ``pdf`` (or the reverse) would
+    otherwise stay on disk, about 1.5 GB, until some later reap.
+
+    Only when the outgoing ``current`` is provably a leftover of an interrupted
+    run: there was none, or its receipt names the version just built (the same
+    version rebuilt with other extras), or its interpreter is gone (it cannot
+    start, so it is no rollback target). A usable generation of an OLDER version
+    whose shims were lost is a working install that the bootstrap merely cannot
+    call complete; it and the ``previous`` pointer to it are left to the normal
+    keep-3 prune, as a plain install would leave them.
+
+    The reap is the install's own (:func:`_reap_generations`, ``keep=1``) with its
+    four never-delete rules, so ``current`` and a generation a live process runs
+    from stay. Rule (d) is passed as :func:`perform_self_gc` passes it, when the
+    running interpreter sits under the tools directory.
+
+    The flip records the outgoing ``current`` as ``previous``, and rule (b)
+    protects ``previous``. That pointer would keep the leftover alive, and a
+    rollback to a generation that never held a complete install is no rollback,
+    so it is dropped when it names the generation this build replaced. A failure
+    to drop it is reported and never fails a bootstrap whose flip succeeded.
+
+    When ``previous`` named some OTHER generation before the flip (*prior_previous*),
+    the flip moved it off that generation, and ``keep=1`` would then reap a rollback
+    target the user still had. Then nothing is reaped here and the normal keep-3
+    prune decides, the same as for a usable older ``current``."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+    from nexus._install import layout_core  # noqa: PLC0415 — deferred import
+
+    if outgoing is not None:
+        receipt = _read_receipt_or_none(outgoing)
+        reapable = (
+            (receipt is not None and receipt.version == built_version)
+            or _generation_interpreter_gone(outgoing)
+        )
+        if not reapable:
+            return
+    platform = _plat()
+    if prior_previous is not None and (
+        outgoing is None
+        or install_layout.compare_key(prior_previous, platform=platform)
+        != install_layout.compare_key(outgoing, platform=platform)
+    ):
+        return
+    link = install_layout.previous_link(tools=tools)
+    if outgoing is not None and install_layout.is_link(link, platform=platform):
+        try:
+            names_outgoing = install_layout.compare_key(
+                install_layout.read_link(link, platform=platform), platform=platform,
+            ) == install_layout.compare_key(outgoing, platform=platform)
+            if names_outgoing:
+                layout_core.remove_link(link)
+        except (OSError, layout_core.LayoutError) as exc:
+            click.echo(f"nexus: could not drop the rollback pointer to {outgoing.name}: {exc}", err=True)
+    host = running_generation()
+    self_generation = host if _same_dir(host.parent, tools) and _is_generation_name(host.name) else None
+    for line in _reap_generations(
+        install_dir, tools, keep=1, self_generation=self_generation, remove_launchers=False,
+    ):
+        click.echo(line)
 
 
 def _record_lockstep_after_bootstrap() -> None:
@@ -732,6 +970,35 @@ def _merge_extras(existing: list[str], new: list[str]) -> list[str]:
     return list(existing) + [n for n in new if _norm(n) not in have]
 
 
+def _slim_on_runtime_gap(
+    extras: list[str], *, asked: bool = False, note: list[str] | None = None,
+) -> list[str]:
+    """*extras* without ``pdf`` when this Windows machine cannot load the PDF stack
+    (:func:`nexus.pdf_stack.drop_pdf_on_runtime_gap`), with its one line echoed, or appended
+    to *note* when the caller reports it itself. *extras* unchanged everywhere else."""
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import
+
+    kept, line = pdf_stack.drop_pdf_on_runtime_gap(extras, asked=asked)
+    if line is not None:
+        if note is not None:
+            note.append(line)
+        else:
+            click.echo(line)
+    return kept
+
+
+def _carry_pdf_forward(receipt, extras: list[str]) -> list[str]:
+    """*extras* plus ``pdf`` when *receipt* predates the PDF split (the upgrade
+    rule in :func:`perform_self_install`). A receipt that already lists ``pdf``
+    or was written by the split-aware installer is returned unchanged: a fresh
+    slim install stays slim."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    if install_layout.receipt_predates_pdf_split(receipt):
+        return _merge_extras(extras, ["pdf"])
+    return extras
+
+
 def _build_argv(
     install_dir: Path, receipt, *, version: str | None,
     extras: list[str] | None = None,
@@ -759,14 +1026,130 @@ def _build_argv(
     return build
 
 
+#: The failures a target installer can be blamed for: the build step's own messages.
+_BUILD_FAILURE_PREFIXES = ("generation build failed", "legacy migration failed")
+
+
+def _target_installer(
+    source: str, *, version: str | None, extras: list[str] | bool,
+    purpose: str = "build", package_root: Path | None = None,
+):
+    """Which installer builds *source* at *version*: see
+    :mod:`nexus.target_installer`. Used by every route that builds a generation
+    (the upgrade, the uv-takeover repair, the legacy convergence), so there is
+    one selection rule. *purpose* is ``"build"`` or ``"migrate"``; *package_root*
+    is a directory already holding the target package (no fetch).
+
+    Says its one line on stderr when it is not the plain case (and logs a
+    fallback at warning level: the plugin's detached ``nx self install``
+    captures stderr and only logs it at DEBUG), turns a failed fetch into a
+    clean exit before anything has been built, and names the escape hatches when
+    a build run by the target's installer fails.
+    ``NX_INSTALL_RUNNING_INSTALLER=1`` skips the lookup."""
+    from contextlib import contextmanager, nullcontext  # noqa: PLC0415 — stdlib, deferred
+
+    from nexus import target_installer  # noqa: PLC0415 — deferred; only the build path needs it
+
+    if os.environ.get("NX_INSTALL_RUNNING_INSTALLER") == "1":
+        return nullcontext(target_installer.Staged())
+
+    @contextmanager
+    def _ctx():
+        from importlib.metadata import PackageNotFoundError, version as dist_version  # noqa: PLC0415 — stdlib
+
+        try:
+            running = dist_version("conexus")
+        except PackageNotFoundError:
+            running = ""
+        try:
+            with target_installer.staged_installer(
+                source, version=version, running_version=running, windows=_is_windows(),
+                with_extras=bool(extras), env=_script_env(), platform=_plat(),
+                purpose=purpose, package_root=package_root,
+            ) as staged:
+                if staged.note:
+                    click.echo(staged.note, err=True)
+                    if staged.fallback:
+                        import structlog  # noqa: PLC0415 — deferred
+
+                        structlog.get_logger(__name__).warning(
+                            "target_installer_fallback", note=staged.note, source=source,
+                        )
+                try:
+                    yield staged
+                except click.ClickException as exc:
+                    if (staged.install_dir is not None or staged.core is not None) and exc.message.startswith(
+                        _BUILD_FAILURE_PREFIXES
+                    ):
+                        exc.message += (
+                            "\n\nThe installer used here is the one shipped by the release being installed. "
+                            "NX_INSTALL_RUNNING_INSTALLER=1 builds with the running release's installer "
+                            "instead; if the pinned dependency resolve is what failed, "
+                            "NX_INSTALL_UNPINNED=1 resolves fresh."
+                        )
+                    raise
+        except target_installer.TargetFetchError as exc:
+            detail = str(exc)
+            if exc.registry:
+                pinned = f"=={version}" if version else ""
+                head = f"could not fetch {source}{pinned} to read the installer it ships"
+                hint = index_failure_hint(detail)
+                detail = f"{hint}\n\nuv output:\n{detail}" if hint else detail
+            else:
+                head = f"could not read the installer of {source}"
+            raise click.ClickException(
+                f"{head}; nothing was built or changed:\n{detail}\n"
+                "Set NX_INSTALL_RUNNING_INSTALLER=1 to build with the installer of the running release instead."
+            ) from exc
+
+    return _ctx()
+
+
+def _warn_on_version_skew(staged, generation: Path | None) -> None:
+    """One stderr warning when the generation just built holds a different
+    conexus version than the installer was read at (the build resolves again,
+    so an index that moved in between can disagree). Silent when either side is
+    unknown. No ``--version`` pin is added to prevent it: that would change the
+    receipt's spec, and ``upgrade_finish`` reports a pin as a one-shot."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    if generation is None or not staged.version:
+        return
+    try:
+        built = install_layout.read_receipt(generation).version
+    except (install_layout.InstallLayoutError, OSError):
+        return
+    if not built or _same_version(built, staged.version):
+        return
+    message = (
+        f"warning: the installer was read from conexus {staged.version} but the generation holds {built}; "
+        "the package index changed between the two steps. The generation is installed and working."
+    )
+    click.echo(message, err=True)
+    import structlog  # noqa: PLC0415 — deferred
+
+    structlog.get_logger(__name__).warning(
+        "target_installer_version_skew", installer_version=staged.version, built_version=built,
+    )
+
+
+def _same_version(left: str, right: str) -> bool:
+    from packaging.version import InvalidVersion, Version  # noqa: PLC0415 — deferred import
+
+    try:
+        return Version(left) == Version(right)
+    except InvalidVersion:
+        return left == right
+
+
 def _build_request(
-    install_dir: Path, receipt, *, version: str | None, extras: list[str] | None = None,
+    install_dir: Path, receipt, *, version: str | None, extras: list[str] | None = None, core=None,
 ):
     """What one generation build is asked to do: the bash argv on POSIX, a
     :class:`_WindowsBuild` on Windows, where the build is a Python call."""
     if _is_windows():
         effective = receipt.extras if extras is None else extras
-        return _WindowsBuild(receipt.source, list(effective), version)
+        return _WindowsBuild(receipt.source, list(effective), version, core)
     return _build_argv(install_dir, receipt, version=version, extras=extras)
 
 
@@ -780,7 +1163,12 @@ _NETWORK_FAILURE_RE = re.compile(
     r"temporary failure in name resolution|name or service not known|"
     r"request failed after \d+ retries|error sending request|"
     r"tcp connect error|connection refused|connection reset|"
-    r"timed out|failed to connect",
+    r"timed out|failed to connect|"
+    # uv with UV_OFFLINE / --offline, or a cache miss it may not fill: the network
+    # is the cause and is off on purpose or by policy ("Packages were unavailable
+    # because the network was disabled", "Network connectivity is disabled, but
+    # the requested data wasn't found in the cache").
+    r"network was disabled|network connectivity is disabled",
     re.IGNORECASE,
 )
 #: A certificate or TLS failure: reachability is not the problem, trust is.
@@ -950,8 +1338,158 @@ def index_failure_hint(
     return "\n".join(lines)
 
 
+_BUILD_WARNING_PREFIX = "install_generation: WARNING:"
+
+
+def _echo_build_warnings(stderr: str) -> None:
+    """Re-echo the builder's WARNING lines from a SUCCESSFUL build's *stderr*.
+
+    The rest of the captured stderr is uv's progress and is discarded on success.
+    The WARNING lines are not: one says the install resolved UNCONSTRAINED because
+    the package predates constraints.txt, another that ``NX_INSTALL_UNPINNED=1``
+    switched the lock off (nexus-2k66t.4.1). An operator who asked for a rollback
+    or an opt-out needs to read them. Every POSIX path that runs a builder script
+    and captures its stderr (``_build_flip_shims``, ``_converge_legacy_install``)
+    calls this; Windows builds in-process, so ``generation_core`` writes the same
+    lines straight to the console.
+    """
+    for line in stderr.splitlines():
+        if line.startswith(_BUILD_WARNING_PREFIX):
+            click.echo(line, err=True)
+
+
+#: uv's wording when a pinned wheel has no build for this platform tag, e.g.
+#: "onnxruntime==1.24.2 has no wheels with a matching platform tag (e.g.,
+#: `macosx_13_0_arm64`)". Matched only on macOS (see platform_failure_hint).
+# uv's resolver failure for a wheel with no tag for this macOS: "... has no wheels
+# with a matching platform tag (e.g. `macosx_13_0_arm64`)". Only that phrase, and
+# only with a macOS below 14 named, carries the floor; a wheel URL in a network
+# failure or another package's "current platform" error does not.
+_PLATFORM_TAG_FAILURE_RE = re.compile(
+    r"matching platform tag.{0,40}?macosx_(?:1[0-3]|[1-9])_\d+_", re.IGNORECASE | re.DOTALL,
+)
+
+
+def _host_system() -> str:
+    """``sys.platform``, behind a seam so a test can pose as macOS without patching ``sys``."""
+    return sys.platform
+
+
+def platform_failure_hint(stderr: str, *, system: str | None = None) -> str | None:
+    """Name the macOS floor when a build died resolving a platform tag, or ``None``.
+
+    The pinned dependency set includes onnxruntime (the embedder runtime), which
+    ships only macOS 14 wheels from 1.24 on, so a macOS 13 or Intel Mac fails the
+    resolve with a platform-tag message that reads like a nexus fault. *system*
+    is injectable for tests; it defaults to ``sys.platform``. Stdlib only.
+    """
+    plat = _host_system() if system is None else system
+    if plat != "darwin" or not _PLATFORM_TAG_FAILURE_RE.search(stderr):
+        return None
+    return (
+        "nexus requires macOS 14 or later on Apple Silicon: the embedder runtime "
+        "(onnxruntime) ships only macOS 14 wheels from 1.24 on, so this Mac cannot "
+        "install it. Upgrade macOS, or use a Linux or Windows host."
+    )
+
+
+def _with_platform_hint(detail: str) -> str:
+    """*detail* with the macOS-floor hint above it when it applies."""
+    hint = platform_failure_hint(detail)
+    return f"{hint}\n\nuv output:\n{detail}" if hint else detail
+
+
+def _run_build(argv: list[str], *, progress: bool) -> "subprocess.CompletedProcess[str]":
+    """Run one generation build, capturing stdout and stderr. With *progress*
+    the builder's stderr is also written through to this process's stderr as it
+    arrives (uv's download progress), so a long fetch is visible."""
+    if not progress:
+        return subprocess.run(  # noqa: S603 — fixed argv, no shell
+            argv_off_cwd(argv), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
+        )
+    import threading  # noqa: PLC0415 — stdlib, only this path
+
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        argv_off_cwd(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+        env=_script_env(),
+    )
+    captured: list[str] = []
+
+    def _pump() -> None:
+        assert proc.stderr is not None
+        for chunk in iter(lambda: proc.stderr.readline(), ""):
+            captured.append(chunk)
+            try:
+                sys.stderr.write(chunk)
+                sys.stderr.flush()
+            except (OSError, ValueError, AttributeError):
+                pass  # a dead stderr must not stop this drain: uv would block on a full pipe
+
+    pump = threading.Thread(target=_pump, daemon=True)
+    pump.start()
+    out = proc.stdout.read() if proc.stdout is not None else ""
+    proc.wait()
+    pump.join(timeout=5)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, "".join(captured))
+
+
+def _stderr_is_a_terminal() -> bool:
+    try:
+        return sys.stderr is not None and sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _progress_kwarg(fn, progress: bool) -> dict[str, bool]:
+    """``{"progress": progress}`` when *fn* takes it, else ``{}``: a target release's
+    ``generation_core`` older than nexus-2k66t.4.7 builds quietly, as it always did,
+    rather than being refused for a keyword it predates."""
+    import inspect  # noqa: PLC0415 — stdlib, only the Windows build path
+
+    try:
+        params = inspect.signature(fn).parameters
+        accepts = "progress" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+    except (TypeError, ValueError):
+        accepts = False
+    return {"progress": progress} if accepts else {}
+
+
+def _verify_kwarg(fn) -> dict:
+    """``{"verify": _require_readable_receipt}`` when *fn* names a ``verify`` parameter, else
+    ``{}``. Strict: a ``**kwargs`` that would swallow the argument without running it does not
+    count, because a check that silently does not run is the failure this exists to stop."""
+    import inspect  # noqa: PLC0415 — stdlib, only the Windows convergence path
+
+    try:
+        accepts = "verify" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    return {"verify": _require_readable_receipt} if accepts else {}
+
+
+def _without_pdf_kwarg(fn) -> dict:
+    """``{"without_pdf": True}`` when *fn* names a ``without_pdf`` parameter, else ``{}``.
+    Strict like :func:`_verify_kwarg`: a ``**kwargs`` that would swallow it does not count,
+    because a build that still adds the stack after saying it would not is the failure."""
+    import inspect  # noqa: PLC0415 — stdlib, only the Windows convergence path
+
+    try:
+        accepts = "without_pdf" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    return {"without_pdf": True} if accepts else {}
+
+
+def _tail(text: str, lines: int = 15) -> str:
+    """The last *lines* lines of *text*."""
+    return "\n".join(text.splitlines()[-lines:])
+
+
 def _build_flip_shims(
     build, *, install_dir: Path, tools: Path, bin_dir: Path, bootstrap: bool = False,
+    progress: bool = False,
 ) -> Path:
     """Run one generation build, flip ``current`` to it, write the shims.
 
@@ -966,18 +1504,26 @@ def _build_flip_shims(
     """
     tools.mkdir(parents=True, exist_ok=True)
     if isinstance(build, _WindowsBuild):
-        return _windows_build_flip_shims(build, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
-    built = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
-    )
+        return _windows_build_flip_shims(
+            build, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap, progress=progress,
+        )
+    built = _run_build(build, progress=progress)
     if built.returncode != 0:
         detail = built.stderr.strip()
-        hint = index_failure_hint(detail, bootstrap=bootstrap)
-        if hint is None:
-            raise click.ClickException(f"generation build failed:\n{detail}")
-        raise click.ClickException(
-            f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
+        hint = "\n".join(
+            h for h in (
+                index_failure_hint(detail, bootstrap=bootstrap), platform_failure_hint(detail),
+            ) if h
         )
+        # A streamed build already showed uv's output: repeat only its tail.
+        shown = _tail(detail) if progress else detail
+        label = "uv output (last lines; the full output is above)" if progress else "uv output"
+        if not hint:
+            raise click.ClickException(f"generation build failed:\n{shown}")
+        raise click.ClickException(
+            f"generation build failed:\n{hint}\n\n{label}:\n{shown}"
+        )
+    _echo_build_warnings(built.stderr)
     generation = Path(built.stdout.strip().splitlines()[-1])
     _flip_and_shim(generation, install_dir=install_dir, tools=tools, bin_dir=bin_dir, bootstrap=bootstrap)
     return generation
@@ -991,11 +1537,110 @@ def _flip_and_shim(
     build, on their own, so a bootstrap that died between the build and them can
     finish without building again."""
     tools.mkdir(parents=True, exist_ok=True)
+    _require_readable_receipt(generation)
     if _is_windows():
         _windows_flip_and_path(generation, tools=tools, bootstrap=bootstrap)
         return
     _sh(install_dir, f'nx_flip_current "{generation}" "{tools}"')
     _sh(install_dir, f'nx_write_shims "{generation}" "{bin_dir}"')
+
+
+class UnreadableReceiptError(click.ClickException):
+    """A built generation whose receipt this nx cannot read; ``current`` was not moved.
+    *generation* is the directory that was built."""
+
+    def __init__(self, message: str, generation: Path) -> None:
+        super().__init__(message)
+        self.generation = generation
+
+
+def _build_flip_shims_or_fall_back(
+    staged, build, *, install_dir: Path, tools: Path, bin_dir: Path, progress: bool, running_build,
+) -> Path:
+    """:func:`_build_flip_shims`, and once, when the release being installed wrote a receipt this
+    nx cannot read, again with the RUNNING release's installer (nexus-ff366).
+
+    Refusing is right for a person at a prompt and wrong for the hook's ``--auto`` run: the target
+    keeps writing the same receipt, so every session start would spend a full build (minutes, about
+    a gigabyte) to refuse again, and each refusal leaves a complete generation on disk that counts
+    against the keep-3 rule. The running installer writes a receipt this nx reads by construction,
+    so the install ends at the same version with the running release's lock; one stderr line and a
+    warning-level log say that. The unreadable generation is removed: it never held ``current``.
+    Nothing falls back when the build already was the running installer's (*staged* has no
+    installer), because that would loop. *running_build* returns the build request for the running
+    installer."""
+    try:
+        return _build_flip_shims(
+            build, install_dir=install_dir, tools=tools, bin_dir=bin_dir, progress=progress,
+        )
+    except UnreadableReceiptError as exc:
+        if staged.install_dir is None and staged.core is None:
+            raise
+        note = (
+            f"the installer of the release being installed wrote a receipt this nx cannot read "
+            f"({exc.generation.name}); building again with the installer of the running release"
+        )
+        click.echo(note, err=True)
+        import structlog  # noqa: PLC0415 — deferred
+
+        structlog.get_logger(__name__).warning(
+            "target_installer_fallback", note=note, generation=str(exc.generation),
+        )
+        _discard_unflipped_generation(exc.generation, tools)
+        return _build_flip_shims(
+            running_build(), install_dir=install_dir, tools=tools, bin_dir=bin_dir, progress=progress,
+        )
+
+
+def _discard_unflipped_generation(generation: Path, tools: Path) -> None:
+    """Remove a generation this process just built and refused to flip to, so a retry does not
+    leave a complete, receipted tree for the keep-3 rule to count. Only a generation directly
+    under *tools* that neither ``current`` nor ``previous`` names; best effort, never raises."""
+    import shutil  # noqa: PLC0415 — stdlib, only this path
+
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    try:
+        if not (_same_dir(generation.parent, tools) and _is_generation_name(generation.name)):
+            return
+        platform = _plat()
+        held = [_current_generation_dir(tools), _previous_target(tools)]
+        key = install_layout.compare_key(generation, platform=platform)
+        if any(h is not None and install_layout.compare_key(h, platform=platform) == key for h in held):
+            return
+        shutil.rmtree(generation)
+    except Exception as exc:  # noqa: BLE001 — a leftover is the cost; the install goes on
+        import structlog  # noqa: PLC0415 — deferred
+
+        structlog.get_logger(__name__).warning(
+            "unflipped_generation_not_removed", generation=str(generation), error=str(exc),
+        )
+
+
+def _require_readable_receipt(generation: Path) -> None:
+    """Refuse, before ``current`` moves, a built *generation* whose receipt this
+    nx cannot read (nexus-lvvhm).
+
+    The receipt is written by the installer of the release being installed
+    (nexus-2k66t.4.3) and read back by every step after the flip: the version
+    check, the reap, the PDF and lock rungs, ``nx doctor``. The reader accepts a
+    newer schema (:data:`nexus._install.layout_core.RECEIPT_SCHEMA` has the
+    rule), so what is refused here is a receipt that is missing, not JSON, below
+    the schema this nx reads, or lacking a field it needs. Checking here, rather
+    than refusing the target up front, keeps an upgrade that is fine from being
+    blocked by a number, and fails before the flip when it is not."""
+    from nexus import install_layout  # noqa: PLC0415 — deferred import
+
+    try:
+        install_layout.read_receipt(generation)
+    except (install_layout.InstallLayoutError, OSError) as exc:
+        raise UnreadableReceiptError(
+            f"the generation {generation.name} was built, but this nx cannot read its receipt: {exc}\n"
+            "`current` was not moved; the install in use is unchanged. The release being installed "
+            "wrote a receipt this version cannot use. NX_INSTALL_RUNNING_INSTALLER=1 builds with the "
+            "installer of the running release instead.",
+            generation,
+        ) from exc
 
 
 def _echo_path_result(result) -> None:
@@ -1007,16 +1652,19 @@ def _echo_path_result(result) -> None:
 
 def _windows_build_flip_shims(
     build: _WindowsBuild, *, tools: Path, bin_dir: Path, bootstrap: bool = False,
+    progress: bool = False,
 ) -> Path:
     """The Windows twin of the build, flip and shim steps, through
     ``generation_core``: the shim step is the user PATH entry. A build failure
     keeps the POSIX path's wording and its package-index diagnosis; nothing is
-    flipped unless the build finished."""
-    core = _generation()
+    flipped unless the build finished. *progress* streams uv's stderr and prints
+    a heartbeat while it is silent, as the POSIX build's ``_run_build`` does
+    (nexus-2k66t.4.7)."""
+    core = build.core or _generation()
     try:
         generation = core.build_generation(
             build.source, version=build.version or "", extras=build.extras, tools=tools,
-            platform=_plat(),
+            platform=_plat(), **_progress_kwarg(core.build_generation, progress),
         )
     except core.GenerationError as exc:
         detail = str(exc)
@@ -1026,6 +1674,7 @@ def _windows_build_flip_shims(
         raise click.ClickException(
             f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         ) from exc
+    _require_readable_receipt(generation)
     _windows_flip_and_path(generation, tools=tools, bootstrap=bootstrap)
     return generation
 
@@ -1187,10 +1836,30 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
                 f"(source {receipt.source}, extras {','.join(receipt.extras) or 'none'})"
             )
             if not dry_run:
-                target = _build_flip_shims(
-                    _build_argv(install_dir, receipt, version=uv_version),
-                    install_dir=install_dir, tools=tools, bin_dir=bin_dir,
-                )
+                takeover_extras = _carry_pdf_forward(receipt, list(receipt.extras))
+                # nexus-vyy65: the same slim-and-say-so rule as every other build.
+                takeover_extras = _slim_on_runtime_gap(takeover_extras, note=lines)
+                # The uv tree's own package is on disk and IS the release being
+                # built: its installer is read there, nothing is fetched.
+                with _target_installer(
+                    receipt.source, version=uv_version, extras=takeover_extras,
+                    package_root=_site_packages(legacy),
+                ) as staged:
+                    target = _build_flip_shims_or_fall_back(
+                        staged,
+                        _build_argv(
+                            staged.install_dir or install_dir, receipt, version=uv_version,
+                            extras=takeover_extras,
+                        ),
+                        install_dir=install_dir, tools=tools, bin_dir=bin_dir,
+                        # Interactive `nx upgrade` waits on this build; the hook's background
+                        # --auto run has no terminal and stays captured (nexus-2k66t.4.7).
+                        progress=_stderr_is_a_terminal(),
+                        running_build=lambda: _build_argv(
+                            install_dir, receipt, version=uv_version, extras=takeover_extras,
+                        ),
+                    )
+                    _warn_on_version_skew(staged, target)
                 lines.append(f"installed {target.name}")
                 taken = []  # _build_flip_shims wrote the shims
     if taken:
@@ -1208,6 +1877,14 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
         if not dry_run:
             _register_legacy_tree_if_present(install_dir, tools)
     return lines
+
+
+def _site_packages(venv: Path) -> Path | None:
+    """A POSIX venv's ``site-packages``, or ``None``."""
+    for candidate in sorted(venv.glob("lib/python*/site-packages")):
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def _register_legacy_tree_if_present(install_dir: Path, tools: Path) -> Path | None:
@@ -1299,15 +1976,26 @@ def _converge_legacy_install(
         return None
 
     tools.mkdir(parents=True, exist_ok=True)
-    r = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=_script_env(),
-    )
-    if r.returncode != 0:
-        raise click.ClickException(
-            f"legacy migration failed:\n{r.stderr.strip()}"
+    # nexus-2k66t.4.3: the build inside migrate_legacy.sh runs the install_generation.sh of
+    # the release being installed (the newest when no version is asked for), so its lock
+    # pin applies. The script's flip, shims and ledger steps stay the running one's.
+    # --extras is always passed by the script (it adds pdf), hence extras=True.
+    with _target_installer("conexus", version=version, extras=True, purpose="migrate") as staged:
+        env = _script_env()
+        env.pop("NX_MIGRATE_BUILD_SCRIPT", None)
+        if staged.install_dir is not None:
+            env["NX_MIGRATE_BUILD_SCRIPT"] = str(staged.install_dir / "install_generation.sh")
+        r = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            argv_off_cwd(build), capture_output=True, text=True, encoding="utf-8", check=False, env=env,
         )
+        if r.returncode != 0:
+            detail = _with_platform_hint(r.stderr.strip())
+            raise click.ClickException(f"legacy migration failed:\n{detail}")
+        _echo_build_warnings(r.stderr)
 
-    out = r.stdout.strip()
+        out = r.stdout.strip()
+        if out:
+            _warn_on_version_skew(staged, Path(out.splitlines()[-1]))
     if not out:
         # migrate_legacy.sh's documented clean no-op: uv resolved and found no
         # legacy tree. Reaching it HERE is a contradiction -- we only got here
@@ -1337,24 +2025,63 @@ def _windows_converge_legacy_install(
     """The Windows twin of the legacy convergence, ``generation_core.migrate_legacy``:
     extras read from uv's receipt one last time, a generation built beside uv's
     tree, ``current`` flipped, launcher shims written, the legacy tree
-    registered in the ledger as a junction. Never reaps, never uninstalls."""
-    core = _generation()
+    registered in the ledger as a junction. Never reaps, never uninstalls.
+
+    A legacy tree predates the PDF split, so the build adds ``pdf``; on a machine that cannot
+    load the stack it goes slim and says so (nexus-vyy65)."""
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import
+
+    _kept, slim_line = pdf_stack.drop_pdf_on_runtime_gap(["pdf"])
+    if slim_line is not None:
+        click.echo(slim_line)
     if dry_run:
         click.echo(
             "generation_core.migrate_legacy --source conexus"
             + (f" --version {version}" if version else "")
         )
         return None
-    try:
-        generation = core.migrate_legacy(
-            "conexus", version=version or "", tools=tools, platform=_plat(),
-            on_path=_echo_path_result,
-        )
-    except core.GenerationError as exc:
-        detail = str(exc)
-        hint = index_failure_hint(detail)
-        message = f"{hint}\n\nuv output:\n{detail}" if hint else detail
-        raise click.ClickException(f"legacy migration failed:\n{message}") from exc
+    # nexus-2k66t.4.3: the TARGET release's migrate_legacy runs whole when it can (its build,
+    # flip and PATH entry are one call here); its own GenerationError class is the one caught.
+    with _target_installer("conexus", version=version, extras=True, purpose="migrate") as staged:
+        core = staged.core or _generation()
+        # nexus-lvvhm: the receipt the build wrote is read back BEFORE `current` flips. The flip is
+        # inside the target's migrate_legacy, so the check goes in as its `verify` argument: a call
+        # AROUND it could only run after the flip. A target core that predates the argument cannot
+        # take it, and there is no seam to the flip in it, so the convergence is built by the running
+        # release's core instead (the same remedy as NX_INSTALL_RUNNING_INSTALLER=1) and says so.
+        verify = _verify_kwarg(core.migrate_legacy)
+        if not verify:
+            note = (
+                "the target release's generation_core cannot check the receipt before it flips `current`; "
+                "converging with the installer of the running release instead"
+            )
+            click.echo(note, err=True)
+            import structlog  # noqa: PLC0415 — deferred
+
+            structlog.get_logger(__name__).warning("target_installer_fallback", note=note, source="conexus")
+            core = _generation()
+            verify = _verify_kwarg(core.migrate_legacy)
+        slim = _without_pdf_kwarg(core.migrate_legacy) if slim_line is not None else {}
+        if slim_line is not None and not slim:
+            # A target core that predates the keyword would add pdf regardless of what was just
+            # said. The running release's core has it: converge with that one.
+            core = _generation()
+            verify = _verify_kwarg(core.migrate_legacy)
+            slim = _without_pdf_kwarg(core.migrate_legacy)
+        try:
+            generation = core.migrate_legacy(
+                "conexus", version=version or "", tools=tools, platform=_plat(),
+                on_path=_echo_path_result, **slim,
+                # a person waits on this (nexus-2k66t.4.7); a target core older than that has no keyword
+                **_progress_kwarg(core.migrate_legacy, True),
+                **verify,
+            )
+        except core.GenerationError as exc:
+            detail = str(exc)
+            hint = index_failure_hint(detail)
+            message = f"{hint}\n\nuv output:\n{detail}" if hint else detail
+            raise click.ClickException(f"legacy migration failed:\n{message}") from exc
+        _warn_on_version_skew(staged, generation)
     if generation is None:
         raise click.ClickException(
             "this nx looks like a packaged uv-tool install, but the migration "
@@ -1412,15 +2139,19 @@ def _sh(install_dir: Path, snippet: str, *, check: bool = True) -> str:
 
 def _reap_generations(
     install_dir: Path, tools: Path, *, keep: int,
-    self_generation: Path | None, dry_run: bool = False,
+    self_generation: Path | None, dry_run: bool = False, remove_launchers: bool = True,
 ) -> list[str]:
     """Run gc.sh's reap once and return its report lines (``reaped``,
     ``would reap``, ``kept ...: held by ...``). The four never-delete rules
     live in gc.sh; this passes rule (d) when the caller runs from a
     generation and never raises: a reap that cannot run leaves the trees
-    where they are, which is the safe direction."""
+    where they are, which is the safe direction. *remove_launchers* is Windows
+    only (see :func:`_windows_reap`)."""
     if _is_windows():
-        return _windows_reap(tools, keep=keep, self_generation=self_generation, dry_run=dry_run)
+        return _windows_reap(
+            tools, keep=keep, self_generation=self_generation, dry_run=dry_run,
+            remove_launchers=remove_launchers,
+        )
     self_arg = f' --self "{self_generation}"' if self_generation is not None else ""
     dry_arg = " --dry-run" if dry_run else ""
     out = _sh(
@@ -1433,6 +2164,7 @@ def _reap_generations(
 
 def _windows_reap(
     tools: Path, *, keep: int, self_generation: Path | None, dry_run: bool,
+    remove_launchers: bool = True,
 ) -> list[str]:
     """The Windows reap: ``generation_core.reap``, then uv's old launchers.
 
@@ -1443,6 +2175,13 @@ def _windows_reap(
     read BEFORE the reap deletes it, else the distribution's declared console
     scripts. Never anything else, and never when ``current\\bin`` has no
     replacement.
+
+    *remove_launchers* False skips that second half. The bootstrap passes False:
+    on a first install there is no uv tree to have owned a launcher, uv's bin
+    directory (``~/.local/bin``) is shared with pipx and others, and Windows has
+    no foreign-program refusal for it (the shim refusal returns early there), so
+    an ``nx.exe`` in it that is not nexus's would be deleted on the strength of a
+    name match alone.
     """
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
@@ -1458,7 +2197,7 @@ def _windows_reap(
         # A reap that cannot run leaves the trees where they are.
         click.echo(f"nexus: generation reap did not run: {exc}", err=True)
         return []
-    if legacy.is_dir():
+    if not remove_launchers or legacy.is_dir():
         return lines  # uv's tree is still there (held, or registered for a later pass)
     try:
         current = install_layout.current_generation(tools=tools, platform="win32")
@@ -1530,14 +2269,16 @@ def self_group() -> None:
 @click.option("--version", default=None,
               help="Install this version instead of whatever the source resolves to.")
 @click.option("--extras", "extras", multiple=True,
-              help="Extra(s) to ADD, e.g. --extras local (repeatable, or "
+              help="Extra(s) to ADD, e.g. --extras pdf (repeatable, or "
                    "comma-separated). MERGED with the extras this install "
-                   "already has — never replaces them (nexus-pffc4).")
+                   "already has — never replaces them (nexus-pffc4). With "
+                   "--bootstrap they are the first install's extras.")
 @click.option("--bootstrap", is_flag=True,
               help="First install from nothing: build the released package, at the version "
-                   "of the nx running this command and with no extras, into a new "
-                   "generation. Takes neither --version nor --extras, does not prune "
-                   "uv's package cache, and refuses when an install already exists.")
+                   "of the nx running this command and with the --extras named (none by "
+                   "default; the plugin setup passes pdf), into a new generation. Takes no "
+                   "--version, does not prune uv's package cache, and refuses when an "
+                   "install already exists.")
 @click.option("--dry-run", is_flag=True,
               help="Print the build command and stop.")
 def install_cmd(
@@ -1554,6 +2295,7 @@ def install_cmd(
     """
     generation = perform_self_install(
         keep=keep, version=version, dry_run=dry_run, add_extras=extras, bootstrap=bootstrap,
+        progress=True,  # interactive: install.ps1, the setup build and a person at a prompt (nexus-2k66t.4.7)
     )
     if generation is None:
         return

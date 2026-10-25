@@ -1023,6 +1023,17 @@
           },
           "mode": {
             "type": "string"
+          },
+          "slim": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [

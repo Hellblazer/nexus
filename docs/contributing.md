@@ -36,14 +36,16 @@ the nexus-service; for that stack use `nx daemon service start|stop|status`.
 ## Running Tests
 
 ```bash
-uv run pytest                         # full suite, no API keys needed
+uv run pytest -n auto                 # full unit suite in parallel (no API keys needed)
+uv run pytest                         # serial fallback, for debugging
+uv run pytest -m lint                 # repo-structure meta-tests, PR-gated in CI
 uv run pytest -m integration          # E2E tests (requires real API keys)
 uv run pytest --cov=nexus             # with coverage
 uv run pytest tests/test_indexer.py   # single file
 uv run pytest -k "test_frecency"      # by name pattern
 ```
 
-Unit tests use `InMemoryVectorClient` + bundled ONNX MiniLM model — no accounts needed.
+Unit tests use `InMemoryVectorClient` + bundled ONNX MiniLM model — no accounts needed. The default selection (`-m 'not integration and not slow and not lint'`) leaves out the integration, slow and lint buckets, so a bare `uv run pytest` is not everything CI runs. After a pull, a rebase, or any edit under `service/`, run `scripts/build-gate-jar.sh` before the first substrate-backed test; a session refuses to start on a stale jar (exit 75). [test-running](agents/test-running.md) has the hand-run rules and the engine-substrate details.
 
 For integration tests: copy `.env.example` to `.env`, fill in your keys, then:
 
@@ -229,7 +231,7 @@ Do not bump these without testing the full chunking pipeline.
 
 - Branch naming: `feature/<bead-id>-<short-description>`
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge (or merge-then-tag).
-- `main` is fully PR-gated, release version-bumps included (nexus-mkj6u replaced the prior direct-to-main carve-out). See Release Process below.
+- `main` takes changes through PRs only, release version-bumps included (nexus-mkj6u replaced the prior direct-to-main carve-out). That is policy, held by the push guard and the release skill, not by the branch protection (below). See Release Process below.
 - **Pushing `develop` from the shared checkout goes through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6). Every session commits as the same git user, so the outbound range cannot be attributed by author; the script fetches, lists `origin/develop..develop`, and pushes only when that range equals the commits you vouch for on the command line. An unvouched commit, a vouched commit that is not in the range, or a diverged branch refuses with a `PUSH_REFUSED_*` line and pushes nothing. From a detached worktree based on `origin/develop`, `NX_PUSH_SOURCE=HEAD` pushes your worktree's commits and leaves the local `develop` (a peer's in-flight tree) alone. `git commit --amend` in the primary checkout is refused by the user-level policy hook when HEAD is not a commit this session made (`tests/fixtures/hal_git_policy_hook.py` rule 3); amend in a worktree you own, or make a new commit. Rule 5 below applies to an amend too, so even on your own tip it must name its paths. The same hook (rule 4) denies a bare `git push` to `develop` in any repo whose toplevel carries the script, so the script is the only unblocked path; `# routing-allow: <reason>` is the audited escape. The script also takes the `lock/ci-develop-push` tuple-space lock immediately before the push and releases it right after (nexus-agctp), refusing with `PUSH_REFUSED_LOCK_HELD` (naming the holder and lease expiry) or `PUSH_REFUSED_LOCK_UNREACHABLE`; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape.
 
 - **Commits in the shared primary must name their paths, and the push audits what they contain** (nexus-bbriq). Vouching is by SHA: it proves you made the commit and says nothing about what is in it. On 2026-09-17 a peer had staged a 740-line `docs/rdr/rdr-212-*.md` draft in the shared index; an accept commit ran `git add <two paths>` then a bare `git commit`, which commits the whole INDEX, so the peer's draft rode `0249b0c98` to `origin/develop` past every check. Two guards now:
@@ -241,18 +243,24 @@ Do not bump these without testing the full chunking pipeline.
 - **`nx init` / `nx upgrade` install a machine-wide `bd prime` file** (nexus-cnzei.8) when `bd` or the beads Claude Code plugin is detected: a short, generic, conexus-managed `PRIME.md` at the OS user config directory `bd` itself falls back to when no repo-level `.beads/PRIME.md` exists (macOS `~/Library/Application Support/beads/PRIME.md`; Linux `$XDG_CONFIG_HOME/beads/PRIME.md` or `~/.config/beads/PRIME.md`; Windows `%AppData%/beads/PRIME.md`). This is separate from — and applies to every beads repo on the machine, not only — this repo's own tracked `.beads/PRIME.md`, which still wins when present. beads 1.2.x still appends its own `bd remember` memories after this file; installing it does not stop that. The installed marker records a hash of its body, so a hand edit under an intact marker is detected and never overwritten (same protection as an unmarked hand-authored file); `nx uninstall` removes the file only when that hash still matches. Opt out per-run with `--no-beads-prime`, or persistently with `nx config set beads_prime.manage false`; deleting the file restores `bd`'s own default. `nx doctor`'s "Beads PRIME.md (user-level)" row reports its state and the same undo text.
 - **Code review**: Plans include review tasks after implementation phases. Use `/conexus:review-code` or dispatch `code-review-expert` at the designated plan steps.
 
-Both `main` and `develop` carry branch protection. Configure at
-https://github.com/Hellblazer/nexus/settings/branches:
+Both `main` and `develop` carry branch protection. Read the live settings with
+`gh api repos/Hellblazer/nexus/branches/develop/protection` (and `.../main/...`);
+the settings page is https://github.com/Hellblazer/nexus/settings/branches. As of
+2026-10-24 they are:
 
-- **Rules** (apply to both `main` and `develop`):
-  - Require a pull request before merging
-  - Require status checks to pass before merging:
-    - `pytest-gate` (one required check on both `main` and `develop`; it fans
-      in over the sharded hosted pytest matrix, plus the lint and census legs. The
-      swap from the prior `pytest (Python 3.12)` / `pytest (Python 3.13)`
-      two-check shape happened at nexus-n0ful)
-  - Require branches to be up to date before merging
-  - Do not allow force-pushes (the develop reset on 2026-05-21 was a one-time bypass via the API; routine resets are not permitted).
+- **Required status checks** (the same three on both branches):
+  - `pytest-gate` (it fans in over the sharded pytest matrix, on the lab pool or hosted runners, plus the
+    lint and census legs; it replaced the two `pytest (Python 3.12)` /
+    `pytest (Python 3.13)` checks at nexus-n0ful)
+  - `service change detection`
+  - `Java tests + jOOQ codegen drift guard`
+- **Up to date before merging:** required on `develop`, not on `main`.
+- **Pull request required:** not at the protection level, on either branch.
+  `develop` takes direct pushes through `scripts/git-push-develop.sh`, and the
+  PR-only rule for `main` is policy plus the push guard.
+- **Force-pushes and deletions:** not allowed on either branch (the develop reset
+  on 2026-05-21 was a one-time bypass via the API; routine resets are not permitted).
+- **Administrators:** the rules are not enforced for them.
 
 ## License
 
@@ -272,282 +280,15 @@ editions. This is what keeps the dual-license offer viable.
 
 ## Release Process
 
-Every step below is **required**. Missing any one of them has caused problems in the past — hence the explicit checklist.
+The `release` skill (`.claude/skills/release/SKILL.md`, also `/conexus:release`) is the executable checklist and the authority for a client release; `.claude/rules/releases-and-engine.md` has the short rules and the engine-service cut has its own skill (`engine-release`). This page keeps what those do not: the plugin channel cut, the schema/data-migration rationale, break-glass, the file quick reference and the one-time setup. A step-by-step copy used to live here and drifted from the skill, so it was removed; do not rebuild one.
 
-### Step-by-step checklist
+Three rules hold for every release:
 
-0. **Engine-freshness gate (BLOCKING — run before everything else)**
-   ```bash
-   uv run python scripts/check_engine_release_floor.py
-   ```
-   Non-zero exit = STOP. Do not proceed with the PyPI release: cut, deploy,
-   and cloud-gate a fresh `engine-service-v*` tag first (the `engine-release`
-   skill / `docs/agents/engine-service-release.md`), bump
-   `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py` to that tag
-   (this alone also moves the fresh-install pin, `PINNED_SERVICE_TAG`), then
-   re-run the script until it exits 0. This is a command gate, not an
-   eyeball check — the prose version of this step was routinely skipped and
-   let releases ship against a stale, un-cloud-validated engine
-   (nexus-i5c2u).
+- **The releaser is human.** AI prepares the release branch; the explicit "cut the release" and "tag and push" come from Sam.
+- **Work in a release worktree off `origin/develop`**, never in the shared primary checkout, which keeps `develop` checked out (AGENTS.md worktree rules 2 to 4). The release branch is cut from `develop`, not `main`, because a release promotes `develop`'s state; `origin/main` is merged into the branch first so the release-only files resolve there and not in the PR.
+- **Nothing lands on `main` except through the release PR** (merged with `--merge`, never `--squash`, so the release commit keeps its SHA). The tag points at the merge commit.
 
-   **Paired release** (Hal directive 2026-08-02): when this release bumps the
-   floor to an engine tag whose deploy fires AT client-tag push, cloud-behind
-   pre-tag is EXPECTED, not drift. Re-run with `--paired-deploy` naming the
-   exact tag (nexus-k1c08):
-   ```bash
-   uv run python scripts/check_engine_release_floor.py --paired-deploy engine-service-vX.Y.Z
-   ```
-   The flag accepts a below-floor cloud only when the named tag independently
-   verifies as a published (non-draft, with the `nexus-service-linux-amd64`
-   asset) GH release, exactly equal to `REQUIRED_ENGINE_VERSION`, the newest
-   published engine tag, and recent (72h) — any single miss stays red with a named reason. On acceptance it prints a
-   "PAIRED MODE" acknowledgment and a POST-TAG VERIFY obligation: once the
-   deploy lands, re-run the same command WITHOUT `--paired-deploy` to confirm
-   convergence; escalate loudly if it is still behind at that point.
-
-   The reverse direction — an engine deploying ahead of the client commits
-   it requires — is a separate mode of the same script,
-   `check_engine_release_floor.py --client-precondition <engine-tag>`,
-   run from the `engine-release` skill before a new `engine-service-v*` tag
-   deploys (nexus-9ssih deploy order); it is not part of this PyPI checklist.
-
-0b. **Remediation-commit gate — RETIRED 2026-08-24 (nexus-2zmfw).**
-   Removed along with `.release-gates/remediation-snapshot.json` and its
-   script. It gated nothing (0 of 428 non-closed beads named a required
-   commit) while asserting a repo-wide invariant from ONE developer's local
-   clone, dumped and committed by hand — so it could report confident green
-   over a view that never matched reality. Its staleness check keyed on
-   `max(updated_at)` across every bead, closed ones included, so it failed a
-   release on wall-clock rather than on content; that is what blocked v7.16.2.
-   Sequencing a remediation behind a commit remains a bead-authoring
-   convention (`requires-commit: <sha>`); it is no longer a release gate.
-
-1. **Verify the full release test battery passes.** See `AGENTS.md` §
-   Cutting a release, step 1, for the authoritative command list (the
-   release skill's Step 1 restates it) — it changes independently
-   of this pointer and a copy here would drift. The battery's host-side
-   scripts need a Python 3.10 or newer and resolve it themselves
-   (`NX_E2E_PYTHON` overrides; `tests/AGENTS.md` § host requirements).
-
-2. **Audit docs against changes since last release**
-   Run `git log --oneline v<prev>..HEAD` and check each feature/fix against the docs:
-   - `docs/cli-reference.md` — new or changed CLI flags, subcommands
-   - `docs/architecture.md` — new modules, changed module responsibilities
-   - `docs/repo-indexing.md` — indexing pipeline changes, new languages, chunking behavior
-   - `docs/configuration.md` — new config keys or tuning parameters
-   - `docs/storage-tiers.md` — new storage capabilities (export, import, etc.)
-   - `README.md` — high-level feature descriptions, command table
-
-   Every user-visible feature must be documented before release. This step has been skipped
-   in the past and required patch releases to fix — hence it is now mandatory.
-
-3. **Bump the version in `pyproject.toml`**
-   Change the `version` field (e.g. `"1.2.0"` → `"1.3.0"`).
-   Semver: `MAJOR` for breaking changes, `MINOR` for new features, `PATCH` for bug fixes.
-
-4. **Regenerate `uv.lock` and reinstall the local tool**
-   ```bash
-   uv sync
-   scripts/reinstall-tool.sh   # preserves [local] and other extras (mineru is now a default dep)
-   nx --version   # must print X.Y.Z before proceeding
-   ```
-   `uv.lock` **must** be committed — the release pipeline pins exact versions from it.
-
-5. **Update `CHANGELOG.md`**
-   - Move everything under `## [Unreleased]` into a new `## [X.Y.Z] - YYYY-MM-DD` section
-   - Leave a fresh empty `## [Unreleased]` at the top
-   - Group entries under `### Added`, `### Fixed`, `### Changed`, `### Removed`, `### Docs`
-
-6. **Update `conexus/CHANGELOG.md`** (plugin changelog — always, even if no plugin changes)
-   Add a release entry. If there are no plugin-level changes, write:
-   > Plugin version aligned with Nexus CLI X.Y.Z. No plugin-level functional changes.
-
-7. **Bump every manifest in lock-step (CI enforces parity)**
-   Counted from the actual parity tests in `tests/test_plugin_structure.py`
-   (nexus-smsau, 2026-09-27 — this list and AGENTS.md's own copy had
-   drifted to two different counts, "seven" and "six", that also
-   disagreed on WHICH files they meant, and `conexus/.claude-plugin/
-   plugin.json` had NO parity test at all until this same pass added
-   one): **seven** version surfaces (`pyproject.toml` plus the six
-   others below) must equal the new `X.Y.Z`, and every plugin's
-   `source.ref` in `.claude-plugin/marketplace.json` must become
-   `vX.Y.Z`:
-   - `pyproject.toml` — `version` (the canonical source of truth every other surface is checked against)
-   - `mcpb/pyproject.toml` — `version` (`TestMarketplaceVersion::test_mcpb_manifest_version_matches_pyproject`)
-   - `mcpb/manifest.json` — `version` (same test)
-   - `.claude-plugin/marketplace.json` — every plugin's `plugins[].version` (`test_marketplace_version_matches_pyproject`, loops over every entry in the file — currently conexus and sn, but ANY plugin added there is covered without a test edit) **and** every plugin's `plugins[].source.ref` (the pinned tag that decouples installed users from main HEAD; `test_marketplace_source_ref_matches_pyproject` enforces `source.ref == "v" + pyproject.version` per plugin, same loop)
-   - every plugin's own `<plugin>/.claude-plugin/plugin.json` — `version` (`test_every_plugins_own_plugin_json_version_matches_pyproject`, same loop-over-every-plugin shape — today that means both `conexus/.claude-plugin/plugin.json` and `sn/.claude-plugin/plugin.json`; controls each plugin's cache refresh)
-   - `uv.lock` — `version` (`test_uv_lock_version_matches_pyproject`)
-
-   Forgetting any one fails CI parity; forgetting `source.ref` ships a release that installed Claude Code users never receive.
-
-   One more bump target is NOT in the seven above because it is not a version field at all:
-   - `conexus/PENDING_RELEASE.md` — empty the pending-drift list for every entry this release ships (this is a drift LEDGER — nothing here equals `X.Y.Z` — advancing `source.ref` is what makes those plugin changes live; `tests/test_plugin_release_drift_ledger.py` fails on a stale entry)
-
-7a. **Run the fresh-install MVV** (~3-5 min; downloads on first run)
-   ```bash
-   ./tests/e2e/fresh-install-mvv.sh
-   ```
-   The virgin-journey gate (nexus-nolqs): wheel under test → scrubbed-env
-   virgin HOME → local init (ladder converged) → store/index with
-   engine-catalog registration asserted → search → doctor (zero ✗,
-   warnings allowlist reviewed for new drift) → a generation install on that
-   same virgin HOME (leg 9 of 10, nexus-utpuw.19: the only fresh-journey
-   coverage of the `<tools>/gen-<stamp>` + shim path, and the only proof the
-   built WHEEL actually ships `nexus/_install/*.sh` — every other test of
-   `packaged_install_dir()` runs against an editable checkout, where that
-   path exists because the repo does). Complements the upgrade-axis
-   gate (package-upgrade) which starts from a populated
-   install — the 2026-07-21 fresh-box defect class was invisible to every
-   one of them. Must end `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL,
-   release-battery layer)`.
-
-   This is the LOCAL WHEEL layer: it builds and installs the tree under
-   test, so it proves the release candidate works, but it resolves
-   dependencies from `uv.lock`/the wheel's own metadata, not PyPI. It does
-   NOT exercise a fresh `uv tool install`'s independent resolution — that
-   is a separate, POST-publish layer:
-   ```bash
-   ./tests/e2e/fresh-install-mvv.sh --published [X.Y.Z]   # omit X.Y.Z for latest
-   ```
-   `--published` installs the ACTUAL PyPI artifact via
-   `uv tool install conexus[==X.Y.Z]`, isolated to a scrubbed sandbox HOME
-   exactly like the default layer (never touches the live `~/.local/share/uv`
-   or `~/.local/bin`). This is the layer nexus-l2ku5 broke (`mcp>=1.0`
-   resolved `mcp` 2.0.0 fresh from PyPI and killed both MCP servers for 4
-   days while every pre-existing gate ran pinned to the dev venv's
-   `uv.lock` and saw nothing) — it belongs to the POST-publish shakedown
-   (T2 `nexus/shakedown-playbook` §2 S1), not this pre-tag battery, since
-   there is nothing on PyPI yet to install at this point in the checklist.
-   Run it manually after a tag publishes to verify what PyPI is actually
-   serving; see the shakedown playbook for the standing T1 trigger.
-
-7b-7f. **Removed** (cleanup step 11). The sandbox smoke, the sandbox
-   shakedown, the data-token CLI gate, the upgrade shakeout and the
-   generation-flip live-holder gate were deleted with their scripts; the release
-   battery is now exactly the fresh-install MVV (7a), the package-upgrade
-   convergence MVV (`tests/e2e/migration-rehearsal/run.sh --package-upgrade`)
-   and the local-service gate, behind one preflight
-   (`tests/e2e/release-preflight.sh`). The fast-loop generation-flip test
-   (`tests/scripts/test_generation_flip_live_holder.py`) still runs on every
-   `pytest -n auto`.
-
-8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push).
-   Base the release branch on **develop**, not main — a release PROMOTES develop's accumulated
-   state to main (§ Git Workflow above); branching off main would release main's stale tree with
-   new version numbers, omitting everything on develop. Then pre-merge `origin/main` so the
-   always-conflicting release-only files (CHANGELOGs, manifests) are resolved on the branch —
-   a release PR that still conflicts gets NO CI checks (see `.claude/skills/release/SKILL.md`
-   Step 7 for the changelog-union conflict resolution).
-   ```bash
-   git checkout develop && git pull && git checkout -b release/vX.Y.Z
-   git merge origin/main   # resolve release-only conflicts here, not in the PR
-   git add pyproject.toml mcpb/pyproject.toml mcpb/manifest.json uv.lock \
-           CHANGELOG.md conexus/CHANGELOG.md \
-           conexus/.claude-plugin/plugin.json sn/.claude-plugin/plugin.json \
-           .claude-plugin/marketplace.json docs/ \
-           conexus/PENDING_RELEASE.md
-   git commit -m "chore(release): conexus X.Y.Z"
-   git push -u origin release/vX.Y.Z
-   gh pr create --base main --title "release: conexus X.Y.Z"
-   ```
-   Wait for CI green, then `gh pr merge <N> --merge` (NOT `--squash` — preserves the release commit SHA). The tag in step 9 points at the merge commit. The human cuts the release; AI prepares the branch.
-
-8a. **Optional: bump `source.sha` post-merge** (defends against tag force-push)
-   Once step 8's merge lands on `main`, the release commit has a known SHA:
-   ```bash
-   git checkout main && git pull
-   RELEASE_SHA=$(git rev-parse HEAD)
-   # edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA"
-   # alongside "ref": "vX.Y.Z" for both plugins
-   git add .claude-plugin/marketplace.json
-   git commit -m "chore(release): pin sha for vX.Y.Z"
-   git push
-   ```
-   Tradeoff: one extra commit on `main`, but guards against someone
-   force-pushing the `vX.Y.Z` tag afterward. For solo/small-team projects
-   `source.ref` alone is usually sufficient — skip if so.
-
-9. **Tag the merge commit and push — this triggers the full release pipeline**
-   ```bash
-   git checkout main && git pull
-   git tag -a vX.Y.Z -m "conexus X.Y.Z" $(git rev-parse HEAD)
-   git push origin vX.Y.Z
-   ```
-   The `release.yml` workflow:
-   - Verifies the tagged commit already carries a green required check
-     (evidence read from GitHub's check-run record — it does NOT re-run the
-     test suite; the release PR's own CI already tested this tree, and CI
-     Cost Discipline bans testing the same tree twice)
-   - Verifies the tag matches `pyproject.toml` version
-   - Extracts release notes from the matching `## [X.Y.Z]` section in `CHANGELOG.md`
-   - Builds wheel + sdist
-   - Publishes to PyPI via OIDC trusted publisher
-   - Creates a GitHub release with the extracted notes and build artifacts
-
-10. **Verify the release**
-    ```bash
-    gh run watch --interval 60   # the release workflow; ONE watcher per box (AGENTS.md worktree rule 7)
-    gh release view vX.Y.Z
-    uv pip compile --no-deps conexus==X.Y.Z  # confirm version resolves on PyPI
-    ```
-
-11. **Yank pre-release versions** (if applicable)
-    Go to https://pypi.org/manage/project/conexus/releases/ and yank any `rcN`, `alpha`, or `beta` versions that should not be resolved by `pip install conexus`.
-
-11b. **Back-merge `main` into `develop` (MANDATORY, zero-change releases included)**
-    ```bash
-    git checkout develop && git pull
-    git merge origin/main --no-edit    # trivially clean right after a release:
-                                       # the release branch just CONTAINED develop
-    scripts/git-push-develop.sh HEAD     # the merge commit vouches for what it merged in
-    ```
-    Earned by the 2026-07-23 incident: from 6.12.0 through 6.17.0 no release
-    was ever merged back, so develop's seven manifests froze at 6.11.0 — all
-    stale TOGETHER, so the parity tests stayed green on a coherent lie. Every
-    dev-tree install self-identified as 6.11.0, doctor nagged, and the
-    downgrade guard misfired on reinstalls. Running this step immediately
-    after tag-push is the moment the merge is conflict-free by construction
-    (see `.claude/skills/release/SKILL.md` Step 11b).
-
-11c. **Post-publish: published-bytes upgrade journey**
-    Both commands drive the just-published PyPI bytes, not the working
-    tree — "identical tree" is an argument that the pre-tag battery
-    already ran this; it is not a run of the actual published artifact.
-    Run once step 10 confirms PyPI shows the new version.
-    ```bash
-    tests/e2e/fresh-install-mvv.sh --published X.Y.Z    # FRESH-install axis, published bytes
-    NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade   # UPGRADE axis, published bytes
-    ```
-    The first (nexus-796zn) is the post-publish shakedown for a box that
-    has never run conexus before — it belongs here, not in the pre-tag
-    battery, because nothing is on PyPI yet at that point in the
-    checklist. The second (nexus-86mx2) closes the loop the pre-tag
-    `--package-upgrade` run (step 1) cannot: that run always upgrades to
-    the WORKING-TREE wheel, which proves the code but not the actual
-    bytes PyPI now serves — a packaging/MANIFEST.in/dependency-resolution
-    difference at the real `uv tool install`/`pip install` layer (the
-    nexus-l2ku5 shape) is invisible to a worktree-wheel run by
-    construction. `NEXUS_TARGET_RELEASE=X.Y.Z` makes `run.sh` download the
-    real published wheel from PyPI (sha256-verified against PyPI's own
-    JSON API) and upgrade to THAT instead. Must end `PACKAGE-UPGRADE
-    CONVERGENCE MVV PASSED — ... -> published conexus X.Y.Z -> ...`; a
-    plain `-> working tree` here means `NEXUS_TARGET_RELEASE` was not set
-    and the loop was not actually closed.
-
-
-12. **Reinstall local tool and verify**
-    ```bash
-    scripts/reinstall-tool.sh    # preserves [local] and other extras
-    nx --version                 # must print X.Y.Z
-    ```
-    `pyproject.toml` bumps the project version, but the local `nx` shim
-    does not point at a wheel — it resolves `<tools>/current` at spawn
-    time and execs the generation that pointer names. Until this runs,
-    `current` still names the old generation and every new spawn lands
-    there; once it runs, new spawns land in the newly flipped generation
-    while existing holders keep running from theirs. Caught on v4.9.11
-    (`nx --version` reported 4.9.10 even after PyPI showed 4.9.11).
+What the skill walks, in order: the engine-freshness gate (`scripts/check_engine_release_floor.py`, Step 0, blocking) and the preflight (0c); the release battery (`tests/e2e/release-battery.sh` and its legs, Step 1); the docs audit against changes since the last tag (2); the version bump across every manifest, the changelogs, the wire ledger, the privacy-policy date and `uv.lock` (3 to 5); the release branch and PR (7); the pre-push verification (8); tag and push (9), which fires `release.yml`; verification that the workflow, GitHub and PyPI all show the release (10, 11); the mandatory back-merge of `main` into `develop` (11b); the published-bytes journeys (11c); and the local reinstall (12). The checks that gate a tag read GitHub's check-run record and do not re-run the suite on a tree CI already tested.
 
 ### Plugin channel cut (RDR-197)
 
@@ -564,7 +305,7 @@ rules); check them before cutting.
 Command sequence (the script does the work; the human pushes):
 
 ```bash
-# Step 0 — MANDATORY before every cut (AGENTS.md usage-discipline rule 4):
+# Step 0 — MANDATORY before every cut (`docs/agents/plugin-release-channel.md` § Usage discipline):
 tests/e2e/plugin-cut-rehearsal/run.sh --promote-machinery   # container default; --host = fast loop
 # must end: PLUGIN-CUT REHEARSAL PASSED. A rehearsal that passed on a
 # full clone has not rehearsed CI — the runs cover the depth-1 tag leg
@@ -617,9 +358,9 @@ cut derives its number from the new version's (empty) tag list.
 
 ### Schema/data-migration releases (conditional)
 
-Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) carries a schema or data migration — a new Liquibase changeset, a new `upgrade_ladder` rung, or any change to a shape data already has to conform to. Four requirements, none of which the checklist above enforced before this section existed (T2 [22511] gap 9 — no schema-migration protocol existed in any release document; every prior trigger for "is this release safe" reduced to version identity and the standard functional gates, none of which speak to migration risk specifically). Operational checklist form: `.claude/skills/release/SKILL.md` Step 6d (client-side data migrations) and `.claude/skills/engine-release/SKILL.md` Step 5b (engine-side schema DDL). This section is their shared rationale and evidence citations.
+Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) carries a schema or data migration — a new Liquibase changeset, a new `upgrade_ladder` rung, or any change to a shape data already has to conform to. Four requirements, none of which the release checklist enforced before this section existed (T2 [22511] gap 9 — no schema-migration protocol existed in any release document; every prior trigger for "is this release safe" reduced to version identity and the standard functional gates, none of which speak to migration risk specifically). Operational checklist form: `.claude/skills/release/SKILL.md` Step 6d (client-side data migrations) and `.claude/skills/engine-release/SKILL.md` Step 5b (engine-side schema DDL). This section is their shared rationale and evidence citations.
 
-1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see Step 11c above) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents in `rehearse_package_upgrade.sh` and `rehearse_acquire.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
+1. **Populated-store upgrade rehearsal at a stated, representative scale.** The mechanism is `NEXUS_TARGET_RELEASE=X.Y.Z tests/e2e/migration-rehearsal/run.sh --package-upgrade` (published-bytes mode; see the release skill's Step 11c) run against a corpus seeded above a named floor, not the harness's default toy seed (10-30 documents in `rehearse_package_upgrade.sh` and `rehearse_acquire.sh`). State the floor and the actual seed count used in the release relay. If the seed cannot be brought to a genuinely representative scale before deploy, say so explicitly — do not let a toy-scale pass stand in for an at-scale one. RDR-191 is the standing evidence for why this matters: the cloud 385,484-row unify-chunks migration (T2 [22485]) is the only at-scale proof this project has produced for a chunk-table DDL change, and it ran in PRODUCTION — no pre-production rehearsal at that scale has ever happened. Treat that as a named, accepted gap until a representative-scale pre-production rehearsal exists, not a silently inherited one.
 
 2. **A rollback decision point, settled before the deploy relay fires.** Determine explicitly whether the migration can be rolled back after it commits. Non-transactional DDL (`CREATE INDEX CONCURRENTLY`, any Liquibase changeset that cannot run inside a transaction) forfeits the free atomic rollback a transactional migration gets — RDR-191's `nexus-o8dil.22` names this exactly: "CIC, non-blocking, +11%, cannot run in a transaction, and therefore forfeits the free atomic rollback that the local path gets." When the answer is no, write **IRREVERSIBLE** in the relay verbatim, and attach its substitute: a written rollback/abort runbook (exact statements, abort criteria) that exists and is in the operator's hand before the window opens, not improvised mid-window.
 
@@ -629,7 +370,7 @@ Trigger: this release's tag (client `vX.Y.Z` or engine `engine-service-vX.Y.Z`) 
 
 ### Break-glass: retry, yank, revert, and tag retraction
 
-Two prior pointers to this content — `.claude/skills/release/SKILL.md`'s "See also" list and AGENTS.md § Cutting a release, both saying "rollback / one-time setup steps live in `docs/contributing.md` § Release Process" — named nothing until this subsection existed (T2 [22511] Explore sweep, dangling-pointer finding; Step 11 above only ever covered pre-release-version yanking). This is what they were pointing at.
+Two prior pointers to this content — `.claude/skills/release/SKILL.md`'s "See also" list and AGENTS.md § Cutting a release, both saying "rollback / one-time setup steps live in `docs/contributing.md` § Release Process" — named nothing until this subsection existed (T2 [22511] Explore sweep, dangling-pointer finding). This is what they were pointing at.
 
 **Publish failed after the tag already pushed.** Never move, delete, or force-push a published release tag (`vX.Y.Z` or `engine-service-vX.Y.Z`) to retry a failed publish — see "Tag retraction" below for why. Use the `release.yml` `workflow_dispatch` retry path instead: it checks out the ALREADY-PUSHED tag but runs the CURRENT workflow file from `main`, so a bug in the pipeline itself (not the artifact) can be fixed on `main` and re-run against the same immutable tag.
 ```bash
@@ -637,7 +378,7 @@ gh workflow run release.yml --ref main -f tag=vX.Y.Z
 ```
 This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first tag-push run failed because `GITHUB_REF_NAME` resolves to the triggering BRANCH on `workflow_dispatch`, not the tag, so the version-verify step compared `main` against `pyproject.toml`'s `7.7.0` and red'd on the retry path's first real exercise. The fix landed on `main` (`RELEASE_TAG` now resolves from the dispatch's `tag` input when present, mirroring the checkout step), and the SAME `v7.7.0` tag was re-dispatched without ever being moved. Before this path existed, `v7.6.0`'s publish failure (a `twine`/metadata-version mismatch, unrelated to the artifact — `gh-action-pypi-publish`'s bundled twine predated `hatchling`'s Metadata-Version 2.5) had no such recourse and the tag was moved twice to retry — see "Tag retraction" for why that was the wrong fix and is now forbidden.
 
-**PyPI yank for a bad full release** (distinct from Step 11's pre-release-version yank above). PyPI yanking marks a release as yanked; it does not delete it. Effect: `pip install conexus` (unpinned, or a range) stops resolving to the yanked version; an exact pin (`conexus==X.Y.Z`) still installs it, with a warning. It does **not** un-install it from any box that already ran `pip install`/`uv tool install` before the yank, and it does **not** touch `.claude-plugin/marketplace.json`'s `source.ref` on `main` — if the bad release's plugin-side commit already landed and got tagged, `source.ref` still points new `/plugin install` users at that content until a NEW release supersedes it. To yank: https://pypi.org/manage/project/conexus/release/X.Y.Z/ → "Yank release", with a reason. A yank is a signal, not a recall; the actual fix is always a new release.
+**PyPI yank for a bad full release** (distinct from yanking a pre-release version such as an `rcN`, `alpha` or `beta` at https://pypi.org/manage/project/conexus/releases/ so `pip install conexus` does not resolve it). PyPI yanking marks a release as yanked; it does not delete it. Effect: `pip install conexus` (unpinned, or a range) stops resolving to the yanked version; an exact pin (`conexus==X.Y.Z`) still installs it, with a warning. It does **not** un-install it from any box that already ran `pip install`/`uv tool install` before the yank, and it does **not** touch `.claude-plugin/marketplace.json`'s `source.ref` on `main` — if the bad release's plugin-side commit already landed and got tagged, `source.ref` still points new `/plugin install` users at that content until a NEW release supersedes it. To yank: https://pypi.org/manage/project/conexus/release/X.Y.Z/ → "Yank release", with a reason. A yank is a signal, not a recall; the actual fix is always a new release.
 
 **Engine-deploy revert.** The engine-service cloud deployment is conexus-managed infrastructure this repo does not drive directly (`docs/agents/t1-sub-agent-contract.md`'s "Hal relays the cross-instance bus" convention applies here too). A revert is **relay-mediated**, with real limits:
 - There is no button here to press; surface an explicit relay naming the target tag to redeploy (normally the previous `engine-service-v*` identity), never frame it as autonomous.

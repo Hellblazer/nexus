@@ -45,7 +45,9 @@ def _make_executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _stub_uv(bin_dir: Path, *, argv_log: Path, fail_install: bool = False) -> None:
+def _stub_uv(
+    bin_dir: Path, *, argv_log: Path, fail_install: bool = False, fail_constrained: bool = False,
+) -> None:
     """A fake ``uv`` that fabricates a venv and records every invocation.
 
     ``uv venv <dir>`` creates the shape the builder inspects: ``bin/python``
@@ -63,6 +65,13 @@ def _stub_uv(bin_dir: Path, *, argv_log: Path, fail_install: bool = False) -> No
     box tolerated it). Every build in this file therefore pins the flag.
     """
     fail = "exit 1" if fail_install else "exit 0"
+    # fail_constrained fails ONLY the install that carries --constraints: the
+    # second, dependency-bearing step of the pinned build (nexus-2k66t.4.1).
+    # The first --no-deps fetch succeeds, so a build that leaves a half-made
+    # tree after the fetch is caught where fail_install (which fails the fetch)
+    # cannot reach.
+    if fail_constrained:
+        fail = 'if [[ " $* " == *" --constraints "* ]]; then exit 1; fi; exit 0'
     _make_executable(
         bin_dir / "uv",
         f"""#!/bin/bash
@@ -91,6 +100,21 @@ if [[ "$1" == "venv" ]]; then
     exit 0
 fi
 if [[ "$1" == "pip" && "$2" == "install" ]]; then
+    # nexus-2k66t.4.1: a no-deps install is the builder fetching the package
+    # itself. Emulate the wheel shipping nexus/_install/constraints.txt into
+    # the venv's site-packages unless the test dropped the opt-out marker
+    # (an older release that predates the file).
+    if [[ " $* " == *" --no-deps "* && ! -e "{bin_dir}/no-packaged-constraints" ]]; then
+        py=""
+        prev=""
+        for a in "$@"; do
+            if [[ "$prev" == "--python" ]]; then py="$a"; fi
+            prev="$a"
+        done
+        site="$(dirname "$(dirname "$py")")/lib/python3.12/site-packages/nexus/_install"
+        mkdir -p "$site"
+        printf 'mcp==1.2.3\\n' > "$site/constraints.txt"
+    fi
     {fail}
 fi
 exit 0
@@ -125,6 +149,16 @@ def _tree_hashes(root: Path) -> dict[str, str]:
         if path.is_file():
             out[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
     return out
+
+
+def _installs(argv_log: Path) -> list[str]:
+    """Every ``uv pip install`` argv line, in order."""
+    return [ln for ln in argv_log.read_text().splitlines() if ln.startswith("pip install")]
+
+
+def _final_install(argv_log: Path) -> str:
+    """The install that brings in the dependencies: the last one."""
+    return _installs(argv_log)[-1]
 
 
 @pytest.fixture
@@ -281,10 +315,11 @@ def test_spec_reaches_uv_with_extras_before_the_pin(
     result = _run(tools, *args, uv_bin=uv_bin)
     assert result.returncode == 0, result.stderr
 
-    invocations = argv_log.read_text().splitlines()
-    installs = [line for line in invocations if line.startswith("pip install")]
-    assert len(installs) == 1, f"expected exactly one pip install, got {installs}"
-    assert expected_spec in installs[0], f"uv received {installs[0]!r}"
+    installs = _installs(argv_log)
+    # nexus-2k66t.4.1: the package is fetched alone (--no-deps), then installed
+    # with its dependencies under the constraints it ships. Both receive the spec.
+    assert len(installs) == 2, f"expected the fetch and the constrained install, got {installs}"
+    assert all(expected_spec in line for line in installs), f"uv received {installs!r}"
 
     gen = Path(result.stdout.strip().splitlines()[-1])
     payload = json.loads((gen / "nexus-install.json").read_text())
@@ -313,8 +348,8 @@ def test_the_venv_is_built_at_its_final_path(env) -> None:
 def test_pip_install_targets_the_new_generations_interpreter(env) -> None:
     tools, uv_bin, argv_log = env
     _, gen = _build(tools, uv_bin, argv_log)
-    installs = [l for l in argv_log.read_text().splitlines() if l.startswith("pip install")]
-    assert str(gen / "bin" / "python") in installs[0]
+    installs = _installs(argv_log)
+    assert installs and all(str(gen / "bin" / "python") in line for line in installs)
 
 
 # --------------------------------------------------------------------------
@@ -455,21 +490,34 @@ def test_stamp_exhaustion_fails_loudly(env) -> None:
 
 # ── --constraints (nexus-jd8fi drift) ─────────────────────────────────────────
 
-def _run_builder(tmp_path: Path, *extra: str) -> tuple[subprocess.CompletedProcess, Path]:
+def _run_builder(
+    tmp_path: Path, *extra: str, env_extra: dict[str, str] | None = None, fail_constrained: bool = False,
+) -> tuple[subprocess.CompletedProcess, Path]:
     bin_dir = tmp_path / "bin"
     argv_log = tmp_path / "uv-argv.log"
-    _stub_uv(bin_dir, argv_log=argv_log)
+    _stub_uv(bin_dir, argv_log=argv_log, fail_constrained=fail_constrained)
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "NX_TOOLS_DIR": str(tmp_path / "tools"),
     }
+    env.pop("NX_INSTALL_UNPINNED", None)  # an operator's opt-out must not leak into a pinned-build test
+    env.update(env_extra or {})
     (tmp_path / "tools").mkdir(exist_ok=True)
     proc = subprocess.run(
         ["bash", str(_INSTALLER), "--source", "conexus", *extra],
         capture_output=True, text=True, env=env, check=False,
     )
     return proc, argv_log
+
+
+def _recorded_constraints(tmp_path: Path) -> str:
+    """What the receipt of the one generation built under *tmp_path* says it did
+    about the lock (nexus-au0s3)."""
+    import json  # noqa: PLC0415 — only this helper needs it
+
+    (gen,) = list((tmp_path / "tools").glob("gen-*"))
+    return json.loads((gen / "nexus-install.json").read_text())["constraints"]
 
 
 def test_constraints_file_is_handed_to_uv_pip_install(tmp_path: Path) -> None:
@@ -480,8 +528,12 @@ def test_constraints_file_is_handed_to_uv_pip_install(tmp_path: Path) -> None:
     proc, argv_log = _run_builder(tmp_path, "--constraints", str(constraints))
     assert proc.returncode == 0, proc.stderr
     install_lines = [ln for ln in argv_log.read_text().splitlines() if "pip install" in ln]
+    # An explicit file is the whole answer (the checkout flow exports its own
+    # lock): one install, no fetch step, the packaged file never consulted.
     assert len(install_lines) == 1, argv_log.read_text()
     assert f"--constraints {constraints}" in install_lines[0]
+    assert "--no-deps" not in install_lines[0]
+    assert _recorded_constraints(tmp_path) == "applied"
 
 
 def test_missing_constraints_file_refuses_before_building(tmp_path: Path) -> None:
@@ -491,10 +543,82 @@ def test_missing_constraints_file_refuses_before_building(tmp_path: Path) -> Non
     assert not argv_log.exists() or "pip install" not in argv_log.read_text()
 
 
-def test_no_constraints_flag_installs_unconstrained(tmp_path: Path) -> None:
+def test_no_constraints_flag_uses_the_constraints_the_package_ships(tmp_path: Path) -> None:
+    """nexus-2k66t.4.1: with no --constraints the builder fetches the package
+    alone, then installs it under the constraints.txt THAT PACKAGE ships (the
+    target's own, not the running nexus's: on an upgrade the running copy is
+    the old release and its lock would pin the new one to old versions)."""
     proc, argv_log = _run_builder(tmp_path)
     assert proc.returncode == 0, proc.stderr
-    assert "--constraints" not in argv_log.read_text()
+    installs = _installs(argv_log)
+    assert len(installs) == 2, installs
+    fetch, final = installs
+    assert "--no-deps" in fetch and "--constraints" not in fetch
+    assert "--no-deps" not in final
+    gen = next((tmp_path / "tools").glob("gen-*"))
+    shipped = gen / "lib" / "python3.12" / "site-packages" / "nexus" / "_install" / "constraints.txt"
+    assert shipped.is_file()
+    assert f"--constraints {shipped}" in final
+    assert "UNCONSTRAINED" not in proc.stderr
+    assert _recorded_constraints(tmp_path) == "applied"
+
+
+def test_a_package_without_the_file_installs_unconstrained_and_says_so(tmp_path: Path) -> None:
+    """A release that predates the file (a deliberate rollback) must still
+    install; it must also not look pinned. The warning is on stderr and names
+    the consequence; the constrained install is NOT claimed."""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "no-packaged-constraints").write_text("")
+    proc, argv_log = _run_builder(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "--constraints" not in _final_install(argv_log)
+    assert "UNCONSTRAINED" in proc.stderr
+    assert "constraints.txt" in proc.stderr
+    # The text claims only what was observed: the file was not found in the
+    # installed package, not that the package "ships none".
+    assert "was found in the installed" in proc.stderr
+    assert "ships no" not in proc.stderr
+    assert _recorded_constraints(tmp_path) == "none", "the receipt must not claim a lock that was not applied"
+
+
+def test_a_failed_constrained_install_leaves_no_generation(tmp_path: Path) -> None:
+    """nexus-2k66t.4.1 made the build two installs. Failing only the SECOND (the
+    one carrying --constraints) must leave no receipt, so no enumerator counts the
+    half-built tree and nothing flips onto it. fail_install fails the first
+    --no-deps fetch and never reaches this step."""
+    proc, argv_log = _run_builder(tmp_path, fail_constrained=True)
+    assert proc.returncode != 0
+    installs = _installs(argv_log)
+    assert len(installs) == 2 and "--constraints" in installs[1], installs
+    tools = tmp_path / "tools"
+    assert [d for d in tools.glob("gen-*") if (d / "nexus-install.json").exists()] == []
+    assert list(tools.glob("gen-*")) == [], "the half-built tree is removed, not left behind"
+    assert not (tools / "current").exists() and not (tools / "current").is_symlink()
+
+
+def test_install_unpinned_skips_the_constraints_step_and_says_so(tmp_path: Path) -> None:
+    """NX_INSTALL_UNPINNED=1 (the way to take a transitive security fix ahead of
+    a release): one unconstrained install, no fetch step, a WARNING line."""
+    proc, argv_log = _run_builder(tmp_path, env_extra={"NX_INSTALL_UNPINNED": "1"})
+    assert proc.returncode == 0, proc.stderr
+    installs = _installs(argv_log)
+    assert len(installs) == 1, installs
+    assert "--constraints" not in installs[0] and "--no-deps" not in installs[0]
+    assert "install_generation: WARNING: NX_INSTALL_UNPINNED=1" in proc.stderr
+    assert "not pinned" in proc.stderr
+    assert _recorded_constraints(tmp_path) == "unpinned", "a deliberate opt-out is recorded as such"
+
+
+def test_install_unpinned_does_not_override_an_explicit_constraints_file(tmp_path: Path) -> None:
+    constraints = tmp_path / "c.txt"
+    constraints.write_text("mineru==3.1.11\n")
+    proc, argv_log = _run_builder(
+        tmp_path, "--constraints", str(constraints), env_extra={"NX_INSTALL_UNPINNED": "1"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"--constraints {constraints}" in _final_install(argv_log)
+    assert "NX_INSTALL_UNPINNED" not in proc.stderr
+    assert _recorded_constraints(tmp_path) == "applied"
 
 
 # nexus-heykz: the packaged overrides file reaches uv on every build.
@@ -506,10 +630,10 @@ def test_packaged_overrides_are_handed_to_uv_pip_install(tmp_path: Path) -> None
     The builder passes the shipped overrides file explicitly, every time."""
     proc, argv_log = _run_builder(tmp_path)
     assert proc.returncode == 0, proc.stderr
-    install_lines = [ln for ln in argv_log.read_text().splitlines() if "pip install" in ln]
-    assert len(install_lines) == 1, argv_log.read_text()
+    install_lines = _installs(argv_log)
+    assert install_lines, argv_log.read_text()
     overrides = _INSTALLER.parent / "overrides.txt"
-    assert f"--overrides {overrides}" in install_lines[0]
+    assert f"--overrides {overrides}" in install_lines[-1]
     assert overrides.is_file()
 
 
@@ -537,14 +661,14 @@ def _run_builder_as(tmp_path: Path, kernel: str, env_extra: dict[str, str] | Non
 def test_linux_installs_cpu_torch_by_default(tmp_path: Path) -> None:
     proc, argv_log = _run_builder_as(tmp_path, "Linux")
     assert proc.returncode == 0, proc.stderr
-    line = [ln for ln in argv_log.read_text().splitlines() if "pip install" in ln][0]
+    line = _final_install(argv_log)
     assert "--torch-backend cpu" in line
 
 
 def test_linux_torch_backend_is_overridable(tmp_path: Path) -> None:
     proc, argv_log = _run_builder_as(tmp_path, "Linux", {"NX_TORCH_BACKEND": "auto"})
     assert proc.returncode == 0, proc.stderr
-    line = [ln for ln in argv_log.read_text().splitlines() if "pip install" in ln][0]
+    line = _final_install(argv_log)
     assert "--torch-backend auto" in line
 
 

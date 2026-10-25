@@ -30,5 +30,9 @@ mechanize, it matters enough to ship.
 cut_plugin_release.py`) refuses when a ledger entry's bead also touches wheel
 content (`src/`, `conexus/plans/`, `conexus/daemon/`, `mcpb/`, `dt/`) the
 wholesale import cannot hold back on a per-entry basis. The only fix is moving
-that entry under `## Deferred to the next client release
-
+that entry under `## Deferred to the next client release` below: the cut then
+holds the entry's channel path(s) back from itself too (restored to the base
+branch's own content) so the whole bead ships together, in one piece, at the
+next client release. A deferred entry is exempt from the release-window
+"ledger must be empty" rule above -- still declared there is correct, not
+stale -- and stays exactly where it is until moved back deliberately.

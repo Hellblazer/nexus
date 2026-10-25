@@ -14,9 +14,9 @@ Subcommands::
     stamp           write release_version into release.properties (tag runs)
     check-deps      dumpbin /dependents on nexus-service.exe AND on every native
                     library the image embeds; fail on any import that is not one
-                    of the four shipped VC++ DLLs, a Windows system DLL, or (for
+                    of the shipped VC++ DLLs, a Windows system DLL, or (for
                     an embedded library) a sibling extracted beside it
-    package         exe + the four VC++ DLLs + the notice -> nexus-service-windows-x64.txz
+    package         exe + the VC++ DLLs + the notice -> nexus-service-windows-x64.txz
                     (+ .sha256), the P0.4 layout
     verify-archive  assert an archive has exactly that layout
 
@@ -69,7 +69,7 @@ ARCH = "windows-x64"
 ASSET_NAME = f"nexus-service-{ARCH}.txz"
 ENGINE_EXE = "nexus-service.exe"
 NOTICE_NAME = "THIRD-PARTY-NOTICES.txt"
-#: Same four files, same routine as the PG bundle (one source of truth: P0.6).
+#: Same files, same routine as the PG bundle (one source of truth: P0.6).
 VC_RUNTIME_DLLS: tuple[str, ...] = bw.VC_RUNTIME_DLLS
 #: An engine exe is ~130 MB; a truncated link that still has an MZ header is not shippable.
 MIN_EXE_BYTES = 20_000_000
@@ -331,7 +331,7 @@ def notice_text(redist: bw.Redist, digests: Mapping[str, str]) -> str:
 
 1. Microsoft Visual C++ runtime ({', '.join(VC_RUNTIME_DLLS)})
 
-   These four files are Microsoft's. They are NOT covered by the AGPL-3.0 that
+   These files are Microsoft's. They are NOT covered by the AGPL-3.0 that
    covers nexus. They are copied unmodified from Visual Studio 2022's
    redistributable folder (VC redist {redist.version}) and are distributed with
    this program under the Distributable Code terms of the Microsoft Visual
@@ -360,7 +360,7 @@ def package(
     min_exe_bytes: int = MIN_EXE_BYTES,
     signature_reader: bw.SignatureReader | None = None,
 ) -> Path:
-    """exe + four DLLs + notice -> ``nexus-service-windows-x64.txz`` and its ``.sha256``.
+    """exe + the VC++ DLLs + notice -> ``nexus-service-windows-x64.txz`` and its ``.sha256``.
 
     Flat layout, exactly what ``nexus.daemon.binary_install._place_engine_archive``
     reads. The DLLs go through ``bw.copy_runtime_dlls``, the PG bundle's copy
@@ -444,7 +444,7 @@ def verify_archive(archive: Path) -> list[str]:
         if low.endswith(".pdb"):
             problems.append(f"{name}: a .pdb must not ship (pdb)")
         elif low.endswith(".dll") and name not in VC_RUNTIME_DLLS:
-            problems.append(f"{name}: a DLL outside the four VC++ runtime files")
+            problems.append(f"{name}: a DLL outside the VC++ runtime files")
         elif low.endswith(".exe") and name != ENGINE_EXE:
             problems.append(f"{name}: an executable other than {ENGINE_EXE}")
     return problems

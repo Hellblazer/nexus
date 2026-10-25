@@ -246,6 +246,15 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
            "and `_nx store list` (read-only listings). Teardown stops that engine and "
            "deletes the sandbox.",
     ),
+    "tests/e2e/pdf-on-demand-rehearsal.sh": (
+        8, "NX_LOCAL+SANDBOX: every call goes through `_nx`, an `env -i` wrapper with "
+           "HOME, NX_TOOLS_DIR, NX_BIN_DIR, NEXUS_CONFIG_DIR and every XDG variable under a "
+           "mktemp sandbox (leg u re-points them at a second directory inside it) and NX_LOCAL=1, "
+           "against the bundled engine that `_nx init` provisions there (--engine only). The eight "
+           "sites are `nx index pdf` (legs b, c, d, f, u), `nx index repo` (leg e) and "
+           "`nx collection list` (leg c's before/after snapshot). Teardown stops the service and "
+           "deletes the sandbox.",
+    ),
     "tests/e2e/cloud-client-path-gate.sh": (
         1, "READ-ONLY: every leg in this gate is a read (per its own header, "
            "it asserts the engine's read-path contracts survive the public "

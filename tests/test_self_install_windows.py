@@ -12,6 +12,7 @@ flip, shims, ledger registration).
 """
 from __future__ import annotations
 
+import io
 import os
 import stat
 import subprocess
@@ -65,6 +66,22 @@ class FakeUvAndSpy:
         raise AssertionError(f"unexpected uv command {argv}")
 
 
+class _PopenOf:
+    """What ``subprocess.Popen`` hands back for a command the fake already answered:
+    the progress-mode build (nexus-2k66t.4.7) starts uv with Popen and reads its pipes."""
+
+    def __init__(self, done: "subprocess.CompletedProcess[str]") -> None:
+        self.stdout = io.StringIO(done.stdout or "")
+        self.stderr = io.StringIO(done.stderr or "")
+        self.returncode = done.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
+
+
 @pytest.fixture
 def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     tools = tmp_path / "tools"
@@ -73,6 +90,10 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NX_TOOLS_DIR", str(tools))
     monkeypatch.setenv("NX_BIN_DIR", str(bin_dir))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # These tests drive the RUNNING installer's build against a fake uv; the
+    # target-installer lookup (a real `uv` fetch) has its own tests, in
+    # test_self_install_target_installer.py (nexus-2k66t.4.3).
+    monkeypatch.setenv("NX_INSTALL_RUNNING_INSTALLER", "1")
     monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
     setattr_in(monkeypatch, "nexus._install.layout_core", "os.path.realpath", lambda s, **_kw: s)
     monkeypatch.setattr(
@@ -87,6 +108,11 @@ def win(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     spy = FakeUvAndSpy(subprocess.run, uv_bin=uv_bin)
     setattr_in(monkeypatch, gen_core, "subprocess.run", spy)
     setattr_in(monkeypatch, self_cmd, "subprocess.run", spy)
+    real_popen = subprocess.Popen
+    setattr_in(
+        monkeypatch, gen_core, "subprocess.Popen",
+        lambda argv, *a, **kw: _PopenOf(spy(argv)) if list(argv)[0] == "uv" else real_popen(argv, *a, **kw),
+    )
     return tools, uv_bin, spy
 
 
@@ -245,7 +271,9 @@ class TestLegacySite:
         spy.tool_dir = legacy.parent
         generation = self_cmd.perform_self_install()
         assert generation is not None and generation.parent == tools
-        assert install_layout.read_receipt(generation).extras == ["local"]  # mineru dropped
+        # mineru dropped; pdf carried (nexus-2k66t.4.2: a legacy uv tree is an existing install, which keeps
+        # PDF support, so `nx self install` on it is ONE command, nexus-2k66t.4.9)
+        assert install_layout.read_receipt(generation).extras == ["local", "pdf"]
         assert os.readlink(tools / "current") == str(generation)
         assert (generation / "bin" / "nx.exe").read_bytes().endswith(b"launcher:nx")
         entry = str(tools / "current" / "bin")

@@ -21,7 +21,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1211,8 +1211,14 @@ def _catalog_hook(
     complete_doc_hashes: dict[str, str] | None = None,
     needs_fence: dict[str, tuple[str, str]] | None = None,
     unregistered: dict[Path, str] | None = None,
+    housekeeping_keep: list[Path] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
+
+    ``housekeeping_keep`` (nexus-2k66t.4.2) names files that exist but were
+    deliberately not offered for registration this run (PDFs held back because
+    the PDF stack is missing). They count as present for the orphan sweep, so a
+    refused run never ages their existing catalog rows toward deletion.
 
     ``unregistered`` (nexus-z0o2p.20, RDR-223 P2.10) is an optional OUT-param:
     ``abs_path -> cause`` for every file this call could NOT resolve to a
@@ -2053,7 +2059,7 @@ def _catalog_hook(
         _maybe_run_housekeeping(
             cat, owner, indexed_files, repo,
             writer=writer, skip_housekeeping=skip_housekeeping,
-            progress=_progress,
+            progress=_progress, keep=housekeeping_keep,
         )
         _stage_s["housekeeping"] = time.monotonic() - _stage_mark
 
@@ -2229,8 +2235,14 @@ def _maybe_run_housekeeping(
     writer,
     skip_housekeeping: bool,
     progress: "Callable[[str], object]" = lambda _s: None,
+    keep: "list[Path] | None" = None,
 ) -> None:
     """The nexus-fltb4 mass-delete gate, as a behavioral seam (nexus-4kh95).
+
+    ``keep`` (nexus-2k66t.4.2): files that exist but were deliberately not
+    offered this run (PDFs held back while the PDF stack is missing). They
+    count as present, so a refused run does not age their catalog rows toward
+    the two-miss delete.
 
     Housekeeping's miss-count sweep interprets "not in this run's indexed
     set" as "gone" — run against a PARTIAL (delta-filtered) walk it marks
@@ -2245,6 +2257,8 @@ def _maybe_run_housekeeping(
         return
     progress("  Catalog: housekeeping…\r")
     indexed_set = _indexed_relpaths(indexed_files, repo)
+    if keep:
+        indexed_set |= _indexed_relpaths([(p, "", "") for p in keep], repo)
     _run_housekeeping(cat, owner, indexed_set, writer=writer)
 
 
@@ -2562,6 +2576,9 @@ def index_repository(
                     + stats.get("chunk_flush_throttled_files", 0)
                     + stats.get("transient_upsert_deferred_files", 0)
                     + stats.get("identity_less_dropped_files", 0)
+                    # nexus-2k66t.4.2: a held PDF was not offered this run; the
+                    # next --since-head diff must still contain it.
+                    + stats.get("pdf_stack_held", 0)
                 )
                 if _deferred_or_failed_files:
                     _log.warning(
@@ -2881,6 +2898,133 @@ def _record_transient_upsert_deferred(n: int = 1, *, path: str | None = None) ->
             _transient_upsert_deferred_paths.append(path)
 
 
+def _file_sha256(path: Path) -> str:
+    """sha256 of *path*'s bytes, hex. Raises ``OSError`` when it cannot be read."""
+    import hashlib  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
+
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(65536), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _pdf_is_current(
+    file: Path, content_hash_hex: str, col: object, model: str, *,
+    doc_id_resolver: "Callable[[Path], str] | None", staleness_cache: "StalenessCache | None",
+) -> bool:
+    """Whether *file* is already indexed at *content_hash_hex*: the one staleness
+    decision for a PDF. ``_index_pdf_file`` skips on it and the late stack recheck
+    in :func:`_run_index` holds on its negation, so the two cannot disagree about
+    which PDFs extraction will touch. An empty doc id is an unconditional "stale"
+    (nexus-afudo deleted ``check_staleness``'s source_path fallback)."""
+    doc_id = doc_id_resolver(file) if doc_id_resolver is not None else ""
+    return bool(check_staleness(
+        col, file, content_hash_hex, model, doc_id=doc_id, cache=staleness_cache,
+    ))
+
+
+def _pdfs_needing_index(pdf_paths: list[Path], repo: Path) -> list[Path]:
+    """The PDFs of a walk that are NOT already indexed and unchanged
+    (nexus-2k66t.4.8), decided from the catalog alone so it can run before
+    anything is registered or any collection is opened.
+
+    A PDF is cleared only when the catalog holds its document fenced
+    ``'complete'`` at the sha256 of the file as it is now: the same signal
+    ``_catalog_hook`` feeds ``apply_catalog_content_hashes``. Anything else
+    (no catalog, no owner, no document, an ``indexing``/``failed`` fence, a
+    pre-fence engine that reports no state, a changed hash, an unreadable
+    file, a catalog error) counts as needing work. The fence does not carry the
+    embedding model, so :func:`_run_index` re-checks a cleared PDF against the
+    real staleness cache before it dispatches it.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        reader = make_catalog_reader()
+        owner = reader.owner_for_repo(_repo_identity(repo)[1]) if reader is not None else None
+        if owner is None:
+            return list(pdf_paths)
+        by_path = {e.file_path: e for e in reader.by_owner(owner)}
+    except Exception:  # noqa: BLE001 - advisory: an unreadable catalog means "assume work", never a failed run
+        _log.warning("pdf_probe_catalog_unreadable", exc_info=True)
+        return list(pdf_paths)
+
+    needing: list[Path] = []
+    for path in pdf_paths:
+        try:
+            rel_path = str(path.relative_to(repo))
+        except ValueError:
+            rel_path = path.name
+        entry = by_path.get(rel_path)
+        try:
+            digest = _file_sha256(path)
+        except OSError:
+            needing.append(path)
+            continue
+        if not (
+            entry is not None
+            and getattr(entry, "index_state_reported", True)
+            and getattr(entry, "index_state", None) == "complete"
+            and getattr(entry, "index_content_hash", "") == digest
+        ):
+            needing.append(path)
+    return needing
+
+
+def _hold_pdfs_without_stack(
+    pdf_paths: list[Path], repo: Path, *, on_phase: Callable[[str], None] | None = None,
+    probe: Callable[[list[Path]], list[Path]] | None = None,
+    already_held: Sequence[Path] = (),
+) -> list[Path]:
+    """The repo walk found PDFs: make sure the PDF stack is here before any of
+    them is registered or written (nexus-2k66t.4.2).
+
+    Returns ``[]`` when the stack is present or was just installed (an install
+    raises ``pdf_stack.RerunRequired``, caught by ``nx index repo`` after the
+    index lock is released). Returns every PDF when the policy REFUSES the
+    install (the post-commit hook sets ``NX_PDF_STACK=refuse``): they are not
+    registered, not indexed and not stamped, so the next run retries them; each
+    is named in an ERROR line and the CLI exits 69 once code and prose are
+    indexed. The same containment shape as ``_contain_extraction_quality_gate``:
+    the PDF fails, the run's other files do not. A network or installer failure
+    exits at once, before anything is written.
+
+    *already_held* is the set an earlier call of this run kept out: the late
+    recheck passes it so the skipped record is the union (``record_skipped``
+    replaces a repo's record) and the refusal line, already printed for those,
+    is not printed again. The per-PDF ERROR lines still name the new ones.
+    """
+    from nexus import pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
+
+    if probe is not None and not pdf_stack.state().present:
+        # nexus-2k66t.4.8: the stack is absent, so settle first whether any PDF
+        # needs extracting. A walk whose PDFs are all indexed and unchanged
+        # must not cost the install; the PDFs the probe clears are not held.
+        pdf_paths = probe(pdf_paths)
+        if not pdf_paths:
+            pdf_stack.record_skipped([*already_held], repo=repo)
+            return []
+    if pdf_stack.ensure_or_exit(
+        "nx index repo", hold_on_refuse=True, defer_rerun=True, quiet_refusal=bool(already_held),
+    ):
+        pdf_stack.record_skipped([*already_held], repo=repo)
+        return []
+    for path in pdf_paths:
+        _log.error(
+            "pdf_not_indexed_stack_missing", path=str(path), repo=str(repo),
+            remedy=pdf_stack.INSTALL_COMMAND,
+        )
+    pdf_stack.record_skipped([*already_held, *pdf_paths], repo=repo)
+    if on_phase is not None and not already_held:
+        on_phase(
+            f"PDF support is not installed and installing it is refused here: {len(pdf_paths)} "
+            f"PDF(s) NOT indexed this run (code and prose proceed). Run: {pdf_stack.INSTALL_COMMAND}"
+        )
+    return list(pdf_paths)
+
+
 def _contain_extraction_quality_gate(
     fn: "Callable[[], int]", file: "Path", failed: list[str],
 ) -> int:
@@ -3149,28 +3293,14 @@ def _index_pdf_file(
     a back-reference to the catalog. ``None`` is the legacy /
     no-catalog path.
     """
-    import hashlib as _hl  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.doc_indexer import _pdf_chunks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    content_hash = _hl.sha256()
-    with file.open("rb") as f:
-        for block in iter(lambda: f.read(65536), b""):
-            content_hash.update(block)
-    content_hash_hex = content_hash.hexdigest()
+    content_hash_hex = _file_sha256(file)
 
-    # Staleness check.
-    # nexus-dcym: prefer doc_id-keyed lookup when the catalog hook
-    # supplied a resolver. Empty doc_id is an unconditional "stale" —
-    # nexus-afudo (2026-08-05) deleted check_staleness's legacy
-    # source_path fallback as dead code (RDR-102 D2 removed
-    # source_path from make_chunk_metadata for every writer).
-    catalog_doc_id_for_staleness = (
-        doc_id_resolver(file) if doc_id_resolver is not None else ""
-    )
-    if not force and check_staleness(
-        col, file, content_hash_hex, target_model,
-        doc_id=catalog_doc_id_for_staleness,
-        cache=staleness_cache,
+    # Staleness check (nexus-dcym: doc_id-keyed; see _pdf_is_current).
+    if not force and _pdf_is_current(
+        file, content_hash_hex, col, target_model,
+        doc_id_resolver=doc_id_resolver, staleness_cache=staleness_cache,
     ):
         return 0
 
@@ -5287,6 +5417,22 @@ def _run_index(
     prose_files.sort(key=lambda x: x[0], reverse=True)
     pdf_files.sort(key=lambda x: x[0], reverse=True)
 
+    # nexus-2k66t.4.2: the PDF stack is the `pdf` extra. Settled BEFORE the
+    # catalog registration below, so a refused PDF leaves no row and no chunk.
+    # The held PDFs stay in `_pdf_held` so the catalog's orphan housekeeping
+    # (which counts a file absent from the walk as missing and deletes it after
+    # two runs) still sees them as present.
+    _pdf_held: list[Path] = []
+    if pdf_files:
+        _pdf_held = _hold_pdfs_without_stack(
+            [f for _, f in pdf_files], repo, on_phase=on_phase,
+            # --force / --force-re-embed re-extract every PDF: no probe.
+            probe=None if (force or force_re_embed) else (lambda paths: _pdfs_needing_index(paths, repo)),
+        )
+        if _pdf_held:
+            _held = set(_pdf_held)
+            pdf_files = [(sc, f) for sc, f in pdf_files if f not in _held]
+
     # GH #371 + #436: surface the oversize-skip set so the operator
     # knows what got dropped. Single structured log + on_phase line
     # so it's visible in non-TTY runs (CI, hooks, nohup).
@@ -5696,6 +5842,7 @@ def _run_index(
         complete_doc_hashes=_complete_doc_hashes,
         needs_fence=_needs_fence,
         unregistered=_unregistered_causes,
+        housekeeping_keep=_pdf_held,
     )
     if on_phase is not None:
         on_phase(
@@ -5872,6 +6019,39 @@ def _run_index(
             f"rdr: {len(rdr_staleness.by_doc_id):,} docs "
             f"({time.monotonic() - _staleness_t0:.1f}s)"
         )
+
+    # nexus-2k66t.4.8: with the stack absent, the early hold let PDFs through only
+    # because the catalog fence called them current. The fence does not carry the
+    # embedding model, so check each against the real staleness cache now; one
+    # that is stale after all is held here, which installs (or refuses) exactly as
+    # the early hold would have. Never runs when the stack is present. After an
+    # early refusal it still runs for the PDFs that hold let through, and merges
+    # what it holds into the early set (the skipped record is the union).
+    if _dispatch_pdf and docs_col is not None and not (force or force_re_embed):
+        from nexus import pdf_stack as _late_pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
+
+        if not _late_pdf_stack.state().present:
+            def _late_pdf_is_stale(f: Path) -> bool:
+                try:
+                    digest = _file_sha256(f)
+                except OSError:
+                    # Removed or unreadable mid-run: not ours to report here. It stays
+                    # in the dispatch and the normal path meets it exactly as before.
+                    return False
+                return not _pdf_is_current(
+                    f, digest, docs_col, docs_model,
+                    doc_id_resolver=_doc_id_resolver, staleness_cache=docs_staleness,
+                )
+
+            _late_stale = [f for _, f in _dispatch_pdf if _late_pdf_is_stale(f)]
+            if _late_stale:
+                _late_held = _hold_pdfs_without_stack(
+                    _late_stale, repo, on_phase=on_phase, already_held=_pdf_held,
+                )
+                if _late_held:
+                    _late_set = set(_late_held)
+                    _dispatch_pdf = [(sc, f) for sc, f in _dispatch_pdf if f not in _late_set]
+                    _pdf_held = _pdf_held + _late_held
 
     # nexus-cfc72: bounded file-level concurrency. Sequential (exact
     # legacy loop) unless both the vectors and catalog backends are the
@@ -7269,6 +7449,9 @@ def _run_index(
         # index_repo_cmd uses this to drive a non-zero exit after
         # post-processing completes.
         "pdf_quality_gate_failed": len(_quality_gate_failed),
+        # nexus-2k66t.4.2: PDFs held back because the PDF stack is missing and
+        # the install was refused. index_repo_cmd exits 69 over a non-zero count.
+        "pdf_stack_held": len(_pdf_held),
         # nexus-4s1ww / GH #1432: count of files whose chunk-batch flush
         # was REJECTED this run (ChunkBatcher.failed_files minus the throttled
         # ones — what is left after the bisect-retry, see chunk_batcher.py).

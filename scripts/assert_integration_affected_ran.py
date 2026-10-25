@@ -12,7 +12,7 @@ and fails when:
 
 A selection that collects zero tests is reported and passes. That happens
 when the selected files carry only carved-out marks (``lived_in``,
-``cloud_mode``, ``mandatory_regression_pin``), which run in other gates.
+``keyed_voyage``, ``mandatory_regression_pin``), which run in other gates.
 
 Stdlib only.
 """
@@ -32,6 +32,9 @@ ALL_SKIP_ALLOWED: dict[str, str] = {
     "tests/test_dt_mcp_stdio_transport.py": "runner limit: DEVONthink MCP binary, macOS only",
     "tests/test_search_fanout_recall_parity.py": (
         "runner limit: needs a real nexus config pointing at the live cloud engine"
+    ),
+    "tests/integration/test_llm_live.py": (
+        "runner limit: spends money against a paid LLM API; hand-run with NX_LIVE_LLM=1 and a key"
     ),
 }
 

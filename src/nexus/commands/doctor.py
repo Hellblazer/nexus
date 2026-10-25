@@ -1132,8 +1132,9 @@ def _report_aspect_queue_service() -> None:
 
         if not _claude_available():
             click.echo(
-                f"  WARN: aspect extraction is idle: {pending} pending, `claude` not on PATH. "
-                "Install Claude Code or put `claude` on PATH; pending rows are "
+                f"  WARN: aspect extraction is idle: {pending} pending, `claude` not on PATH "
+                "and no anthropic_api_key is set. Install Claude Code, or run "
+                "`nx config set anthropic_api_key <key>`; pending rows are "
                 "extracted once a worker can run.",
                 err=True,
             )
@@ -2064,12 +2065,23 @@ def _run_check_mineru() -> None:
     matching the MinerU-server check's existing not-configured semantics
     just below.
     """
+    # nexus-2k66t.4.2: MinerU ships with the `pdf` extra. Without the stack the
+    # probe has nothing to check: say so, as not applicable, and do not import.
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
+
+    _stack = pdf_stack.state()
+    if _stack.status == "absent":
+        click.echo(
+            "MinerU import: N/A (PDF support is not installed; indexing a PDF installs it, "
+            f"or run `{pdf_stack.install_plan().command}`)"
+        )
+        return
     try:
         from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
     except Exception as exc:  # noqa: BLE001 — boundary catch of optional MinerU import failure; surfaced via click.echo
         click.echo(_check("MinerU import", False, _exc_detail(exc, with_type=True)))
         click.echo(
-            "  ↳ MinerU is required since nexus-2fyb. Reinstall with "
+            "  ↳ MinerU ships with PDF support (the pdf extra), so this install is broken. Reinstall with "
             f"`{_reinstall_command()}`."
         )
         return
@@ -2654,9 +2666,11 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
     "check_mineru",
     is_flag=True,
     default=False,
-    help="Verify MinerU is importable. nexus-2fyb promoted mineru[all] "
-         "from optional extra to default dep; this surfaces a corrupt "
-         "install at doctor-time instead of waiting for the first "
+    help="Verify MinerU is importable. MinerU is part of the on-demand "
+         "pdf extra (nexus-2k66t.4.2; a default dependency from nexus-2fyb "
+         "until then), so on an install without PDF support this reports "
+         "N/A and names the command that installs it. Otherwise it surfaces "
+         "a corrupt install at doctor-time instead of waiting for the first "
          "math-PDF index to fail.",
 )
 @click.option(
@@ -3119,6 +3133,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         )
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.t3 import apply_hnsw_ef  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         if not is_local_mode():
             click.echo("HNSW search tuning is server-side in cloud mode (the engine's NX_HNSW_EF_SEARCH); nothing to tune here")
@@ -3135,7 +3150,13 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                 f"T3 handle unavailable for HNSW tuning: {_exc_detail(exc)}"
             ) from exc
         count = apply_hnsw_ef(db)
-        click.echo(f"Updated HNSW search_ef on {count} collection(s).")
+        if count == 0 and is_service_backed(db):
+            click.echo(
+                "HNSW search tuning is server-side (the engine tunes pgvector "
+                "HNSW itself); nothing to change."
+            )
+        else:
+            click.echo(f"Updated HNSW search_ef on {count} collection(s).")
         return
 
     if clean_checkpoints:
@@ -3924,7 +3945,7 @@ def _format_quota_report(report: dict) -> str:
             )
         if r.get("vector_count", 0) > 0:
             lines.append(
-                f"    chroma:  {r['vector_seconds']:>6.1f}s over "
+                f"    vector:  {r['vector_seconds']:>6.1f}s over "
                 f"{r['vector_count']} retries"
             )
         lines.append(

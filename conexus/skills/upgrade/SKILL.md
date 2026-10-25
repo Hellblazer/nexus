@@ -110,10 +110,11 @@ there, then upgrade back to current. Three preconditions for the hop at the pin:
 - **A LOCAL engine only.** Have the user write down `service_url` and
   `service_token` first; the cloud steps need both again. Then
   `unset NX_SERVICE_URL NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT` in the
-  shell, delete the `service_url:` line (and `service_token:`) under
-  `credentials:` in `~/.config/nexus/config.yml`, and `export NX_LOCAL=1` for
-  the hop. There is no `nx config unset`, so the config change is a file edit;
-  `nx config get service_url` prints `service_url: not set` when it is clear.
+  shell, clear the saved `service_url` (and `service_token`) with
+  `nx config unset service_url` on a client that has the verb (7.81.0 and later);
+  on an older client delete those lines under `credentials:` in
+  `~/.config/nexus/config.yml` by hand. Then `export NX_LOCAL=1` for
+  the hop. `nx config get service_url` prints `service_url: not set` when it is clear.
   Both halves are needed. `NX_LOCAL=1` does not by itself override a configured
   `service_url` (the endpoint reads it first), and the pin's provisioning
   refuses when `is_local_mode()` is false (`NX_LOCAL=0`, `install.mode:

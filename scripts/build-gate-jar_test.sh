@@ -51,14 +51,18 @@ echo run >> "$MVNW_COUNT"
 [[ "${MVNW_FAIL:-0}" == 1 ]] && exit 1
 # MVNW_HANG=<file>: publish this pid there and block, as a long build does; a TERM
 # is recorded in <file>.term so a test can tell it from a KILL escalation.
-# MVNW_IGNORE_TERM=1: the build ignores TERM/HUP and keeps running ~3 s, as a JVM finishing a write does,
-# so the wrapper has to wait for the group (a stub that dies at once proves nothing about the wait).
+# MVNW_IGNORE_TERM=1: the build ignores TERM/HUP and keeps running ~3 s after the signal, as a JVM finishing
+# a write does, so the wrapper has to wait for the group (a stub that dies at once proves nothing about the
+# wait). The test touches <file>.sent just before it signals; the 3 s count from then, not from the build's
+# start, so a slow runner's setup polling cannot eat the wait.
 # MVNW_LINGER=<seconds>: leave a background process in the build's group that outlives the build.
 if [[ -n "${MVNW_LINGER:-}" ]]; then (sleep "$MVNW_LINGER" >/dev/null 2>&1 &); fi
 if [[ -n "${MVNW_HANG:-}" ]]; then
     if [[ "${MVNW_IGNORE_TERM:-0}" == 1 ]]; then
         trap '' TERM HUP QUIT
-        echo "$$" > "$MVNW_HANG"; sleep 3
+        echo "$$" > "$MVNW_HANG"
+        for _ in $(seq 1 300); do [[ -f "$MVNW_HANG.sent" ]] && break; sleep 0.1; done
+        sleep 3
         exit 0
     fi
     # The trap also kills its own `sleep`: a background command of a non-job-control shell ignores
@@ -376,7 +380,7 @@ _term_case() {  # _term_case <label> <extra build-gate-jar.sh args...>; env TERM
         return 0
     fi
     local started="$WORKDIR/term-$label.started" build wrapper script_pid term_start released_while_alive=0
-    rm -f "$started" "$started.term"
+    rm -f "$started" "$started.term" "$started.sent"
     set -m
     (cd "$repo" && PATH="$labbin:$PATH" LABRUN_STUB_MARKER="$WORKDIR/labrun-$label.txt" MVNW_HANG="$started" \
         NX_GATE_JAR_CACHE=off MVNW_IGNORE_TERM="$ignore" scripts/build-gate-jar.sh "$@" >"$WORKDIR/term-$label.out" 2>&1) &
@@ -394,6 +398,7 @@ _term_case() {  # _term_case <label> <extra build-gate-jar.sh args...>; env TERM
     # The job is a subshell around the script; the lease's pid is the script itself.
     script_pid="$(cat "$leasedir/pid" 2>/dev/null)"
     term_start=$SECONDS
+    : > "$started.sent"
     kill -s "$sig" "$script_pid" 2>/dev/null
     for _ in $(seq 1 400); do
         if kill -0 -- "-$build" 2>/dev/null; then

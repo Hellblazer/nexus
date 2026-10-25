@@ -53,21 +53,24 @@ discovery, version-skew) is the shared service-registry primitive
 | Provision | bundled PG17 + pgvector, Liquibase migrate, bge-768 ONNX fetch | RDR-155 (pgvector substrate), RDR-160 (bge-768 embedder) |
 | Run | `nexus-service` (T1 + T2 + T3 alike, no separate T2 daemon); lease lifecycle | RDR-149 (daemon lifecycle), RDR-152 (endpoint discovery) |
 | Upgrade | `nx upgrade` — the single trigger for every data transition; `nx doctor` reports pending rungs | RDR-185 (the ladder), RDR-159 (the inherited ETL engine), RDR-162 (cross-model) |
-| Uninstall | `nx uninstall` (CLI), `daemon_uninstall` (MCP) | RDR-165 (this RDR) |
+| Uninstall | `nx uninstall` (CLI), `daemon_uninstall` (MCP) | RDR-165 |
 
 ## Install
 
 Greenfield local first-run (no prior install):
 
 ```bash
-nx daemon service install-binary engine-service-vX.Y.Z   # fetch the cosign-verified native binary + relocatable PG+pgvector bundle
-nx init                                                   # provision Postgres, fetch the bge-768 ONNX, start the service, offer autostart
-nx doctor                                                 # verify: dependencies, service /health, embedding mode
+nx init      # acquire the cosign-verified native engine + relocatable PG+pgvector bundle, provision Postgres, fetch the bge-768 ONNX, start the service, offer autostart
+nx doctor   # verify: dependencies, service /health, embedding mode
 ```
 
-Pick `engine-service-vX.Y.Z` from the
-[engine-service releases](https://github.com/Hellblazer/nexus/releases) (newest
-`engine-service-v*` tag, an explicit pin, no `latest`). `nx init` provisions the
+`nx init` installs the engine itself, from the `engine-service-v*` tag this client
+release was built against (`PINNED_SERVICE_TAG`, derived from
+`REQUIRED_ENGINE_VERSION`; `NEXUS_SERVICE_TAG` overrides it). Do not pick the
+newest tag from the [engine-service releases](https://github.com/Hellblazer/nexus/releases)
+by hand: that can put an engine on the box other than the one the client pins.
+`nx daemon service install-binary <tag>` stays as the advanced pre-stage or
+override. `nx init` provisions the
 local service backend by default (the deprecated `nx init --service` flag still
 works) and offers to register the OS autostart unit (RDR-174 decide-first;
 `--yes` accepts, `--no-autostart` declines). It is idempotent (safe to re-run).
@@ -118,8 +121,7 @@ order of operations.
 
 When to upgrade: whenever you update the code — `nx upgrade` converges whatever
 that install actually needs, whether that is one schema migration or a five-year
-gap. Rollback: the Chroma source is never modified; a blocked migration leaves
-reads degraded-loud and offers rollback, never auto-invoked.
+gap. On the 6.x migration-capable release (the pin a pre-PG install is redirected to) the Chroma source is never modified, and a blocked migration leaves reads degraded-loud and offers rollback, never auto-invoked; that machinery is gone from the current release.
 
 ## Uninstall
 

@@ -1,6 +1,6 @@
 # Self-hosted runners and fork PRs, full text
 
-Moved from AGENTS.md on 2026-10-14 (nexus-2ziaz); AGENTS.md keeps only the per-turn rules and links here. A `§ <heading>` reference below names a section of AGENTS.md or of a sibling file; [README.md](README.md) maps each heading to its file.
+Moved from AGENTS.md on 2026-10-14 (nexus-2ziaz); the short rules-only form is [`.claude/rules/ci-and-runners.md`](../../.claude/rules/ci-and-runners.md), which links here. A `§ <heading>` reference below names a section of AGENTS.md or of a sibling file; [README.md](README.md) maps each heading to its file.
 
 ## Self-hosted runners and fork PRs
 
@@ -82,7 +82,7 @@ differ from a GitHub-hosted runner:
   and the failed tests' `tmp_path` trees (256 MiB
   cap) to `<run>/failed/`. The engine JVM gets `-Djava.io.tmpdir=<TMPDIR>` (the JDK
   ignores `TMPDIR`), so its native extraction lands on the same tmpfs; its hs_err report
-  goes to the original tempdir. `tests/AGENTS.md` has the full paragraph.
+  goes to the original tempdir. The `tests/_tmp_root.py` docstring has the full paragraph.
   If `SubstrateRootExhausted` trips, the floor is 512 MiB of tmpfs space or cgroup
   headroom after a 45 s wait: read the cause in the exception, the summary line and
   the `cluster_root` events (`--log-level=INFO`), then run fewer workers (`-n` =

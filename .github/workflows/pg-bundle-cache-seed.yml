@@ -263,7 +263,7 @@ jobs:
         if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
         run: |
           # verify asserts the whole layout (PG toolchain, vector and pg_trgm
-          # controls, the four VC++ DLLs). The cache post-save runs only on job
+          # controls, the five VC++ DLLs). The cache post-save runs only on job
           # success, so a non-zero exit here prevents a hollow seed.
           & $env:PYTHON scripts\build_pg_bundle_windows.py verify --prefix "$env:GITHUB_WORKSPACE\bundle"
 

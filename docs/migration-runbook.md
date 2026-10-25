@@ -142,11 +142,12 @@ machinery that performed that migration no longer ships:
      mode. Write down your `service_url` and `service_token` values first: the
      cloud steps below need both again. In the shell:
      `unset NX_SERVICE_URL NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT`
-     and `export NX_LOCAL=1`. In the config file: delete the
-     `service_url:` line (and `service_token:` if it is there) under
-     `credentials:` in `~/.config/nexus/config.yml` (`$NEXUS_CONFIG_DIR/config.yml`
-     if you set that variable). There is no `nx config unset` verb, so this is a
-     file edit; leave every other key alone. `nx config get service_url` prints
+     and `export NX_LOCAL=1`. In the config file: on a
+     client that has the verb (7.81.0 and later) run `nx config unset service_url`
+     (and `nx config unset service_token` if one is saved); on an older client
+     delete the `service_url:` line (and `service_token:`) under `credentials:`
+     in `~/.config/nexus/config.yml` (`$NEXUS_CONFIG_DIR/config.yml` if you set
+     that variable) by hand. Leave every other key alone. `nx config get service_url` prints
      `service_url: not set` once it is clear. A machine that ran in cloud
      mode has the key set. **Both halves are needed.** Clearing `service_url`
      alone is not enough, and `NX_LOCAL=1` alone is not enough. A configured

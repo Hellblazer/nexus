@@ -74,17 +74,26 @@ def _running_version() -> str:
     return importlib.metadata.version("conexus")
 
 
-def _write_standin_wheel(index: Path, version: str) -> None:
+def _write_standin_wheel(
+    index: Path, version: str, *, requires: tuple[str, ...] = (), constraints: str | None = None,
+    provides_extras: tuple[str, ...] = (),
+) -> None:
     """A minimal ``conexus`` wheel declaring the ``nx`` and ``nx-mcp`` scripts.
 
     Built with ``zipfile``: no build backend, no network. The RECORD lists every
     file so ``uv`` can install and later uninstall it.
+
+    *requires* adds ``Requires-Dist`` lines; *constraints* is shipped as the
+    wheel's ``nexus/_install/constraints.txt`` (nexus-2k66t.4.1), the file the
+    real wheel carries and the installer reads back out of the new venv.
     """
     dist_info = f"conexus-{version}.dist-info"
     files = {
         "conexus_stub/__init__.py": f"def main():\n    print('stand-in nx {version}')\n",
         f"{dist_info}/METADATA": (
             f"Metadata-Version: 2.1\nName: conexus\nVersion: {version}\n"
+            + "".join(f"Provides-Extra: {extra}\n" for extra in provides_extras)
+            + "".join(f"Requires-Dist: {req}\n" for req in requires)
         ),
         f"{dist_info}/WHEEL": (
             "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
@@ -93,6 +102,8 @@ def _write_standin_wheel(index: Path, version: str) -> None:
             "[console_scripts]\nnx = conexus_stub:main\nnx-mcp = conexus_stub:main\n"
         ),
     }
+    if constraints is not None:
+        files["nexus/_install/constraints.txt"] = constraints
     record = [
         f"{name},sha256={hashlib.sha256(body.encode()).hexdigest()},{len(body.encode())}"
         for name, body in files.items()
@@ -107,9 +118,35 @@ def _write_standin_wheel(index: Path, version: str) -> None:
     _write_index_page(index)
 
 
-def _write_index_page(index: Path) -> None:
-    """The PEP 503 page for ``conexus``: one link per wheel now in the directory."""
-    project = index / "conexus"
+def _write_standin_dependency(index: Path, name: str, version: str) -> None:
+    """A dependency of the stand-in ``conexus``: a wheel with one module, and its
+    PEP 503 page, in the same local index."""
+    module = name.replace("-", "_")
+    dist_info = f"{module}-{version}.dist-info"
+    files = {
+        f"{module}/__init__.py": f"VERSION = '{version}'\n",
+        f"{dist_info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+    }
+    record = [
+        f"{n},sha256={hashlib.sha256(b.encode()).hexdigest()},{len(b.encode())}"
+        for n, b in files.items()
+    ]
+    record.append(f"{dist_info}/RECORD,,")
+    files[f"{dist_info}/RECORD"] = "\n".join(record) + "\n"
+    project = index / name
+    project.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(project / f"{module}-{version}-py3-none-any.whl", "w") as wheel:
+        for n, body in files.items():
+            wheel.writestr(n, body)
+    _write_index_page(index, name)
+
+
+def _write_index_page(index: Path, name: str = "conexus") -> None:
+    """The PEP 503 page for *name*: one link per wheel now in the directory."""
+    project = index / name
     links = "".join(
         f'<a href="{wheel.name}">{wheel.name}</a><br>\n' for wheel in sorted(project.glob("*.whl"))
     )
@@ -208,7 +245,10 @@ class World:
         return seen
 
 
-def _make_world(root: Path) -> World:
+def _make_world(
+    root: Path, *, requires: tuple[str, ...] = (), constraints: str | None = None,
+    provides_extras: tuple[str, ...] = (),
+) -> World:
     world = World(
         root=root, index=root / "index", tools=root / "tools", bin=root / "bin",
         uv_cache=root / "uvcache", uv_tools=root / "uvtools",
@@ -217,8 +257,11 @@ def _make_world(root: Path) -> World:
     (root / "home").mkdir(parents=True)
     for directory in (world.tools, world.bin, world.uv_cache, world.uv_tools, world.path_store.parent):
         directory.mkdir(parents=True)
-    _write_standin_wheel(world.index, _running_version())
-    _write_standin_wheel(world.index, HIGHER)
+    _write_standin_wheel(
+        world.index, _running_version(), requires=requires, constraints=constraints,
+        provides_extras=provides_extras,
+    )
+    _write_standin_wheel(world.index, HIGHER, requires=requires, provides_extras=provides_extras)
     venv.EnvBuilder(with_pip=False, symlinks=not ON_WINDOWS).create(world.throwaway)
     _let_the_throwaway_import_this_checkout(world)
     return world
@@ -719,23 +762,64 @@ class TestAResumeNeedsTheRightVersionAndAHealthyGeneration:
 
     def _fresh_build_took_over(self, world: World, old: Path, again) -> Path:
         assert again.returncode == 0, again.stdout + again.stderr
-        generations = _generations(world)
-        assert len(generations) == 2 and old in generations, generations
-        (new,) = [g for g in generations if g != old]
-        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
+        # nexus-5kvjb: the leftover the fresh build superseded is reaped, not left for a later gc.
+        new = install_layout.current_generation(tools=world.tools)
+        assert _generations(world) == [new] and not old.exists()
         assert install_layout.read_receipt(new).version == _running_version()
         assert "no rebuild" not in again.stdout
         assert _shim_of(world).is_file()
         return new
 
-    @pytest.mark.parametrize("flipped", [False, True], ids=["no-current", "current-set-no-shims"])
-    def test_an_older_version_leftover_is_not_finished(self, world: World, flipped: bool) -> None:
+    def test_an_older_version_leftover_with_no_current_is_not_finished(self, world: World) -> None:
         old = _built(world)
         _record_version(old, "0.0.1")
-        if flipped:
-            _lose_the_shims(world)
-        else:
-            _interrupt(world)
+        _interrupt(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        self._fresh_build_took_over(world, old, again)
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="reads the POSIX previous symlink")
+    def test_a_usable_older_version_current_that_lost_its_shims_is_rebuilt_beside_it_not_reaped(
+        self, world: World,
+    ) -> None:
+        """nexus-5kvjb: the reap is for interrupted-run leftovers. An older-version `current`
+        that still starts is a working install the bootstrap merely cannot call complete, so
+        the build keeps it, and the `previous` pointer to it, for the normal keep-3 prune."""
+        old = _built(world)
+        _record_version(old, "0.0.1")
+        _lose_the_shims(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        assert again.returncode == 0, again.stdout + again.stderr
+        new = install_layout.current_generation(tools=world.tools)
+        assert new != old and install_layout.read_receipt(new).version == _running_version()
+        assert sorted(_generations(world)) == sorted([old, new]), "the older usable generation was reaped"
+        previous = install_layout.previous_link(tools=world.tools)
+        assert lc.compare_key(os.readlink(previous)) == lc.compare_key(old), "the rollback pointer was dropped"
+        assert _shim_of(world).is_file()
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="`previous` is a junction there; the rule is platform-free and pinned on POSIX")
+    def test_a_rollback_target_previous_named_before_the_flip_survives_the_reap(self, world: World) -> None:
+        """nexus-5kvjb: a broken `current` is reapable, but if `previous` named another,
+        usable generation before the flip, the flip moved the pointer off it and keep=1
+        would take it. The bootstrap leaves that case to the normal keep-3 prune."""
+        old = _built(world)
+        _record_version(old, "0.0.1")
+        broken = _receipted_generation(world, name="gen-20990101T000000Z", version=_running_version())
+        (world.tools / "current").unlink()
+        _point_current(world, broken)
+        previous = install_layout.previous_link(tools=world.tools)
+        if previous.is_symlink():
+            previous.unlink()
+        os.symlink(old, previous)
+        _lose_the_shims(world)
+        again = world.run(world.python, "self", "install", "--bootstrap")
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert old.is_dir(), "the generation `previous` named before the flip was reaped"
+
+    def test_an_older_version_current_whose_interpreter_is_gone_is_reaped(self, world: World) -> None:
+        old = _built(world)
+        _record_version(old, "0.0.1")
+        lc.venv_python(old).unlink()
+        _lose_the_shims(world)
         again = world.run(world.python, "self", "install", "--bootstrap")
         self._fresh_build_took_over(world, old, again)
 
@@ -928,21 +1012,31 @@ class TestTheFlagTakesNothingElse:
         monkeypatch.setenv("UV_TOOL_DIR", str(world.uv_tools))
         return CliRunner().invoke(self_cmd.install_cmd, ["--bootstrap", *args])
 
-    @pytest.mark.parametrize("args", [("--extras", "local"), ("--version", "1.2.3")], ids=["extras", "version"])
-    def test_extras_and_a_version_are_refused(
-        self, world: World, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...],
+    def test_a_version_is_refused(self, world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``--extras`` is accepted since nexus-2k66t.4.9 (Sam, 2026-10-23: the installers
+        install the PDF stack by default); a version is still the running program's."""
+        before = world.snapshot()
+        result = self._invoke(world, monkeypatch, "--version", "1.2.3")
+        assert result.exit_code == 1
+        assert "--bootstrap" in result.output and "--version" in result.output
+        assert "--extras" not in result.output, "the refusal must not claim extras are refused"
+        assert world.snapshot() == before
+
+    def test_a_bad_extra_name_is_refused_before_anything_is_built(
+        self, world: World, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         before = world.snapshot()
-        result = self._invoke(world, monkeypatch, *args)
-        assert result.exit_code == 1
-        assert "--bootstrap" in result.output and args[0] in result.output
+        result = self._invoke(world, monkeypatch, "--extras", "not a name!")
+        assert result.exit_code != 0
+        assert "not a valid extra name" in result.output
         assert world.snapshot() == before
 
     def test_keep_is_accepted_and_changes_nothing_about_the_build(
         self, world: World, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Nothing is reaped on this path, so the count has nothing to act on;
-        the flag is still accepted, because the plain command's callers pass it."""
+        """The bootstrap's own reap keeps only the new generation, so the count has
+        nothing to act on; the flag is still accepted, because the plain command's
+        callers pass it."""
         plain = self._invoke(world, monkeypatch, "--dry-run")
         kept = self._invoke(world, monkeypatch, "--keep", "7", "--dry-run")
         assert kept.exit_code == 0, kept.output
@@ -956,6 +1050,185 @@ class TestTheFlagTakesNothingElse:
         assert result.exit_code == 0, result.output
         assert "conexus" in result.output and _running_version() in result.output
         assert "--extras" not in result.output
+        assert world.snapshot() == before
+
+
+class TestTheBootstrapTakesExtras:
+    """nexus-2k66t.4.9 (Sam, 2026-10-23: install everything by default). The installers
+    and the plugin's setup run ``nx self install --bootstrap --extras pdf``; the throwaway
+    environment stays slim and the GENERATION gets the extra. The world's stand-in wheel
+    declares a ``pdf`` extra that pulls one stand-in dependency, so a build that dropped
+    the extra shows as a missing distribution, not only a receipt line."""
+
+    DEP = "pdf-standin"
+
+    def _pdf_world(self, root: Path) -> World:
+        world = _make_world(
+            root, requires=(f"{self.DEP}; extra == 'pdf'",), provides_extras=("pdf",),
+        )
+        _write_standin_dependency(world.index, self.DEP, "1.0.0")
+        return world
+
+    def _has_dep(self, generation: Path) -> bool:
+        out = subprocess.run(  # noqa: S603 -- fixed argv
+            [str(lc.venv_python(generation)), "-c",
+             f"import importlib.metadata as m, sys\n"
+             f"try: m.version('{self.DEP}')\nexcept m.PackageNotFoundError: sys.exit(3)"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        return out.returncode == 0
+
+    def test_the_pdf_extra_reaches_the_generation_and_its_receipt(self, tmp_path: Path) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        result = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert result.returncode == 0, result.stdout + result.stderr
+        (generation,) = _generations(world)
+        receipt = install_layout.read_receipt(generation)
+        assert receipt.extras == ["pdf"]
+        assert receipt.spec == f"conexus[pdf]=={_running_version()}"
+        assert self._has_dep(generation), "the generation was built without the pdf extra's dependency"
+
+    def test_without_extras_the_same_world_builds_slim(self, tmp_path: Path) -> None:
+        """The control: if this installed the dependency the test above proves nothing."""
+        world = self._pdf_world(tmp_path / "w")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        (generation,) = _generations(world)
+        assert install_layout.read_receipt(generation).extras == []
+        assert not self._has_dep(generation)
+
+    def test_extras_are_normalised_and_merged_in_order(self, tmp_path: Path) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        result = world.run(
+            world.python, "self", "install", "--bootstrap", "--extras", "PDF,pdf", "--dry-run",
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "--extras pdf" in result.stdout or "extras pdf" in result.stdout.lower()
+        assert "pdf,pdf" not in result.stdout
+
+    def test_a_dry_run_names_the_extra_and_changes_nothing(self, tmp_path: Path) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf", "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "pdf" in result.stdout and _running_version() in result.stdout
+        assert world.snapshot() == before
+
+    def test_an_interrupted_slim_build_is_not_finished_when_the_pdf_extra_is_asked(
+        self, tmp_path: Path,
+    ) -> None:
+        """A run that died after its flip left a SLIM generation. The same command with
+        ``--extras pdf`` must not finish that one (it would end with no PDF support and
+        say done): it builds the generation that has it."""
+        world = self._pdf_world(tmp_path / "w")
+        slim = _built(world)
+        _lose_the_shims(world)
+
+        again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        current = install_layout.current_generation(tools=world.tools)
+        assert current != slim and install_layout.read_receipt(current).extras == ["pdf"]
+        assert self._has_dep(current)
+        assert _shim_of(world).is_file()
+        # nexus-5kvjb: the slim generation this build superseded is reaped, with the
+        # rollback pointer that named it; only the new generation is left.
+        assert _generations(world) == [current], "the superseded slim generation stayed on disk"
+        assert not slim.exists()
+        assert not os.path.lexists(install_layout.previous_link(tools=world.tools))
+
+    @pytest.mark.skipif(ON_WINDOWS, reason="the holder is a POSIX process started from the generation")
+    def test_a_superseded_generation_a_live_process_runs_from_is_kept(self, tmp_path: Path) -> None:
+        """The reap is the install's own, so a process running from the leftover keeps it."""
+        world = self._pdf_world(tmp_path / "w")
+        slim = _built(world)
+        _lose_the_shims(world)
+        holder = subprocess.Popen(  # noqa: S603 -- fixed argv
+            [str(lc.venv_python(slim)), "-c", "import time; time.sleep(120)"],
+        )
+        try:
+            again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+            assert again.returncode == 0, again.stdout + again.stderr
+            assert slim.is_dir(), "a generation with a live holder was reaped"
+            assert f"kept {slim}" in again.stdout
+        finally:
+            holder.kill()
+            holder.wait()
+
+    def test_a_receipted_leftover_with_no_current_is_reaped_when_the_build_supersedes_it(
+        self, tmp_path: Path,
+    ) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        slim = _built(world)
+        _interrupt(world)
+        assert not (world.tools / "current").exists()
+
+        again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        current = install_layout.current_generation(tools=world.tools)
+        assert _generations(world) == [current] and not slim.exists()
+
+    def test_an_interrupted_pdf_build_is_finished_by_the_same_command_without_a_rebuild(
+        self, tmp_path: Path,
+    ) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        first = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert first.returncode == 0, first.stdout + first.stderr
+        (built,) = _generations(world)
+        _lose_the_shims(world)
+
+        again = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert _generations(world) == [built]
+        assert "no rebuild" in again.stdout
+
+    def test_an_interrupted_pdf_build_is_not_finished_by_a_command_that_asks_for_nothing(
+        self, tmp_path: Path,
+    ) -> None:
+        """``--slim`` after an interrupted default install: the leftover carries pdf, the
+        caller asked for none, so finishing it would silently flip in what ``--slim`` left
+        out. It builds the slim generation instead, and the pdf one it superseded is reaped (nexus-5kvjb)."""
+        world = self._pdf_world(tmp_path / "w")
+        first = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert first.returncode == 0, first.stdout + first.stderr
+        (built,) = _generations(world)
+        _lose_the_shims(world)
+
+        again = world.run(world.python, "self", "install", "--bootstrap")
+
+        assert again.returncode == 0, again.stdout + again.stderr
+        assert "no rebuild" not in again.stdout
+        current = install_layout.current_generation(tools=world.tools)
+        assert current != built and install_layout.read_receipt(current).extras == []
+        assert not self._has_dep(current)
+        assert _generations(world) == [current], "the pdf generation --slim superseded stayed on disk"
+
+    def test_the_finishing_and_dry_run_lines_name_the_extras(self, tmp_path: Path) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        first = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert first.returncode == 0, first.stdout + first.stderr
+        _lose_the_shims(world)
+
+        dry = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf", "--dry-run")
+        assert dry.returncode == 0, dry.stdout + dry.stderr
+        assert "would finish the interrupted install" in dry.stdout and "extras: pdf" in dry.stdout
+
+        real = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert real.returncode == 0, real.stdout + real.stderr
+        assert "finishing the interrupted install" in real.stdout and "extras: pdf" in real.stdout
+
+    def test_a_complete_install_refuses_and_names_the_command_that_adds_the_extra(
+        self, tmp_path: Path,
+    ) -> None:
+        world = self._pdf_world(tmp_path / "w")
+        _built(world)
+        before = world.snapshot()
+        result = world.run(world.python, "self", "install", "--bootstrap", "--extras", "pdf")
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "already installed" in result.stderr
+        assert "nx self install --extras pdf" in result.stderr
         assert world.snapshot() == before
 
 
@@ -1002,10 +1275,8 @@ class TestAnInstallWhoseInterpreterWasPruned:
         assert not gone.exists()
         result = world.run(world.python, "self", "install", "--bootstrap")
         assert result.returncode == 0, result.stdout + result.stderr
-        generations = _generations(world)
-        assert len(generations) == 2 and old in generations, "the old generation is left for garbage collection"
-        (new,) = [g for g in generations if g != old]
-        assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
+        new = install_layout.current_generation(tools=world.tools)
+        assert _generations(world) == [new] and not old.exists(), "the unstartable generation the build replaced is reaped"
         assert _shim_of(world).is_file()
         # The repaired install is complete again: the next call refuses.
         again = world.run(world.python, "self", "install", "--bootstrap")
@@ -1109,8 +1380,8 @@ class TestALegacyUvToolInstallWhoseInterpreterWasPruned:
         result = world.run(world.python, "self", "install", "--bootstrap")
         assert result.returncode == 0, result.stdout + result.stderr
         generations = _generations(world)
-        assert len(generations) == 2 and old in generations
-        (new,) = [g for g in generations if g != old]
+        (new,) = generations
+        assert new != old and not old.exists()
         assert lc.compare_key(install_layout.current_generation(tools=world.tools)) == lc.compare_key(new)
 
 
@@ -1198,6 +1469,11 @@ class TestTheWindowsTwin:
         core = self_cmd._generation()
         generation = tmp_path / "tools" / "gen-20260101T000000Z"
         generation.mkdir(parents=True)
+        # A built generation always carries its receipt, and the flip step reads it first (nexus-lvvhm).
+        (generation / install_layout.RECEIPT_NAME).write_text(install_layout.Receipt(
+            version="1.0.0", spec="conexus", source_kind="registry", source="conexus", python="3.12.8",
+            base_interpreter="/py", created_at="2026-10-24T00:00:00Z", extras=[],
+        ).to_json())
         monkeypatch.setattr(core, "build_generation", lambda *a, **k: generation)
         monkeypatch.setattr(self_cmd, "_plat", lambda: "win32")
         monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda *_: None)
@@ -1296,6 +1572,23 @@ class TestTheLockstepMarker:
         assert result.exit_code == 0, result.output
         assert marker.read_text(encoding="utf-8") == _running_version()
 
+    def test_the_bootstrap_build_is_asked_to_show_progress(
+        self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """install.ps1 and the setup tool run ``nx self install --bootstrap``; on Windows the
+        build behind it was silent for minutes (nexus-2k66t.4.7)."""
+        built = world.tools / "gen-20260303T000000Z"
+        seen: list[dict] = []
+
+        def _build(*a, **k):
+            seen.append(k)
+            return built
+
+        monkeypatch.setattr(self_cmd, "_build_flip_shims", _build)
+        result = self._invoke(world, monkeypatch)
+        assert result.exit_code == 0, result.output
+        assert seen and seen[0].get("progress") is True
+
     def test_a_dry_run_writes_no_marker(
         self, world: World, marker: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1346,3 +1639,83 @@ class TestTheLockstepMarker:
         assert result.exit_code == 0, result.output
         assert "lockstep marker" in result.output
         assert "installed gen-" in result.output
+
+
+class TestTheBuildInstallsTheVersionsThePackageShips:
+    """nexus-2k66t.4.1: the first install resolves a dependency to the version the
+    package's own ``nexus/_install/constraints.txt`` names, not to the newest the
+    index offers. Real ``uv`` against the local index, on every platform: POSIX
+    runs ``install_generation.sh``, Windows runs ``generation_core``.
+
+    The index holds ``standin-dep`` 1.0.0 and 2.0.0 and the stand-in ``conexus``
+    requires it. Only a build that read the constraints out of the package it
+    just fetched can land on 1.0.0."""
+
+    @staticmethod
+    def _dep_version(world: World) -> str:
+        generation = _generations(world)[0]
+        out = subprocess.run(  # noqa: S603 — fixed argv
+            [str(lc.venv_python(generation)), "-c",
+             "import importlib.metadata as m; print(m.version('standin-dep'))"],
+            capture_output=True, text=True, check=True, timeout=60,
+        )
+        return out.stdout.strip()
+
+    @staticmethod
+    def _world(root: Path, *, constraints: str | None) -> World:
+        world = _make_world(root, requires=("standin-dep",), constraints=constraints)
+        _write_standin_dependency(world.index, "standin-dep", "1.0.0")
+        _write_standin_dependency(world.index, "standin-dep", "2.0.0")
+        return world
+
+    def test_a_dependency_is_held_to_the_shipped_pin(self, tmp_path: Path) -> None:
+        world = self._world(tmp_path / "w", constraints="standin-dep==1.0.0\n")
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._dep_version(world) == "1.0.0"
+        assert "UNCONSTRAINED" not in result.stdout + result.stderr
+
+    def test_without_the_file_the_dependency_floats_and_the_build_says_so(self, tmp_path: Path) -> None:
+        """The control: the same world, no shipped file. If this installed 1.0.0
+        the test above would prove nothing about the constraints."""
+        world = self._world(tmp_path / "w", constraints=None)
+        result = world.run(world.python, "self", "install", "--bootstrap")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._dep_version(world) == "2.0.0"
+        assert "UNCONSTRAINED" in result.stdout + result.stderr
+
+
+class TestTheBootstrapReapNeverRemovesUvLaunchers:
+    """Windows (nexus-5kvjb): the plain reap also removes uv's conexus launchers from uv's bin
+    directory once the legacy tree is gone. On a first install there is no legacy tree and the
+    directory is shared with pipx, so a name match alone would delete somebody else's ``nx.exe``."""
+
+    def _fake_core(self, calls: list[str]):
+        import types
+
+        return types.SimpleNamespace(
+            legacy_launcher_names=lambda legacy: [],
+            reap=lambda tools, **kw: calls.append("reap") or [],
+            declared_launcher_names=lambda generation, platform=None: ["nx"],
+            uv_bin_dir=lambda: Path("uv-bin"),
+            current_launcher_dir=lambda tools: Path("current-bin"),
+            remove_uv_launchers=lambda *a, **kw: calls.append("remove_uv_launchers") or ["removed nx.exe"],
+        )
+
+    def _windows(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, calls: list[str]) -> None:
+        monkeypatch.setattr(self_cmd, "_generation", lambda: self._fake_core(calls))
+        monkeypatch.setattr(install_layout, "uv_conexus_venv", lambda platform=None: tmp_path / "no-legacy-tree")
+        monkeypatch.setattr(install_layout, "current_generation", lambda tools=None, platform=None: tmp_path / "gen")
+
+    def test_the_plain_windows_reap_still_removes_them(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        calls: list[str] = []
+        self._windows(monkeypatch, tmp_path, calls)
+        lines = self_cmd._windows_reap(tmp_path, keep=3, self_generation=None, dry_run=False)
+        assert calls == ["reap", "remove_uv_launchers"] and lines == ["removed nx.exe"]
+
+    def test_the_bootstrap_reap_does_not(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        calls: list[str] = []
+        self._windows(monkeypatch, tmp_path, calls)
+        monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
+        self_cmd._reap_superseded(tmp_path, tmp_path, outgoing=None, built_version="1.0.0")
+        assert calls == ["reap"], "the bootstrap's reap reached uv's bin directory"

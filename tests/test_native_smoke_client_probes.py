@@ -55,7 +55,7 @@ _T1_PROBE = _PROBE_DIR / "t1_real_client.py"
 _T2_PROBE = _PROBE_DIR / "t2_real_client.py"
 _TUPLES_PROBE = _PROBE_DIR / "tuples_real_client.py"
 
-#: Same bound native-smoke.sh applies via its own $TIMEOUT_CMD (60s).
+#: Same bound native-smoke.sh applies via _bounded 60.
 _PROBE_TIMEOUT_S = 60
 
 

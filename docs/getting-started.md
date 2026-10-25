@@ -6,7 +6,7 @@
 - **[uv](https://docs.astral.sh/uv/)** — Python package manager. Route one under [Install](#install) installs it for you; route two needs it first.
 - **git**
 
-- **Hardware** — an Apple Silicon Mac (arm64), Linux on x86-64 or arm64, or
+- **Hardware** — an Apple Silicon Mac (arm64) on **macOS 14 or later**, Linux on x86-64 or arm64, or
   Windows 11 on x64.
   Nexus ships its own PostgreSQL and **never** uses a host install: there is
   no fallback leg (`_NO_HOST_FALLBACK`, `nexus.db.pg_provision`), because the
@@ -15,10 +15,13 @@
   is built for those four targets only, so an **Intel Mac** or **Windows on
   ARM** cannot run a local install: `nx init` stops with an error naming how to
   get a bundle, rather than falling back to anything.
+  macOS 14 is the floor because onnxruntime, the embedder runtime, ships only
+  macOS 14 wheels from version 1.24 on, and Apple patches only recent releases;
+  on macOS 13 or earlier the install fails resolving with a platform-tag error.
   Native Windows x64 works through the same two steps as the other platforms,
-  `uv tool install conexus` and `nx init --service`, using the published
+  `uv tool install conexus` and `nx init`, using the published
   windows-x64 engine and PostgreSQL bundle. It passed a test from PyPI on a
-  clean Windows 11 x64 machine (conexus 7.72.1: `nx init --service`, a live
+  clean Windows 11 x64 machine (conexus 7.72.1: `nx init`, a live
   Claude Code session with MCP store and search, hooks, stop and restart).
   Windows 11 x64 is supported, with the limits listed in
   [What is not supported or not measured](windows-install.md#what-is-not-supported-or-not-measured).
@@ -32,17 +35,19 @@
   on ARM are not supported.
   No GPU is required, and none is used by default. Search embeds through a
   bundled ONNX model on CPU (`CPUExecutionProvider` is the only provider in
-  the tree). On Linux, torch is pinned to its CPU build at both install steps:
-  the first command is `uv tool install conexus --python 3.12 --torch-backend cpu`
-  (uv 0.9.19 or newer; uv warns that the flag is experimental), and
-  `nx self install` passes the same backend to every generation it builds.
-  Without the flag, uv takes the CUDA torch from PyPI on x86-64 and with it 15
-  nvidia packages and triton that nothing on this path uses: measured
-  2026-10-07 in a fresh ubuntu:24.04 container, 4,264 MB downloaded and
-  7,955 MB unpacked, against 688 MB and 2,250 MB with the flag. Set
-  `NX_TORCH_BACKEND` (to `auto`, `cu130`, and so on) to opt a GPU box back in
-  at `nx self install`. macOS and Windows wheels carry no CUDA payload, so
-  nothing is pinned there.
+  the tree). A bare `uv tool install conexus` carries no torch: torch arrives
+  only with PDF support (the `pdf` extra), which the installers add by default
+  and `nx` adds on the first PDF index or with `nx self install --extras pdf`.
+  Those builds name the CPU build of torch on Linux, so a box with an NVIDIA GPU
+  does not download the CUDA tree (about 4.3 GB and 15 nvidia packages plus
+  triton, measured 2026-10-07 in a fresh ubuntu:24.04 container, against 688 MB
+  with the CPU build). Set `NX_TORCH_BACKEND` to opt a GPU box back in at
+  `nx self install`. The default is `cpu`; `auto` picks a build from the NVIDIA
+  driver. A driver that supports CUDA 12.6 to 12.8 needs `cu126`; a newer
+  driver can use `cu129` or `cu130`. `cu128` does not exist for this torch
+  (2.13), so `auto` on a CUDA 12.8-only driver can fail to resolve: name
+  `cu126` instead. macOS and Windows wheels carry no CUDA payload, so nothing
+  is pinned there.
 
   **Memory.** Measured on an Apple Silicon Mac, sampling the local-stack
   processes' own RSS (never a whole-machine reading, which a shared box's
@@ -108,14 +113,18 @@ In Claude Desktop, add the plugin in Customize → Plugins, then say "Set up Nex
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 1.3 GB down, 2.4 to 3.1 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.7 GB down, 2.1 to 2.3 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.7 GB down, 2.1 to 2.3 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
 | Not now | Nothing is installed | none |
 
-The sizes on disk are the install itself, measured from nothing with conexus 7.81.0 on macOS, Linux and Windows; Windows is the high end. `uv` also keeps a download cache, about 2.4 GB on Linux, 3.6 GB on macOS and 4.8 GB on Windows after a first install. On Linux the cache and the install together measured 2.4 GB, not 4.4 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The service is the **nexus-service**: the native Postgres + pgvector + bge-768 backend that serves every persistent tier. Check the result with `nx doctor`. The commands the routes run for you are under [Install by hand](#install-by-hand) in Troubleshooting. The [Getting started lessons on the site](https://hellblazer.github.io/nexus/getting-started.html) cover the work you do next, and updating is covered at the end of this page.
+These sizes include PDF support (docling, MinerU and torch), which the script and the setup tool install by default; the script's `--slim` and the setup tool's `slim` leave it out (about 0.25 GB less down on macOS, 0.37 GB on Linux; 0.85 GB less on disk on macOS, 1.3 GB on Linux) and the first PDF you index then fetches it. The sizes are measured on 7.85.0 on macOS and Linux (2026-10-24): the download is the wheels in the lock, the Python and, for Local, the service and its models; the sizes on disk are the install itself. Windows was not measured. `uv` also keeps a download cache, about 2.1 GB on Linux and 1.8 GB on macOS after a first install (an earlier 7.81.0 measurement found 4.8 GB on Windows). On Linux the cache and the install together measured about 2.2 GB, not 4.2 GB, because they share files, so the cache is not all extra space. `uv cache clean` empties it but frees only the files the install does not share. The service is the **nexus-service**: the native Postgres + pgvector + bge-768 backend that serves every persistent tier. Check the result with `nx doctor`. The commands the routes run for you are under [Install by hand](#install-by-hand) in Troubleshooting. The [Getting started lessons on the site](https://hellblazer.github.io/nexus/getting-started.html) cover the work you do next, and updating is covered at the end of this page.
 
 Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document — pre-PG installs need a **two-hop** upgrade via `conexus==6.18.1` (the last migration-capable release); a direct jump to current migrates nothing.
+
+### PDF support installs on first use
+
+The script and the setup tool install PDF support (docling, MinerU and torch) with everything else. An install that arrives without it (`--slim`, a bare `uv tool install conexus`) gets it the first time you index a PDF; the Claude Desktop extension gets it from its Include PDF support setting instead (off by default, applied at the extension's next start): `nx` installs it into a new generation and re-runs your command there; you see one line on stderr naming the size (about 240 MB on macOS, 370 MB on Linux, 0.85 GB on disk on macOS and 1.3 GB on Linux) and uv's progress. It is kept by every later upgrade, and an install that already had it keeps it. To install it ahead of time, for instance before going offline, run `nx self install --extras pdf`. If the install cannot run, the PDF command stops before writing anything: exit 69 with the command to run (the install was refused, or this is a source checkout, where `uv sync` carries it), 75 when the network failed (retry), 70 when the installer failed. A background run, such as the post-commit hook, never starts the download: it indexes code and prose, names the PDFs it held back, and exits 69; `nx doctor` counts them under "PDF support".
 
 ## Use it (no API keys needed)
 
@@ -167,7 +176,7 @@ See [Document Catalog](catalog.md) for details.
 
 ## Claude Code plugin (optional)
 
-The conexus plugin gives Claude Code agents access to all three storage tiers, 10 specialized agents, and 44 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
+The conexus plugin gives Claude Code agents access to all three storage tiers, 10 specialized agents, and skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
 
 ```bash
 /plugin marketplace add Hellblazer/nexus
@@ -267,7 +276,7 @@ taxonomy:
 Use these commands when a route under [Install](#install) fails, or when you want each step yourself.
 
 ```bash
-uv tool install conexus --python 3.12     # on Linux add: --torch-backend cpu
+uv tool install conexus --python 3.12
 nx self install
 nx init
 nx doctor
@@ -302,7 +311,10 @@ uv-tool layout. If it reports 3.14, rebuild the uv environment:
 
 ```bash
 uv tool install conexus --force --python 3.12   # use "conexus[local]" here if you rely on the bge-768 embedder
+nx self install                                 # moves onto a generation, installed at the versions the release's uv.lock resolved
 ```
+
+A bare `uv tool install` resolves the dependencies afresh, unpinned; the `nx self install` after it is what pins them.
 
 Note: `uv tool upgrade` reuses the existing environment's Python — it won't
 switch from 3.14 to 3.12 automatically, which is why this one case wants
@@ -316,7 +328,7 @@ interpreter is already supported.
 
 **`nx index repo .` fails with a service-auth error** — In managed-cloud mode, indexing requires a reachable service and a valid `NX_SERVICE_TOKEN`. Export the token (`export NX_SERVICE_TOKEN=…`) and confirm the endpoint with `nx doctor`, or use local mode (run `nx daemon service start`, no token needed).
 
-**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14, so this is the same uv-tool-layout case as *Crash on startup* above and takes the same fix: `uv tool install conexus --force --python 3.12` (re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras).
+**`import voyageai` or Pydantic v1 error** — The tool is running under Python 3.14, so this is the same uv-tool-layout case as *Crash on startup* above and takes the same fix: `uv tool install conexus --force --python 3.12` (re-include `[local]` — `"conexus[local]"` — if you use the bge-768 embedder, since `--force` drops extras), then run `nx self install` so the install is a generation pinned to the release's lock.
 
 **First index is slow or hits a rate limit** — Large repos may take a few minutes. Add `--monitor` for per-file progress. Re-running is safe — unchanged files are skipped.
 
@@ -368,9 +380,11 @@ on the older uv-tool layout and step 1 is `uv tool upgrade conexus`. `nx doctor`
 *Generation layout* row tells you which you have.
 
 Do not upgrade with `uv tool install conexus` or `--force`. That resets the
-environment and drops `[local]`, which downgrades the embedder from 768 to 384
-dimensions and makes search over existing collections return nothing. On a
-uv-tool box recover with `uv tool install --reinstall "conexus[local]"`; on a
+environment and drops `[local]`, and on a generation box it rebuilds the uv tree
+and takes the shims back. Search over existing collections is not affected by the
+extra, because the service embeds server-side. On a
+uv-tool box recover with `uv tool install --reinstall "conexus[local]"` and then run
+`nx self install` so the install is pinned to the release's lock; on a
 generation box `nx self install` rewrites the shims. Never `uv tool uninstall
 conexus` on a generation box.
 
@@ -404,9 +418,11 @@ block below).** First, stop any local service a 7.x install left running
 (`nx daemon service stop`). Second, make the pin run against a **local** engine,
 not a managed one. Write down your `service_url` and `service_token` values
 first (the cloud steps need both again), then `unset NX_SERVICE_URL
-NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT`, delete the `service_url:`
-line under `credentials:` in `~/.config/nexus/config.yml` (there is no
-`nx config unset`; it is a file edit), and `export NX_LOCAL=1` for the hop.
+NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT`, clear the saved
+`service_url` (`nx config unset service_url`, and `nx config unset service_token`
+if one is saved; a client too old to have `unset` needs the lines under
+`credentials:` in `~/.config/nexus/config.yml` deleted by hand), and
+`export NX_LOCAL=1` for the hop.
 `nx config get service_url` prints `service_url: not set` when it is clear.
 `NX_LOCAL=1` is needed in addition: it does not by itself override a configured
 `service_url`, and without it the pin's provisioning refuses to start a local
