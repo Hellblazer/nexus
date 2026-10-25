@@ -23,12 +23,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * nexus-tko2w: {@code catalog-046-manifest-section-labels.xml} adds three NULLABLE per-position labels
- * ({@code section_title}, {@code section_type}, {@code page_number}) to {@code catalog_document_chunks}.
+ * ({@code section_title}, {@code section_type}, {@code page_number}) and the {@code labels_written} marker
+ * (BOOLEAN NOT NULL DEFAULT false) to {@code catalog_document_chunks}.
  *
- * <p>On an empty database migrated to the changeset before it, the three columns are absent; after it they
- * exist, typed and NULLABLE (no default, so no row is rewritten or backfilled: the only source would be the
- * shared chunk row, the wrong value for a shared chunk); its own rollback drops exactly the three columns;
- * the full changelog applies again over the rolled-back schema.
+ * <p>On an empty database migrated to the changeset before it, the four columns are absent; after it they
+ * exist, typed, the labels NULLABLE and the marker NOT NULL defaulting to false (an existing row is read as
+ * legacy, not rewritten or backfilled: the only source would be the shared chunk row, the wrong value for a
+ * shared chunk); its own rollback drops exactly the four columns; the full changelog applies again over the
+ * rolled-back schema.
  */
 class Catalog046ManifestSectionLabelsSchemaLiquibaseTest {
 
@@ -37,7 +39,7 @@ class Catalog046ManifestSectionLabelsSchemaLiquibaseTest {
     private static final String TARGET_CHANGESET_ID = "catalog-046-1";
 
     @Test
-    void addsThreeNullableColumns_rollsBackAndReapplies() throws Exception {
+    void addsThreeNullableLabelsAndTheWrittenMarker_rollsBackAndReapplies() throws Exception {
         PostgreSQLContainer<?> dedicated = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = dedicated.createConnection("")) {
@@ -45,7 +47,7 @@ class Catalog046ManifestSectionLabelsSchemaLiquibaseTest {
             }
             try (Connection su = dedicated.createConnection("")) {
                 assertThat(columns(su)).as("before the changeset")
-                    .doesNotContainKeys("section_title", "section_type", "page_number");
+                    .doesNotContainKeys("section_title", "section_type", "page_number", "labels_written");
             }
             try (Connection su = dedicated.createConnection("")) {
                 migrateUpTo(su, TARGET_CHANGESET_ID);
@@ -54,10 +56,17 @@ class Catalog046ManifestSectionLabelsSchemaLiquibaseTest {
                 Map<String, String> cols = columns(su);
                 assertThat(cols).containsEntry("section_title", "text")
                     .containsEntry("section_type", "text")
-                    .containsEntry("page_number", "int4");
-                assertThat(nullable(su)).as("all three are NULLABLE").containsOnly(
+                    .containsEntry("page_number", "int4")
+                    .containsEntry("labels_written", "bool");
+                assertThat(nullable(su)).as("the labels are NULLABLE, the marker is not").containsOnly(
                     Map.entry("section_title", "YES"), Map.entry("section_type", "YES"),
-                    Map.entry("page_number", "YES"));
+                    Map.entry("page_number", "YES"), Map.entry("labels_written", "NO"));
+                // The DEFAULT is what makes every row written before catalog-046 read as legacy (labels
+                // NULL, not written), with no rewrite of the table.
+                try (ResultSet rs = su.getMetaData().getColumns(null, "nexus", "catalog_document_chunks", "labels_written")) {
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getString("COLUMN_DEF")).isEqualTo("false");
+                }
             }
             try (Connection su = dedicated.createConnection("")) {
                 Database database = DatabaseFactory.getInstance()
@@ -68,8 +77,8 @@ class Catalog046ManifestSectionLabelsSchemaLiquibaseTest {
                 }
             }
             try (Connection su = dedicated.createConnection("")) {
-                assertThat(columns(su)).as("rollback drops exactly the three columns")
-                    .doesNotContainKeys("section_title", "section_type", "page_number")
+                assertThat(columns(su)).as("rollback drops exactly the four columns")
+                    .doesNotContainKeys("section_title", "section_type", "page_number", "labels_written")
                     .containsKeys("chash", "line_start", "char_end", "collection", "embedding_model");
             }
             try (Connection su = dedicated.createConnection("")) {
@@ -80,7 +89,7 @@ class Catalog046ManifestSectionLabelsSchemaLiquibaseTest {
                 su.setAutoCommit(true);
             }
             try (Connection su = dedicated.createConnection("")) {
-                assertThat(columns(su)).containsKeys("section_title", "section_type", "page_number");
+                assertThat(columns(su)).containsKeys("section_title", "section_type", "page_number", "labels_written");
             }
         } finally {
             dedicated.stop();
@@ -96,13 +105,14 @@ class Catalog046ManifestSectionLabelsSchemaLiquibaseTest {
         return out;
     }
 
-    /** The three label columns' {@code IS_NULLABLE}, through JDBC metadata. */
+    /** The label columns' and marker's {@code IS_NULLABLE}, through JDBC metadata. */
     private static Map<String, String> nullable(Connection su) throws Exception {
         Map<String, String> out = new HashMap<>();
         try (ResultSet rs = su.getMetaData().getColumns(null, "nexus", "catalog_document_chunks", null)) {
             while (rs.next()) {
                 String name = rs.getString("COLUMN_NAME");
-                if (name.equals("section_title") || name.equals("section_type") || name.equals("page_number")) {
+                if (name.equals("section_title") || name.equals("section_type") || name.equals("page_number")
+                        || name.equals("labels_written")) {
                     out.put(name, rs.getString("IS_NULLABLE"));
                 }
             }

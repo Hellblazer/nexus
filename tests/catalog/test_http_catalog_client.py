@@ -771,7 +771,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                  "collection": row.get("collection", "knowledge__fake__v1"),
                  "section_title": row.get("section_title"),
                  "section_type": row.get("section_type"),
-                 "page_number": row.get("page_number")}
+                 "page_number": row.get("page_number"),
+                 "labels_written": row.get("labels_written", False)}
                 for doc_id, doc_rows in sorted(manifest.items())
                 for row in doc_rows if row["chash"] in wanted
             ]
@@ -1677,6 +1678,7 @@ class TestHttpCatalogClientRoundTrip:
             # nexus-tko2w: the row's own collection and its (here unlabelled) section labels.
             "collection": "knowledge__fake__v1",
             "section_title": None, "section_type": None, "page_number": None,
+            "labels_written": False,
         }]
         assert client.chash_positions([]) == []
 

@@ -357,11 +357,16 @@ class ManifestRow:
     collection: str | None = None
     # nexus-tko2w (RDR-108): the per-position section labels. Document structure lives in
     # the manifest, not on the shared T3 chunk row, whose metadata is the last writer's.
-    # None is "unlabelled": every row written before catalog-046, or by a client that
-    # predates the columns, and a pre-field engine that sends no key.
+    # ``labels_written`` says whether these three are this document's own answer: True for a
+    # row written by a client that sends the labels (an empty title or type then means "this
+    # chunk has none here"), False for a row written before catalog-046 or by a client that
+    # predates the columns, and for a pre-field engine that sends no key. A False row has NULL
+    # labels that mean "never recorded", and readers fall back to the chunk row's own label
+    # for it; a True row is authoritative and is never overridden by the chunk row.
     section_title: str | None = None
     section_type: str | None = None
     page_number: int | None = None
+    labels_written: bool = False
 
 
 def manifest_row_wire(row: object) -> dict:
@@ -371,8 +376,10 @@ def manifest_row_wire(row: object) -> dict:
     Every re-write of an existing manifest (a retraction that drops one chash and writes the
     rest back, the atomic replace of a pruned collection) must carry ALL the row's fields: a
     field left out here is written as NULL, and the section labels (nexus-tko2w) are the ones
-    nothing else can restore short of a re-index. ``getattr`` throughout so the real dataclass
-    and a lightweight fake carrying fewer fields work identically.
+    nothing else can restore short of a re-index. ``labels_written`` travels with them: a row
+    that was legacy stays legacy, so its NULL labels are not turned into "unlabelled for good" by
+    the rewrite. ``getattr`` throughout so the real dataclass and a lightweight fake carrying
+    fewer fields work identically.
     """
     return {
         "chash": getattr(row, "chash", "") or "",
@@ -385,6 +392,7 @@ def manifest_row_wire(row: object) -> dict:
         "section_title": getattr(row, "section_title", None),
         "section_type": getattr(row, "section_type", None),
         "page_number": getattr(row, "page_number", None),
+        "labels_written": bool(getattr(row, "labels_written", False)),
     }
 
 

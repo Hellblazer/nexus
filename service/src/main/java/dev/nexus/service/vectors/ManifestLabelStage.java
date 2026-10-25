@@ -40,16 +40,18 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       <em>document</em> that owns an occurrence passing the predicate (the document's lowest passing
  *       position), carrying that document's {@code doc_id}, {@code position} and own labels. A shared
  *       chunk can therefore come back twice, once per owner, each with its own label.</li>
- *   <li>NULL: a negative operator ({@code $ne}, {@code $nin}) keeps an unlabelled occurrence (SQL
- *       {@code IS DISTINCT FROM}); every other operator drops it. An unlabelled occurrence is one whose
- *       manifest label is NULL <em>and</em> whose chunk row carries no label of its own (see the next
- *       item).</li>
- *   <li>Legacy fallback: a manifest row written before catalog-046 has NULL labels, and nothing
- *       backfills them. Reading NULL as "no label" would make {@code section_type!=references} stop
- *       filtering every existing document until it is re-indexed, so an occurrence whose manifest label
- *       is NULL takes the chunk row's own (last-writer, possibly another document's) label instead,
- *       exactly the value the filter read before this change. A re-index fills the manifest and the
- *       fallback stops being consulted for that row.</li>
+ *   <li>Unlabelled: a negative operator ({@code $ne}, {@code $nin}) keeps an unlabelled occurrence (SQL
+ *       {@code IS DISTINCT FROM}); every other operator drops it. An empty string counts as unlabelled
+ *       exactly as NULL does: a current client writes {@code ""} for a chunk with no heading.</li>
+ *   <li>{@code labels_written} (catalog-046): a manifest row says whether its labels are its document's
+ *       own answer. A WRITTEN row is authoritative, its empty or NULL label included: the chunk row is
+ *       never consulted, because the chunk row belongs to the last writer and a document that indexed a
+ *       chunk with no label must not inherit another document's. A LEGACY row (written before
+ *       catalog-046, by a client that sends no labels, or by the backfill) has NULL labels that mean
+ *       "never recorded": reading them as "no label" would make {@code section_type!=references} stop
+ *       filtering every existing document until it is re-indexed, so a legacy occurrence takes the chunk
+ *       row's own label instead, exactly the value the filter read before this change. A re-index writes
+ *       the manifest and the fallback stops being consulted for that row.</li>
  *   <li>A hit with no live manifest row (an orphan) is kept or dropped on its chunk row's own label
  *       alone, with no {@code doc_id}.</li>
  *   <li>The caller's limit applies after expansion and de-duplication, never before.</li>
@@ -194,7 +196,7 @@ final class ManifestLabelStage {
     }
 
     private static boolean test(Predicate p, Object label) {
-        if (label == null) {
+        if (label == null || (label instanceof String text && text.isEmpty())) {
             // IS DISTINCT FROM: a negative operator keeps an unlabelled occurrence, any other drops it.
             return p.operator().equals("$ne") || p.operator().equals("$nin");
         }
@@ -265,7 +267,7 @@ final class ManifestLabelStage {
      * the document's {@code source_uri} (a row that carries one is re-pointed at the document it speaks for).
      */
     record Occurrence(String docId, int position, String sectionTitle, String sectionType, Integer pageNumber,
-                      String sourceUri) {}
+                      boolean labelsWritten, String sourceUri) {}
 
     /**
      * The live manifest occurrences of each (collection, chash) the rows name, in (doc_id, position)
@@ -299,6 +301,7 @@ final class ManifestLabelStage {
                                              CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE,
                                              CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
                                              CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER,
+                                             CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
                                              CATALOG_DOCUMENTS.SOURCE_URI)
                         .from(CATALOG_DOCUMENT_CHUNKS)
                         .join(CATALOG_DOCUMENTS)
@@ -314,7 +317,7 @@ final class ManifestLabelStage {
                     for (var r : fetched) {
                         out.computeIfAbsent(key(e.getKey(), r.value1()), k -> new ArrayList<>())
                            .add(new Occurrence(r.value2(), r.value3(), r.value4(), r.value5(), r.value6(),
-                                               r.value7()));
+                                               Boolean.TRUE.equals(r.value7()), r.value8()));
                     }
                 }
             }
@@ -360,7 +363,7 @@ final class ManifestLabelStage {
                     Map<String, Object> labels = rowLabels(row, o);
                     if (passes(predicates, labels)) {
                         seenDocs.add(o.docId());
-                        out.add(expanded(row, o, labels));
+                        out.add(expanded(row, o));
                     }
                 }
             }
@@ -372,19 +375,31 @@ final class ManifestLabelStage {
     }
 
     /**
-     * The effective label of one occurrence, per key: the manifest's own, else (a row written before
-     * catalog-046) the chunk row's, else absent. The chunk row's labels are flattened into the row map.
+     * The effective label of one occurrence, per key. A WRITTEN manifest row (see {@link Occurrence})
+     * answers for itself, an empty or NULL label included. A legacy row, or a hit with no live manifest row
+     * ({@code o == null}), takes the chunk row's own label (flattened into the row map), else is absent.
      */
     private static Map<String, Object> rowLabels(Map<String, Object> row, Occurrence o) {
         Map<String, Object> m = new HashMap<>(4);
-        m.put("section_title", o != null && o.sectionTitle() != null ? o.sectionTitle() : row.get("section_title"));
-        m.put("section_type", o != null && o.sectionType() != null ? o.sectionType() : row.get("section_type"));
-        m.put("page_number", o != null && o.pageNumber() != null ? o.pageNumber() : row.get("page_number"));
+        if (o != null && o.labelsWritten()) {
+            m.put("section_title", o.sectionTitle());
+            m.put("section_type", o.sectionType());
+            m.put("page_number", o.pageNumber());
+        } else {
+            m.put("section_title", row.get("section_title"));
+            m.put("section_type", row.get("section_type"));
+            m.put("page_number", row.get("page_number"));
+        }
         return m;
     }
 
-    /** A copy of {@code row} that speaks for one owning document: its id, position and own labels. */
-    private static Map<String, Object> expanded(Map<String, Object> row, Occurrence o, Map<String, Object> labels) {
+    /**
+     * A copy of {@code row} that speaks for one owning document: its id, position and own labels. A written
+     * occurrence replaces the chunk row's (foreign) labels outright: an empty title or type is sent as
+     * {@code ""} (the chunkers' "none here"), and an unset page removes the key instead of leaving another
+     * document's page behind.
+     */
+    private static Map<String, Object> expanded(Map<String, Object> row, Occurrence o) {
         Map<String, Object> copy = new LinkedHashMap<>(row);
         copy.put("doc_id", o.docId());
         copy.put("position", o.position());
@@ -392,9 +407,13 @@ final class ManifestLabelStage {
             // include_source_uri resolved one owner's URI for the shared chunk; this row speaks for o's document.
             copy.put("source_uri", o.sourceUri());
         }
-        for (Map.Entry<String, Object> e : labels.entrySet()) {
-            if (e.getValue() != null) {
-                copy.put(e.getKey(), e.getValue());
+        if (o.labelsWritten()) {
+            copy.put("section_title", o.sectionTitle() == null ? "" : o.sectionTitle());
+            copy.put("section_type", o.sectionType() == null ? "" : o.sectionType());
+            if (o.pageNumber() == null) {
+                copy.remove("page_number");
+            } else {
+                copy.put("page_number", o.pageNumber());
             }
         }
         return copy;

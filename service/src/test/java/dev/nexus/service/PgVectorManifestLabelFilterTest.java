@@ -32,14 +32,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code page_number} is answered per (doc_id, position) from the catalog manifest, not from the shared T3
  * chunk row, whose metadata is whichever document wrote last.
  *
- * <p>Fixture. One chunk text X is held by two documents with different labels: document A labels it
- * {@code references} (page 9), document B labels it {@code body} (page 3). The shared T3 row carries B's
- * label ({@code body}), the stale last-writer value, so a filter that reads the chunk row would keep X for
- * document A under {@code section_type!=references}. Around it: Y (only in A, {@code body}, language tag
- * {@code en}), Z (only in B, no label anywhere), W (only in B, {@code abstract}) and V (only in A, manifest
- * label NULL, chunk row says {@code references}: a row written before catalog-046).
+ * <p>Fixture. One chunk text X is held by two documents that both WROTE their labels (labels_written):
+ * document A labels it {@code references} (page 9), document B has a title and page for it but no type
+ * ({@code ""}). The shared T3 row carries A's labels ({@code references}, page 9): the last writer's, and
+ * foreign to B. A filter that read the chunk row for B's empty type would give X@B A's {@code references}.
+ * Around it: Y (only in A, {@code body}, language tag {@code en}); Z (only in B, written with every label
+ * empty, whose chunk row nevertheless carries a foreign {@code references} and page 7, so a reader that
+ * fell back to the chunk row on an empty label would fail); W (only in B, {@code abstract}); V (only in A,
+ * a LEGACY row: manifest labels NULL, labels_written false, chunk row says {@code references}); and U (a
+ * legacy PAIR: held by both documents, both rows legacy, chunk row says {@code references}), which must
+ * keep falling back to the chunk row.
  *
- * <p>Ranking is pinned by registering the texts at known unit vectors: X, then Y, Z, V, W by distance.
+ * <p>Ranking is pinned by registering the texts at known unit vectors: X, then Y, Z, V, W, U by distance.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PgVectorManifestLabelFilterTest {
@@ -60,6 +64,7 @@ class PgVectorManifestLabelFilterTest {
     private static final String TEXT_Z = "labelprobe chunk only document b holds, unlabelled";
     private static final String TEXT_V = "labelprobe chunk with a legacy label on the chunk row only";
     private static final String TEXT_W = "labelprobe chunk only document b holds, the abstract";
+    private static final String TEXT_U = "labelprobe chunk both documents hold, both rows legacy";
     private static final String QUERY = "labelprobe";
 
     private static final String X = Chash.ofText("label-filter-x").toHex();
@@ -67,6 +72,7 @@ class PgVectorManifestLabelFilterTest {
     private static final String Z = Chash.ofText("label-filter-z").toHex();
     private static final String V = Chash.ofText("label-filter-v").toHex();
     private static final String W = Chash.ofText("label-filter-w").toHex();
+    private static final String U = Chash.ofText("label-filter-u").toHex();
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -91,12 +97,13 @@ class PgVectorManifestLabelFilterTest {
         var tenantScope = new TenantScope(svcDs);
 
         var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
-        // Query is (1, 0): distance grows X < Y < Z < V < W.
+        // Query is (1, 0): distance grows X < Y < Z < V < W < U.
         embedder.register(TEXT_X, 1.0f, 0.0f);
         embedder.register(TEXT_Y, 0.9539392f, 0.3f);
         embedder.register(TEXT_Z, 0.8f, 0.6f);
         embedder.register(TEXT_V, 0.6f, 0.8f);
         embedder.register(TEXT_W, 0.3f, 0.9539392f);
+        embedder.register(TEXT_U, 0.0f, 1.0f);
         vec = new PgVectorRepository(tenantScope, embedder, embedder);
 
         try (Connection su = pg.createConnection("")) {
@@ -107,28 +114,37 @@ class PgVectorManifestLabelFilterTest {
             insertDocument(seed, DOC_B, "Document B");
         }
 
-        // The shared row carries B's label: the last writer's. V's row carries a legacy label.
+        // The shared row X carries A's labels: the last writer's, foreign to B. Z's row carries a foreign
+        // label although its only owner wrote an empty one. V's and U's rows carry the legacy labels.
         Map<String, Object> mx = new LinkedHashMap<>();
-        mx.put("section_type", "body");
-        mx.put("section_title", "Methods");
-        mx.put("page_number", 3);
+        mx.put("section_type", "references");
+        mx.put("section_title", "References");
+        mx.put("page_number", 9);
         Map<String, Object> my = new LinkedHashMap<>();
         my.put("section_type", "body");
         my.put("lang", "en");
+        Map<String, Object> mz = new LinkedHashMap<>();
+        mz.put("section_type", "references");
+        mz.put("section_title", "Foreign title");
+        mz.put("page_number", 7);
         Map<String, Object> mv = new LinkedHashMap<>();
         mv.put("section_type", "references");
-        vec.upsertChunks(TENANT, COLLECTION, List.of(X, Y, Z, V, W),
-            List.of(TEXT_X, TEXT_Y, TEXT_Z, TEXT_V, TEXT_W), List.of(mx, my, Map.of(), mv, Map.of()));
+        Map<String, Object> mu = new LinkedHashMap<>();
+        mu.put("section_type", "references");
+        vec.upsertChunks(TENANT, COLLECTION, List.of(X, Y, Z, V, W, U),
+            List.of(TEXT_X, TEXT_Y, TEXT_Z, TEXT_V, TEXT_W, TEXT_U), List.of(mx, my, mz, mv, Map.of(), mu));
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
-            manifest(seed, DOC_A, 0, X, "References", "references", 9);
-            manifest(seed, DOC_A, 1, Y, "Intro", "body", 1);
-            manifest(seed, DOC_A, 2, V, null, null, null);
-            manifest(seed, DOC_B, 0, X, "Methods", "body", 3);
-            manifest(seed, DOC_B, 1, Z, null, null, null);
-            manifest(seed, DOC_B, 2, W, "Abstract", "abstract", 1);
+            manifest(seed, DOC_A, 0, X, "References", "references", 9, true);
+            manifest(seed, DOC_A, 1, Y, "Intro", "body", 1, true);
+            manifest(seed, DOC_A, 2, V, null, null, null, false);
+            manifest(seed, DOC_A, 3, U, null, null, null, false);
+            manifest(seed, DOC_B, 0, X, "Methods", "", 3, true);
+            manifest(seed, DOC_B, 1, Z, "", "", null, true);
+            manifest(seed, DOC_B, 2, W, "Abstract", "abstract", 1, true);
+            manifest(seed, DOC_B, 3, U, null, null, null, false);
         }
     }
 
@@ -149,7 +165,7 @@ class PgVectorManifestLabelFilterTest {
     }
 
     private static void manifest(DSLContext seed, String doc, int position, String chash,
-                                 String title, String type, Integer page) {
+                                 String title, String type, Integer page, boolean labelsWritten) {
         seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
             .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
@@ -160,6 +176,7 @@ class PgVectorManifestLabelFilterTest {
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, title)
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, type)
             .set(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, page)
+            .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, labelsWritten)
             .execute();
     }
 
@@ -168,7 +185,7 @@ class PgVectorManifestLabelFilterTest {
     private static String label(Map<String, Object> row) {
         String chash = (String) row.get("id");
         String name = chash.equals(X) ? "X" : chash.equals(Y) ? "Y" : chash.equals(Z) ? "Z"
-                    : chash.equals(V) ? "V" : chash.equals(W) ? "W" : chash;
+                    : chash.equals(V) ? "V" : chash.equals(W) ? "W" : chash.equals(U) ? "U" : chash;
         return name + "@" + row.get("doc_id");
     }
 
@@ -198,9 +215,10 @@ class PgVectorManifestLabelFilterTest {
     void negativeFilter_dropsOnlyTheReferencesOccurrence_keepsTheOtherOwnersOfAShared_chunk() {
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_type", op("$ne", "references")));
 
-        // X survives for B (body) and not for A (references). The shared chunk row says "body": a filter
-        // reading it would have kept X@A too. Z is unlabelled anywhere and survives; V's manifest label
-        // is NULL, so it takes the chunk row's legacy label (references) and is dropped, as it was before.
+        // X survives for B (its manifest type is empty) and not for A (references). Z's only owner wrote
+        // an empty label, so it survives although its chunk row says "references". V and U are legacy rows
+        // (labels_written false): they take the chunk row's label (references) and are dropped, as they were
+        // before the manifest carried labels.
         assertThat(labels(rows)).containsExactly("X@" + DOC_B, "Y@" + DOC_A, "Z@" + DOC_B, "W@" + DOC_B);
     }
 
@@ -208,8 +226,35 @@ class PgVectorManifestLabelFilterTest {
     void positiveFilter_mirrorsTheNegativeOne_perOccurrence() {
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_type", "references"));
 
-        // X@A (manifest: references) and V@A (legacy chunk-row label: references); never X@B.
-        assertThat(labels(rows)).containsExactly("X@" + DOC_A, "V@" + DOC_A);
+        // X@A (manifest: references), then the legacy rows V@A and U@A, U@B (chunk-row label: references).
+        // Never X@B (its manifest type is empty although the shared chunk row says references) and never
+        // Z@B (written empty, chunk row says references).
+        assertThat(labels(rows)).containsExactly("X@" + DOC_A, "V@" + DOC_A, "U@" + DOC_A, "U@" + DOC_B);
+    }
+
+    @Test
+    void writtenEmptyLabel_isAuthoritative_theChunkRowsForeignLabelIsNeverConsulted() {
+        // The new document's chunk with no label of its own (X@B's type, Z@B's every label) sits on a
+        // chunk row carrying another document's label. It must read as unlabelled, not inherit it.
+        var neg = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_type", op("$ne", "references")));
+        assertThat(labels(neg)).contains("X@" + DOC_B, "Z@" + DOC_B).doesNotContain("X@" + DOC_A);
+
+        var pos = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_type", "references"));
+        assertThat(labels(pos)).doesNotContain("X@" + DOC_B, "Z@" + DOC_B);
+
+        // Z's chunk row says page 7 and title "Foreign title"; Z@B wrote neither.
+        assertThat(vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("page_number", 7))).isEmpty();
+        assertThat(vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_title", "Foreign title"))).isEmpty();
+    }
+
+    @Test
+    void legacyRows_stillFallBackToTheChunkRowsLabel_includingAPairHeldByTwoDocuments() {
+        // U is held by A and B, both rows legacy (labels_written false, NULL labels); V by A alone.
+        var pos = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_type", "references"));
+        assertThat(labels(pos)).contains("U@" + DOC_A, "U@" + DOC_B, "V@" + DOC_A);
+
+        var neg = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_type", op("$ne", "references")));
+        assertThat(labels(neg)).doesNotContain("U@" + DOC_A, "U@" + DOC_B, "V@" + DOC_A);
     }
 
     @Test
@@ -222,10 +267,18 @@ class PgVectorManifestLabelFilterTest {
         assertThat(xa.get("section_type")).isEqualTo("references");
         assertThat(xa.get("section_title")).isEqualTo("References");
         assertThat(((Number) xa.get("page_number")).intValue()).isEqualTo(9);
-        assertThat(xb.get("section_type")).isEqualTo("body");
+        // B's type is empty: the row says so, not the chunk row's "references".
+        assertThat(xb.get("section_type")).isEqualTo("");
         assertThat(xb.get("section_title")).isEqualTo("Methods");
         assertThat(((Number) xb.get("page_number")).intValue()).isEqualTo(3);
         assertThat(xa.get("position")).isEqualTo(0);
+        // Z@B wrote nothing: empty strings, and no page (the chunk row's foreign page 7 is not carried).
+        var zb = rowOf(rows, "Z@" + DOC_B);
+        assertThat(zb.get("section_type")).isEqualTo("");
+        assertThat(zb.get("section_title")).isEqualTo("");
+        assertThat(zb).doesNotContainKey("page_number");
+        // A legacy row keeps the chunk row's labels.
+        assertThat(rowOf(rows, "V@" + DOC_A).get("section_type")).isEqualTo("references");
     }
 
     @Test
@@ -238,12 +291,26 @@ class PgVectorManifestLabelFilterTest {
     }
 
     @Test
+    void hybridSearch_includeSourceUri_namesTheDocumentEachExpandedRowSpeaksFor() {
+        // /hybrid-search resolves one owner's source_uri per chash in enrichSearchRows. The label stage
+        // runs after it and re-points each expanded row at its own document; run before it, the stage's
+        // two rows for X would both have been stamped with the first owner's URI.
+        var rows = vec.hybridSearchWithTokens(TENANT, QUERY, List.of(COLLECTION), 10,
+            where("section_type", op("$nin", List.of("nothing"))), true).value();
+
+        assertThat(rowOf(rows, "X@" + DOC_A).get("source_uri")).isEqualTo("file:///" + DOC_A + ".md");
+        assertThat(rowOf(rows, "X@" + DOC_B).get("source_uri")).isEqualTo("file:///" + DOC_B + ".md");
+        assertThat(rowOf(rows, "U@" + DOC_A).get("source_uri")).isEqualTo("file:///" + DOC_A + ".md");
+        assertThat(rowOf(rows, "U@" + DOC_B).get("source_uri")).isEqualTo("file:///" + DOC_B + ".md");
+    }
+
+    @Test
     void unlabelledChunk_survivesTheNegativeFilter_andIsDroppedByAPositiveOne() {
         var neg = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_type", op("$ne", "abstract")));
         assertThat(labels(neg)).contains("Z@" + DOC_B);
 
         var pos = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, where("section_type", "body"));
-        assertThat(labels(pos)).containsExactly("X@" + DOC_B, "Y@" + DOC_A);
+        assertThat(labels(pos)).containsExactly("Y@" + DOC_A);
     }
 
     @Test
@@ -290,7 +357,7 @@ class PgVectorManifestLabelFilterTest {
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, null);
 
         assertThat(rows.stream().map(r -> (String) r.get("id")).collect(Collectors.toList()))
-            .containsExactly(X, Y, Z, V, W);
+            .containsExactly(X, Y, Z, V, W, U);
         assertThat(rows).allSatisfy(r -> assertThat(r).doesNotContainKey("doc_id"));
     }
 
@@ -334,7 +401,7 @@ class PgVectorManifestLabelFilterTest {
             try {
                 var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10,
                     where("section_type", op("$ne", "nothing")));
-                assertThat(labels(rows)).containsExactly("X@" + DOC_A, "Y@" + DOC_A, "V@" + DOC_A);
+                assertThat(labels(rows)).containsExactly("X@" + DOC_A, "Y@" + DOC_A, "V@" + DOC_A, "U@" + DOC_A);
             } finally {
                 DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
                     .setNull(CATALOG_DOCUMENTS.DELETED_AT)

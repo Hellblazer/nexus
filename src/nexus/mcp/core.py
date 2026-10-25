@@ -3195,7 +3195,7 @@ def _search_render(
             # RDR-055 / the frecency-scoring work. Before this fix the MCP
             # path ranked by raw vector distance only and never read
             # frecency_score or bib_citation_count at all.
-            _cluster_order = [r.id for r in results] if clustered else None
+            _cluster_order = [_row_key(r) for r in results] if clustered else None
             results = apply_ranking_boosts(
                 results,
                 hybrid=cfg.get("search", {}).get("hybrid_default", False),
@@ -3242,8 +3242,13 @@ def _search_render(
                 # hybrid_score values are kept on each result; only the
                 # display ORDER is restored to the cluster-grouped order
                 # search_cross_corpus produced.
-                _by_id = {r.id: r for r in results}
-                results = [_by_id[i] for i in _cluster_order if i in _by_id]
+                # By row, not by id (nexus-tko2w): a chunk several documents hold comes back
+                # once per document with the same id and a different ``doc_id``, and an
+                # id-keyed map would keep one of the two and return it twice.
+                _by_row: dict[tuple, list] = {}
+                for r in results:
+                    _by_row.setdefault(_row_key(r), []).append(r)
+                results = [_by_row[k].pop(0) for k in _cluster_order if _by_row.get(k)]
                 if lexical_rerank:
                     # The restore above would put a lexical row back in its
                     # distance position (review finding on a463fa4ce). Keep
@@ -5953,6 +5958,12 @@ def _read_scope(t3, collection: str) -> list[str]:
 _CHASH_ID = re.compile(r"[0-9a-f]{64}")
 
 
+def _row_key(r) -> tuple:
+    """The identity of one search row: its chunk id, collection and the owning document it
+    speaks for (a per-document expansion repeats the id once per document)."""
+    return (r.id, r.collection, r.metadata.get("doc_id"), r.metadata.get("position"))
+
+
 def resolve_owner_section_types(
     chunk_ids: list[str],
     found: list[bool],
@@ -5964,17 +5975,20 @@ def resolve_owner_section_types(
 
     A T3 chunk row is one per chash, so the ``section_type`` on it is whichever owning
     document wrote last. The label of a chunk is a fact about its position in ONE document;
-    the manifest row carries it. ``store_get_many`` is handed chunk ids and no document, so
-    the chash does not name one occurrence. The rule, per chunk:
+    the manifest row carries it, and ``labels_written`` says whether the row's label is that
+    document's own answer (a row written before catalog-046, or by a client that predates it,
+    is ``labels_written`` false: its NULL means "never recorded"). ``store_get_many`` is handed
+    chunk ids and no document, so the chash does not name one occurrence. The rule, per chunk,
+    over the live owners in the collection the chunk was found in:
 
-    * owners (live manifest rows holding the chash, in the collection the chunk was found
-      in) that carry a label and all AGREE: that label;
-    * owners that carry a label and DISAGREE: ``""``, the label is ambiguous for a bare chunk
-      id, and an empty type is the value every filter on it treats as "keep" (the plan
-      runner drops only a chunk whose type is exactly ``imports``);
-    * no owner carries a label (a manifest written before catalog-046, a note, a chunk with
-      no manifest row, an engine without the route): the chunk row's own *stored* value, the
-      answer this field always gave, until a re-index labels the manifest.
+    * no owner (a note, a chunk with no manifest row, an engine without the route): the chunk
+      row's own *stored* value, the answer this field always gave;
+    * every owner is legacy: the stored value too, until a re-index writes the manifest;
+    * every owner is written and they all AGREE: that label ("" when all of them wrote an empty
+      one: the chunk row's value is another document's and does not apply);
+    * anything else, owners that DISAGREE or a mix of written and legacy owners: ``""``. The
+      label is ambiguous for a bare chunk id, and an empty type is the value every filter on it
+      treats as "keep" (the plan runner drops only a chunk whose type is exactly ``imports``).
 
     Best-effort: a catalog that is unreachable, or an engine that predates the
     ``chash_positions`` route, leaves every entry on its stored value.
@@ -5996,15 +6010,15 @@ def resolve_owner_section_types(
             by_chash.setdefault(row["chash"], []).append(row)
     out = list(stored)
     for i in wanted:
-        labels = {
-            str(row["section_type"])
-            for row in by_chash.get(chunk_ids[i], ())
-            if row.get("section_type") and (not row.get("collection") or row["collection"] == collections[i])
-        }
-        if len(labels) == 1:
-            out[i] = next(iter(labels))
-        elif labels:
-            out[i] = ""
+        owners = [
+            row for row in by_chash.get(chunk_ids[i], ())
+            if not row.get("collection") or row["collection"] == collections[i]
+        ]
+        written = [bool(row.get("labels_written")) for row in owners]
+        if not owners or not any(written):
+            continue  # no owner, or only legacy owners: the stored value stands
+        labels = {str(row.get("section_type") or "") for row in owners}
+        out[i] = next(iter(labels)) if all(written) and len(labels) == 1 else ""
     return out
 
 

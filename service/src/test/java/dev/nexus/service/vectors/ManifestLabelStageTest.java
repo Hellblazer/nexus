@@ -90,6 +90,24 @@ class ManifestLabelStageTest {
     }
 
     @Test
+    void anEmptyLabel_isUnlabelled_exactlyAsNullIs() {
+        // A current client writes "" for a chunk with no heading (labels_written): same verdicts as NULL.
+        var empty = labels("", "", null);
+        for (String neg : List.of("$ne", "$nin")) {
+            Object operand = neg.equals("$ne") ? "references" : List.of("references");
+            var p = ManifestLabelStage.split(w("section_type", w(neg, operand))).labels();
+            assertThat(ManifestLabelStage.passes(p, empty)).as(neg).isTrue();
+        }
+        for (var positive : List.of(w("section_type", "references"),
+                                    w("section_type", w("$in", List.of("references"))),
+                                    w("section_title", w("$gte", "a")),
+                                    w("section_title", w("$lt", "z")))) {
+            assertThat(ManifestLabelStage.passes(ManifestLabelStage.split(positive).labels(), empty))
+                .as(positive.toString()).isFalse();
+        }
+    }
+
+    @Test
     void equalityIsTolerantAboutNumbersAndStrings_asTheSearchPlannerIs() {
         var nine = labels("body", "T", 9);
         assertThat(ManifestLabelStage.passes(ManifestLabelStage.split(w("page_number", 9)).labels(), nine)).isTrue();

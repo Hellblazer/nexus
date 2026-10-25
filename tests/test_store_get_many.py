@@ -850,27 +850,32 @@ class TestStoreGetManySectionTypes:
         """nexus-tko2w (RDR-108): the chunk row's ``section_type`` is whichever document wrote
         last. For a chash-shaped id the structured result reads the label from the manifest rows
         of the documents that own it: owners that agree give their label, owners that disagree
-        give "" (ambiguous for a bare chunk id), and a chunk with no labelled owner keeps the
-        stored value. Human mode never asks (it does not show the field)."""
+        give "" (ambiguous for a bare chunk id), and a chunk whose owners all predate the labels
+        (``labels_written`` false) keeps the stored value, while an owner that wrote an EMPTY
+        label has answered "" whatever the chunk row says. Human mode never asks (it does not
+        show the field)."""
         from types import SimpleNamespace
 
         from nexus.mcp.core import store_get_many
 
-        agreed, split, legacy = "a" * 64, "b" * 64, "c" * 64
+        agreed, split, legacy, emptied = "a" * 64, "b" * 64, "c" * 64, "d" * 64
         found = {
             agreed: {"content": "A", "section_type": "body"},     # stored: another document's label
             split: {"content": "B", "section_type": "imports"},
             legacy: {"content": "C", "section_type": "imports"},
+            emptied: {"content": "D", "section_type": "imports"},   # stored: another document's label
         }
 
-        def owner(chash, doc, kind):
+        def owner(chash, doc, kind, written=True):
             # No "collection" key: an engine that predates it; the rows then apply to any collection.
-            return {"chash": chash, "doc_id": doc, "position": 0, "chunk_count": 1, "section_type": kind}
+            return {"chash": chash, "doc_id": doc, "position": 0, "chunk_count": 1, "section_type": kind,
+                    "labels_written": written}
 
         rows = [
             owner(agreed, "1.1.1", "references"), owner(agreed, "1.1.2", "references"),
             owner(split, "1.1.1", "imports"), owner(split, "1.1.2", "method"),
-            owner(legacy, "1.1.1", None),
+            owner(legacy, "1.1.1", None, written=False),
+            owner(emptied, "1.1.1", ""),
         ]
         catalog = SimpleNamespace(chash_positions=lambda chashes: rows)
         mock_t3, _ = _make_stub_t3({"*": found})
@@ -879,10 +884,10 @@ class TestStoreGetManySectionTypes:
             "nexus.mcp.core._get_catalog", return_value=catalog,
         ):
             result = store_get_many(
-                ids=[agreed, split, legacy], collections="knowledge", structured=True,
+                ids=[agreed, split, legacy, emptied], collections="knowledge", structured=True,
             )
 
-        assert result["section_types"] == ["references", "", "imports"]
+        assert result["section_types"] == ["references", "", "imports", ""]
 
     def test_human_readable_mode_unaffected_by_section_types(self):
         """``structured=False`` keeps rendering only content -- adding

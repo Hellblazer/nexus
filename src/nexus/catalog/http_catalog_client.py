@@ -128,10 +128,11 @@ def _manifest_row_from_dict(d: dict) -> ManifestRow:
         # absence, never fabricate). Present -> the row's own stamped
         # collection, verbatim.
         collection=d.get("collection"),
-        # nexus-tko2w: absent on a pre-catalog-046 engine -> None (unlabelled).
+        # nexus-tko2w: absent on a pre-catalog-046 engine -> None / not written (legacy).
         section_title=d.get("section_title"),
         section_type=d.get("section_type"),
         page_number=d.get("page_number"),
+        labels_written=bool(d.get("labels_written", False)),
     )
 
 

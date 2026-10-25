@@ -3255,11 +3255,16 @@ public final class PgVectorRepository {
             tenant, queryText, collectionNames,
             labelSplit.active() ? ManifestLabelStage.widen(nResults) : nResults,
             labelSplit.rest(), SELECTIVE_GATE_MAX, tokensOut, skippedOut);
+        // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in).
+        // Enrichment runs BEFORE the label stage (nexus-tko2w): it resolves ONE owner's source_uri per
+        // chash and writes it on every row of that chash, so a stage that had already expanded a shared
+        // chunk into one row per document would have each of them overwritten with the same URI. The
+        // stage re-points source_uri on the rows it expands, as searchWithTokens and
+        // searchPerCollection do.
+        enrichSearchRows(tenant, rows, includeSourceUri);
         if (labelSplit.active()) {
             rows = labelStage().apply(tenant, rows, labelSplit.labels(), nResults);
         }
-        // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
-        enrichSearchRows(tenant, rows, includeSourceUri);
         return new Tokened<>(rows, tokensOut[0], skippedOut);
     }
 

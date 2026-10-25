@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from nexus.catalog.http_catalog_client import _manifest_row_from_dict
+from nexus.catalog.manifest_backfill import _fetch_chunks_by_key
 from nexus.catalog.store_hook import _retract_manifest_rows_for_chash
 from nexus.catalog.types import ManifestRow, manifest_row_wire
 from nexus.mcp.core import resolve_owner_section_types
@@ -38,15 +39,19 @@ def test_manifest_chunk_rows_carry_the_labels_of_each_position() -> None:
     ]
 
 
-def test_manifest_chunk_rows_send_null_for_the_chunkers_none_here_defaults() -> None:
-    """"" (a chunk before the first heading) and 0 (a non-paged document) are "no label"."""
+def test_manifest_chunk_rows_always_send_the_label_keys_an_empty_label_is_sent_as_empty() -> None:
+    """A new client always sends the three keys: their PRESENCE is what tells the engine the row's
+    labels are the document's own (``labels_written``), so a chunk with no heading ("" title, "" type)
+    must send "" and not be mapped to None, which the engine could not tell from a client that
+    predates the columns. A non-paged document's page 0 is "no page" and travels as null."""
     (row,) = _manifest_chunk_rows([
         (0, {"chunk_text_hash": X, "section_title": "", "section_type": "", "page_number": 0}),
     ])
-    assert (row["section_title"], row["section_type"], row["page_number"]) == (None, None, None)
+    assert (row["section_title"], row["section_type"], row["page_number"]) == ("", "", None)
 
     (bare,) = _manifest_chunk_rows([(0, {"chunk_text_hash": X})])
-    assert (bare["section_title"], bare["section_type"], bare["page_number"]) == (None, None, None)
+    assert {"section_title", "section_type", "page_number"} <= bare.keys()
+    assert (bare["section_title"], bare["section_type"], bare["page_number"]) == ("", "", None)
 
 
 # ── a manifest re-write must not drop the labels ─────────────────────────────
@@ -55,13 +60,26 @@ def test_manifest_row_wire_carries_every_field_of_the_row() -> None:
     row = ManifestRow(
         position=3, chash=X, chunk_index=3, line_start=1, line_end=2, char_start=10, char_end=20,
         collection="docs__c", section_title="Methods", section_type="methods", page_number=4,
+        labels_written=True,
     )
 
     assert manifest_row_wire(row) == {
         "chash": X, "position": 3, "chunk_index": 3, "line_start": 1, "line_end": 2,
         "char_start": 10, "char_end": 20,
         "section_title": "Methods", "section_type": "methods", "page_number": 4,
+        "labels_written": True,
     }
+
+
+def test_a_legacy_row_is_rewritten_as_legacy_not_as_authoritatively_unlabelled() -> None:
+    """A row read back from a manifest written before catalog-046 has no labels and
+    ``labels_written`` False. Re-writing it (a retraction, a pruned collection) must say so: if the
+    label keys alone made the engine mark it written, the NULL labels would become "unlabelled for
+    good" and the chunk row's label (the reader's fallback for a legacy row) would stop applying."""
+    wire = manifest_row_wire(ManifestRow(position=0, chash=X))
+
+    assert wire["labels_written"] is False
+    assert (wire["section_title"], wire["section_type"], wire["page_number"]) == (None, None, None)
 
 
 def test_manifest_row_wire_tolerates_a_double_with_fewer_fields() -> None:
@@ -69,6 +87,7 @@ def test_manifest_row_wire_tolerates_a_double_with_fewer_fields() -> None:
 
     assert wire["chash"] == X and wire["position"] == 0
     assert wire["section_type"] is None and wire["page_number"] is None
+    assert wire["labels_written"] is False
 
 
 @dataclass
@@ -83,6 +102,7 @@ class _Row:
     section_title: str | None = None
     section_type: str | None = None
     page_number: int | None = None
+    labels_written: bool = False
 
 
 class _Reader:
@@ -103,10 +123,15 @@ class _Writer:
 
 def test_retracting_one_chash_rewrites_the_others_with_their_labels() -> None:
     """The retraction reads the whole manifest and writes the rest back. A row that came back
-    without its labels would be rewritten with NULL ones, and only a re-index restores them."""
+    without its labels would be rewritten with NULL ones, and only a re-index restores them. A
+    legacy row stays legacy, a written one stays written (an empty label included)."""
     reader = _Reader([
-        _Row(chash=X, position=0, section_title="Refs", section_type="references", page_number=9),
-        _Row(chash=Y, position=1, section_title="Intro", section_type="body", page_number=1),
+        _Row(chash=X, position=0, section_title="Refs", section_type="references", page_number=9,
+             labels_written=True),
+        _Row(chash=Y, position=1, section_title="Intro", section_type="body", page_number=1,
+             labels_written=True),
+        _Row(chash="c" * 64, position=2, section_title="", section_type="", labels_written=True),
+        _Row(chash="d" * 64, position=3),
     ])
     writer = _Writer()
     entry = SimpleNamespace(tumbler="1.2.3", physical_collection="docs__c")
@@ -115,8 +140,11 @@ def test_retracting_one_chash_rewrites_the_others_with_their_labels() -> None:
 
     ((_, remaining, collection),) = writer.calls
     assert collection == "docs__c"
-    assert [(r["chash"], r["section_title"], r["section_type"], r["page_number"]) for r in remaining] == [
-        (Y, "Intro", "body", 1),
+    assert [(r["chash"], r["section_title"], r["section_type"], r["page_number"], r["labels_written"])
+            for r in remaining] == [
+        (Y, "Intro", "body", 1, True),
+        ("c" * 64, "", "", None, True),
+        ("d" * 64, None, None, None, False),
     ]
 
 
@@ -125,11 +153,14 @@ def test_retracting_one_chash_rewrites_the_others_with_their_labels() -> None:
 def test_the_client_parses_the_labels_and_tolerates_a_pre_field_engine() -> None:
     labelled = _manifest_row_from_dict({
         "position": 2, "chash": X, "section_title": "Intro", "section_type": "body", "page_number": 7,
+        "labels_written": True,
     })
     assert (labelled.section_title, labelled.section_type, labelled.page_number) == ("Intro", "body", 7)
+    assert labelled.labels_written is True
 
     old = _manifest_row_from_dict({"position": 2, "chash": X})
     assert (old.section_title, old.section_type, old.page_number) == (None, None, None)
+    assert old.labels_written is False
 
 
 # ── store_get_many: the label of a chunk is read from its owners ─────────────
@@ -142,10 +173,12 @@ class _Catalog:
         return self._rows
 
 
-def _owner(chash: str, doc: str, section_type: str | None, collection: str = "docs__c") -> dict:
+def _owner(chash: str, doc: str, section_type: str | None, collection: str = "docs__c",
+           *, written: bool = True) -> dict:
+    """One live owner of the chash, as ``chash_positions`` returns it."""
     return {"chash": chash, "doc_id": doc, "position": 0, "chunk_count": 1,
             "collection": collection, "section_type": section_type, "section_title": None,
-            "page_number": None}
+            "page_number": None, "labels_written": written}
 
 
 def _resolve(rows, *, stored: str = "", collection: str = "docs__c", chunk: str = X) -> list[str]:
@@ -165,16 +198,37 @@ def test_owners_that_disagree_make_the_label_ambiguous_and_empty() -> None:
     assert _resolve(rows, stored="imports") == [""]
 
 
-def test_an_unlabelled_owner_does_not_vote() -> None:
-    rows = [_owner(X, "1.1.1", None), _owner(X, "1.1.2", "method")]
-    assert _resolve(rows, stored="imports") == ["method"]
+def test_a_written_empty_label_is_an_answer_not_an_abstention() -> None:
+    """The reviewers' fixture: document A labels the chunk ``references``, document B wrote the
+    manifest and has no label for it (""), and the shared chunk row says ``references`` (A wrote it).
+    The owners disagree, so the answer is "" and not the chunk row's ``references``; and when every
+    owner wrote an empty label the answer is "" whatever the chunk row says."""
+    split = [_owner(X, "1.1.1", "references"), _owner(X, "1.1.2", "")]
+    assert _resolve(split, stored="references") == [""]
+    assert _resolve([_owner(X, "1.1.2", ""), _owner(X, "1.1.3", None)], stored="references") == [""]
+    assert _resolve([_owner(X, "1.1.2", "")], stored="references") == [""]
 
 
-def test_no_labelled_owner_falls_back_to_the_chunk_rows_stored_value() -> None:
+def test_all_legacy_owners_fall_back_to_the_chunk_rows_stored_value() -> None:
     """A manifest written before catalog-046 has no labels; the stored value is what this field
     always answered, and a re-index replaces it."""
-    assert _resolve([_owner(X, "1.1.1", None)], stored="imports") == ["imports"]
+    legacy = [_owner(X, "1.1.1", None, written=False), _owner(X, "1.1.2", None, written=False)]
+    assert _resolve(legacy, stored="imports") == ["imports"]
     assert _resolve([], stored="imports") == ["imports"]
+
+
+def test_a_mix_of_written_and_legacy_owners_is_ambiguous_and_empty() -> None:
+    """A legacy owner has no label of its own to vote with, and a written one does: the chunk row
+    belongs to the last writer, so it cannot break the tie either."""
+    rows = [_owner(X, "1.1.1", "method"), _owner(X, "1.1.2", None, written=False)]
+    assert _resolve(rows, stored="method") == [""]
+    assert _resolve(rows, stored="imports") == [""]
+
+
+def test_a_reply_without_labels_written_reads_as_legacy() -> None:
+    """An engine that predates the column sends no ``labels_written``: legacy, stored value."""
+    row = {"chash": X, "doc_id": "1.1.1", "position": 0, "chunk_count": 1, "collection": "docs__c"}
+    assert _resolve([row], stored="imports") == ["imports"]
 
 
 def test_only_the_owners_in_the_collection_the_chunk_was_found_in_count() -> None:
@@ -198,3 +252,25 @@ def test_ids_that_are_not_chashes_and_missing_entries_are_never_looked_up() -> N
 
     with patch("nexus.mcp.core._get_catalog", return_value=_Boom()):
         assert resolve_owner_section_types(["doc-1", X], [True, False], ["c", "c"], ["a", "b"]) == ["a", "b"]
+
+
+# ── the backfill must not mint authoritative labels ──────────────────────────
+
+def test_the_manifest_backfill_sends_no_label_keys_so_its_rows_stay_legacy() -> None:
+    """The backfill reads chunk rows, whose labels are the last writer's. Carrying them into
+    the manifest row (and, by their presence, marking it ``labels_written``) would make the
+    contamination authoritative. Its rows carry none of the three keys."""
+    class _Col:
+        def get(self, **kw):
+            return {
+                "ids": [X],
+                "metadatas": [{
+                    "chunk_text_hash": X, "chunk_index": 0, "section_title": "Refs",
+                    "section_type": "references", "page_number": 9,
+                }],
+            }
+
+    (row,) = _fetch_chunks_by_key(_Col(), "1.1.1", "docs__c", "catalog_doc_id")
+
+    assert row["chash"] == X
+    assert not ({"section_title", "section_type", "page_number", "labels_written"} & row.keys())

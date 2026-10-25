@@ -3030,8 +3030,10 @@ class TestImportOnlySectionTypeExclusion:
         coll = "code__x__model-code__v1"
         manifests = {
             "1.1.5": [
-                ManifestRow(position=0, chash="a" * 64, collection=coll, section_type="method"),
-                ManifestRow(position=1, chash="b" * 64, collection=coll, section_type="imports"),
+                ManifestRow(position=0, chash="a" * 64, collection=coll, section_type="method",
+                            labels_written=True),
+                ManifestRow(position=1, chash="b" * 64, collection=coll, section_type="imports",
+                            labels_written=True),
             ],
         }
         fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
@@ -3047,6 +3049,33 @@ class TestImportOnlySectionTypeExclusion:
         ):
             result = _hydrate_tumbler_ids(["1.1.5"])
         assert result["contents"] == ["shared body"]
+
+    def test_tumbler_hydration_trusts_a_written_empty_label_over_the_chunk_rows_foreign_one(
+        self,
+    ) -> None:
+        """nexus-tko2w: a manifest row the engine marked ``labels_written`` is authoritative even
+        when its section_type is empty. The shared chunk row says ``imports`` (another document's
+        header position); this document wrote no label for the chunk, so the chunk stays in. A
+        fallback on "empty" would drop it, the contamination the manifest labels exist to end."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        manifests = {
+            "1.1.5": [ManifestRow(position=0, chash="a" * 64, collection="code__x__model-code__v1",
+                                  section_type="", labels_written=True)],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["real body"], "missing": [], "section_types": ["imports"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == ["real body"]
 
     def test_tumbler_hydration_falls_back_to_the_hydrated_type_for_an_unlabelled_manifest_row(
         self,

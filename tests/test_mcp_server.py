@@ -730,6 +730,34 @@ def test_cluster_by_semantic_discards_the_boosted_order():
     assert "hybrid_score" not in out
 
 
+@pytest.mark.t2_tenant
+def test_cluster_by_keeps_every_per_document_row_of_a_shared_chunk():
+    """nexus-tko2w: a ``section_type`` where on a chunk several documents hold returns it once per
+    document, so one chunk id arrives twice, each row carrying its own ``doc_id``. The cluster-order
+    restore keyed the rows by id, which kept the last of the two and returned it twice (the other
+    document's row vanished). It restores by row, so both survive, in the cluster order."""
+    _mock_t3([{"name": "code__test", "count": 3}])
+    shared, other = "a" * 64, "b" * 64
+
+    def fake(*_a, **_kw):
+        return [
+            SearchResult(id=shared, content="x", distance=0.10, collection="code__test",
+                         metadata={"doc_id": "1.1.1", "section_type": "references", "frecency_score": 0.0}),
+            SearchResult(id=shared, content="x", distance=0.10, collection="code__test",
+                         metadata={"doc_id": "1.1.2", "section_type": "", "frecency_score": 100.0}),
+            SearchResult(id=other, content="y", distance=0.30, collection="code__test",
+                         metadata={"doc_id": "1.1.2", "section_type": "body", "frecency_score": 0.0}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        out = _search_render(query="cluster duplicate ids", corpus="code__test",
+                             cluster_by="semantic", structured=True)
+
+    assert out["ids"] == [shared, shared, other]
+    assert out["tumblers"] == ["1.1.1", "1.1.2", "1.1.2"]
+
+
 # ── File diversity cap (RDR-006 supersession, nexus-0bmhd) ──────────────────
 #
 # RDR-006's chunk-count scoring penalty is removed from scoring entirely
