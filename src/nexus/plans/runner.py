@@ -1230,15 +1230,16 @@ def _scope_conflict_output(
 ) -> dict[str, Any]:
     """The output of a retrieval step skipped for a scope conflict (RDR-232 S2).
 
-    The empty structured retrieval shape (the same keys the default dispatcher synthesizes for
-    a retrieval error, plus the per-chunk fields), so a later ``$stepN.ids`` /
-    ``.tumblers`` / ``.collections`` / ``.contents`` reference resolves to the empty value and
-    never raises :class:`PlanRunStepRefError`; plus the ``scope_conflict`` marker carrying the
-    plan's corpus and the caller's scope.
+    The empty structured retrieval shape: every key ``query``/``search`` return in structured mode
+    (``hybrid_scores``, ``also_in`` and ``also_in_ids`` included) plus the runner's ``contents``,
+    so a later ``$stepN.<key>`` reference resolves to the empty value and never raises
+    :class:`PlanRunStepRefError`; plus the ``scope_conflict`` marker carrying the plan's corpus
+    and the caller's scope.
     """
     return {
-        "ids": [], "tumblers": [], "distances": [], "collections": [],
-        "chunk_collections": [], "chunk_text_hash": [], "contents": [],
+        "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [], "collections": [],
+        "chunk_collections": [], "also_in": [], "also_in_ids": [], "chunk_text_hash": [],
+        "contents": [],
         "scope_conflict": {
             "step_index": step_index,
             "tool": tool,

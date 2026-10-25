@@ -61,6 +61,7 @@ __all__ = [
     "SourceRef",
     "SourceRefError",
     "build_evidence_request",
+    "parse_sources",
     "catalog_name_lookup",
     "check_no_reserved_declarations",
     "declared_reserved_names",
@@ -266,8 +267,53 @@ class SourceRef:
             f"source {text!r} is not an RDR id (RDR-084) or a document tumbler (1.2.4686)"
         )
 
+    @classmethod
+    def parse_labeled(cls, label: object) -> tuple[SourceRef, str | None]:
+        """Parse ``RDR-084@ART`` into ``(SourceRef, "ART")``; no ``@`` gives ``None``.
+
+        The golden set (and any human note) names a project-qualified source
+        this way. ``SourceRef.parse`` stays strict and never sees the ``@``:
+        the qualifier travels as the ``project`` (or ``owner``) binding, so a
+        caller turns a label into ``source=<ref.value>`` plus
+        ``project=<qualifier>``.
+        """
+        text = str(label).strip() if label is not None else ""
+        base, sep, qualifier = text.partition("@")
+        ref = cls.parse(base)
+        qualifier = qualifier.strip()
+        if sep and not qualifier:
+            raise SourceRefError(f"source {text!r} has an empty project after '@'")
+        return ref, (qualifier or None)
+
     def to_wire(self) -> dict[str, str]:
         return {"kind": self.kind, "value": self.value}
+
+
+def parse_sources(raw: object) -> tuple[tuple[SourceRef, ...], tuple[str, ...]]:
+    """Parse the ``source`` binding into ``(sources, errors)``.
+
+    One reference, a list of references, or a comma- or semicolon-separated
+    string of them. Order is kept and repeats are dropped. A malformed
+    element becomes an error string and the others still parse: the caller
+    discloses what it could not honour and goes on with the rest.
+    """
+    if isinstance(raw, (list, tuple)):
+        parts: list[object] = list(raw)
+    elif isinstance(raw, str):
+        parts = [p for p in re.split(r"[;,]", raw) if p.strip()] or [raw]
+    else:
+        parts = [raw]
+    sources: list[SourceRef] = []
+    errors: list[str] = []
+    for part in parts:
+        try:
+            ref = SourceRef.parse(part)
+        except SourceRefError as exc:
+            errors.append(str(exc))
+            continue
+        if ref not in sources:
+            sources.append(ref)
+    return tuple(sources), tuple(errors)
 
 
 # ── Owner qualifier ──────────────────────────────────────────────────────────
@@ -429,6 +475,10 @@ class EvidenceRequest:
     source: SourceRef | None
     source_error: str | None
     owner: OwnerResolution
+    #: Every named source, in the order given. ``source`` is the sole one
+    #: (the single-source shape callers already read) and ``None`` when
+    #: there are several; read ``sources`` for the full request.
+    sources: tuple[SourceRef, ...] = ()
 
     def to_wire(self) -> dict[str, Any] | None:
         """Envelope form, or ``None`` when no reserved binding was passed."""
@@ -438,6 +488,7 @@ class EvidenceRequest:
             "source": self.source.to_wire() if self.source else None,
             "source_error": self.source_error,
             "owner": self.owner.to_wire(),
+            "sources": [s.to_wire() for s in self.sources],
         }
 
     def disclosures(self) -> list[str]:
@@ -466,13 +517,12 @@ def build_evidence_request(
     """
     _, reserved = split_reserved(bindings)
 
-    source: SourceRef | None = None
+    sources: tuple[SourceRef, ...] = ()
     source_error: str | None = None
     if "source" in reserved:
-        try:
-            source = SourceRef.parse(reserved["source"])
-        except SourceRefError as exc:
-            source_error = str(exc)
+        sources, errors = parse_sources(reserved["source"])
+        source_error = "; ".join(errors) or None
+    source = sources[0] if len(sources) == 1 else None
 
     owner = resolve_owner_qualifier(
         owner=reserved.get("owner"),
@@ -482,6 +532,7 @@ def build_evidence_request(
     )
     return EvidenceRequest(
         requested=bool(reserved),
+        sources=sources,
         source=source,
         source_error=source_error,
         owner=owner,

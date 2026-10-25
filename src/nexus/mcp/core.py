@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
 from mcp.server.fastmcp import FastMCP
@@ -125,6 +125,9 @@ from nexus.mcp import subscriptions as _subscriptions
 # announces mail references and never claims them -- imported as a module
 # for the same reason as `_subscriptions` just above.
 from nexus.mcp import channel as _channel
+
+if TYPE_CHECKING:
+    from nexus.plans.primary_evidence import NamedSourceResolution
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
 #: string to the agent rather than raising; before returning an error they must
@@ -9919,6 +9922,27 @@ def _nx_answer_evidence_request(
     return build_evidence_request(bindings, scope=scope, name_lookup=_lookup)
 
 
+def _nx_answer_named_sources(request: EvidenceRequest) -> NamedSourceResolution | None:
+    """Resolve the request's named sources (RDR-232 Phase 1, nexus-jypmj.1.4).
+
+    ``None`` when no source was named, with no catalog call. The resolution is
+    bounded (``PrimaryEvidenceCaps``) and never raises; what it could not
+    resolve is disclosed in the envelope and the text. Reading the resolved
+    document's chunks happens where the primary stream is merged (nexus-jypmj.1.6),
+    not here, so a call that never reaches a reduction pays for the lookup only.
+    """
+    if not request.sources:
+        return None
+    from nexus.plans.primary_evidence import resolve_named_sources  # noqa: PLC0415 — deferred; matches this module's convention
+
+    try:
+        cat = _get_catalog()
+    except Exception as exc:  # noqa: BLE001 — a missing catalog is disclosed as an unresolved source
+        _log.warning("nx_answer_named_sources_catalog_unavailable", error=str(exc))
+        cat = None
+    return resolve_named_sources(request.sources, request.owner, cat=cat)
+
+
 def _autoalias_bindings(
     *,
     required: list[str],
@@ -9980,6 +10004,24 @@ def _nx_answer_text_is_empty(text: str) -> bool:
     failure, which is the same class of wrong signal in the other direction.
     """
     return text.strip().lower() in _EMPTY_ANSWER_TEXTS
+
+
+def _nx_answer_empty_retrieval_outcome(steps: Any) -> bool | None:
+    """The outcome to count for a zero-evidence plan run (RDR-232, nexus-jypmj.1.3).
+
+    ``False`` (a failure, nexus-yg49g) when a retrieval step ran and found nothing. ``None``
+    (no verdict) when EVERY retrieval step was skipped for a conflict between the plan's corpus
+    and the caller's scope: that is the caller's error, and counting it would feed plan hygiene.
+    """
+    retrieval = [
+        s for s in (steps or ())
+        if isinstance(s, dict)
+        and (isinstance(s.get("scope_conflict"), dict)
+             or isinstance(s.get("ids"), list) or isinstance(s.get("tumblers"), list))
+    ]
+    if retrieval and all(isinstance(s.get("scope_conflict"), dict) for s in retrieval):
+        return None
+    return False
 
 
 def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
@@ -10054,7 +10096,7 @@ def _nx_answer_record_complete(
     step_records: list[Any] | None,
     duration_ms: int,
     trace: bool,
-    success: bool,
+    success: bool | None,
     composite_supported_at_start: bool,
     early_bump_fired: bool,
 ) -> None:
@@ -10143,6 +10185,12 @@ def _nx_answer_record_complete(
     against the outer one. The 404 fallback's own outcome bump reuses
     this exact shape for the same reason.
 
+    **success is None** (RDR-232 nexus-jypmj.1.3): the run is recorded and counted in
+    ``use_count`` but no outcome is counted. A run whose every retrieval step conflicted with the
+    CALLER's scope is the caller's error, not a plan failure, and a failure count would feed plan
+    hygiene and the always-failing skip. The composite route carries a verdict, so a verdictless
+    run takes the per-call record path on either capability, as the 404 fallback does.
+
     This REPRODUCES the source functions' bodies rather than delegating
     to them, so each keeps its own behaviour precisely:
 
@@ -10175,7 +10223,7 @@ def _nx_answer_record_complete(
     cost_usd = sum(_known_costs) if _known_costs else None
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
 
-    if composite_supported_at_start:
+    if composite_supported_at_start and success is not None:
         import httpx  # noqa: PLC0415 — rare/branch-local path; only the composite route needs the 404-vs-other-failure distinction
         from datetime import datetime, timezone  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
@@ -10229,7 +10277,7 @@ def _nx_answer_record_complete(
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
         _warn_telemetry_drop("nx_answer_runs", exc)
 
-    if plan_id:
+    if plan_id and success is not None:
         try:
             # Own independent _t2_index_write call, NOT the record half's
             # `db` above — see the docstring's eviction-classifier note.
@@ -10721,11 +10769,13 @@ async def nx_answer(
     scope: Annotated[str, Field(
         description=(
             "Catalog subtree or corpus filter (e.g. \"1.2\" or \"knowledge\"). "
-            "Honoured on every path, including the single-step query() fast path. "
             "A corpus scope narrows the corpus a plan declares (a plan entry under "
             "the scope is kept, \"all\" becomes the scope); a retrieval step whose "
             "corpus has nothing under the scope is skipped and reported in the "
-            "envelope's scope_diagnostics."
+            "envelope's scope_diagnostics. A catalog subtree filters only the "
+            "single-step query() fast path; on a multi-step plan it is not "
+            "intersected with the plan's corpora, and a step with no corpus of "
+            "its own searches nothing under it."
         ),
     )] = "",
     context: Annotated[str, Field(description="Supplementary caller-supplied context for the plan matcher.")] = "",
@@ -10989,11 +11039,17 @@ async def nx_answer(
     )
     # RDR-232 Phase 1 (nexus-jypmj.1.2): the reserved bindings source,
     # owner and project were removed from the run above; read them here as
-    # the caller's evidence request. Disclosed in the envelope; the named-
-    # source resolver (nexus-jypmj.1.4) takes it from this closure.
+    # the caller's evidence request. Disclosed in the envelope.
     _evidence_request = _nx_answer_evidence_request(
         bindings=bindings, scope=scope,
     )
+    # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
+    # (bounded; nothing is guessed). The primary stream that reads the
+    # resolved documents is merged at the runner (nexus-jypmj.1.6).
+    _named_sources = _nx_answer_named_sources(_evidence_request)
+    # Set by the single_query fast path, which has no primary evidence stream: the
+    # named-source notice then says so instead of implying the document was read.
+    _single_query_fast_path = False
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -11081,6 +11137,12 @@ async def nx_answer(
             line for line in (
                 _budget_warning_text, _dropped_reduce_text, _scope_notice,
                 *_evidence_request.disclosures(),
+                *(
+                    _named_sources.disclosures(
+                        owner_failure_disclosed=_evidence_request.owner.status in ("conflict", "unresolved"),
+                        primary_stream=not _single_query_fast_path,
+                    ) if _named_sources else ()
+                ),
             )
             if line
         ]
@@ -11189,6 +11251,11 @@ async def nx_answer(
             # handoff, and the budget-exhausted marker (which carries its
             # own prefix).
             "answer_shape": _answer_shape,
+            # RDR-232 Phase 1 (nexus-jypmj.1.4): how each named source
+            # resolved: {sources: [{source, status, tumbler, candidates,
+            # detail, ...}], dropped, catalog_calls}. None when no source
+            # was named.
+            "named_sources": _named_sources.to_wire() if _named_sources else None,
             # RDR-232 Phase 1 (nexus-jypmj.1.2): the caller's evidence
             # request read from the reserved bindings (source, owner,
             # project) and a subtree scope: {source, source_error, owner:
@@ -11994,6 +12061,7 @@ async def nx_answer(
             # notice names it and query() is never called.
             from nexus.plans.evidence import ScopeConstraint, narrow_corpus  # noqa: PLC0415 — deferred; matches this module's convention
 
+            _single_query_fast_path = True
             _fast_scope = ScopeConstraint.parse(scope)
             _fast_narrowing = narrow_corpus(step_args.get("corpus") or None, _fast_scope)
             if _fast_scope.kind != "none":
@@ -12101,7 +12169,8 @@ async def nx_answer(
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
-                        success=not _fast_conflict and not _nx_answer_text_is_empty(str(result_text)),
+                        # a scope conflict is the caller's error: the run counts no outcome
+                        success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
                     )
@@ -12709,7 +12778,8 @@ async def nx_answer(
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
                     final_text=no_match[:2000], step_records=_result_step_records,
-                    duration_ms=elapsed_ms, trace=trace, success=False,
+                    duration_ms=elapsed_ms, trace=trace,
+                    success=_nx_answer_empty_retrieval_outcome(result.steps),
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                 )

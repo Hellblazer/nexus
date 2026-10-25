@@ -5386,6 +5386,38 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
+The envelope has three RDR-232 keys, all always present:
+
+- `scope_diagnostics` (nexus-jypmj.1.3): a list with one entry per
+  corpus-taking retrieval step the caller's `scope` reached,
+  `{step_index, tool, plan_corpus, caller_scope, scope_kind, outcome,
+  resolved_corpus}`; `[]` when the call had no scope or never reached a
+  retrieval step. A corpus scope narrows the corpus a plan declares
+  (`outcome: "narrowed"`, `"within_scope"`, `"scope_applied"`). A step whose
+  corpus has nothing under the scope is skipped (`outcome: "conflict"`,
+  `resolved_corpus: null`) and its text-mode notice is a
+  `[scope conflict: ...]` line after any leading `[non-answer: ...]` or
+  `[budget exhausted ...]` marker. A run in which every retrieval step
+  conflicted is recorded, but counts no success or failure for the plan: the
+  scope was the caller's. A catalog-subtree scope is reported as
+  `subtree_not_intersected` and is not intersected with plan corpora.
+- `evidence_request` (nexus-jypmj.1.2): the caller's reserved bindings
+  `source`, `owner` and `project`, plus a subtree `scope` as owner
+  qualifier: `{source, source_error, owner: {status, tumbler, ...},
+  sources}`. `owner.status` is `none`, `resolved`, `conflict` or
+  `unresolved`; a qualifier that failed picks nothing. `None` when no
+  reserved binding was passed.
+- `named_sources` (nexus-jypmj.1.4): how each named source resolved,
+  `{sources: [{source, status, tumbler, title, file_path, qualified,
+  candidates, candidates_truncated, detail}], dropped, catalog_calls}`.
+  `status` is `resolved`, `candidates` (several documents fit; nothing is
+  picked) or `unresolved`; `qualified` says an owner qualifier narrowed the
+  choice. `None` when no source was named. Text mode adds one
+  `[evidence request: ...]` line per ambiguous, unresolved or
+  not-owner-qualified source, and states a failed owner qualifier once. On
+  the single-step fast path the notice says the plan has no primary evidence
+  stream, so a resolved document is not read as evidence there.
+
 ### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
 
 Derives the default `budget_usd` from recorded **post-flip** history and

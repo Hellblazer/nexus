@@ -155,7 +155,10 @@ class TestOutcomeIsRecordedWhereItIsKnown:
         src = pathlib.Path(core.__file__).read_text(encoding="utf-8")
         guard = src.index("_nx_answer_is_empty_retrieval(result.steps)")
         # Look only at the guard's own body, not the whole rest of the file.
-        body = src[guard:guard + 3000]
+        # 3000 -> 3200 (RDR-232, nexus-jypmj.1.3): the arm's choke-point call now spells its
+        # verdict as a helper call (~57 chars longer than ``success=False,``) and the arm's
+        # own text ends at ~3050; the window still stops short of the non-answer arm below.
+        body = src[guard:guard + 3200]
         # RDR-203 P1: the outcome no longer stands alone as
         # _nx_answer_record_outcome(best.plan_id, success=False) — it is
         # the success= kwarg of the choke-point call this branch makes.
@@ -163,7 +166,18 @@ class TestOutcomeIsRecordedWhereItIsKnown:
             "the empty-retrieval branch no longer routes through the "
             "RDR-203 choke point (nexus-yg49g)"
         )
-        assert "success=False," in body, (
+        # RDR-232 (nexus-jypmj.1.3) changed this pin's premise: the arm no longer
+        # writes the literal ``success=False,``. Its verdict comes from
+        # _nx_answer_empty_retrieval_outcome, which is False (a failure) for every
+        # zero-evidence run and None (no verdict) ONLY when each retrieval step was
+        # skipped for the caller's own scope conflict. The helper is pinned directly.
+        assert "success=_nx_answer_empty_retrieval_outcome(result.steps)," in body, (
+            "the empty-retrieval branch no longer takes its verdict from "
+            "_nx_answer_empty_retrieval_outcome (nexus-yg49g)"
+        )
+        from nexus.mcp.core import _nx_answer_empty_retrieval_outcome
+
+        assert _nx_answer_empty_retrieval_outcome([{"ids": [], "tumblers": []}]) is False, (
             "zero-evidence no longer records a failure — promote.py's "
             "success/(success+failure) gate would return to promoting plans "
             "that reliably return nothing (nexus-yg49g)"

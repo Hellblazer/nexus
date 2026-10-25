@@ -555,6 +555,40 @@ def test_project_art_resolves_to_owner_1_2_on_a_fixture_catalog() -> None:
             "no qualifier and scope=rdr must stay ambiguous, not default to nexus"
         )
 
+        # nexus-jypmj.1.4: the named-source resolver over this real catalog. Two RDR-084
+        # documents, one per owner; the qualifier decides, and a literal tumbler owner that
+        # names no registered owner (evidence.py accepts 9.9 without a catalog) is disclosed.
+        from nexus.plans.primary_evidence import resolve_named_sources
+
+        art_doc = str(cat.register(
+            art_owner, "RDR-084-list-parse", content_type="rdr",
+            file_path="docs/rdr/RDR-084-list-parse.md", physical_collection="rdr__1-2__x__v1",
+        ))
+        nexus_doc = str(cat.register(
+            nexus_owner, "rdr-084-plan-growth", content_type="rdr",
+            file_path="docs/rdr/rdr-084-plan-growth.md", physical_collection="rdr__1-1__x__v1",
+        ))
+        (ambiguous,) = resolve_named_sources(no_qualifier.sources, no_qualifier.owner, cat=cat).sources
+        assert ambiguous.status == "candidates" and ambiguous.tumbler is None
+        assert {c.tumbler for c in ambiguous.candidates} == {art_doc, nexus_doc}
+        (chosen,) = resolve_named_sources(art.sources, art.owner, cat=cat).sources
+        assert (chosen.status, chosen.tumbler) == ("resolved", art_doc)
+        (other,) = resolve_named_sources(nx.sources, nx.owner, cat=cat).sources
+        assert (other.status, other.tumbler) == ("resolved", nexus_doc)
+        at_document = build_evidence_request(
+            {"source": "RDR-084", "owner": "1.2"}, scope=art_doc, name_lookup=lookup,
+        )
+        assert at_document.owner.tumbler == art_doc, "scope at document depth agrees with owner 1.2"
+        (by_scope,) = resolve_named_sources(at_document.sources, at_document.owner, cat=cat).sources
+        assert (by_scope.status, by_scope.tumbler) == ("resolved", art_doc)
+
+        phantom = build_evidence_request(
+            {"source": "RDR-084", "owner": "9.9"}, scope="", name_lookup=lookup,
+        )
+        assert phantom.owner.status == "resolved" and phantom.owner.tumbler == "9.9"
+        (gone,) = resolve_named_sources(phantom.sources, phantom.owner, cat=cat).sources
+        assert gone.status == "unresolved" and "9.9" in gone.detail and "not in the catalog" in gone.detail
+
 
 # ── Test 6: text-mode disclosure placement (tenant-free) ─────────────────────
 #

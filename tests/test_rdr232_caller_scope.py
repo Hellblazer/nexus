@@ -399,8 +399,12 @@ def _single_query_match(corpus: str | None, *, default_corpus: bool = True) -> M
     )
 
 
-def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan_run_result=None):
-    """Call ``nx_answer`` with the matcher, the plan runner, T2 and the catalog patched away."""
+def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan_run_result=None,
+                     db=None, bindings=None):
+    """Call ``nx_answer`` with the matcher, the plan runner, T2 and the catalog patched away.
+
+    *db* is the T2 stub (a ``MagicMock``) the run records into, for a test that reads the outcome
+    counters; a fresh one otherwise."""
     import nexus.mcp.core as core
 
     query_calls: list[dict] = []
@@ -412,7 +416,7 @@ def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan
                     "distances": [0.1], "collections": [ART_RDR_COLLECTION]}
         return "canned query result"
 
-    db_stub = MagicMock(plans=MagicMock())
+    db_stub = db if db is not None else MagicMock(plans=MagicMock())
     db_stub.conn = MagicMock()
     patches = [
         patch("nexus.plans.matcher.plan_match", return_value=[match]),
@@ -431,7 +435,7 @@ def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan
         mocks = [stack.enter_context(p) for p in patches]
         mocks[2].return_value.__enter__.return_value = db_stub
         out = asyncio.run(core.nx_answer(question="which documents discuss widgets", scope=scope,
-                                         structured=structured))
+                                         structured=structured, bindings=bindings))
     return out, query_calls
 
 

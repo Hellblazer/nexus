@@ -4,8 +4,7 @@ substrate, the containment expectations for the runner, and the baseline emissio
 
 ONE journey test (tests/AGENTS.md: a scenario is a single self-contained function with
 function-scoped fixtures; the tenant ceiling forbids a second one) because the fixture costs about
-12 s to write and the claims share it. Its three parts are separate helpers so each can change on
-its own:
+12 s to write and the claims share it. Its parts are separate helpers so each can change on its own:
 
 1. ``_assert_fixture_loads``: two RDR-084 documents under two owners, more than 300 code chunks
    reachable through ``implements``/``relates`` links, written into the test tenant only.
@@ -22,12 +21,17 @@ its own:
 
    A red in a helper after a later Phase 1 change means exactly that: update the expectation the
    change owns, do not weaken the fixture.
-3. ``_emit_baseline``: every golden request's plan selection under the matcher, and the seven
+3. ``_assert_named_source_and_primary_evidence`` (nexus-jypmj.1.4): the named-source resolver and
+   the section-diverse primary selection against the real catalog and T3.
+4. ``_emit_baseline``: every golden request's plan selection under the matcher, and the seven
    measures with the later-phase ones reported "not measurable before Phase N". It asserts
-   non-vacuity only, never a pre-change value, so it keeps emitting. The report it writes
-   (``$NX_RDR232_BASELINE_OUT``) measures THIS tree; the pre-change baseline is the T2 record
-   ``nexus/rdr232-golden-baseline`` at its recorded sha and is reproduced by checking that sha out,
-   where the test's pin was still the pre-change one.
+   non-vacuity only (the measures scored the run, the later-phase ones are reported as such),
+   never a value a Phase 1 change owns, so it keeps emitting whatever the tree does. The report it
+   writes (``$NX_RDR232_BASELINE_OUT``) measures THIS tree; the pre-change baseline is the T2 record
+   ``nexus/rdr232-golden-baseline`` at its recorded sha.
+5. ``_assert_measures_follow_containment``: what the containment changes did to the measures,
+   asserted after the report is written. The graph-stream bead (nexus-jypmj.1.5) edits this
+   helper and ``_assert_graph_stream_not_yet_contained``, never the emission.
 
 No model call anywhere: plan selection is the matcher over local ONNX embeddings, and the run is cut
 before the first operator step (``continuation_cut_at_step``).
@@ -56,7 +60,8 @@ ART_REQUEST_QID = "G06-synthesis-art-rdr084"
 MIN_CODE_CHUNKS = 301
 
 
-def _assert_fixture_loads(fx) -> None:
+def _assert_fixture_loads(fx):
+    """Asserts the fixture is in the hermetic tenant and returns the catalog reader."""
     url = os.environ.get("NX_SERVICE_URL", "")
     assert url.startswith(("http://127.0.0.1", "http://localhost")), (
         f"the fixture must write to the hermetic substrate, not a live service: {url!r}")
@@ -72,6 +77,7 @@ def _assert_fixture_loads(fx) -> None:
     assert sorted(str(d.tumbler) for d in rdr084) == sorted([fx.art_rdr, fx.nexus_rdr]), (
         "two RDR-084 documents, one per owner, must be the only RDR-084 candidates")
     assert len(reader.get_manifest(fx.art_rdr)) == len(g.ART_RDR_PIECES)
+    return reader
 
 
 def _assert_vector_stream_contained(fx, run) -> dict[str, int]:
@@ -92,6 +98,9 @@ def _assert_vector_stream_contained(fx, run) -> dict[str, int]:
     hydrated = g.count_by_corpus(g.evidence_from_contents(fx, run.vector_contents))
     assert hydrated.get("rdr", 0) > 0 and "code" not in hydrated, (
         f"the vector stream hydrated for the reducer holds rdr chunks only: {hydrated}")
+    reducer_input = g.evidence_from_contents(fx, run.vector_contents + run.graph_contents)
+    assert any(i.source == g.ART_REF and i.corpus == "rdr" for i in reducer_input), (
+        "an ART RDR-084 chunk reaches the reducer's input once the vector stream is contained")
     return search_by_corpus
 
 
@@ -106,7 +115,46 @@ def _assert_graph_stream_not_yet_contained(fx, run) -> dict[str, int]:
     return traverse_by_corpus
 
 
-def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus) -> None:
+def _assert_named_source_and_primary_evidence(fx, reader) -> None:
+    """nexus-jypmj.1.4: the named-source resolver and primary evidence, real catalog + T3."""
+    from dataclasses import replace as _replace
+
+    from nexus.mcp_infra import get_t3
+    from nexus.plans.evidence import OwnerResolution, SourceRef
+    from nexus.plans.primary_evidence import (
+        DEFAULT_CAPS,
+        resolve_named_sources,
+        select_primary_evidence,
+        t3_chunk_fetcher,
+    )
+
+    rdr084_ref = SourceRef.parse("RDR-084")
+    (both,) = resolve_named_sources([rdr084_ref], OwnerResolution("none"), cat=reader).sources
+    assert both.status == "candidates" and both.tumbler is None, (
+        "the incident's call has no qualifier and two RDR-084 documents: it must not pick one")
+    assert {c.tumbler for c in both.candidates} == {fx.art_rdr, fx.nexus_rdr}
+    art_resolution = resolve_named_sources(
+        [rdr084_ref], OwnerResolution("resolved", fx.art_owner, (("project", fx.art_owner),)), cat=reader)
+    assert [s.tumbler for s in art_resolution.sources] == [fx.art_rdr]
+    caps = _replace(DEFAULT_CAPS, max_selected_items=6)
+    primary = select_primary_evidence(
+        art_resolution, cat=reader, fetch_chunks=t3_chunk_fetcher(get_t3()), caps=caps)
+    (cov,) = primary.documents
+    assert cov.status == "ok" and cov.manifest_rows == len(g.ART_RDR_PIECES) and cov.partial is True
+    assert primary.selected_items == 6 and {i.doc_id for i in primary.items} == {fx.art_rdr}
+    assert all(fx.chunks[i.chash][0] == g.ART_REF for i in primary.items), "every chunk is ART RDR-084's own"
+    labelled = {i.label for i in primary.items if i.label}
+    for kind in ("Locked Architecture", "Evidence", "Implementation State", "Open by Design"):
+        assert any(kind in label for label in labelled), f"no {kind!r} section selected: {sorted(labelled)}"
+    sources_of_labels = {i.label_source for i in primary.items}
+    print(
+        f"RDR232-PRIMARY rows={cov.manifest_rows} hydrated={cov.rows_hydrated} selected={cov.selected_rows} "
+        f"labels_from_manifest={cov.labels_from_manifest} labels_from_content={cov.labels_from_content} "
+        f"label_sources={sorted(sources_of_labels)} catalog_calls={art_resolution.catalog_calls}")
+
+
+def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus) -> dict:
+    """Emit the report and return the measures. Asserts non-vacuity only."""
     refs = g.evidence_from_ids(fx, run.search_ids + run.traverse_ids)
     refs_by_corpus = g.count_by_corpus(refs)
     reducer_input = g.evidence_from_contents(fx, run.vector_contents + run.graph_contents)
@@ -116,8 +164,6 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus) 
         f"refs={len(refs)} by_corpus={refs_by_corpus} traverse_truncated={run.traverse_ids_truncated} "
         f"reducer_input={len(reducer_input)} reducer_by_corpus={reducer_by_corpus} "
         f"search_corpus={run.resolved_search_corpus!r}")
-    assert any(i.source == g.ART_REF and i.corpus == "rdr" for i in reducer_input), (
-        "an ART RDR-084 chunk reaches the reducer's input once the vector stream is contained")
 
     library = g.seed_builtin_plans()
     observations: list[RunObservation] = []
@@ -145,13 +191,6 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus) 
         "every golden request must have had its candidate plans observed")
     for later in ("repair_yield_and_cost", "terminal_completeness"):
         assert isinstance(measures[later].value, NotMeasurable) and measures[later].value.phase == 3
-
-    # The one measure expectation this bead owns: the vector stream now reaches the ART RDR, so
-    # coverage of the named source is no longer zero and leakage is no longer total. Leakage stays
-    # high on purpose: the graph stream is contained by nexus-jypmj.1.5.
-    assert measures["primary_source_coverage"].value == 1.0
-    assert 0.9 < measures["scope_leakage"].value < 1.0, measures["scope_leakage"]
-    assert measures["facet_evidence_coverage"].value > 0.0
 
     out = os.environ.get("NX_RDR232_BASELINE_OUT")
     if out:
@@ -181,6 +220,17 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus) 
             "art_reducer_input_measures": json.loads(measures_to_json(reducer_measures)),
         }
         Path(out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return measures
+
+
+def _assert_measures_follow_containment(measures: dict) -> None:
+    """What the vector-stream containment (nexus-jypmj.1.3) did to the measures: the vector stream
+    reaches the ART RDR, so coverage of the named source is no longer zero and leakage is no longer
+    total. Leakage stays high on purpose: the graph stream is contained by nexus-jypmj.1.5, which
+    edits this helper along with ``_assert_graph_stream_not_yet_contained``."""
+    assert measures["primary_source_coverage"].value == 1.0
+    assert 0.9 < measures["scope_leakage"].value < 1.0, measures["scope_leakage"]
+    assert measures["facet_evidence_coverage"].value > 0.0
 
 
 def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> None:
@@ -188,13 +238,15 @@ def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> Non
     art = next(q for q in queries if q.qid == ART_REQUEST_QID)
 
     fx = g.build_rdr084_fixture()
-    _assert_fixture_loads(fx)
+    reader = _assert_fixture_loads(fx)
 
     scope, bindings = g.request_call_shape(art)
     run = asyncio.run(g.run_lookup_retrieval(art.text, scope=scope, bindings=bindings))
     search_by_corpus = _assert_vector_stream_contained(fx, run)
+    _assert_named_source_and_primary_evidence(fx, reader)
     traverse_by_corpus = _assert_graph_stream_not_yet_contained(fx, run)
     raw_references = len(run.search_ids) + len(run.traverse_ids)
     assert raw_references > 300, f"only {raw_references} chunk references; the graph stream's cap is 300"
 
-    _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus)
+    measures = _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus)
+    _assert_measures_follow_containment(measures)
