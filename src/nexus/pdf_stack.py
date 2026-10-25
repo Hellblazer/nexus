@@ -708,7 +708,10 @@ def _install_generation(*, carrying: bool = False, notes: list[str] | None = Non
     notice = INSTALL_NOTICE.format(version=version)
     if carrying:
         notice = notice.replace("Installing PDF support", "Carrying PDF support forward", 1)
-    _say(notice)
+    # nexus-p4vhj: a carry-forward on a Windows box without the VC++ runtime builds slim
+    # and says so (drop_pdf_on_runtime_gap); announcing a download first would be false.
+    if not (carrying and _windows_runtime_gap() is not None):
+        _say(notice)
     # perform_self_install reports its reap on stdout; this command's stdout is
     # its own (a caller may parse it), so the install's chatter goes to stderr.
     with contextlib.redirect_stdout(sys.stderr):

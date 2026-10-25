@@ -272,6 +272,21 @@ PYTHON_FULL="${PYTHON_FULL%%$'\n'*}"
 [ -n "$BASE_INTERPRETER" ] || _die "pyvenv.cfg has no 'home =' line; refusing to write a receipt with an empty base_interpreter: $GEN/pyvenv.cfg"
 [ -n "$PYTHON_FULL" ] || PYTHON_FULL="$PYTHON_VERSION"
 
+# nexus-3yv0o: a plain `nx self install` passes no --version, and a receipt
+# with version "" is never rebuilt by the installer rebuild rung (it compares
+# the receipt version with the running one). A registry build records the
+# version it actually installed, read from the venv's dist-info directory name
+# (conexus-X.Y.Z.dist-info); an explicit --version still wins.
+if [ -z "$VERSION" ] && [ "$SOURCE_KIND" = "registry" ]; then
+    for _dist in "$GEN"/lib/python*/site-packages/conexus-*.dist-info; do
+        if [ -d "$_dist" ]; then
+            VERSION="${_dist##*/conexus-}"
+            VERSION="${VERSION%.dist-info}"
+            break
+        fi
+    done
+fi
+
 RECEIPT="$(nx_receipt_path "$GEN")" || exit $?
 _tmp_receipt="$GEN/.nexus-install.json.tmp"
 nx_render_receipt \

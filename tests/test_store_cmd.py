@@ -237,6 +237,25 @@ def test_store_put_file_not_found(runner, mock_store):
     assert "not found" in result.output.lower() or "File not found" in result.output
 
 
+def test_store_put_strips_a_leading_utf8_bom(runner, mock_store, tmp_path, monkeypatch):
+    """nexus-3ppub: Windows PowerShell 5.1 `Set-Content -Encoding UTF8` writes a BOM;
+    the stored chunk must not start with it, from a file or from stdin."""
+    import click  # noqa: PLC0415
+
+    seen: list[str] = []
+
+    def fake_put_note(*, content, **_kw):
+        seen.append(content)
+        raise click.ClickException("stop here")
+
+    monkeypatch.setattr("nexus.catalog.note_write.put_note", fake_put_note)
+    src = tmp_path / "bom.md"
+    src.write_bytes(b"\xef\xbb\xbfhello bom")
+    runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src)])
+    runner.invoke(main, ["store", "put", "--collection", "fixture-subject", "-", "--title", "t"], input="\ufeffhello bom")
+    assert seen == ["hello bom", "hello bom"]
+
+
 def test_store_put_invalid_ttl_shows_error(runner, mock_store, tmp_path):
     src = tmp_path / "f.txt"
     src.write_text("content")

@@ -1393,6 +1393,30 @@ def platform_failure_hint(stderr: str, *, system: str | None = None) -> str | No
     )
 
 
+def torch_backend_hint(
+    stderr: str, *, env: Mapping[str, str] | None = None, system: str | None = None,
+) -> str | None:
+    """Name ``cu126`` when a Linux build failed while using the ``cu128`` torch
+    backend, or ``None`` (nexus-husxe).
+
+    ``cu128`` is not published for the torch this release pins, so uv fails the
+    resolve with a bare "unsatisfiable" message. The backend counts as cu128 when
+    ``NX_TORCH_BACKEND`` says so, or when it is ``auto`` and uv's own output names
+    ``cu128`` (the backend it picked for a CUDA 12.8 driver).
+    """
+    plat = _host_system() if system is None else system
+    if not plat.startswith("linux"):
+        return None
+    env = os.environ if env is None else env
+    backend = env.get("NX_TORCH_BACKEND", "").strip().lower()
+    if backend != "cu128" and not (backend == "auto" and "cu128" in stderr):
+        return None
+    return (
+        "The torch backend is cu128, which does not exist for this release's torch. "
+        "Set NX_TORCH_BACKEND=cu126 (it covers CUDA 12.6 to 12.8 drivers) and run again."
+    )
+
+
 def _with_platform_hint(detail: str) -> str:
     """*detail* with the macOS-floor hint above it when it applies."""
     hint = platform_failure_hint(detail)
@@ -1513,6 +1537,7 @@ def _build_flip_shims(
         hint = "\n".join(
             h for h in (
                 index_failure_hint(detail, bootstrap=bootstrap), platform_failure_hint(detail),
+                torch_backend_hint(detail),
             ) if h
         )
         # A streamed build already showed uv's output: repeat only its tail.

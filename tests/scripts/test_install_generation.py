@@ -114,6 +114,9 @@ if [[ "$1" == "pip" && "$2" == "install" ]]; then
         site="$(dirname "$(dirname "$py")")/lib/python3.12/site-packages/nexus/_install"
         mkdir -p "$site"
         printf 'mcp==1.2.3\\n' > "$site/constraints.txt"
+        # The wheel's metadata directory: the receipt's version, when the
+        # caller asked for none, is read from its name (nexus-3yv0o).
+        mkdir -p "$(dirname "$(dirname "$py")")/lib/python3.12/site-packages/conexus-7.86.0.dist-info"
     fi
     {fail}
 fi
@@ -676,3 +679,14 @@ def test_macos_passes_no_torch_backend(tmp_path: Path) -> None:
     proc, argv_log = _run_builder_as(tmp_path, "Darwin")
     assert proc.returncode == 0, proc.stderr
     assert "--torch-backend" not in argv_log.read_text()
+
+
+def test_a_plain_install_records_the_version_it_installed(tmp_path: Path) -> None:
+    """nexus-3yv0o: with no --version the receipt used to carry "", which the
+    installer rebuild rung treats as a different release and never rebuilds."""
+    proc, _argv_log = _run_builder(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    (gen,) = list((tmp_path / "tools").glob("gen-*"))
+    import json  # noqa: PLC0415
+
+    assert json.loads((gen / "nexus-install.json").read_text())["version"] == "7.86.0"
