@@ -63,6 +63,7 @@ VC_RUNTIME_DLLS: tuple[str, ...] = (
     "vcruntime140_1.dll",
     "msvcp140.dll",
     "msvcp140_1.dll",
+    "msvcp140_atomic_wait.dll",
 )
 EXPECT_VECTOR = "0.8.2"
 ARCHIVE_ROOT = "bundle"
@@ -261,7 +262,7 @@ def check_loaded_modules(
     seen: list[str] = []
     for m in modules:
         name = Path(m.replace("\\", "/")).name.lower()
-        # The four shipped files, or any versioned VC++ runtime module (msvcp120, vcruntime140_2, ...).
+        # The shipped files, or any versioned VC++ runtime module (msvcp120, vcruntime140_2, ...).
         # NOT a bare 'msvcp' prefix: msvcp_win.dll is a Windows component in System32 (nexus-f9bgu.9).
         if name in wanted or _VERSIONED_VC_RUNTIME_RE.match(name):
             seen.append(m)
@@ -410,7 +411,7 @@ def run(
         emit(f"SMOKE build prefix: {check_relocated(root, allow_prefix_present=allow_prefix_present)}")
         if platform.windows:
             check_runtime_present(root)
-            emit("SMOKE runtime: four VC++ DLLs and the notice are in the bundle")
+            emit("SMOKE runtime: the VC++ DLLs and the notice are in the bundle")
         smoke(root, work, port=port or free_port(), expect_vector=expect_vector,
               platform=platform, runner=runner, base_env=base_env, emit=emit)
         emit("SMOKE PASSED")

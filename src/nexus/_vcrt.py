@@ -22,11 +22,13 @@ import sys
 VC_RUNTIME_DLLS: tuple[str, ...] = ("msvcp140.dll", "msvcp140_1.dll")
 
 #: What the PDF stack adds: torch 2.13 imports ``MSVCP140_ATOMIC_WAIT.dll`` and fails
-#: to load (WinError 126) without it. No app-local copy carries it yet (nexus-vyy65),
-#: so today only Microsoft's redistributable satisfies this set. STALE WHEN THE ENGINE
-#: SHIPS THE DLL in the Windows PG bundle (nexus-vyy65): this set, ``app_local_dirs`` and
-#: the refusal text in ``pdf_stack._windows_runtime_refusal`` change together then.
-PDF_STACK_DLLS: tuple[str, ...] = (*VC_RUNTIME_DLLS, "msvcp140_atomic_wait.dll")
+#: to load (WinError 126) without it. An engine release whose Windows PG bundle carries the
+#: DLL (nexus-vyy65) puts it app-local beside the base pair, and the provisioner copies it to
+#: ``<config>/vcrt``; an older engine's bundle does not, so there only Microsoft's
+#: redistributable satisfies this set. Both are true at once, which is why the gate reads the
+#: DLLs on disk and never the engine version. Re-walk torch's PE imports on any torch bump.
+PDF_ONLY_DLLS: tuple[str, ...] = ("msvcp140_atomic_wait.dll",)
+PDF_STACK_DLLS: tuple[str, ...] = (*VC_RUNTIME_DLLS, *PDF_ONLY_DLLS)
 
 #: Subdirectory of the config dir the provisioner fills.
 VCRT_SUBDIR = "vcrt"

@@ -66,7 +66,10 @@ def _dump(*deps: str, delay: tuple[str, ...] = ()) -> str:
 def test_the_asset_contract_equals_what_the_client_expects() -> None:
     assert wer.ASSET_NAME == binary_install.asset_name("windows-x64")
     assert wer.ENGINE_EXE == binary_install.WINDOWS_ENGINE_EXE
-    assert tuple(wer.VC_RUNTIME_DLLS) == tuple(binary_install.WINDOWS_RUNTIME_DLLS)
+    # The client REQUIRES the base four and places the optional ones when the archive carries
+    # them, so a pinned older archive (four DLLs) still installs (nexus-vyy65).
+    assert tuple(wer.VC_RUNTIME_DLLS) == (
+        *binary_install.WINDOWS_RUNTIME_DLLS, *binary_install.WINDOWS_OPTIONAL_RUNTIME_DLLS)
     assert tuple(wer.VC_RUNTIME_DLLS) == tuple(bw.VC_RUNTIME_DLLS)
 
 
@@ -117,8 +120,8 @@ def test_parse_refuses_output_with_no_dependency_section(text: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("name", [*bw.VC_RUNTIME_DLLS, "VCRUNTIME140.dll", "MSVCP140_1.DLL"])
-def test_the_four_vc_runtime_dlls_classify_as_vc_case_insensitively(name: str) -> None:
+@pytest.mark.parametrize("name", [*bw.VC_RUNTIME_DLLS, "VCRUNTIME140.dll", "MSVCP140_1.DLL", "MSVCP140_ATOMIC_WAIT.dll"])
+def test_the_shipped_vc_runtime_dlls_classify_as_vc_case_insensitively(name: str) -> None:
     assert wer.classify(name, siblings=frozenset()) == "vc"
 
 
@@ -133,7 +136,7 @@ def test_windows_system_dlls_classify_as_system(name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["VCRUNTIME140_THREADS.dll", "concrt140.dll", "vcomp140.dll", "msvcp140_2.dll", "msvcp140_atomic_wait.dll",
+    ["VCRUNTIME140_THREADS.dll", "concrt140.dll", "vcomp140.dll", "msvcp140_2.dll",
      "vcruntime140d.dll", "ucrtbased.dll", "libcrypto-3-x64.dll", "zlib1.dll", "dbghelp.dll", "api-ms-win-crt.exe"],
     ids=lambda n: n,
 )

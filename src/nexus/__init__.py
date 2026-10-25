@@ -133,19 +133,29 @@ def _add_vc_runtime_dirs(
     """On Windows without a system VC++ runtime, put nx's app-local copies on the
     DLL search path: the engine dir, the PG bundle's bin, and ``<config>/vcrt``
     (which ``nx init`` / ``nx upgrade --auto`` fill on a cloud-mode install).
-    Returns the directories added (empty elsewhere)."""
+
+    When System32 has the base pair but not ``msvcp140_atomic_wait.dll`` (an old
+    redistributable; torch 2.13 imports it, nexus-vyy65), the directories that carry the
+    WHOLE PDF set are added too, and only those: a base-only directory would shadow
+    System32's own ``msvcp140`` for nothing. Returns the directories added (empty
+    elsewhere)."""
     import os  # noqa: PLC0415 -- keep the package import light
 
     if not _vcrt.is_windows(platform):
         return []
-    if _vcrt.has_runtime(system_dir or _vcrt.system_dir()):
-        return []
+    sysdir = system_dir or _vcrt.system_dir()
+    if _vcrt.has_runtime(sysdir):
+        if _vcrt.has_runtime(sysdir, _vcrt.PDF_STACK_DLLS):
+            return []
+        needed = _vcrt.PDF_STACK_DLLS
+    else:
+        needed = _vcrt.VC_RUNTIME_DLLS
     adder = add if add is not None else getattr(os, "add_dll_directory", None)
     if adder is None:
         return []
     added: list[str] = []
     for d in _vcrt.app_local_dirs(config_dir or _vcrt.default_config_dir()):
-        if _vcrt.has_runtime(d):
+        if _vcrt.has_runtime(d, needed):
             try:
                 _VC_DLL_DIR_HANDLES.append(adder(d))
                 added.append(d)

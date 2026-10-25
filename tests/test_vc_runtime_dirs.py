@@ -104,3 +104,47 @@ def test_runtime_source_checks_the_set_it_is_given(tmp_path: Path) -> None:
     _dlls(sysdir, _vcrt.PDF_STACK_DLLS)
     assert _vcrt.runtime_source("win32", str(cfg), str(sysdir), _vcrt.PDF_STACK_DLLS) == (
         _vcrt.SYSTEM, str(sysdir))
+
+
+# ── System32 has the base pair but not atomic_wait: the full-set dirs join the path ──
+
+
+def test_a_base_only_system32_adds_the_app_local_dir_that_carries_all_three(tmp_path: Path) -> None:
+    sysdir = _dlls(tmp_path / "System32")
+    svc = _dlls(tmp_path / "cfg" / "service", _vcrt.PDF_STACK_DLLS)
+    out, added = _run(tmp_path, system=sysdir)
+    assert out == [str(svc)] and added == out
+
+
+def test_a_base_only_app_local_dir_is_never_added_beside_a_base_system32(tmp_path: Path) -> None:
+    """It would shadow System32's own msvcp140 and buy nothing: it cannot supply atomic_wait."""
+    sysdir = _dlls(tmp_path / "System32")
+    _dlls(tmp_path / "cfg" / "service")
+    pgbin = _dlls(tmp_path / "cfg" / "pg-bundle" / "bundle" / "bin", _vcrt.PDF_STACK_DLLS)
+    out, _added = _run(tmp_path, system=sysdir)
+    assert out == [str(pgbin)], "only the dir with the whole set"
+
+
+def test_a_complete_system32_adds_nothing(tmp_path: Path) -> None:
+    sysdir = _dlls(tmp_path / "System32", _vcrt.PDF_STACK_DLLS)
+    _dlls(tmp_path / "cfg" / "service", _vcrt.PDF_STACK_DLLS)
+    assert _run(tmp_path, system=sysdir) == ([], [])
+
+
+def test_no_system_runtime_still_takes_every_base_dir_as_before(tmp_path: Path) -> None:
+    svc = _dlls(tmp_path / "cfg" / "service")
+    full = _dlls(tmp_path / "cfg" / "vcrt", _vcrt.PDF_STACK_DLLS)
+    out, _added = _run(tmp_path)
+    assert out == [str(svc), str(full)]
+
+
+def test_the_gate_and_the_dll_path_agree_on_a_base_only_system32_with_a_full_app_local_dir(tmp_path: Path) -> None:
+    """The latent disagreement this closes (nexus-vyy65 review): the PDF gate accepted a full
+    app-local dir beside an old redistributable, but the dir was never put on the DLL search
+    path, so `import torch` still failed."""
+    from nexus import pdf_stack
+
+    sysdir = _dlls(tmp_path / "System32")
+    svc = _dlls(tmp_path / "cfg" / "service", _vcrt.PDF_STACK_DLLS)
+    assert pdf_stack._windows_runtime_gap("win32", str(tmp_path / "cfg"), str(sysdir)) is None
+    assert _run(tmp_path, system=sysdir)[0] == [str(svc)]

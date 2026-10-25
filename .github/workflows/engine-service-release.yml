@@ -44,7 +44,7 @@ name: Engine Service Native Release
 # matrix job carries the apple-signing environment (an approval click), bash
 # steps and mac-only steps, and one matrix entry cannot be skipped on its own;
 # a separate job leaves the three existing legs byte for byte as they were. Its
-# asset is ONE archive, nexus-service-windows-x64.txz (exe plus the four VC++
+# asset is ONE archive, nexus-service-windows-x64.txz (exe plus the five VC++
 # runtime DLLs, P0.4), with a .sha256 and a .sigstore.json (new bundle format
 # only: the client verifies that, and no cloud deploy consumes this asset).
 
@@ -1188,7 +1188,7 @@ jobs:
   # pins + the script's sha256), the same exact-input shape as the other legs;
   # pg-bundle-cache-seed.yml's seed-windows job computes it the same way, so a
   # tag restores what main seeded. Restore-only here, for the reason given on the
-  # other legs. The four VC++ runtime DLLs are NOT a key input (P0.6 condition 8:
+  # other legs. The five VC++ runtime DLLs are NOT a key input (P0.6 condition 8:
   # refreshed from the current redist every release), so a restored prefix goes
   # through refresh-runtime before it is packaged.
   #

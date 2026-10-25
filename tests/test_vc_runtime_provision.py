@@ -29,15 +29,16 @@ from nexus.daemon import binary_install as b
 from tests._module_seam import setattr_in
 
 _DLLS = _vcrt.VC_RUNTIME_DLLS
-_BODY = {n: f"fake {n}".encode() for n in (*_DLLS, "vcruntime140.dll", "postgres.exe")}
+_ATOMIC_WAIT = "msvcp140_atomic_wait.dll"
+_BODY = {n: f"fake {n}".encode() for n in (*_DLLS, _ATOMIC_WAIT, "vcruntime140.dll", "postgres.exe")}
 
 
-def _bundle_bytes(*, omit: tuple[str, ...] = (), arcroot: str = "bundle") -> bytes:
+def _bundle_bytes(*, omit: tuple[str, ...] = (), arcroot: str = "bundle", atomic_wait: bool = False) -> bytes:
     """A txz laid out like scripts/build_pg_bundle_windows.py's: members under
     ``bundle/``, PostgreSQL first so an early break matters."""
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w") as tf:
-        for name in ("postgres.exe", "vcruntime140.dll", *_DLLS):
+        for name in ("postgres.exe", "vcruntime140.dll", *_DLLS, *((_ATOMIC_WAIT,) if atomic_wait else ())):
             if name in omit:
                 continue
             data = _BODY[name]
@@ -171,6 +172,33 @@ def test_provisions_the_two_dlls_from_the_pinned_tags_pg_bundle(cfg: Path, syste
     meta = json.loads((cfg / "vcrt" / "vcrt.meta.json").read_text())
     assert meta["tag"] == pinned and set(meta["dlls"]) == set(_DLLS)
     assert meta["sha256"] == hashlib.sha256(net.content).hexdigest()
+
+
+def test_a_bundle_from_an_engine_without_atomic_wait_still_provisions_the_base_pair_and_says_so(
+    cfg: Path, system: str, net: _Net,
+) -> None:
+    """The default bundle here is the older one (no msvcp140_atomic_wait.dll). It is a valid
+    source for the base pair; the detail says the fifth DLL was not in it (nexus-vyy65)."""
+    r = _ensure(cfg, system, net)
+    assert r.status == "provisioned" and r.ok
+    assert _ATOMIC_WAIT not in _vcrt_files(cfg)
+    assert _ATOMIC_WAIT in r.detail and "was not in that bundle" in r.detail
+    assert _vcrt.runtime_source("win32", str(cfg), system, _vcrt.PDF_STACK_DLLS) == (_vcrt.MISSING, None)
+
+
+def test_a_bundle_that_carries_atomic_wait_provisions_it_too(
+    cfg: Path, system: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(b, "_download", _Net(_bundle_bytes(atomic_wait=True)))
+    r = _ensure(cfg, system, None)
+    assert r.status == "provisioned", r.detail
+    assert _vcrt_files(cfg) == sorted([*_DLLS, _ATOMIC_WAIT, "vcrt.meta.json"])
+    assert (cfg / "vcrt" / _ATOMIC_WAIT).read_bytes() == _BODY[_ATOMIC_WAIT]
+    assert "was not in that bundle" not in r.detail and _ATOMIC_WAIT in r.detail
+    assert _ATOMIC_WAIT in json.loads((cfg / "vcrt" / "vcrt.meta.json").read_text())["dlls"]
+    # the gate reads the disk: <config>/vcrt now satisfies the PDF stack's set
+    assert _vcrt.runtime_source("win32", str(cfg), system, _vcrt.PDF_STACK_DLLS) == (
+        _vcrt.APP_LOCAL, str(cfg / "vcrt"))
 
 
 def test_idempotent_second_call_finds_them_and_downloads_nothing(cfg: Path, system: str, net: _Net) -> None:

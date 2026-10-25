@@ -27,17 +27,23 @@ was not measured, it says so.
   from Windows' default example refuses the same programs (2026-10-15). An
   administrator has to allow them first; [Application control](#application-control)
   lists the rules that were enough for each.
-- **PDF support needs Microsoft's Visual C++ redistributable.** torch imports
-  `msvcp140_atomic_wait.dll`, and neither the engine nor the PostgreSQL bundle
-  carries it yet (nexus-vyy65), so PDF support is refused on every Windows
-  install until the redistributable is installed or the engine ships that DLL.
-  The first PDF index, `nx self install` with the `pdf` extra and an upgrade of
-  an install that has PDF support all check for it before downloading the PDF
-  stack and stop with the download link; `nx doctor` shows "PDF support" red on
-  an install that has the stack but not the DLL. Microsoft's installer needs
-  administrator rights. The base client, local embedding and the engine do not
-  need the redistributable: they use the runtime DLLs the engine and the
-  PostgreSQL bundle carry beside their executables (nexus-lqjll).
+- **PDF support needs Microsoft's Visual C++ redistributable on a machine whose
+  engine does not carry one DLL yet.** torch imports `msvcp140_atomic_wait.dll`.
+  The engine and the PostgreSQL bundle carry the other runtime DLLs beside their
+  executables (nexus-lqjll), and from the first engine release that also carries
+  this one (nexus-vyy65) PDF support needs nothing installed. Until a machine has
+  such an engine, and has no redistributable, nexus installs without PDF support
+  and says so: `nx self install` (including the `--bootstrap` form the plugin
+  setup and the installers run with the `pdf` extra), `nx upgrade` and the
+  carry-forward of PDF support into an upgraded install each build the
+  generation without the PDF stack and print one line with the download link,
+  and the new install records no `pdf` extra, so no upgrade is held back by it.
+  Typing `nx self install --extras pdf` does the same and says PDF support was
+  not installed. The first PDF index stops with the link too, and installs the
+  stack on first use once the redistributable is present. `nx doctor` shows
+  "PDF support" red on an install that has the stack but not the DLL. Microsoft's
+  installer needs administrator rights. The base client, local embedding and the
+  engine do not need it.
 - **The binaries are unsigned** (signing is deferred, nexus-dj01b). See
   [Signing and SmartScreen](#signing-and-smartscreen).
 

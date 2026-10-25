@@ -50,6 +50,7 @@ import structlog
 from nexus._winsec import grant_user_tree_access
 from nexus.daemon.binary_lifecycle import (
     WINDOWS_ENGINE_EXE,  # noqa: F401 - part of this module's asset contract, read by the Windows release leg's tests
+    WINDOWS_OPTIONAL_RUNTIME_DLLS,
     WINDOWS_RUNTIME_DLLS,
     well_known_binary_path,
 )
@@ -758,6 +759,7 @@ def _place_engine_archive(
     exe_dest: Path,
     *,
     support_names: tuple[str, ...] = WINDOWS_RUNTIME_DLLS,
+    optional_names: tuple[str, ...] | None = None,
     platform: str | None = None,
     guard: AbstractContextManager[object] | None = None,
 ) -> dict:
@@ -783,9 +785,16 @@ def _place_engine_archive(
     hashing and extracting the ~190 MB archive happen before it, with the
     service still running (nexus-f9bgu.49). Returns the receipt fields
     ``installed_sha256`` (exe), ``support_files`` (DLL digests) and ``layout``.
+
+    *optional_names* (default: :data:`WINDOWS_OPTIONAL_RUNTIME_DLLS` when there are
+    *support_names*, none otherwise) are placed when the archive carries them and skipped
+    when it does not, so an older pinned archive keeps installing (nexus-vyy65). A placed
+    one is recorded in ``support_files`` and verified like the rest.
     """
     exe_name = exe_dest.name
     required = (exe_name, *support_names)
+    if optional_names is None:
+        optional_names = WINDOWS_OPTIONAL_RUNTIME_DLLS if support_names else ()
     exe_dest.parent.mkdir(parents=True, exist_ok=True)
     _grant_user_ace(exe_dest.parent, platform)
     stage = Path(tempfile.mkdtemp(dir=exe_dest.parent, prefix=".nx_stage_"))
@@ -817,7 +826,7 @@ def _place_engine_archive(
                             f"unsafe archive: duplicate member {name!r}"
                         )
                     seen.add(name)
-                    if name not in required:
+                    if name not in required and name not in optional_names:
                         _log.debug("service_binary_archive_extra_member_ignored", member=name)
                         continue
                     src = tf.extractfile(member)
@@ -843,10 +852,11 @@ def _place_engine_archive(
                 f"{', '.join(missing)}; not installing."
             )
 
+        placed_optional = tuple(n for n in optional_names if n in digests)
         os.chmod(stage / exe_name, 0o755)
         with guard if guard is not None else contextlib.nullcontext():
             place_set_with_rollback(
-                stage, exe_dest.parent, (*support_names, exe_name),
+                stage, exe_dest.parent, (*support_names, *placed_optional, exe_name),
                 platform=platform,
             )
     finally:
@@ -855,7 +865,7 @@ def _place_engine_archive(
     return {
         "layout": "archive",
         "installed_sha256": digests[exe_name],
-        "support_files": {name: digests[name] for name in support_names},
+        "support_files": {name: digests[name] for name in (*support_names, *placed_optional)},
     }
 
 
@@ -1029,8 +1039,16 @@ class VcRuntimeResult:
         return self.status != "failed"
 
 
-def _extract_vc_runtime(archive: Path, dest_dir: Path, names: tuple[str, ...]) -> dict[str, str]:
-    """Copy exactly *names* out of the verified PG-bundle *archive* into *dest_dir*.
+def _extract_vc_runtime(
+    archive: Path, dest_dir: Path, names: tuple[str, ...], optional: tuple[str, ...] = (),
+) -> dict[str, str]:
+    """Copy exactly *names* (and any of *optional* the archive carries) out of the
+    verified PG-bundle *archive* into *dest_dir*.
+
+    *optional* names are copied when present and left out when not: a bundle from an
+    engine release before the one that ships ``msvcp140_atomic_wait.dll`` (nexus-vyy65)
+    is still a valid source for the base pair. The caller reads which came back from the
+    returned digests.
 
     Members stream out of the tar (no ``extractall``): a member's name is only
     compared against ``bundle/bin/<name>`` and never reaches the filesystem, and
@@ -1039,7 +1057,7 @@ def _extract_vc_runtime(archive: Path, dest_dir: Path, names: tuple[str, ...]) -
     DLL. Returns ``{name: sha256}``; raises :class:`BinaryVerificationError` when
     the archive is unreadable or lacks a name.
     """
-    wanted = {f"{_PG_BUNDLE_BIN_PREFIX}{n}": n for n in names}
+    wanted = {f"{_PG_BUNDLE_BIN_PREFIX}{n}": n for n in (*names, *optional)}
     digests: dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="nx_vcrt_") as td:
         stage = Path(td)
@@ -1071,7 +1089,7 @@ def _extract_vc_runtime(archive: Path, dest_dir: Path, names: tuple[str, ...]) -
                 f"PG bundle {archive.name} has no {_PG_BUNDLE_BIN_PREFIX}"
                 f"{', '.join(missing)}; not installing."
             )
-        for name in names:
+        for name in (*names, *(n for n in optional if n in digests)):
             _atomic_copy(stage / name, dest_dir / name, executable=False)
     return digests
 
@@ -1095,7 +1113,8 @@ def ensure_vc_runtime(
     ``msvcp140_1.dll``, or when the engine dir, the PG bundle's ``bin`` or
     ``<config>/vcrt`` already holds both. Otherwise it downloads the PG bundle
     asset for the pinned engine tag through the same sha256 + sigstore gates
-    :func:`install_pg_bundle` uses, and copies ONLY those two DLLs into
+    :func:`install_pg_bundle` uses, and copies ONLY those two DLLs, plus
+    ``msvcp140_atomic_wait.dll`` when that bundle carries it, into
     ``<config_dir>/vcrt`` (PostgreSQL is not provisioned or started). The bundle
     is the signed asset Sam's licensing reading covers (app-local, unmodified).
 
@@ -1143,7 +1162,9 @@ def ensure_vc_runtime(
             dir=str(download_dir) if download_dir else None, prefix="nx_vcrt_dl_"
         ) as td:
             asset, digest, asset_url = (fetch or _fetch_verified)(tag, name, Path(td), checker)
-            digests = _extract_vc_runtime(asset, dest_dir, _vcrt.VC_RUNTIME_DLLS)
+            digests = _extract_vc_runtime(
+                asset, dest_dir, _vcrt.VC_RUNTIME_DLLS, optional=_vcrt.PDF_ONLY_DLLS,
+            )
         provenance = _provenance(tag, name, digest, asset_url, installed_by)
         provenance["dlls"] = digests
         try:
@@ -1165,4 +1186,11 @@ def ensure_vc_runtime(
     except Exception as exc:  # noqa: BLE001 - later processes pick it up at import regardless
         _log.debug("vc_runtime_activate_failed", error=str(exc))
     _log.info("vc_runtime_provisioned", dest=str(dest_dir), tag=tag, sha256=digest[:12])
-    return VcRuntimeResult("provisioned", f"{', '.join(_vcrt.VC_RUNTIME_DLLS)} placed in {dest_dir}", dest_dir)
+    placed = [n for n in (*_vcrt.VC_RUNTIME_DLLS, *_vcrt.PDF_ONLY_DLLS) if n in digests]
+    absent = [n for n in _vcrt.PDF_ONLY_DLLS if n not in digests]
+    detail = f"{', '.join(placed)} placed in {dest_dir}"
+    if absent:
+        # Not an error: the engine release this build pins predates the one that ships it.
+        # The base pair is enough for everything but the PDF stack (nexus-vyy65).
+        detail += f"; {', '.join(absent)} was not in that bundle (PDF support needs it or Microsoft's redistributable)"
+    return VcRuntimeResult("provisioned", detail, dest_dir)
