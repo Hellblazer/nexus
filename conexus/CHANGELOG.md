@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.86.0] - 2026-10-25
+
+Plugin version aligned with conexus 7.86.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included):
+
+- **The plugin setup installs PDF support by default and shows the measured install sizes** (nexus-2k66t.4.2, nexus-2k66t.4.9, nexus-2k66t.4.10, nexus-w8ug5). `launch/nx_setup.py` runs `nx self install --bootstrap --extras pdf`; `start --slim` leaves PDF support out and records the choice, `--no-slim` installs it over an inherited slim run. `commands/setup.md` and the stand-in (`launch/nx_standin.py`) show the full default install with a slim line, and the stand-in's `setup` tool takes the same `slim` argument as the real server.
+- **A plugin-setup user hears when PDF support was left out** (nexus-vyy65). On a Windows machine that cannot load the PDF stack, `launch/nx_setup.py` copies the bootstrap's "PDF support will not be installed by this build." line into its done message.
+- **The lockstep action no longer kills an upgrade-time rebuild** (nexus-2k66t.4.7, nexus-qytet, nexus-vyy65). `hooks/scripts/version_lockstep_action.py` detaches plain `nx upgrade` instead of running it under the 120 s cap, gives `nx self install` its own 1800 s budget (`NX_LOCKSTEP_SELF_INSTALL_TIMEOUT`), logs the last 500 characters of a failed install's stderr, and records a slim-build line in `lockstep.log` as `lockstep_pdf_slim`.
+- **The upgrade skill clears a saved service URL with `nx config unset`** (nexus-t99tw). `skills/upgrade/SKILL.md`, the pre-PG hop's local-engine precondition, on clients 7.81.0 and later; the hand edit stays for older clients.
+
 ## [7.85.0] - 2026-10-23
 
 Plugin version aligned with conexus 7.85.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included):
