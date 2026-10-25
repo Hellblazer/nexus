@@ -50,12 +50,15 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import structlog
 
 from nexus import call_deadline
 from nexus.plans.match import Match
+
+if TYPE_CHECKING:
+    from nexus.plans.evidence import CorpusNarrowing
 
 _log = structlog.get_logger(__name__)
 
@@ -519,6 +522,15 @@ class PlanResult:
     #: :func:`_discarded_reduce_steps`'s docstring for the "smallest
     #: change that makes the loss visible" rationale.
     dropped_reduce_steps: list[int] = field(default_factory=list)
+    #: RDR-232 Phase 1 (nexus-jypmj.1.3): one dict per corpus-taking retrieval step the caller's
+    #: ``scope`` reached, in step order -- ``{step_index, tool, plan_corpus, caller_scope,
+    #: scope_kind, outcome, resolved_corpus}``. ``outcome`` is a
+    #: :data:`nexus.plans.evidence.NarrowStatus`: ``conflict`` (the step was skipped),
+    #: ``narrowed``, ``within_scope``, ``scope_applied``, ``scope_all``,
+    #: ``subtree_not_intersected`` or ``unscoped_collection_pin`` (a step pinned through
+    #: ``collection``/``collections`` keeps today's behaviour). Empty when the caller gave no
+    #: scope, so an unscoped run reports nothing.
+    scope_diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -583,8 +595,10 @@ _COLLECTION_ARG_KEYS: tuple[str, ...] = ("collection", "collections")
 #: Binding key used by ``nx_answer`` to propagate the caller-supplied
 #: ``scope`` parameter through ``plan_run``. Nexus-zs1d Phase 1: gives
 #: the runner a way to honour caller-supplied corpus intent without
-#: requiring plan-library schema changes. Plans that pin their own
-#: corpus still win; this binding only fills in the gap.
+#: requiring plan-library schema changes. RDR-232 section 2a
+#: (nexus-jypmj.1.3): a corpus-prefix or collection scope NARROWS the
+#: corpus a plan declares (a conflict skips the step); it fills in when the
+#: plan declares none.
 _CALLER_SCOPE_BINDING: str = "_nx_scope"
 
 #: Last-resort ``corpus`` default for a ``search``/``query`` retrieval
@@ -1158,37 +1172,81 @@ def _apply_caller_scope_to_args(
     args: dict[str, Any],
     *,
     bindings: dict[str, Any],
-) -> dict[str, Any]:
-    """Return *args* with caller-supplied scope forwarded as ``corpus``
-    when the plan step is corpus-agnostic (nexus-zs1d Phase 1).
+) -> tuple[dict[str, Any], "CorpusNarrowing | None"]:
+    """Apply the caller's ``scope`` (the ``_nx_scope`` binding) to a corpus-taking
+    retrieval step's resolved *args*; returns ``(args, narrowing)``.
 
-    When ``nx_answer`` is invoked with a ``scope`` argument, it is
-    propagated as the ``_nx_scope`` binding. This helper reads that
-    binding and fills in ``args["corpus"]`` for retrieval tools that
-    haven't already pinned one. Behaviour:
+    nexus-zs1d Phase 1 filled ``corpus`` from the scope only when the plan left it
+    unset, so a plan-declared corpus beat the caller. RDR-232 section 2a (nexus-jypmj.1.3)
+    narrows it instead (:func:`nexus.plans.evidence.narrow_corpus`):
 
-      * Only retrieval tools in :data:`_RETRIEVAL_TOOLS` are affected.
-      * Plan-declared ``corpus`` / ``collection`` / ``collections`` win
-        (``_collections_in_args`` covers the latter two); this helper
-        does not overwrite them.
-      * Plan-declared ``scope.taxonomy_domain`` still wins too, because
-        :func:`_apply_scope_to_args` runs first and populates ``corpus``
-        before this helper sees the args.
-      * Empty / missing binding → no-op, existing behaviour preserved.
-        (:func:`_apply_default_corpus_to_args` runs next in the pipeline
-        and fills the remaining gap for ``search``/``query`` steps —
-        this function's own no-op is unchanged.)
+      * Only tools in :data:`_CORPUS_QUERY_TOOLS` are affected (``store_get_many`` takes no
+        corpus; ``traverse`` and operators never did).
+      * The step's corpus here is whatever it has after binding resolution and
+        ``scope.taxonomy_domain`` (:func:`_apply_scope_to_args` runs first). None gives the
+        scope, ``all`` gives the scope, entries under the scope (or a scope under an entry)
+        give the narrower of the two, and no overlap is a ``conflict``: the returned args are
+        the unchanged input and the CALLER skips the step. The step is never run unscoped.
+      * A step pinned through ``collection``/``collections`` keeps today's behaviour (the plan
+        wins) and is reported as ``unscoped_collection_pin``.
+      * A catalog-subtree scope is not a corpus and is not intersected: it keeps the
+        zs1d forwarding (it fills a missing ``corpus`` and nothing else).
+      * No scope binding is a no-op and returns ``(args, None)``.
+
+    The narrowing is ``None`` exactly when the scope did not reach the step. The same helper
+    serves ``plan_run``'s isolated path and the continuation path
+    (:func:`nexus.plans.continuation_envelope._compose_shape_b`).
     """
-    if tool not in _RETRIEVAL_TOOLS:
-        return args
+    if tool not in _CORPUS_QUERY_TOOLS:
+        return args, None
     override = bindings.get(_CALLER_SCOPE_BINDING)
     if not override:
-        return args
-    if "corpus" in args or _collections_in_args(args):
-        return args
+        return args, None
+    from nexus.plans.evidence import (  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
+        CorpusNarrowing,
+        ScopeConstraint,
+        narrow_corpus,
+    )
+
+    scope = ScopeConstraint.parse(override)
+    if _collections_in_args(args):
+        plan_corpus = args.get("corpus")
+        return args, CorpusNarrowing(
+            "unscoped_collection_pin", plan_corpus or None, plan_corpus or None, scope,
+        )
+    narrowing = narrow_corpus(args.get("corpus"), scope)
+    if narrowing.conflict:
+        return args, narrowing
     out = dict(args)
-    out["corpus"] = override
-    return out
+    if narrowing.corpus is not None:
+        out["corpus"] = narrowing.corpus
+    elif scope.kind == "subtree":
+        out["corpus"] = scope.value
+    return out, narrowing
+
+
+def _scope_conflict_output(
+    narrowing: "CorpusNarrowing", *, step_index: int, tool: str,
+) -> dict[str, Any]:
+    """The output of a retrieval step skipped for a scope conflict (RDR-232 S2).
+
+    The empty structured retrieval shape (the same keys the default dispatcher synthesizes for
+    a retrieval error, plus the per-chunk fields), so a later ``$stepN.ids`` /
+    ``.tumblers`` / ``.collections`` / ``.contents`` reference resolves to the empty value and
+    never raises :class:`PlanRunStepRefError`; plus the ``scope_conflict`` marker carrying the
+    plan's corpus and the caller's scope.
+    """
+    return {
+        "ids": [], "tumblers": [], "distances": [], "collections": [],
+        "chunk_collections": [], "chunk_text_hash": [], "contents": [],
+        "scope_conflict": {
+            "step_index": step_index,
+            "tool": tool,
+            "plan_corpus": narrowing.plan_corpus,
+            "caller_scope": narrowing.scope.value,
+            "scope_kind": narrowing.scope.kind,
+        },
+    }
 
 
 #: Tools eligible for the :func:`_apply_default_corpus_to_args`
@@ -2620,6 +2678,8 @@ async def plan_run(
     #: nexus-ivv4d code-review follow-up (T2 [24198]). See
     #: :attr:`PlanResult.resolved_step_args`'s own docstring.
     resolved_step_args: list[dict[str, Any]] = []
+    #: RDR-232 (nexus-jypmj.1.3). See :attr:`PlanResult.scope_diagnostics`.
+    scope_diagnostics: list[dict[str, Any]] = []
     #: RDR-200 .p1c (nexus-4e75w.5): set True the moment the
     #: ``continuation_cut_at_step`` pre-segment check actually stops
     #: dispatch. See ``continuation_cut_at_step``'s own docstring
@@ -3124,18 +3184,52 @@ async def plan_run(
             )
             # nexus-zs1d Phase 1: caller-supplied scope (from nx_answer's
             # ``scope`` argument, propagated via the ``_nx_scope`` binding)
-            # fills in the corpus when the plan step is agnostic. Runs after
-            # _apply_scope_to_args so plan-declared corpus / taxonomy_domain
-            # always wins.
-            resolved = _apply_caller_scope_to_args(
+            # reaches the corpus. Runs after _apply_scope_to_args so a
+            # taxonomy_domain-derived corpus is narrowed like a declared one.
+            # RDR-232 section 2a (nexus-jypmj.1.3): the same hook now NARROWS a
+            # plan-declared corpus to the caller's scope instead of deferring to it.
+            # A step whose corpus has nothing under the scope is a scope conflict:
+            # it is skipped (never run unscoped) and contributes an empty structured
+            # result plus a ``scope_conflict`` marker, so a later ``$stepN.field``
+            # reference resolves to the empty value.
+            resolved, _narrowing = _apply_caller_scope_to_args(
                 tool, resolved, bindings=merged,
             )
+            if _narrowing is not None:
+                scope_diagnostics.append(
+                    _narrowing.to_diagnostic(step_index=index, tool=tool)
+                )
+                if _narrowing.conflict:
+                    _log.warning(
+                        "nx_answer_scope_conflict_step_skipped",
+                        step_index=index, tool=tool,
+                        plan_corpus=_narrowing.plan_corpus,
+                        caller_scope=_narrowing.scope.value,
+                    )
+                    resolved_step_args.append({
+                        "step_index": index,
+                        "tool": tool,
+                        "corpus": _narrowing.plan_corpus or "",
+                        "query": resolved.get("query") or resolved.get("question") or "",
+                        "skipped": True,
+                    })
+                    step_outputs.append(_scope_conflict_output(
+                        _narrowing, step_index=index, tool=tool,
+                    ))
+                    _log.info(
+                        "nx_answer_step_complete",
+                        kind="isolated_skipped_scope_conflict",
+                        step_indices=_seg_indices,
+                        tools=_seg_tools,
+                        elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    )
+                    continue
             # RDR-200 Phase 1b (nexus-rl59s): last-resort corpus default for
             # a bare search/query step that still has no corpus after plan,
             # scope, AND caller scope all declined to set one. Runs after
             # _apply_caller_scope_to_args so a plan-declared corpus,
             # scope.taxonomy_domain, and a caller's _nx_scope binding all
-            # still win over this fall-through.
+            # take precedence over this fall-through.
             resolved = _apply_default_corpus_to_args(tool, resolved)
             # nexus-h3e2: ``mode: broad`` is an authoring affordance for
             # abstract / community-summary plans whose per-corpus default
@@ -3362,4 +3456,5 @@ async def plan_run(
         continuation_cut_applied=continuation_cut_applied,
         resolved_step_args=resolved_step_args,
         dropped_reduce_steps=_dropped_reduce_steps,
+        scope_diagnostics=scope_diagnostics,
     )

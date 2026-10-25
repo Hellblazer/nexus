@@ -4,8 +4,9 @@ observers that turn a run into ``bench.answer_shape_metrics.RunObservation`` rec
 
 The fixture reproduces, on the engine substrate and without reading any live corpus, the evidence
 mix of the 2026-10-23 incident: an ART RDR-084 and a Nexus RDR-084 under two repo owners, plus
-more than 300 code chunks reachable from them through ``implements`` and ``relates`` links, so the
-UNMODIFIED runner running the factual-lookup plan gathers a code-dominated evidence set.
+more than 300 code chunks reachable from them through ``implements`` and ``relates`` links, so
+the runner as it was before RDR-232, running the factual-lookup plan, gathers a code-dominated
+evidence set.
 
 Everything here is deterministic: documents, pieces and links are generated from fixed templates
 and a fixed index, never from a clock or an RNG, and the substrate embeds with its bundled local
@@ -364,11 +365,13 @@ class RetrievalRun:
     graph_contents: list[str]
     resolved_search_corpus: str
     cut_applied: bool
+    #: ``PlanResult.scope_diagnostics``: what the caller's scope did to each retrieval step.
+    scope_diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
 
 async def run_lookup_retrieval(question: str, *, scope: str = "", bindings: dict[str, Any] | None = None) -> RetrievalRun:
-    """Run the factual-lookup builtin's retrieval steps through the UNMODIFIED ``plan_run``, with
-    the call-shape ``nx_answer`` gives it, and stop before the first operator step (no model call)."""
+    """Run the factual-lookup builtin's retrieval steps through ``plan_run``, with the call-shape
+    ``nx_answer`` gives it, and stop before the first operator step (no model call)."""
     from nexus.plans.runner import plan_run
 
     match = builtin_match("hybrid-factual-lookup", "lookup")
@@ -391,6 +394,7 @@ async def run_lookup_retrieval(question: str, *, scope: str = "", bindings: dict
         graph_contents=list(s[3].get("contents", [])),
         resolved_search_corpus=corpus,
         cut_applied=result.continuation_cut_applied,
+        scope_diagnostics=[dict(d) for d in result.scope_diagnostics],
     )
 
 

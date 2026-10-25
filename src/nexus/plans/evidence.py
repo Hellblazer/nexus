@@ -30,6 +30,12 @@ resolver), so the schema validator, the matcher and the MCP layer can all
 import it without a cycle. Resolving the named source to a document is a later step
 (nexus-jypmj.1.4) and takes :class:`SourceRef` and the
 :class:`OwnerResolution` produced here as its inputs.
+
+The second half of the module is the caller's corpus scope over a plan's declared corpora
+(RDR-232 section 2a, nexus-jypmj.1.3): :class:`ScopeConstraint` classifies the ``scope`` string,
+:func:`narrow_corpus` applies the narrowing rule to one step's corpus, and
+:func:`scope_conflict_notice` renders the disclosure line. The runner and the ``single_query`` fast
+path both call them, so the rule lives once.
 """
 
 from __future__ import annotations
@@ -46,18 +52,23 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "RESERVED_BINDINGS",
+    "CorpusNarrowing",
     "EvidenceRequest",
     "OwnerNameError",
     "OwnerResolution",
     "ReservedBindingError",
+    "ScopeConstraint",
     "SourceRef",
     "SourceRefError",
     "build_evidence_request",
     "catalog_name_lookup",
     "check_no_reserved_declarations",
     "declared_reserved_names",
+    "narrow_corpus",
     "reserved_binding_declarations",
     "resolve_owner_qualifier",
+    "scope_conflict_clauses",
+    "scope_conflict_notice",
     "scope_subtree",
     "split_reserved",
 ]
@@ -475,3 +486,171 @@ def build_evidence_request(
         source_error=source_error,
         owner=owner,
     )
+
+
+# ── Caller scope over plan-declared corpora (RDR-232 section 2a) ─────────────
+
+ScopeKind = Literal["none", "subtree", "corpus_prefix", "collection"]
+
+#: Tokens that are corpus words, never owner names, whatever the owner table holds (the same
+#: protection ``resolve_owner_scope(strict=False)`` gives ``nx_answer(scope="knowledge")``).
+_CORPUS_WORDS: frozenset[str] = frozenset({"knowledge", "code", "docs", "rdr", "paper", "all"})
+
+
+@dataclass(frozen=True)
+class ScopeConstraint:
+    """What the caller's ``scope`` string means (RDR-232 section 2a, review S8).
+
+    The discriminator, in order:
+
+    1. a token of digits and dots is a catalog **subtree** (``1.2``, ``1.2.4686``);
+    2. a conformant four-segment name (``content_type__owner__model__vN``) is a full
+       **collection** name;
+    3. with a *name_lookup*, a registered owner name is a **subtree** (its tumbler);
+    4. anything else is a corpus **prefix** (``rdr``, ``knowledge__x``).
+
+    ``nx_answer`` resolves an owner name to its tumbler before the scope reaches the runner, so the
+    runner and the fast path parse without a lookup; step 3 serves a caller that holds the raw
+    string.
+    """
+
+    kind: ScopeKind
+    value: str = ""
+
+    @classmethod
+    def parse(
+        cls, scope: object, *, name_lookup: NameLookup | None = None,
+    ) -> ScopeConstraint:
+        text = "" if scope is None else str(scope).strip()
+        if not text:
+            return cls("none", "")
+        if scope_subtree(text) is not None:
+            return cls("subtree", text)
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred: keeps this module stdlib-only at import time
+
+        if is_conformant_collection_name(text):
+            return cls("collection", text)
+        if name_lookup is not None and text not in _CORPUS_WORDS and "__" not in text:
+            try:
+                tumbler = str(name_lookup(text))
+            except OwnerNameError:
+                tumbler = ""
+            except Exception as exc:  # noqa: BLE001 — a failed catalog lookup leaves the token a corpus prefix, which is what it was before owner names existed
+                _log.warning("evidence_scope_lookup_failed", scope=text, error=str(exc))
+                tumbler = ""
+            if scope_subtree(tumbler) is not None:
+                return cls("subtree", tumbler)
+        return cls("corpus_prefix", text)
+
+    @property
+    def narrows_corpus(self) -> bool:
+        """Whether the scope is a corpus (prefix or collection) rather than a subtree."""
+        return self.kind in ("corpus_prefix", "collection")
+
+
+NarrowStatus = Literal[
+    "no_scope",                 # the caller gave no scope: the corpus is untouched
+    "scope_applied",            # the plan declared no corpus: the scope is the corpus
+    "narrowed",                 # `all` or plan entries narrowed to the scope
+    "within_scope",             # every plan entry was already under the scope
+    "conflict",                 # no plan entry overlaps the scope: the step is skipped
+    "scope_all",                # scope `all` restricts nothing
+    "subtree_not_intersected",  # a catalog subtree is not a corpus and is not intersected
+    "unscoped_collection_pin",  # pinned through collection(s): the plan wins (reported only)
+]
+
+
+@dataclass(frozen=True)
+class CorpusNarrowing:
+    """The outcome of applying a :class:`ScopeConstraint` to one step's resolved corpus."""
+
+    status: NarrowStatus
+    corpus: str | None
+    plan_corpus: str | None
+    scope: ScopeConstraint
+
+    @property
+    def conflict(self) -> bool:
+        return self.status == "conflict"
+
+    def to_diagnostic(self, *, step_index: int, tool: str) -> dict[str, Any]:
+        """The wire form carried in ``PlanResult.scope_diagnostics`` and the envelope."""
+        return {
+            "step_index": step_index,
+            "tool": tool,
+            "plan_corpus": self.plan_corpus,
+            "caller_scope": self.scope.value,
+            "scope_kind": self.scope.kind,
+            "outcome": self.status,
+            "resolved_corpus": self.corpus,
+        }
+
+
+def _corpus_entries(plan_corpus: object) -> list[str]:
+    if plan_corpus is None:
+        return []
+    parts = plan_corpus if isinstance(plan_corpus, (list, tuple)) else [plan_corpus]
+    return [e for part in parts for e in (s.strip() for s in str(part).split(",")) if e]
+
+
+def _under(entry: str, parent: str) -> bool:
+    """*entry* is *parent* or a name under it (``rdr__1-1__...`` under ``rdr``): a segment match."""
+    return entry == parent or entry.startswith(parent + "__")
+
+
+def narrow_corpus(plan_corpus: object, scope: ScopeConstraint) -> CorpusNarrowing:
+    """Apply the caller's *scope* to a step's resolved *plan_corpus* (RDR-232 section 2a).
+
+    *plan_corpus* is whatever the step has after binding resolution and
+    ``scope.taxonomy_domain``: ``None``/blank (nothing), a comma string, or a list. Matching goes
+    both ways (review S8): a plan entry matches when it is under the scope (``rdr__1-1__...`` under
+    ``rdr``) or the scope is under the entry (scope ``knowledge__x`` under entry ``knowledge``);
+    the step's corpus becomes the narrower of the two. ``all`` is no restriction, so it gives the
+    scope. No overlap is a ``conflict``: the caller does not run the step unscoped and does not
+    drop the scope.
+
+    A catalog-subtree scope is not a corpus and is returned as ``subtree_not_intersected`` with
+    the plan's corpus untouched; the caller keeps its existing forwarding for it.
+    """
+    entries = _corpus_entries(plan_corpus)
+    plan_text = ",".join(entries) or None
+    if scope.kind == "none":
+        return CorpusNarrowing("no_scope", plan_text, plan_text, scope)
+    if scope.kind == "subtree":
+        return CorpusNarrowing("subtree_not_intersected", plan_text, plan_text, scope)
+    if scope.value == "all":
+        return CorpusNarrowing("scope_all", plan_text or "all", plan_text, scope)
+    if not entries:
+        return CorpusNarrowing("scope_applied", scope.value, None, scope)
+    if "all" in entries:
+        return CorpusNarrowing("narrowed", scope.value, plan_text, scope)
+    kept: list[str] = []
+    for entry in entries:
+        if _under(entry, scope.value):
+            kept.append(entry)
+        elif _under(scope.value, entry):
+            kept.append(scope.value)
+    kept = list(dict.fromkeys(kept))
+    if not kept:
+        return CorpusNarrowing("conflict", None, plan_text, scope)
+    status: NarrowStatus = "within_scope" if kept == entries else "narrowed"
+    return CorpusNarrowing(status, ",".join(kept), plan_text, scope)
+
+
+def scope_conflict_clauses(diagnostics: object) -> list[str]:
+    """One clause per conflicted step in *diagnostics*, 1-indexed for a human reader."""
+    clauses: list[str] = []
+    for d in diagnostics if isinstance(diagnostics, list) else []:
+        if isinstance(d, dict) and d.get("outcome") == "conflict":
+            clauses.append(
+                f"step {int(d.get('step_index', 0)) + 1} ({d.get('tool', '?')}) declares corpus "
+                f"{d.get('plan_corpus')!r}, outside the caller scope {d.get('caller_scope')!r}, "
+                "and was skipped"
+            )
+    return clauses
+
+
+def scope_conflict_notice(diagnostics: object) -> str | None:
+    """The one-line text-mode disclosure for skipped steps, or ``None`` when nothing conflicted."""
+    clauses = scope_conflict_clauses(diagnostics)
+    return f"[scope conflict: {'; '.join(clauses)}]" if clauses else None

@@ -9274,6 +9274,10 @@ def _nx_answer_is_empty_retrieval(steps: "list") -> bool:
     for step_out in steps:
         if not isinstance(step_out, dict):
             continue
+        # RDR-232 (nexus-jypmj.1.3): a step skipped for a scope conflict is a
+        # retrieval step that contributed nothing, whatever else its output holds.
+        if isinstance(step_out.get("scope_conflict"), dict):
+            had_retrieval = True
         ids = step_out.get("ids")
         tumblers = step_out.get("tumblers")
         if isinstance(ids, list):
@@ -9283,6 +9287,15 @@ def _nx_answer_is_empty_retrieval(steps: "list") -> bool:
             had_retrieval = True
             total_evidence += len(tumblers)
     return had_retrieval and total_evidence == 0
+
+
+def _nx_answer_scope_conflict_sentence(diagnostics: Any) -> str:
+    """``scope conflict: step 1 (search) declares corpus 'code', ...`` for the no-match
+    text, or ``""`` when no step conflicted (RDR-232 section 2a, nexus-jypmj.1.3)."""
+    from nexus.plans.evidence import scope_conflict_clauses  # noqa: PLC0415 — deferred; matches this module's convention
+
+    clauses = scope_conflict_clauses(diagnostics)
+    return f"scope conflict: {'; '.join(clauses)}" if clauses else ""
 
 
 def _plan_retrieval_step_basis(plan_json: str | dict | None) -> list[dict[str, Any]]:
@@ -9400,6 +9413,7 @@ def _render_zero_evidence_step_basis_text(
             f"step{a.get('step_index')}={a.get('tool', '')}"
             f"(corpus={str(a.get('corpus') or '')!r}, "
             f"query={str(a.get('query') or '')!r})"
+            + (" [skipped]" if a.get("skipped") else "")
             for a in resolved_step_args
         )
     return _render_retrieval_step_basis_text(plan_json)
@@ -10707,7 +10721,11 @@ async def nx_answer(
     scope: Annotated[str, Field(
         description=(
             "Catalog subtree or corpus filter (e.g. \"1.2\" or \"knowledge\"). "
-            "Honoured on every path, including the single-step query() fast path."
+            "Honoured on every path, including the single-step query() fast path. "
+            "A corpus scope narrows the corpus a plan declares (a plan entry under "
+            "the scope is kept, \"all\" becomes the scope); a retrieval step whose "
+            "corpus has nothing under the scope is skipped and reported in the "
+            "envelope's scope_diagnostics."
         ),
     )] = "",
     context: Annotated[str, Field(description="Supplementary caller-supplied context for the plan matcher.")] = "",
@@ -10795,6 +10813,10 @@ async def nx_answer(
     - `budget_usd` is a soft cost guide (warns, does not hard-block, and
       can overshoot); `budget_seconds` is a hard wall-clock cap on plan
       execution only.
+    - A corpus-prefix or collection `scope` narrows each retrieval step's
+      plan-declared corpus; a step with nothing under the scope is skipped,
+      named in the `scope_diagnostics` list of a `structured=True` envelope
+      and in a `[scope conflict: ...]` line in text mode.
     - `continuation=True` is live for eligible plan cuts and requires a
       matching `nx_answer_report` call from the caller afterward.
     - A `structured=True` `answer_shape` other than "answered" means
@@ -10932,6 +10954,20 @@ async def nx_answer(
     #: a stub result) — the same "no plan_run, nothing to drop" reading
     #: ``step_records``'s own default in ``_result`` already gives.
     _dropped_reduce_steps: "list[int]" = []
+    #: RDR-232 section 2a (nexus-jypmj.1.3): the per-step scope diagnostics
+    #: (``PlanResult.scope_diagnostics``, or the fast path's one entry), read by
+    #: ``_result``'s closure on every exit path exactly like ``_dropped_reduce_steps``
+    #: above. A path whose own text already names the conflict (the no-match
+    #: notice) suppresses the extra notice line: ``_result`` checks the text.
+    _scope_diagnostics: "list[dict[str, Any]]" = []
+
+    def _set_scope_diagnostics(plan_result: Any) -> None:
+        # Defensive isinstance: a MagicMock result's unconfigured attribute is a
+        # truthy non-list (same landmine as ``_dropped_reduce_steps`` below).
+        diag = getattr(plan_result, "scope_diagnostics", None)
+        _scope_diagnostics[:] = (
+            [d for d in diag if isinstance(d, dict)] if isinstance(diag, list) else []
+        )
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
     # scope to broad search (with a warning) so it doesn't filter
@@ -11028,9 +11064,22 @@ async def nx_answer(
             + ", ".join(str(i) for i in _dropped_reduce_steps) + "]"
             if _dropped_reduce_steps else None
         )
+        # RDR-232 (nexus-jypmj.1.3): steps skipped for a scope conflict are
+        # disclosed AFTER classify_answer_shape ran (that happens before this
+        # closure is called), so the shape is unchanged by the notice.
+        from nexus.plans.evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+            scope_conflict_clauses,
+            scope_conflict_notice,
+        )
+
+        _scope_clauses = scope_conflict_clauses(_scope_diagnostics)
+        _scope_notice = (
+            None if all(c in text for c in _scope_clauses)
+            else scope_conflict_notice(_scope_diagnostics)
+        )
         _extra_lines = [
             line for line in (
-                _budget_warning_text, _dropped_reduce_text,
+                _budget_warning_text, _dropped_reduce_text, _scope_notice,
                 *_evidence_request.disclosures(),
             )
             if line
@@ -11146,6 +11195,13 @@ async def nx_answer(
             # {status, tumbler, contributions, detail}}. Always present,
             # None when no reserved binding was passed.
             "evidence_request": _evidence_request.to_wire(),
+            # RDR-232 section 2a (nexus-jypmj.1.3): one entry per corpus-taking
+            # retrieval step the caller's scope reached: {step_index, tool,
+            # plan_corpus, caller_scope, scope_kind, outcome, resolved_corpus}.
+            # outcome "conflict" means the step was skipped; see
+            # PlanResult.scope_diagnostics. Always present, [] when the caller
+            # gave no scope or the call never reached a retrieval step.
+            "scope_diagnostics": [dict(d) for d in _scope_diagnostics],
         }
 
     # nexus-f9kxd: single emitter for every error return. The tool contract
@@ -11928,7 +11984,37 @@ async def nx_answer(
             # query()'s bare "knowledge" default -- the degenerate class A
             # listings of the RDR-200 Phase 1b gate (q06/q08/q19).
             from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS  # noqa: PLC0415 — deferred; runner is heavy and this branch is rare
-            corpus = step_args.get("corpus") or _PLAN_STEP_DEFAULT_CORPUS
+            # RDR-232 section 2a (nexus-jypmj.1.3): this fast path bypasses
+            # plan_run, so the caller's scope is applied to the step's corpus
+            # here, by the same rule (nexus.plans.evidence.narrow_corpus). A
+            # corpus-prefix or collection scope narrows ``corpus`` and is NOT
+            # passed as ``subtree`` (query() rejects a non-tumbler subtree as an
+            # unknown owner); a catalog-subtree scope is not intersected and
+            # keeps riding ``subtree``. A conflict skips the step: the no-match
+            # notice names it and query() is never called.
+            from nexus.plans.evidence import ScopeConstraint, narrow_corpus  # noqa: PLC0415 — deferred; matches this module's convention
+
+            _fast_scope = ScopeConstraint.parse(scope)
+            _fast_narrowing = narrow_corpus(step_args.get("corpus") or None, _fast_scope)
+            if _fast_scope.kind != "none":
+                _scope_diagnostics.append(
+                    _fast_narrowing.to_diagnostic(step_index=0, tool="query")
+                )
+            _fast_conflict = _fast_narrowing.conflict
+            if _fast_conflict:
+                _log.warning(
+                    "nx_answer_single_query_scope_conflict",
+                    plan_id=best.plan_id, plan_corpus=_fast_narrowing.plan_corpus,
+                    caller_scope=scope,
+                )
+                no_match = (
+                    f"No matching evidence found for {question!r} in scope {scope!r}. "
+                    f"The plan's one retrieval step was skipped (plan_id={best.plan_id}); "
+                    f"{_nx_answer_scope_conflict_sentence(_scope_diagnostics)} — pass a scope "
+                    "the plan's corpus covers, or use search/query directly."
+                )
+            corpus = _fast_narrowing.corpus or _PLAN_STEP_DEFAULT_CORPUS
+            fast_subtree = _fast_scope.value if _fast_scope.kind == "subtree" else ""
             try:
                 limit = int(step_args.get("limit", 10))
             except (TypeError, ValueError):
@@ -11945,14 +12031,17 @@ async def nx_answer(
             # ``result_text`` (doubling the T3 round-trip) even though
             # the structured envelope already contains enough to
             # synthesize a result summary.
-            if structured:
+            if _fast_conflict:
+                chunks = []
+                result_text = no_match
+            elif structured:
                 # GH #1523 (nexus-hfflc): the caller's scope is a catalog
                 # subtree filter and rode only the plan-run path as the
                 # _nx_scope binding; this fast path dropped it and answered
                 # from every collection. Pass it through as query()'s own
                 # subtree so both paths honour the same filter.
                 q_struct = query(question=q, corpus=corpus, limit=limit, structured=True,
-                                 subtree=scope or "")
+                                 subtree=fast_subtree)
                 chunks: list[dict] = []
                 if isinstance(q_struct, dict):
                     ids = q_struct.get("ids", [])
@@ -11996,7 +12085,7 @@ async def nx_answer(
                 else:
                     result_text = "No results."
             else:
-                result_text = query(question=q, corpus=corpus, limit=limit, subtree=scope or "")
+                result_text = query(question=q, corpus=corpus, limit=limit, subtree=fast_subtree)
                 chunks = []
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -12012,12 +12101,16 @@ async def nx_answer(
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
-                        success=not _nx_answer_text_is_empty(str(result_text)),
+                        success=not _fast_conflict and not _nx_answer_text_is_empty(str(result_text)),
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
+            if _fast_conflict:
+                return _error_result(
+                    no_match, shape="no_evidence", plan_id=best.plan_id, step_count=1, chunks=chunks,
+                )
             return _result(
                 str(result_text),
                 plan_id=best.plan_id,
@@ -12057,8 +12150,9 @@ async def nx_answer(
     # ── Step 4: execute plan ─────────────────────────────────────────────
     # nexus-zs1d Phase 1: propagate caller-supplied scope as the
     # ``_nx_scope`` binding so retrieval steps in library-matched plans
-    # honour the caller's corpus intent. Plans that pin their own corpus
-    # still win; this only fills in the gap when a plan is agnostic.
+    # honour the caller's corpus intent. RDR-232 section 2a: a corpus-prefix or
+    # collection scope narrows a plan-declared corpus (a conflict skips the
+    # step) and fills in when the plan declares none.
     run_bindings = dict(_caller_run)
 
     # Auto-alias the question text into any required binding the plan
@@ -12237,6 +12331,7 @@ async def nx_answer(
     _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
     if not isinstance(_dropped_reduce_steps, list):
         _dropped_reduce_steps = []
+    _set_scope_diagnostics(result)
     # nexus-vply6 fix round 2 (coordinator follow-up, "never silent" for
     # the person reading the answer): a retrieval step's own structured
     # output carries an additive "warnings" list when
@@ -12491,6 +12586,7 @@ async def nx_answer(
         _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
         if not isinstance(_dropped_reduce_steps, list):
             _dropped_reduce_steps = []
+        _set_scope_diagnostics(result)
         _budget_response = _budget_exhausted_response(result)
         if _budget_response is not None:
             return _budget_response
@@ -12558,6 +12654,11 @@ async def nx_answer(
     # (naming the scope so a malformed/over-narrow scope is visible)
     # instead of the misleading synthesis. Fires BEFORE plan-grow so we
     # never persist an ad-hoc plan that produced no evidence.
+    # RDR-232 (nexus-jypmj.1.3): when the zero is partly or wholly the caller's
+    # scope contradicting the plan's corpus, the no-match text below says so (it
+    # is also the telemetry row's final_text); `_result` then adds no notice line.
+    _conflict_part = _nx_answer_scope_conflict_sentence(_scope_diagnostics)
+    _conflict_part = f"; {_conflict_part}" if _conflict_part else ""
     if _nx_answer_is_empty_retrieval(result.steps):
         _log.info(
             "nx_answer_empty_retrieval_guard",
@@ -12592,8 +12693,8 @@ async def nx_answer(
             + (f" in scope {scope!r}" if scope else "")
             + f". The plan's retrieval steps returned zero results "
             f"(plan_id={best.plan_id}, basis: "
-            f"{_render_zero_evidence_step_basis_text(resolved_step_args=getattr(result, 'resolved_step_args', None), plan_json=best.plan_json)}) — "
-            "rephrase the question, correct/widen the scope, or use "
+            f"{_render_zero_evidence_step_basis_text(resolved_step_args=getattr(result, 'resolved_step_args', None), plan_json=best.plan_json)})"
+            f"{_conflict_part} — rephrase the question, correct/widen the scope, or use "
             "search/query directly."
         )
         try:

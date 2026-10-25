@@ -304,7 +304,10 @@ def _compose_shape_b(
     resolved = _apply_scope_to_args(
         tool, scope, resolved, bindings=bindings, step_outputs=step_outputs,
     )
-    resolved = _apply_caller_scope_to_args(tool, resolved, bindings=bindings)
+    # RDR-232 (nexus-jypmj.1.3): the same helper the runner uses. It only acts on a corpus-taking
+    # retrieval tool, and Shape B composes an operator step, so the narrowing is None here; a
+    # retrieval prefix step was already narrowed (or skipped) by ``plan_run`` before the cut.
+    resolved, _narrowing = _apply_caller_scope_to_args(tool, resolved, bindings=bindings)
     resolved = _apply_mode_to_args(tool, resolved)
     resolved_tool, prepared = _hydrate_operator_args(tool, resolved)
     prepared.pop("_truncation_metadata", None)

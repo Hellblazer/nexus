@@ -53,7 +53,7 @@ tolerance_tests = 0
 # tests/test_catalog_search_description.py in this commit), tests/test_rdr_084_plan_grow.py 5->7 (two F14 tests that
 # read the saved plan id back from the real plan store). 13 need their tenant; the DDL-per-run ratchet is untouched.
 # 4939 -> 4944 (nexus-jypmj.1.1, nexus-jypmj.1.2, 2026-10-25, Sam's ruling): five RDR-232 Phase 1 tests need the real
-# engine. tests/test_rdr232_golden_fixture.py::test_rdr084_fixture_non_vacuity_and_pre_change_baseline writes the
+# engine. tests/test_rdr232_golden_fixture.py::test_rdr084_fixture_containment_and_baseline_emission writes the
 # self-contained ART RDR-084 fixture (two owners, over 300 linked code chunks) and runs the unmodified runner over it.
 # tests/test_rdr232_reserved_bindings.py, consolidated from 16 tenant cases to 4: the nx_answer bindings test, the
 # plan-library save-path refusal, the saved-plan exclusion on the T1 and FTS match paths, and project ART resolving

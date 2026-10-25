@@ -811,24 +811,24 @@ async def test_run_caller_scope_fills_unset_corpus_on_query() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_caller_scope_does_not_override_plan_pinned_corpus() -> None:
-    """When the plan step already pins ``corpus``, caller scope does NOT
-    override. Plan authors win."""
+async def test_run_caller_scope_narrows_plan_pinned_corpus() -> None:
+    """RDR-232 section 2a (nexus-jypmj.1.3), reversing the nexus-zs1d rule that a plan-pinned
+    corpus beats the caller's scope: the scope NARROWS the pin, and a pin with nothing under
+    the scope is a conflict whose step is skipped (never run unscoped)."""
     from nexus.plans.runner import plan_run
 
     plan = {
         "steps": [
+            {"tool": "search", "args": {"query": "x", "corpus": "rdr"}},
             {"tool": "search", "args": {"query": "x", "corpus": "code__delos"}},
         ],
     }
     disp = _FakeDispatcher([{"text": "ok", "ids": []}])
-    await plan_run(
-        _match(plan),
-        {"_nx_scope": "rdr__arcaneum"},
-        dispatcher=disp,
+    result = await plan_run(_match(plan), {"_nx_scope": "rdr__arcaneum"}, dispatcher=disp)
+    assert [a["corpus"] for _t, a in disp.calls] == ["rdr__arcaneum"], (
+        "the rdr pin narrows to the scope; the code__delos pin conflicts and is not dispatched"
     )
-    _tool, args = disp.calls[0]
-    assert args["corpus"] == "code__delos"
+    assert result.steps[1]["scope_conflict"]["plan_corpus"] == "code__delos"
 
 
 @pytest.mark.asyncio
@@ -857,29 +857,22 @@ async def test_run_caller_scope_does_not_override_plan_collection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_caller_scope_does_not_override_plan_taxonomy_domain() -> None:
-    """When the plan step declares ``scope.taxonomy_domain``, that populates
-    corpus first; caller scope does not clobber it."""
+async def test_run_caller_scope_narrows_the_taxonomy_domain_corpus() -> None:
+    """``scope.taxonomy_domain`` still populates corpus first (RDR-078); the caller's scope then
+    narrows that domain corpus (RDR-232 section 2a): prose (knowledge,docs,rdr,paper) holds the
+    scope, code does not, so the code step conflicts and is skipped."""
     from nexus.plans.runner import plan_run
 
     plan = {
         "steps": [
-            {
-                "tool": "search",
-                "args": {"query": "x"},
-                "scope": {"taxonomy_domain": "code"},
-            },
+            {"tool": "search", "args": {"query": "x"}, "scope": {"taxonomy_domain": "prose"}},
+            {"tool": "search", "args": {"query": "x"}, "scope": {"taxonomy_domain": "code"}},
         ],
     }
     disp = _FakeDispatcher([{"text": "ok", "ids": []}])
-    await plan_run(
-        _match(plan),
-        {"_nx_scope": "rdr__arcaneum"},
-        dispatcher=disp,
-    )
-    _tool, args = disp.calls[0]
-    # taxonomy_domain=code → "code" corpus prefix (from _DOMAIN_TO_CORPUS)
-    assert args["corpus"] == "code"
+    result = await plan_run(_match(plan), {"_nx_scope": "rdr__arcaneum"}, dispatcher=disp)
+    assert [a["corpus"] for _t, a in disp.calls] == ["rdr__arcaneum"]
+    assert result.steps[1]["scope_conflict"]["plan_corpus"] == "code"
 
 
 @pytest.mark.asyncio
