@@ -243,6 +243,32 @@ grep -qE 'exit[[:space:]]+1' <<<"$tally_body" && ok "a short tally exits 1" || b
 grep -qE '^DG_PASSES=2[[:space:]]*$' "$GATE" && ok "DG_PASSES is pinned at 2 (before and after the restart)" \
   || bad "DG_PASSES=2 not found"
 
+# The Phase 6 scenarios (nexus-s08oe) run after the tally and before the keyed_voyage leg, and keep each
+# Minimum Viable Validation check: a pin per check, so a deleted check is a red here, not a quieter gate.
+mvv_line="$(line_of "$GATE" '^dg_run_mvv[[:space:]]*$')"
+kv_line="$(line_of "$GATE" '^dg_run_keyed_voyage_tests[[:space:]]*$')"
+[[ -n "$mvv_line" && -n "$kv_line" ]] || fail_loud_and_exit "anchor for the Phase 6 call matched nothing; this test needs updating, not a silent pass"
+[[ "$tally_line" -lt "$mvv_line" && "$mvv_line" -lt "$kv_line" ]] \
+  && ok "order: tally ($tally_line) < Phase 6 scenarios ($mvv_line) < keyed_voyage leg ($kv_line)" \
+  || bad "the Phase 6 scenarios are not between the tally and the keyed_voyage leg: tally=$tally_line mvv=$mvv_line leg=$kv_line"
+mvv_body="$(code_of "$GATE" | sed -n '/^dg_run_mvv()[[:space:]]*{/,/^}/p')"
+[[ -n "$mvv_body" ]] || fail_loud_and_exit "dg_run_mvv() body anchor matched nothing; this test needs updating"
+missing_mvv_needles() {  # <body>: each MVV check that is absent from <body>
+  local needle
+  for needle in 'dg_set_embed_choice voyage-context-3' 'dry-run: 2 job\(s\) would start' \
+      're-embed --all --no-dry-run --yes --wait --token-cap' "state'\)=='done'" 'deleted \(404\)' \
+      "mvv_before.json'\)\)\['ids'\]" 'aspects/get_by_doc_id' 'taxonomy/meta/last_count' \
+      'taxonomy/assignments/for_docs' 'No collection is off the profile.'; do
+    [[ "$(grep -cE -- "$needle" <<<"$1")" -gt 0 ]] || printf '%s\n' "$needle"
+  done
+}
+[[ -z "$(missing_mvv_needles "$mvv_body")" ]] \
+  && ok "dg_run_mvv keeps every MVV check (profile switch, plan, start with --wait, done, source deleted, same documents, aspect, meta, assignments, empty second --all)" \
+  || bad "dg_run_mvv lost: $(missing_mvv_needles "$mvv_body" | tr '\n' ';')"
+[[ -n "$(missing_mvv_needles "$(grep -v 'aspects/get_by_doc_id' <<<"$mvv_body")")" ]] \
+  && ok "a dg_run_mvv with the aspect check removed is noticed (positive control)" \
+  || bad "the MVV pin does not notice a removed check"
+
 # The keyed_voyage leg (nexus-8errq) runs after the tally and before the banner, demands exactly the
 # count the local-service gate deselects, and exits 1 on a short count.
 cm_line="$(line_of "$GATE" '^dg_run_keyed_voyage_tests[[:space:]]*$')"
