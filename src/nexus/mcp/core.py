@@ -8810,7 +8810,10 @@ def traverse(
     `$stepN.collections` hydrates through `store_get_many`. When `purpose`
     does not resolve to a known name the call fails with
     `{"tumblers": [...], "ids": [...], "collections": [...], "warning": "..."}`
-    as an error result.
+    as an error result, and so does a call where no seed parses as a
+    tumbler. A `warning` entry on a successful result names seeds that
+    did not parse, or says the chunk ids are missing because the manifest
+    lookup failed.
 
     Constraints:
     - `ids` is capped at 300 (a two-hop walk from one note reached 1,196
@@ -8857,14 +8860,23 @@ def traverse(
     from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     seed_tumblers = []
+    unparsed: list[str] = []
     for s in seeds:
         try:
             seed_tumblers.append(Tumbler.parse(s))
-        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            pass  # drop unparseable seeds
+        except Exception:  # noqa: BLE001 — an unparseable seed is reported below, never raised
+            unparsed.append(s)
 
+    # nexus-4jwr0: no seed that parses is a caller error, not an empty graph.
+    # Seeds that parse still walk when others do not; the warning names the rest.
     if not seed_tumblers:
-        return {"tumblers": [], "ids": [], "collections": []}
+        return _fail({
+            "tumblers": [], "ids": [], "collections": [],
+            "warning": f"traverse: no seed parses as a tumbler: {unparsed!r}",
+        })
+    warnings: list[str] = []
+    if unparsed:
+        warnings.append(f"traverse: dropped unparseable seeds {unparsed!r}")
 
     kw = dict(depth=depth, direction=direction, link_types=effective_types or None)
     if len(seed_tumblers) == 1:
@@ -8899,8 +8911,12 @@ def traverse(
                     if chash and chash not in seen_ids:
                         seen_ids.add(chash)
                         chunk_ids.append(chash)
-        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            pass  # catalog manifest unavailable — ids stays empty
+        except Exception as exc:  # noqa: BLE001 — ids are an enrichment; the walk still answers
+            # nexus-4jwr0: the tumblers still come back, but an empty ids from a
+            # failed lookup must not read as documents with no chunks.
+            _log.warning("traverse_manifest_lookup_failed", error=str(exc), exc_info=True)
+            chunk_ids = []
+            warnings.append(f"traverse: chunk ids unavailable, manifest lookup failed: {type(exc).__name__}: {exc}")
 
     # nexus-zdzm5: the docstring said ids was always empty while it carried
     # every manifest chash of every reachable document, uncapped (1,196 ids,
@@ -8911,6 +8927,8 @@ def traverse(
                  "collections": collections}
     if len(chunk_ids) > MAX_QUERY_RESULTS:
         out["ids_truncated"] = {"total": len(chunk_ids), "kept": MAX_QUERY_RESULTS}
+    if warnings:
+        out["warning"] = "; ".join(warnings)
     return out
 
 
