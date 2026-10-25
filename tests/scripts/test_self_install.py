@@ -32,6 +32,7 @@ import click
 import pytest
 
 from _generation_harness import SAFE_BASE_PATH, stub_uv
+from nexus import _vcrt, install_layout, pdf_stack
 from tests._module_seam import setattr_in
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -638,3 +639,68 @@ def test_no_packaging_rule_can_drop_a_file_from_the_install_directory() -> None:
         f"install directory. Every file there is reachable from the install "
         f"path at runtime, and the failure appears only after release."
     )
+
+
+# ── nx self install refuses a PDF generation a Windows box cannot load (nexus-vyy65) ──
+
+
+def _windows_box_without_atomic_wait(monkeypatch, tmp_path, *, whole: bool = False) -> None:
+    sysdir = tmp_path / "System32"
+    sysdir.mkdir(exist_ok=True)
+    if whole:
+        for n in _vcrt.PDF_STACK_DLLS:
+            (sysdir / n).write_bytes(b"MZ")
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: True)
+    monkeypatch.setattr(_vcrt, "system_dir", lambda: str(sysdir))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+
+
+def _generation_bed(bed, monkeypatch, **kw):
+    tools, _, src = bed
+    host = _hosting_generation(tools, "20260101T000000Z", source=str(src), **kw)
+    (tools / "current").symlink_to(host)
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
+    return tools, host
+
+
+def test_an_explicit_extras_pdf_is_refused_before_any_build_on_a_runtime_gap(bed, monkeypatch, tmp_path) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    with pytest.raises(click.ClickException) as err:
+        _run_self_install(add_extras=("pdf",))
+    assert pdf_stack.VCRT_URL in err.value.message and "no Microsoft Visual C++ runtime" in err.value.message
+    assert (tools / "current").resolve() == host.resolve(), "current is unchanged"
+    assert [p.name for p in tools.iterdir() if p.name.startswith("gen-")] == [host.name], "nothing was built"
+
+
+def test_a_receipt_that_lists_pdf_is_refused_the_same_way_on_a_runtime_gap(bed, monkeypatch, tmp_path) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local", "pdf"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    with pytest.raises(click.ClickException):
+        _run_self_install()
+    assert (tools / "current").resolve() == host.resolve()
+
+
+def test_a_dry_run_is_not_gated(bed, monkeypatch, tmp_path) -> None:
+    _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    assert _run_self_install(add_extras=("pdf",), dry_run=True) is None
+
+
+def test_extras_pdf_builds_when_the_windows_runtime_is_whole(bed, monkeypatch, tmp_path) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path, whole=True)
+    _run_self_install(add_extras=("pdf",))
+    assert (tools / "current").resolve() != host.resolve()
+
+
+def test_a_post_split_install_without_pdf_is_not_gated_by_the_windows_runtime(bed, monkeypatch, tmp_path) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    receipt = json.loads((host / "nexus-install.json").read_text())
+    receipt["installer_schema"] = install_layout.INSTALLER_SCHEMA  # written after the PDF split: stays slim
+    (host / "nexus-install.json").write_text(json.dumps(receipt))
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    _run_self_install(add_extras=("dt",))
+    new = (tools / "current").resolve()
+    assert new != host.resolve()
+    assert "pdf" not in json.loads((new / "nexus-install.json").read_text())["extras"]

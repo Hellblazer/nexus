@@ -27,14 +27,17 @@ was not measured, it says so.
   from Windows' default example refuses the same programs (2026-10-15). An
   administrator has to allow them first; [Application control](#application-control)
   lists the rules that were enough for each.
-- **No Visual C++ redistributable install is needed.** The engine and the
-  PostgreSQL bundle carry the runtime DLLs beside their executables, and nx
-  points its own Python modules (PDF extraction, local embedding) at those
-  copies when the system has none (nexus-lqjll). A cloud-mode install, which
-  never downloads the local engine, still needs the redistributable for PDF
-  extraction: the first PDF index checks for it before downloading the PDF
-  stack (nexus-2k66t.4.2) and stops with exit 69 and the download link if it
-  is missing.
+- **PDF support needs Microsoft's Visual C++ redistributable.** torch imports
+  `msvcp140_atomic_wait.dll`, and neither the engine nor the PostgreSQL bundle
+  carries it yet (nexus-vyy65), so PDF support is refused on every Windows
+  install until the redistributable is installed or the engine ships that DLL.
+  The first PDF index, `nx self install` with the `pdf` extra and an upgrade of
+  an install that has PDF support all check for it before downloading the PDF
+  stack and stop with the download link; `nx doctor` shows "PDF support" red on
+  an install that has the stack but not the DLL. Microsoft's installer needs
+  administrator rights. The base client, local embedding and the engine do not
+  need the redistributable: they use the runtime DLLs the engine and the
+  PostgreSQL bundle carry beside their executables (nexus-lqjll).
 - **The binaries are unsigned** (signing is deferred, nexus-dj01b). See
   [Signing and SmartScreen](#signing-and-smartscreen).
 

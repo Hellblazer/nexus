@@ -2848,7 +2848,7 @@ def _check_pdf_support() -> list[HealthResult]:
                 label="PDF support", ok=False,
                 detail=(
                     f"broken: the stack is installed but cannot load. "
-                    f"{pdf_stack._windows_runtime_refusal(pdf_stack.install_plan(), gap)}"  # noqa: SLF001
+                    f"{pdf_stack._windows_runtime_refusal(pdf_stack.install_plan(), gap, then='rerun nx doctor.')}"  # noqa: SLF001
                 ),
                 fix_suggestions=[f"Install Microsoft's Visual C++ redistributable: {pdf_stack.VCRT_URL}"],
             )]

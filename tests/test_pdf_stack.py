@@ -21,7 +21,7 @@ import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from nexus import pdf_stack
+from nexus import _vcrt, pdf_stack
 from tests._module_seam import setattr_in
 from nexus.pdf_stack import (
     Outcome,
@@ -663,3 +663,66 @@ def test_require_raises_the_base_only_wording(tmp_path, monkeypatch) -> None:
     with pytest.raises(PdfStackMissingError) as err:
         pdf_stack._require_windows_runtime(pdf_stack.install_plan())
     assert "msvcp140_atomic_wait.dll" in str(err.value) and pdf_stack.VCRT_URL in str(err.value)
+
+
+# ── a PRESENT stack the machine cannot load is refused too (nexus-vyy65) ─────
+#
+# state() looks at files; it cannot see that torch will not import. On Windows
+# without msvcp140_atomic_wait.dll, require() and ensure() used to answer "present"
+# and `nx index pdf` died with a raw WinError 126. The real _windows_runtime_gap
+# runs here: only the platform test and the System32 location are patched.
+
+
+def _windows_box(monkeypatch, tmp_path, *, system=(), service=()) -> None:
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: True)
+    monkeypatch.setattr(_vcrt, "system_dir", lambda: _put(tmp_path / "System32", system))
+    if service:
+        _put(tmp_path / "cfg" / "service", service)
+
+
+def test_require_refuses_a_present_stack_on_a_windows_box_without_atomic_wait(
+    stack, monkeypatch, tmp_path,
+) -> None:
+    stack.status = "present"
+    _windows_box(monkeypatch, tmp_path, service=_BASE)
+    with pytest.raises(PdfStackMissingError) as err:
+        pdf_stack.require("nx index pdf")
+    msg = str(err.value)
+    assert "msvcp140_atomic_wait.dll" in msg and pdf_stack.VCRT_URL in msg
+    assert "run the command again" in msg, "the stack is installed: no install command to rerun"
+    assert pdf_stack.INSTALL_COMMAND not in msg
+
+
+def test_ensure_refuses_a_present_stack_on_a_windows_box_with_no_runtime(
+    stack, monkeypatch, tmp_path,
+) -> None:
+    stack.status = "present"
+    _windows_box(monkeypatch, tmp_path)
+    with pytest.raises(PdfStackMissingError) as err:
+        pdf_stack.ensure("nx index pdf")
+    assert "no Microsoft Visual C++ runtime" in str(err.value)
+    assert stack.installed == 0
+
+
+def test_a_runtime_refusal_is_not_cached_as_present(stack, monkeypatch, tmp_path) -> None:
+    stack.status = "present"
+    _windows_box(monkeypatch, tmp_path)
+    for _ in range(2):  # the second call must refuse again, not hit a cached "present"
+        with pytest.raises(PdfStackMissingError):
+            pdf_stack.require()
+    _put(tmp_path / "System32", _ALL)  # the user installs the redistributable
+    pdf_stack.require()
+    assert pdf_stack.ensure("nx index pdf") is Outcome.PRESENT
+
+
+def test_a_present_stack_with_the_whole_runtime_is_unchanged(stack, monkeypatch, tmp_path) -> None:
+    stack.status = "present"
+    _windows_box(monkeypatch, tmp_path, system=_ALL)
+    pdf_stack.require()
+    assert pdf_stack.ensure("nx index pdf") is Outcome.PRESENT
+
+
+def test_a_present_stack_off_windows_is_unchanged(stack) -> None:
+    stack.status = "present"
+    pdf_stack.require()
+    assert pdf_stack.ensure("nx index pdf") is Outcome.PRESENT

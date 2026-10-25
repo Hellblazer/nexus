@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus import health, pdf_stack
+from nexus import _vcrt, health, pdf_stack
 from nexus.pdf_stack import InstallPlan, StackState
 
 _PLAN = InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND)
@@ -209,3 +209,28 @@ def test_present_with_no_windows_runtime_gap_stays_healthy(monkeypatch) -> None:
     monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: None)
     rows = health._check_pdf_support()
     assert rows[0].ok and len(rows) == 2
+
+
+def test_the_red_row_runs_the_real_gap_probe_and_does_not_tell_an_installed_stack_to_reinstall(
+    monkeypatch, tmp_path,
+) -> None:
+    """No lambda for the probe: real tmp dirs, only the platform test and System32 patched."""
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    sysdir = tmp_path / "System32"
+    sysdir.mkdir()
+    cfg_service = tmp_path / "cfg" / "service"
+    cfg_service.mkdir(parents=True)
+    for n in _vcrt.VC_RUNTIME_DLLS:
+        (cfg_service / n).write_bytes(b"MZ")
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: True)
+    monkeypatch.setattr(_vcrt, "system_dir", lambda: str(sysdir))
+    (row,) = health._check_pdf_support()
+    assert not row.ok
+    assert "msvcp140_atomic_wait.dll" in row.detail and str(cfg_service) in row.detail
+    assert "then rerun nx doctor" in row.detail
+    assert pdf_stack.INSTALL_COMMAND not in row.detail, "the stack is installed: do not send the user to reinstall"
+    assert any(pdf_stack.VCRT_URL in f for f in row.fix_suggestions)
+    # the redistributable lands in System32: the same probe now passes
+    for n in _vcrt.PDF_STACK_DLLS:
+        (sysdir / n).write_bytes(b"MZ")
+    assert health._check_pdf_support()[0].ok

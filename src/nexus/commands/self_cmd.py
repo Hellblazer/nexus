@@ -313,6 +313,17 @@ def perform_self_install(
         build = _build_request(install_dir, receipt, version=version, extras=extras)
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
+    # nexus-vyy65: refuse BEFORE any download when the generation would carry the PDF
+    # stack and this Windows machine lacks the DLLs torch imports. Covers an explicit
+    # `--extras pdf`, a receipt that already lists pdf, and the carry-forward above; the
+    # old generation stays `current` and keeps working. Off Windows this is a no-op.
+    if any(e.strip().lower() == "pdf" for e in extras):
+        from nexus import pdf_stack  # noqa: PLC0415 — deferred import
+
+        try:
+            pdf_stack._require_windows_runtime(pdf_stack.install_plan())  # noqa: SLF001
+        except pdf_stack.PdfStackMissingError as exc:
+            raise click.ClickException(f"{exc}\nNothing was installed; the current generation is unchanged.") from exc
     # nexus-2k66t.4.3: the build runs the installer of the release being
     # installed, so an upgrade into a release that changed the installer (the
     # lock pin) is built by it. The flip, shims and reap below stay ours.

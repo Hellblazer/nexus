@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus import install_layout, pdf_stack
+from nexus import _vcrt, install_layout, pdf_stack
 from nexus.commands import self_cmd
 from nexus.commands import upgrade as upgrade_cmd
 
@@ -658,3 +658,44 @@ def test_a_previous_swap_that_fails_after_current_moved_back_does_not_say_curren
     assert "stays on the rebuilt generation" not in line
     assert "current is back on" in line and "previous was gen-20261001T000000Z" in line
     assert real_restore is not moves_current_then_fails
+
+
+# ── the rebuild does not download torch onto a Windows box that cannot load it (nexus-vyy65) ──
+
+
+def _windows_box_without_atomic_wait(monkeypatch, tmp_path: Path) -> None:
+    sysdir = tmp_path / "System32"
+    sysdir.mkdir()
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: True)
+    monkeypatch.setattr(_vcrt, "system_dir", lambda: str(sysdir))
+
+
+def test_a_rebuild_with_pdf_extras_on_a_windows_box_with_a_runtime_gap_builds_nothing(
+    bed, monkeypatch, tmp_path,
+) -> None:
+    bed.current = _receipt(constraints="none", extras=["local", "pdf"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    line = pdf_stack.rebuild_stale_installer(auto_mode=True)
+    assert bed.builds == [], "no download for a stack that cannot load"
+    assert line is not None and "not rebuilt" in line and pdf_stack.VCRT_URL in line
+    assert bed.current.constraints == "none", "current is left as it was"
+    assert not (Path(os.environ["NEXUS_CONFIG_DIR"]) / SENTINEL).exists(), "a refusal is not a failed attempt"
+    # and it is not retried against the backoff window: the next run refuses again, still building nothing
+    assert "not rebuilt" in pdf_stack.rebuild_stale_installer(auto_mode=True)
+    assert bed.builds == []
+
+
+def test_a_rebuild_without_pdf_extras_is_not_gated_by_the_windows_runtime(bed, monkeypatch, tmp_path) -> None:
+    bed.current = _receipt(constraints="none", extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    line = pdf_stack.rebuild_stale_installer()
+    assert bed.builds == [("local",)] and line is not None and "rebuilt" in line
+
+
+def test_a_rebuild_with_pdf_extras_and_the_whole_runtime_builds(bed, monkeypatch, tmp_path) -> None:
+    bed.current = _receipt(constraints="none", extras=["local", "pdf"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    for n in _vcrt.PDF_STACK_DLLS:
+        (tmp_path / "System32" / n).write_bytes(b"MZ")
+    assert pdf_stack.rebuild_stale_installer() is not None
+    assert bed.builds == [("local", "pdf")]

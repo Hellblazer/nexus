@@ -486,7 +486,8 @@ def require(entry: str = "PDF extraction") -> None:
         return
     st = state()
     if st.present:
-        _present_cache = True
+        _refuse_if_windows_runtime_gap()
+        _present_cache = True  # only reached with no gap: a refusal is never cached
         return
     raise PdfStackMissingError(_remedy(entry, st, None))
 
@@ -529,9 +530,19 @@ def _windows_runtime_missing() -> bool:
     return _windows_runtime_gap() is not None
 
 
-def _windows_runtime_refusal(plan: InstallPlan, gap: tuple[str, str | None]) -> str:
+def _windows_runtime_refusal(
+    plan: InstallPlan, gap: tuple[str, str | None], *, then: str | None = None,
+) -> str:
     """The refusal text for a :func:`_windows_runtime_gap`. One wording per cause,
-    so the base-runtime-present case never claims the machine has no runtime."""
+    so the base-runtime-present case never claims the machine has no runtime.
+
+    The tail is "and run: <install command>" for a stack that is not installed yet.
+    A caller whose stack IS installed (it cannot load) passes *then*, what to do
+    after the redistributable, so the text never sends the user to reinstall.
+
+    STALE WHEN THE ENGINE SHIPS ``msvcp140_atomic_wait.dll`` (nexus-vyy65): "no
+    bundled copy provides yet" below and :data:`nexus._vcrt.PDF_STACK_DLLS` change
+    together with the Windows PG bundle."""
     kind, where = gap
     if kind == "base_only":
         have = (
@@ -540,10 +551,24 @@ def _windows_runtime_refusal(plan: InstallPlan, gap: tuple[str, str | None]) -> 
         )
     else:
         have = "This machine has no Microsoft Visual C++ runtime. "
+    tail = f"and run: {plan.command}" if then is None else f"then {then}"
     return (
         f"PDF support needs Microsoft's Visual C++ redistributable. {have}"
-        f"Install it from {VCRT_URL} and run: {plan.command}"
+        f"Install it from {VCRT_URL} {tail}"
     )
+
+
+def _refuse_if_windows_runtime_gap() -> None:
+    """Raise the refusal when the stack's files are present but, on Windows, the
+    runtime DLLs it imports are not (``import torch`` would fail with WinError 126).
+    The same text :func:`ensure` gives before an install, minus the install command:
+    nothing is missing from the stack, the machine lacks the redistributable. A no-op
+    off Windows and when the probe cannot tell."""
+    gap = _windows_runtime_gap()
+    if gap is not None:
+        raise PdfStackMissingError(
+            _windows_runtime_refusal(install_plan(), gap, then="run the command again.")
+        )
 
 
 def _require_windows_runtime(plan: InstallPlan) -> None:
@@ -660,7 +685,8 @@ def ensure(entry: str) -> Outcome:
     global _present_cache
     st = state()
     if st.present:
-        _present_cache = True
+        _refuse_if_windows_runtime_gap()
+        _present_cache = True  # only reached with no gap: a refusal is never cached
         return Outcome.PRESENT
     if os.environ.get(REEXEC_ENV) == "1":
         # The generation we were re-run in does not have it either: a loop
@@ -1111,6 +1137,16 @@ def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
             extras = _stale_current_extras()
             if extras is None:
                 return "the current generation was already rebuilt with the release's dependency lock"
+            if any(e.strip().lower() == "pdf" for e in extras):
+                # nexus-vyy65: the rebuild would download torch 2.13 for a generation whose
+                # PDF stack cannot load on this machine. Same shape as carry_forward: a
+                # line, no attempt, no failure sentinel, `current` untouched.
+                try:
+                    _require_windows_runtime(install_plan())
+                except PdfStackMissingError as exc:
+                    return (
+                        f"the current generation was not rebuilt with the release's dependency lock. {exc}"
+                    )
             replaced, replaced_previous = _generation_pointers()
 
             def check(_generation: Path) -> None:
