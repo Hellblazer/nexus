@@ -641,7 +641,7 @@ def test_no_packaging_rule_can_drop_a_file_from_the_install_directory() -> None:
     )
 
 
-# ── nx self install refuses a PDF generation a Windows box cannot load (nexus-vyy65) ──
+# ── nx self install builds SLIM and says so when a Windows box cannot load the PDF stack (nexus-vyy65) ──
 
 
 def _windows_box_without_atomic_wait(monkeypatch, tmp_path, *, whole: bool = False) -> None:
@@ -657,41 +657,90 @@ def _windows_box_without_atomic_wait(monkeypatch, tmp_path, *, whole: bool = Fal
 
 def _generation_bed(bed, monkeypatch, **kw):
     tools, _, src = bed
-    host = _hosting_generation(tools, "20260101T000000Z", source=str(src), **kw)
+    kw.setdefault("source", str(src))
+    host = _hosting_generation(tools, "20260101T000000Z", **kw)
     (tools / "current").symlink_to(host)
     setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(host))
     return tools, host
 
 
-def test_an_explicit_extras_pdf_is_refused_before_any_build_on_a_runtime_gap(bed, monkeypatch, tmp_path) -> None:
+def _extras_of(generation: Path) -> list[str]:
+    return json.loads((generation / "nexus-install.json").read_text())["extras"]
+
+
+def test_an_explicit_extras_pdf_builds_slim_on_a_runtime_gap_and_says_it_was_not_installed(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
     tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
     _windows_box_without_atomic_wait(monkeypatch, tmp_path)
-    with pytest.raises(click.ClickException) as err:
-        _run_self_install(add_extras=("pdf",))
-    assert pdf_stack.VCRT_URL in err.value.message and "no Microsoft Visual C++ runtime" in err.value.message
-    assert (tools / "current").resolve() == host.resolve(), "current is unchanged"
-    assert [p.name for p in tools.iterdir() if p.name.startswith("gen-")] == [host.name], "nothing was built"
+    _run_self_install(add_extras=("pdf",))
+    new = (tools / "current").resolve()
+    assert new != host.resolve(), "a generation was built and flipped to"
+    assert "pdf" not in _extras_of(new) and "local" in _extras_of(new)
+    out = capsys.readouterr().out
+    assert out.count("PDF support was NOT installed") == 1, "one line, and it does not ignore the flag silently"
+    assert pdf_stack.VCRT_URL in out and "no Microsoft Visual C++ runtime" in out
 
 
-def test_a_receipt_that_lists_pdf_is_refused_the_same_way_on_a_runtime_gap(bed, monkeypatch, tmp_path) -> None:
+def test_a_receipt_that_lists_pdf_builds_slim_on_a_runtime_gap_with_one_line(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
     tools, host = _generation_bed(bed, monkeypatch, extras=["local", "pdf"])
     _windows_box_without_atomic_wait(monkeypatch, tmp_path)
-    with pytest.raises(click.ClickException):
-        _run_self_install()
+    _run_self_install()
+    new = (tools / "current").resolve()
+    assert new != host.resolve()
+    assert _extras_of(new) == ["local"], "the new receipt does not list pdf, so later upgrades are not gated"
+    out = capsys.readouterr().out
+    assert out.count("Built without PDF support") == 1
+    assert pdf_stack.VCRT_URL in out and "installs on first use" in out
+
+
+def test_the_carry_forward_of_a_pre_split_receipt_is_dropped_too_and_does_not_repeat(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    """installer_schema 1 means pdf is carried forward; on a gap box that build is slim, and
+    its (current-schema) receipt owes no carry, so the next install is silent."""
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    _run_self_install()
+    first = (tools / "current").resolve()
+    assert "pdf" not in _extras_of(first)
+    assert "Built without PDF support" in capsys.readouterr().out
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(first))
+    _run_self_install()
+    assert "PDF support" not in capsys.readouterr().out, "nothing is owed, nothing is said"
+    assert "pdf" not in _extras_of((tools / "current").resolve())
+
+
+def test_a_dry_run_shows_the_slim_build_and_the_line(bed, monkeypatch, tmp_path, capsys) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    assert _run_self_install(add_extras=("pdf",), dry_run=True) is None
+    out = capsys.readouterr().out
+    assert "PDF support was NOT installed" in out
+    argv = [ln for ln in out.splitlines() if ln.startswith("bash ")]
+    assert len(argv) == 1 and argv[0].endswith("--extras local"), out
     assert (tools / "current").resolve() == host.resolve()
 
 
-def test_a_dry_run_is_not_gated(bed, monkeypatch, tmp_path) -> None:
-    _generation_bed(bed, monkeypatch, extras=["local"])
-    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
-    assert _run_self_install(add_extras=("pdf",), dry_run=True) is None
-
-
-def test_extras_pdf_builds_when_the_windows_runtime_is_whole(bed, monkeypatch, tmp_path) -> None:
+def test_extras_pdf_builds_when_the_windows_runtime_is_whole(bed, monkeypatch, tmp_path, capsys) -> None:
     tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
     _windows_box_without_atomic_wait(monkeypatch, tmp_path, whole=True)
     _run_self_install(add_extras=("pdf",))
-    assert (tools / "current").resolve() != host.resolve()
+    new = (tools / "current").resolve()
+    assert new != host.resolve()
+    assert "pdf" in _extras_of(new)
+    assert "PDF support" not in capsys.readouterr().out
+
+
+def test_off_windows_extras_pdf_builds_as_before(bed, monkeypatch, tmp_path, capsys) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"])
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: False)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    _run_self_install(add_extras=("pdf",))
+    assert "pdf" in _extras_of((tools / "current").resolve())
+    assert "PDF support" not in capsys.readouterr().out
 
 
 def test_a_post_split_install_without_pdf_is_not_gated_by_the_windows_runtime(bed, monkeypatch, tmp_path) -> None:
@@ -704,3 +753,51 @@ def test_a_post_split_install_without_pdf_is_not_gated_by_the_windows_runtime(be
     new = (tools / "current").resolve()
     assert new != host.resolve()
     assert "pdf" not in json.loads((new / "nexus-install.json").read_text())["extras"]
+
+
+def test_bootstrap_with_extras_pdf_builds_slim_on_a_runtime_gap_and_the_receipt_has_no_pdf(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    """The plugin's setup and the installers run `nx self install --bootstrap --extras pdf`
+    by default. On a box without the runtime that first install is slim, with one line."""
+    tools, bin_dir, _src = bed
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    monkeypatch.setattr("nexus.commands.self_cmd._flip_and_shim", lambda *a, **k: None)
+    generation = _run_self_install(bootstrap=True, add_extras=("pdf", "local"))
+    assert generation is not None and _extras_of(generation) == ["local"]
+    out = capsys.readouterr().out
+    assert out.count("Built without PDF support") == 1 and pdf_stack.VCRT_URL in out
+
+
+def test_bootstrap_with_extras_pdf_builds_pdf_when_the_runtime_is_whole(bed, monkeypatch, tmp_path, capsys) -> None:
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path, whole=True)
+    monkeypatch.setattr("nexus.commands.self_cmd._flip_and_shim", lambda *a, **k: None)
+    generation = _run_self_install(bootstrap=True, add_extras=("pdf",))
+    assert generation is not None and "pdf" in _extras_of(generation)
+    assert "PDF support" not in capsys.readouterr().out
+
+
+def test_the_carry_forward_builds_a_slim_generation_on_a_runtime_gap_and_stops_being_owed(
+    bed, monkeypatch, tmp_path, capsys,
+) -> None:
+    """`nx upgrade` carries pdf into a pre-split install. On a box without the runtime that
+    build is slim, the account is the one line, and the new receipt owes no carry."""
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"], source="conexus", source_kind="registry")
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path)
+    assert pdf_stack.carry_forward_pending()
+    line = pdf_stack.carry_forward()
+    assert line is not None and line.startswith("Built without PDF support") and pdf_stack.VCRT_URL in line
+    new = (tools / "current").resolve()
+    assert new != host.resolve() and _extras_of(new) == ["local"]
+    assert "Built without PDF support" not in capsys.readouterr().out, "the line is returned once, not also echoed"
+    setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(new))
+    assert not pdf_stack.carry_forward_pending()
+    assert pdf_stack.carry_forward() is None
+
+
+def test_the_carry_forward_builds_pdf_when_the_runtime_is_whole(bed, monkeypatch, tmp_path) -> None:
+    tools, host = _generation_bed(bed, monkeypatch, extras=["local"], source="conexus", source_kind="registry")
+    _windows_box_without_atomic_wait(monkeypatch, tmp_path, whole=True)
+    line = pdf_stack.carry_forward()
+    assert line is not None and "carried forward" in line
+    assert "pdf" in _extras_of((tools / "current").resolve())

@@ -208,6 +208,28 @@ def test_a_newer_uv_tree_means_the_user_meant_to_upgrade(bed) -> None:
     assert current.is_dir(), "the repair must not reap; that is the next install's pass"
 
 
+def test_the_takeover_rebuild_goes_slim_and_says_so_on_a_windows_runtime_gap(bed, monkeypatch, tmp_path) -> None:
+    """nexus-vyy65: the same slim-and-say-so rule as every other build."""
+    from nexus import _vcrt, pdf_stack
+
+    sysdir = tmp_path / "System32"
+    sysdir.mkdir()
+    monkeypatch.setattr(_vcrt, "is_windows", lambda platform=None: True)
+    monkeypatch.setattr(_vcrt, "system_dir", lambda: str(sysdir))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    tools, bin_dir, uv_tools, current, versions = bed
+    legacy = _uv_tree(uv_tools, extras_in_uv_receipt="")
+    versions[str(legacy)] = "7.21.0"
+    _take_shims(bin_dir, legacy)
+
+    lines = repair_uv_takeover()
+
+    receipt = install_layout.read_receipt((tools / "current").resolve())
+    assert receipt.extras == ["local"], "pdf was carried by the rule and dropped by the gap"
+    said = [ln for ln in lines if ln.startswith("Built without PDF support")]
+    assert len(said) == 1 and pdf_stack.VCRT_URL in said[0], lines
+
+
 def test_a_rebuilt_tree_without_taken_shims_is_still_registered(bed) -> None:
     """The measured plain-install shape: uv rebuilt its tree but refused to
     overwrite the shims. Nothing to rewrite; the tree still gets registered."""

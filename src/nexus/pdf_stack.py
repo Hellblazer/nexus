@@ -49,6 +49,7 @@ import re
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -530,32 +531,71 @@ def _windows_runtime_missing() -> bool:
     return _windows_runtime_gap() is not None
 
 
+def _gap_sentence(gap: tuple[str, str | None]) -> str:
+    """What is missing, as one sentence ending in a space, for the refusal and the
+    slim-build line. One wording per cause, so the base-runtime-present case never
+    claims the machine has no runtime.
+
+    The ``base_only`` text is true before and after an engine release carries
+    ``msvcp140_atomic_wait.dll`` (nexus-vyy65): it says this engine's bundle does not,
+    and that a release which does ends the need, so it never names a version."""
+    kind, where = gap
+    if kind == "base_only":
+        return (
+            f"The Visual C++ runtime found in {where} lacks msvcp140_atomic_wait.dll, "
+            "which torch needs and this engine's bundle does not carry "
+            "(an engine release that carries it ends the need for the redistributable, nexus-vyy65). "
+        )
+    return "This machine has no Microsoft Visual C++ runtime. "
+
+
 def _windows_runtime_refusal(
     plan: InstallPlan, gap: tuple[str, str | None], *, then: str | None = None,
 ) -> str:
-    """The refusal text for a :func:`_windows_runtime_gap`. One wording per cause,
-    so the base-runtime-present case never claims the machine has no runtime.
+    """The refusal text for a :func:`_windows_runtime_gap`.
 
     The tail is "and run: <install command>" for a stack that is not installed yet.
     A caller whose stack IS installed (it cannot load) passes *then*, what to do
-    after the redistributable, so the text never sends the user to reinstall.
-
-    STALE WHEN THE ENGINE SHIPS ``msvcp140_atomic_wait.dll`` (nexus-vyy65): "no
-    bundled copy provides yet" below and :data:`nexus._vcrt.PDF_STACK_DLLS` change
-    together with the Windows PG bundle."""
-    kind, where = gap
-    if kind == "base_only":
-        have = (
-            f"The Visual C++ runtime found in {where} lacks msvcp140_atomic_wait.dll, "
-            "which torch needs and no bundled copy provides yet. "
-        )
-    else:
-        have = "This machine has no Microsoft Visual C++ runtime. "
+    after the redistributable, so the text never sends the user to reinstall."""
     tail = f"and run: {plan.command}" if then is None else f"then {then}"
     return (
-        f"PDF support needs Microsoft's Visual C++ redistributable. {have}"
+        f"PDF support needs Microsoft's Visual C++ redistributable. {_gap_sentence(gap)}"
         f"Install it from {VCRT_URL} {tail}"
     )
+
+
+def drop_pdf_on_runtime_gap(
+    extras: Sequence[str], *, asked: bool = False,
+) -> tuple[list[str], str | None]:
+    """The BUILD-SLIM-AND-SAY-SO policy (nexus-vyy65, Sam 2026-10-25).
+
+    ``(extras, line)``: *extras* without ``pdf`` and the one line to show, when *extras*
+    names ``pdf`` and, on Windows, the runtime DLLs torch imports are absent; else
+    *extras* unchanged and None. Every install and upgrade build runs its resolved extras
+    through here, AFTER the merge and the carry-forward, so a machine that cannot load the
+    PDF stack still gets the rest of nexus and an upgrade is never frozen by it. The new
+    receipt then does not list ``pdf``, so nothing later is gated by it; the first
+    ``nx index pdf`` refuses with the link (:func:`ensure`) and installs on demand once the
+    redistributable is present. *asked*: the user typed ``--extras pdf``; the line then
+    says PDF support was not installed, rather than that the build leaves it out."""
+    if not any(e.strip().lower() == "pdf" for e in extras):
+        return list(extras), None
+    gap = _windows_runtime_gap()
+    if gap is None:
+        return list(extras), None
+    kept = [e for e in extras if e.strip().lower() != "pdf"]
+    plan = install_plan()
+    if asked:
+        line = (
+            f"PDF support was NOT installed, although --extras pdf asked for it. {_gap_sentence(gap)}"
+            f"Install the redistributable from {VCRT_URL}, then run: {plan.command}"
+        )
+    else:
+        line = (
+            f"Built without PDF support. {_gap_sentence(gap)}"
+            f"Install the redistributable from {VCRT_URL}; PDF support then installs on first use."
+        )
+    return kept, line
 
 
 def _refuse_if_windows_runtime_gap() -> None:
@@ -573,9 +613,11 @@ def _refuse_if_windows_runtime_gap() -> None:
 
 def _require_windows_runtime(plan: InstallPlan) -> None:
     """Refuse, before anything is written, on a Windows box that lacks the VC++
-    runtime the stack's extension modules need. Both install paths (:func:`ensure`
-    and :func:`carry_forward`) run it, so neither builds a generation whose PDF
-    support would then show as broken in ``nx doctor`` (nexus-2k66t.4.7)."""
+    runtime the stack's extension modules need. The on-demand install
+    (:func:`ensure`) runs it, so it never builds a generation whose PDF support would
+    then show as broken in ``nx doctor`` (nexus-2k66t.4.7). Builds that are not a PDF
+    request (bootstrap, upgrade, rebuild, carry-forward) go slim instead:
+    :func:`drop_pdf_on_runtime_gap`."""
     if _windows_runtime_missing():
         gap = _windows_runtime_gap() or ("none", None)
         raise PdfStackMissingError(_windows_runtime_refusal(plan, gap))
@@ -627,7 +669,7 @@ def _install_lock(doing: str = "installing PDF support"):
         os.close(fd)
 
 
-def _install_generation(*, carrying: bool = False) -> None:
+def _install_generation(*, carrying: bool = False, notes: list[str] | None = None) -> None:
     """Build a generation that adds the ``pdf`` extra and flip to it. The one
     place the on-demand install is spelled.
 
@@ -659,7 +701,12 @@ def _install_generation(*, carrying: bool = False) -> None:
     # perform_self_install reports its reap on stdout; this command's stdout is
     # its own (a caller may parse it), so the install's chatter goes to stderr.
     with contextlib.redirect_stdout(sys.stderr):
-        self_cmd.perform_self_install(add_extras=extras, version=version, progress=True)
+        # A carry-forward is the upgrade's own rule, not a flag the user typed: on a machine
+        # without the runtime it builds slim and reports through *notes* (nexus-vyy65).
+        slim: dict = {"pdf_asked": False} if carrying else {}
+        if notes is not None:
+            slim["pdf_note"] = notes
+        self_cmd.perform_self_install(add_extras=extras, version=version, progress=True, **slim)
 
 
 def _newer(candidate: str, than: str) -> bool:
@@ -905,12 +952,6 @@ def carry_forward(*, auto_mode: bool = False) -> str | None:
     and retried by the next run (backed off under ``--auto``)."""
     if not carry_forward_pending():
         return None
-    try:
-        _require_windows_runtime(install_plan())
-    except PdfStackMissingError as exc:
-        # The same refusal ensure() raises, as this function's contract has it:
-        # a line, never a raise, and no attempt, so no failure sentinel either.
-        return f"PDF support was not carried forward. {exc}"
     sentinel = _carry_failed_sentinel()
     if auto_mode and sentinel is not None:
         try:
@@ -919,13 +960,14 @@ def carry_forward(*, auto_mode: bool = False) -> str | None:
             age = None
         if age is not None and age < CARRY_FORWARD_AUTO_BACKOFF_S:
             return f"PDF support carry-forward deferred: the last attempt failed {int(age)}s ago"
+    notes: list[str] = []
     try:
         with _install_lock():
             # A peer's carry (the lockstep upgrade, a SessionStart --auto, a
             # pre-change hook) may have built it while we waited.
             if current_generation_has_stack():
                 return "PDF support was already carried forward into the current generation"
-            _install_generation(carrying=True)
+            _install_generation(carrying=True, notes=notes)
     except Exception as exc:  # noqa: BLE001 — reported, retried next run
         if sentinel is not None:
             with contextlib.suppress(OSError):
@@ -939,6 +981,11 @@ def carry_forward(*, auto_mode: bool = False) -> str | None:
     if sentinel is not None:
         with contextlib.suppress(OSError):
             sentinel.unlink(missing_ok=True)
+    if notes:
+        # nexus-vyy65: the build was slim because this machine cannot load the PDF stack. The
+        # generation is current and its receipt no longer predates the split, so this does not
+        # repeat; the first `nx index pdf` installs the stack once the runtime is present.
+        return notes[0]
     return "PDF support carried forward into a new generation (existing installs keep it)"
 
 
@@ -1130,6 +1177,7 @@ def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
         if age is not None and age < CARRY_FORWARD_AUTO_BACKOFF_S:
             return f"installer rebuild deferred: the last attempt failed {int(age)}s ago"
     moved_back: list[str] = []
+    slim_note: str | None = None
     try:
         with _install_lock("rebuilding the current generation"):
             # A peer's run may have rebuilt it while we waited; `current` is the
@@ -1137,16 +1185,11 @@ def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
             extras = _stale_current_extras()
             if extras is None:
                 return "the current generation was already rebuilt with the release's dependency lock"
-            if any(e.strip().lower() == "pdf" for e in extras):
-                # nexus-vyy65: the rebuild would download torch 2.13 for a generation whose
-                # PDF stack cannot load on this machine. Same shape as carry_forward: a
-                # line, no attempt, no failure sentinel, `current` untouched.
-                try:
-                    _require_windows_runtime(install_plan())
-                except PdfStackMissingError as exc:
-                    return (
-                        f"the current generation was not rebuilt with the release's dependency lock. {exc}"
-                    )
+            # nexus-vyy65: on a machine that cannot load the PDF stack the rebuild is slim, like
+            # every other build; dropping pdf HERE (not inside the install) puts the one line in
+            # this function's account. `current` is still rebuilt with the lock.
+            extras_list, slim_note = drop_pdf_on_runtime_gap(extras)
+            extras = tuple(extras_list)
             replaced, replaced_previous = _generation_pointers()
 
             def check(_generation: Path) -> None:
@@ -1173,7 +1216,8 @@ def rebuild_stale_installer(*, auto_mode: bool = False) -> str | None:
     if sentinel is not None:
         with contextlib.suppress(OSError):
             sentinel.unlink(missing_ok=True)
-    return "rebuilt the current generation with the release's dependency lock"
+    done = "rebuilt the current generation with the release's dependency lock"
+    return f"{done}. {slim_note}" if slim_note else done
 
 
 def _generation_pointers() -> tuple[Path | None, str | None]:

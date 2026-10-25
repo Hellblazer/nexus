@@ -660,7 +660,7 @@ def test_a_previous_swap_that_fails_after_current_moved_back_does_not_say_curren
     assert real_restore is not moves_current_then_fails
 
 
-# ── the rebuild does not download torch onto a Windows box that cannot load it (nexus-vyy65) ──
+# ── the rebuild goes slim on a Windows box that cannot load the PDF stack (nexus-vyy65) ──
 
 
 def _windows_box_without_atomic_wait(monkeypatch, tmp_path: Path) -> None:
@@ -670,19 +670,21 @@ def _windows_box_without_atomic_wait(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(_vcrt, "system_dir", lambda: str(sysdir))
 
 
-def test_a_rebuild_with_pdf_extras_on_a_windows_box_with_a_runtime_gap_builds_nothing(
+def test_a_rebuild_with_pdf_extras_on_a_windows_box_with_a_runtime_gap_builds_slim_and_says_so(
     bed, monkeypatch, tmp_path,
 ) -> None:
+    """Not a no-op: the lock is still applied, so an upgrade is never frozen by the gap; the
+    generation just does not carry pdf, and its receipt will not list it."""
     bed.current = _receipt(constraints="none", extras=["local", "pdf"])
     _windows_box_without_atomic_wait(monkeypatch, tmp_path)
     line = pdf_stack.rebuild_stale_installer(auto_mode=True)
-    assert bed.builds == [], "no download for a stack that cannot load"
-    assert line is not None and "not rebuilt" in line and pdf_stack.VCRT_URL in line
-    assert bed.current.constraints == "none", "current is left as it was"
-    assert not (Path(os.environ["NEXUS_CONFIG_DIR"]) / SENTINEL).exists(), "a refusal is not a failed attempt"
-    # and it is not retried against the backoff window: the next run refuses again, still building nothing
-    assert "not rebuilt" in pdf_stack.rebuild_stale_installer(auto_mode=True)
-    assert bed.builds == []
+    assert bed.builds == [("local",)], "built once, without pdf"
+    assert line is not None and line.startswith("rebuilt the current generation with the release's dependency lock")
+    assert line.count("Built without PDF support") == 1 and pdf_stack.VCRT_URL in line
+    assert bed.current.constraints == "applied" and bed.current.extras == ["local"]
+    assert not (Path(os.environ["NEXUS_CONFIG_DIR"]) / SENTINEL).exists()
+    assert pdf_stack.rebuild_stale_installer(auto_mode=True) is None, "nothing is owed afterwards"
+    assert len(bed.builds) == 1
 
 
 def test_a_rebuild_without_pdf_extras_is_not_gated_by_the_windows_runtime(bed, monkeypatch, tmp_path) -> None:

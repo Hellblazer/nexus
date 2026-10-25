@@ -55,7 +55,7 @@ def bed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr("nexus.commands.self_cmd.running_generation", lambda: tmp_path / "gen-x")
     monkeypatch.setattr(pdf_stack, "install_plan", lambda: b.plan)
 
-    def _install(*, carrying: bool = False) -> None:
+    def _install(*, carrying: bool = False, notes: list[str] | None = None) -> None:
         b.installs.append(carrying)
         if b.error is not None:
             raise b.error
@@ -163,7 +163,7 @@ def test_the_carry_runs_before_the_process_cycle_so_processes_cycle_onto_the_car
         lambda **kw: order.append("process-cycle") or [],
     )
     monkeypatch.setattr(upgrade_cmd, "_converge_vc_runtime", lambda **kw: order.append("vc-runtime"))
-    monkeypatch.setattr(pdf_stack, "_install_generation", lambda *, carrying=False: order.append("carry"))
+    monkeypatch.setattr(pdf_stack, "_install_generation", lambda *, carrying=False, notes=None: order.append("carry"))
     upgrade_cmd._converge_preconditions(auto_mode=True)
     assert order.index("carry") < order.index("process-cycle"), order
     assert order.index("takeover") < order.index("carry"), order
@@ -182,37 +182,41 @@ def test_the_vc_runtime_is_provisioned_before_the_carry_so_the_first_upgrade_is_
         lambda **kw: order.append("process-cycle") or [],
     )
     monkeypatch.setattr(upgrade_cmd, "_converge_vc_runtime", lambda **kw: order.append("vc-runtime"))
-    monkeypatch.setattr(pdf_stack, "_install_generation", lambda *, carrying=False: order.append("carry"))
+    monkeypatch.setattr(pdf_stack, "_install_generation", lambda *, carrying=False, notes=None: order.append("carry"))
     upgrade_cmd._converge_preconditions(auto_mode=True)
     assert order == ["takeover", "vc-runtime", "carry", "process-cycle"], order
 
 
-# ── the VC++ runtime check (nexus-2k66t.4.7) ─────────────────────────────────
+# ── the VC++ runtime check (nexus-2k66t.4.7, nexus-vyy65) ────────────────────
 
 
-def test_carry_forward_refuses_before_building_when_the_windows_runtime_is_missing(bed, monkeypatch) -> None:
-    """ensure() refuses a Windows box without the VC++ runtime before it writes
-    anything; the carry used to skip the check, install the stack, and leave
-    `nx doctor` showing PDF support broken."""
+def test_carry_forward_no_longer_refuses_on_a_windows_runtime_gap_it_builds_slim(bed, monkeypatch) -> None:
+    """ensure() still refuses a Windows box without the runtime before it writes anything.
+    The carry does not: an existing install is moved forward, slim, with the line in its
+    account (the build itself is proven through the real installer in
+    tests/scripts/test_self_install.py), so `nx upgrade` is never frozen by the gap."""
     monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: True)
-    line = pdf_stack.carry_forward()
-    assert bed.installs == [], "no generation may be built on a box that cannot load the stack"
-    assert line is not None and pdf_stack.VCRT_URL in line and "not carried forward" in line
-    assert pdf_stack.INSTALL_COMMAND in line
+    pdf_stack.carry_forward()
+    assert bed.installs == [True], "the build runs; slimming happens inside the install"
 
 
-def test_the_carry_and_ensure_refuse_with_the_same_words(bed, monkeypatch) -> None:
-    monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: True)
+def test_the_refusal_and_the_slim_line_name_the_same_cause(bed, monkeypatch) -> None:
+    gap = ("none", None)
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: gap)
     monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "no docling"))
     with pytest.raises(pdf_stack.PdfStackMissingError) as exc:
         pdf_stack.ensure("nx index repo")
-    assert str(exc.value) in pdf_stack.carry_forward()
+    _kept, line = pdf_stack.drop_pdf_on_runtime_gap(["pdf"])
+    assert "no Microsoft Visual C++ runtime" in str(exc.value) and "no Microsoft Visual C++ runtime" in line
+    assert pdf_stack.VCRT_URL in str(exc.value) and pdf_stack.VCRT_URL in line
 
 
-def test_a_runtime_refusal_is_not_a_failed_attempt_so_the_auto_backoff_stays_clear(bed, monkeypatch) -> None:
-    monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: True)
-    pdf_stack.carry_forward(auto_mode=True)
+def test_a_carry_that_built_slim_reports_the_line_and_leaves_no_failure_marker(bed, monkeypatch) -> None:
+    def slim_install(*, carrying: bool = False, notes: list[str] | None = None) -> None:
+        bed.installs.append(carrying)
+        assert notes is not None
+        notes.append("Built without PDF support. (the line)")
+
+    monkeypatch.setattr(pdf_stack, "_install_generation", slim_install)
+    assert pdf_stack.carry_forward(auto_mode=True) == "Built without PDF support. (the line)"
     assert not (Path(os.environ["NEXUS_CONFIG_DIR"]) / "pdf-carry-forward-failed").exists()
-    monkeypatch.setattr(pdf_stack, "_windows_runtime_missing", lambda: False)
-    line = pdf_stack.carry_forward(auto_mode=True)
-    assert bed.installs == [True] and line is not None and "carried forward" in line

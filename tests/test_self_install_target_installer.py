@@ -605,6 +605,31 @@ echo "$NX_TOOLS_DIR/gen-20261024T000000Z"
         assert not Path(str(world.marker) + ".flipped").exists(), "the target core never reached its flip"
         assert target_installer._CORE_KEY not in sys.modules
 
+    def test_a_target_core_that_cannot_leave_pdf_out_is_replaced_by_the_running_core_on_a_runtime_gap(
+        self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-vyy65: a target core that predates `without_pdf` would add the stack anyway, after
+        the line said it was left out. The running core has the keyword, so it converges."""
+        from nexus import pdf_stack
+
+        _index_for(tmp_path, monkeypatch, {
+            **WINDOWS_SUPPORT, "nexus/_install/generation_core.py": MIGRATE_CORE,
+        })
+        monkeypatch.setattr(self_cmd, "_is_windows", lambda platform=None: True)
+        monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda gen: None)
+        monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("none", None))
+        running = self_cmd._generation()
+        seen: list[dict] = []
+
+        def spy(source, *, verify=None, progress=False, without_pdf=False, **kw):
+            seen.append({"without_pdf": without_pdf})
+            return world.tools / "gen-x"
+
+        monkeypatch.setattr(running, "migrate_legacy", spy)
+        self_cmd._converge_legacy_install(tmp_path / "unused", world.tools, version="99.0.0", dry_run=False)
+        assert not world.marker.exists(), "the target core, which would have added pdf, was not run"
+        assert seen == [{"without_pdf": True}]
+
     def test_a_target_core_that_cannot_take_the_check_is_replaced_by_the_running_core_and_says_so(
         self, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     ) -> None:

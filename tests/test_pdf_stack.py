@@ -649,6 +649,15 @@ def test_the_refusal_names_the_dll_the_redistributable_and_the_command_when_a_ba
     assert "no Microsoft Visual C++ runtime" not in msg and "no engine copy" not in msg
 
 
+def test_the_base_only_wording_is_true_before_and_after_an_engine_ships_the_dll(tmp_path) -> None:
+    """It says this engine's bundle does not carry the DLL and that a release which does ends the
+    need (nexus-vyy65); it never claims no bundled copy exists, and names no version."""
+    msg = pdf_stack._windows_runtime_refusal(pdf_stack.install_plan(), ("base_only", str(tmp_path)))
+    assert "no bundled copy" not in msg and "provides yet" not in msg
+    assert "this engine's bundle does not carry" in msg and "an engine release that carries it" in msg
+    assert "nexus-vyy65" in msg
+
+
 def test_the_refusal_when_there_is_no_runtime_at_all(tmp_path) -> None:
     plan = pdf_stack.install_plan()
     msg = pdf_stack._windows_runtime_refusal(plan, ("none", None))

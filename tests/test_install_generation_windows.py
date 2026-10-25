@@ -961,6 +961,19 @@ class TestMigrateLegacy:
         # Never uninstalled, never reaped, and no file written into uv's bin dir.
         assert (legacy / "Scripts" / "nx.exe").read_bytes() == b"uv's launcher"
 
+    def test_without_pdf_leaves_the_stack_out_of_the_migrated_generation(
+        self, tools: Path, tmp_path: Path,
+    ) -> None:
+        """nexus-vyy65: the caller has said the machine cannot load the PDF stack."""
+        legacy = self._legacy(tmp_path)
+        gen, _store, _paths = self._migrate(tools, tmp_path, legacy, without_pdf=True)
+        assert gen is not None and lc.read_receipt(gen).extras == ["local"]
+
+    def test_without_pdf_also_drops_a_pdf_the_legacy_receipt_named(self, tools: Path, tmp_path: Path) -> None:
+        legacy = self._legacy(tmp_path, extras='"local", "pdf"')
+        gen, _store, _paths = self._migrate(tools, tmp_path, legacy, without_pdf=True)
+        assert gen is not None and lc.read_receipt(gen).extras == ["local"]
+
     def test_a_verify_that_refuses_stops_the_convergence_before_the_flip(
         self, tools: Path, tmp_path: Path,
     ) -> None:

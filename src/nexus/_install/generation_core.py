@@ -1239,6 +1239,7 @@ def migrate_legacy(
     ops: LinkOps | None = None, platform: str | None = None,
     store: UserPathStore | None = None, uv_bin: Path | str | None = None,
     environ=None, on_path=None, progress: bool = False, verify=None,
+    without_pdf: bool = False,
 ) -> Path | None:
     """Converge a legacy ``uv tool install conexus`` tree onto the generation layout.
 
@@ -1255,7 +1256,8 @@ def migrate_legacy(
     build and BEFORE the flip; whatever it raises propagates and ``current`` is untouched.
     The caller is the one who knows which receipt reader matters: this module may be a
     TARGET release's copy, older than the nx running it, and the steps after the flip are
-    read by that nx. Returns the new generation, or
+    read by that nx. *without_pdf* (nexus-vyy65) leaves the PDF stack out of the new generation
+    (the caller has said why: the machine cannot load it). Returns the new generation, or
     ``None`` when uv resolves and there is no legacy tree to migrate.
     """
     layout = _layout()
@@ -1274,7 +1276,9 @@ def migrate_legacy(
     extras = legacy_extras(legacy)
     # nexus-2k66t.4.2: a legacy uv tree predates the PDF split, so an existing
     # install carries the stack forward (twin of migrate_legacy.sh).
-    if "pdf" not in extras:
+    if without_pdf:
+        extras = [e for e in extras if e != "pdf"]
+    elif "pdf" not in extras:
         extras = sorted([*extras, "pdf"])
     gen = build_generation(
         source, version=version, extras=extras,

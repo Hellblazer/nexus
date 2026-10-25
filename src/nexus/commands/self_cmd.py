@@ -168,6 +168,7 @@ def perform_self_install(
     add_extras: tuple[str, ...] = (), bootstrap: bool = False, progress: bool = False,
     exact_extras: tuple[str, ...] | None = None,
     after_flip: Callable[[Path], None] | None = None,
+    pdf_asked: bool | None = None, pdf_note: list[str] | None = None,
 ) -> Path | None:
     """Build a new generation from the running one's receipt, flip, reap.
 
@@ -195,6 +196,13 @@ def perform_self_install(
     needs this ordering: a reap that ran first could remove the generation ``previous`` named
     before the flip, which that rollback then cannot restore.
 
+    *pdf_asked* and *pdf_note* (nexus-vyy65): on a Windows machine that cannot load the PDF
+    stack, every path here builds SLIM and says so (:func:`nexus.pdf_stack.drop_pdf_on_runtime_gap`):
+    the resolved extras lose ``pdf``, so an install or upgrade is never refused by it and the
+    new receipt does not list it. *pdf_asked* is whether the user typed ``--extras pdf`` (default:
+    whether *add_extras* names it); the line then says PDF support was not installed. The line is
+    echoed, or appended to *pdf_note* when a caller wants to report it in its own account.
+
     *bootstrap* (RDR-228, nexus-sv2wx.14) is the explicit first-install path:
     see :func:`_bootstrap_install`. It is the only way into that path; nothing
     is inferred from where this process runs, and without it every refusal
@@ -211,14 +219,18 @@ def perform_self_install(
     from nexus import install_layout  # noqa: PLC0415 — deferred import
 
     new_extras = _normalize_extras(add_extras)
+    if pdf_asked is None:
+        pdf_asked = "pdf" in new_extras
 
     install_dir = packaged_install_dir()
     tools = install_layout.tools_dir()
     bin_dir = install_layout.bin_dir()
     if bootstrap:
+        # The plugin's setup and the installers pass `--extras pdf` by default (not a user's
+        # request for it on this machine), so a bootstrap is never "asked".
         return _bootstrap_install(
             install_dir, tools, bin_dir, version=version, extras=new_extras, dry_run=dry_run,
-            progress=progress,
+            progress=progress, pdf_note=pdf_note,
         )
     host = running_generation()
 
@@ -306,6 +318,10 @@ def perform_self_install(
     # building the first post-split generation. Only a fresh install goes slim.
     if exact_extras is None:
         extras = _carry_pdf_forward(receipt, extras)
+    # nexus-vyy65: AFTER the merge and the carry-forward (the merge never removes an extra),
+    # and only for this one case: pdf asked for, or inherited, on a Windows machine that cannot
+    # load the stack. Build slim and say so; never refuse, so an upgrade is not frozen by it.
+    extras = _slim_on_runtime_gap(extras, asked=pdf_asked, note=pdf_note)
     if dry_run:
         # The argv shown is the RUNNING installer's. The real run reads the
         # target release's installer first (a fetch, so not done here) and uses
@@ -313,17 +329,6 @@ def perform_self_install(
         build = _build_request(install_dir, receipt, version=version, extras=extras)
         click.echo(build.describe() if isinstance(build, _WindowsBuild) else " ".join(build))
         return None
-    # nexus-vyy65: refuse BEFORE any download when the generation would carry the PDF
-    # stack and this Windows machine lacks the DLLs torch imports. Covers an explicit
-    # `--extras pdf`, a receipt that already lists pdf, and the carry-forward above; the
-    # old generation stays `current` and keeps working. Off Windows this is a no-op.
-    if any(e.strip().lower() == "pdf" for e in extras):
-        from nexus import pdf_stack  # noqa: PLC0415 — deferred import
-
-        try:
-            pdf_stack._require_windows_runtime(pdf_stack.install_plan())  # noqa: SLF001
-        except pdf_stack.PdfStackMissingError as exc:
-            raise click.ClickException(f"{exc}\nNothing was installed; the current generation is unchanged.") from exc
     # nexus-2k66t.4.3: the build runs the installer of the release being
     # installed, so an upgrade into a release that changed the installer (the
     # lock pin) is built by it. The flip, shims and reap below stay ours.
@@ -679,7 +684,7 @@ def _refuse_a_foreign_program_in_the_bin_directory(
 
 def _bootstrap_install(
     install_dir: Path, tools: Path, bin_dir: Path, *, version: str | None,
-    extras: list[str], dry_run: bool, progress: bool = False,
+    extras: list[str], dry_run: bool, progress: bool = False, pdf_note: list[str] | None = None,
 ) -> Path | None:
     """The first install of the CLI, in one command and one generation (RDR-228
     Phase 2 Step 1, nexus-sv2wx.14).
@@ -743,6 +748,9 @@ def _bootstrap_install(
             f"--bootstrap will not move `current`: it names {current}, whose receipt is missing "
             f"or unreadable. Repair it with `{nx} self install`. Nothing was changed."
         )
+    # nexus-vyy65: a first install on a Windows machine that cannot load the PDF stack goes
+    # slim and says so, before the leftover check so a leftover is matched on what would be built.
+    extras = _slim_on_runtime_gap(extras, note=pdf_note)
     running = _running_version()
     unfinished = _unfinished_generation(tools, running, tuple(extras))
     _refuse_a_foreign_program_in_the_bin_directory(tools, bin_dir, unfinished)
@@ -959,6 +967,23 @@ def _merge_extras(existing: list[str], new: list[str]) -> list[str]:
 
     have = {_norm(n) for n in existing}
     return list(existing) + [n for n in new if _norm(n) not in have]
+
+
+def _slim_on_runtime_gap(
+    extras: list[str], *, asked: bool = False, note: list[str] | None = None,
+) -> list[str]:
+    """*extras* without ``pdf`` when this Windows machine cannot load the PDF stack
+    (:func:`nexus.pdf_stack.drop_pdf_on_runtime_gap`), with its one line echoed, or appended
+    to *note* when the caller reports it itself. *extras* unchanged everywhere else."""
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import
+
+    kept, line = pdf_stack.drop_pdf_on_runtime_gap(extras, asked=asked)
+    if line is not None:
+        if note is not None:
+            note.append(line)
+        else:
+            click.echo(line)
+    return kept
 
 
 def _carry_pdf_forward(receipt, extras: list[str]) -> list[str]:
@@ -1443,6 +1468,19 @@ def _verify_kwarg(fn) -> dict:
     return {"verify": _require_readable_receipt} if accepts else {}
 
 
+def _without_pdf_kwarg(fn) -> dict:
+    """``{"without_pdf": True}`` when *fn* names a ``without_pdf`` parameter, else ``{}``.
+    Strict like :func:`_verify_kwarg`: a ``**kwargs`` that would swallow it does not count,
+    because a build that still adds the stack after saying it would not is the failure."""
+    import inspect  # noqa: PLC0415 — stdlib, only the Windows convergence path
+
+    try:
+        accepts = "without_pdf" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        accepts = False
+    return {"without_pdf": True} if accepts else {}
+
+
 def _tail(text: str, lines: int = 15) -> str:
     """The last *lines* lines of *text*."""
     return "\n".join(text.splitlines()[-lines:])
@@ -1798,6 +1836,8 @@ def repair_uv_takeover(*, dry_run: bool = False) -> list[str]:
             )
             if not dry_run:
                 takeover_extras = _carry_pdf_forward(receipt, list(receipt.extras))
+                # nexus-vyy65: the same slim-and-say-so rule as every other build.
+                takeover_extras = _slim_on_runtime_gap(takeover_extras, note=lines)
                 # The uv tree's own package is on disk and IS the release being
                 # built: its installer is read there, nothing is fetched.
                 with _target_installer(
@@ -1984,7 +2024,15 @@ def _windows_converge_legacy_install(
     """The Windows twin of the legacy convergence, ``generation_core.migrate_legacy``:
     extras read from uv's receipt one last time, a generation built beside uv's
     tree, ``current`` flipped, launcher shims written, the legacy tree
-    registered in the ledger as a junction. Never reaps, never uninstalls."""
+    registered in the ledger as a junction. Never reaps, never uninstalls.
+
+    A legacy tree predates the PDF split, so the build adds ``pdf``; on a machine that cannot
+    load the stack it goes slim and says so (nexus-vyy65)."""
+    from nexus import pdf_stack  # noqa: PLC0415 — deferred import
+
+    _kept, slim_line = pdf_stack.drop_pdf_on_runtime_gap(["pdf"])
+    if slim_line is not None:
+        click.echo(slim_line)
     if dry_run:
         click.echo(
             "generation_core.migrate_legacy --source conexus"
@@ -2012,10 +2060,17 @@ def _windows_converge_legacy_install(
             structlog.get_logger(__name__).warning("target_installer_fallback", note=note, source="conexus")
             core = _generation()
             verify = _verify_kwarg(core.migrate_legacy)
+        slim = _without_pdf_kwarg(core.migrate_legacy) if slim_line is not None else {}
+        if slim_line is not None and not slim:
+            # A target core that predates the keyword would add pdf regardless of what was just
+            # said. The running release's core has it: converge with that one.
+            core = _generation()
+            verify = _verify_kwarg(core.migrate_legacy)
+            slim = _without_pdf_kwarg(core.migrate_legacy)
         try:
             generation = core.migrate_legacy(
                 "conexus", version=version or "", tools=tools, platform=_plat(),
-                on_path=_echo_path_result,
+                on_path=_echo_path_result, **slim,
                 # a person waits on this (nexus-2k66t.4.7); a target core older than that has no keyword
                 **_progress_kwarg(core.migrate_legacy, True),
                 **verify,

@@ -482,6 +482,43 @@ def test_the_windows_legacy_convergence_asks_for_progress(
     assert seen and seen[0]["progress"] is True
 
 
+def _legacy_converge_seen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, gap) -> list[dict]:
+    from nexus import pdf_stack
+
+    core = self_cmd._generation()
+    seen: list[dict] = []
+
+    def _fake(source, *, without_pdf=False, **kw):
+        seen.append({"without_pdf": without_pdf, **kw})
+        return tmp_path / "gen-x"
+
+    monkeypatch.setattr(core, "migrate_legacy", _fake)
+    monkeypatch.setattr(self_cmd, "_plat", lambda: "win32")
+    monkeypatch.setattr(self_cmd, "_retarget_autostart_task", lambda generation: None)
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: gap)
+    self_cmd._windows_converge_legacy_install(tmp_path, version=None, dry_run=False)
+    return seen
+
+
+def test_the_windows_legacy_convergence_leaves_pdf_out_and_says_so_on_a_runtime_gap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A legacy tree predates the PDF split, so migrate_legacy adds pdf; on a machine that cannot
+    load the stack it is told not to, and one line says so (nexus-vyy65)."""
+    seen = _legacy_converge_seen(monkeypatch, tmp_path, gap=("none", None))
+    assert len(seen) == 1 and seen[0]["without_pdf"] is True
+    out = capsys.readouterr().out
+    assert out.count("Built without PDF support") == 1 and "aka.ms/vs/17" in out
+
+
+def test_the_windows_legacy_convergence_adds_pdf_as_before_without_a_gap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen = _legacy_converge_seen(monkeypatch, tmp_path, gap=None)
+    assert len(seen) == 1 and seen[0]["without_pdf"] is False
+    assert "PDF support" not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("progress", [True, False])
 def test_a_failed_streamed_build_repeats_only_the_tail_of_uv_output(progress: bool, monkeypatch, tmp_path) -> None:
     """A streamed build already showed uv's output on stderr, so its failure message repeats only
