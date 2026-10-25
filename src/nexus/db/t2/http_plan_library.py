@@ -137,6 +137,13 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not verb or not verb.strip():
             raise ValueError("verb required")
+        # RDR-232 (nexus-jypmj.1.2): source, owner and project are the
+        # caller's evidence request on nx_answer, never a plan binding.
+        # default_bindings is its own column, invisible to plan_json
+        # validation, so this shared choke point checks both.
+        from nexus.plans.evidence import check_no_reserved_declarations  # noqa: PLC0415 — deferred, matches this method's imports
+
+        check_no_reserved_declarations(plan_json, default_bindings)
         # nexus-i711w Stage 2 Phase 0: the scope helpers were only RE-EXPORTED
         # by plan_library (they live in nexus.plans.scope), and match-text
         # synthesis now has its own home. Neither import touches a dying module.

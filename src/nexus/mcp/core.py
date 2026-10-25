@@ -56,6 +56,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp._tool_failure import fail as _fail
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
+from nexus.plans.evidence import EvidenceRequest
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
@@ -9832,6 +9833,12 @@ def _nx_answer_caller_bindings(
     slips through JSON tool arguments easily, and treating it as supplied
     would reopen the offer-a-plan-that-cannot-run hole from the other
     side.
+
+    ``source``, ``owner`` and ``project`` are the caller's evidence request
+    (RDR-232, ``nexus.plans.evidence``), not plan bindings: they are removed
+    here, before the run bindings and the availability set exist, so they
+    never reach plan binding resolution or ``plan_match``. They are read
+    separately by :func:`_nx_answer_evidence_request`.
     """
     # Typed bindings the question itself supplies, derived FIRST so an
     # explicit caller value always overrides one that was inferred
@@ -9849,14 +9856,41 @@ def _nx_answer_caller_bindings(
     # query without it returned the right paper first.
     from nexus.plans.binding_infer import infer_typed_bindings  # noqa: PLC0415 — deferred; matches this module's convention
 
+    from nexus.plans.evidence import RESERVED_BINDINGS, split_reserved  # noqa: PLC0415 — deferred; matches this module's convention
+
     run: dict[str, Any] = dict(infer_typed_bindings(question))
-    run.update({
-        k: v for k, v in (bindings or {}).items() if v is not None
-    })
+    plan_bindings, _reserved = split_reserved(bindings)
+    run.update(plan_bindings)
+    for _name in RESERVED_BINDINGS:
+        run.pop(_name, None)
     run["intent"] = question
     if scope:
         run["_nx_scope"] = scope
     return run, frozenset(run)
+
+
+def _nx_answer_evidence_request(
+    *,
+    bindings: dict[str, Any] | None,
+    scope: str,
+) -> EvidenceRequest:
+    """Read the caller's evidence request from the reserved bindings and scope.
+
+    RDR-232 Phase 1 (nexus-jypmj.1.2). The catalog is consulted only when
+    ``owner`` or ``project`` is a name rather than a tumbler; the lookup is
+    the same owner-name resolution ``scope`` uses. Never raises: a failure
+    is carried in the returned request and disclosed in the envelope.
+    """
+    from nexus.plans.evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+        build_evidence_request,
+        catalog_name_lookup,
+    )
+
+    def _lookup(name: str) -> str:
+        # Lazy: a tumbler-shaped owner needs no catalog at all.
+        return catalog_name_lookup(_get_catalog())(name)
+
+    return build_evidence_request(bindings, scope=scope, name_lookup=_lookup)
 
 
 def _autoalias_bindings(
@@ -10702,7 +10736,13 @@ async def nx_answer(
         description=(
             "Caller-supplied plan bindings (e.g. {\"content_type\": \"rdr\"}) "
             "that reach the plan runner and are advertised to the matcher as "
-            "available, making type-scoped builtin plans reachable."
+            "available, making type-scoped builtin plans reachable. The keys "
+            "source (an RDR id such as RDR-084, or a catalog tumbler), owner "
+            "(a tumbler or registered owner name) and project (a registered "
+            "owner name such as ART) are reserved: they name the document the "
+            "question is about and which project's it is, are never plan "
+            "bindings, and are reported back in the envelope's "
+            "evidence_request."
         ),
     )] = None,
     continuation: Annotated[bool | None, Field(
@@ -10890,6 +10930,13 @@ async def nx_answer(
     _caller_run, _caller_available = _nx_answer_caller_bindings(
         question=question, scope=scope, bindings=bindings,
     )
+    # RDR-232 Phase 1 (nexus-jypmj.1.2): the reserved bindings source,
+    # owner and project were removed from the run above; read them here as
+    # the caller's evidence request. Disclosed in the envelope; the named-
+    # source resolver (nexus-jypmj.1.4) takes it from this closure.
+    _evidence_request = _nx_answer_evidence_request(
+        bindings=bindings, scope=scope,
+    )
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -10961,7 +11008,10 @@ async def nx_answer(
             if _dropped_reduce_steps else None
         )
         _extra_lines = [
-            line for line in (_budget_warning_text, _dropped_reduce_text)
+            line for line in (
+                _budget_warning_text, _dropped_reduce_text,
+                *_evidence_request.disclosures(),
+            )
             if line
         ]
         _extra_text = "\n".join(_extra_lines) if _extra_lines else None
@@ -11063,6 +11113,12 @@ async def nx_answer(
             # handoff, and the budget-exhausted marker (which carries its
             # own prefix).
             "answer_shape": _answer_shape,
+            # RDR-232 Phase 1 (nexus-jypmj.1.2): the caller's evidence
+            # request read from the reserved bindings (source, owner,
+            # project) and a subtree scope: {source, source_error, owner:
+            # {status, tumbler, contributions, detail}}. Always present,
+            # None when no reserved binding was passed.
+            "evidence_request": _evidence_request.to_wire(),
         }
 
     # nexus-f9kxd: single emitter for every error return. The tool contract
