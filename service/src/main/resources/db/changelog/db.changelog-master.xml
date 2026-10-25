@@ -1861,6 +1861,14 @@
     <include file="db/changelog/catalog-046-manifest-section-labels.xml"/>
 
     <!--
+        Bead nexus-2k8wi: the cross pass (assign_from_chashes_<dim>'s cross branch, cross_preview_<dim>, the
+        cross-collection branch of taxonomy_ann_query_<dim>) skips the centroids of superseded collections.
+        CREATE OR REPLACE FUNCTION on the vectors-031-1 signatures, no DATA EFFECT. After catalog-046 (current
+        tail), before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-038-cross-pass-skips-superseded.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

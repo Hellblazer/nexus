@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
@@ -345,9 +346,20 @@ public final class TaxonomyCentroidRepository {
      *
      * <p>Each row carries its own {@code collection} so the caller can group/filter; the
      * embedding is hydrated like {@link #getByCollection}.
+     *
+     * <p>nexus-2k8wi: centroids of a SUPERSEDED collection (a supersede tombstone keeps them; a
+     * rename tombstone's are re-homed) are left out, the same set the engine's cross pass
+     * ({@code assign_from_chashes_<dim>}, {@code cross_preview_<dim>}) chooses from. {@code nx doctor}'s
+     * assignment check recomputes the exact nearest foreign centroid from this read and compares it
+     * with {@code cross_preview}; the two must be one set. A tombstone's own centroids stay readable
+     * by name through {@link #getByCollection}.
      */
     public List<CentroidRecord> getForeignCentroids(String tenant, String collection) {
-        return fetchCentroids(tenant, ct -> ct.collection().ne(collection));
+        return fetchCentroids(tenant, ct -> ct.collection().ne(collection).and(DSL.notExists(
+            DSL.selectOne().from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(ct.tenantId()))
+               .and(CATALOG_COLLECTIONS.NAME.eq(ct.collection()))
+               .and(DSL.coalesce(CATALOG_COLLECTIONS.SUPERSEDED_BY, "").ne("")))));
     }
 
     /**

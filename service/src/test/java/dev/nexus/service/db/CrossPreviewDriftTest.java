@@ -76,7 +76,8 @@ class CrossPreviewDriftTest {
      * {@code cross_preview_<dim>} carry verbatim (taxonomy-020/taxonomy-021's
      * own changelog SQL as redefined by vectors-030, which adds the chunk's
      * {@code embedding_model} to the batch for the persist, and by vectors-031, which names the model and tenant
-     * on both scans — see either file's header). Ends right at the
+     * on both scans, and by vectors-038, which leaves the centroids of superseded collections out of both
+     * cross scans (nexus-2k8wi) — see either file's header). Ends right at the
      * {@code nearest} CTE's own closing paren, deliberately BEFORE the comma
      * that (only in {@code assign_from_chashes_<dim>}) introduces the
      * {@code persisted} INSERT CTE — {@code cross_preview_<dim>} has no such
@@ -107,6 +108,10 @@ class CrossPreviewDriftTest {
             + "            WHERE ct.embedding_model = p_embedding_model"
             + "              AND ct.tenant_id = p_tenant"
             + "              AND ct.collection <> p_collection"
+            + "              AND ct.collection <> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc"
+            + "                   WHERE cc.tenant_id = p_tenant"
+            + "                     AND cc.embedding_model = p_embedding_model"
+            + "                     AND COALESCE(cc.superseded_by, '') <> ''))"
             + "              AND ct.embedding_" + dim + " IS NOT NULL"
             + "            ORDER BY ct.embedding_" + dim + " OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
             + "            LIMIT 1"
