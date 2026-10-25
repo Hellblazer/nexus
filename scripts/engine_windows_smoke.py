@@ -8,7 +8,7 @@ so this boots the engine against the Windows PostgreSQL bundle instead, inside
 the same job. Pass means all of:
 
   * the engine archive has the P0.4 layout, and the engine started from the
-    EXTRACTED archive, beside only its four VC++ DLLs, with a PATH that holds
+    EXTRACTED archive, beside only its five VC++ DLLs, with a PATH that holds
     nothing of the build host's toolchain (windows_engine_release.verify_archive);
   * ``/health`` answers;
   * ``/version`` reports a ``schema_changeset_count`` equal to the number of

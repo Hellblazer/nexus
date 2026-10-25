@@ -58,7 +58,7 @@ done
 if [ "$windows" = "on" ]; then
   # P0.4 layout: one archive and one .sha256 and one sigstore bundle per artifact.
   # The PG bundle (P2.2, nexus-f9bgu.14) and the engine archive (P1.2, nexus-f9bgu.9:
-  # exe plus the four VC++ DLLs). Both carry the new-format .sigstore.json only: the
+  # exe plus the five VC++ DLLs). Both carry the new-format .sigstore.json only: the
   # client verifies that, and no cloud deploy consumes the Windows assets.
   for p in nexus-pg-windows-x64.txz nexus-service-windows-x64.txz; do
     expected="$expected $p $p.sha256 $p.sigstore.json"
