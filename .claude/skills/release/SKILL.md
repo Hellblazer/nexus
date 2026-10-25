@@ -259,7 +259,7 @@ Update any drift before bumping version. Doc audit is what catches "we changed t
 
 CI enforces parity on all but one of these (`conexus/PENDING_RELEASE.md` is a drift
 ledger, not a version field — see `.claude/rules/releases-and-engine.md` § Release cadence policy rule 6 and
-`docs/contributing.md` § Release Process Step 7 for the exact enumeration these
+Step 3 below for the exact enumeration these
 agree on, nexus-smsau 2026-09-27). Missing any one of the seven CI-enforced ones
 fails the marketplace-version-matches-pyproject test, the
 marketplace-source-ref-matches-pyproject test, the

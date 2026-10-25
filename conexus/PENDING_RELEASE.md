@@ -49,6 +49,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
+- `conexus/skills/upgrade/SKILL.md` (nexus-t99tw): the pre-PG hop's local-engine precondition clears `service_url`/`service_token` with `nx config unset` (7.81.0 and later), keeping the hand edit of `~/.config/nexus/config.yml` for older clients. Deferred because the same bead changes user-facing strings in `src/`.
 - `conexus/commands/setup.md` (nexus-2k66t.4.2, nexus-2k66t.4.9, nexus-2k66t.4.10): the setup command's install-size rows show the full default install (PDF support included; measured sizes, nexus-2k66t.4.10) with a slim line, and step 3 names the `slim` argument. Needs the client release that carries the [pdf] split and the default-[pdf] installers.
 - `conexus/launch/nx_standin.py` (nexus-2k66t.4.2, nexus-2k66t.4.9, nexus-2k66t.4.10, nexus-w8ug5): the stand-in's size rows, the `setup` tool's new `slim` argument (tri-state: omitted, true, false) and the manual and repair commands (`--extras pdf`) match the real server's `src/nexus/mcp/setup_tools.py`, for the same release. Needs the client release that carries the [pdf] split and the default-[pdf] installers.
 - `conexus/launch/nx_setup.py` (nexus-2k66t.4.9, nexus-w8ug5): the setup build runs `nx self install --bootstrap --extras pdf` (PDF support by default; `start --slim` leaves it out and records the choice; `--no-slim` installs it over an inherited slim run). Needs the client release whose `--bootstrap` accepts `--extras`.

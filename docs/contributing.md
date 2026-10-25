@@ -36,7 +36,7 @@ the nexus-service; for that stack use `nx daemon service start|stop|status`.
 ## Running Tests
 
 ```bash
-uv run pytest -n auto                 # full unit suite in parallel (~13 min, no API keys needed)
+uv run pytest -n auto                 # full unit suite in parallel (no API keys needed)
 uv run pytest                         # serial fallback, for debugging
 uv run pytest -m lint                 # repo-structure meta-tests, PR-gated in CI
 uv run pytest -m integration          # E2E tests (requires real API keys)

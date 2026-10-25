@@ -1,6 +1,6 @@
 # tests/AGENTS.md
 
-Test-suite conventions for AI coding agents. `CLAUDE.md` is not a symlink here; the project-root `AGENTS.md` covers global conventions and links this file. Mechanism, measurements and incident history that used to sit here live in the module docstrings named below and in [`docs/agents/test-running.md`](../docs/agents/test-running.md).
+Test-suite conventions for AI coding agents. The project-root `AGENTS.md` covers global conventions and links this file. Mechanism, measurements and incident history that used to sit here live in the module docstrings named below and in [`docs/agents/test-running.md`](../docs/agents/test-running.md).
 
 ## Dev loop
 

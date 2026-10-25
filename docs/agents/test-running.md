@@ -29,7 +29,7 @@ labrun measures the change a week after it lands: `kind=hand` full-suite lines i
 
 ## Test substrate, guard and ratchet mechanics
 
-Moved from `tests/AGENTS.md` on 2026-10-24 (docs tidy, agents guidance) so that file keeps the rules a test author obeys; the text below is the mechanism, measurements and procedures behind them, unchanged. The module docstrings (`tests/_xdist_cap.py`, `tests/_engine_substrate.py`, `tests/_tmp_root.py`, `tests/_tenant_pool.py`, `tests/_storage_touch_guard.py`, `tests/_ddl_counter.py`) are the first source for each.
+Moved from `tests/AGENTS.md` on 2026-10-24 (docs tidy, agents guidance) so that file keeps the rules a test author obeys; the text below is the mechanism, measurements and procedures behind them, unchanged where kept; parts that a module docstring already carried were dropped in favour of it. The module docstrings (`tests/_xdist_cap.py`, `tests/_engine_substrate.py`, `tests/_tmp_root.py`, `tests/_tenant_pool.py`, `tests/_storage_touch_guard.py`, `tests/_ddl_counter.py`) are the first source for each.
 
 ### Worker caps
 
@@ -67,7 +67,7 @@ to it; that drift wrote 3.9 GB to the NVMe in 4 minutes on lab-l). A cluster sta
 that finds under 512 MiB of tmpfs space or cgroup headroom (droppable page cache
 counted as room) waits up to 45 s for it to recover, then raises
 `SubstrateRootExhausted`; a start within 120 s of such a raise in the same process
-looks once and raises at once instead of waiting again (nexus-gsjzh) (see "If `SubstrateRootExhausted` trips" below). The start
+looks once and raises at once instead of waiting again (nexus-gsjzh) (see "If `SubstrateRootExhausted` trips" in `tests/AGENTS.md`). The start
 decision uses the same page-cache-credited headroom, so a grant warmed by a build or
 `uv sync` still picks tmpfs; `nexus_t2_substrate.root_decision_headroom` logs the raw
 and the credited figure. Every cluster start
@@ -107,7 +107,7 @@ socket would pass `sun_path`.
 - `NX_STORAGE_TOUCH_GUARD_MODE=report` prints what would fail without failing it.
   `NX_STORAGE_TOUCH_SWEEP=1` adds the whole-run shape checks (some test provisioned, some clean,
   some touch event, and Python children that were spawned reached the shim: `children_seen` must be
-  non-zero when `children_spawned` is) and marks the report as a whole-run one for the ratchet below;
+  non-zero when `children_spawned` is) and marks the report as a whole-run one for the ratchet (the "saving is ratcheted" rule in `tests/AGENTS.md`);
   set it on a full-suite run, not a scoped one. A run that pytest-split is splitting (`--splits`: a CI
   shard, whatever its size) or that collects at least `SWEEP_AUTO_FLOOR` (4000,
   `tests/_storage_touch_guard.py`) tests asks them by itself; the docs-readers leg (1561, not split)
