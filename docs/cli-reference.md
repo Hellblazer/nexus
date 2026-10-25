@@ -4827,9 +4827,9 @@ Starts a foreground FastAPI/uvicorn server. The PID file is written to `~/.confi
 **Threads** (`/threads`) is a board of every Claude session's open threads. It reads two sources: T2 project `threads`, one entry per session (the entry title is the session name), and the live beads labelled `needs-sam` (`bd list --status open,in_progress,blocked`, run from the directory the console was started in; if `bd` is missing or fails, the panel says so in one line). An entry looks like:
 
 ```
-## RDR-234 auto-continuation
-ref: RDR-234, nexus-qlrj7
-state: spike proven; rewriting the draft
+## Prose editor, Phase 2
+ref: RDR-221, nexus-ger02.8
+state: two of four documents edited
 waiting_on: none
 needs_sam: none
 ```
