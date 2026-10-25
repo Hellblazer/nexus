@@ -74,3 +74,33 @@ def test_a_refused_directory_does_not_break_import(tmp_path: Path) -> None:
 def test_the_needed_set_is_the_measured_one() -> None:
     # msvcp140 alone left onnxruntime failing on the guest; both are required.
     assert nexus._VC_RUNTIME_DLLS == ("msvcp140.dll", "msvcp140_1.dll")
+
+
+# ── the PDF stack's DLL set (nexus-vyy65) ────────────────────────────────────
+
+from nexus import _vcrt  # noqa: E402
+
+
+def test_the_pdf_stack_set_is_the_base_pair_plus_atomic_wait() -> None:
+    # torch 2.13 imports MSVCP140_ATOMIC_WAIT.dll (WinError 126 without it).
+    assert _vcrt.PDF_STACK_DLLS == (*_vcrt.VC_RUNTIME_DLLS, "msvcp140_atomic_wait.dll")
+
+
+def test_has_runtime_defaults_to_the_base_pair_and_takes_a_set(tmp_path: Path) -> None:
+    d = _dlls(tmp_path / "d")
+    assert _vcrt.has_runtime(str(d))
+    assert not _vcrt.has_runtime(str(d), _vcrt.PDF_STACK_DLLS)
+    _dlls(d, ("msvcp140_atomic_wait.dll",))
+    assert _vcrt.has_runtime(str(d), _vcrt.PDF_STACK_DLLS)
+
+
+def test_runtime_source_checks_the_set_it_is_given(tmp_path: Path) -> None:
+    cfg, sysdir = tmp_path / "cfg", tmp_path / "System32"
+    _dlls(cfg / "service")
+    base = _vcrt.runtime_source("win32", str(cfg), str(sysdir))
+    assert base == (_vcrt.APP_LOCAL, str(cfg / "service"))
+    pdf = _vcrt.runtime_source("win32", str(cfg), str(sysdir), _vcrt.PDF_STACK_DLLS)
+    assert pdf == (_vcrt.MISSING, None)
+    _dlls(sysdir, _vcrt.PDF_STACK_DLLS)
+    assert _vcrt.runtime_source("win32", str(cfg), str(sysdir), _vcrt.PDF_STACK_DLLS) == (
+        _vcrt.SYSTEM, str(sysdir))

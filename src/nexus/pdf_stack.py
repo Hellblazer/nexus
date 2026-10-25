@@ -491,19 +491,59 @@ def require(entry: str = "PDF extraction") -> None:
     raise PdfStackMissingError(_remedy(entry, st, None))
 
 
-def _windows_runtime_missing() -> bool:
-    """On Windows, true when the VC++ runtime is absent everywhere the stack's
-    extension modules look. False elsewhere."""
+def _windows_runtime_gap(
+    platform: str | None = None,
+    config_dir: str | None = None,
+    system: str | None = None,
+) -> tuple[str, str | None] | None:
+    """On Windows, why the stack's extension modules cannot load, else None.
+
+    The stack needs the base pair PLUS ``msvcp140_atomic_wait.dll`` (torch 2.13
+    imports it; nexus-vyy65) in System32 or together in one app-local directory.
+    ``("none", None)``: no VC++ runtime anywhere. ``("base_only", dir)``: the base
+    pair is there (in *dir*) but ``msvcp140_atomic_wait.dll`` is not. None off
+    Windows, when the set is present, or when the probe cannot tell (do not
+    refuse on a guess)."""
     try:
         from nexus import _vcrt  # noqa: PLC0415 — deferred
         import nexus.config as _config  # noqa: PLC0415 — deferred; module attribute so a patched config dir is seen (nexus-78blw)
 
-        if not _vcrt.is_windows():
-            return False
-        kind, _where = _vcrt.runtime_source(None, str(_config.nexus_config_dir()), None)
+        if not _vcrt.is_windows(platform):
+            return None
+        cfg = config_dir if config_dir is not None else str(_config.nexus_config_dir())
+        kind, _where = _vcrt.runtime_source(platform, cfg, system, _vcrt.PDF_STACK_DLLS)
+        if kind != _vcrt.MISSING:
+            return None
+        base_kind, base_where = _vcrt.runtime_source(platform, cfg, system)
     except Exception:  # noqa: BLE001 — cannot tell: do not refuse on a guess
-        return False
-    return kind == _vcrt.MISSING
+        return None
+    if base_kind in (_vcrt.SYSTEM, _vcrt.APP_LOCAL):
+        return "base_only", base_where
+    return "none", None
+
+
+def _windows_runtime_missing() -> bool:
+    """On Windows, true when the VC++ runtime the stack needs (the base pair and
+    ``msvcp140_atomic_wait.dll``) is absent everywhere its extension modules look.
+    False elsewhere."""
+    return _windows_runtime_gap() is not None
+
+
+def _windows_runtime_refusal(plan: InstallPlan, gap: tuple[str, str | None]) -> str:
+    """The refusal text for a :func:`_windows_runtime_gap`. One wording per cause,
+    so the base-runtime-present case never claims the machine has no runtime."""
+    kind, where = gap
+    if kind == "base_only":
+        have = (
+            f"The Visual C++ runtime found in {where} lacks msvcp140_atomic_wait.dll, "
+            "which torch needs and no bundled copy provides yet. "
+        )
+    else:
+        have = "This machine has no Microsoft Visual C++ runtime. "
+    return (
+        f"PDF support needs Microsoft's Visual C++ redistributable. {have}"
+        f"Install it from {VCRT_URL} and run: {plan.command}"
+    )
 
 
 def _require_windows_runtime(plan: InstallPlan) -> None:
@@ -512,11 +552,8 @@ def _require_windows_runtime(plan: InstallPlan) -> None:
     and :func:`carry_forward`) run it, so neither builds a generation whose PDF
     support would then show as broken in ``nx doctor`` (nexus-2k66t.4.7)."""
     if _windows_runtime_missing():
-        raise PdfStackMissingError(
-            f"PDF support needs the Microsoft Visual C++ redistributable, which this machine lacks "
-            f"and a cloud-mode install has no engine copy to borrow. Install it from {VCRT_URL} "
-            f"and run: {plan.command}"
-        )
+        gap = _windows_runtime_gap() or ("none", None)
+        raise PdfStackMissingError(_windows_runtime_refusal(plan, gap))
 
 
 def _classify_failure(message: str) -> PdfStackError:

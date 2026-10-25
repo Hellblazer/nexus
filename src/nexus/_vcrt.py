@@ -21,6 +21,11 @@ import sys
 #: enough for onnxruntime; uv's CPython supplies vcruntime140*).
 VC_RUNTIME_DLLS: tuple[str, ...] = ("msvcp140.dll", "msvcp140_1.dll")
 
+#: What the PDF stack adds: torch 2.13 imports ``MSVCP140_ATOMIC_WAIT.dll`` and fails
+#: to load (WinError 126) without it. No app-local copy carries it yet (nexus-vyy65),
+#: so today only Microsoft's redistributable satisfies this set.
+PDF_STACK_DLLS: tuple[str, ...] = (*VC_RUNTIME_DLLS, "msvcp140_atomic_wait.dll")
+
 #: Subdirectory of the config dir the provisioner fills.
 VCRT_SUBDIR = "vcrt"
 
@@ -44,9 +49,10 @@ def default_config_dir() -> str:
         os.path.expanduser("~"), ".config", "nexus")
 
 
-def has_runtime(directory: str) -> bool:
-    """True when *directory* holds BOTH runtime DLLs (one is not enough)."""
-    return all(os.path.isfile(os.path.join(directory, n)) for n in VC_RUNTIME_DLLS)
+def has_runtime(directory: str, dlls: tuple[str, ...] = VC_RUNTIME_DLLS) -> bool:
+    """True when *directory* holds EVERY DLL of *dlls* (default: the base pair;
+    one of the two is not enough)."""
+    return all(os.path.isfile(os.path.join(directory, n)) for n in dlls)
 
 
 def app_local_dirs(config_dir: str) -> tuple[str, str, str]:
@@ -62,17 +68,19 @@ def runtime_source(
     platform: str | None = None,
     config_dir: str | None = None,
     system: str | None = None,
+    dlls: tuple[str, ...] = VC_RUNTIME_DLLS,
 ) -> tuple[str, str | None]:
     """``(kind, directory)``: ``not_applicable`` off Windows, ``system`` when
-    System32 has both DLLs, ``app_local`` (with the first directory that has
-    both) otherwise, ``missing`` when nothing does."""
+    System32 has every DLL of *dlls*, ``app_local`` (with the first directory
+    that has them all) otherwise, ``missing`` when nothing does. *dlls* defaults
+    to the base pair; the PDF stack passes :data:`PDF_STACK_DLLS`."""
     if not is_windows(platform):
         return NOT_APPLICABLE, None
     sysdir = system if system is not None else system_dir()
-    if has_runtime(sysdir):
+    if has_runtime(sysdir, dlls):
         return SYSTEM, sysdir
     cfg = config_dir if config_dir is not None else default_config_dir()
     for d in app_local_dirs(cfg):
-        if has_runtime(d):
+        if has_runtime(d, dlls):
             return APP_LOCAL, d
     return MISSING, None

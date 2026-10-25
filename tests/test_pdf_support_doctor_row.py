@@ -187,3 +187,25 @@ def test_check_mineru_reports_na_not_a_failure_without_the_stack(monkeypatch, ca
     assert "required since nexus-2fyb" not in out
     assert "⚠" not in out and "✗" not in out, "no warning or failure glyph on a slim install"
     assert pdf_stack.INSTALL_COMMAND in out
+
+
+# nexus-vyy65: a Windows box with the stack but without msvcp140_atomic_wait.dll
+# cannot import torch, so the row must not say healthy.
+
+
+def test_present_but_the_windows_runtime_lacks_atomic_wait_is_red_with_the_redistributable(monkeypatch) -> None:
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("base_only", r"C:\cfg\service"))
+    rows = health._check_pdf_support()
+    assert [r.label for r in rows] == ["PDF support"], "no docling-importable row on a stack that cannot load"
+    (row,) = rows
+    assert not row.ok
+    assert "msvcp140_atomic_wait.dll" in row.detail
+    assert any(pdf_stack.VCRT_URL in f for f in row.fix_suggestions)
+
+
+def test_present_with_no_windows_runtime_gap_stays_healthy(monkeypatch) -> None:
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: None)
+    rows = health._check_pdf_support()
+    assert rows[0].ok and len(rows) == 2

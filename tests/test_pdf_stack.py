@@ -576,3 +576,90 @@ def test_an_uncontended_install_lock_is_silent_and_never_blocks_the_first_try(mo
     with pdf_stack._install_lock():
         events.append("held")
     assert events == ["try", "held", "unlock"]
+
+
+# ── the Windows runtime gate checks the PDF stack's DLL set (nexus-vyy65) ────
+#
+# torch 2.13 imports MSVCP140_ATOMIC_WAIT.dll, which no app-local copy carries,
+# so a box with only msvcp140 and msvcp140_1 passed the gate and then failed at
+# `import torch` (WinError 126). Real tmp dirs; the platform and System32 are
+# arguments, not patched.
+
+
+def _put(d, names) -> str:
+    d.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (d / n).write_bytes(b"MZ")
+    return str(d)
+
+
+_BASE = ("msvcp140.dll", "msvcp140_1.dll")
+_ALL = (*_BASE, "msvcp140_atomic_wait.dll")
+
+
+def _gap(tmp_path, *, system=(), service=(), platform="win32"):
+    sysdir = _put(tmp_path / "System32", system)
+    cfg = tmp_path / "cfg"
+    if service:
+        _put(cfg / "service", service)
+    return pdf_stack._windows_runtime_gap(platform, str(cfg), sysdir)
+
+
+def test_the_gate_accepts_a_system_runtime_with_all_three(tmp_path) -> None:
+    assert _gap(tmp_path, system=_ALL) is None
+
+
+def test_the_gate_refuses_base_only_in_system32_and_app_local(tmp_path) -> None:
+    gap = _gap(tmp_path, system=_BASE, service=_BASE)
+    assert gap is not None and gap[0] == "base_only"
+
+
+def test_the_gate_refuses_app_local_base_only(tmp_path) -> None:
+    gap = _gap(tmp_path, service=_BASE)
+    assert gap == ("base_only", str(tmp_path / "cfg" / "service"))
+
+
+def test_the_gate_refuses_when_nothing_is_there(tmp_path) -> None:
+    assert _gap(tmp_path) == ("none", None)
+
+
+def test_the_gate_accepts_one_app_local_dir_with_all_three(tmp_path) -> None:
+    assert _gap(tmp_path, service=_ALL) is None
+
+
+def test_the_gate_does_not_combine_dlls_across_directories(tmp_path) -> None:
+    sysdir = _put(tmp_path / "System32", ("msvcp140_atomic_wait.dll",))
+    cfg = tmp_path / "cfg"
+    _put(cfg / "service", _BASE)
+    gap = pdf_stack._windows_runtime_gap("win32", str(cfg), sysdir)
+    assert gap == ("base_only", str(cfg / "service"))
+
+
+def test_the_gate_is_a_no_op_off_windows(tmp_path) -> None:
+    assert _gap(tmp_path, platform="darwin") is None
+    assert _gap(tmp_path, platform="linux") is None
+
+
+def test_the_refusal_names_the_dll_the_redistributable_and_the_command_when_a_base_copy_exists(tmp_path) -> None:
+    plan = pdf_stack.install_plan()
+    where = str(tmp_path / "cfg" / "service")
+    msg = pdf_stack._windows_runtime_refusal(plan, ("base_only", where))
+    assert "msvcp140_atomic_wait.dll" in msg and where in msg
+    assert pdf_stack.VCRT_URL in msg and plan.command in msg
+    assert "no Microsoft Visual C++ runtime" not in msg and "no engine copy" not in msg
+
+
+def test_the_refusal_when_there_is_no_runtime_at_all(tmp_path) -> None:
+    plan = pdf_stack.install_plan()
+    msg = pdf_stack._windows_runtime_refusal(plan, ("none", None))
+    assert pdf_stack.VCRT_URL in msg and plan.command in msg
+    assert "no Microsoft Visual C++ runtime" in msg and "msvcp140_atomic_wait" not in msg
+    assert "no engine copy" not in msg
+
+
+def test_require_raises_the_base_only_wording(tmp_path, monkeypatch) -> None:
+    where = str(tmp_path / "cfg" / "service")
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("base_only", where))
+    with pytest.raises(PdfStackMissingError) as err:
+        pdf_stack._require_windows_runtime(pdf_stack.install_plan())
+    assert "msvcp140_atomic_wait.dll" in str(err.value) and pdf_stack.VCRT_URL in str(err.value)

@@ -2840,6 +2840,18 @@ def _check_pdf_support() -> list[HealthResult]:
 
     st = pdf_stack.state()
     if st.present:
+        # nexus-vyy65: on Windows the stack also needs msvcp140_atomic_wait.dll (torch 2.13);
+        # without it `import torch` fails, so the files being present is not health.
+        gap = pdf_stack._windows_runtime_gap()  # noqa: SLF001
+        if gap is not None:
+            return [HealthResult(
+                label="PDF support", ok=False,
+                detail=(
+                    f"broken: the stack is installed but cannot load. "
+                    f"{pdf_stack._windows_runtime_refusal(pdf_stack.install_plan(), gap)}"  # noqa: SLF001
+                ),
+                fix_suggestions=[f"Install Microsoft's Visual C++ redistributable: {pdf_stack.VCRT_URL}"],
+            )]
         return [
             HealthResult(label="PDF support", ok=True, detail=st.detail),
             *_check_docling_importable(),
