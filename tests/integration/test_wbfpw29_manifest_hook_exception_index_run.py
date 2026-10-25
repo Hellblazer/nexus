@@ -96,7 +96,10 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
     document registered with ``chunk_count=2`` while T3 holds only ONE
     unique-content chunk for it (a genuine shortfall, not RDR-108
     duplicate collapse). The partial manifest is still written and counted
-    in ``reconciled``, and the shortfall is tracked in ``dup_collapsed``.
+    in ``reconciled``, and the shortfall is reported in ``reindex`` with the
+    document's fence failed so the next index run re-indexes it (nexus-8o06q:
+    the heal no longer books a shortfall as a benign duplicate collapse, and
+    no longer writes ``chunk_count``: the append folds it to the one row).
     Whether a write failure counts as repaired is decided elsewhere, by
     reading the manifest back after the run
     (``commands._helpers.resolve_confirmed_write_failure_doc_ids``).
@@ -148,13 +151,20 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
     # hidden -- but this function no longer tries to render a verdict
     # ("confirmed" vs not) about it; that verdict is computed downstream
     # by reading the manifest back after the whole run.
-    assert result.dup_collapsed == 1
+    assert [(p.manifest_rows, p.chunk_count) for p in result.reindex] == [(1, 2)]
 
     manifest_after = make_catalog_reader().get_manifest(doc_id)
     assert len(manifest_after) == 1, (
         f"the manifest write itself must still have happened: "
         f"{len(manifest_after)} row(s)"
     )
+    # The shortfall is not hidden: the fence is failed, so the next plain
+    # index run re-indexes the document. chunk_count is the folded row count.
+    (entry_after,) = [
+        e for e in make_catalog_reader().all_documents() if str(e.tumbler) == doc_id
+    ]
+    assert entry_after.index_state == "failed"
+    assert entry_after.chunk_count == 1
 
 
 @pytest.mark.parametrize(
