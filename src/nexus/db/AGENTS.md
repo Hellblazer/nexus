@@ -149,6 +149,6 @@ consumers query the wrapper, never the matview.
 
 ## Hot rules
 
-- **No ORM, and NO new SQLite.** Raw SQL through the engine only. The SQLite substrate this module once carried is DELETED (RDR-158 P4 — see the retirement notes above); new persistent state is a Liquibase changeset in `service/src/main/resources/db/changelog/`, never client-side DDL and never a `sqlite3.connect`. A diff adding either is a review **Critical** (project AGENTS.md hot rule, Hal directive 2026-07-18).
+- **No ORM, and NO new SQLite** (root `AGENTS.md` hot rule). New persistent state is a Liquibase changeset in `service/src/main/resources/db/changelog/`, never client-side DDL and never a `sqlite3.connect`; the SQLite substrate this module once carried is DELETED (RDR-158 P4, see above).
 - **Never edit a shipped Liquibase changeset.** Schema evolution is a NEW changeset (and, for data migrations, an upgrade-ladder rung in `src/nexus/upgrade_ladder/`). Editing a shipped changeset breaks checksum validation on every installed engine past that version.
-- **Pagination must respect `_PAGE = 300`.** When walking a large collection, `offset += 300` in a loop. Same cap on writes (`MAX_RECORDS_PER_WRITE`).
+- **Pagination must respect `_PAGE = 300`, and writes `MAX_RECORDS_PER_WRITE`** (limits table: `.claude/rules/external-service-limits.md`).

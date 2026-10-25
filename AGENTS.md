@@ -26,9 +26,9 @@ uv sync && scripts/reinstall-tool.sh && nx --version    # after edits
 
 ## Architecture at a glance
 
-Three storage tiers, by lifetime. **ChromaDB is not a live substrate in any mode** (RDR-155 P4b, 2026-07-25 — dependency dropped, absent from `uv.lock`):
+Three storage tiers, by lifetime. **ChromaDB is not a live substrate in any mode** (RDR-155 P4b: dependency dropped, absent from `uv.lock`):
 
-- **T1** — service-backed session scratch (`HttpScratchStore`; `nx scratch`), PG-only. `NX_T1_ISOLATED` is retired (nexus-4lkmz, 2026-08) — setting it hard-fails with `T1IsolatedLegRetiredError`; there is no in-process opt-out.
+- **T1** — service-backed session scratch (`HttpScratchStore`; `nx scratch`), PG-only. `NX_T1_ISOLATED` is retired (nexus-4lkmz) — setting it hard-fails with `T1IsolatedLegRetiredError`; there is no in-process opt-out.
 - **T2** — nine domain stores behind a `T2Database` facade, all HTTP clients over the engine's PG tables. Persistent notes, plans, taxonomy, telemetry, chash, aspects, aspect queue, DEVONthink highlights, tuples.
 - **T3** — `HttpVectorClient` over the nexus-service `/v1/vectors` (pgvector) in both modes: local = bundled PG17+pgvector embedding bge-768 by default, or Voyage when `NX_VOYAGE_API_KEY` reaches the service (nexus-umm29 carve-out; one posture per boot, see RDR-210); cloud = managed service + Voyage always. Permanent knowledge (`nx store`, `nx search`).
 
@@ -52,14 +52,14 @@ For the full module map, post-store hook contracts, T2 schema, and design herita
 
 - **Python 3.12+** — use `match/case`, `tomllib`, `typing.Protocol`, walrus freely.
 - **Type hints on every public API.** Module-level constants too.
-- **No ORM.** Raw SQL. (Existing T2 SQLite code: raw `sqlite3`, WAL on open — maintenance only, see the NO-SQLITE hot rule.)
+- **No ORM.** Raw SQL. (SQLite is a migration source and maintenance path only: see the NO-SQLITE hot rule.)
 - **Composition over inheritance.** Protocols, not deep hierarchies. Constructor injection — no global singletons, no service locators.
 - **TDD.** Test file before implementation. Deterministic: seeded randomness, fixed clocks, `port=0` for dynamic allocation.
 - **Gates fail loud on absent dependencies.** A gate that skip-passes when
   its dependency is absent must carry a max-skip / non-vacuity assert; a
   sweep that found nothing to check is a failure, not a pass (the
   nexus-moht0 vacuous-gate doctrine).
-- **Integration over mocks.** Hit real substrates — mocks hide boundary bugs. For existing SQLite-backed stores that means a real tmp-path SQLite (maintenance only); NEW persistence targets PG via the engine (see the NO-SQLITE hot rule), so its tests hit PG, not a new SQLite fixture.
+- **Integration over mocks.** Hit real substrates — mocks hide boundary bugs. New persistence targets PG via the engine (NO-SQLITE hot rule), so its tests hit PG, never a new SQLite fixture; a surviving SQLite maintenance path is tested against a real tmp-path SQLite.
 - **Structured logging only.** `structlog.get_logger(__name__)`. Never `print()` in library code; CLI commands use `click.echo()`.
 - **`uv` as package manager.** `pyproject.toml` for deps. Don't bump `llama-index-core` or `tree-sitter-language-pack` without exercising the chunking pipeline — they have known breaking incompatibilities.
 
@@ -67,17 +67,16 @@ For the full module map, post-store hook contracts, T2 schema, and design herita
 
 Full text with history: [hot-rules](docs/agents/hot-rules.md).
 
-- **⛔ NO new SQLite — nexus is MIGRATING from SQLite TO PG, in EVERY mode** (Hal directive 2026-07-18; T2 `nexus/directive-no-sqlite-pg-everywhere`). SQLite is a migration SOURCE only, never a destination. Never add a SQLite table, database file, or `CREATE TABLE` bootstrap in Python; new persistent state goes to PG through Liquibase via the engine. In review, a diff adding SQLite DDL or a new `sqlite3.connect` substrate is a **Critical**. Exemptions are Hal's explicit decisions, never code comments. There is no path back to the Chroma/SQLite era: no downgrade, no rollback, no probe of leftover `.db` files or Chroma directories; `SQLITE_CONNECT_ALLOWLIST` is empty and stays empty.
-- **Never `print()` in library code.** Use `structlog.get_logger(__name__).info(event=..., **fields)`.
-- **`develop` is releasable; Chroma is gone.** Pre-PG installs redirect through `conexus==6.18.1` (`nx guided-upgrade`, against a LOCAL engine): `docs/migration-runbook.md` § Installs that predate Postgres.
+- **⛔ NO new SQLite — nexus is MIGRATING from SQLite TO PG, in EVERY mode** (Sam's directive; record: hot-rules). SQLite is a migration SOURCE only, never a destination. Never add a SQLite table, database file, or `CREATE TABLE` bootstrap in Python; new persistent state goes to PG through Liquibase via the engine. In review, a diff adding SQLite DDL or a new `sqlite3.connect` substrate is a **Critical**. Exemptions are Sam's explicit decisions, never code comments. There is no path back to the Chroma/SQLite era: no downgrade, no rollback, no probe of leftover `.db` files or Chroma directories; `SQLITE_CONNECT_ALLOWLIST` is empty and stays empty.
+- **`develop` is releasable; Chroma is gone.** Pre-PG installs: `docs/migration-runbook.md` § Installs that predate Postgres (the redirect path is in hot-rules).
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. Releases promote `develop` to `main` via a PR-gated release branch (nexus-mkj6u); there are NO direct-to-`main` commits at all (`docs/contributing.md` § Release Process).
 - **Never `git add -A` or `git add .`.** Stage by explicit path so untracked drafts don't sneak in.
-- **Push `develop` only through `scripts/git-push-develop.sh <sha>...`** (nexus-9wxu6): it refuses unless `origin/develop..develop` equals the commits you name. `NX_PUSH_SOURCE=HEAD` from a worktree pushes your commits without touching the local branch. Never `git commit --amend` in the primary checkout. See `docs/contributing.md` § Git Workflow.
+- **Push `develop` only through `scripts/git-push-develop.sh <sha>...`**: it refuses unless `origin/develop..develop` equals the commits you name (worktree rule 8 below). Never `git commit --amend` in the primary checkout. See `docs/contributing.md` § Git Workflow.
 - **Never include AI attribution in commits.** No "Generated with Claude", no `Co-Authored-By: Claude`. Bead references and `Closes #N` only.
 - **Never delete RDR files.** Closing an RDR is a frontmatter `status: closed` flip — the file stays. See [`docs/rdr/AGENTS.md`](docs/rdr/AGENTS.md). Closed vocabularies (RDR status, and future ones) are CHECKED TABLES in `src/nexus/tables/`, not prose.
-- **A review gate has a stated end and a triage.** Before dispatching a reviewer, write "Ship when <X>" in the relay (never "no criticals"); triage each finding as a ship-blocker against it or a bead, never both; run both `code-review-expert` and `substantive-critic`; a new check, gate, census or lint pastes its first live run (counts examined and skipped) into its bead before close. Rounds and the confirmation-pass brief: the `orchestration` skill § Review Gate and § Review Rounds; developer escalation: § Implementer and Debugger Dispatch.
+- **A review gate has a stated end and a triage.** Write "Ship when <X>" in the relay before dispatching a reviewer, run both `code-review-expert` and `substantive-critic`, triage each finding as a ship-blocker or a bead (never both), and paste a new check's first live run (counts examined and skipped) into its bead before close. Mechanics: `orchestration` skill § Review Gate, § Review Rounds, § Implementer and Debugger Dispatch.
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime.
-- **Worktree-dispatched agents run `scripts/agent-worktree-preflight.sh [required-sha]` as their FIRST action and stop on any `PREFLIGHT_FAIL` line** (nexus-5kwkf: the harness cuts worktrees from the default branch's tip, so one can be stale by construction).
+- **Worktree-dispatched agents run `scripts/agent-worktree-preflight.sh` first and stop on `PREFLIGHT_FAIL`.** The conexus SubagentStart hook injects this into every dispatch; reason and recovery: hot-rules.
 - **Daemon-lifecycle fixes land in the shared primitive (`src/nexus/daemon/service_registry.py`), never one tier's copy.** See [`src/nexus/daemon/AGENTS.md`](src/nexus/daemon/AGENTS.md).
 
 ## Situational rules (`.claude/rules/`)
@@ -92,10 +91,9 @@ These load only when you read a file their `paths:` matches; each is the short-r
 These always-on rules are repeated here because no file read triggers them:
 
 - **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even holding the owner's `gh` token. Report the run id and stop; the click is Sam's.
-- On chas run a heavy suite as `lab-run -c <class> -- <command>` so it queues behind CI. An engine build is the exception: `scripts/mvnw-leased.sh --lab-run <class> ...` (or `scripts/build-gate-jar.sh --lab-run <class>` for the gate jar), never wrapped in lab-run, so the build lease is taken before the grant.
 - **Never stop processes by pattern on a shared pool user** (chas/qwent `nxtest`): no `pkill -f`, `pkill -u`, `killall` or `kill $(pgrep ...)`; they kill other sessions' work. Stop your own lab-run, or kill one pid you checked with `ps`; report strays to the labrun session. Full text: [labrun README § Stopping work on a shared user](https://github.com/Hellblazer/labrun/blob/main/README.md#stopping-work-on-a-shared-user) (labrun RDR-001 F13).
 
-## Worktrees: one session, one worktree (2026-09-19)
+## Worktrees: one session, one worktree
 
 **Every session works in its own worktree on its own branch. The shared primary checkout is not edited.** Full text, incidents and recipes: [worktrees](docs/agents/worktrees.md).
 
@@ -104,14 +102,14 @@ These always-on rules are repeated here because no file read triggers them:
 3. **In the primary: no edits, no commits, no staging, no branch switches.** Build and test output is fine.
 4. **The release battery runs IN THE RELEASE WORKTREE, never the primary** (`tests/e2e/release-battery.sh` refuses otherwise; `NX_BATTERY_ALLOW_DEVELOP=1` opts a non-release sweep back in).
 5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** Concurrent `pytest -n auto` runs exhaust the SysV shared-memory budget. Scoped runs are unaffected.
-6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST SUBSTRATE-BACKED TEST.** A setup-error wall means shared-memory exhaustion (rule 5; check `ipcs -m`) or a jar rewritten mid-run.
+6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST SUBSTRATE-BACKED TEST** (Quick start; a setup-error wall also means rule 5's shared-memory exhaustion or a jar rewritten mid-run).
 7. **Before pushing, ask whether a run someone is waiting on is in flight.** Read checks with `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs`; never `gh run watch`, never a polling loop (secondary rate limit).
-8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...` from INSIDE the worktree (it reads HEAD from cwd). `PUSH_REFUSED_LOCK_HELD` names the holder; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape. **Batch develop pushes** (Sam, 2026-10-21, nexus-cvtxu): develop CI runs one run at a time, so each push waits for the one before it; hold green commits and push them together, alone only for a develop red or a peer who is waiting. A push within 30 min of the worktree's last one prints `PUSH_BATCH_HINT` on stderr.
+8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...` from INSIDE the worktree (it reads HEAD from cwd). `PUSH_REFUSED_LOCK_HELD` names the holder; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape. **Batch develop pushes**: develop CI runs one run at a time, so hold green commits and push them together, alone only for a develop red or a peer who is waiting.
 9. **Whoever pushes to `develop` fast-forwards the primary in the same breath:** `git merge --ff-only origin/develop` there. If the primary is dirty, do NOT force it; say so on the bus.
 10. **Never hand-run `nx index repo` from a worktree.**
 11. **Serena:** a session that did not START in the worktree must never use a Serena write tool (it can silently write the primary). Use Edit/Write with absolute worktree paths, then `git status --short`.
 12. **Default test host is `chas`** (`ssh chas-test`); `hellmini` is the second. Inside a lab-run grant `-n auto` follows the grant, clamped to its memory (lab-l: 15 workers, `tests/_xdist_cap.py`). Recipes: T2 `nexus/chas-test-host-howto`, `nexus/hellmini-second-test-host-howto`.
-13. **Hand runs are targeted, and no tree gets two green full runs** (nexus-clmlb). Iterate on the changed modules' tests (a path, `-k` or `-m`). A green full run of a tree (same sha, clean) is not repeated by anyone, whoever ran it: hand on the sha and the status file; once pushed, develop CI's verdict is the run. A fix round reruns its reds plus its change class's tripwire. A hand full suite is announced with the change class it is for, the tree sha, and "no green full run of this tree exists"; "pre-push" alone is not a reason. Full suites run on chas through `lab-run -c lab-l -- python3 scripts/watched_pytest.py ...`; engine builds and suites through `scripts/mvnw-leased.sh --lab-run <class>`. [test-running](docs/agents/test-running.md) § Hand runs and develop CI.
+13. **Hand runs are targeted, and no tree gets two green full runs** (nexus-clmlb). Iterate on the changed modules' tests (a path, `-k` or `-m`). A green full run of a tree (same sha, clean) is not repeated by anyone, whoever ran it: hand on the sha and the status file; once pushed, develop CI's verdict is the run. A fix round reruns its reds plus its change class's tripwire. A hand full suite is announced with the change class it is for, the tree sha, and "no green full run of this tree exists"; "pre-push" alone is not a reason. On chas a heavy command runs as `lab-run -c <class> -- <command>` so it queues behind CI: full suites as `lab-run -c lab-l -- python3 scripts/watched_pytest.py ...`; engine builds and suites are the exception, through `scripts/mvnw-leased.sh --lab-run <class>` (or `scripts/build-gate-jar.sh --lab-run <class>` for the gate jar), never wrapped in `lab-run`, so the build lease is taken before the grant. [test-running](docs/agents/test-running.md) § Hand runs and develop CI.
 
 **Moving an in-flight session:** apply or cherry-pick into the new worktree and verify there FIRST, then revert the primary, never the reverse. **A remote pytest hand run goes through `scripts/watched_pytest.py`** (`--stall 180 --status <file> -- uv run pytest ...`); read the status file, never sleep and guess. Read long runs with `head` as well as `tail`.
 
