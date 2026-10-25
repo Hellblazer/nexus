@@ -82,7 +82,7 @@ differ from a GitHub-hosted runner:
   and the failed tests' `tmp_path` trees (256 MiB
   cap) to `<run>/failed/`. The engine JVM gets `-Djava.io.tmpdir=<TMPDIR>` (the JDK
   ignores `TMPDIR`), so its native extraction lands on the same tmpfs; its hs_err report
-  goes to the original tempdir. `tests/AGENTS.md` has the full paragraph.
+  goes to the original tempdir. The `tests/_tmp_root.py` docstring has the full paragraph.
   If `SubstrateRootExhausted` trips, the floor is 512 MiB of tmpfs space or cgroup
   headroom after a 45 s wait: read the cause in the exception, the summary line and
   the `cluster_root` events (`--log-level=INFO`), then run fewer workers (`-n` =
