@@ -52,9 +52,13 @@ Invocation: ``["claude", "-p", "--output-format", "json",
 argv, see ``_run_claude_isolated``), prompt fed via stdin, ``timeout=180``. ``--strict-mcp-config`` (RDR-196
 Gap 4, nexus-nyry9.6) keeps this tool-free dispatch from loading the
 user's ambient MCP server set. The Claude CLI is expected to be on
-PATH; if it is not, subprocess creation raises ``FileNotFoundError``
-which propagates (configuration error, not a runtime extraction
-failure).
+PATH; if it is not (and no API backend is selected), subprocess creation
+raises ``OSError``, which ``_invoke_once`` classifies as a hard failure: ONE
+attempt, a ``aspect_extractor_hard_failure`` warning with the raw error, and a
+null-fields record. This path deliberately does not raise
+``NoBackendAvailableError``: the aspect worker and the ingest hooks call it with
+no operator to tell, and must not stop. ``nx enrich aspects`` makes the
+backend check itself, once, before its loop (``_require_llm_backend``).
 
 The ``--output-format json`` flag returns a wrapper of the form
 ``{"result": "<model-response-text>", "session_id": ..., "usage":

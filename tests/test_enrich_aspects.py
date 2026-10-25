@@ -26,7 +26,9 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
-from nexus.commands.enrich import _PER_PAPER_COST_USD, enrich
+from nexus.commands.enrich import _ASPECT_CONFIDENCE_FLOOR, _PER_PAPER_COST_USD, enrich
+from nexus.db.t2 import T2Database
+from nexus.operators.llm_backend import NO_BACKEND_MESSAGE, NoBackendAvailableError
 from tests._catalog_fixture_ops import ActiveCatalog, register_real_doc_id
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
@@ -85,12 +87,24 @@ def _git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
+@pytest.fixture(autouse=True)
+def _llm_backend_is_the_cli(monkeypatch):
+    """`nx enrich aspects` checks once that an LLM backend can run before it
+    extracts (_require_llm_backend). These tests fake extraction at the
+    extract_aspects boundary, so the box they run on (no `claude`, no key on CI)
+    must not decide whether they run: the backend resolver answers "cli"."""
+    monkeypatch.setattr(
+        "nexus.operators.llm_backend.resolve_backend_name", lambda req: "cli",
+    )
+
+
 def _make_record(
     *, source_path: str = "/p1.pdf",
     problem_formulation: str | None = "P",
     proposed_method: str | None = "M",
     model_version: str = "claude-haiku-4-5-20251001",
     doc_id: str | None = None,
+    confidence: float | None = 0.9,
 ) -> AspectRecord:
     from nexus.aspect_readers import uri_for
     collection = "knowledge__delos"
@@ -103,7 +117,7 @@ def _make_record(
         experimental_baselines=["b1"],
         experimental_results="R",
         extras={"venue": "V"},
-        confidence=0.9,
+        confidence=confidence,
         extracted_at=datetime.now(UTC).isoformat(),
         model_version=model_version,
         extractor_name="scholarly-paper-v1",
@@ -813,6 +827,127 @@ class TestDefaultExtraction:
         )
         assert result.exit_code == 0, result.output
         assert "0 extracted, 1 null-fields" in result.output
+
+
+@pytest.mark.t2_tenant
+class TestRejectedRowsAndBackendGate:
+    """7.86.1 shakeout fixes: a row the engine's confidence gate refuses is not
+    "extracted"; a null-fields line does not claim 3 attempts; a run with no LLM
+    backend stops up front instead of writing nothing and exiting 0; the cost
+    line says what it assumes."""
+
+    def test_rows_below_the_confidence_floor_are_not_counted_as_extracted(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, db_path, cat = env
+        _register_entries(cat, ["/papers/low.pdf", "/papers/good.pdf"])
+
+        def fake_extract(content, source_path, collection, **_kw):
+            return _make_record(
+                source_path=source_path,
+                confidence=0.05 if source_path.endswith("low.pdf") else 0.9,
+            )
+
+        monkeypatch.setattr("nexus.aspect_extractor.extract_aspects", fake_extract)
+
+        result = CliRunner().invoke(
+            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        low_line = next(
+            line for line in result.output.splitlines() if "low.pdf:" in line
+        )
+        assert "below the confidence floor (0.3), not stored" in low_line, result.output
+        assert "extracted" not in low_line, result.output
+        assert "1 extracted" in result.output, result.output
+        assert "1 below the confidence floor (0.3, not stored)" in result.output, result.output
+
+        with T2Database(db_path) as db:
+            rows = db.document_aspects.list_by_collection("knowledge__delos")
+        assert len(rows) == 1, "the summary must match what was actually stored"
+
+    def test_the_floor_matches_the_engines(self) -> None:
+        """The number printed is the engine's, not a copy that can drift."""
+        java = (
+            Path(__file__).resolve().parents[1]
+            / "service/src/main/java/dev/nexus/service/db/AspectRepository.java"
+        ).read_text(encoding="utf-8")
+        assert f"MIN_CONFIDENCE = {_ASPECT_CONFIDENCE_FLOOR};" in java
+
+    def test_null_fields_line_does_not_claim_three_attempts(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, _, cat = env
+        _register_entries(cat, ["/papers/p1.pdf"])
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: _make_record(
+                source_path=source_path, problem_formulation=None,
+                proposed_method=None, confidence=None,
+            ),
+        )
+        result = CliRunner().invoke(
+            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "null-fields (extraction failed)" in result.output
+        assert "3x" not in result.output
+
+    def test_no_llm_backend_stops_before_extracting_and_exits_nonzero(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, _, cat = env
+        _register_entries(cat, ["/papers/p1.pdf", "/papers/p2.pdf"])
+
+        def _no_backend(req):
+            raise NoBackendAvailableError(NO_BACKEND_MESSAGE)
+
+        monkeypatch.setattr("nexus.operators.llm_backend.resolve_backend_name", _no_backend)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: calls.append(source_path),
+        )
+
+        result = CliRunner().invoke(
+            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert result.exit_code != 0, result.output
+        assert NO_BACKEND_MESSAGE in result.output, result.output
+        assert calls == [], "nothing may be dispatched when no backend can run"
+
+    def test_dry_run_is_not_gated_on_a_backend(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--dry-run makes no LLM call, so a box with no backend can still ask
+        what a run would cost."""
+        _, _, cat = env
+        _register_entries(cat, ["/papers/p1.pdf"])
+
+        def _no_backend(req):
+            raise NoBackendAvailableError(NO_BACKEND_MESSAGE)
+
+        monkeypatch.setattr("nexus.operators.llm_backend.resolve_backend_name", _no_backend)
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_t3",
+            lambda: (_ for _ in ()).throw(RuntimeError("test: no t3")),
+        )
+        result = CliRunner().invoke(enrich, ["aspects", "knowledge__delos", "--dry-run"])
+        assert result.exit_code == 0, result.output
+
+    def test_cost_estimate_names_its_assumption_and_the_measured_note_cost(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _, _, cat = env
+        _register_entries(cat, ["/papers/p1.pdf", "/papers/p2.pdf"])
+        monkeypatch.setattr(
+            "nexus.mcp_infra.get_t3",
+            lambda: (_ for _ in ()).throw(RuntimeError("test: no t3")),
+        )
+        result = CliRunner().invoke(enrich, ["aspects", "knowledge__delos", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "upper bound: assumes paper-sized documents" in result.output
+        assert "a one-line note measured $0.0035" in result.output
 
 
 # ── --re-extract --extractor-version ─────────────────────────────────────────

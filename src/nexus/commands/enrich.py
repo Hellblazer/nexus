@@ -1059,6 +1059,25 @@ def _enrich_apply(
 # LiveMeasurement -s`` when the model or its pricing changes.
 _PER_PAPER_COST_USD = 0.20
 
+# What _PER_PAPER_COST_USD assumes, stated in every estimate line (nexus-shake7861).
+# It is a mean over PAPER-SIZED documents (54k-109k prompt tokens each), so for a
+# collection of short notes it is far too high: the 7.86.1 shakeout measured
+# $0.0035 for a one-line note on the same model (aspect_extractor_usage log:
+# cost_usd=0.00350840, claude-haiku-4-5-20251001, 5.4 s), against the $0.20 this
+# constant puts on it. The estimate therefore reads as an upper bound; a
+# per-document figure scaled by size needs per-model rates this module does not
+# hold, so it is not attempted here.
+_MEASURED_SHORT_NOTE_COST_USD = 0.0035
+_COST_BASIS = (
+    "upper bound: assumes paper-sized documents, 54k-109k prompt tokens each; "
+    f"a one-line note measured ${_MEASURED_SHORT_NOTE_COST_USD}"
+)
+
+# The write floor on aspect confidence: the engine's upsert refuses a row below
+# it and reports written=False (service AspectRepository.MIN_CONFIDENCE).
+# tests/test_enrich_aspects.py::TestRejectedRowsAndBackendGate pins the two to one value.
+_ASPECT_CONFIDENCE_FLOOR = 0.3
+
 # Default per the RDR's original Phase 2 spec. The P1.3 spike's
 # 16.7% strict-equality "stability" rate measures whether the model
 # emits the same token sequence on a re-run, which is a methodology
@@ -1268,7 +1287,7 @@ def enrich_aspects(
         # the per-document actual lands in the aspect_extractor_usage log.
         cost_str = (
             f"Estimated cost: ~${cost_estimate:.2f} "
-            f"(mean of measured {config.model_version} dispatches)"
+            f"(mean of measured {config.model_version} dispatches; {_COST_BASIS})"
         )
     # nexus-kk4ut: a knowledge__* collection is routed PER DOCUMENT
     # (nexus-kmbys) — select_config's `config` is only the prefix's base
@@ -1296,6 +1315,9 @@ def enrich_aspects(
         )
         return
 
+    if not is_deterministic:
+        _require_llm_backend()
+
     extracted = _run_extraction(entries, collection, config)
     if not extracted:
         click.echo("No aspects extracted.")
@@ -1308,6 +1330,28 @@ def enrich_aspects(
             sample_pct=validate_sample,
             validation_out=validation_out,
         )
+
+
+def _require_llm_backend() -> None:
+    """Refuse an LLM extraction run when no LLM backend can run, once, up front.
+
+    With neither a ``claude`` on PATH nor an API key, every document would reach
+    the extractor's spawn, fail with a raw ``[Errno 2] ... 'claude'``, and come
+    out as a null-fields row; the run then exited 0 having done nothing
+    (7.86.1 shakeout). The backend check the other LLM steps make
+    (``NoBackendAvailableError``, whose message names every remedy) is made
+    here instead of per document. Only this verb is gated: the extractor keeps
+    its null-record fallback for the hook and worker paths, which have no
+    operator to tell and must not stop the daemon. A misconfigured explicit
+    backend (``anthropic`` with no key) is refused the same way.
+    """
+    from nexus.operators.llm_backend import DispatchRequest, resolve_backend_name  # noqa: PLC0415 — deferred command-local import; keeps CLI startup light
+    from nexus.operators.llm_types import OperatorError  # noqa: PLC0415 — deferred, as above
+
+    try:
+        resolve_backend_name(DispatchRequest(prompt="", json_schema=None))
+    except OperatorError as exc:  # NoBackendAvailableError is a subclass
+        raise click.ClickException(str(exc)) from exc
 
 
 def _aspect_identity(entry) -> str:
@@ -1598,7 +1642,7 @@ def _dry_run_predict_skips(
         actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
         click.echo(
             f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f} "
-            "(mean of measured dispatches on the configured model)"
+            f"(mean of measured dispatches on the configured model; {_COST_BASIS})"
         )
 
 
@@ -1685,6 +1729,7 @@ def _run_extraction(
     skipped = 0
     skipped_unreadable = 0
     write_skipped = 0
+    below_floor = 0
     by_reason: dict[str, int] = {}
     # nexus-kk4ut: the ACTUAL extractor_name each successful record was
     # written under, not `config.extractor_name` (the base config) --
@@ -1803,7 +1848,7 @@ def _run_extraction(
                 )
                 continue
             try:
-                t2_index_write(
+                stored = t2_index_write(
                     lambda t2db, _rec=record: t2db.complete_aspect(
                         _dataclasses.asdict(_rec)
                     )
@@ -1836,9 +1881,22 @@ def _run_extraction(
 
             if record.problem_formulation is None:
                 null_fields += 1
+                # No attempt count here: a hard failure (no backend, a schema
+                # miss) makes ONE attempt, and the record cannot say how many.
                 click.echo(
                     f"  [{i}/{len(entries)}] {Path(source_path).name}: "
-                    f"null-fields (extractor failed 3x)"
+                    "null-fields (extraction failed)"
+                )
+            elif stored is False:
+                # complete_aspect returns the upsert result: False is the
+                # engine's confidence gate refusing the row. Counting it as
+                # extracted reported work that was never stored (7.86.1
+                # shakeout: "Done: 4 extracted", 0 rows written).
+                below_floor += 1
+                click.echo(
+                    f"  [{i}/{len(entries)}] {Path(source_path).name}: "
+                    f"below the confidence floor ({_ASPECT_CONFIDENCE_FLOOR}), "
+                    f"not stored (confidence {record.confidence})"
                 )
             else:
                 success += 1
@@ -1852,6 +1910,8 @@ def _run_extraction(
 
     summary = (
         f"Done: {success} extracted, {null_fields} null-fields, "
+        f"{below_floor} below the confidence floor "
+        f"({_ASPECT_CONFIDENCE_FLOOR}, not stored), "
         f"{skipped_unreadable} skipped (read-failure), "
         f"{write_skipped} skipped (write-failure), "
         f"{skipped} skipped (other)"

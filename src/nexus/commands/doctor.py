@@ -3890,28 +3890,48 @@ def _collect_quota_report() -> dict:
     from nexus.embed_window import MODEL_MAX_TOKENS, window_status  # noqa: PLC0415 — deferred; doctor loads per-check dependencies lazily
 
     if is_local_mode():
-        from nexus.db.local_ef import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.local_ef)
-            LocalEmbeddingFunction,
-            local_model_token,
+        # 7.86.1 shakeout: this branch used to read local_model_token() from the
+        # CLIENT's Python embedder. In service mode without the [local] extra
+        # that falls back to MiniLM, so a fresh `nx init` install (service embeds
+        # bge-768, T3 wrote *__bge-base-en-v15-768__v1) was reported as MiniLM,
+        # with a red tokenizer row for a model nothing on the install uses.
+        # The model T3 writes are actually embedded with is the one the write
+        # path names its collections after, so ask that: no second opinion.
+        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+            LocalVoyageCredentialMissingError,
+            effective_embedding_model_for_writes,
         )
-        _ef = LocalEmbeddingFunction()
-        _local_token = local_model_token()
-        _local_caps: dict = {
-            "max_tokens": MODEL_MAX_TOKENS.get(_local_token, 0),
-            "embedding_dims": _ef.dimensions,
-        }
-        # nexus-ajvjx: a small-window model whose tokenizer the client cannot
-        # load gets no chunk-size check (nexus-spujb warns and skips rather
-        # than refusing to index), so the report carries that fact.
-        _window = window_status(_local_token)
-        if _window is not None:
-            _local_caps["window"] = _window
+        from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — deferred; doctor loads per-check dependencies lazily
+
+        _local_models: dict[str, dict] = {}
+        _embed_error = ""
+        try:
+            for _ct in ("code", "docs", "knowledge"):
+                _token = effective_embedding_model_for_writes(_ct)
+                if _token in _local_models:
+                    continue
+                _caps: dict = {
+                    "max_tokens": MODEL_MAX_TOKENS.get(_token, 0),
+                    "embedding_dims": dim_for_model_token(_token) or 0,
+                }
+                # nexus-ajvjx: a small-window model whose tokenizer the client
+                # cannot load gets no chunk-size check (nexus-spujb warns and
+                # skips rather than refusing to index), so the report carries
+                # that fact. Asked of the model that embeds, never the client EF.
+                _window = window_status(_token)
+                if _window is not None:
+                    _caps["window"] = _window
+                _local_models[_token] = _caps
+        except LocalVoyageCredentialMissingError as exc:
+            _embed_error = str(exc)
         voyage_limits = {
             "mode": "local",
-            "models": {_local_token: _local_caps},
+            "models": _local_models,
             "target_rpm": 0,
             "api_key_set": False,
         }
+        if _embed_error:
+            voyage_limits["embed_model_error"] = _embed_error
     else:
         voyage_limits = {
             "mode": "cloud",
@@ -4017,6 +4037,8 @@ def _format_quota_report(report: dict) -> str:
     )
     lines.append(f"  {_CHECK} Voyage AI: {key_label}")
     lines.append(f"    target rpm (indexer rate limiter):        {v['target_rpm']}")
+    if v.get("embed_model_error"):
+        lines.append(f"  {_WARN} embedding model: {v['embed_model_error']}")
     for model, caps in v["models"].items():
         lines.append(
             f"    {model:20} tokens={caps['max_tokens']:>6,}  "
@@ -4064,7 +4086,10 @@ def _format_quota_report(report: dict) -> str:
             f"{r['total_count']} retries"
         )
     else:
-        lines.append(f"  {_CHECK} Retry accumulator: no transient backoffs observed")
+        lines.append(
+            f"  {_CHECK} Retry accumulator: no transient backoffs observed in this "
+            "process (counters are per process; earlier nx runs are not counted)"
+        )
 
     return "\n".join(lines)
 
