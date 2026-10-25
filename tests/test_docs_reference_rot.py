@@ -72,6 +72,7 @@ JOINT_DIR = RDR_DIR / "joint"
 SHA_ALLOWLIST: dict[str, str] = {
     "71437ca05": "rdr-225: gate round 1 commit before the 2026-10-06 rebase onto develop; the gate critique in T2 is keyed to it, so the citation keeps the gated sha",
     "7fafc96c2": "rdr-225: gate round 2 commit before the 2026-10-06 rebase onto develop; the gate critique and fix check in T2 are keyed to it, so the citation keeps the gated sha",
+    "1d9b72968": "rdr-189: gate round 2 commit before the 2026-10-25 rebase onto develop (now 15c116076); the gate record, critique and fix check in T2 are keyed to it, so the citation keeps the gated sha",
     "a1b2c3d4e5f6": "docs/catalog.md: chash placeholder in a usage example",
     "abc123def456": "rdr-053: chash placeholder in a usage example",
     "abc1234": "rdr-018: placeholder in an example message",
