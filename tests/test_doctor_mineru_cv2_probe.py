@@ -9,9 +9,11 @@ directory, `import cv2` died on libGL.so.1, MinerU answered 409 on every formula
 PDF, and the doctor row stayed green. The row now imports cv2 itself and names
 the repair.
 
-The cv2 here is a real importable module in a tmp dir placed first on sys.path
-(one that raises the real ImportError text, one that loads), not a stubbed
-function, so the probe's own import runs.
+The cv2 here is a real importable module in a tmp dir placed first on the PYTHONPATH
+of the probe's child interpreter (one that raises the real ImportError text, one
+that loads, one that kills its process like a native crash), not a stubbed
+function, so the probe's own import runs. The probe runs in a child process
+(a native crash in cv2 must not take `nx doctor` down with it).
 """
 from __future__ import annotations
 
@@ -37,11 +39,12 @@ def _present_stack_no_weights(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def fake_cv2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Write a cv2.py ahead of the real one on sys.path; restore sys.modules after."""
+    """Write a cv2.py ahead of the real one on the child's PYTHONPATH; restore sys.modules after."""
     import importlib
 
     saved = sys.modules.pop("cv2", None)
-    monkeypatch.syspath_prepend(str(tmp_path))
+    # The probe imports cv2 in a CHILD interpreter, which reads PYTHONPATH.
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
 
     def _write(source: str) -> None:
         (tmp_path / "cv2.py").write_text(source, encoding="utf-8")
@@ -87,3 +90,34 @@ def test_a_broken_cv2_skips_the_real_parse_probe(fake_cv2, monkeypatch, capsys) 
     doctor._run_check_mineru()
     out = capsys.readouterr().out
     assert "MinerU parse" not in out
+
+
+def test_the_probe_never_imports_cv2_into_the_doctor_process(fake_cv2) -> None:
+    fake_cv2('__version__ = "9.9.9"\n')
+    assert doctor._probe_cv2() == (None, "9.9.9")
+    assert "cv2" not in sys.modules, "the probe imported cv2 in-process: a native crash would kill nx doctor"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGSEGV self-kill is POSIX")
+def test_a_cv2_that_crashes_the_interpreter_is_red_not_a_dead_doctor(fake_cv2, capsys) -> None:
+    fake_cv2("import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
+    doctor._run_check_mineru()
+    out = capsys.readouterr().out
+    row = next(ln for ln in out.splitlines() if "cv2" in ln and "↳" not in ln)
+    assert "✗" in row and "crashed" in row, row
+    assert "MinerU parse" not in out
+
+
+def test_a_cv2_that_hangs_is_red_after_the_timeout(fake_cv2, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(doctor, "_CV2_PROBE_TIMEOUT_S", 1.0)
+    fake_cv2("import time\ntime.sleep(30)\n")
+    doctor._run_check_mineru()
+    out = capsys.readouterr().out
+    row = next(ln for ln in out.splitlines() if "cv2" in ln and "↳" not in ln)
+    assert "✗" in row and "did not finish" in row, row
+
+
+def test_a_credential_in_the_cv2_error_is_redacted(fake_cv2) -> None:
+    fake_cv2('raise ImportError("boom api_key=sk-live-0123456789abcdef")\n')
+    error, _version = doctor._probe_cv2()
+    assert error is not None and "sk-live-0123456789abcdef" not in error and "[redacted]" in error

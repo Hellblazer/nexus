@@ -17,6 +17,7 @@ import pytest
 
 from nexus import _vcrt, health, pdf_stack
 from nexus.pdf_stack import InstallPlan, StackState
+from tests._module_seam import setattr_in
 
 _PLAN = InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND)
 
@@ -25,6 +26,25 @@ _PLAN = InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND)
 def _cfg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
     monkeypatch.setattr(pdf_stack, "install_plan", lambda: _PLAN)
+    # Hermetic: the OpenCV rows below set their own installed distributions.
+    _opencv(monkeypatch)
+
+
+def _opencv(monkeypatch, *dists: str) -> None:
+    """Make exactly *dists* the installed OpenCV distributions, through the real
+    importlib.metadata lookup the doctor row uses (no cv2 import)."""
+    import importlib.metadata as md
+
+    real = md.version
+
+    def _version(name: str) -> str:
+        if name in ("opencv-python", "opencv-python-headless"):
+            if name in dists:
+                return "4.13.0"
+            raise md.PackageNotFoundError(name)
+        return real(name)
+
+    monkeypatch.setattr(md, "version", _version)
 
 
 def _stack(monkeypatch, status: str, detail: str = "") -> None:
@@ -267,3 +287,46 @@ def test_absent_on_a_box_without_a_gap_keeps_the_first_use_wording(monkeypatch) 
     (row,) = health._check_pdf_support()
     assert row.ok and not row.warn
     assert "installs it on first use" in row.detail and pdf_stack.INSTALL_COMMAND in row.detail
+
+
+# ── two OpenCV builds in one environment (nexus-11x9o) ────────────────────────
+# opencv-python and opencv-python-headless both write site-packages/cv2/. On a
+# Linux box without libGL.so.1 the non-headless one wins and `import cv2` dies,
+# so every PDF fails. find_spec cannot see it (the package directory is there).
+
+
+def test_both_opencv_builds_make_the_row_red_on_linux_and_name_the_repair(monkeypatch) -> None:
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
+    setattr_in(monkeypatch, health, "sys.platform", "linux")
+    row = health._check_pdf_support()[0]
+    assert row.label == "PDF support" and not row.ok
+    assert "opencv-python" in row.detail and "opencv-python-headless" in row.detail
+    assert "libGL" in row.detail
+    assert row.fix_suggestions and pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
+
+
+def test_both_opencv_builds_off_linux_is_a_warning_not_red(monkeypatch) -> None:
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
+    setattr_in(monkeypatch, health, "sys.platform", "darwin")
+    row = health._check_pdf_support()[0]
+    assert row.ok and row.warn
+    assert pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
+
+
+def test_headless_only_is_the_healthy_shape(monkeypatch) -> None:
+    _stack(monkeypatch, "present", "5 distributions on their pins")
+    _opencv(monkeypatch, "opencv-python-headless")
+    rows = health._check_pdf_support()
+    assert rows[0].ok and not rows[0].warn
+    assert rows[0].detail == "5 distributions on their pins"
+
+
+def test_a_slim_install_does_not_report_opencv(monkeypatch) -> None:
+    """No PDF stack, so the OpenCV pair is not this box's business: the row stays the informational pass."""
+    _stack(monkeypatch, "absent", "docling, MinerU and torch are not installed")
+    _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
+    setattr_in(monkeypatch, health, "sys.platform", "linux")
+    (row,) = health._check_pdf_support()
+    assert row.ok and not row.warn and "opencv" not in row.detail.lower()

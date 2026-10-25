@@ -79,3 +79,14 @@ def test_the_tail_is_bounded_and_keeps_the_end_not_the_start(monkeypatch, tmp_pa
 def test_a_worker_with_no_stderr_logs_an_empty_tail_not_a_crash(monkeypatch, tmp_path) -> None:
     event = _run_failing_worker(monkeypatch, tmp_path, "import os\nos._exit(1)")
     assert event.get("stderr_tail") == ""
+
+
+def test_a_credential_in_the_tail_is_redacted_before_it_is_logged(monkeypatch, tmp_path) -> None:
+    """A worker's stderr can echo a rejected credential (a service 401 body does);
+    the tail goes through the repo's redaction helper, as doctor's exception text does."""
+    secret = "sk-live-0123456789abcdef"
+    body = f'raise RuntimeError("HTTP 401: invalid api_key={secret}")'
+    event = _run_failing_worker(monkeypatch, tmp_path, body)
+    tail = event["stderr_tail"]
+    assert secret not in tail, tail
+    assert "[redacted]" in tail and "HTTP 401" in tail, tail

@@ -2042,22 +2042,40 @@ def _run_check_mineru_parse() -> None:
         click.echo(_check("MinerU parse", True, "parsed a synthesized one-page probe PDF"))
 
 
-def _cv2_import_error() -> str | None:
-    """None when ``import cv2`` works in this interpreter (the one MinerU runs
-    in), else the error as ``ExceptionClass: message`` (credentials redacted)."""
-    import importlib  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-    try:
-        importlib.import_module("cv2")
-    except Exception as exc:  # noqa: BLE001 — any load failure (ImportError for libGL.so.1, OSError, a broken wheel) is the finding
-        return _exc_detail(exc, with_type=True)
-    return None
+#: How long the cv2 import probe may run before it is reported as hung.
+_CV2_PROBE_TIMEOUT_S = 60.0
 
 
-def _cv2_version() -> str:
+def _probe_cv2(timeout_s: float | None = None) -> tuple[str | None, str]:
+    """``(error, version)`` for ``import cv2`` in the interpreter MinerU runs in.
+
+    *error* is None when the import works, else a one-line cause (credentials
+    redacted). The import runs in a CHILD interpreter, bounded by a timeout, like
+    the real-parse probe: cv2 is a native extension, so a bad build can kill its
+    process outright, and that must be a red row, not the end of ``nx doctor``.
+    """
+    import subprocess  # noqa: PLC0415 — deferred to keep CLI startup fast
     import sys  # noqa: PLC0415 — deferred to keep CLI startup fast
 
-    return str(getattr(sys.modules.get("cv2"), "__version__", "")) or "version unknown"
+    timeout = _CV2_PROBE_TIMEOUT_S if timeout_s is None else timeout_s
+    try:
+        proc = run_bounded(
+            [sys.executable, "-c", "import cv2; print(cv2.__version__)"], timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"the cv2 import did not finish within {timeout:g} s", ""
+    except OSError as exc:
+        return _exc_detail(exc, with_type=True), ""
+    if proc.returncode == 0:
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        return None, lines[-1].strip() if lines else "version unknown"
+    # A traceback ends with the cause ("ImportError: libGL.so.1: ..."): its last line.
+    tail = [ln for ln in proc.stderr.splitlines() if ln.strip()]
+    if tail:
+        return redact_credentials(tail[-1].strip()), ""
+    if proc.returncode < 0:
+        return f"the cv2 import crashed the interpreter (signal {-proc.returncode})", ""
+    return f"the cv2 import exited {proc.returncode} with no output", ""
 
 
 def _run_check_mineru() -> None:
@@ -2117,7 +2135,7 @@ def _run_check_mineru() -> None:
     # nexus-11x9o: MinerU imports cv2 lazily, so the do_parse import above
     # succeeds on a box whose cv2 cannot load (a Linux box without libGL.so.1
     # where the non-headless opencv-python won the shared cv2/ directory).
-    cv2_error = _cv2_import_error()
+    cv2_error, cv2_version = _probe_cv2()
     if cv2_error is not None:
         click.echo(_check("MinerU cv2 import", False, cv2_error))
         click.echo(
@@ -2128,7 +2146,7 @@ def _run_check_mineru() -> None:
             "would fail on the same import."
         )
     else:
-        click.echo(_check("MinerU cv2 import", True, f"cv2 {_cv2_version()} loads"))
+        click.echo(_check("MinerU cv2 import", True, f"cv2 {cv2_version} loads"))
         if not _mineru_pipeline_model_dir_configured():
             click.echo(
                 "  (MinerU pipeline model weights not downloaded; real-parse "
@@ -2704,7 +2722,9 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET) -> N
          "until then), so on an install without PDF support this reports "
          "N/A and names the command that installs it. Otherwise it surfaces "
          "a corrupt install at doctor-time instead of waiting for the first "
-         "math-PDF index to fail.",
+         "math-PDF index to fail, including a cv2 that cannot load (MinerU "
+         "imports it lazily; the non-headless opencv-python needs libGL.so.1 "
+         "on Linux).",
 )
 @click.option(
     "--check-aspect-queue",

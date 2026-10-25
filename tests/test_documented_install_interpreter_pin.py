@@ -56,10 +56,11 @@ _INSTALL_RE = re.compile(
 
 #: The MVV's published-install leg, the gate that resolves against real PyPI.
 #: Flags between the interpreter pin and the spec are allowed (nexus-tt5vm
-#: added --no-cache there, nexus-11x9o added --overrides FILE); the pin itself is
-#: what this lint reads.
+#: added --no-cache there, nexus-11x9o added --overrides FILE and --constraints FILE;
+#: the call is split over backslash-continued lines, which _pins joins); the pin
+#: itself is what this lint reads.
 _MVV_RE = re.compile(
-    r"tool install --python (\d+\.\d+)(?: --[a-z][a-z-]*(?: \"\$OVERRIDES_FILE\")?)* \"\$PKG_SPEC\""
+    r"tool install --python (\d+\.\d+)(?:\s+--[a-z][a-z-]*(?:\s+\"\$[A-Z_]+\")?)*\s+\"\$PKG_SPEC\""
 )
 
 #: Non-vacuity floors: the count of typed-by-a-user install commands each
@@ -71,7 +72,8 @@ _MIN_CONFIGURATION_OCCURRENCES = 2
 
 
 def _pins(path: pathlib.Path, pattern: re.Pattern[str]) -> list[str]:
-    return pattern.findall(path.read_text(encoding="utf-8"))
+    # A shell command continued over backslash-newlines is one command.
+    return pattern.findall(re.sub(r"\\\n\s*", " ", path.read_text(encoding="utf-8")))
 
 
 def _readme_pin() -> str:

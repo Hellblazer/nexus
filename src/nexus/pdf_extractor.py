@@ -39,6 +39,7 @@ import httpx
 import structlog
 
 from nexus.errors import ExtractionQualityError, UnextractableContentError
+from nexus.redact import redact_credentials
 
 # MinerU is resolved LAZILY (nexus-ct17r). ``mineru.cli.common`` imports
 # magika, which imports onnxruntime at module scope, and this module is
@@ -112,9 +113,12 @@ def _read_stderr_tail(path: Path) -> str:
             fh.seek(max(0, fh.tell() - _MINERU_STDERR_TAIL_BYTES))
             # The cut can land inside a multibyte sequence: its orphaned bytes
             # decode to replacement characters, which are not worth keeping.
-            return fh.read().decode("utf-8", errors="replace").lstrip("�").strip()
+            text = fh.read().decode("utf-8", errors="replace").lstrip("�").strip()
     except OSError:
         return ""
+    # A worker's stderr can echo a rejected credential (a service 401 body does);
+    # the log event goes through the same redaction doctor's exception text does.
+    return redact_credentials(text)
 
 
 _MINERU_WORKER_SCRIPT = '''
