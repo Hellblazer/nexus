@@ -41,7 +41,7 @@ supplied RDR excerpt did not identify the canonical implementations. Direct T2
 and T3 reads in the same session immediately returned those choices and the
 gate history. Telemetry record 722 confirms plan 473, the six steps, and the
 12,325-token generation input, but does not record per-stream counts or which
-chunks survived the 100-input cap. The accumulated references therefore show a
+chunks reached the reducer. The accumulated references therefore show a
 retrieval/evidence-selection problem; they do not establish that all 340
 reached the reducer.
 
@@ -70,10 +70,10 @@ First, the caller's scope never reaches a retrieval step whose plan already
 names a corpus. The runner fills a step's corpus from caller scope only when
 the step has none (`plans/runner.py:1184-1190`), so a plan-declared corpus
 wins. All 12 builtin plans pin a corpus on their retrieval steps; ten of them
-pin `corpus: all`, which admits every collection family, quarantine
-collections included. Plan 473 pins it through its default binding, so the
-observed `scope="rdr"` call ran its vector search over every corpus (research
-14).
+pin `corpus: all`, which fans out over every live collection family. Plan 473
+pins it through its default binding, so on the source as read the observed
+`scope="rdr"` call's vector search ran over every corpus (research 14; the
+saved run's `resolved_step_args` was not read).
 
 Second, RDR-097 deliberately expands factual lookup through citation and
 relation links. The traversal primitive has no caller-scope argument. It
@@ -154,9 +154,11 @@ would still make broad questions follow a factual-answer pipeline.
 - **Traversal**: `src/nexus/mcp/core.py::traverse` accepts seeds, link types or
   purpose, depth, and direction. It has no corpus or primary-source reservation
   parameter. It returns document tumblers, chunk ids, and collections.
-- **Hydration**: runner auto-hydration preserves source notes and caps operator
-  inputs at 100 after dropping empty content. The cap is positional; it has no
-  per-corpus or per-document reservation.
+- **Hydration**: runner auto-hydration of an operator's `ids` preserves source
+  notes and caps operator inputs at 100 after dropping empty content. The cap
+  is positional; it has no per-corpus or per-document reservation. Operators
+  fed explicit `inputs` from earlier `store_get_many` steps, as plan 473's
+  `rank` is, have no count cap (research 17).
 - **Reduction**: `src/nexus/plans/bundle.py` composes rank and generate into one
   model call and returns only the terminal schema. `answer_shape.py` classifies
   the final text afterward.
@@ -325,7 +327,7 @@ feasibility within the stated fixtures, not production integration or live
 answer quality. The detailed A1/A2 census is
 `nexus_rdr/232-research-a1-a2-source-verification`; A3/A4 current interfaces
 are in `232-research-3`. Behavioral evidence is in `232-research-6` through
-`232-research-9`.
+`232-research-10`.
 
 - [ ] **A1 — explicit answer-kind metadata and conservative request routing can
   improve eligibility without material recall loss.** **Status**: Partially
@@ -586,8 +588,10 @@ corpus prefix such as `rdr` or a catalog subtree such as `1.2`
 (`_nx_answer_normalize_scope`, research 16), and this call needs both. The
 owner therefore travels in the reserved `owner`/`project` binding. When a
 caller passes a catalog-subtree `scope` and no `owner` binding, the subtree is
-also used as the owner qualifier for source resolution; when both are given
-and disagree, the run reports the conflict instead of picking one.
+also used as the owner qualifier for source resolution. When both are given,
+they agree if one tumbler is a prefix of the other (`1.2.4686` agrees with
+`1.2`) and resolution uses the longer; otherwise the run reports the conflict
+in the envelope instead of picking one.
 
 Deterministic extraction has no model cost. If structured extraction is needed,
 it is at most one direct operator call, never recursive `nx_answer`; it is
@@ -647,25 +651,42 @@ existing traversal and operator-count caps remain; they are not substitutes for
 these budgets. Initial numeric limits are calibration parameters derived from
 current operator and bundle limits, not unmeasured constants locked by this RDR.
 
-The primary stream enters at the runner, not as a plan step, so it applies
-equally to builtin, grown and inline-planned plans. Before the first operator
-that consumes retrieved evidence, the runner merges the reserved primary
-evidence ahead of the plan's own hydrated inputs. Primary items take a reserved
-share of `_OPERATOR_MAX_INPUTS` (100, `plans/runner.py:1446`); the plan's
-inputs, still bounded by their own `limit_per_source`, fill the remainder. The
-existing positional truncation (`runner.py:1948-1976`) therefore cuts only
-secondary items and never evicts reserved primary ones. Deduplication by chash
-keeps the primary copy and its attribution.
+The primary stream enters at the runner, not as a plan step, so it applies to
+every plan that runs through `plan_run`: builtin, grown and inline-planned.
+`single_query` plans have no operator step and therefore no reduction to feed;
+they are not given a primary stream. Before the first operator that consumes
+retrieved evidence, the runner merges the reserved primary evidence (and the
+T2 records below) ahead of the plan's own inputs. Operators receive evidence
+in two shapes, and the merge covers both:
 
-T2 is outside the corpus graph. When a named source resolves to an RDR and the
-request has a gate, lifecycle or status facet, the runner adds a third stream:
-that RDR's T2 records (its metadata record and its latest gate record) from the
-`{repo}_rdr` project of the resolved source's owner. The stream is read only
-when that owner is in the caller's tenant, as every T2 read already is; it
-contributes a small fixed number of records (a calibration parameter) and
-counts against the same aggregate character budget. It applies only to RDR
-sources. It must not be replaced by code links or treated as an ordinary T3
-document. Assumption A7 covers it.
+- **`ids` auto-hydration** (`runner.py:1940-1978`): the existing positional
+  cap of `_OPERATOR_MAX_INPUTS` (100, `runner.py:1446`) applies after the
+  merge, so it cuts only secondary items.
+- **Explicit `inputs`** from earlier `store_get_many` steps
+  (`runner.py:2010-2040`; plan 473's `rank` step uses this shape): today this
+  branch has no count cap. The merge adds the same cap there, applied the
+  same way.
+
+The reserved share is a calibration parameter and must stay below
+`_OPERATOR_MAX_INPUTS`, so plan evidence always keeps some room. Every merged
+item, reserved or not, also counts against the aggregate character budget
+above and the bundle prompt limit. Deduplication by chash keeps the primary
+copy and its attribution. The continuation path re-runs the same hydration
+helper (`plans/continuation_envelope.py:302-309`) and must apply the same
+merge so both reduction routes see the same evidence.
+
+T2 is outside the corpus graph. When a named source resolves to an RDR, the
+runner adds a third stream: that RDR's T2 records (its metadata record and its
+latest gate record) from the `{repo}_rdr` project of the resolved source's
+owner. In Phase 1 the trigger is the explicit RDR `SourceRef` alone; from
+Phase 2 the stream is added only when the request also has a gate, lifecycle
+or status facet. The T2 read goes through the same tenant-scoped T2 client as
+every other T2 read in `nx_answer` (inferred, not read: the client's tenant
+check was not traced), and a source in another tenant gets no T2 stream. The
+stream contributes a small fixed number of records (a calibration parameter)
+inside the reserved share, so truncation cannot evict it. It applies only to
+RDR sources. It must not be replaced by code links or treated as an ordinary
+T3 document. Assumption A7 covers it.
 
 #### 2a. Caller scope over plan-declared corpora
 
@@ -673,31 +694,49 @@ Today a plan-declared corpus beats the caller's scope (nexus-zs1d's rule,
 `plans/runner.py:1156-1190`). This RDR narrows that rule. Where the caller
 gave no scope, nothing changes: the plan's corpus, then the RDR-200 default
 `knowledge,code,docs,rdr`, apply as now. Where the caller gave a corpus-prefix
-scope, it narrows every retrieval step's corpus (`search`, `query`, and the
-other tools in `_RETRIEVAL_TOOLS`):
+scope, it narrows the resolved corpus of every corpus-taking retrieval step
+(`_CORPUS_QUERY_TOOLS`: `search`, `query` and the scoped search primitives;
+`store_get_many` takes no corpus and is unaffected). The resolved corpus is
+whatever the step has after binding resolution and `scope.taxonomy_domain`,
+so a domain-derived corpus is narrowed the same way. Matching is by corpus
+prefix: a plan entry matches when it is the prefix or a collection name
+under it (`rdr__...` matches `rdr`).
 
-| Plan step corpus | Caller scope `rdr` | Result |
+| Resolved step corpus | Caller scope `rdr` | Result |
 | --- | --- | --- |
 | none | `rdr` | `rdr` (today's behavior) |
 | `all` | `rdr` | `rdr`: `all` is no restriction |
-| a list containing `rdr` | `rdr` | `rdr` |
-| a list or name without `rdr` | `rdr` | scope conflict |
+| a list with entries under `rdr` | `rdr` | those entries |
+| entries none of which is under `rdr` | `rdr` | scope conflict |
 
 A scope conflict does not run the step unscoped and does not drop the
-caller's scope. The step returns no evidence, and the run discloses the
-conflict with the plan's corpus and the caller's scope in the coverage ledger's
-scope row. A catalog-subtree scope (for example `1.2`) is not a corpus and is
-not intersected; it keeps its current forwarding (inferred, not read: how a
-subtree value behaves once forwarded as `corpus` was not traced).
+caller's scope: the step is skipped and contributes no evidence. In Phase 1
+the conflict is reported in the envelope diagnostics and logs, with the plan's
+corpus and the caller's scope; from Phase 3 it is also the ledger's scope row
+(`conflict`). If every retrieval step conflicts, the run takes the existing
+empty-retrieval path (no-match notice) and the notice names the conflict.
+Steps pinned through `collection`/`collections` keep today's behavior (the
+plan wins) and are reported as unscoped in the diagnostics; narrowing them is
+not part of this RDR. A catalog-subtree scope (for example `1.2`) is not a
+corpus and is not intersected; it keeps its current forwarding (inferred, not
+read: how a subtree value behaves once forwarded as `corpus` was not traced).
 
-The builtin plans are rewritten as part of this change, not worked around.
-Their `corpus: all` pins (eight literal, two through a default binding) are
-incidental: removing them makes those steps corpus-agnostic, so the existing
-caller-scope path and the RDR-200 default apply, and the plans stop admitting
-quarantine collections that `all` includes. `corpus-coverage-check` and
-`document-discovery` keep their `knowledge,code,docs,rdr` default, which the
-narrowing rule handles. The narrowing rule still matters for grown plans,
-which can pin any corpus. Source census: research 14.
+The rule lives in two places, because single-step `query` plans never reach
+the runner. `nx_answer` classifies a matched plan with exactly one `query`
+step as `single_query` and runs it on a fast path that reads the step's corpus
+or the RDR-200 default and passes the caller's scope as `subtree`
+(`mcp/core.py:9468-9505`, `11740-11800`). Both `corpus-coverage-check` and
+`document-discovery` take that path. The fast path applies the same
+narrowing and conflict rule to its corpus before calling `query`; a
+corpus-prefix scope then goes into `corpus`, not `subtree`. The continuation
+path re-runs the runner's helpers (`plans/continuation_envelope.py:302-309`)
+and gets the rule through `_apply_caller_scope_to_args`.
+
+The builtin YAMLs keep their pins. Because `all` narrows like no restriction,
+removing them is unnecessary for scope, and it would change unscoped
+behavior: the taxonomy-domain steps would take a domain corpus, and the two
+`search_metadata_scoped` plans would fall to that tool's default
+`knowledge,code,docs`, losing `rdr` (research 17). Source census: research 14.
 
 #### 3. Traversal as a bounded secondary stream
 
@@ -719,16 +758,20 @@ filtering already-truncated results. `traverse` currently returns a sorted
 union of collections and caps ids in graph order. A runner-only filter would
 lose in-scope evidence before the policy saw it. The engine's `graphBFS` also
 truncates at 500 nodes by `(min_depth, tumbler)` before the client sees them;
-the observed failure hit the client's 300-id cap, and no evidence yet shows
-real traversals reaching 500 nodes.
+the observed run's 340 references equal its search limit of 40 plus the
+client's 300-id cap, which suggests that cap was reached (inferred from the
+arithmetic, not read from the run), and no evidence yet shows real
+traversals reaching 500 nodes.
 
 Direct MCP `traverse` keeps its current behavior when the optional policy is
 absent. With a policy it:
 
 1. Reports a response carrying exactly `MAX_GRAPH_NODES` (500) nodes as a
-   possibly truncated traversal. The engine logs `event=graph_node_limit` when
-   it truncates (`CatalogRepository.java:4568`); Phase 1 counts those events.
-   Only if real traversals hit the cap does a gated step add the
+   possibly truncated traversal, and counts those responses in its own
+   diagnostics. (The engine's `event=graph_node_limit` log fires whenever the
+   reachable set is at least 500, `CatalogRepository.java:4564-4569`, but
+   carries no caller, so it cannot isolate `nx_answer` traversals.) Only if
+   those counts show capped responses does a gated step add the
    allowed-collection predicate **during the graph walk**, before truncation.
    That is a scoped filter on the existing engine traversal, not a new graph
    algorithm: `graphBFS` already reads each node's document, and
@@ -799,6 +842,26 @@ independent of prose fluency.
 | `unavailable` | no usable answer can be produced | an existing non-answer shape (for example `no_evidence`) | the existing non-answer notice and chunk references | `failure_count` | blocked |
 | `unassessed` | the request has no facets, or the coverage assessment itself failed | `answered` | the answer, as today | `success_count` | as today |
 
+A **usable answer** exists when the terminal generation returned prose that
+`classify_answer_shape` reads as `answered` and at least one required facet
+is covered. Prose with no covered facet is `unavailable`. A repair or
+reassessment call that fails after the first assessment succeeded leaves the
+first ledger in force, so the result is `partial` (or `complete`), not
+`unassessed`. A missing named source, or a scope conflict that removed all
+evidence, counts as uncovered facets under these same rules.
+
+The counter and growth columns apply to different runs, because growth happens
+only on an inline-planned run (`plan_id == 0`), and plan counters move only on
+a library plan (`mcp/core.py:9826`, `12537`; research 17). For a library plan
+the counter column applies; for an inline-planned run the growth column does.
+
+The partial notice opens with a stable marker, `[insufficient-evidence:
+<n> unresolved]`, so `nx answer-runs`, which classifies rows by their
+recorded text (`commands/answer_runs.py:226`), can bucket them; the marker
+survives `trace=False` redaction because it carries no question text.
+`nx_answer` sets `answer_shape` from the coverage state, not by classifying
+the final text.
+
 A partial answer is still returned. Gap 3 asks for missing facets to be
 reported, not for the covered ones to be withheld; the notice comes first so
 no reader takes the prose as complete. `unassessed` keeps an assessor outage
@@ -812,8 +875,13 @@ ledger, not a redundant side channel that consumers can ignore.
 `success=False`, never grows the plan, and replaces the prose with a notice
 (`plans/answer_shape.py:98-112`, `mcp/core.py:12455-12500`, research 15). A
 partial answer needs only the no-grow effect, so growth is blocked by an
-explicit no-grow flag on the result instead. `nx answer-runs` classifies
-`insufficient_evidence` rows in their own bucket, not as degenerate.
+explicit no-grow flag on the result instead, consulted where growth is
+decided (`mcp/core.py:12537`). `nx answer-runs` classifies
+`insufficient_evidence` rows in their own bucket, not as degenerate. The
+vocabulary test `tests/plans/test_answer_shape.py:95` asserts that `ANSWERED`
+is the only shape outside `NON_ANSWER_SHAPES`; it and the `AnswerShape`
+docstring are updated to say that `ANSWERED` and `INSUFFICIENT_EVIDENCE` both
+carry prose.
 
 The counters keep their structural meaning, with one consequence spelled out.
 The live consumer of `failure_count` is the matcher's always-failing skip:
@@ -947,7 +1015,7 @@ whether a run can serve as a positive answer-quality exemplar.
 | Answer-kind compatibility | `plans/matcher.py`, `plans/schema.py`, `seed_loader.py`, builtin YAML, grown saves | Extend: validated top-level `plan_json` declaration; eligibility on cosine/category/FTS and planner few-shots before cost ranking. Never put kind in identity dimensions. |
 | Request facet extraction | `mcp/core.py`, existing structured operator dispatch | Extend narrowly: deterministic-first request kind/facet/source extraction and explicit unknown-request route; optional one direct structured call; not a general RDR-189 target registry. |
 | Named-source resolution | `rdr_canonical` admission/winner policy, owner-scope lookup, bounded catalog lookup, manifest APIs | Extend with bounded project-aware resolution; resolve explicit project qualifiers and no-guess ambiguity; do not reuse unbounded resolution or global first-exact selection. |
-| Caller scope on retrieval steps | `plans/runner.py::_apply_caller_scope_to_args`, builtin YAML | Narrow plan-pinned corpora by caller scope; disclose an empty intersection as a scope conflict; remove incidental `corpus: all` pins from the builtins. |
+| Caller scope on retrieval steps | `plans/runner.py::_apply_caller_scope_to_args` (also reached by `continuation_envelope.py`), the `single_query` fast path in `mcp/core.py` | Narrow the resolved corpus by caller scope at both sites; skip and disclose a step whose intersection is empty. Builtin YAML pins stay. |
 | Traversal containment | `mcp/core.py::traverse`, catalog nodes/manifests | Apply policy inside traverse before manifest expansion, with per-id alignment; preserve legacy no-policy behavior. Runner-only post-filtering is insufficient. |
 | Evidence budgets | `store_get_many`, runner tumbler hydration, `_OPERATOR_MAX_INPUTS`, bundle prompt construction | Extend with a runner-level merge of the reserved primary stream ahead of plan inputs, so positional truncation cuts only secondary items; source-aware reservations and content-derived document-scoped section labels; manifest order + positional fallback; shared-chash T3 titles are not authoritative. |
 | Facet coverage | `check`, `verify`, `extract`, source annotations, runner segmentation | Reuse direct operator dispatch; add runner-owned pre-reduction state/hook and typed anchors. Do not rely on bundled intermediate output or recursive `nx_answer`. |
@@ -1092,7 +1160,7 @@ more context is useful.
   return the existing planner error with eligibility diagnostics.
 - **Traversal policy failure**: keep the primary/vector stream and omit the
   secondary stream with a warning. Do not fall back to unrestricted traversal.
-- **Coverage check unavailable**: use deterministic source/scope checks,
+- **Coverage assessment fails**: use deterministic source/scope checks,
   return the answer with `coverage.state="unassessed"`, and say that facet
   coverage was not assessed; do not mark facets covered by default.
 - **Repair exhausts budget**: skip repair and generate once from available
@@ -1149,8 +1217,9 @@ Phases 1 and 2 have separate proofs and do not claim full facet coverage.
 full `RequestCoverage` extractor is Phase 2), resolve the correct ART RDR-084,
 preserve section-diverse primary evidence, and keep a >300-out-of-scope-id
 traversal from discarding in-scope evidence. With `scope="rdr"`, the vector
-stream's corpus counts show only `rdr__` collections, on plan 473 and on a
-rewritten synthesis builtin alike. Record per-stream corpus counts and
+stream's corpus counts show only `rdr__` collections, on plan 473, on a
+taxonomy-domain synthesis builtin such as `research-default`, and on the
+`single_query` fast path. Record per-stream corpus counts and
 reducer-input counts. No facet-coverage guarantee is claimed.
 
 The traversal proof for Phase 1 is client-side:
@@ -1194,12 +1263,16 @@ first phase that claims the complete motivating behavior.
    In production they arrive as reserved `bindings` keys on the existing
    `nx_answer` call: `source` (an RDR id or catalog tumbler) and `owner` or
    `project` (the qualifier), next to the existing `scope`. No builtin plan
-   declares a binding with those names today. `nx_answer` consumes them and
-   never passes them to plan binding resolution. Add named-source resolution
+   declares a binding with those names today; grown and library plans were
+   not enumerated, so validation rejects a plan that declares one. `nx_answer`
+   removes them before building the run bindings and the availability set
+   (`_nx_answer_caller_bindings`, `mcp/core.py:9740-9758`), so they never reach
+   plan binding resolution or matching. Add named-source resolution
    and a source-aware evidence-stream model using catalog manifests. Full
    `RequestCoverage` extraction lands in Phase 2.
-2. Apply caller scope over plan-declared corpora (section 2a) and rewrite the
-   builtins' incidental `corpus: all` pins.
+2. Apply caller scope over plan-declared corpora (section 2a) in the runner
+   and on the `single_query` fast path, with conflict disclosure in the
+   envelope.
 3. Add traversal evidence policy inside `traverse` before manifest expansion,
    with per-id collection alignment and legacy no-policy results preserved.
    Disclose an engine response at the 500-node cap as possibly truncated.
@@ -1210,9 +1283,11 @@ first phase that claims the complete motivating behavior.
    diagnostics, plus the observed RDR-084 regression fixture. Phase 1 and 2
    diagnostics live in the returned envelope and logs only; they persist once
    Phase 3 adds the run summary.
-6. Engine pre-cap graph filter, gated. Count `event=graph_node_limit` warnings
-   (`CatalogRepository.java:4568`) on real traffic first. Only if real
-   `nx_answer` traversals hit the cap, add the predicate inside the catalog
+6. Engine pre-cap graph filter, gated. The signal is step 3's count of
+   `nx_answer` traversals that came back at the 500-node cap; the engine's
+   `graph_node_limit` log has no caller field and can only corroborate. If any
+   golden-set or live-canary traversal returns a capped response, or capped
+   responses appear in real `nx_answer` traffic, add the predicate inside the catalog
    walk before `MAX_GRAPH_NODES` truncation: a Java query change, an engine
    release, dedicated capability negotiation, and the scoped-result proof
    above. The rest of Phase 1 does not wait for it.
@@ -1251,7 +1326,8 @@ first phase that claims the complete motivating behavior.
    capability negotiation. Extend the structured envelope with returned versus
    persisted coverage states. Add `INSUFFICIENT_EVIDENCE` outside
    `NON_ANSWER_SHAPES`, the explicit no-grow flag, the unresolved-facet notice
-   ahead of the prose, and its `nx answer-runs` bucket. Partial runs count as
+   ahead of the prose with its stable marker, its `nx answer-runs` bucket,
+   and the updated vocabulary test. Partial runs count as
    successes and `unavailable` runs as failures, so `_is_always_failing` skips
    only plans that never produce a usable answer. No plans-table counter
    migration and no `promote.py` change: coverage outcomes are derived from
@@ -1287,12 +1363,18 @@ library, and composite telemetry surfaces.
   **Verify**: the vector stream searches only `rdr__` collections even when
   the plan pins `corpus: all`; traversal does not admit code merely through
   `implements` or `relates`; per-stream corpus counts prove containment.
-- **Scenario**: Caller scope `rdr` on a plan step pinned to `code` —
-  **Verify**: the step returns no evidence and the run discloses a scope
-  conflict; it does not run unscoped or with the plan's corpus.
-- **Scenario**: No caller scope on a rewritten builtin — **Verify**: the step
-  falls back to the RDR-200 default `knowledge,code,docs,rdr` and admits no
-  quarantine collection.
+- **Scenario**: Caller scope `rdr` on a multi-step plan with one step pinned
+  to `code` (or a `taxonomy_domain: code` step) — **Verify**: that step is
+  skipped and contributes no evidence, the envelope discloses a scope conflict,
+  and the other steps run narrowed to `rdr`.
+- **Scenario**: Caller scope `rdr` on a `single_query` plan whose step pins
+  `code` — **Verify**: the fast path discloses a scope conflict instead of
+  querying `code`; on a plan pinned to `knowledge,code,docs,rdr` it queries
+  `rdr` only.
+- **Scenario**: Every retrieval step conflicts — **Verify**: the run returns
+  the empty-retrieval notice, and the notice names the scope conflict.
+- **Scenario**: No caller scope on any builtin — **Verify**: retrieval corpora
+  are unchanged from today.
 - **Scenario**: “What does current code implement differently from RDR-084?” —
   **Verify**: implementation/code expansion is explicitly allowed, while the
   RDR remains a reserved primary stream.
@@ -1302,12 +1384,14 @@ library, and composite telemetry surfaces.
 - **Scenario**: Primary document exceeds the evidence budget — **Verify**:
   section-diverse selection survives, partial coverage is marked, and secondary
   chunks cannot consume the reservation.
-- **Scenario**: Gate-history facet on a resolved RDR source — **Verify**: the
-  T2 lifecycle stream supplies that RDR's metadata and latest gate record
-  within its record and character budget; a non-RDR source gets no T2 stream.
+- **Scenario**: Explicit RDR `SourceRef` in Phase 1 (gate-history facet from
+  Phase 2) — **Verify**: the T2 lifecycle stream supplies that RDR's metadata
+  and latest gate record within its record count and the character budget; a
+  non-RDR source gets no T2 stream; a source in another tenant gets none.
 - **Scenario**: Plan inputs exceed `_OPERATOR_MAX_INPUTS` with a reserved
-  primary stream — **Verify**: truncation removes only secondary items; every
-  reserved primary item reaches the operator.
+  primary stream, once through `ids` hydration and once through explicit
+  `inputs` (plan 473's shape) — **Verify**: in both, truncation removes only
+  secondary items and every reserved primary and T2 item reaches the operator.
 - **Scenario**: Engine traversal response with exactly 500 nodes —
   **Verify**: the run reports a possibly truncated traversal, not containment.
 - **Scenario**: More than 300 out-of-scope traversal ids precede in-scope ids —
@@ -1330,9 +1414,11 @@ library, and composite telemetry surfaces.
   assessment is grouped within the call cap, not six unconditional model calls.
 - **Scenario**: Execution succeeds but required evidence is missing —
   **Verify**: `answer_shape="insufficient_evidence"`, coverage is `partial`,
-  the text is the unresolved-facet notice followed by the prose,
-  `success_count` increments, the no-grow flag blocks growth, the run-summary
-  outcome is `coverage_partial`, and the run is not a quality exemplar.
+  the text opens with the `[insufficient-evidence: ...]` marker followed by
+  the prose, the run-summary outcome is `coverage_partial`, and the run is not
+  a quality exemplar. On a library plan `success_count` increments; on an
+  inline-planned run the no-grow flag blocks growth. `nx answer-runs` puts the
+  row in its own bucket.
 - **Scenario**: A plan whose runs are all `partial` — **Verify**: it stays
   matchable; `_is_always_failing` does not skip it. A plan with three
   `unavailable` runs and no success is skipped.
@@ -1346,9 +1432,13 @@ library, and composite telemetry surfaces.
   `persistence=dropped`, not success.
 - **Scenario**: `trace=False` and private question text — **Verify**: new logs
   and telemetry contain structured ids/counts, not the redacted question.
-- **Scenario**: Coverage or repair model call fails — **Verify**: deterministic
-  checks still run, no facet is defaulted to covered, and the terminal state
-  is `unassessed` with the answer returned, not a notice in its place.
+- **Scenario**: The first coverage assessment call fails — **Verify**:
+  deterministic checks still run, no facet is defaulted to covered, and the
+  terminal state is `unassessed` with the answer returned, not a notice in its
+  place.
+- **Scenario**: The repair call fails after a successful first assessment —
+  **Verify**: the first ledger stands and the state is `partial` with the
+  unresolved facets listed.
 - **Scenario**: Older engine run-record capability — **Verify**: no extra write,
   no retrieval failure, and current record fields remain intact.
 - **Scenario**: Existing bundle/continuation path — **Verify**: the same evidence
@@ -1417,11 +1507,12 @@ current run records. No throughput target is asserted without a baseline.
 
 ### Contradiction Check
 
-Gate round 1 found two contradictions, both now resolved. The diagnosis
-blamed traversal alone while the plan-pinned vector search also ignored
-caller scope; Gap 2 now names both causes and section 2a fixes the second.
+Gate round 1 failed this criterion on three findings (C2, S1, S2), and C1
+refuted an assumption the diagnosis rested on. All four are resolved. Gap 2
+now names both causes of dilution and section 2a fixes the plan-pinned one.
 Partial coverage was specified three ways; section 4's coverage-state table is
-now the single definition, and the counters follow it. Whether facet
+now the single definition, and the counters follow it, with the matcher as
+their live consumer. RDR-189 is shown as accepted. Whether facet
 assessment can reliably reuse existing operators remains an open assumption
 (A3), not a verified claim.
 
@@ -1474,8 +1565,8 @@ retrieval language, and an LLM-only plan judge are out of scope.
 - **Deployment model**: Client runner/MCP changes plus an additive engine
   telemetry migration (Phase 3, an engine release), and possibly a Java
   graph-scope filter with dedicated capability negotiation. The graph filter ships
-  only if Phase 1's `graph_node_limit` count shows real traversals hit the
-  cap; the rest of Phase 1 is client-only.
+  only if Phase 1's count of capped `nx_answer` traversals shows the cap is
+  reached; the rest of Phase 1 is client-only.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Land deterministic evidence containment first,
   then eligibility, then optional bounded repair; each phase has its own
