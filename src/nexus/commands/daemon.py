@@ -652,6 +652,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
         ServiceRegistry,
         clear_stop_marker,
+        popen_outliving_host_job,
         reclaim_lease_if_dead_owner,
         service_identity,
     )
@@ -746,7 +747,13 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
         # (RDR-224, nexus-f9bgu.17) is the spawn flags below plus a console
         # CTRL_BREAK from the stopper; the Job Object lives one level down,
         # around the ENGINE, in the supervisor.
-        supervisor = _popen(
+        # nexus-9pc2f: the supervisor must also outlive a CALLER'S job. A caller
+        # that sits in a kill-on-close job (a contained run_bounded, the desktop
+        # extension's bootstrap) would otherwise take the supervisor and engine
+        # with it when the job closed. Ask to break away; a job that refuses is
+        # retried without the flag (shared rule: service_registry).
+        supervisor = popen_outliving_host_job(
+            _popen,
             argv,
             stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)
             stdout=spawn_log,

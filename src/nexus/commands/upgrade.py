@@ -592,13 +592,23 @@ def _cycle_storage_service_to_current(
         # plugin_lockstep's injected Runner did. Both streams are DEVNULL, so
         # there is nothing to decode and text= would say nothing.
         _run = _run_fn if _run_fn is not None else run_bounded
-        for verb in ("stop", "start"):
-            _run(
-                [*nx, "daemon", "service", verb],
-                timeout=60,  # service start waits for PG + JVM
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        _run(
+            [*nx, "daemon", "service", "stop"],
+            timeout=60,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _run(
+            [*nx, "daemon", "service", "start"],
+            timeout=60,  # service start waits for PG + JVM
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            # nexus-9pc2f: `start` detach-spawns the supervisor, which must outlive
+            # this call. Contained, the child sits in a kill-on-close Windows job that
+            # run_bounded closes on return, and that kills the new supervisor and its
+            # engine. `stop` stays contained: nothing it starts is meant to survive.
+            contained=False,
+        )
     except Exception as exc:  # noqa: BLE001 — best-effort storage-service cycle; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_storage_service_cycle_failed", error=str(exc))
 

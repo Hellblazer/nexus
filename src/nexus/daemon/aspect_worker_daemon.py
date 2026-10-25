@@ -50,6 +50,7 @@ from nexus.daemon.service_registry import (
     DEFAULT_STOP_ELECTION_BUDGET,
     ServiceRegistry,
     ServiceSupervisor,
+    popen_outliving_host_job,
     ttl_for_tier,
 )
 
@@ -675,32 +676,10 @@ _SPAWN_SUPPRESS_WINDOW: float = 10.0
 def _popen_outliving_host_job(
     popen: Callable[..., Any], argv: list[str], **kwargs: Any,
 ) -> Any:
-    """``popen(argv, **kwargs)``, asking Windows to take the child out of the
-    spawning process's Job Object first (RDR-224 review finding E).
-
-    The daemon is documented as outliving the storing process. Under the
-    desktop extension that process sits in the bootstrap's kill-on-close job,
-    which every descendant joins unless it breaks away, so without this the
-    daemon dies when the extension closes. The bootstrap's job allows
-    breakaway; a host job that does not refuses the spawn with access denied,
-    and the spawn is retried once without the flag, as
-    ``nexus._session_end_launcher`` does. A no-op off Windows (no
-    ``creationflags``); a failure that is not about breakaway fails the same
-    way on the retry and propagates.
-    """
-    flags = kwargs.pop("creationflags", None)
-    if flags is None:
-        return popen(argv, **kwargs)
-    from nexus.util import win_job  # noqa: PLC0415 — deferred import — Windows spawn path only
-
-    try:
-        return popen(argv, creationflags=flags | win_job.CREATE_BREAKAWAY_FROM_JOB, **kwargs)
-    except OSError as exc:
-        _log.info(
-            "aspect_worker_daemon.breakaway_refused",
-            error=str(exc), hint="retrying the spawn inside the host job",
-        )
-        return popen(argv, creationflags=flags, **kwargs)
+    """The aspect worker's spawn: the shared breakaway-then-retry rule (RDR-224
+    review finding E), now in ``service_registry.popen_outliving_host_job``
+    where the storage supervisor's spawn uses it too (nexus-9pc2f)."""
+    return popen_outliving_host_job(popen, argv, **kwargs)
 
 
 def ensure_aspect_worker_daemon(

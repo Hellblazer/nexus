@@ -274,7 +274,8 @@ def run_bounded(
     the child joins a fresh KILL_ON_JOB_CLOSE job object, which this function closes
     on EVERY return, killing whatever the child left running. A caller whose child
     starts something meant to outlive the call (the setup tools start ``nx_setup.py``,
-    which detaches a build; nexus-sv2wx.16) passes ``False``: no job is created, so
+    which detaches a build, nexus-sv2wx.16; ``nx daemon service start`` and ``nx mineru
+    start``, which detach a supervisor and a server, nexus-9pc2f) passes ``False``: no job is created, so
     nothing is killed on return and the child may break away from the caller's own
     job. A timeout then reaches the direct child only, the same reach as a failed
     containment.

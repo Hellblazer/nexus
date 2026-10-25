@@ -55,7 +55,7 @@ _ALLOWED: dict[tuple[str, str], str] = {
     ("db/pg_provision.py", "_pg_ctl_start_detached"): (
         "pg_ctl start: the postmaster chdirs to PGDATA itself"
     ),
-    ("daemon/aspect_worker_daemon.py", "_popen_outliving_host_job"): (
+    ("daemon/service_registry.py", "popen_outliving_host_job"): (
         "a pass-through: it forwards the caller's kwargs, which are _supervisor_popen_kwargs()"
     ),
 }
