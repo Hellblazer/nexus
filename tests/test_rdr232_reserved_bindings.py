@@ -411,7 +411,7 @@ def test_a_subtree_scope_alone_is_the_owner_qualifier() -> None:
     assert dict(res.contributions) == {"scope": "1.2"}
 
 
-@pytest.mark.parametrize("scope", ["rdr", "knowledge", "code__1-1__voyage-code-3__v1", ""])
+@pytest.mark.parametrize("scope", ["rdr", "knowledge", "code__1-1__model-code__v1", ""])
 def test_a_corpus_scope_is_never_an_owner_qualifier(scope: str) -> None:
     """``scope="rdr"`` alone is never a project selector (RDR section 1)."""
     from nexus.plans.evidence import resolve_owner_qualifier
