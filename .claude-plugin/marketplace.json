@@ -35,7 +35,7 @@
         "path": "tool-spill",
         "ref": "v7.86.2"
       },
-      "description": "Opt-in Claude Code mod: a main-session tool result over a size limit is written to a file, and the model sees the head and the path instead of all of it.",
+      "description": "Opt-in Claude Code mod: a main-session tool result over a size limit is written to a file, and the model sees its head, its tail and the path instead of all of it.",
       "version": "7.86.2"
     }
   ]

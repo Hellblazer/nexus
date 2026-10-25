@@ -1,6 +1,6 @@
 {
   "name": "conexus-tool-spill",
-  "version": "7.86.1",
+  "version": "7.86.2",
   "description": "Opt-in: a main-session Bash output or whole-file Read over a size limit is cut to its head and tail (Bash: the full text goes to a file), so a big read costs a few KB of context instead of all of it. Replaces any machine-local copy of the mod.",
   "author": {
     "name": "Hal Hildebrand",

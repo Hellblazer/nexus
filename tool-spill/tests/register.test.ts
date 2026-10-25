@@ -68,11 +68,21 @@ test('a Bash result of limit + 1 bytes spills (default limit 4000)', async ($, o
 
 test('stdout and stderr count together toward the limit', async ($, on) => {
   const writes = spy(on)
+  on('tool.call', () => ({ result: { stdout: exact(3_000), stderr: exact(1_500) } }))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
+
+  // stdout alone (3000) is under the limit; only the 4500-byte sum makes it spill
+  expect(writes).toHaveLength(1)
+  expect(r.result.stdout).toContain('[tool-spill:')
+})
+
+test('streams over the limit together but each within head + tail are left whole', async ($, on) => {
+  const writes = spy(on)
   on('tool.call', () => ({ result: { stdout: exact(2_000), stderr: exact(2_001) } }))
 
   const r: any = await $.tool.call({ tool: 'Bash', command: 'x' })
 
-  // 4001 bytes in all, yet neither stream exceeds head + tail (2200): nothing would be cut, so nothing is spilled
   expect(writes).toHaveLength(0)
   expect(r.result.stdout).toBe(exact(2_000))
   expect(r.result.stderr).toBe(exact(2_001))
@@ -407,6 +417,15 @@ test('includeHeadless cuts a headless run too', { options: { includeHeadless: tr
   expect(r.result.stdout).toContain('[tool-spill:')
 })
 
+test('includeHeadless cuts a headless whole-file Read too', { options: { includeHeadless: true } }, async ($, on) => {
+  spy(on, {}, [])
+  on('tool.call', () => readResult(lines(2_000)))
+
+  const r: any = await $.tool.call({ tool: 'Read', file_path: '/repo/big.txt' })
+
+  expect(r.result.file.content).toContain('[tool-spill:')
+})
+
 // ---------------------------------------------------------------- Read
 
 test('a whole-file Read over the limit is cut, with the next offset, a limit to use, and a warning about Edit', async ($, on) => {
@@ -419,7 +438,10 @@ test('a whole-file Read over the limit is cut, with the next offset, a limit to 
   expect(r.result.type).toBe('text')
   expect(f.content.startsWith('line 0\n')).toBe(true)
   expect(f.content).toContain('2000 lines in the file')
-  expect(f.content).toContain(`offset ${1 + f.numLines} and limit `)
+  // counted from the text, not from the numLines the hook wrote, so an off-by-one in both cannot pass
+  const shown = f.content.slice(0, f.content.indexOf('\n[tool-spill:')).split('\n')
+  expect(shown.at(-1)).toBe(`line ${shown.length - 1}`)
+  expect(f.content).toContain(`offset ${1 + shown.length} and limit `)
   expect(Number(/limit (\d+)/.exec(f.content)![1])).toBeGreaterThanOrEqual(20)
   expect(f.content).toContain('Do not Edit text you have not seen')
   expect(f.numLines).toBeLessThan(2_000)
@@ -465,6 +487,10 @@ test('instruction files pass whole however large', async ($, on) => {
     '/repo/AGENTS.md',
     'CLAUDE.md',
     '/repo/conexus/REGISTER.md',
+    '/repo/CLAUDE.local.md',
+    'C:\\repo\\CLAUDE.md',
+    'C:\\repo\\.claude\\rules\\a.md',
+    'C:\\repo\\conexus\\skills\\foo\\SKILL.md',
   ]) {
     const r: any = await $.tool.call({ tool: 'Read', file_path: path })
     expect(r.result.file.content).toBe(content)
@@ -475,7 +501,7 @@ test('files that only look like instruction files are still cut', async ($, on) 
   spy(on)
   on('tool.call', (_: unknown, e: any) => readResult(lines(2_000), e.file_path))
 
-  for (const path of ['/repo/docs/MYAGENTS.md', '/repo/skills.py', '/repo/notes/CLAUDE.md.bak', '/repo/src/rules.py']) {
+  for (const path of ['/repo/docs/MYAGENTS.md', '/repo/skills.py', '/repo/notes/CLAUDE.md.bak', '/repo/src/rules.py', 'C:\\repo\\MYAGENTS.md']) {
     const r: any = await $.tool.call({ tool: 'Read', file_path: path })
     expect(r.result.file.content).toContain('[tool-spill:')
   }
@@ -525,6 +551,23 @@ test('a large result of any other tool passes whole: no denial, no write', async
     expect(r.deny).toBeUndefined()
     expect(r.text).toBe(text)
     expect(r.result.content).toBe(text)
+  }
+  expect(writes).toHaveLength(0)
+})
+
+// Shaped like a Bash and a Read result, so only the tool-name gates keep these whole.
+test('another tool returning a Bash-shaped or Read-shaped result passes whole', async ($, on) => {
+  const writes = spy(on)
+  const bashShaped = BIG_BASH(lines(1_000), { stderr: lines(1_000) })
+  const readShaped = readResult(lines(2_000))
+  let shape: object = bashShaped
+  on('tool.call', () => shape)
+
+  for (const tool of ['TaskOutput', 'BashOutput', 'Monitor', 'Grep', 'mcp__srv__dump']) {
+    shape = bashShaped
+    expect(((await $.tool.call({ tool } as any)) as any).result).toEqual(bashShaped.result)
+    shape = readShaped
+    expect(((await $.tool.call({ tool } as any)) as any).result).toEqual(readShaped.result)
   }
   expect(writes).toHaveLength(0)
 })
