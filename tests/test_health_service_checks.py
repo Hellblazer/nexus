@@ -1707,7 +1707,7 @@ class TestServiceBgeModelCheck:
         assert len(res) == 1
         assert res[0].ok is False and res[0].warn is True and res[0].fatal is False
         assert "will not boot" in res[0].detail
-        assert any("nx init --service" in s for s in res[0].fix_suggestions)
+        assert any("nx init" in s and "--service" not in s for s in res[0].fix_suggestions)
 
     def test_service_with_truncated_model_is_flagged(self, tmp_path, monkeypatch):
         # below the size floor → "incomplete", treated as not-present

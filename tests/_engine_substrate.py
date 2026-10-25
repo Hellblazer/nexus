@@ -1456,7 +1456,7 @@ def _ensure_onnx_models(spawn_env: dict[str, str]) -> Path | None:
                     raise RuntimeError(
                         f"T2 engine substrate unavailable: the engine's bge-768 ONNX "
                         f"model is not provisioned under {root} and fetching it "
-                        f"failed ({exc}). Run `nx init --service` once on this "
+                        f"failed ({exc}). Run `nx init` once on this "
                         "host, or point NX_ONNX_MODEL_DIR at a provisioned "
                         "onnx_models root."
                     ) from exc

@@ -241,7 +241,7 @@ def emit_retry_summary() -> None:
             )
         if retry_stats["vector_count"]:
             parts.append(
-                f"chroma {retry_stats['vector_seconds']:.1f}s over "
+                f"vector store {retry_stats['vector_seconds']:.1f}s over "
                 f"{retry_stats['vector_count']} retries"
             )
         click.echo(

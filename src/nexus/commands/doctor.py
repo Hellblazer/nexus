@@ -3133,6 +3133,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         )
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db.t3 import apply_hnsw_ef  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         if not is_local_mode():
             click.echo("HNSW search tuning is server-side in cloud mode (the engine's NX_HNSW_EF_SEARCH); nothing to tune here")
@@ -3149,7 +3150,13 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                 f"T3 handle unavailable for HNSW tuning: {_exc_detail(exc)}"
             ) from exc
         count = apply_hnsw_ef(db)
-        click.echo(f"Updated HNSW search_ef on {count} collection(s).")
+        if count == 0 and is_service_backed(db):
+            click.echo(
+                "HNSW search tuning is server-side (the engine tunes pgvector "
+                "HNSW itself); nothing to change."
+            )
+        else:
+            click.echo(f"Updated HNSW search_ef on {count} collection(s).")
         return
 
     if clean_checkpoints:
@@ -3938,7 +3945,7 @@ def _format_quota_report(report: dict) -> str:
             )
         if r.get("vector_count", 0) > 0:
             lines.append(
-                f"    chroma:  {r['vector_seconds']:>6.1f}s over "
+                f"    vector:  {r['vector_seconds']:>6.1f}s over "
                 f"{r['vector_count']} retries"
             )
         lines.append(

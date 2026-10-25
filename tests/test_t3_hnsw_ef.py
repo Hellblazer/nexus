@@ -282,7 +282,7 @@ class TestDoctorFixFlag:
     def test_doctor_fix_local_mode_service_handle_reports_zero(self) -> None:
         """RDR-155 P4a.2 (critique finding 1): doctor --fix in local mode with
         the REAL make_t3() result (service-backed HttpVectorClient) must exit
-        cleanly reporting 0 tuned collections — not AttributeError on
+        cleanly reporting that tuning is server-side — not AttributeError on
         ``_local_mode``."""
         from click.testing import CliRunner
         from nexus.commands.doctor import doctor_cmd
@@ -292,7 +292,11 @@ class TestDoctorFixFlag:
             result = runner.invoke(doctor_cmd, ["--fix"])
 
         assert result.exit_code == 0, result.output
-        assert "0 collection(s)" in result.output
+        # Truthful on the service handle: tuning is server-side, and the
+        # command must not claim it updated anything.
+        assert "server-side" in result.output
+        assert "nothing to change" in result.output
+        assert "Updated HNSW" not in result.output
 
     def test_doctor_fix_cloud_mode_skips_hnsw(self) -> None:
         """doctor --fix in cloud mode prints skip message and returns."""

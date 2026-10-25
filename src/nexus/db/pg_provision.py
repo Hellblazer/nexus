@@ -364,7 +364,7 @@ def _install_hint() -> str:
     """
     return (
         "nexus ships its own PostgreSQL; it never uses a host install.\n"
-        "  nx init --service        # downloads + verifies the signed PG bundle\n"
+        "  nx init                  # downloads + verifies the signed PG bundle\n"
         "Or point NEXUS_PG_BIN at an already-extracted bundle's bin/ directory."
     )
 
@@ -547,7 +547,7 @@ def check_pgvector_available(bins: PgBinaries, *, platform: str | None = None) -
         "  - NEXUS_PG_BIN points at a PostgreSQL that lacks pgvector. Unset it "
         "to use the bundle, or point it at a bundle's bin/ directory.\n"
         "  - the extracted bundle is damaged. Re-acquire it:\n"
-        "      nx init --service"
+        "      nx init"
     )
 
 
@@ -2563,7 +2563,7 @@ def _write_credentials(
     db_url = f"jdbc:postgresql://127.0.0.1:{port}/{NEXUS_DB_NAME}"
     content = (
         f"# nexus-managed Postgres credentials — DO NOT EDIT MANUALLY\n"
-        f"# Re-run 'nx init --service' to regenerate.\n"
+        f"# Re-run 'nx init' to regenerate.\n"
         f"PG_DATA={pgdata}\n"
         f"PG_PORT={port}\n"
         # nexus-ja4pq: the bootstrap superuser's password. Provisioner-only; the

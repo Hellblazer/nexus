@@ -98,7 +98,7 @@ def test_a_failed_bge_fetch_names_the_model_and_the_fix(models, monkeypatch) -> 
     with pytest.raises(RuntimeError) as exc:
         es._ensure_onnx_models({})
     msg = str(exc.value)
-    assert "bge-768" in msg and str(root) in msg and "nx init --service" in msg
+    assert "bge-768" in msg and str(root) in msg and "`nx init`" in msg and "--service" not in msg
 
 
 def test_a_failed_cross_encoder_fetch_only_warns(models, monkeypatch) -> None:

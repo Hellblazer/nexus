@@ -235,7 +235,7 @@ def live_store_detail(statements, *, resolve=None, run=None) -> str:
         return (
             "live diagnostics UNAVAILABLE — no nexus_diag credentials "
             "(pre-P2.1 install or no local service PG). Re-run "
-            "`nx init --service` to backfill the diagnostic role, then "
+            "`nx init` to backfill the diagnostic role, then "
             "re-invoke. Do NOT interpret this as a clean store."
         )
     if not statements:

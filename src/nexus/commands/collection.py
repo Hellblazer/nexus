@@ -2713,7 +2713,7 @@ def health_cmd(sort_by: str, fmt: str) -> None:
     default=False,
     help=(
         "When the 30-day search_telemetry histogram is empty, sample N "
-        "chunks from ChromaDB and derive the distance histogram from "
+        "chunks from the T3 service store and derive the distance histogram from "
         "self-queries (budget ~10 s at N=25). Reuses stored embeddings "
         "— no Voyage API roundtrips."
     ),

@@ -112,7 +112,7 @@ class TestStatusSurface:
         config_dir.mkdir(parents=True)
         result = self._invoke(config_dir, svc_version=None)
         assert result.exit_code == 0, result.output
-        assert "nx init --service" in result.output
+        assert "nx init" in result.output and "--service" not in result.output
 
     # RDR-002: staleness compares the installed binary's tag version against the
     # running service's release_version (NOT app_version, frozen at 1.0-SNAPSHOT).
@@ -251,7 +251,7 @@ class TestPgVectorPreflight:
             check_pgvector_available(bins)
         msg = str(exc.value)
         assert "vector.control" in msg
-        assert "nx init --service" in msg
+        assert "nx init" in msg and "--service" not in msg
         # The remedy names the two ways this can now happen. It used to hand
         # out a PG_CONFIG= build-pgvector-from-source recipe aimed at a
         # Homebrew versioned major, which stopped being reachable when host-PG

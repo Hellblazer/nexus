@@ -2,9 +2,12 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """T1 ``plans__session`` semantic cache — RDR-078 P1 (SC-2).
 
-:class:`PlanSessionCache` wraps a ChromaDB client (HTTP via the T1
-session server in production; ``EphemeralClient`` in tests) and owns a
-``plans__session`` collection. At :func:`nexus.hooks.session_start` the
+:class:`PlanSessionCache` wraps a vector client with the
+``get_or_create_collection`` / ``query`` / ``upsert`` surface and owns a
+``plans__session`` collection. In production that client is an in-process
+:class:`~nexus.db.inmemory_vector_store.InMemoryVectorClient` (the
+service-backed T1 carries no such client, so the registry builds one per
+process); a T1 that exposes a client of that shape is used as-is. At :func:`nexus.hooks.session_start` the
 cache is fully rebuilt from every row in :class:`~nexus.db.t2.
 http_plan_library.HttpPlanLibrary` that :meth:`~nexus.db.t2.http_plan_library.
 HttpPlanLibrary.list_active_plans` returns — meaning ``outcome='success'``
@@ -46,8 +49,8 @@ __all__ = ["PlanSessionCache", "PLANS_COLLECTION", "_synthesize_match_text"]
 _log = structlog.get_logger(__name__)
 
 #: Collection name for T1 plan cache. Static — every session uses the
-#: same name; the ``EphemeralClient`` (or HTTP server) provides the
-#: per-session isolation.
+#: same name; the per-instance vector client provides the per-session
+#: isolation.
 PLANS_COLLECTION: str = "plans__session"
 
 
@@ -56,9 +59,9 @@ class PlanSessionCache:
 
     See module docstring for invariants. The ``session_id`` is recorded
     on every row so co-tenant sessions stay isolated when multiple
-    sessions share an HTTP server (production). With
-    ``EphemeralClient`` (tests) the client itself is per-instance so
-    the filter is a no-op safety net.
+    sessions share one client. With a per-instance
+    :class:`~nexus.db.inmemory_vector_store.InMemoryVectorClient` (the
+    production default) the filter is a no-op safety net.
     """
 
     def __init__(self, *, client: Any, session_id: str) -> None:
@@ -102,20 +105,12 @@ class PlanSessionCache:
     def query(self, intent: str, n: int) -> list[tuple[int, float]]:
         """Return ``(plan_id, distance)`` pairs ordered closest-first.
 
-        GH #554: pre-embed the intent here and pass
-        ``query_embeddings=`` to chromadb. Pre-fix this called
-        ``query_texts=[intent]`` which routes through chromadb 1.5.9's
-        text-side path; that path unconditionally calls
-        ``convert_np_embeddings_to_list`` on the post-embed result and
-        crashes when the embedding function returns ``list[list[float]]``
-        (every conexus install: LocalEmbeddingFunction returns plain
-        Python lists, not numpy arrays). The crash was caught by the
-        outer ``except`` and silently disabled session-level plan
-        caching on every ``nx_answer`` invocation.
-
-        Routing the embed call through ``LocalEmbeddingFunction``
-        directly bypasses chromadb's text-side adapter and keeps the
-        cache live.
+        The intent is pre-embedded here with ``LocalEmbeddingFunction``
+        (the function the collection was built with) and passed as
+        ``query_embeddings=``, so the query never depends on the client's
+        own text-side embed path (GH #554: that path crashed on plain-list
+        embeddings and the outer ``except`` silently disabled session-level
+        plan caching on every ``nx_answer``).
         """
         if not self.is_available or not intent:
             return []
@@ -140,12 +135,12 @@ class PlanSessionCache:
             if plan_id is None:
                 continue
             d = float(distance)
-            # Cosine distance is mathematically in [0.0, 2.0] but ChromaDB
+            # Cosine distance is mathematically in [0.0, 2.0] but the client
             # can return tiny negatives (~1e-7) from FP rounding on exact
             # matches. Clamp so downstream consumers see the documented range.
             # Warn loudly on meaningful out-of-range values (> ~FP noise) so
-            # Chroma misconfiguration (e.g. wrong distance metric) becomes
-            # observable rather than silently zeroed.
+            # a wrong distance metric becomes observable rather than
+            # silently zeroed.
             if d > 2.0 + 1e-3 or d < -1e-3:
                 _log.warning(
                     "plan_session_cache_distance_out_of_range",

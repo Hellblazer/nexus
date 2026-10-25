@@ -1047,8 +1047,8 @@ class TestCheckQuotas:
         assert "Observed transient-error retries" in result.output
         assert "voyage:" in result.output
         assert "2 retries" in result.output       # voyage count
-        assert "chroma:" in result.output
-        assert "1 retries" in result.output       # chroma count
+        assert "vector:" in result.output
+        assert "1 retries" in result.output       # vector count
         # Total aggregates both sides
         assert "3 retries" in result.output       # total_count
         assert "6.5s" in result.output            # 1.5 + 3.0 + 2.0 total_seconds

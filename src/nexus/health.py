@@ -128,7 +128,7 @@ def format_health_for_cli(
         else:
             lines.append(
                 "\nRun 'nx config init' to configure managed-service credentials, "
-                "or 'nx init --service' to provision a local service stack."
+                "or 'NX_LOCAL=1 nx init' to provision a local service stack."
             )
 
     return "\n".join(lines), failed
@@ -1123,7 +1123,7 @@ def _check_service_bge_model() -> list[HealthResult]:
             f"provisioned"
         ),
         fix_suggestions=[
-            "Provision it: nx init --service",
+            "Provision it: nx init",
             "Or stage the STANDARD fp32 export (Xenova/bge-base-en-v1.5 model.onnx "
             "+ tokenizer.json — NOT fastembed's model_optimized.onnx) at that path.",
         ],
@@ -3144,8 +3144,9 @@ def _check_t2_schema_applied() -> list[HealthResult]:
     ``default_db_path()`` — the frozen SQLite migration source, per RDR-158
     P4 never the live store in ANY mode since T2 moved to Postgres — with
     no service-mode branch. On a legacy file present it validated a fossil
-    under the "T2 integrity" label; on a fresh PG-only box (the file never
-    exists) it returned ``ok=True, detail="not created yet"`` having
+    and reported it as the T2 row (this row, now labelled
+    :data:`_T2_SCHEMA_LABEL`, "T2 schema applied"); on a fresh PG-only box
+    (the file never exists) it returned ``ok=True, detail="not created yet"`` having
     examined nothing — a clean pass that measured nothing, permanently
     vacuous on every supported install shape (WAVE-2 finding, bead notes).
 
@@ -4922,9 +4923,9 @@ def _check_reranker(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Health
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=f"{which}, so searches are served without rerank",
-        fix_suggestions=["If the files are absent, run `nx init --service` to provision them. If a load failed, the "
+        fix_suggestions=["If the files are absent, run `nx init` to provision them. If a load failed, the "
                          "engine log's cross_encoder_reranker_init_failed event names the cause; for bad files, "
-                         "`nx init --service` again. Every rerank retries the load"],
+                         "`nx init` again. Every rerank retries the load"],
     )]
 
 
@@ -5017,7 +5018,7 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
         label=label, ok=False, warn=True,
         detail=(f"profile bge but the engine serves {served}: it booted degraded, and every bge collection "
                 "answers 422 (the engine found no bge model files)"),
-        fix_suggestions=["Run `nx init --service` to provision the bge model files, then restart the service: "
+        fix_suggestions=["Run `nx init` to provision the bge model files, then restart the service: "
                          f"`{_SERVICE_RESTART_COMMAND}`"],
     )]
 
@@ -6208,7 +6209,7 @@ def _check_migration_state(
                 f"(psql exit {proc.returncode}): {stderr_snip}"
             ),
             fix_suggestions=[
-                "Run `nx init --service` to apply migrations",
+                "Run `nx init` to apply migrations",
                 "Check that the Postgres cluster is running: nx service status",
             ],
             fatal=True,
@@ -6232,7 +6233,7 @@ def _check_migration_state(
             label="Schema migrations",
             ok=False,
             detail="databasechangelog exists but has 0 rows — migrations never ran",
-            fix_suggestions=["Run `nx init --service` to apply Liquibase migrations"],
+            fix_suggestions=["Run `nx init` to apply Liquibase migrations"],
             fatal=True,
         )]
 
@@ -6309,7 +6310,7 @@ def _check_migration_state(
             fix_suggestions=[
                 "Inspect: psql -c \"SELECT id,exectype FROM public.databasechangelog "
                 "WHERE exectype='FAILED'\"",
-                "Re-run: nx init --service to recover",
+                "Re-run: nx init to recover",
             ],
             fatal=True,
         )]
@@ -6365,7 +6366,7 @@ def _check_migration_state(
             fix_suggestions=[
                 "Inspect: psql -c \"SELECT id,md5sum FROM public.databasechangelog "
                 "WHERE exectype='EXECUTED' AND md5sum IS NULL\"",
-                "Re-run: nx init --service to re-apply and restore checksums",
+                "Re-run: nx init to re-apply and restore checksums",
             ],
             fatal=True,
         )]
@@ -6425,7 +6426,7 @@ def _check_migration_state(
             detail=(
                 "no nexus_diag diagnostic credentials (pre-P2.1 install) — "
                 "the pre-upgrade poison check could NOT run. Re-run "
-                "`nx init --service` to backfill the diagnostic role. Do NOT "
+                "`nx init` to backfill the diagnostic role. Do NOT "
                 "read this as a clean store."
             ),
             warn=True,
@@ -6535,7 +6536,7 @@ def _check_migration_state(
                     # yet the leg came back blank, so the deployed VIEW is
                     # stale (still per-dim shaped): view re-provisioning only
                     # happens via the chash-rekey rung's re-provision step or
-                    # `nx init --service`, never automatically after a bare
+                    # `nx init`, never automatically after a bare
                     # engine binary swap. This store IS measurable, just not
                     # through the stale view — fall through to the SAME
                     # direct unified-table statements used when the
@@ -7071,7 +7072,7 @@ ORDER BY tbl.schema_name, tbl.table_name;
                 + (f"; {tree_text}" if tree_text else "")
             ),
             fix_suggestions=[
-                "Re-run migrations: nx init --service",
+                "Re-run migrations: nx init",
                 "Verify the Liquibase changeset applied RLS: "
                 "check service/src/main/resources/db/changelog/",
                 *(_PARTITION_TREE_FIXES if tree_text else ()),
@@ -7349,7 +7350,7 @@ def _check_tenant_model_partitions(
                 + (f"; and {len(shown_m) - _PARTITION_GAPS_SHOWN} more" if len(shown_m) > _PARTITION_GAPS_SHOWN else "")
             ),
             fix_suggestions=[
-                "Run the engine's pending migrations: nx init --service (the changeset that registers a model "
+                "Run the engine's pending migrations: nx init (the changeset that registers a model "
                 "also creates its partitions)",
                 "As the migrating role, per missing pair: SELECT nexus.create_model_partition("
                 "'nexus.<parent>'::regclass, '<model>');",
@@ -8113,7 +8114,7 @@ def _check_tuple_lock_held(
                     detail=(
                         (over_text() + "; " if over else "")
                         + f"held: {holders}; hold duration not measured: no nexus_diag "
-                        "diagnostic credentials. Re-run `nx init --service` to "
+                        "diagnostic credentials. Re-run `nx init` to "
                         "backfill the diagnostic role."
                         + (f" Also {unresolved_note}." if unresolved else "")
                     ),

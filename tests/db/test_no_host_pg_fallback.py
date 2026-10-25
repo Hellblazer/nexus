@@ -174,7 +174,7 @@ def test_missing_bundle_fails_loud_and_names_the_bundle(monkeypatch, tmp_path) -
         discover_pg_binaries()
 
     msg = str(exc.value)
-    assert "nx init --service" in msg, msg
+    assert "nx init" in msg and "--service" not in msg, msg
     assert "NEXUS_PG_BIN" in msg, msg
     for forbidden in ("brew install", "apt-get install", "dnf install"):
         assert forbidden not in msg, (

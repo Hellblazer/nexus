@@ -861,7 +861,7 @@ _GIT_FAILED_OUT = "  ✗ git: not found on PATH\n    Fix: brew install git\n"
 _LOCAL_FOOTER = "\nSome checks failed. Run 'nx doctor' again after fixing the issues above.\n"
 _CLOUD_FOOTER = (
     "\nRun 'nx config init' to configure managed-service credentials, "
-    "or 'nx init --service' to provision a local service stack.\n"
+    "or 'NX_LOCAL=1 nx init' to provision a local service stack.\n"
 )
 
 

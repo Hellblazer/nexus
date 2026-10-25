@@ -235,7 +235,7 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
         click.echo(
             "\n  No native service binary is installed and no service tag is "
             "pinned for this build.\n"
-            "  Install one explicitly, then re-run `nx init --service`:\n"
+            "  Install one explicitly, then re-run `nx init`:\n"
             "    nx daemon service install-binary engine-service-vX.Y.Z\n"
             "  (or set NEXUS_SERVICE_TAG=engine-service-vX.Y.Z)."
         )
