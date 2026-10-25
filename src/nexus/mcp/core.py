@@ -7322,12 +7322,17 @@ def plan_save(
     matched to a verb-shaped intent by `nx_answer`'s plan-match gate.
 
     Returns "Saved plan: [<id>] <query>", or a refusal naming why (missing
-    verb, invalid JSON, or a plan with no executable steps).
+    verb, invalid JSON, a plan with no executable steps, or a plan that
+    declares a reserved binding name).
 
     Constraints:
     - `verb` is required; a verb-less plan is refused outright.
     - `plan_json` must be valid JSON with a non-empty `steps` list, each
       step naming a tool.
+    - `source`, `owner` and `project` are reserved for `nx_answer`'s
+      evidence request: a plan that lists one in `required_bindings`,
+      `optional_bindings` or `default_bindings`, or references it as
+      `$name` in a step's args, is refused.
     """
     try:
         if not query or not plan_json:
@@ -7361,6 +7366,13 @@ def plan_save(
         try:
             validate_plan_steps(parsed_plan, require_steps=True)
         except PlanTemplateSchemaError as exc:
+            from nexus.plans.evidence import ReservedBindingError  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+            if isinstance(exc.__cause__, ReservedBindingError):
+                # The message already names the reserved key and says it is
+                # nx_answer's evidence request; the generic "executable
+                # plans" tail below would misdescribe a well-formed plan.
+                return _fail(f"Plan not saved: {exc}")
             return _fail(
                 f"Plan not saved: {exc}. The plan library stores executable "
                 "retrieval plans (a non-empty steps list, each step with a "
@@ -10600,6 +10612,15 @@ _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
 #: too, so it is exported as a named constant instead of inlined here).
 NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX: str = "[budget exhausted"
 
+
+def _non_answer_prefix() -> str:
+    """``NON_ANSWER_NOTICE_PREFIX``, imported on first use (deferred like its
+    other consumer, ``_error_result``)."""
+    from nexus.plans.answer_shape import NON_ANSWER_NOTICE_PREFIX  # noqa: PLC0415 — deferred: only reached when a notice is composed
+
+    return NON_ANSWER_NOTICE_PREFIX
+
+
 #: RDR-200 §Telemetry (nexus-4e75w.5). Handoff-row marker — the SAME
 #: "a stable prefix, followed by call-specific detail" convention as
 #: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX`` above. Written by
@@ -11017,7 +11038,13 @@ async def nx_answer(
         _extra_text = "\n".join(_extra_lines) if _extra_lines else None
         if not _extra_text:
             _text = text
-        elif text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX):
+        elif text.startswith(
+            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix())
+        ):
+            # The tool contract: a degraded text answer STARTS with its
+            # marker. Both markers keep the leading position and the extra
+            # notices (budget warnings, dropped reduce steps, evidence-
+            # request disclosures) follow.
             _text = f"{text}\n{_extra_text}"
         else:
             _text = f"{_extra_text}\n{text}"

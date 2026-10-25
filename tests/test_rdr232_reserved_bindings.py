@@ -182,6 +182,11 @@ def test_plan_save_tool_refuses_with_the_key_named(name: str, where: str) -> Non
     )
     assert "not saved" in out.lower()
     assert f"'{name}'" in out
+    assert "reserved" in out
+    assert "evidence request" in out
+    # The generic non-executable-plan tail would misdescribe a well-formed plan.
+    assert "executable retrieval plans" not in out
+    assert "non-empty steps list" not in out
 
 
 @pytest.mark.parametrize("near_miss", ["sources", "owner_name", "projects", "Source"])
@@ -549,3 +554,85 @@ def test_project_art_resolves_to_owner_1_2_on_a_fixture_catalog() -> None:
         assert no_qualifier.owner.status == "none", (
             "no qualifier and scope=rdr must stay ambiguous, not default to nexus"
         )
+
+
+# ── Test 6: text-mode disclosure placement (tenant-free) ─────────────────────
+#
+# nx_answer's docstring promises a degraded text answer STARTS with
+# ``[budget exhausted ...]`` or ``[non-answer: <shape>]``. The evidence
+# request's disclosure lines are folded into the same composition, so they
+# must follow a leading marker and precede only ordinary prose.
+
+_DISCLOSURE = "[evidence request: source "
+
+
+async def _text_answer(plan_result, *, bindings: dict) -> str:
+    from nexus.mcp.core import nx_answer
+
+    match = Match(
+        plan_id=0, name="ad-hoc", description="q", confidence=None,
+        dimensions={}, tags="ad-hoc",
+        plan_json=json.dumps({"steps": [
+            {"tool": "search", "args": {"query": "$intent"}},
+        ]}),
+        required_bindings=["intent"], optional_bindings=[],
+        default_bindings={"intent": "q"}, parent_dims=None,
+    )
+    db_stub = MagicMock()
+    db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+    with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+         patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+         patch("nexus.plans.runner.plan_run", AsyncMock(return_value=plan_result)), \
+         patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+         patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+         patch("nexus.mcp.core.scratch", return_value="ok"), \
+         patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+        t2_ctx.return_value.__enter__.return_value = db_stub
+        out = await nx_answer(question="q", bindings=bindings)
+    assert isinstance(out, str)
+    return out
+
+
+def _plan_result(steps: list[dict]) -> MagicMock:
+    result = MagicMock()
+    result.steps = steps
+    result.dropped_reduce_steps = []
+    result.step_records = []
+    return result
+
+
+@pytest.mark.asyncio
+async def test_a_disclosure_precedes_the_prose_of_a_normal_answer() -> None:
+    text = await _text_answer(
+        _plan_result([{"text": "the answer is 42"}]),
+        bindings={"source": "not a source"},
+    )
+    assert _DISCLOSURE in text, "the evidence-request disclosure was dropped"
+    assert text.startswith(_DISCLOSURE), text
+    assert text.endswith("the answer is 42"), text
+
+
+@pytest.mark.asyncio
+async def test_a_disclosure_never_goes_ahead_of_a_non_answer_marker() -> None:
+    from nexus.plans.answer_shape import NON_ANSWER_NOTICE_PREFIX
+
+    retrieval_only = _plan_result([
+        {"ids": ["c1"], "collections": ["rdr__1-1"], "distances": [0.1],
+         "chunk_text_hash": ["c1"]},
+        {"contents": ["body"], "missing": [], "section_types": ["class"]},
+    ])
+    text = await _text_answer(retrieval_only, bindings={"source": "not a source"})
+    assert text.startswith(NON_ANSWER_NOTICE_PREFIX), (
+        "the evidence notice displaced the leading non-answer marker: " + text
+    )
+    assert _DISCLOSURE in text, "the notice was dropped from a non-answer"
+
+
+@pytest.mark.asyncio
+async def test_no_disclosure_when_no_reserved_key_is_given() -> None:
+    """Non-vacuity for the two placement tests: the line comes from the
+    reserved key, not from the composition."""
+    text = await _text_answer(
+        _plan_result([{"text": "the answer is 42"}]), bindings={},
+    )
+    assert text == "the answer is 42"

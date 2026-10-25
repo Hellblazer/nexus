@@ -24,10 +24,10 @@ tumbler is a segment prefix of the other (``1.2.4686`` agrees with ``1.2``)
 and resolution uses the longer; otherwise the request reports the conflict
 and picks nothing. ``scope="rdr"`` alone is never a project selector.
 
-This module imports only the standard library (and, lazily inside
-:func:`catalog_name_lookup`, the catalog's owner-name resolver), so the
-schema validator, the matcher and the MCP layer can all import it without
-a cycle. Resolving the named source to a document is a later step
+This module imports only the standard library and ``structlog`` (and,
+lazily inside :func:`catalog_name_lookup`, the catalog's owner-name
+resolver), so the schema validator, the matcher and the MCP layer can all
+import it without a cycle. Resolving the named source to a document is a later step
 (nexus-jypmj.1.4) and takes :class:`SourceRef` and the
 :class:`OwnerResolution` produced here as its inputs.
 """
