@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-tko2w (RDR-108: document structure lives in the catalog manifest, never in chunk metadata).
+
+    nexus.catalog_document_chunks gains three NULLABLE per-position labels:
+        section_title TEXT, section_type TEXT, page_number INTEGER
+
+    WHY. A T3 chunk row is content-addressed: one row per (tenant, collection, chash, model), and an
+    upsert merges the metadata last-writer-wins (PgVectorRepository.mergeMetadata, jsonb concatenation).
+    section_title, section_type and page_number are derived from a chunk's POSITION in one document, so
+    when two documents hold the same chunk text one document's labels overwrite the other's on the shared
+    row (RDR-232 research 7: ART RDR-084 position 24 carried RDR-002's title). The manifest row is already
+    per (tenant, doc_id, position), so the labels belong there. The writers (CatalogRepository's single
+    manifest insert), the manifest reads and chash_positions carry them; the search where-filter on these
+    three keys is answered per (doc_id, position) from this table (PgVectorRepository label stage).
+
+    NO BACKFILL. NULL is the true prior state of every existing row: the only source for a backfill is the
+    shared T3 metadata, which is exactly the wrong value for a shared chunk. A re-index of a document
+    rewrites its manifest and fills the columns. Readers treat NULL as "unlabelled" (a negative filter keeps
+    it; a reader may fall back to the chunk row's own legacy label for such a row, see the label stage).
+
+    ADD COLUMN only, three columns in ONE statement (no UPDATE, no ALTER ... TYPE ... USING), so there is no
+    DATA EFFECT line, matching tuples-009-claimed-at.xml: scripts/data_effect_lint.py's own scope excludes
+    ADD COLUMN. A nullable column with no default is a catalog-only change in PostgreSQL (no table rewrite).
+    No new table, so no RLS, grant or jOOQ reflection-registration change. No index: the label filter is
+    reached through the existing (tenant_id, chash) index and filtered per row.
+
+    Placed after vectors-037-reembed-jobs.xml (the tail when this landed) and before the grants-nexus-svc.xml
+    runAlways block (the established late-append convention, D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-046-1" author="nexus-tko2w">
+        <comment>Adds section_title TEXT, section_type TEXT and page_number INTEGER (all NULL) to nexus.catalog_document_chunks -- per-position labels, document-scoped by the manifest's (tenant_id, doc_id, position) key. An additive ADD COLUMN only (no data mutation of any existing row), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. NULL is the true prior state of every existing row; a re-index fills it.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_document_chunks
+    ADD COLUMN section_title TEXT NULL,
+    ADD COLUMN section_type  TEXT NULL,
+    ADD COLUMN page_number   INTEGER NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.catalog_document_chunks
+                    DROP COLUMN IF EXISTS section_title,
+                    DROP COLUMN IF EXISTS section_type,
+                    DROP COLUMN IF EXISTS page_number;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

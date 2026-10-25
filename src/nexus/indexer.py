@@ -3661,15 +3661,9 @@ def _row_to_chunk_dict(row: object) -> dict:
     ``getattr`` throughout (rather than ``dataclasses.asdict``) so both the
     real dataclass and lightweight test fakes carrying only a subset of
     fields work identically."""
-    return {
-        "chash": getattr(row, "chash", "") or "",
-        "position": getattr(row, "position", None),
-        "chunk_index": getattr(row, "chunk_index", None),
-        "line_start": getattr(row, "line_start", None),
-        "line_end": getattr(row, "line_end", None),
-        "char_start": getattr(row, "char_start", None),
-        "char_end": getattr(row, "char_end", None),
-    }
+    from nexus.catalog.types import manifest_row_wire  # noqa: PLC0415 — deliberate function-scoped import (avoid a module-level catalog dep in the indexer)
+
+    return manifest_row_wire(row)
 
 
 def _prune_misclassified_in_collection(

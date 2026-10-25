@@ -1589,6 +1589,12 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     flat_ids: list[str] = []
     flat_collections: list[str] = []
     owner: list[str] = []
+    # nexus-tko2w (RDR-108): the label of a chunk is a fact about its position in ONE
+    # document. This path reads each document's own manifest, so it has the document: the
+    # row's ``section_type`` is that document's label, where the chunk row's (read below
+    # through store_get_many) is whichever document wrote it last. ``None`` is a row written
+    # before the manifest carried labels.
+    flat_manifest_types: list[str | None] = []
     for doc_id in tumbler_ids:
         if doc_id in excluded_doc_ids:
             # Contributes no chunks -- per_doc[doc_id] stays empty, so
@@ -1612,6 +1618,7 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
             flat_ids.append(row.chash)
             flat_collections.append(row.collection)
             owner.append(doc_id)
+            flat_manifest_types.append(getattr(row, "section_type", None))
 
     if not flat_ids:
         return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
@@ -1647,7 +1654,9 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     for i, (doc_id, content) in enumerate(zip(owner, chunk_contents)):
         if not content:
             continue
-        section_type = chunk_section_types[i] if i < len(chunk_section_types) else ""
+        section_type = flat_manifest_types[i] or (
+            chunk_section_types[i] if i < len(chunk_section_types) else ""
+        )
         if section_type == "imports":
             continue
         per_doc[doc_id].append(content)

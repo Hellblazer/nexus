@@ -3214,6 +3214,13 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
             "line_end": m.get("line_end") or None,
             "char_start": m.get("chunk_start_char") or None,
             "char_end": m.get("chunk_end_char") or None,
+            # nexus-tko2w (RDR-108): position-derived labels belong to the (doc, position)
+            # manifest row, not to the shared T3 chunk row. "" and 0 are the chunkers'
+            # "none here" defaults (a chunk before the first heading, a non-paged document)
+            # and travel as NULL.
+            "section_title": m.get("section_title") or None,
+            "section_type": m.get("section_type") or None,
+            "page_number": m.get("page_number") or None,
         }
         for i, m in indexed_metas
     ]

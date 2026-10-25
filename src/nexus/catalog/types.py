@@ -355,6 +355,37 @@ class ManifestRow:
     # "genuinely no collection", which the engine contract no longer
     # permits.
     collection: str | None = None
+    # nexus-tko2w (RDR-108): the per-position section labels. Document structure lives in
+    # the manifest, not on the shared T3 chunk row, whose metadata is the last writer's.
+    # None is "unlabelled": every row written before catalog-046, or by a client that
+    # predates the columns, and a pre-field engine that sends no key.
+    section_title: str | None = None
+    section_type: str | None = None
+    page_number: int | None = None
+
+
+def manifest_row_wire(row: object) -> dict:
+    """A manifest row (or a test double carrying a subset of its fields) as the wire dict a
+    manifest write takes.
+
+    Every re-write of an existing manifest (a retraction that drops one chash and writes the
+    rest back, the atomic replace of a pruned collection) must carry ALL the row's fields: a
+    field left out here is written as NULL, and the section labels (nexus-tko2w) are the ones
+    nothing else can restore short of a re-index. ``getattr`` throughout so the real dataclass
+    and a lightweight fake carrying fewer fields work identically.
+    """
+    return {
+        "chash": getattr(row, "chash", "") or "",
+        "position": getattr(row, "position", None),
+        "chunk_index": getattr(row, "chunk_index", None),
+        "line_start": getattr(row, "line_start", None),
+        "line_end": getattr(row, "line_end", None),
+        "char_start": getattr(row, "char_start", None),
+        "char_end": getattr(row, "char_end", None),
+        "section_title": getattr(row, "section_title", None),
+        "section_type": getattr(row, "section_type", None),
+        "page_number": getattr(row, "page_number", None),
+    }
 
 
 def _default_registry_path() -> Path:

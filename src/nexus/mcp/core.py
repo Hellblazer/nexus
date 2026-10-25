@@ -11,6 +11,7 @@ operators toward no longer exists.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -5949,6 +5950,64 @@ def _read_scope(t3, collection: str) -> list[str]:
     )
 
 
+_CHASH_ID = re.compile(r"[0-9a-f]{64}")
+
+
+def resolve_owner_section_types(
+    chunk_ids: list[str],
+    found: list[bool],
+    collections: list[str],
+    stored: list[str],
+) -> list[str]:
+    """The ``section_type`` of each hydrated chunk, read from the catalog manifest of the
+    documents that own it (nexus-tko2w, RDR-108).
+
+    A T3 chunk row is one per chash, so the ``section_type`` on it is whichever owning
+    document wrote last. The label of a chunk is a fact about its position in ONE document;
+    the manifest row carries it. ``store_get_many`` is handed chunk ids and no document, so
+    the chash does not name one occurrence. The rule, per chunk:
+
+    * owners (live manifest rows holding the chash, in the collection the chunk was found
+      in) that carry a label and all AGREE: that label;
+    * owners that carry a label and DISAGREE: ``""``, the label is ambiguous for a bare chunk
+      id, and an empty type is the value every filter on it treats as "keep" (the plan
+      runner drops only a chunk whose type is exactly ``imports``);
+    * no owner carries a label (a manifest written before catalog-046, a note, a chunk with
+      no manifest row, an engine without the route): the chunk row's own *stored* value, the
+      answer this field always gave, until a re-index labels the manifest.
+
+    Best-effort: a catalog that is unreachable, or an engine that predates the
+    ``chash_positions`` route, leaves every entry on its stored value.
+    """
+    wanted = [i for i, cid in enumerate(chunk_ids) if found[i] and _CHASH_ID.fullmatch(cid or "")]
+    if not wanted:
+        return stored
+    try:
+        lookup = getattr(_get_catalog(), "chash_positions", None)
+        rows = lookup(list(dict.fromkeys(chunk_ids[i] for i in wanted))) if lookup else None
+    except Exception:  # noqa: BLE001 — best-effort label lookup; the stored value is the documented fallback
+        _log.debug("store_get_many_owner_section_types_failed", exc_info=True)
+        return stored
+    if not isinstance(rows, list):
+        return stored
+    by_chash: dict[str, list[dict]] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("chash"):
+            by_chash.setdefault(row["chash"], []).append(row)
+    out = list(stored)
+    for i in wanted:
+        labels = {
+            str(row["section_type"])
+            for row in by_chash.get(chunk_ids[i], ())
+            if row.get("section_type") and (not row.get("collection") or row["collection"] == collections[i])
+        }
+        if len(labels) == 1:
+            out[i] = next(iter(labels))
+        elif labels:
+            out[i] = ""
+    return out
+
+
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
     """Dedupe an id sequence while keeping first-seen order.
 
@@ -6119,7 +6178,8 @@ def store_get_many(
         description=(
             "Return {contents, missing, section_types} instead of the "
             "human-readable string; section_types aligns 1:1 with contents/ids "
-            "(\"\" when missing or unstamped)."
+            "(\"\" when missing, unstamped, or when the documents that own the "
+            "chunk disagree on its section type)."
         ),
     )] = False,
     limit_per_source: Annotated[int | list[int] | None, Field(
@@ -6377,6 +6437,12 @@ def store_get_many(
             source_notes.append(source_note(entry, collection=entry_collection))
 
         if structured:
+            # nexus-tko2w: the stored value above is the chunk row's, the last writer's; the
+            # label is read from the owning documents' manifest rows (only the structured
+            # result carries it, so only that mode pays the lookup).
+            section_types = resolve_owner_section_types(
+                id_list, [entry is not None for entry in entries], entry_collections, section_types,
+            )
             return {
                 "contents": contents, "missing": missing,
                 "section_types": section_types,

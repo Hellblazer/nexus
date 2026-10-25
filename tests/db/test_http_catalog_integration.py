@@ -814,6 +814,35 @@ class TestManifest:
         chashes = [r.chash for r in rows]
         assert _ch("chunk_hash_030000000000000000000") in chashes
 
+    def test_section_labels_round_trip_on_the_manifest_row(self, cat, pg_instance) -> None:
+        """nexus-tko2w: the per-position section labels are written with the manifest row and
+        read back by ``get_manifest``, ``get_manifests`` and ``chash_positions``; a row sent
+        without them reads as unlabelled (None), not as a missing field."""
+        coll = "knowledge__test__voyage-context-3__v1"
+        labelled = _ch("section_label_chunk_00000000000")
+        bare = _ch("section_label_chunk_01000000000")
+        t = cat.register(
+            "1.1", "Section Label Doc", content_type="paper",
+            source_uri="file:///manifest/section-labels.md",
+        )
+        _seed_chunks(pg_instance, "default", coll, [labelled, bare])
+        cat.write_manifest(str(t), [
+            {"position": 0, "chash": labelled, "section_title": "Abstract",
+             "section_type": "abstract", "page_number": 1},
+            {"position": 1, "chash": bare},
+        ], collection=coll)
+
+        rows = cat.get_manifest(str(t))
+        assert [(r.section_title, r.section_type, r.page_number) for r in rows] == [
+            ("Abstract", "abstract", 1), (None, None, None),
+        ]
+        assert [r.section_type for r in cat.get_manifests([str(t)])[str(t)]] == ["abstract", None]
+
+        positions = cat.chash_positions([labelled])
+        assert positions is not None
+        assert [(p["doc_id"], p["section_type"], p["section_title"], p["page_number"], p["collection"])
+                for p in positions] == [(str(t), "abstract", "Abstract", 1, coll)]
+
     def test_docs_for_chashes_reverse_lookup(self, cat, doc_with_manifest) -> None:
         """docs_for_chashes returns dict[chash, [doc_id, ...]] (nexus-h8rf6.3).
 

@@ -203,7 +203,12 @@ supersedes) as a graph of nodes agents can traverse without touching vectors.
 This is the git/IPFS-style blob (T3 chunk) + tree (catalog manifest) split:
 T3 chunks are content-addressed blobs with no notion of document structure or
 order; the catalog's `document_chunks` manifest is the sole source of truth
-for which chashes compose a document and in what order.
+for which chashes compose a document and in what order. Anything that is a
+fact about a chunk's POSITION in one document rides the manifest row, because a
+chunk text two documents share is one T3 row whose metadata is the last
+writer's: the spans (`line_*`, `char_*`) and, since `catalog-046`
+(nexus-tko2w), the labels `section_title`, `section_type` and `page_number`
+(nullable; a re-index fills them).
 
 Indexing (`nx index repo`, `nx index pdf`, `nx index rdr`) and MCP `store_put`
 auto-register entries via catalog hooks (see [Post-Store Hooks](#post-store-hooks)
@@ -458,7 +463,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 | `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
 | `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
 | `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
-| `section_title` / `section_type` | chunk | tree-sitter / Markdown section header | code/prose chunkers | search-time filtering (`section_type!=references`) |
+| `section_title` / `section_type` / `page_number` | chunk position | tree-sitter / Markdown section header / PDF page | code/prose/PDF chunkers | search-time filtering (`section_type!=references`), answered per (document, position) from the catalog manifest columns of the same names (nexus-tko2w, `catalog-046`); the T3 copy is the last writer's and only the legacy fallback |
 | `embedding_model` | document | model id string | every write through the T3 client (`HttpVectorClient`; `T3Database`/`db/t3.py` is the retired serving path kept only as a test facade — see Storage row above) | `voyage-code-3` vs `voyage-context-3` routing; embedding-model drift/staleness detection (`nx doctor`, `indexer_utils.py` re-embed check) |
 | `extraction_method` | chunk | PDF-extractor identity string | PDF chunks only, via `pipeline_stages._enrich_metadata_from_extraction` post-pass (streaming) / `doc_indexer._pdf_chunks` (legacy batch path) | retroactively scoping extractor regressions — `docling` \| `mineru` \| `pymupdf_normalized`, or the honest mixed aggregate `mineru+docling-degraded` when an `--on-formula-oom docling` per-page degrade fired (nexus-1oguj, new-writes-only — see epistemic-hole note below) |
 

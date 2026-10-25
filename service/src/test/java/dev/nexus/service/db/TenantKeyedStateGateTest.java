@@ -526,7 +526,7 @@ public class TenantKeyedStateGateTest {
                 "TupleRepository.tenantScope", "TelemetryRepository.tenantScope", "LadderRepository.tenantScope",
                 "PlanRepository.tenantScope", "MemoryRepository.tenantScope", "PipelineRepository.tenantScope",
                 "CatalogRepository.tenantScope", "ChashRepository.tenantScope", "AspectRepository.tenantScope",
-                "ScratchRepository.tenantScope")) {
+                "ScratchRepository.tenantScope", "ManifestLabelStage.tenantScope")) {
                 notKeyed.put(f, HANDLE);
             }
             for (String f : List.of("NexusService.TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV",
@@ -729,6 +729,8 @@ public class TenantKeyedStateGateTest {
                 "OwnerlessChunkWriteException.unownedSample",
                 "PgSession.GucBatch.calls",
                 "PgVectorRepository.Candidate.row",
+                "ManifestLabelStage.Split.rest",
+                "ManifestLabelStage.Split.labels",
                 "PgVectorRepository.ExistencePartition.haveVectorIdx",
                 "PgVectorRepository.ExistencePartition.needEmbedIdx",
                 "PgVectorRepository.ManifestLessCensusResult.chashes",

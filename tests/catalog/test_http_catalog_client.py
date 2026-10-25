@@ -756,15 +756,22 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"chashes": chashes, "count": len(chashes)})
         elif op == "/manifest/chash_positions":
             # nexus-opxwd: mirrors CatalogHandler.handleChashPositions --
-            # {"rows": [{chash, doc_id, position, chunk_count}], "count": N}
+            # {"rows": [{chash, doc_id, position, chunk_count, collection,
+            # section_title, section_type, page_number}], "count": N}
             # for the requested chashes only, over the same one-doc manifest
             # /manifest/get_many serves above (chunk_count = that doc's row
-            # count, rows ordered by doc_id then position).
+            # count, rows ordered by doc_id then position). nexus-tko2w: the
+            # row's own collection and per-position section labels (null for
+            # an unlabelled row) ride the same rows.
             manifest = {"1.1.1": [{"position": 0, "chash": CHASH_A}]}
             wanted = set(body.get("chashes") or [])
             rows = [
                 {"chash": row["chash"], "doc_id": doc_id,
-                 "position": row["position"], "chunk_count": len(doc_rows)}
+                 "position": row["position"], "chunk_count": len(doc_rows),
+                 "collection": row.get("collection", "knowledge__fake__v1"),
+                 "section_title": row.get("section_title"),
+                 "section_type": row.get("section_type"),
+                 "page_number": row.get("page_number")}
                 for doc_id, doc_rows in sorted(manifest.items())
                 for row in doc_rows if row["chash"] in wanted
             ]
@@ -1665,7 +1672,12 @@ class TestHttpCatalogClientRoundTrip:
         agreeing with the manifest /manifest/get_many serves for the same doc;
         an unknown chash yields no row."""
         rows = client.chash_positions([CHASH_A, "f" * 64])
-        assert rows == [{"chash": CHASH_A, "doc_id": "1.1.1", "position": 0, "chunk_count": 1}]
+        assert rows == [{
+            "chash": CHASH_A, "doc_id": "1.1.1", "position": 0, "chunk_count": 1,
+            # nexus-tko2w: the row's own collection and its (here unlabelled) section labels.
+            "collection": "knowledge__fake__v1",
+            "section_title": None, "section_type": None, "page_number": None,
+        }]
         assert client.chash_positions([]) == []
 
     def test_docs_and_manifests_for_chashes_journey(self, client: HttpCatalogClient) -> None:

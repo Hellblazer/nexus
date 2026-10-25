@@ -3013,6 +3013,65 @@ class TestImportOnlySectionTypeExclusion:
         assert result["contents"] == ["some content"]
         assert result["missing"] == []
 
+    def test_tumbler_hydration_reads_the_documents_own_manifest_label_not_the_chunk_rows(
+        self,
+    ) -> None:
+        """nexus-tko2w: the chunk row's section_type is the last writer's. This path holds the
+        document, so the manifest row's label decides: a chunk this document labels ``method``
+        is kept although the shared chunk row (another document's header) says ``imports``,
+        and one this document labels ``imports`` is dropped although the chunk row says
+        ``method``."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        coll = "code__x__model-code__v1"
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64, collection=coll, section_type="method"),
+                ManifestRow(position=1, chash="b" * 64, collection=coll, section_type="imports"),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {
+            "contents": ["shared body", "header body"],
+            "missing": [],
+            "section_types": ["imports", "method"],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == ["shared body"]
+
+    def test_tumbler_hydration_falls_back_to_the_hydrated_type_for_an_unlabelled_manifest_row(
+        self,
+    ) -> None:
+        """A manifest written before the labels existed has none; the hydrated value decides, as
+        it always did."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        manifests = {
+            "1.1.5": [ManifestRow(position=0, chash="a" * 64, collection="code__x__model-code__v1")],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["imports only"], "missing": [], "section_types": ["imports"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == [""]
+
 
 @pytest.mark.asyncio
 async def test_bundle_path_strips_truncation_marker_before_composition(monkeypatch) -> None:

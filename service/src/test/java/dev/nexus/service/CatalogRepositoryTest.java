@@ -5514,4 +5514,106 @@ class CatalogRepositoryTest {
         repo.upsertCollection(TENANT_A, row);
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
     }
+    // ── nexus-tko2w (RDR-108): per-position section labels on the manifest row ──────
+
+    private static Map<String, Object> labelled(int position, String chash, String title, String type, Integer page) {
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put("position", position);
+        row.put("chash", chash);
+        row.put("chunk_index", position);
+        if (title != null) row.put("section_title", title);
+        if (type != null) row.put("section_type", type);
+        if (page != null) row.put("page_number", page);
+        return row;
+    }
+
+    @Test @Order(400)
+    void manifestLabels_writeThenReadBack_onGetManifest_andGetManifestMany_andChashPositions() {
+        String coll = "knowledge__tko2w-labels__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.1", "title", "Labels A",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.2", "title", "Labels B",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        String shared = ch("tko2w-shared");
+        // The SAME chunk text in two documents, labelled differently: each manifest row keeps its own.
+        writeManifestSeeded(TENANT_A, "tko2w.1", coll, List.of(
+            labelled(0, shared, "References", "references", 9),
+            labelled(1, ch("tko2w-only-a"), null, null, null)));
+        writeManifestSeeded(TENANT_A, "tko2w.2", coll, List.of(
+            labelled(0, shared, "Methods", "body", 3)));
+
+        var a = repo.getManifest(TENANT_A, "tko2w.1");
+        assertThat(a.get(0).get("section_title")).isEqualTo("References");
+        assertThat(a.get(0).get("section_type")).isEqualTo("references");
+        assertThat(a.get(0).get("page_number")).isEqualTo(9);
+        // An unlabelled row reads NULL, and the key is always present.
+        assertThat(a.get(1)).containsKeys("section_title", "section_type", "page_number");
+        assertThat(a.get(1).get("section_type")).isNull();
+        assertThat(a.get(1).get("page_number")).isNull();
+
+        var many = repo.getManifestMany(TENANT_A, List.of("tko2w.1", "tko2w.2"));
+        assertThat(many.get("tko2w.2").get(0).get("section_type")).isEqualTo("body");
+        assertThat(many.get("tko2w.2").get(0).get("page_number")).isEqualTo(3);
+        assertThat(many.get("tko2w.1").get(0).get("section_type")).isEqualTo("references");
+
+        var positions = repo.chashPositions(TENANT_A, List.of(shared));
+        assertThat(positions).hasSize(2);
+        assertThat(positions.stream().map(r -> r.get("doc_id") + ":" + r.get("section_type")).toList())
+            .containsExactly("tko2w.1:references", "tko2w.2:body");
+        assertThat(positions.get(0).get("collection")).isEqualTo(coll);
+        assertThat(positions.get(0).get("section_title")).isEqualTo("References");
+        assertThat(positions.get(1).get("page_number")).isEqualTo(3);
+    }
+
+    @Test @Order(401)
+    void manifestLabels_aReplaceWithoutThem_clearsThem_aReplaceWithThem_setsThem() {
+        String coll = "knowledge__tko2w-replace__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.3", "title", "Replace",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        String chash = ch("tko2w-replace-chunk");
+        writeManifestSeeded(TENANT_A, "tko2w.3", coll, List.of(labelled(0, chash, "Intro", "body", 1)));
+        assertThat(repo.getManifest(TENANT_A, "tko2w.3").get(0).get("section_type")).isEqualTo("body");
+
+        // A client that predates the columns re-writes the manifest: the row is the new row, unlabelled.
+        writeManifestSeeded(TENANT_A, "tko2w.3", coll, List.of(labelled(0, chash, null, null, null)));
+        assertThat(repo.getManifest(TENANT_A, "tko2w.3").get(0).get("section_type")).isNull();
+
+        writeManifestSeeded(TENANT_A, "tko2w.3", coll, List.of(labelled(0, chash, "Refs", "references", 12)));
+        var row = repo.getManifest(TENANT_A, "tko2w.3").get(0);
+        assertThat(row.get("section_title")).isEqualTo("Refs");
+        assertThat(row.get("page_number")).isEqualTo(12);
+    }
+
+    @Test @Order(402)
+    void manifestLabels_theAppendUpsertMovesTheLabelsWithTheChashAtThePosition() {
+        String coll = "knowledge__tko2w-append__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.4", "title", "Append",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        String first = ch("tko2w-append-first");
+        String second = ch("tko2w-append-second");
+        stubChunk(TENANT_A, coll, first);
+        stubChunk(TENANT_A, coll, second);
+        repo.appendManifestChunks(TENANT_A, "tko2w.4", coll, List.of(labelled(0, first, "Old", "references", 9)));
+        // The same position now holds another chunk, with its own label.
+        repo.appendManifestChunks(TENANT_A, "tko2w.4", coll, List.of(labelled(0, second, "New", "body", 2)));
+
+        var row = repo.getManifest(TENANT_A, "tko2w.4").get(0);
+        assertThat(row.get("chash")).isEqualTo(second);
+        assertThat(row.get("section_title")).isEqualTo("New");
+        assertThat(row.get("section_type")).isEqualTo("body");
+        assertThat(row.get("page_number")).isEqualTo(2);
+    }
+
+    @Test @Order(403)
+    void manifestLabels_theImportPathKeepsThem() {
+        String coll = "knowledge__tko2w-import__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.5", "title", "Import",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        importChunkSeeded(TENANT_A, "tko2w.5", coll, labelled(0, ch("tko2w-import-chunk"), "Abs", "abstract", 1));
+
+        var row = repo.getManifest(TENANT_A, "tko2w.5").get(0);
+        assertThat(row.get("section_type")).isEqualTo("abstract");
+        assertThat(row.get("section_title")).isEqualTo("Abs");
+        assertThat(row.get("page_number")).isEqualTo(1);
+    }
 }

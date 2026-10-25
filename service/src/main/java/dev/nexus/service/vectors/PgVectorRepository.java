@@ -1436,6 +1436,28 @@ public final class PgVectorRepository {
                                                                int nResults,
                                                                Map<String, Object> where,
                                                                boolean includeSourceUri) {
+        // nexus-tko2w: section_title / section_type / page_number are answered per manifest occurrence.
+        var labelSplit = ManifestLabelStage.split(where);
+        if (!labelSplit.active()) {
+            return searchWithTokensUnlabelled(tenant, queryText, collectionNames, nResults, where, includeSourceUri);
+        }
+        var wide = searchWithTokensUnlabelled(tenant, queryText, collectionNames,
+                                              ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri);
+        return new Tokened<>(labelStage().apply(tenant, wide.value(), labelSplit.labels(), nResults),
+                             wide.tokens(), wide.skippedCollections());
+    }
+
+    /** nexus-tko2w: stateless; answers the section_title / section_type / page_number where-keys from the manifest. */
+    private ManifestLabelStage labelStage() {
+        return new ManifestLabelStage(tenantScope);
+    }
+
+    /** {@link #searchWithTokens} for a {@code where} that carries none of the manifest-answered label keys. */
+    private Tokened<List<Map<String, Object>>> searchWithTokensUnlabelled(String tenant, String queryText,
+                                                                          List<String> collectionNames,
+                                                                          int nResults,
+                                                                          Map<String, Object> where,
+                                                                          boolean includeSourceUri) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -2547,7 +2569,14 @@ public final class PgVectorRepository {
             includeSourceUri, includeEmbeddings, false, settings);
     }
 
-    /** As above with every fan-out knob explicit, the embeddings opt-in and the lexical leg; a test seam. */
+    /**
+     * As above with every fan-out knob explicit, the embeddings opt-in and the lexical leg; a test seam.
+     *
+     * <p>nexus-tko2w: a {@code where} naming {@code section_title}, {@code section_type} or {@code
+     * page_number} is answered per manifest occurrence ({@link ManifestLabelStage}). The fan-out runs with
+     * the label keys removed and a wider per-collection K and global cut, and the stage then expands,
+     * filters and cuts to the caller's {@code limit}, in the vector rows and in the lexical extras alike.
+     */
     public PerCollectionResult searchPerCollection(String tenant, String queryText,
                                                    List<String> collectionNames,
                                                    int perCollectionK, int limit,
@@ -2557,6 +2586,50 @@ public final class PgVectorRepository {
                                                    boolean includeEmbeddings,
                                                    boolean lexical,
                                                    FanoutSettings settings) {
+        var labelSplit = ManifestLabelStage.split(where);
+        boolean validBounds = perCollectionK >= 1 && perCollectionK <= MAX_PER_COLLECTION_K
+            && limit >= 1 && limit <= MAX_FANOUT_LIMIT;
+        if (!labelSplit.active() || !validBounds) {
+            // An out-of-range K or limit is refused by the fan-out itself, with its own wording.
+            return searchPerCollectionUnlabelled(tenant, queryText, collectionNames, perCollectionK, limit,
+                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings);
+        }
+        var wide = searchPerCollectionUnlabelled(tenant, queryText, collectionNames,
+            Math.min(MAX_PER_COLLECTION_K, ManifestLabelStage.widen(perCollectionK)),
+            Math.min(MAX_FANOUT_LIMIT, ManifestLabelStage.widen(limit)),
+            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings);
+        var stage = labelStage();
+        List<Map<String, Object>> rows = stage.apply(tenant, wide.rows(), labelSplit.labels(), limit);
+        List<Map<String, Object>> lexicalRows = wide.lexicalRows().isEmpty()
+            ? wide.lexicalRows()
+            : stage.apply(tenant, wide.lexicalRows(), labelSplit.labels(), Integer.MAX_VALUE);
+        // Every id a lexical arm reports must still be in the response: drop the ones the filter removed.
+        List<LexicalStat> lexicalStats = wide.lexical();
+        if (!lexicalStats.isEmpty()) {
+            Set<String> served = new HashSet<>();
+            for (var row : rows) served.add(String.valueOf(row.get("id")));
+            for (var row : lexicalRows) served.add(String.valueOf(row.get("id")));
+            List<LexicalStat> kept = new ArrayList<>(lexicalStats.size());
+            for (LexicalStat st : lexicalStats) {
+                kept.add(new LexicalStat(st.count(), st.ids().stream().filter(served::contains).toList(),
+                                         st.error(), st.errorKind()));
+            }
+            lexicalStats = kept;
+        }
+        return new PerCollectionResult(rows, wide.perCollection(), wide.tokens(), wide.skippedCollections(),
+                                       wide.peakRetainedRows(), wide.embeddingDim(), lexicalRows, lexicalStats);
+    }
+
+    /** {@link #searchPerCollection} for a {@code where} that carries none of the manifest-answered label keys. */
+    private PerCollectionResult searchPerCollectionUnlabelled(String tenant, String queryText,
+                                                              List<String> collectionNames,
+                                                              int perCollectionK, int limit,
+                                                              Map<String, Double> thresholds,
+                                                              Map<String, Object> where,
+                                                              boolean includeSourceUri,
+                                                              boolean includeEmbeddings,
+                                                              boolean lexical,
+                                                              FanoutSettings settings) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
         final int searchBoundMs = settings.searchBoundMs();
@@ -3174,11 +3247,17 @@ public final class PgVectorRepository {
                                                                       int nResults,
                                                                       Map<String, Object> where,
                                                                       boolean includeSourceUri) {
+        // nexus-tko2w: the manifest-answered label keys leave the where the SQL receives; see ManifestLabelStage.
+        var labelSplit = ManifestLabelStage.split(where);
         long[] tokensOut = {0L};
         List<String> skippedOut = new ArrayList<>();
-        List<Map<String, Object>> rows =
-            hybridSearch(tenant, queryText, collectionNames, nResults, where, SELECTIVE_GATE_MAX,
-                         tokensOut, skippedOut);
+        List<Map<String, Object>> rows = hybridSearch(
+            tenant, queryText, collectionNames,
+            labelSplit.active() ? ManifestLabelStage.widen(nResults) : nResults,
+            labelSplit.rest(), SELECTIVE_GATE_MAX, tokensOut, skippedOut);
+        if (labelSplit.active()) {
+            rows = labelStage().apply(tenant, rows, labelSplit.labels(), nResults);
+        }
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
         enrichSearchRows(tenant, rows, includeSourceUri);
         return new Tokened<>(rows, tokensOut[0], skippedOut);

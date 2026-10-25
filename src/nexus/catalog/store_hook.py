@@ -25,6 +25,7 @@ import httpx
 import structlog
 
 from nexus.aspect_readers import uri_for
+from nexus.catalog.types import manifest_row_wire
 from nexus.embed_window import window_for_model
 
 _log = structlog.get_logger(__name__)
@@ -1343,14 +1344,7 @@ def _retract_manifest_rows_for_chash(
     """
     tumbler_str = str(entry.tumbler)
     current_rows = reader.get_manifest(tumbler_str)
-    remaining = [
-        {
-            "position": r.position, "chash": r.chash, "chunk_index": r.chunk_index,
-            "line_start": r.line_start, "line_end": r.line_end,
-            "char_start": r.char_start, "char_end": r.char_end,
-        }
-        for r in current_rows if r.chash != chash
-    ]
+    remaining = [manifest_row_wire(r) for r in current_rows if r.chash != chash]
     if len(remaining) == len(current_rows):
         return  # chash was not present in this entry's manifest -- nothing to retract
     collection = entry.physical_collection or expected_collection
@@ -1489,14 +1483,7 @@ def reap_catalog_documents_by_title(
         for entry in entries:
             tumbler = str(entry.tumbler)
             rows = reader.get_manifest(tumbler)
-            original = [
-                {
-                    "position": r.position, "chash": r.chash, "chunk_index": r.chunk_index,
-                    "line_start": r.line_start, "line_end": r.line_end,
-                    "char_start": r.char_start, "char_end": r.char_end,
-                }
-                for r in rows
-            ]
+            original = [manifest_row_wire(r) for r in rows]
             row_collection = entry.physical_collection or collection
             try:
                 if original:
