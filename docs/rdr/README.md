@@ -207,7 +207,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-186](rdr-186-client-persistence-closure-no-sqlite.md) | Client-Persistence Closure: PG in Every Mode — Retire Every SQLite Substrate Outside RDR-158's Seven-Domain Scope, and End Self-Granted Exemptions | Architecture | Closed | 2026-07-18 |
 | [RDR-187](rdr-187-retire-chash-index-router-table.md) | Retire chash_index: the Chunks Tables Are the Chash-Keyed Store — Drop the Router Remnant of the Split-Store Architecture | Architecture | Closed | 2026-07-20 |
 | [RDR-188](rdr-188-server-side-rerank.md) | Server-Side Reranking: Retire the Last Client-Side Voyage Consumer So the Client Carries Zero Voyage Credentials | Architecture | Closed | 2026-07-22 |
-| [RDR-189](rdr-189-target-definition-layer.md) | Target-Definition Layer for NL-to-X Querying: Answer-Object Families, Target Contracts, and Witness Obligations over the Existing Plan/Operator Realization Layer | Architecture | Draft | 2026-07-25 |
+| [RDR-189](rdr-189-target-definition-layer.md) | Target-Definition Layer for NL-to-X Querying: Answer-Object Families, Target Contracts, and Witness Obligations over the Existing Plan/Operator Realization Layer | Architecture | Accepted | 2026-07-25 |
 | [RDR-190](rdr-190-plan-ir-loop-collect-primitives.md) | Plan-IR Fan-Out and Fold: Add `loop` and `collect` Step Primitives So Plans Can Process More Than 100 Items Without Truncating or Round-Tripping Through the Agent | Architecture | Deferred | 2026-07-26 |
 | [RDR-191](rdr-191-unify-chunk-tables-enable-manifest-fk.md) | Unify the Dim-Sharded Chunk Tables into One nexus.chunks with Nullable Typed Embedding Columns: Make the Manifest FK Expressible and Retire the Client-Side Integrity Apparatus | Architecture | Closed | 2026-08-10 |
 | [RDR-192](rdr-192-superseded-note-chunks-outlive-manifest-less-is-live.md) | Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition | Bug Fix | Closed | 2026-08-12 |
@@ -249,6 +249,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Draft | 2026-10-17 |
 | [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Draft | 2026-10-18 |
 | [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Draft | 2026-10-23 |
+| [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Draft | 2026-10-23 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

@@ -2,10 +2,11 @@
 title: "Target-Definition Layer for NL-to-X Querying: Answer-Object Families, Target Contracts, and Witness Obligations over the Existing Plan/Operator Realization Layer"
 id: RDR-189
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-10-24
 priority: medium
 author: Hal Hildebrand
-reviewed-by: unreviewed
+reviewed-by: Sam
 created: 2026-07-25
 related_issues: ["nexus-sbl4m", "nexus-yg49g", "nexus-l2vam"]
 related: [RDR-078, RDR-079, RDR-080, RDR-084, RDR-088, RDR-089, RDR-090, RDR-093, RDR-134, RDR-147, RDR-179, RDR-232]
@@ -16,13 +17,13 @@ related: [RDR-078, RDR-079, RDR-080, RDR-084, RDR-088, RDR-089, RDR-090, RDR-093
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 
-**Status note**: this RDR is `draft`. D1 remains a human adoption decision;
-R8 recommends yes. The shared contract with RDR-232 is design direction under
-review, not acceptance. RDR-232's research is partial prototype evidence, not
-production or live-model proof. P2 uses observed answer/coverage shapes and
-human promotion; coverage telemetry is not a human-label-free adequacy signal.
-P1 is unblocked; P5 first requires recovering or re-registering the ghost
-roadmap source described below. Do not quote as design intent until gated.
+**Status note**: D1=(a), the full target-definition layer, was adopted by Sam
+on 2026-10-24 after the formal gate passed. D2(b) remains the governance:
+observed candidates, human-authored obligations, and human promotion. The
+shared contract with RDR-232 is design direction under review, not acceptance.
+RDR-232's research is partial prototype evidence, not production or live-model
+proof. P1 is unblocked; P5 first requires recovering or re-registering the
+ghost roadmap source described below.
 
 ## Problem Statement
 
@@ -681,9 +682,10 @@ roadmap.
 
 ## Decision (draft — options to resolve in research)
 
-**D1. Does nexus adopt a target-definition layer at all?**
-Options: (a) full layer per Desired End State; (b) evidence-shape hygiene
-only (P1) and stop; (c) no. **R8 recommends (a).** The degradation is
+**D1. Does nexus adopt a target-definition layer at all?** **DECIDED: (a),
+adopt the full layer (Sam, 2026-10-24).** R8's recommendation was based on
+current prompt artifacts and run 722, not the retired low-usage premise. The
+degradation is
 real (2/2 grown plans embed answer contracts in prompt strings) and a
 live probe confirmed the reuse machinery works end to end. The shared
 contract with RDR-232 defines how the layer is introduced without a second
@@ -756,16 +758,14 @@ not `preserved`. These proofs belong to P1/P3/P4, not the later P6 evaluation.
 
 ### P0 — Decision gate (no code)
 
-Resolve **D1 and D2 governance only**. D1 is load-bearing: if it resolves to
-(b) or (c), P2–P4 and P6 are dropped; P1 may proceed as hygiene and P5 as
-source recovery.
-D2(b) is the recommended governance: observed candidates, human-authored
-obligations, human promotion. The October census refreshed the July evidence;
-RDR-232's finer-grained coverage summaries are future inputs, not current
-family-adequacy measurements.
-
-D4 is not decided here. It requires P4/P6 evidence and a pre-registered stop
-threshold.
+**D1 and D2 are decided.** Sam adopted D1=(a), the full target-definition
+layer, on 2026-10-24. D2(b) is the governance: observed candidates,
+human-authored obligations, and human promotion. P2–P4 proceed under their
+stated prerequisites and P6's later keep/narrow/stop measurement. P1/P5 remain
+independent. The October census refreshed the July evidence; RDR-232's
+finer-grained coverage summaries are future inputs, not current
+family-adequacy measurements. D4 is not decided here; it requires P4/P6
+evidence and a pre-registered stop threshold.
 
 ### P1 — Evidence-shape unification (independent hygiene)
 
@@ -1269,9 +1269,8 @@ RDR-232 safeguards remain.
 
 ## Open Questions
 
-1. **D1 adoption:** R8 recommends the target layer from current prompt
-   artifacts and the observed wrong-shape run. The research is complete; Sam's
-   P0 adoption decision remains. P6 will test whether P2–P4 earn their cost.
+1. ~~**D1 adoption:**~~ **DECIDED (Sam, 2026-10-24): (a), full layer.** P6
+   will test whether P2–P4 earn their cost.
 2. **D4 cost/value:** deferred until P4/P6 produce target-fidelity and cost
    measurements against a pre-registered stop threshold.
 3. ~~Does the paper's §6 benchmark supply automatic promotion?~~ **CLOSED** —
@@ -1397,6 +1396,7 @@ RDR-232 safeguards remain.
   complete; proposed runtime behavior and D4 value remain unproven. No gate,
   acceptance, or implementation performed.
 - 2026-10-24: Gate round 1 — BLOCKED (1 Critical, 4 Significant, 1 ship-blocker(s)); commit `6aa585629`; critique `nexus_rdr/189-gate-critique-2026-10-24-r1`.
+- 2026-10-24: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `1d9b72968`; critique `nexus_rdr/189-gate-critique-2026-10-24-r2`.
 - 2026-10-24 — **Fix-check repair (research 22).** Separated legacy and
   all-outcomes validation paths; defined the enrichment trace flag and default;
   made unresolved version, contract-version, and continuation evidence-id
