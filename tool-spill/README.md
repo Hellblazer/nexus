@@ -26,7 +26,7 @@ It hooks `tool.call` and touches only `Bash` and `Read`, and only in the main co
 
 | Tool | Result over the limit |
 |---|---|
-| `Bash` | `stdout` and `stderr` are each cut to the first `head` bytes and the last `tail` bytes, at line ends. A note between them gives the size, the line count, the number of middle lines cut, how many of those mention an error or failure (`error`, `fail`, `traceback`, `panic`, `exception`, `fatal`), and the path of the full output (stdout, then stderr after a `--- stderr ---` line). A script's verdict on its last line, even with exit code 0, is in the tail. |
+| `Bash` | Each stream longer than `head` + `tail` is cut to the first `head` bytes and the last `tail` bytes, at line ends. A note between them gives the size, the line count, the number of middle lines cut, how many of those mention an error or failure (`error`, `fail`, `traceback`, `panic`, `exception`, `fatal`, `denied`, `not found`, `no such`, `cannot`, `refused`, `timed out`, `unable`; a count, not a verdict), and the path of the full output (stdout, then stderr after a `--- stderr ---` line). A script's verdict on its last line, even with exit code 0, is in the tail. |
 | `Read` (whole file) | The text is cut to the first `head` + `tail` bytes, with a note giving the line count, the `offset` to read next and a `limit` to use, and a reminder not to `Edit` text the model has not seen. Nothing is written: the file is already on disk. |
 
 Passed through whole:
@@ -34,7 +34,7 @@ Passed through whole:
 - a result at or under the limit (the limit counts UTF-8 bytes, and a cut never splits a character);
 - an errored result or a denied call;
 - a `Read` with an `offset` or a `limit`: the model sliced it itself, so following the note, or reading a slice of a spill file, costs nothing extra and is never cut again;
-- a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `REGISTER.md`, or anything under `skills/`, `agents/`, `commands/` or `rules/`);
+- a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `REGISTER.md`, or anything under a `skills/`, `agents/`, `commands/` or `rules/` directory, so a large source file under, say, `src/nexus/commands/` also passes whole; either path separator, any case);
 - `Bash` output Claude Code has already moved to a file of its own (past about 30 KB: `persistedOutputPath`, `rawOutputPath` or its `<persisted-output>` marker), and image output;
 - every call a subagent makes;
 - every call in a headless run, unless `includeHeadless` is on.

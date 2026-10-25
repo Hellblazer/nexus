@@ -19,8 +19,9 @@ import type { Engine, Register } from 'claude-code'
 const DEFAULT_LIMIT = 4_000
 const DEFAULT_HEAD = 1_400
 const DEFAULT_TAIL = 800
-const INSTRUCTIONS = /(^|\/)(SKILL|AGENTS|CLAUDE|REGISTER)\.md$|\/(skills|agents|commands|rules)\//
-const ERRORISH = /error|fail|traceback|panic|exception|fatal/i
+// Either separator, so a Windows path matches too.
+const INSTRUCTIONS = /(^|[\\/])(SKILL|AGENTS|CLAUDE|CLAUDE\.local|REGISTER)\.md$|[\\/](skills|agents|commands|rules)[\\/]/i
+const ERRORISH = /error|fail|traceback|panic|exception|fatal|denied|not found|no such|cannot|refused|timed out|unable/i
 
 function bytes(s: string): number {
   return new TextEncoder().encode(s).length
