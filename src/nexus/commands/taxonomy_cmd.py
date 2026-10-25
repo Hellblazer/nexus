@@ -83,7 +83,7 @@ def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str
             names.append((c.name, c.count()))
     return [
         name for name, count in names
-        if count >= 5
+        if count >= MIN_DISCOVER_CHUNKS
         and name
         and not name.startswith("taxonomy__")
         and not any(fnmatch(name, pat) for pat in exclude)
@@ -691,6 +691,21 @@ def _show_assignment_quality(topic_id: int, limit: int) -> None:
         )
 
 
+def _record_discover_attempt(db: Any, collection: str, *, success: bool, error_class: str = "") -> None:
+    """Record that discover ran on *collection* (``nexus_taxonomy_discover_health``), as ``nx index`` does.
+
+    A run that formed no topics is still a success: it ran. The doctor reads the record (the discover-health row,
+    and the re-embed row's "no discover since the job", nexus-s08oe). Best-effort, including the ``db.memory``
+    access: a diagnostic write never changes the discover's own outcome.
+    """
+    from nexus.mcp_infra import record_taxonomy_discover_attempt  # noqa: PLC0415 — deferred to avoid circular import
+
+    try:
+        record_taxonomy_discover_attempt(db.memory, collection, success=success, error_class=error_class)
+    except Exception as exc:  # noqa: BLE001 — best-effort diagnostic write
+        _log.warning("taxonomy_discover_health_record_call_failed", collection=collection, error=str(exc))
+
+
 @taxonomy.command("discover")
 @click.option("--collection", "-c", default="", help="T3 collection (omit for --all)")
 @click.option("--all", "discover_all", is_flag=True, help="Discover all eligible T3 collections")
@@ -757,6 +772,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                 # keep going, fail the run at the end.
                 click.echo(f"  {col_name}: REFUSED: {exc}", err=True)
                 failed.append(col_name)
+                _record_discover_attempt(db, col_name, success=False, error_class=type(exc).__name__)
                 continue
             except TopicPersistConflictError as exc:
                 # GH #1489 (nexus-zhxxd): a persist conflict on a collection
@@ -765,7 +781,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                 # old path logged it at INFO, printed "skipped" and exited 0.
                 click.echo(f"  {col_name}: FAILED: {exc}", err=True)
                 failed.append(col_name)
+                _record_discover_attempt(db, col_name, success=False, error_class=type(exc).__name__)
                 continue
+            _record_discover_attempt(db, col_name, success=True)
             if count:
                 click.echo(f"  {col_name}: {count} topics")
                 total_topics += count

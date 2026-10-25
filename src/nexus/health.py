@@ -9532,11 +9532,17 @@ def _check_reembed_jobs() -> list[HealthResult]:
     in_flight = [j for j in jobs if j.get("state") in _REEMBED_IN_PROGRESS_STATES and j not in blocked]
     topics_note = ""
     try:
-        undiscovered = reembed_job.undiscovered_targets(jobs)
+        found = reembed_job.undiscovered_targets(jobs)
+        undiscovered = list(found.targets)
+        if found.unjudged:
+            topics_note = (
+                f"; {len(found.unjudged)} re-embed target(s) not judged for topics (chunk count unread): "
+                f"{_name_list(list(found.unjudged))}"
+            )
     except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
         _log.debug("doctor_reembed_topics_unread", error=str(exc))
         undiscovered = []
-        topics_note = f"; whether the targets have topics was not judged ({type(exc).__name__})"
+        topics_note = f"; whether the re-embed targets have had a discover was not judged ({type(exc).__name__})"
     if not (failed or blocked or in_flight or undiscovered):
         return _na(f"no job is running or failed ({len(jobs)} finished){topics_note}")
 
@@ -9579,7 +9585,7 @@ def _check_reembed_jobs() -> list[HealthResult]:
         # says so until a discover has run.
         parts.append(
             f"{len(undiscovered)} re-embed target(s) have had no taxonomy discover since their job finished, so "
-            f"topic search and topic boosts miss the moved documents: {_name_list(undiscovered)}"
+            f"topic search and topic boosts may miss the moved documents: {_name_list(undiscovered)}"
         )
         fixes.extend(reembed_job.discover_command(t) for t in undiscovered[:_MAX_FAILED_JOB_FIXES])
     warn = bool(failed or blocked or undiscovered)
