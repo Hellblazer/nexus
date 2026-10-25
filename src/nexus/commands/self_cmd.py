@@ -226,8 +226,9 @@ def perform_self_install(
     tools = install_layout.tools_dir()
     bin_dir = install_layout.bin_dir()
     if bootstrap:
-        # The plugin's setup and the installers pass `--extras pdf` by default (not a user's
-        # request for it on this machine), so a bootstrap is never "asked".
+        # The plugin's setup (conexus/launch/nx_setup.py) and the stand-in's REPAIR_COMMAND pass
+        # `--extras pdf` by default (not a user's request for it on this machine), so a bootstrap
+        # is never "asked". web/install.ps1 and web/install.sh pass no extras.
         return _bootstrap_install(
             install_dir, tools, bin_dir, version=version, extras=new_extras, dry_run=dry_run,
             progress=progress, pdf_note=pdf_note,
@@ -691,7 +692,7 @@ def _bootstrap_install(
 
     Reached ONLY through ``--bootstrap``. Installs the released package, at the
     running program's own version and with the *extras* named (none by default;
-    the installers and the plugin's setup name ``pdf``, nexus-2k66t.4.9), from the package index
+    the plugin's setup names ``pdf``, nexus-2k66t.4.9; web/install.* name none), from the package index
     into a new ``gen-<stamp>``, points ``current`` at it and writes the command
     shims. It is what ``uv tool run --python 3.12 --from conexus==<v> nx self
     install --bootstrap`` runs, from a throwaway ``uv`` environment that
@@ -2275,7 +2276,7 @@ def self_group() -> None:
 @click.option("--bootstrap", is_flag=True,
               help="First install from nothing: build the released package, at the version "
                    "of the nx running this command and with the --extras named (none by "
-                   "default; the installers pass pdf), into a new generation. Takes no "
+                   "default; the plugin setup passes pdf), into a new generation. Takes no "
                    "--version, does not prune uv's package cache, and refuses when an "
                    "install already exists.")
 @click.option("--dry-run", is_flag=True,

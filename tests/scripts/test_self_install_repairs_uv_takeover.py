@@ -226,7 +226,7 @@ def test_the_takeover_rebuild_goes_slim_and_says_so_on_a_windows_runtime_gap(bed
 
     receipt = install_layout.read_receipt((tools / "current").resolve())
     assert receipt.extras == ["local"], "pdf was carried by the rule and dropped by the gap"
-    said = [ln for ln in lines if ln.startswith("Built without PDF support")]
+    said = [ln for ln in lines if ln.startswith("PDF support will not be installed by this build")]
     assert len(said) == 1 and pdf_stack.VCRT_URL in said[0], lines
 
 

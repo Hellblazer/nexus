@@ -262,7 +262,8 @@ def _provision_vc_runtime_step(config_dir: Path) -> None:
     """Windows without Microsoft's VC++ redistributable: put ``msvcp140.dll`` and
     ``msvcp140_1.dll`` where the client's extension modules find them
     (nexus-lqjll). A no-op everywhere else and whenever the DLLs are already
-    reachable. Runs on the cloud-mode branches, which never download the engine or
+    reachable, except that a box with the base pair but not ``msvcp140_atomic_wait.dll``
+    (PDF support needs it, nexus-vyy65) has it topped up from the pinned bundle. Runs on the cloud-mode branches, which never download the engine or
     PG bundle that otherwise carry them; ``nx upgrade --auto`` does the same for
     installs that predate this step. Reports a failure with its remedy and never
     stops init: the install is otherwise complete and the DLLs are retried by

@@ -298,7 +298,9 @@ def _converge_pdf_stack(*, auto_mode: bool, skip_t3: bool) -> None:
     the new release to run; it sees a receipt written before the split and
     builds the generation that adds ``pdf``. Only a fresh install starts slim.
     ``--skip-t3`` is the fast T2-only run and skips it, as it skips the engine
-    install: the download is minutes. Never raises."""
+    install: the download is minutes. On a Windows machine that cannot load the stack the
+    build goes slim and says so (nexus-vyy65): interactive ``nx upgrade`` prints the line,
+    ``nx upgrade --auto`` only logs it (``upgrade_pdf_stack``). Never raises."""
     if skip_t3:
         return
     try:
@@ -357,8 +359,11 @@ def _converge_vc_runtime(*, auto_mode: bool) -> None:
     SessionStart ``nx upgrade --auto``, which runs detached with a limit on starting new
     ladder work (nexus-dcbof; this step is not bounded by it), so the download is never
     interrupted. A cheap three-directory stat on every run once
-    the DLLs are in place, a no-op off Windows. Runs before the PDF carry-forward
-    (nexus-2k66t.4.7), which refuses without them, and so before the engine
+    the DLLs are in place, a no-op off Windows. It also tops up ``msvcp140_atomic_wait.dll``
+    (PDF support needs it, nexus-vyy65) from the pinned bundle onto a box that has the base
+    pair but not that file, at most once per pinned engine tag. Runs before the PDF
+    carry-forward (nexus-2k66t.4.7), which builds without PDF support when they are
+    missing (it never refuses), and so before the engine
     axis: a local-mode box that would have taken the DLLs from its engine gets
     them from this download instead, and the engine's copy is then redundant,
     not missing. Never raises."""

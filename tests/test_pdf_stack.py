@@ -11,6 +11,7 @@ rule, the doctor row and the real CLI under a hidden stack have their own files.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tomllib
@@ -650,12 +651,15 @@ def test_the_refusal_names_the_dll_the_redistributable_and_the_command_when_a_ba
 
 
 def test_the_base_only_wording_is_true_before_and_after_an_engine_ships_the_dll(tmp_path) -> None:
-    """It says this engine's bundle does not carry the DLL and that a release which does ends the
-    need (nexus-vyy65); it never claims no bundled copy exists, and names no version."""
+    """It states the machine's state, then the two ways out, each conditional or engine-independent
+    (nexus-vyy65); it never claims no bundled copy exists, never says a release will carry the
+    DLL, and names no version."""
     msg = pdf_stack._windows_runtime_refusal(pdf_stack.install_plan(), ("base_only", str(tmp_path)))
     assert "no bundled copy" not in msg and "provides yet" not in msg
-    assert "this engine's bundle does not carry" in msg and "an engine release that carries it" in msg
-    assert "nexus-vyy65" in msg
+    assert "this engine's bundle does not carry" not in msg and "ends the need" not in msg
+    assert "when the engine release this nx pins carries" in msg
+    assert "with any engine" in msg and pdf_stack.VCRT_URL in msg
+    assert not re.search(r"v?\d+\.\d+\.\d+", msg.replace(str(tmp_path), "")), "no version is named"
 
 
 def test_the_refusal_when_there_is_no_runtime_at_all(tmp_path) -> None:

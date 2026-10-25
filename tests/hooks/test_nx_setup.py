@@ -525,6 +525,51 @@ def test_the_default_build_installs_the_pdf_extra(box: Box) -> None:
     assert "slim" not in done, "a default run records no slim choice"
 
 
+def _the_slim_line() -> str:
+    """The line the real build prints, made by the real function on a faked runtime gap."""
+    from nexus import pdf_stack  # noqa: PLC0415 -- the one place this file reaches into nexus
+
+    real = pdf_stack._windows_runtime_gap  # noqa: SLF001
+    pdf_stack._windows_runtime_gap = lambda *a, **k: ("none", None)  # noqa: SLF001
+    try:
+        _kept, line = pdf_stack.drop_pdf_on_runtime_gap(["pdf"])
+    finally:
+        pdf_stack._windows_runtime_gap = real  # noqa: SLF001
+    assert line is not None
+    return line
+
+
+def test_the_slim_line_prefix_is_the_one_the_real_build_prints() -> None:
+    """The setup script copies a line by its start; this ties that start to src/nexus/pdf_stack.py (nexus-vyy65)."""
+    line = _the_slim_line()
+    mod = _load_module()
+    assert line.startswith(mod.PDF_SLIM_LINE_PREFIX)
+    assert mod.pdf_slim_note(f"installing...\n{line}\nbuilding\n") == line
+    assert mod.pdf_slim_note("installing...\ndone\n") is None
+
+
+def test_a_build_that_left_pdf_support_out_says_so_in_the_done_message(box: Box) -> None:
+    """The build's output goes to the setup log; the slim line has to reach the done message as well, or
+    a plugin-setup user on a Windows box that cannot load the PDF stack gets no word of it (nexus-vyy65)."""
+    line = _the_slim_line()
+    rule = box.uv_builds_nx()
+    rule["out"] = f"resolving\n{line}\nbuilt\n"
+    box.behave([rule, _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done", box.read_log()
+    assert line in done["message"]
+
+
+def test_a_build_that_printed_no_slim_line_adds_nothing_about_pdf(box: Box) -> None:
+    rule = box.uv_builds_nx()
+    rule["out"] = "resolving\nbuilt\n"
+    box.behave([rule, _nx_reports(_PLUGIN_VERSION)])
+    box.start("cli-only")
+    done = box.wait_terminal()
+    assert done["state"] == "done" and "PDF support" not in done["message"]
+
+
 @pytest.mark.parametrize("mode", ["cli-only", "local"])
 def test_slim_builds_without_the_pdf_extra_and_records_the_choice(box: Box, mode: str) -> None:
     box.behave([box.uv_builds_nx(), _nx_reports(_PLUGIN_VERSION)])

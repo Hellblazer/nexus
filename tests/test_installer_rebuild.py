@@ -680,7 +680,7 @@ def test_a_rebuild_with_pdf_extras_on_a_windows_box_with_a_runtime_gap_builds_sl
     line = pdf_stack.rebuild_stale_installer(auto_mode=True)
     assert bed.builds == [("local",)], "built once, without pdf"
     assert line is not None and line.startswith("rebuilt the current generation with the release's dependency lock")
-    assert line.count("Built without PDF support") == 1 and pdf_stack.VCRT_URL in line
+    assert line.count("PDF support will not be installed by this build") == 1 and pdf_stack.VCRT_URL in line
     assert bed.current.constraints == "applied" and bed.current.extras == ["local"]
     assert not (Path(os.environ["NEXUS_CONFIG_DIR"]) / SENTINEL).exists()
     assert pdf_stack.rebuild_stale_installer(auto_mode=True) is None, "nothing is owed afterwards"

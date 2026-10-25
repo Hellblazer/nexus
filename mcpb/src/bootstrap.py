@@ -349,20 +349,63 @@ def _set_pdf(bundle_dir, on):
     return True, ""
 
 
-def _apply_pdf(bundle_dir, environ=None):
+#: The VC++ runtime DLLs the PDF stack's torch imports on Windows (nexus-vyy65): the base pair the
+#: client's extension modules need plus ``msvcp140_atomic_wait.dll``. This launcher imports nothing
+#: from nexus, so the names and the search directories are repeated from ``nexus/_vcrt.py``;
+#: ``tests/test_mcpb_pdf_setting.py`` compares them.
+_PDF_RUNTIME_DLLS = ("msvcp140.dll", "msvcp140_1.dll", "msvcp140_atomic_wait.dll")
+_VCRT_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+
+
+def _pdf_runtime_gap(environ, platform):
+    """``True`` when, on Windows, no directory nexus loads DLLs from holds every runtime DLL the PDF stack
+    imports: System32, or one of the app-local directories under the config directory, with ALL of them
+    (the whole-set rule of ``nexus/__init__.py``). A cheap stat; ``False`` off Windows. Never raises."""
+    if platform != _WINDOWS:
+        return False
+    try:
+        system = os.path.join(environ.get("SystemRoot") or r"C:\Windows", "System32")
+        config = (environ.get("NEXUS_CONFIG_DIR") or "").strip() or os.path.join(
+            os.path.expanduser("~"), ".config", "nexus")
+        candidates = (
+            system,
+            os.path.join(config, "service"),
+            os.path.join(config, "pg-bundle", "bundle", "bin"),
+            os.path.join(config, "vcrt"),
+        )
+        return not any(
+            all(os.path.isfile(os.path.join(d, n)) for n in _PDF_RUNTIME_DLLS) for d in candidates
+        )
+    except (OSError, ValueError):  # cannot tell: say nothing rather than a guess
+        return False
+
+
+def _apply_pdf(bundle_dir, environ=None, platform=None):
     """Make the bundle's conexus requirement match the ``include_pdf`` setting.
     ``(in_force, line)``: whether the pdf extra is now requested, and the line to
-    state on stderr (``""`` when off and already bare). Never raises."""
+    state on stderr (``""`` when off and already bare). On Windows without the VC++
+    runtime the PDF stack's torch imports, the line adds that PDF support will not load
+    until the runtime is present; the setting is applied all the same. Never raises."""
     environ = os.environ if environ is None else environ
+    platform = sys.platform if platform is None else platform
     want = str(environ.get(_PDF_ENV, "")).strip().lower() in _OPT_OUT_VALUES
     changed, refusal = _set_pdf(bundle_dir, want)
     if refusal:
         return False, "[conexus-mcpb] WARNING: the include_pdf setting was not applied: %s." % refusal
     if want:
-        return True, (
+        line = (
             "[conexus-mcpb] PDF support is on (the include_pdf setting): the sync installs conexus[pdf]%s."
             % (", about 0.25 GB more to download and 0.85 GB more on disk on macOS" if changed else "")
         )
+        if _pdf_runtime_gap(environ, platform):
+            line += (
+                "\n[conexus-mcpb] WARNING: this Windows machine lacks the Visual C++ runtime files PDF "
+                "support loads (%s), so PDF support will not load until they are present. Install "
+                "Microsoft's redistributable from %s, or run `nx upgrade` if nexus is installed: it "
+                "places them when the engine release it pins carries them."
+                % (", ".join(_PDF_RUNTIME_DLLS), _VCRT_URL)
+            )
+        return True, line
     if changed:
         return False, "[conexus-mcpb] PDF support is off (the include_pdf setting): the sync removes it."
     return False, ""
@@ -809,7 +852,7 @@ def main(platform=None) -> None:
     else:
         # Before the sync AND before the launch's own `uv run`, which resolves too.
         print(_apply_pin(bundle_dir), file=sys.stderr, flush=True)
-        pdf, line = _apply_pdf(bundle_dir)
+        pdf, line = _apply_pdf(bundle_dir, platform=platform)
         if line:
             print(line, file=sys.stderr, flush=True)
         sync_kw = {"uv": uv} if platform == _WINDOWS else {}

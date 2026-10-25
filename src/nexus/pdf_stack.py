@@ -534,19 +534,29 @@ def _windows_runtime_missing() -> bool:
 def _gap_sentence(gap: tuple[str, str | None]) -> str:
     """What is missing, as one sentence ending in a space, for the refusal and the
     slim-build line. One wording per cause, so the base-runtime-present case never
-    claims the machine has no runtime.
-
-    The ``base_only`` text is true before and after an engine release carries
-    ``msvcp140_atomic_wait.dll`` (nexus-vyy65): it says this engine's bundle does not,
-    and that a release which does ends the need, so it never names a version."""
+    claims the machine has no runtime. It states the machine's state and nothing about any
+    engine release, so it is true before and after one carries ``msvcp140_atomic_wait.dll``
+    (nexus-vyy65)."""
     kind, where = gap
     if kind == "base_only":
         return (
             f"The Visual C++ runtime found in {where} lacks msvcp140_atomic_wait.dll, "
-            "which torch needs and this engine's bundle does not carry "
-            "(an engine release that carries it ends the need for the redistributable, nexus-vyy65). "
+            "which torch needs. "
         )
     return "This machine has no Microsoft Visual C++ runtime. "
+
+
+def _runtime_ways() -> str:
+    """The two ways to get the missing runtime, as a sentence. Conditional on purpose:
+    ``nx init`` and ``nx upgrade`` place ``msvcp140_atomic_wait.dll`` only when the engine
+    release this nx pins carries it, and Microsoft's redistributable works with any engine,
+    so the sentence is true before and after an engine release that carries the DLL
+    (nexus-vyy65)."""
+    return (
+        "`nx init` or `nx upgrade` places the missing files itself when the engine release "
+        f"this nx pins carries them; Microsoft's redistributable ({VCRT_URL}) provides them "
+        "with any engine."
+    )
 
 
 def _windows_runtime_refusal(
@@ -559,8 +569,8 @@ def _windows_runtime_refusal(
     after the redistributable, so the text never sends the user to reinstall."""
     tail = f"and run: {plan.command}" if then is None else f"then {then}"
     return (
-        f"PDF support needs Microsoft's Visual C++ redistributable. {_gap_sentence(gap)}"
-        f"Install it from {VCRT_URL} {tail}"
+        f"PDF support needs the Visual C++ runtime. {_gap_sentence(gap)}"
+        f"{_runtime_ways()} To use the redistributable, install it from {VCRT_URL} {tail}"
     )
 
 
@@ -576,8 +586,9 @@ def drop_pdf_on_runtime_gap(
     PDF stack still gets the rest of nexus and an upgrade is never frozen by it. The new
     receipt then does not list ``pdf``, so nothing later is gated by it; the first
     ``nx index pdf`` refuses with the link (:func:`ensure`) and installs on demand once the
-    redistributable is present. *asked*: the user typed ``--extras pdf``; the line then
-    says PDF support was not installed, rather than that the build leaves it out."""
+    runtime is in place. *asked*: the user typed ``--extras pdf``; the line then
+    says PDF support will not be installed, rather than that the build leaves it out. The
+    line is worded as what will happen: it prints before the build and on ``--dry-run``."""
     if not any(e.strip().lower() == "pdf" for e in extras):
         return list(extras), None
     gap = _windows_runtime_gap()
@@ -587,13 +598,13 @@ def drop_pdf_on_runtime_gap(
     plan = install_plan()
     if asked:
         line = (
-            f"PDF support was NOT installed, although --extras pdf asked for it. {_gap_sentence(gap)}"
-            f"Install the redistributable from {VCRT_URL}, then run: {plan.command}"
+            f"PDF support will NOT be installed, although --extras pdf asked for it. {_gap_sentence(gap)}"
+            f"{_runtime_ways()} Once the runtime is in place, run: {plan.command}"
         )
     else:
         line = (
-            f"Built without PDF support. {_gap_sentence(gap)}"
-            f"Install the redistributable from {VCRT_URL}; PDF support then installs on first use."
+            f"PDF support will not be installed by this build. {_gap_sentence(gap)}"
+            f"It installs on first use once the runtime is in place: {_runtime_ways()}"
         )
     return kept, line
 

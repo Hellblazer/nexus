@@ -234,3 +234,36 @@ def test_the_red_row_runs_the_real_gap_probe_and_does_not_tell_an_installed_stac
     for n in _vcrt.PDF_STACK_DLLS:
         (sysdir / n).write_bytes(b"MZ")
     assert health._check_pdf_support()[0].ok
+
+
+# nexus-vyy65: an ABSENT stack on a Windows box that cannot load it. "First use installs it"
+# and "to install now: <command>" are both false there (the first PDF index refuses, and the
+# command builds slim again), so the row says the gap and what places the runtime instead.
+
+
+def test_absent_on_a_gap_box_says_the_gap_and_the_remedy_not_the_install_command(monkeypatch, tmp_path) -> None:
+    _stack(monkeypatch, "absent", "docling, MinerU and torch are not installed")
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("base_only", str(tmp_path / "svc")))
+    (row,) = health._check_pdf_support()
+    assert row.label == "PDF support" and row.ok and row.warn, "informational, but not a plain pass"
+    assert "msvcp140_atomic_wait.dll" in row.detail and str(tmp_path / "svc") in row.detail
+    assert "cannot be installed yet" in row.detail
+    assert "nx upgrade" in row.detail and pdf_stack.VCRT_URL in row.detail
+    assert "installs it on first use" not in row.detail, "false on a gap box"
+    assert "to install now" not in row.detail and pdf_stack.INSTALL_COMMAND not in row.detail
+    assert any(pdf_stack.VCRT_URL in f for f in row.fix_suggestions)
+
+
+def test_absent_with_no_runtime_at_all_says_so(monkeypatch) -> None:
+    _stack(monkeypatch, "absent")
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("none", None))
+    (row,) = health._check_pdf_support()
+    assert "no Microsoft Visual C++ runtime" in row.detail and "to install now" not in row.detail
+
+
+def test_absent_on_a_box_without_a_gap_keeps_the_first_use_wording(monkeypatch) -> None:
+    _stack(monkeypatch, "absent")
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: None)
+    (row,) = health._check_pdf_support()
+    assert row.ok and not row.warn
+    assert "installs it on first use" in row.detail and pdf_stack.INSTALL_COMMAND in row.detail

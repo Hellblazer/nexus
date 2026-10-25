@@ -215,8 +215,8 @@ def test_a_carry_that_built_slim_reports_the_line_and_leaves_no_failure_marker(b
     def slim_install(*, carrying: bool = False, notes: list[str] | None = None) -> None:
         bed.installs.append(carrying)
         assert notes is not None
-        notes.append("Built without PDF support. (the line)")
+        notes.append("PDF support will not be installed by this build. (the line)")
 
     monkeypatch.setattr(pdf_stack, "_install_generation", slim_install)
-    assert pdf_stack.carry_forward(auto_mode=True) == "Built without PDF support. (the line)"
+    assert pdf_stack.carry_forward(auto_mode=True) == "PDF support will not be installed by this build. (the line)"
     assert not (Path(os.environ["NEXUS_CONFIG_DIR"]) / "pdf-carry-forward-failed").exists()

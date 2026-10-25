@@ -508,7 +508,7 @@ def test_the_windows_legacy_convergence_leaves_pdf_out_and_says_so_on_a_runtime_
     seen = _legacy_converge_seen(monkeypatch, tmp_path, gap=("none", None))
     assert len(seen) == 1 and seen[0]["without_pdf"] is True
     out = capsys.readouterr().out
-    assert out.count("Built without PDF support") == 1 and "aka.ms/vs/17" in out
+    assert out.count("PDF support will not be installed by this build") == 1 and "aka.ms/vs/17" in out
 
 
 def test_the_windows_legacy_convergence_adds_pdf_as_before_without_a_gap(

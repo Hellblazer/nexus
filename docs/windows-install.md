@@ -27,23 +27,33 @@ was not measured, it says so.
   from Windows' default example refuses the same programs (2026-10-15). An
   administrator has to allow them first; [Application control](#application-control)
   lists the rules that were enough for each.
-- **PDF support needs Microsoft's Visual C++ redistributable on a machine whose
-  engine does not carry one DLL yet.** torch imports `msvcp140_atomic_wait.dll`.
-  The engine and the PostgreSQL bundle carry the other runtime DLLs beside their
-  executables (nexus-lqjll), and from the first engine release that also carries
-  this one (nexus-vyy65) PDF support needs nothing installed. Until a machine has
-  such an engine, and has no redistributable, nexus installs without PDF support
-  and says so: `nx self install` (including the `--bootstrap` form the plugin
-  setup and the installers run with the `pdf` extra), `nx upgrade` and the
-  carry-forward of PDF support into an upgraded install each build the
-  generation without the PDF stack and print one line with the download link,
-  and the new install records no `pdf` extra, so no upgrade is held back by it.
-  Typing `nx self install --extras pdf` does the same and says PDF support was
-  not installed. The first PDF index stops with the link too, and installs the
-  stack on first use once the redistributable is present. `nx doctor` shows
-  "PDF support" red on an install that has the stack but not the DLL. Microsoft's
-  installer needs administrator rights. The base client, local embedding and the
-  engine do not need it.
+- **PDF support needs three Visual C++ runtime DLLs, and installs without them
+  only as a build without PDF support.** torch imports
+  `msvcp140_atomic_wait.dll` as well as `msvcp140.dll` and `msvcp140_1.dll`. The
+  engine and the PostgreSQL bundle carry the first two beside their executables
+  (nexus-lqjll). Once the engine release this nx pins carries the third
+  (nexus-vyy65), `nx init` and `nx upgrade` place all three where nexus finds
+  them, in every mode, and PDF support needs nothing installed. Before that, and
+  on a machine that has none of them yet, PDF support needs Microsoft's
+  redistributable, which needs administrator rights. In that case nexus installs
+  without PDF support and says so, and never refuses an install or an upgrade:
+  `nx self install` (including `--bootstrap`), `nx upgrade`, and the carry-forward of PDF
+  support into an upgraded install each build the generation without the PDF
+  stack, and the new install records no `pdf` extra, so no upgrade is held back
+  by it. Typing `nx self install --extras pdf` does the same and says PDF support
+  will not be installed. A machine that installs before `nx init` has placed
+  anything is in this case at first; PDF support then installs on first use once
+  the DLLs are in place. Where the line appears: interactive `nx self install` and
+  `nx upgrade` print it; the Claude Code plugin setup repeats it in its done
+  message (it is the one caller that asks for PDF support by default;
+  `web/install.ps1` and `web/install.sh` pass no extras, so what they build has no
+  PDF support on any machine, and they print nothing about it); `nx upgrade --auto`
+  and the session-start lockstep upgrade write it to their logs only
+  (`lockstep.log` for the second). The first PDF index
+  stops with the link too. `nx doctor` shows "PDF support" red on an install that
+  has the stack but not the DLL, and amber, with the same remedies, on one that has
+  neither. The base client, local embedding and the engine do not need the third
+  DLL.
 - **The binaries are unsigned** (signing is deferred, nexus-dj01b). See
   [Signing and SmartScreen](#signing-and-smartscreen).
 

@@ -293,6 +293,11 @@ RECONNECT_NEXT: str = (
 #: so the model that resumes the run does not drop it.
 SLIM_DONE_NOTE: str = "PDF support was left out (slim); `nx self install --extras pdf` adds it, and the first PDF indexed installs it."
 SLIM_WORDS: str = " and slim true"
+#: The start of the line `nx self install --bootstrap` prints when it leaves PDF support out because this
+#: Windows machine cannot load the stack (nexus-vyy65, `drop_pdf_on_runtime_gap` in src/nexus/pdf_stack.py;
+#: tests/hooks/test_nx_setup.py ties the two). The build output goes to the setup log, so the run copies the
+#: line into its done message: a user who never opens the log still hears it.
+PDF_SLIM_LINE_PREFIX: str = "PDF support will not be installed by this build."
 #: Appended to a slim run's resume text: a resume inherits slim, so the way out has to be said.
 FULL_WORDS: str = " To switch to the full install (PDF support included), pass slim false instead."
 
@@ -2188,6 +2193,15 @@ def build_env(platform: str | None = None, environ: dict[str, str] | None = None
     return env
 
 
+def pdf_slim_note(output: str) -> str | None:
+    """The line the bootstrap build printed to say it left PDF support out (:data:`PDF_SLIM_LINE_PREFIX`), or
+    ``None`` when it printed none."""
+    for line in output.splitlines():
+        if line.strip().startswith(PDF_SLIM_LINE_PREFIX):
+            return line.strip()
+    return None
+
+
 def _execute(run: _Run) -> int:
     if run.mode == MODE_CLOUD and not (run.data.get(CLOUD_SAVED) and _credentials_saved(config_dir())):
         failed = run.open_page()  # at the start of the run, so the user is asked while the build goes on
@@ -2208,11 +2222,14 @@ def _execute(run: _Run) -> int:
             # throwaway environment that runs --bootstrap stays slim.
             build += ["--extras", "pdf"]
         try:
-            code, _ = run.cmd(build, env=build_env())
+            code, built = run.cmd(build, env=build_env())
         except OSError as exc:
             return run.fail("build", f"the build could not start: {exc}")
         if code != 0:
             return run.fail("build", "the build timed out." if code is None else f"the build exited {code}.")
+        slim_line = pdf_slim_note(built)
+        if slim_line is not None:
+            run.notes.append(slim_line)
         nx = _nx_after_build(run)
         if nx is None:
             layout = _layout_nx()

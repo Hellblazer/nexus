@@ -386,12 +386,31 @@ def satisfies(installed: str | None, target: str) -> bool:
     return inst >= tgt
 
 
+#: Standard output of the last :func:`run_cmd` that exited 0 (empty after a failure), so the caller
+#: can read a line the command printed. Only ``nx self install``'s PDF line is read from it.
+_last_stdout: str = ""
+
+#: The start of the line `nx self install` prints when it builds without PDF support because this
+#: Windows machine cannot load the stack (nexus-vyy65; src/nexus/pdf_stack.py, drop_pdf_on_runtime_gap).
+_PDF_SLIM_PREFIXES: tuple[str, ...] = ("PDF support will not be installed", "PDF support will NOT be installed")
+
+
+def pdf_slim_line(stdout: str) -> str | None:
+    """The slim-build line in *stdout*, or None."""
+    for line in stdout.splitlines():
+        if line.strip().startswith(_PDF_SLIM_PREFIXES):
+            return line.strip()
+    return None
+
+
 def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
     """Run a command; return True on exit 0, False otherwise. Never raises.
 
     ``cmd[0]`` is resolved off the cwd and spawned by absolute path: ``nx`` by
     the launcher's lookup (:func:`resolve_nx`), anything else on PATH alone. A
     name that does not resolve is a failed command, never a cwd lookup."""
+    global _last_stdout
+    _last_stdout = ""
     exe = resolve_nx() if cmd[0] == "nx" else which_off_cwd(cmd[0])
     if exe is None:
         debug(f"{cmd[0]} not found")
@@ -407,6 +426,7 @@ def run_cmd(cmd: list[str], timeout: int = 300) -> bool:
         if result.returncode != 0:
             debug(f"{' '.join(cmd)} exited {result.returncode}: {result.stderr[-500:]}")
             return False
+        _last_stdout = result.stdout or ""
         return True
     except (subprocess.SubprocessError, OSError) as exc:
         debug(f"{' '.join(cmd)} raised: {exc}")
@@ -702,6 +722,12 @@ def main(argv: list[str]) -> None:
             debug("uv tool upgrade failed; leaving marker stale for retry")
             log_event("lockstep_upgrade_result", target=target, outcome="uv_upgrade_failed")
             return
+        # nexus-vyy65: this build runs detached and its output is shown only under NX_HOOK_DEBUG, so a
+        # build that left PDF support out (a Windows machine that cannot load the stack) would be silent.
+        # Always log the line it printed.
+        slim_line = pdf_slim_line(_last_stdout) if generation else None
+        if slim_line is not None:
+            log_event("lockstep_pdf_slim", target=target, line=slim_line)
         # 3b. The migrations and any upgrade-time rebuild run DETACHED
         #     (nexus-qytet): this step must not be the timeout that kills a
         #     ~0.8 GB rebuild. Step 4 below confirms the BINARY (3a installed

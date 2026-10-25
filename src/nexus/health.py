@@ -2866,6 +2866,22 @@ def _check_pdf_support() -> list[HealthResult]:
     owed = pdf_stack.carry_forward_note()
     owed_note = f"; {owed}" if owed else ""
     if st.status == "absent":
+        # nexus-vyy65: on a Windows box that cannot load the stack, "first use installs it" and
+        # the install command are both false (the first PDF index refuses, and the command builds
+        # slim again). Say why and what places the runtime instead.
+        gap = pdf_stack._windows_runtime_gap()  # noqa: SLF001
+        if gap is not None:
+            return [HealthResult(
+                label="PDF support", ok=True, warn=True,
+                detail=(
+                    f"not installed, and it cannot be installed yet. {pdf_stack._gap_sentence(gap)}"  # noqa: SLF001
+                    f"{pdf_stack._runtime_ways()} PDF support then installs on first use{held_note}{owed_note}"  # noqa: SLF001
+                ),
+                fix_suggestions=[
+                    f"Install Microsoft's Visual C++ redistributable: {pdf_stack.VCRT_URL}",
+                    "or run `nx upgrade` (places the runtime when the pinned engine carries it)",
+                ],
+            )]
         return [HealthResult(
             label="PDF support", ok=owed is None, warn=owed is not None,
             detail=(

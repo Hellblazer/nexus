@@ -678,7 +678,7 @@ def test_an_explicit_extras_pdf_builds_slim_on_a_runtime_gap_and_says_it_was_not
     assert new != host.resolve(), "a generation was built and flipped to"
     assert "pdf" not in _extras_of(new) and "local" in _extras_of(new)
     out = capsys.readouterr().out
-    assert out.count("PDF support was NOT installed") == 1, "one line, and it does not ignore the flag silently"
+    assert out.count("PDF support will NOT be installed") == 1, "one line, and it does not ignore the flag silently"
     assert pdf_stack.VCRT_URL in out and "no Microsoft Visual C++ runtime" in out
 
 
@@ -692,7 +692,7 @@ def test_a_receipt_that_lists_pdf_builds_slim_on_a_runtime_gap_with_one_line(
     assert new != host.resolve()
     assert _extras_of(new) == ["local"], "the new receipt does not list pdf, so later upgrades are not gated"
     out = capsys.readouterr().out
-    assert out.count("Built without PDF support") == 1
+    assert out.count("PDF support will not be installed by this build") == 1
     assert pdf_stack.VCRT_URL in out and "installs on first use" in out
 
 
@@ -706,7 +706,7 @@ def test_the_carry_forward_of_a_pre_split_receipt_is_dropped_too_and_does_not_re
     _run_self_install()
     first = (tools / "current").resolve()
     assert "pdf" not in _extras_of(first)
-    assert "Built without PDF support" in capsys.readouterr().out
+    assert "PDF support will not be installed by this build" in capsys.readouterr().out
     setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(first))
     _run_self_install()
     assert "PDF support" not in capsys.readouterr().out, "nothing is owed, nothing is said"
@@ -718,7 +718,7 @@ def test_a_dry_run_shows_the_slim_build_and_the_line(bed, monkeypatch, tmp_path,
     _windows_box_without_atomic_wait(monkeypatch, tmp_path)
     assert _run_self_install(add_extras=("pdf",), dry_run=True) is None
     out = capsys.readouterr().out
-    assert "PDF support was NOT installed" in out
+    assert "PDF support will NOT be installed" in out
     argv = [ln for ln in out.splitlines() if ln.startswith("bash ")]
     assert len(argv) == 1 and argv[0].endswith("--extras local"), out
     assert (tools / "current").resolve() == host.resolve()
@@ -766,7 +766,7 @@ def test_bootstrap_with_extras_pdf_builds_slim_on_a_runtime_gap_and_the_receipt_
     generation = _run_self_install(bootstrap=True, add_extras=("pdf", "local"))
     assert generation is not None and _extras_of(generation) == ["local"]
     out = capsys.readouterr().out
-    assert out.count("Built without PDF support") == 1 and pdf_stack.VCRT_URL in out
+    assert out.count("PDF support will not be installed by this build") == 1 and pdf_stack.VCRT_URL in out
 
 
 def test_bootstrap_with_extras_pdf_builds_pdf_when_the_runtime_is_whole(bed, monkeypatch, tmp_path, capsys) -> None:
@@ -786,10 +786,10 @@ def test_the_carry_forward_builds_a_slim_generation_on_a_runtime_gap_and_stops_b
     _windows_box_without_atomic_wait(monkeypatch, tmp_path)
     assert pdf_stack.carry_forward_pending()
     line = pdf_stack.carry_forward()
-    assert line is not None and line.startswith("Built without PDF support") and pdf_stack.VCRT_URL in line
+    assert line is not None and line.startswith("PDF support will not be installed by this build") and pdf_stack.VCRT_URL in line
     new = (tools / "current").resolve()
     assert new != host.resolve() and _extras_of(new) == ["local"]
-    assert "Built without PDF support" not in capsys.readouterr().out, "the line is returned once, not also echoed"
+    assert "PDF support will not be installed by this build" not in capsys.readouterr().out, "the line is returned once, not also echoed"
     setattr_in(monkeypatch, ("nexus.commands.self_cmd", "nexus.upgrade_finish"), "sys.prefix", str(new))
     assert not pdf_stack.carry_forward_pending()
     assert pdf_stack.carry_forward() is None

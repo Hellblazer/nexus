@@ -234,3 +234,85 @@ def bootstrap_env() -> str:
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod._PDF_ENV
+
+
+# ── a Windows machine without the VC++ runtime the PDF stack imports (nexus-vyy65) ──────────────
+#
+# The setting is applied either way (the opt-in stays what it was); the stderr line adds that PDF
+# support will not load until the runtime is present. The launcher imports nothing from nexus, so the
+# DLL names and directories are repeated and compared here.
+
+_GAP_ENV = "NX_MCPB_INCLUDE_PDF"
+
+
+def _win_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    root = tmp_path / "win"
+    (root / "System32").mkdir(parents=True, exist_ok=True)
+    return {_GAP_ENV: "true", "SystemRoot": str(root), "NEXUS_CONFIG_DIR": str(tmp_path / "cfg"), **extra}
+
+
+def _dlls(directory: Path, names) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (directory / n).write_bytes(b"MZ")
+
+
+def test_the_launchers_runtime_names_are_the_clients(bootstrap) -> None:
+    from nexus import _vcrt, pdf_stack
+
+    assert bootstrap._PDF_RUNTIME_DLLS == _vcrt.PDF_STACK_DLLS
+    assert bootstrap._VCRT_URL == pdf_stack.VCRT_URL
+
+
+def test_on_windows_with_no_runtime_the_setting_applies_and_the_line_warns(bootstrap, bundle: Path, tmp_path: Path) -> None:
+    in_force, line = bootstrap._apply_pdf(str(bundle), environ=_win_env(tmp_path), platform="win32")
+    assert in_force is True and _conexus_reqs(bundle)[0].startswith("conexus[pdf]")
+    assert "PDF support is on" in line, "the opt-in line is kept"
+    assert "will not load until they are present" in line and "msvcp140_atomic_wait.dll" in line
+    assert "aka.ms/vs/17/release/vc_redist.x64.exe" in line and "nx upgrade" in line
+
+
+def test_a_base_pair_without_atomic_wait_still_warns(bootstrap, bundle: Path, tmp_path: Path) -> None:
+    env = _win_env(tmp_path)
+    _dlls(Path(env["SystemRoot"]) / "System32", ("msvcp140.dll", "msvcp140_1.dll"))
+    _, line = bootstrap._apply_pdf(str(bundle), environ=env, platform="win32")
+    assert "will not load until they are present" in line
+
+
+def _client_app_local_dirs() -> list[str]:
+    from nexus import _vcrt
+
+    return [str(Path(d).relative_to("CFG")) for d in _vcrt.app_local_dirs("CFG")]
+
+
+@pytest.mark.parametrize("where", ["System32", *_client_app_local_dirs()])
+def test_the_whole_set_in_any_directory_the_client_searches_says_nothing_extra(
+    bootstrap, bundle: Path, tmp_path: Path, where: str,
+) -> None:
+    """The directories are the client's own list (``nexus._vcrt.app_local_dirs``), so a directory
+    added there and not here fails this test."""
+    env = _win_env(tmp_path)
+    base = Path(env["SystemRoot"]) if where == "System32" else tmp_path / "cfg"
+    _dlls(base / where, bootstrap._PDF_RUNTIME_DLLS)
+    in_force, line = bootstrap._apply_pdf(str(bundle), environ=env, platform="win32")
+    assert in_force is True and "will not load" not in line and "WARNING" not in line
+
+
+def test_a_directory_with_only_part_of_the_set_does_not_count(bootstrap, bundle: Path, tmp_path: Path) -> None:
+    env = _win_env(tmp_path)
+    _dlls(tmp_path / "cfg" / "vcrt", ("msvcp140.dll", "msvcp140_1.dll"))
+    assert "will not load" in bootstrap._apply_pdf(str(bundle), environ=env, platform="win32")[1]
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_off_windows_nothing_is_added(bootstrap, bundle: Path, tmp_path: Path, platform: str) -> None:
+    _, line = bootstrap._apply_pdf(str(bundle), environ=_win_env(tmp_path), platform=platform)
+    assert "will not load" not in line and "PDF support is on" in line
+
+
+def test_with_the_setting_off_a_windows_machine_without_the_runtime_hears_nothing(
+    bootstrap, bundle: Path, tmp_path: Path,
+) -> None:
+    env = _win_env(tmp_path)
+    env[_GAP_ENV] = "false"
+    assert bootstrap._apply_pdf(str(bundle), environ=env, platform="win32") == (False, "")

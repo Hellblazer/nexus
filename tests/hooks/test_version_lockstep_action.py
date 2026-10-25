@@ -1041,3 +1041,53 @@ class TestWindowsDetach:
             0x08000000 | 0x00000200 | 0x01000000,
             0x08000000 | 0x00000200,
         ]
+
+
+class TestSlimLineReachesTheLog:
+    """nexus-vyy65: the action's ``nx self install`` runs detached and its output is shown only under
+    NX_HOOK_DEBUG. A build that left PDF support out (a Windows machine that cannot load the stack) printed
+    its one line to nowhere; it now lands in lockstep.log."""
+
+    @staticmethod
+    def _wire_real_run_cmd(mod, monkeypatch, stdout: str) -> None:
+        monkeypatch.setattr(mod, "uv_receipt_present", lambda: False)
+        monkeypatch.setattr(mod, "generation_install_present", lambda: True)
+        versions = ["1.0.0", "9.9.9"]
+        monkeypatch.setattr(mod, "installed_nx_version", lambda: versions.pop(0) if versions else None)
+        monkeypatch.setattr(mod, "resolve_nx", lambda: "/usr/bin/nx")
+        monkeypatch.setattr(mod, "which_off_cwd", lambda c: f"/usr/bin/{c}")
+        monkeypatch.setattr(mod, "start_background_upgrade", lambda: 4242)
+        monkeypatch.setattr(mod, "DEBUG", False)  # the line must not depend on NX_HOOK_DEBUG
+
+        class _Done:
+            returncode = 0
+            stderr = ""
+
+        _Done.stdout = stdout
+        setattr_in(monkeypatch, mod, "subprocess.run", lambda *a, **k: _Done())
+
+    def test_the_slim_line_is_logged_without_debug(self, mod, marker, log, monkeypatch) -> None:
+        line = "PDF support will not be installed by this build. This machine has no Microsoft Visual C++ runtime."
+        self._wire_real_run_cmd(mod, monkeypatch, f"resolving\n{line}\nbuilt\n")
+        mod.main(["action", "9.9.9"])
+        text = log.read_text(encoding="utf-8")
+        assert "lockstep_pdf_slim" in text and "target=9.9.9" in text
+        assert "PDF support will not be installed by this build." in text
+
+    def test_a_build_that_printed_no_such_line_logs_nothing_about_pdf(self, mod, marker, log, monkeypatch) -> None:
+        self._wire_real_run_cmd(mod, monkeypatch, "resolving\nbuilt\n")
+        mod.main(["action", "9.9.9"])
+        assert "lockstep_pdf_slim" not in log.read_text(encoding="utf-8")
+
+    def test_the_prefix_matches_what_the_real_build_prints(self, mod) -> None:
+        from nexus import pdf_stack
+
+        real = pdf_stack._windows_runtime_gap
+        pdf_stack._windows_runtime_gap = lambda *a, **k: ("none", None)
+        try:
+            _kept, plain = pdf_stack.drop_pdf_on_runtime_gap(["pdf"])
+            _kept, asked = pdf_stack.drop_pdf_on_runtime_gap(["pdf"], asked=True)
+        finally:
+            pdf_stack._windows_runtime_gap = real
+        assert mod.pdf_slim_line(f"x\n{plain}\n") == plain
+        assert mod.pdf_slim_line(f"x\n{asked}\n") == asked
