@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.86.0] - 2026-10-25
+
+Pairs with engine-service-v0.1.164 (`REQUIRED_ENGINE_VERSION` unchanged from 7.85.0), already deployed to the managed service; no engine changesets. On Windows, PDF support needs Microsoft's Visual C++ redistributable on this engine: 0.1.164 does not carry `msvcp140_atomic_wait.dll`, so a machine without it installs without PDF support and says so (see Fixed, nexus-vyy65).
+
 ### Added
 - **The Claude Desktop extension can carry PDF support, opt-in** (nexus-dzc61). Its new "Include PDF support" setting (off by default) makes the launcher install `conexus[pdf]` at the next start, about 0.25 GB more to download and 0.85 GB more on disk on macOS; turning it off removes the PDF packages again. With it off, a start resolves exactly what it did before, and a sync that fails with it on falls back to bare so the extension still starts. Indexing a PDF in the extension with the setting off names the setting. `scripts/check_mcpb_resolve.py` resolves both variants (live, 2026-10-24: bare 139 packages, PDF 219, 0 pins moved), and a real sync on macOS installed, imported and removed the PDF stack.
 
