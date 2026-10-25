@@ -9,7 +9,7 @@
 </div>
 <p class="thread-notice" style="margin-top:0;">What each Claude session is working on, and what is waiting for you.</p>
 
-<div id="threads-board">
+<div id="threads-board" hx-get="/threads/refresh" hx-trigger="every 60s" hx-swap="innerHTML">
   {% include "threads/_board.html" %}
 </div>
 {% endblock %}

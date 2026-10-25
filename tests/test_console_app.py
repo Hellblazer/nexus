@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from nexus.console.app import create_app
 from nexus.console.config import ConsoleConfig
+from nexus.console.threads import BeadsResult
 
 
 def test_app_factory_creates_app():
@@ -50,11 +51,10 @@ def test_static_pico_served():
     assert resp.status_code == 200
 
 
-def test_static_alpine_served():
-    app = create_app()
-    client = TestClient(app)
-    resp = client.get("/static/alpine.min.js")
-    assert resp.status_code == 200
+def test_no_page_loads_alpine():
+    client = TestClient(create_app(bd_runner=lambda: BeadsResult(()), threads_reader=lambda: []))
+    assert "alpine" not in client.get("/threads").text.lower()  # base.html is shared with Health
+    assert client.get("/static/alpine.min.js").status_code == 404
 
 
 def test_static_console_css_served():

@@ -1413,9 +1413,10 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # `t1_addr.*` REMOVED round 2 (coordinator directive): the retired
     # RDR-149 P4 Chroma-lease format (nexus-8zfwv, 2026-08-07) -- every
     # remaining src/ reference is a comment/docstring noting readers were
-    # ported OFF it (health.py:1485,1579; commands/doctor.py:1991;
-    # console/watchers.py:84) or a design-heritage mention in
-    # `db/t1.py:840`/`mcp/core.py:1253`. `grep -rn "t1_addr\." src/`
+    # ported OFF it (health.py and commands/doctor.py docstrings; the
+    # console/watchers.py module docstring) or a design-heritage mention in
+    # `db/t1.py`/`mcp/core.py` (line numbers drift; grep for them).
+    # `grep -rn "t1_addr\." src/`
     # returns zero live writers -- a dead carve-out is a vacuous
     # allowlist entry that would mask a real leak of that exact shape.
     # `index.log` itself is NOT here (nexus-wjkc7): it is a top-level file

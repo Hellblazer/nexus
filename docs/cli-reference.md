@@ -4824,11 +4824,9 @@ nx console [--port PORT] [--host HOST]
 
 Starts a foreground FastAPI/uvicorn server. The PID file is written to `~/.config/nexus/console.<project>.pid` and removed on exit.
 
-**Threads** (`/threads`) is a board of every Claude session's open threads. It reads two sources: T2 project `threads`, one entry per session (the entry title is the session name), and the open beads labelled `needs-sam` (`bd list`, run from the directory the console was started in; if `bd` is missing or fails, the panel says so in one line). An entry looks like:
+**Threads** (`/threads`) is a board of every Claude session's open threads. It reads two sources: T2 project `threads`, one entry per session (the entry title is the session name), and the live beads labelled `needs-sam` (`bd list --status open,in_progress,blocked`, run from the directory the console was started in; if `bd` is missing or fails, the panel says so in one line). An entry looks like:
 
 ```
-session: nexus_c9c
-updated: 2026-10-25T18:05Z
 ## RDR-234 auto-continuation
 ref: RDR-234, nexus-qlrj7
 state: spike proven; rewriting the draft
@@ -4836,7 +4834,7 @@ waiting_on: none
 needs_sam: none
 ```
 
-Each `## ` heading starts a thread; fields are `key: value`, and a line that fits nothing is kept as a note. "Needs you" comes first: the `needs-sam` beads, then every thread whose `needs_sam` is not `none` or empty (a highlighted row). Below it are the session cards, newest first. A session whose `updated` stamp and T2 entry time are both older than 24 hours is greyed with its age.
+A `#`, `##` or `###` heading starts a thread; fields before any heading belong to a thread named for the session. Fields are `key: value`; `-`, space and `_` in a key are the same (`needs-sam`, `needs sam`, `Needs_Sam`), and a line that fits nothing is kept as a note. A line whose key mentions "sam" or "needs" is shown as an ask whatever its spelling. `session:` and `updated:` lines are ignored: a session's age is the T2 entry's own write time, which every `memory_put` refreshes. The headline says "Nothing needs you" only when both sources were read and at least one session has reported; with a source down it says "At least N things need you" or "Can't tell what needs you right now". "Needs you" comes first: thread asks, then the `needs-sam` beads (a thread that lists a bead's id in `ref:` is shown on that bead's row, not twice). Below it are the session cards, newest first; a session whose entry is older than 24 hours is greyed with its age. The board prints "As of HH:MM" and reloads itself every 60 seconds.
 
 **Health** (`/health`) shows T1 session leases, MinerU, the catalog cache, the index log, the Dolt log, the aspect queue and the `nx doctor` checks.
 

@@ -3,8 +3,8 @@
 
 Reads two sources: T2 project ``threads`` (one entry per session, see
 ``nexus.console.threads`` for the format) and the beads labelled ``needs-sam``
-(``bd list``). Both readers are seams on ``app.state`` so a test injects a
-stand-in without patching ``subprocess`` or T2 globally.
+(``bd list``). Both readers, and the clock, are seams on ``app.state`` so a
+test injects a stand-in without patching ``subprocess`` or T2 globally.
 """
 from __future__ import annotations
 
@@ -17,7 +17,15 @@ import structlog
 from fastapi import APIRouter, Request
 
 from nexus.bounded_subprocess import run_bounded
-from nexus.console.threads import BeadsResult, build_board, format_age, has_value, parse_beads_json
+from nexus.console.threads import (
+    BeadsResult,
+    build_board,
+    format_age,
+    has_value,
+    headline,
+    merge_asks,
+    parse_beads_json,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -25,14 +33,15 @@ router = APIRouter(tags=["threads"])
 
 THREADS_PROJECT = "threads"
 BD_TIMEOUT_SECONDS = 10.0
-_BD_ARGV = ["bd", "list", "--label", "needs-sam", "--status", "open", "--limit", "0", "--json"]
+_BD_ARGV = ["bd", "list", "--label", "needs-sam", "--status", "open,in_progress,blocked", "--limit", "0", "--json"]
 
 BdRunner = Callable[[], BeadsResult]
 ThreadsReader = Callable[[], list[dict[str, Any]]]
+Clock = Callable[[], datetime]
 
 
 def run_bd_needs_sam(timeout: float = BD_TIMEOUT_SECONDS) -> BeadsResult:
-    """Open beads labelled ``needs-sam``, from the repo the console started in.
+    """Live beads (open, in progress or blocked) labelled ``needs-sam``, from the repo the console started in.
 
     Never raises: a missing ``bd``, a timeout, a non-zero exit or unparseable
     output comes back as a one-line ``error``.
@@ -74,17 +83,21 @@ def _collect(request: Request) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 -- the panel degrades to one line naming the failure
         _log.warning("console_threads_t2_failed", error=str(exc))
         t2_error = f"T2 project '{THREADS_PROJECT}' could not be read: {str(exc)[:200]}"
-    now = datetime.now(timezone.utc)
+    clock: Clock = getattr(state, "clock", lambda: datetime.now(timezone.utc))
+    now = clock()
     board = build_board(entries, now)
     beads = bd_runner()
-    asks = len(board.needs_you) + len(beads.beads)
+    asks = merge_asks(board.needs_you, beads.beads)
+    # False when a source failed or an entry could not be read: "nothing needs you" would then be a guess.
+    checked_everything = beads.ok and not t2_error and not board.unreadable
     return {
         "board": board,
         "beads": beads,
         "t2_error": t2_error,
         "asks": asks,
-        # False when a source failed: "nothing needs you" would then be a guess.
-        "checked_everything": beads.ok and not t2_error,
+        "headline": headline(board, asks, checked_everything),
+        "as_of": now.astimezone().strftime("%H:%M"),
+        "checked_everything": checked_everything,
         "has_value": has_value,
         "age_of": lambda dt: format_age(now - dt) if dt else "",
     }

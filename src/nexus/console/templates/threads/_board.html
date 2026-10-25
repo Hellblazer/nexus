@@ -1,34 +1,36 @@
 {# A glance-cold page: one sentence, then the asks, then the sessions. No raw field names. #}
-<p class="thread-headline">
-  {% if asks == 0 and not checked_everything %}Can't tell what needs you right now.
-  {% elif asks == 0 %}Nothing needs you right now.
-  {% elif asks == 1 %}1 thing needs you.
-  {% else %}{{ asks }} things need you.{% endif %}
-</p>
+<p class="thread-asof ts">As of {{ as_of }}</p>
+{# headline is built from fixed strings, integers and format_age output only, never entry text; |safe keeps its apostrophe literal. #}
+<p class="thread-headline">{{ headline | safe }}</p>
 {% if not beads.ok %}
 <p class="thread-notice">Could not read the list of beads waiting on you: {{ beads.error }}.</p>
 {% endif %}
 {% if t2_error %}
 <p class="thread-notice">{{ t2_error }}</p>
 {% endif %}
+{% for title in board.unreadable %}
+<p class="thread-notice">Could not read {{ title }}.</p>
+{% endfor %}
 
-{% if asks %}
+{% if asks.count %}
 <section class="needs-you">
   <h3>Needs you</h3>
   <ul class="thread-list">
-    {% for i in board.needs_you %}
+    {% for i in asks.threads %}
     <li class="needs-sam">
       <strong>{{ i.thread.needs_sam }}</strong>
       <span class="ts">&mdash; asked by {{ i.session }} on &ldquo;{{ i.thread.title }}&rdquo;, updated {{ i.age }}</span>
       {% if i.thread.refs %}<small class="ts">&nbsp;{{ i.thread.refs | join(", ") }}</small>{% endif %}
     </li>
     {% endfor %}
-    {% for b in beads.beads %}
+    {% for a in asks.beads %}
+    {% set b = a.bead %}
     <li class="needs-sam">
       <strong>{{ b.title }}</strong>
       <span class="ts">&mdash;
         {% if b.assignee %}assigned to {{ b.assignee }}{% else %}not assigned{% endif %}{% if b.updated %}, updated {{ age_of(b.updated) }}{% endif %}</span>
       <small class="ts">&nbsp;{{ b.id }}{% if b.priority is not none %} &middot; P{{ b.priority }}{% endif %}</small>
+      {% for r in a.raised_by %}<br><small class="ts">raised by {{ r.session }} on &ldquo;{{ r.thread.title }}&rdquo;: {{ r.thread.needs_sam }}</small>{% endfor %}
     </li>
     {% endfor %}
   </ul>
