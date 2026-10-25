@@ -642,13 +642,13 @@ Then the text in `brief.py` and `line-editor.md`, and the skill description in
 #### Step 1a.2: Acceptance fixture
 
 `tests/prose_edit/fixtures/compression.md`, in the `reference-doc` genre,
-seeds 10 sentences, two for each feature, some taken from the paper's examples
-(its Table 2). Each seeded sentence shows one feature, and the scorer's table
+seeds 10 sentences, two for each feature, written for this fixture. Each
+seeded sentence shows one feature, and the scorer's table
 gives it exactly one expected prefix. It also holds decoys: an identifier, a
 term the document defines, three of the computing verbs, and one deliberately
 dense passage. Every decoy is always scored, whatever the editor's voice card
-says. A `compression` kind is added to `verdicts.py` (scorer pins first), to
-`run-scenario.sh` and to the README's kind table. The scenario runs with
+says. A `compression` kind is added to `verdicts.py` (scorer pins first) and to
+the README's kind table (`run-scenario.sh` has no kind registry). The scenario runs with
 `--budget 12`, so the budget cannot be what stops the tenth seeded edit.
 
 #### Step 1a.3: Acceptance runs
@@ -853,3 +853,5 @@ one, is a separate bead (nexus-b0b40).
 - 2026-10-22: Amendment A1 drafted (nexus-rrkm7, epic nexus-r9ze7): brief section 6 becomes "Cut redundancy, unpack compression", the line editor gains a parse row, two rules and a rewrite of its "Prefer cutting" rule, with Discovery 14, the "Unpacking is accepted" assumption, a risk, Phase 1a with its pre-registered bar, and a Test Plan scenario. To be gated (nexus-c7fim); any lifecycle move is Sam's. Design: T2 `nexus/design-prose-edit-compression.md`.
 - 2026-10-23: Gate round 2 — PASSED (0 Critical, 12 Significant, 0 ship-blocker(s)); commit `dc6cdfae2`; critique `nexus_rdr/221-gate-critique-2026-10-23-r2`.
 - 2026-10-23: round 2 Significants S1-S12 dispositioned by Sam's decisions of 2026-10-23 (S6, S7, S11, S12) and by the disposition edit (all twelve), fix check `nexus_rdr/221-fix-check-6159bc54e` (consensus PASS); its counted defects carried by nexus-zhdxx, nexus-b0b40, nexus-x7o5e and nexus-0hkkj.
+- 2026-10-25: Step 1a.2 text aligned with the fixture as built: no seeded sentence comes from the paper's Table 2, and `run-scenario.sh` has no kind registry (stacked review B4/B5). The section 6 heading stays unconditional; the brief drops the unpack clause for changelog and commit-message.
+- 2026-10-25: Phase 2 PASSED (Sam): 10 of 10 editor edits accepted across the four documents, the essay still in Sam's voice, yes to reaching for it again on all four, comparison accept rates tied at 100% (editor 6/6, brief 14/14). Record: T2 `nexus_rdr/221-phase2-results`. Phase 1a lands on `develop` after this.
