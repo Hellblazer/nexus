@@ -44,6 +44,9 @@ def scope(monkeypatch):
         lambda name: {"content_type": name.split("__", 1)[0], "lifecycle_state": "live"},
     )
     monkeypatch.setattr(core, "_get_collection_counts", lambda **_kw: {ALPHA: 2, BETA: 2, CODE: 5})
+    # structured store_get_many asks the catalog for each chunk's owners (nexus-tko2w); these
+    # notes have no manifest, so no catalog: the stored section_type is the answer.
+    monkeypatch.setattr(core, "_get_catalog", lambda: None)
     with patch("nexus.mcp.core._get_t3", return_value=t3):
         yield t3, ids
 
