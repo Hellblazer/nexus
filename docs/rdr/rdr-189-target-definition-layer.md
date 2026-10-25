@@ -1396,7 +1396,7 @@ RDR-232 safeguards remain.
   complete; proposed runtime behavior and D4 value remain unproven. No gate,
   acceptance, or implementation performed.
 - 2026-10-24: Gate round 1 — BLOCKED (1 Critical, 4 Significant, 1 ship-blocker(s)); commit `6aa585629`; critique `nexus_rdr/189-gate-critique-2026-10-24-r1`.
-- 2026-10-24: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `1d9b72968`; critique `nexus_rdr/189-gate-critique-2026-10-24-r2`.
+- 2026-10-24: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `15c116076`; critique `nexus_rdr/189-gate-critique-2026-10-24-r2`.
 - 2026-10-24 — **Fix-check repair (research 22).** Separated legacy and
   all-outcomes validation paths; defined the enrichment trace flag and default;
   made unresolved version, contract-version, and continuation evidence-id

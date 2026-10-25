@@ -96,6 +96,7 @@ def _llm_backend_is_the_cli(monkeypatch):
     monkeypatch.setattr(
         "nexus.operators.llm_backend.resolve_backend_name", lambda req: "cli",
     )
+    monkeypatch.setattr("nexus.commands.enrich._claude_on_path", lambda: True)
 
 
 def _make_record(
@@ -924,7 +925,7 @@ class TestRejectedRowsAndBackendGate:
         _, _, cat = env
         _register_entries(cat, ["/papers/p1.pdf"])
         monkeypatch.setenv("NX_LLM_BACKEND", "cli")
-        monkeypatch.setattr("shutil.which", lambda name, *a, **k: None)
+        monkeypatch.setattr("nexus.commands.enrich._claude_on_path", lambda: False)
         calls: list[str] = []
         monkeypatch.setattr(
             "nexus.aspect_extractor.extract_aspects",
@@ -944,7 +945,7 @@ class TestRejectedRowsAndBackendGate:
         _, _, cat = env
         _register_entries(cat, ["/papers/p1.pdf"])
         monkeypatch.setenv("NX_LLM_BACKEND", "cli")
-        monkeypatch.setattr("shutil.which", lambda name, *a, **k: "/usr/local/bin/claude")
+        monkeypatch.setattr("nexus.commands.enrich._claude_on_path", lambda: True)
         calls: list[str] = []
 
         def _extract(content, source_path, collection, **_kw):
