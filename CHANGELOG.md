@@ -4,6 +4,11 @@ All notable changes to Nexus are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Installer pages (published to the site 2026-10-25, ahead of the next client release):** `install.sh --slim` and `install.ps1 -slim` now print that PDF support was left out and how to add it (`nx self install --extras pdf`, or it installs on the first PDF you index), and both `--help` texts state the macOS 14 on Apple Silicon floor (nexus-h6wwq).
+
 ## [7.86.1] - 2026-10-25
 
 Pairs with engine-service-v0.1.164 (`REQUIRED_ENGINE_VERSION` unchanged from 7.86.0), already deployed; no engine changesets. Fixes from the 7.86.0 post-release shakeout on macOS, Linux and Windows, and corrections to the 7.86.0 entries.
