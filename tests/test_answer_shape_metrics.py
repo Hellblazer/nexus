@@ -162,7 +162,55 @@ class TestScopeLeakage:
         assert m.value == pytest.approx(1 / 3)
 
 
+    def test_a_run_with_no_evidence_items_is_not_a_zero_leak_rate(self) -> None:
+        """An empty evidence set can leak nothing and says nothing about
+        scope; counting it as 0.0 would pull the mean down."""
+        qs = [_q("a", allowed_corpora=["rdr"]), _q("b", allowed_corpora=["rdr"])]
+        obs = [
+            RunObservation("a", evidence=[_item("code"), _item("code")]),  # leak rate 1.0
+            RunObservation("b", evidence=[]),
+        ]
+        m = compute_measures(qs, obs)["scope_leakage"]
+        assert m.value == pytest.approx(1.0)
+        assert m.n == 1, "the empty-evidence run was counted"
+
+    def test_not_measurable_when_no_run_has_any_evidence(self) -> None:
+        qs = [_q("a", allowed_corpora=["rdr"])]
+        m = compute_measures(qs, [RunObservation("a", evidence=[])])["scope_leakage"]
+        assert isinstance(m.value, NotMeasurable)
+        assert m.n == 0
+
+
 class TestRepairYieldAndCost:
+    def test_a_run_with_nothing_missing_is_not_a_zero_yield(self) -> None:
+        qs = [_q("a"), _q("b")]
+        obs = [
+            RunObservation("a", repair=RepairOutcome(missing=2, repaired=2, cost_usd=0.10)),
+            RunObservation("b", repair=RepairOutcome(missing=0, repaired=0, cost_usd=0.0)),
+        ]
+        m = compute_measures(qs, obs)["repair_yield_and_cost"]
+        assert m.value == pytest.approx(1.0)
+        assert m.n == 1, "the nothing-to-repair run was counted"
+
+    def test_not_measurable_when_no_run_had_anything_missing(self) -> None:
+        qs = [_q("a")]
+        obs = [RunObservation("a", repair=RepairOutcome(missing=0, repaired=0, cost_usd=0.0))]
+        m = compute_measures(qs, obs)["repair_yield_and_cost"]
+        assert isinstance(m.value, NotMeasurable)
+
+    def test_repaired_beyond_missing_cannot_push_the_yield_past_one(self) -> None:
+        qs = [_q("a"), _q("b")]
+        obs = [
+            RunObservation("a", repair=RepairOutcome(missing=1, repaired=5, cost_usd=0.1)),
+            RunObservation("b", repair=RepairOutcome(missing=3, repaired=0, cost_usd=0.1)),
+        ]
+        m = compute_measures(qs, obs)["repair_yield_and_cost"]
+        assert m.value == pytest.approx(1 / 4)
+        # a run with repaired but nothing missing contributes nothing either
+        obs = [RunObservation("a", repair=RepairOutcome(missing=0, repaired=2, cost_usd=0.1))]
+        assert isinstance(
+            compute_measures(qs[:1], obs)["repair_yield_and_cost"].value, NotMeasurable)
+
     def test_not_measurable_before_phase_3_without_a_repair_observation(self) -> None:
         qs = [_q("a")]
         m = compute_measures(qs, [RunObservation("a")])["repair_yield_and_cost"]
@@ -209,6 +257,37 @@ class TestComputeMeasures:
     def test_an_observation_for_an_unknown_qid_is_an_error(self) -> None:
         with pytest.raises(ValueError, match="nope"):
             compute_measures([_q("a")], [RunObservation("nope")])
+
+    def test_every_numeric_measure_is_a_rate_within_zero_and_one(self) -> None:
+        """Edge-heavy fixture: empty evidence, nothing missing, over-repair."""
+        qs = [
+            _q("a", required_sources=["R"], required_facets=["f1"], allowed_corpora=["rdr"]),
+            _q("b", required_sources=["R"], required_facets=["f1", "f2"], allowed_corpora=["rdr"]),
+            _q("c", required_facets=["f1"], allowed_corpora=["rdr"]),
+        ]
+        obs = [
+            RunObservation(
+                "a", selected_plan=LOOKUP, candidate_plans=[LOOKUP, RESEARCH],
+                evidence=[_item("code", source="R", facets={"f1"}), _item("rdr")],
+                repair=RepairOutcome(missing=1, repaired=9, cost_usd=0.2),
+                terminal=TerminalOutcome(addressed=["f1"], disclosed_missing=[]),
+            ),
+            RunObservation(
+                "b", selected_plan=RESEARCH, candidate_plans=[RESEARCH],
+                evidence=[],
+                repair=RepairOutcome(missing=0, repaired=0, cost_usd=0.0),
+                terminal=TerminalOutcome(addressed=[], disclosed_missing=["f1", "f2"]),
+            ),
+            RunObservation(
+                "c", evidence=[_item("rdr", facets={"f1"})],
+                repair=RepairOutcome(missing=2, repaired=1, cost_usd=0.1),
+            ),
+        ]
+        out = compute_measures(qs, obs)
+        numeric = {n: m.value for n, m in out.items() if not isinstance(m.value, NotMeasurable)}
+        assert len(numeric) >= 5, ("non-vacuity: the fixture must score most measures", numeric)
+        for name, value in numeric.items():
+            assert 0.0 <= value <= 1.0, (name, value)
 
     def test_an_unobserved_measure_is_not_a_zero(self) -> None:
         # No request was observed at all: every measure reports unmeasured, none reports 0.0.

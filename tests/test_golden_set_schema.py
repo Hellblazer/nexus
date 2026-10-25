@@ -26,11 +26,13 @@ GOLDEN = REPO / "bench" / "queries" / "golden_v1.yaml"
 BUILTIN_PLANS = REPO / "conexus" / "plans" / "builtin"
 
 #: The ART RDR-084 request as recorded in the 2026-10-23 incident (RDR-232 Problem Statement;
-#: full text from the A5 spike, /tmp/rdr232-a1a2/a5_a6_review_spike.py).
+#: full text as stored in nx_answer_runs run 722, 2026-10-23T22:25:33Z).
 ART_RDR_084_REQUEST = (
     "Synthesize RDR-084, LIST PARSE Canonical Consolidation. State the locked architecture "
     "and numerical conventions, the evidence and gate history supporting them, the "
-    "implementation work recorded as complete or pending, and what remains open by design."
+    "implementation work recorded as complete or pending, and what remains open by design. "
+    "Distinguish facts at the RDR's 2026-07-30 acceptance from later records, cite source "
+    "documents, and do not infer current code status beyond the retrieved evidence."
 )
 
 NEW_FIELDS = (

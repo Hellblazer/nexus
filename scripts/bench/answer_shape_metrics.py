@@ -22,9 +22,10 @@ The seven measures, with their pre-change reading:
   Items must be facet-labeled (the fixture's oracle labels, or Phase 3's ledger); unlabeled
   evidence is not measurable before Phase 3.
 * ``scope_leakage``: share of evidence items outside ``allowed_corpora`` with no recorded,
-  permitted reason.
+  permitted reason. A run with no evidence items is excluded, not scored 0.0.
 * ``repair_yield_and_cost``: missing facets repaired within one attempt, and mean repair cost.
-  Phase 3.
+  Runs with nothing missing are excluded and repaired counts only among what was missing, so
+  the yield stays in [0, 1]. Phase 3.
 * ``terminal_completeness``: share of required facets addressed or disclosed as missing in the
   terminal answer. Phase 3.
 
@@ -244,15 +245,19 @@ def _facet_evidence_coverage(pairs: list[tuple[Query, RunObservation]]) -> Measu
 
 def _scope_leakage(pairs: list[tuple[Query, RunObservation]]) -> Measure:
     name = "scope_leakage"
-    seen = [(q, o) for q, o in pairs if o.evidence is not None and q.allowed_corpora]
+    # A run whose evidence set is empty can leak nothing and says nothing
+    # about scope: it is excluded, never scored 0.0.
+    seen = [(q, o) for q, o in pairs if o.evidence and q.allowed_corpora]
     if not seen:
-        return _unscored(name, None, "no request with allowed corpora had its evidence observed")
+        return _unscored(
+            name, None, "no request with allowed corpora had any evidence items observed",
+        )
     rates, leaked_total, items_total = [], 0, 0
     for q, o in seen:
         allowed = set(q.allowed_corpora)
         items = o.evidence or []
         leaked = sum(1 for e in items if e.corpus not in allowed and not e.permitted_reason)
-        rates.append(leaked / len(items) if items else 0.0)
+        rates.append(leaked / len(items))
         leaked_total += leaked
         items_total += len(items)
     return Measure(
@@ -263,15 +268,21 @@ def _scope_leakage(pairs: list[tuple[Query, RunObservation]]) -> Measure:
 
 def _repair_yield_and_cost(pairs: list[tuple[Query, RunObservation]]) -> Measure:
     name = "repair_yield_and_cost"
-    seen = [o for _q, o in pairs if o.repair is not None]
-    if not seen:
+    ran = [o.repair for _q, o in pairs if o.repair is not None]
+    if not ran:
         return _unscored(name, 3, "no repair ran")
-    missing = sum(o.repair.missing for o in seen if o.repair)
-    repaired = sum(o.repair.repaired for o in seen if o.repair)
-    costs = [o.repair.cost_usd for o in seen if o.repair]
+    # Yield is repaired over missing, so a run with nothing missing has no
+    # yield to report (excluded, not 0.0), and repaired is counted only
+    # among what was missing: the ratio cannot pass 1.
+    seen = [r for r in ran if r.missing > 0]
+    if not seen:
+        return _unscored(name, None, "repair ran but no run had anything missing")
+    missing = sum(r.missing for r in seen)
+    repaired = sum(min(r.repaired, r.missing) for r in seen)
     return Measure(
-        name, (repaired / missing) if missing else 0.0, len(seen),
-        {"missing": missing, "repaired": repaired, "mean_cost_usd": _mean(costs)},
+        name, repaired / missing, len(seen),
+        {"missing": missing, "repaired": repaired,
+         "mean_cost_usd": _mean([r.cost_usd for r in ran]), "runs_with_repair": len(ran)},
     )
 
 

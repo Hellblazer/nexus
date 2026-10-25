@@ -23,7 +23,7 @@
 # Real requests: the first three lookups and the post-store-hook and retrieval-layer requests are
 # the RDR-090 spike queries (ground_truth kept so the spike's NDCG axis still reads); the ART
 # RDR-084 request is the 2026-10-23 incident request, verbatim (the RDR-232 Problem Statement; full
-# text from the A5 spike). The rest are requests of the shapes the RDR names, written against this
+# text from nx_answer_runs run 722, 2026-10-23T22:25:33Z). The rest are requests of the shapes the RDR names, written against this
 # repository's own RDRs and code.
 #
 # Changing a label or adding a request after a baseline is recorded bumps golden_set_version.
@@ -109,11 +109,12 @@ queries:
       - "debug:default"
 
   # ── synthesis ────────────────────────────────────────────────────────────
-  # The 2026-10-23 incident request, verbatim. Over ART RDR-084; the question carries no project
-  # token, so an owner/project binding (owner 1.2 or project ART) is what names the source.
+  # The 2026-10-23 incident request, verbatim (nx_answer_runs run 722, 2026-10-23T22:25:33Z).
+  # Over ART RDR-084; the question carries no project token, so an owner/project binding
+  # (owner 1.2 or project ART) is what names the source.
   - qid: G06-synthesis-art-rdr084
     category: compositional
-    text: "Synthesize RDR-084, LIST PARSE Canonical Consolidation. State the locked architecture and numerical conventions, the evidence and gate history supporting them, the implementation work recorded as complete or pending, and what remains open by design."
+    text: "Synthesize RDR-084, LIST PARSE Canonical Consolidation. State the locked architecture and numerical conventions, the evidence and gate history supporting them, the implementation work recorded as complete or pending, and what remains open by design. Distinguish facts at the RDR's 2026-07-30 acceptance from later records, cite source documents, and do not infer current code status beyond the retrieved evidence."
     scope: rdr
     answer_kind: synthesis
     required_sources: ["RDR-084@ART"]
