@@ -131,8 +131,9 @@ Prefer `purpose:` for generic traversals. Reserve explicit
 set for reproducibility.
 
 Specifying both raises a schema validator error (SC-16) and the
-`traverse` MCP tool returns a structured `{"error": ...}` payload
-rather than running a half-resolved walk.
+`traverse` MCP tool fails (an MCP error result carrying the
+`{"error": ...}` JSON; in-process callers get the dict itself) rather
+than running a half-resolved walk.
 
 ### Dedup identity (SC-18)
 

@@ -167,6 +167,11 @@ class AuditHub(NamedTuple):
 MAX_CLUSTER_FRACTION_DIVISOR: int = 4
 MAX_CLUSTER_SIZE_FLOOR: int = 50
 
+#: Below this many chunks discover builds nothing (no topics, no taxonomy_meta row): HDBSCAN's
+#: min_cluster_size is 5, so a smaller collection cannot hold one cluster. ``nx taxonomy discover`` returns 0
+#: for it, and the doctor's re-embed row does not ask for a discover it cannot run (nexus-s08oe).
+MIN_DISCOVER_CHUNKS: int = 5
+
 
 def _max_cluster_size(n: int) -> int:
     """Cap on any single HDBSCAN cluster (nexus-9b9oi): 25% of the
@@ -195,7 +200,7 @@ def _cluster(
 
         _log.info("clustering_hdbscan", n=n, collection=collection_name)
         clusterer = SklearnHDBSCAN(
-            min_cluster_size=5,
+            min_cluster_size=MIN_DISCOVER_CHUNKS,
             # nexus-9b9oi: eom cluster selection root-grabs on real embedding
             # corpora — knowledge__delos (2101 chunks, 15 papers) came back as
             # ONE cluster holding 94% of the collection, flattening topic
@@ -547,7 +552,7 @@ def compute_discovered_topics(
         collection_name, doc_ids, embeddings, texts, site="compute_discovered_topics",
     )
     n = len(doc_ids)
-    if n < 5:
+    if n < MIN_DISCOVER_CHUNKS:
         return []
 
     labels, centroids = _cluster(embeddings, n, collection_name)
@@ -714,7 +719,7 @@ def compute_rebuild_plan(
         collection_name, doc_ids, embeddings, texts, site="compute_rebuild_plan",
     )
     n = len(doc_ids)
-    if n < 5:
+    if n < MIN_DISCOVER_CHUNKS:
         return {"specs": [], "manual_transfers": {}}
 
     labels, centroids_arr = _cluster(embeddings, n, collection_name)

@@ -13,6 +13,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
 > You are the **caller only**. Running `bd create`, `bd dep add`, `bd update --description`,
 > or writing plan content in the Planning Chain is a HARD STOP — halt and report the error.
 > Only the dispatched subagent (strategic-planner) and the MCP tool calls (nx_plan_audit, nx_enrich_beads) do this work.
+> The one write you make is step 7.4: `nx_enrich_beads` returns text and writes nothing, so you append that text, unchanged, to the bead's notes.
 > Doing it yourself bypasses the audit and enrichment chain, producing unvalidated plans.
 >
 > **SUBAGENT FAILURE**: If any subagent in the chain fails or returns partial results,
@@ -61,7 +62,7 @@ Accepts an RDR after it passes the gate. This is the author/reviewer decision po
      1. Write T1 scratch entry tagged `rdr-planning-context`: mcp__plugin_conexus_nexus__scratch(action="put", content="RDR {id}: planning context for {title}. RDR file: {rdr_file}", tags="rdr-planning-context,rdr-{id}"
      2. **Dispatch strategic-planner** (Agent tool) — create phased plan with beads. **Wait for completion.** The dispatch brief includes the prose register (`$RDR_DIR/REGISTER.md`, fallback `$CLAUDE_PLUGIN_ROOT/resources/rdr/REGISTER.md`): the plan is read by the people who execute it; each step says one thing; no step needs interpreting.
      3. **Call `mcp__plugin_conexus_nexus__nx_plan_audit`** — audit the plan against codebase. T1 scratch has rdr-planning-context tag.
-     4. **Call `mcp__plugin_conexus_nexus__nx_enrich_beads`** — enrich beads with execution context (+ audit findings from T1), write epic bead ID to T2.
+     4. **Call `mcp__plugin_conexus_nexus__nx_enrich_beads`** once for each implementation bead (not the epic, phase containers, review beads or decision beads), with the bead's title and description as `bead_description` and its audit findings as `context`. The tool returns text and writes nothing. If the text is empty, report that bead as not enriched and go on. Otherwise write the text unchanged with the Write tool to a file and run `bd update <id> --append-notes "$(cat <file>)"`. Never use `--description` or `--body-file`: both replace the description. Then set `epic_bead:` in the RDR's T2 record (`{repo}_rdr`, title `{id}`) to the epic's id.
      5. **Catalog links** (if catalog initialized): Search for related RDRs and create `relates` links:
         - `mcp__plugin_conexus_nexus-catalog__search(query="<rdr-title-keywords>", content_type="rdr")`
         - For each result that is NOT this RDR: `mcp__plugin_conexus_nexus-catalog__link(from_tumbler="<this-rdr-title>", to_tumbler="<related-rdr-tumbler>", link_type="relates", created_by="rdr-accept")`
@@ -94,7 +95,7 @@ The accept skill writes a T1 scratch entry tagged `rdr-planning-context` before 
 - [ ] T1 scratch entry written with rdr-planning-context tag before planner dispatch
 - [ ] Strategic-planner dispatched and completed (if user accepts)
 - [ ] mcp__plugin_conexus_nexus__nx_plan_audit called and result verified (if user accepts)
-- [ ] mcp__plugin_conexus_nexus__nx_enrich_beads called and beads enriched (if user accepts)
+- [ ] mcp__plugin_conexus_nexus__nx_enrich_beads called for each implementation bead, each non-empty result appended to that bead's notes, and `epic_bead:` set in T2 (if user accepts)
 
 ## Agent-Specific PRODUCE
 

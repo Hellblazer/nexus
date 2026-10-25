@@ -158,6 +158,7 @@ def test_it_is_idempotent() -> None:
     assert _sdk_patches.apply_sdk_patches() == {
         "cancellation_response": "already applied",
         "sync_tool_offload": "already applied",
+        "tool_failure_is_error": "already applied",
     }
 
 

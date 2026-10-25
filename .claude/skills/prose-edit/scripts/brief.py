@@ -100,6 +100,9 @@ SITE_GENRES = ("how-to", "exploration-essay")
 # Section 3 bullets that apply to some site genres only (nexus-ger02.23): the bullet's opening words, and the
 # genres it is dropped for. "No semicolons" is for web/ how-to pages; a docs/exploration essay may use them.
 GENRE_DROPS: dict[str, tuple[str, ...]] = {"No semicolons": ("exploration-essay",)}
+# The genres whose section 6 lets an edit add words to unpack compression (RDR-221 Amendment A1): published
+# documents. A changelog entry or a commit message suffers from excess length, so its brief keeps to cutting.
+UNPACK_GENRES: tuple[str, ...] = ("rdr", "reference-doc", "how-to", "exploration-essay")
 DEFAULT_BUDGET = 10
 PHASE3_FLAGS = ("--mode", "--voice-card", "--word-budget")
 TREATMENT_KEYS = {
@@ -636,11 +639,14 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
     out += ["", "## 5. Budget", "",
             f"Propose at most {budget} sentence edits. Fewer is right when fewer are earned. "
             "Paragraph proposals and queries are not counted."]
-    out += ["", "## 6. Prefer cutting", "",
-            "Prefer cutting to rewriting: when a word, clause or sentence can go without loss, "
-            "propose the cut (an empty new string). Cut only filler words; every other qualifier "
-            "or intensifier is a query. Never cut a voice-card device, however this section or a "
-            "diagnostic reads. Never put in content or claims."]
+    unpack = ("An edit may add words when that makes a sentence parse on the first reading; its reason starts "
+              "with the feature it fixes. When the plainer wording needs a meaning the text does not give, ask a "
+              "query instead. ") if genre in UNPACK_GENRES else ""
+    out += ["", "## 6. Cut redundancy, unpack compression", "",
+            "Cut what repeats: when a word, clause or sentence repeats what the text already says, propose the "
+            "cut (an empty new string). Cut only filler words; every other qualifier or intensifier is a query. "
+            f"{unpack}Never cut a voice-card device, however this section or a diagnostic reads. Never put in "
+            "content or claims."]
     if input_text is not None:
         out += ["", "## Text to edit", "", "<document>", input_text.rstrip("\n"), "</document>"]
     return "\n".join(out) + "\n"

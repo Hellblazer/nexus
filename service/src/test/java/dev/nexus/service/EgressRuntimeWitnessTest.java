@@ -25,6 +25,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -41,8 +42,8 @@ import static org.assertj.core.api.Assertions.fail;
  * <p>Two legs. The tokenizer leg always runs: it builds a tiny tokenizer through {@link LocalTokenizers}, the
  * helper that Bge768Embedder, CrossEncoderReranker and OnnxEmbedder share, so the witness has a target on a
  * host with no model. The model leg builds the real bge embedder and cross-encoder and needs the provisioned
- * model files; it skips when nothing is provisioned (CI), fails when {@value #REQUIRE_ENV}=1 names them
- * required, and fails when the model directory exists but is incomplete, so a half provision is not a silent
+ * model files; it skips when nothing is provisioned (a laptop), fails when {@value #REQUIRE_ENV}=1 or a GitHub
+ * Actions job (see {@link #modelsRequired}) names them required, and fails when the model directory exists but is incomplete, so a half provision is not a silent
  * pass. The tokenizer leg and the negative fixtures below are what keep a skipped model leg from leaving the
  * witness empty.
  *
@@ -171,7 +172,7 @@ class EgressRuntimeWitnessTest {
     @Test
     @Order(1)
     void theBgeEmbedderAndTheCrossEncoderOpenNothingOutboundThroughAnEmbedAndARerank() throws Exception {
-        String[] paths = requireModelsOrSkip();
+        String[] paths = requireModelsOrSkip(System::getenv, defaultModelPaths(), () -> modelLegSkipped = true);
         List<String> lines = run("models", paths);
         assertThat(lines).as("non-vacuity: one embed and one rerank ran").contains("EMBED 768", "RERANK 2");
         assertNoOutboundOpen(lines);
@@ -223,22 +224,36 @@ class EgressRuntimeWitnessTest {
     }
 
     /**
-     * The four model paths, or a skip. A skip means nothing is provisioned; a partial provision fails, and so
-     * does {@value #REQUIRE_ENV}=1 with the files absent.
+     * Whether a missing model fails the leg instead of skipping it. {@value #REQUIRE_ENV}=1 says so, and so
+     * does any GitHub Actions job ({@code GITHUB_ACTIONS=true}): the only workflow that runs the engine's unit
+     * suite (service-ci) primes the bge and cross-encoder models first, so a CI run that finds them absent is
+     * a regressed priming step and must not read green on a skipped witness (nexus-3va7p). A developer laptop
+     * with nothing provisioned still skips, loudly.
      */
-    private static String[] requireModelsOrSkip() {
-        String[] paths = defaultModelPaths();
-        LegVerdict verdict = legVerdict(paths, MIN_BGE_BYTES, "1".equals(System.getenv(REQUIRE_ENV)));
+    static boolean modelsRequired(java.util.function.Function<String, String> env) {
+        return "1".equals(env.apply(REQUIRE_ENV)) || "true".equals(env.apply("GITHUB_ACTIONS"));
+    }
+
+    /**
+     * The four model paths, or a skip. A skip means nothing is provisioned; a partial provision fails, and so
+     * does a required leg (see {@link #modelsRequired}) with the files absent. Takes the environment, the paths
+     * and the skip hook so a fixture drives the real decision path: the model leg passes {@code System::getenv}
+     * and records the skip, the fixture passes a map and a no-op.
+     */
+    static String[] requireModelsOrSkip(java.util.function.Function<String, String> env, String[] paths,
+                                        Runnable onSkip) {
+        LegVerdict verdict = legVerdict(paths, MIN_BGE_BYTES, modelsRequired(env));
         String why = "bge or cross-encoder model files not complete under " + Path.of(paths[0]).getParent().getParent();
         switch (verdict) {
             case RUN -> {
                 return paths;
             }
-            case FAIL_REQUIRED -> fail("%s=1 but %s; provision them with `nx init --service`", REQUIRE_ENV, why);
+            case FAIL_REQUIRED -> fail("the model leg is required (%s=1 or GITHUB_ACTIONS=true) but %s; "
+                + "provision them with `nx init --service`", REQUIRE_ENV, why);
             case FAIL_PARTIAL -> fail("a model directory exists but is incomplete (%s): "
                 + "a half provision must not skip this witness", why);
             case SKIP -> {
-                modelLegSkipped = true;
+                onSkip.run();
                 Assumptions.assumeTrue(false, "SKIPPED (not passed): " + why
                     + ". The tokenizer leg and the fixtures still ran.");
             }
@@ -278,6 +293,34 @@ class EgressRuntimeWitnessTest {
         assertThat(legVerdict(paths, 10, true)).as("all present, required").isEqualTo(LegVerdict.RUN);
         assertThat(legVerdict(paths, 11, false)).as("bge model under the size floor")
             .isEqualTo(LegVerdict.FAIL_PARTIAL);
+    }
+
+    @Test
+    void fixture_theModelLegIsRequiredOnCiAndWhenAskedAndOptionalOnALaptop() {
+        java.util.function.Function<Map<String, String>, java.util.function.Function<String, String>> of =
+            m -> m::get;
+        assertThat(modelsRequired(of.apply(Map.of()))).as("a laptop").isFalse();
+        assertThat(modelsRequired(of.apply(Map.of(REQUIRE_ENV, "1")))).as("asked").isTrue();
+        assertThat(modelsRequired(of.apply(Map.of("GITHUB_ACTIONS", "true")))).as("GitHub Actions").isTrue();
+        assertThat(modelsRequired(of.apply(Map.of(REQUIRE_ENV, "0", "GITHUB_ACTIONS", "false")))).as("both off").isFalse();
+    }
+
+    @Test
+    void fixture_theModelLegDecisionPathFailsOnGithubActionsAndSkipsOnALaptopWhenNothingIsProvisioned() {
+        String[] none = {dir.resolve("m/bge/model.onnx").toString(), dir.resolve("m/bge/tokenizer.json").toString(),
+                         dir.resolve("m/ce/model.onnx").toString(), dir.resolve("m/ce/tokenizer.json").toString()};
+        java.util.concurrent.atomic.AtomicInteger skips = new java.util.concurrent.atomic.AtomicInteger();
+
+        assertThatThrownBy(() -> requireModelsOrSkip(Map.of("GITHUB_ACTIONS", "true")::get, none, skips::incrementAndGet))
+            .as("CI with no models is a failure, not a skip").isInstanceOf(AssertionError.class)
+            .isNotInstanceOf(org.opentest4j.TestAbortedException.class);
+        assertThatThrownBy(() -> requireModelsOrSkip(Map.of(REQUIRE_ENV, "1")::get, none, skips::incrementAndGet))
+            .isInstanceOf(AssertionError.class).isNotInstanceOf(org.opentest4j.TestAbortedException.class);
+        assertThat(skips).as("neither required run counted a skip").hasValue(0);
+
+        assertThatThrownBy(() -> requireModelsOrSkip(Map.<String, String>of()::get, none, skips::incrementAndGet))
+            .as("a laptop with nothing provisioned skips").isInstanceOf(org.opentest4j.TestAbortedException.class);
+        assertThat(skips).hasValue(1);
     }
 
     private static long size(String path) {

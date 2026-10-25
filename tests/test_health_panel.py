@@ -89,3 +89,38 @@ def test_session_info_fields():
     assert info.session_id == "s1"
     assert info.expires_at == 1234567890.0
     assert info.fresh is True
+
+
+# ── System card: a soft warning is drawn as a warning, not a failure ────────
+
+
+def _glyph_for(html: str, label: str) -> str:
+    """The status glyph in the System card's row for *label*."""
+    import re
+
+    m = re.search(
+        rf"<td[^>]*>\s*<span[^>]*>(&#x[0-9A-Fa-f]+;)</span>\s*</td>\s*<td>{re.escape(label)}</td>", html,
+    )
+    assert m, f"no row for {label!r} in the System card"
+    return m.group(1)
+
+
+def test_system_card_draws_a_warn_row_as_a_warning_not_a_failure(client, monkeypatch):
+    """`HealthResult(ok=False, warn=True)` is a soft warning (never fatal); the card used to pass
+    only `ok`, so every warn row was drawn as a red cross (7.86.1 shakeout)."""
+    from nexus.health import HealthResult
+
+    rows = [
+        HealthResult(label="row-pass", ok=True, detail="fine"),
+        HealthResult(label="row-warn", ok=False, warn=True, detail="soft"),
+        HealthResult(label="row-fail", ok=False, detail="hard"),
+    ]
+    monkeypatch.setattr("nexus.health.run_health_checks", lambda *a, **k: (rows, True))
+    monkeypatch.setattr(
+        "nexus.console.routes.health._collect_aspect_queue_data", lambda: {"present": False},
+    )
+    resp = client.get("/health/refresh")
+    assert resp.status_code == 200
+    assert _glyph_for(resp.text, "row-pass") == "&#x2713;"
+    assert _glyph_for(resp.text, "row-warn") == "&#x26A0;"
+    assert _glyph_for(resp.text, "row-fail") == "&#x2717;"

@@ -1028,8 +1028,11 @@ cost is a window: from a document's move until discover runs, topic-scoped searc
 and topic boosts miss it, which they would do anyway, since its source chunks are
 invisible from the move. The verb runs discover for the target when it waits on a
 job to `done` or `done_with_skips` (`--wait`); otherwise the `done` report names the command
-(`taxonomy_cmd.py:694`) and the doctor's drift row says so until a discover has
-run.
+(`taxonomy_cmd.py:694`) and the doctor's Re-embed jobs row says so until a discover has
+run on the target. *Amended 2026-10-25, nexus-2ykf1:* the row is the Re-embed jobs row, since
+a finished target is on profile and outside the off-profile row's rule; "has run" counts a
+discover that formed no topics, because `nx taxonomy discover` records every attempt
+(`reembed_job.undiscovered`, nexus-s08oe).
 
 **Cutover.**
 - *Source row.* When the source holds no live document, the job supersedes it
@@ -1911,7 +1914,11 @@ the delete, no aspect, highlight or queue row of a moved document names the
 source, and the moved documents' aspects are intact; the quarantine-sibling and
 cross-collection topic counts in `--status` match what the delete removed;
 after `--wait`, the target has a `taxonomy_meta` row and topic assignments for
-its chunks; without `--wait`, the doctor's drift row names the discover command.
+its chunks when discover can form topics (5 or more chunks that cluster); without
+`--wait`, the doctor's Re-embed jobs row names the discover command until a discover
+has run on the target. *Amended 2026-10-25, nexus-2ykf1:* a target under 5 chunks, or
+one HDBSCAN calls all noise, gets neither from discover, and `--wait` still exits 0;
+`tests/e2e/dual-embedder-gate.sh` checks the row and assignments on a real engine.
 
 #### Step 5: Doctor rows and paired release
 
@@ -2268,3 +2275,4 @@ and the per-table dispositions.
 - 2026-10-18: Gate round 3 — PASSED (0 Critical, 0 Significant, 0 ship-blocker(s)); commit `ecd51d2c3`; critique `nexus_rdr/210-gate-critique-2026-10-18-r3`.
 - 2026-10-18: Accept dispositions (residuals by bead): S-R3-1 nexus-b4w2n and nexus-a0814; S-R3-2 nexus-lard5; S-R3-3 nexus-noayy; S-R3-4 nexus-zyu6n; S-R2-2 nexus-6grho; S-R2-3 nexus-hx3c8; S-R2-4 nexus-q6t89; S-R2-5 nexus-n6mh0; target row selection nexus-5ki2n; client parameter and fixture nexus-dxifx; admission-gate order nexus-e81g7; native-load errors nexus-lt84r.
 - 2026-10-24: Five text amendments from the Phase 6 implementation, approved by Sam ("Apply all five"; nexus-2u3lm). Each is marked in place. (1) The doc-less aspect and queue row arm is dropped: `doc_id` is NOT NULL with a composite foreign key (nexus-0khi2, nexus-09iho). (2) A bare client manifest write-back leaves manifest and `physical_collection` disagreeing until the next pass (nexus-0khi2). (3) A revive applies to a prior job in `done` or `aborted`; a `failed` one holds the lock (nexus-f98bg). (4) A stray manifest row before the supersede ends `done_with_skips`; the re-entry and the `--wait` exit codes are stated (nexus-6grho, nexus-09iho). (5) `CUTOVER_RESCAN` joins the state table (nexus-09iho).
+- 2026-10-25: Two text amendments from the end-of-RDR cross-walk and the Phase 6 Step 5 work, approved by Sam ("apply all three"; nexus-2ykf1). Each is marked in place. (1) Technical Design 4 and Phase 6 Step 4: the doctor's discover hint is in the Re-embed jobs row, not the off-profile row, and clears on any discover run including one that formed no topics; `--wait` builds topics only when discover can form them (5 or more chunks that cluster). (2) The egress census wording in RDR-157, its handoff and RDR-160 now states 22 constructs with planted positive controls, exact counts per file and per construct, and the third (Voyage client) witness (nexus-3va7p). The third decision defers nexus-3va7p's JDBC/Hikari and `Main.goOffline` items past this RDR's close to nexus-4lqi7.

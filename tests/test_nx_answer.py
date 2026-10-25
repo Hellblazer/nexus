@@ -5564,7 +5564,12 @@ class TestNxAnswerReport:
         assert row["final_text"].startswith(NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX)
         assert "continuation_id=cid-abc" in row["final_text"]
         assert "ok=True" in row["final_text"]
-        assert "a short excerpt" in row["final_text"]
+        assert "a short excerpt" not in row["final_text"], (
+            "the excerpt is never stored: the report cannot tell a trace=False run (nexus-i9bzg)"
+        )
+        assert row["final_text"] == (
+            f"{NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX} continuation_id=cid-abc ok=True]"
+        )
         assert row["step_count"] == 0, "a report event is not a run"
         assert row["cost_usd"] is None
         assert row["plan_id"] is None
@@ -5604,7 +5609,12 @@ class TestNxAnswerReport:
         assert result["continuation_id"] == "cid-x"
 
     @pytest.mark.asyncio
-    async def test_excerpt_is_capped(self):
+    async def test_excerpt_is_never_stored(self):
+        """nexus-i9bzg: every nx_answer arm redacts question and final_text
+        under trace=False, and the handoff row of such a run is itself
+        "[redacted]", so the report cannot know whether the caller's text
+        may be kept. It keeps none of it; the question field names only
+        the continuation id."""
         from nexus.mcp.core import nx_answer_report
 
         db_stub = MagicMock()
@@ -5620,8 +5630,10 @@ class TestNxAnswerReport:
                 final_text_excerpt="x" * 5000,
             )
 
-        # 500-char excerpt cap, plus the marker prefix/suffix text.
-        assert len(recorded[0]["final_text"]) < 600
+        row = recorded[0]
+        assert "x" * 10 not in row["final_text"]
+        assert "x" * 10 not in row["question"]
+        assert row["question"] == "nx_answer_report(cid-long)"
 
 
 class TestAnswerShapeGate:

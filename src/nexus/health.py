@@ -2865,12 +2865,14 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
         "Both write site-packages/cv2/, so which one loads depends on install order"
     )
     return HealthResult(
-        label="PDF support", ok=not on_linux, warn=not on_linux,
+        label="PDF support", ok=False, warn=not on_linux,
         detail=(
             f"{detail}; but both opencv-python and opencv-python-headless are installed. "
             f"{consequence}. This install ignored the release's uv overrides."
         ),
-        fix_suggestions=[f"Reinstall with the release's overrides: {pdf_stack.INSTALL_COMMAND}"],
+        # nexus-11x9o: the install this row detects (a bare `uv tool install`) is a legacy tree,
+        # where `nx self install --extras pdf` refuses; the plan names the command for THIS layout.
+        fix_suggestions=[f"Reinstall with the release's overrides: {pdf_stack.repair_command()}"],
     )
 
 
@@ -2924,7 +2926,7 @@ def _check_pdf_support() -> list[HealthResult]:
         gap = pdf_stack._windows_runtime_gap()  # noqa: SLF001
         if gap is not None:
             return [HealthResult(
-                label="PDF support", ok=True, warn=True,
+                label="PDF support", ok=False, warn=True,
                 detail=(
                     f"not installed, and it cannot be installed yet. {pdf_stack._gap_sentence(gap)}"  # noqa: SLF001
                     f"{pdf_stack._runtime_ways()} PDF support then installs on first use{held_note}{owed_note}"  # noqa: SLF001
@@ -2961,7 +2963,7 @@ def _check_installer_rebuild() -> list[HealthResult]:
     if note is None:
         return []
     return [HealthResult(
-        label="Dependency lock", ok=True, warn=True, detail=note,
+        label="Dependency lock", ok=False, warn=True, detail=note,
         fix_suggestions=[f"Rebuild with the release's lock: {pdf_stack.REBUILD_RETRY_COMMAND}"],
     )]
 
@@ -9505,7 +9507,9 @@ def _check_reembed_jobs() -> list[HealthResult]:
     upgrade check's), when it is empty, and when nothing in it is running or failed. Green with the counts: jobs in
     ``running``, ``planned``, ``cutover`` or ``paused``. A soft warning (never fatal, never red): a ``failed`` job
     (it holds its source's lock until resumed or aborted, so ``--all`` names it instead of planning the source)
-    and a job parked in a blocked ``cutover``, each with the command that moves it on. This never raises.
+    and a job parked in a blocked ``cutover``, each with the command that moves it on; and the target of a
+    finished job that has had no taxonomy discover since (``reembed_job.undiscovered_targets``), with the
+    discover command (RDR-210 Technical Design 4). This never raises.
     """
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: patched in tests at the module attribute
     from nexus import reembed_job  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -9528,8 +9532,21 @@ def _check_reembed_jobs() -> list[HealthResult]:
     failed = [j for j in jobs if j.get("state") == "failed"]
     blocked = [j for j in jobs if reembed_job.is_blocked(j)]
     in_flight = [j for j in jobs if j.get("state") in _REEMBED_IN_PROGRESS_STATES and j not in blocked]
-    if not (failed or blocked or in_flight):
-        return _na(f"no job is running or failed ({len(jobs)} finished)")
+    topics_note = ""
+    try:
+        found = reembed_job.undiscovered_targets(jobs)
+        undiscovered = list(found.targets)
+        if found.unjudged:
+            topics_note = (
+                f"; {len(found.unjudged)} re-embed target(s) not judged for topics (chunk count unread): "
+                f"{_name_list(list(found.unjudged))}"
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+        _log.debug("doctor_reembed_topics_unread", error=str(exc))
+        undiscovered = []
+        topics_note = f"; whether the re-embed targets have had a discover was not judged ({type(exc).__name__})"
+    if not (failed or blocked or in_flight or undiscovered):
+        return _na(f"no job is running or failed ({len(jobs)} finished){topics_note}")
 
     parts: list[str] = []
     fixes: list[str] = []
@@ -9565,9 +9582,18 @@ def _check_reembed_jobs() -> list[HealthResult]:
             f"{len(in_flight)} re-embed job(s) in progress ({counts}): "
             f"{_name_list([_reembed_job_summary(j) for j in in_flight])}; {_REEMBED_STATUS_COMMAND}"
         )
+    if undiscovered:
+        # RDR-210 Technical Design 4: without --wait the done report names the discover command, and this row
+        # says so until a discover has run.
+        parts.append(
+            f"{len(undiscovered)} re-embed target(s) have had no taxonomy discover since their job finished, so "
+            f"topic search and topic boosts may miss the moved documents: {_name_list(undiscovered)}"
+        )
+        fixes.extend(reembed_job.discover_command(t) for t in undiscovered[:_MAX_FAILED_JOB_FIXES])
+    warn = bool(failed or blocked or undiscovered)
     return [HealthResult(
-        label=label, ok=not (failed or blocked), warn=bool(failed or blocked),
-        detail="; ".join(parts), fix_suggestions=fixes,
+        label=label, ok=not warn, warn=warn,
+        detail="; ".join(parts) + topics_note, fix_suggestions=fixes,
     )]
 
 

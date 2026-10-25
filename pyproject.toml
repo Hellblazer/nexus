@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.86.1"
+version = "7.86.2"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -119,7 +119,10 @@ dependencies = [
     # protect it) — an unbounded floor shipped 4 days of dead MCP servers to
     # every fresh install (nexus-l2ku5). Raise only with a deliberate 2.0
     # API migration, gated by the MVV's installed-venv handshake probe.
-    "mcp>=1.0,<2",
+    # Floor 1.19 (nexus-6b6hq): the first release whose
+    # FuncMetadata.convert_result passes a returned CallToolResult through,
+    # which is how a tool failure reaches the client as isError.
+    "mcp>=1.19,<2",
     "fastapi>=0.115,<1.0",
     # nexus-l2ku5 sibling (2026-08-14, gap 3 of T2
     # nexus/release-protocol-gap-audit-2026-08-14 [22511]): was fully

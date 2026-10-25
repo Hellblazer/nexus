@@ -91,12 +91,15 @@ the consumer.**
   (`api.voyageai.com`) from `VoyageEmbedder`, `CceEmbedder` and `VoyageReranker`,
   and only when keyed, optionally through the operator's proxy (`EgressProxy`);
   and to its database, a LOCAL Postgres at `NX_DB_URL`, over JDBC. Nothing else is
-  intended. Two tests in `service/src/test/java/dev/nexus/service/` check the list
-  and neither proves it. `EgressGuardCensus` scans `service/src/main/java` for ten
-  named outbound constructs against an allowlist with an exact site count per
-  file. `EgressRuntimeWitnessTest` builds the tokenizer, the bge embedder and the
+  intended. Three tests in `service/src/test/java/dev/nexus/service/` check the list
+  and none proves it. `EgressGuardCensus` scans `service/src/main/java` for 22
+  named outbound constructs, each with a planted positive control, against an
+  allowlist with an exact site count per file and per construct.
+  `EgressRuntimeWitnessTest` builds the tokenizer, the bge embedder and the
   cross-encoder in a JVM whose URL-stream factory refuses every non-`file`,
-  non-`jar` stream. Not covered: `java.net.http` use inside a dependency; raw
+  non-`jar` stream. `EgressVoyageClientWitnessTest` pins each Voyage client's
+  default host in a child JVM and that a keyless boot builds none of them
+  (nexus-3va7p). Not covered: `java.net.http` use inside a dependency; raw
   sockets, DNS or JNI inside a dependency (DJL's Rust tokenizers library does
   network I/O a URL factory cannot see); and the GraalVM native image the engine
   ships as (the witness runs on a JVM). Local mode must

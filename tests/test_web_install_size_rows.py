@@ -15,14 +15,14 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 WEB_FILES = ("web/install.sh", "web/install.ps1", "web/index.html")
 
-#: The default install, measured on 7.85.0 on macOS and Linux on 2026-10-24 (nexus-2k66t.4.10; T2
-#: ``nexus/install-size-measurement-2026-10-24``). Windows was not measured. Kept equal to
+#: The default install, measured on 7.86.0 on macOS and Linux on 2026-10-25 (nexus-q04tu; T2
+#: ``nexus/shakeout-786-linux-leg-2026-10-25``). Windows was not measured. Kept equal to
 #: tests/test_install_size_rows.py, which pins the same figures in the non-web places.
-LOCAL = "about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk"
-CLI = "about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk"
+LOCAL = "about 0.8 GB down (1.0 GB on Linux), 2.8 to 3.0 GB on disk"
+CLI = "about 0.5 GB down (0.6 GB on Linux), 2.0 to 2.3 GB on disk"
 STALE_TABLE = (
     "about 0.55 GB", "1.6 to 2.3 GB", "1.3 to 1.5 GB", "about 0.2 GB down", "about 1.3 GB", "about 0.7 GB down",
-    "2.4 to 3.1 GB", "2.1 to 2.3 GB",
+    "2.4 to 3.1 GB", "2.1 to 2.3 GB", "about 0.45 GB", "1.8 to 2.2 GB", "2.5 to 2.9 GB", "0.9 GB on Linux)", "0.37 GB",
 )
 STALE_PROVENANCE = ("derived", "7.81.0-era", "upper bound", "0.8 GB less", "2.4 GB on Linux", "3.6 GB on macOS", "2.4 GB, not 4.4 GB")
 
@@ -40,11 +40,11 @@ def test_the_web_page_shows_the_default_sizes_the_slim_flag_and_the_macos_floor(
         assert stale not in text, f"web/index.html still quotes {stale!r}"
     assert "~0.8 GB" in text
     assert "include PDF support" in text
-    assert "measured on 7.85.0 on macOS and Linux (2026-10-24); Windows was not measured" in text
+    assert "measured on 7.86.0 on macOS and Linux (2026-10-25); Windows was not measured" in text
     for stale in STALE_PROVENANCE:
         assert stale not in text, f"web/index.html still says {stale!r}"
-    assert "about 2.1 GB on Linux and 1.8 GB on macOS" in text
-    assert "0.25 GB less" in text and "0.85 GB less on disk on macOS and 1.3 GB on Linux" in text
+    assert "about 2.2 GB on Linux and 1.9 GB on macOS" in text and "0.84 GB" in text
+    assert "0.28 GB less" in text and "1.0 GB less on disk on macOS and 1.3 GB on Linux" in text
     assert text.count("<code>--slim</code>") >= 3, "the flag lists (macOS/Linux and the Windows script block) must name --slim"
     assert "macOS 14 or later" in text
 
@@ -52,11 +52,11 @@ def test_the_web_page_shows_the_default_sizes_the_slim_flag_and_the_macos_floor(
 @pytest.mark.parametrize("path", ["web/install.sh", "web/install.ps1"])
 def test_the_installers_state_the_default_size_the_slim_size_and_that_they_are_measured(path: str) -> None:
     text = _text(path)
-    assert "about 0.8 GB" in text and "0.9 GB on Linux" in text
-    assert "about 0.45 GB on macOS and 0.6 GB on Linux" in text
-    assert "--slim" in text and "about 0.2 GB for the" in text and "about 0.55 GB with --local" in text
-    assert "measured on 7.85.0 on macOS and Linux (2026-10-24)" in text
-    assert "1.8 to 2.2 GB for the command-line tool and 2.5 to 2.9 GB with --local" in " ".join(text.split())
+    assert "about 0.8 GB" in text and "1.0 GB on Linux" in text
+    assert "about 0.5 GB on macOS and 0.6 GB on Linux" in text
+    assert "--slim" in text and "about 0.25 GB for the" in text and "about 0.55 GB with --local" in text
+    assert "measured on 7.86.0 on macOS and Linux (2026-10-25)" in text
+    assert "2.0 to 2.3 GB for the command-line tool and 2.8 to 3.0 GB with --local" in " ".join(text.split())
     for stale in STALE_PROVENANCE:
         assert stale not in text, f"{path} still says {stale!r}"
     assert "1.3 GB" not in text and "700 MB" not in text

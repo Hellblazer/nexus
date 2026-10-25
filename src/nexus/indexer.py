@@ -3011,16 +3011,19 @@ def _hold_pdfs_without_stack(
     ):
         pdf_stack.record_skipped([*already_held], repo=repo)
         return []
+    # A refusal reaches here from any layout (the policy, or a non-generation install the auto
+    # path will not touch), so the remedy is the plan's command, not the generation-only constant.
+    remedy = pdf_stack.repair_command()
     for path in pdf_paths:
         _log.error(
             "pdf_not_indexed_stack_missing", path=str(path), repo=str(repo),
-            remedy=pdf_stack.INSTALL_COMMAND,
+            remedy=remedy,
         )
     pdf_stack.record_skipped([*already_held, *pdf_paths], repo=repo)
     if on_phase is not None and not already_held:
         on_phase(
             f"PDF support is not installed and installing it is refused here: {len(pdf_paths)} "
-            f"PDF(s) NOT indexed this run (code and prose proceed). Run: {pdf_stack.INSTALL_COMMAND}"
+            f"PDF(s) NOT indexed this run (code and prose proceed). Run: {remedy}"
         )
     return list(pdf_paths)
 

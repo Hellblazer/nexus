@@ -243,6 +243,60 @@ grep -qE 'exit[[:space:]]+1' <<<"$tally_body" && ok "a short tally exits 1" || b
 grep -qE '^DG_PASSES=2[[:space:]]*$' "$GATE" && ok "DG_PASSES is pinned at 2 (before and after the restart)" \
   || bad "DG_PASSES=2 not found"
 
+# The Phase 6 scenarios (nexus-s08oe) run after the tally and before the keyed_voyage leg, and keep each
+# Minimum Viable Validation check: a pin per check, so a deleted check is a red here, not a quieter gate.
+mvv_line="$(line_of "$GATE" '^dg_run_mvv[[:space:]]*$')"
+kv_line="$(line_of "$GATE" '^dg_run_keyed_voyage_tests[[:space:]]*$')"
+[[ -n "$mvv_line" && -n "$kv_line" ]] || fail_loud_and_exit "anchor for the Phase 6 call matched nothing; this test needs updating, not a silent pass"
+[[ "$tally_line" -lt "$mvv_line" && "$mvv_line" -lt "$kv_line" ]] \
+  && ok "order: tally ($tally_line) < Phase 6 scenarios ($mvv_line) < keyed_voyage leg ($kv_line)" \
+  || bad "the Phase 6 scenarios are not between the tally and the keyed_voyage leg: tally=$tally_line mvv=$mvv_line leg=$kv_line"
+mvv_body="$(code_of "$GATE" | sed -n '/^dg_run_mvv()[[:space:]]*{/,/^}/p')"
+[[ -n "$mvv_body" ]] || fail_loud_and_exit "dg_run_mvv() body anchor matched nothing; this test needs updating"
+missing_mvv_needles() {  # <body>: each MVV check predicate that is absent from <body> (or no longer unique)
+  local needle
+  for needle in \
+      'grep -qF "dry-run: 2 job\(s\) would start"' \
+      're-embed --all --no-dry-run --yes --wait --token-cap' \
+      "j.get\('source_collection'\)=='\\\$DG_BGE_COLL' and j.get\('state'\)=='done'" \
+      "j.get\('source_collection'\)=='\\\$DG_MVV_NOTE_COLL' and j.get\('state'\)=='done'" \
+      'dg_mvv_require_gone "\$DG_BGE_COLL"' \
+      'dg_mvv_require_gone "\$DG_MVV_NOTE_COLL"' \
+      "len\(d\['by_coll'\].get\('\\\$DG_MVV_NOTE_COLL', \[\]\)\) == 1" \
+      "\['ids'\]\) <= set\(d\['ids'\]\)" \
+      "\['by_coll'\]\['\\\$DG_MVV_NOTE_COLL'\] == d\['by_coll'\].get\('\\\$target'\)" \
+      "d\['top'\] == '\\\$DG_MVV_RANK_CHASH'" \
+      "d.get\('collection'\)=='\\\$DG_VOY_COLL' and d.get\('problem_formulation'\)" \
+      "d.get\('count', 0\) >= \\\$DG_MVV_THEME_DOCS" \
+      "len\(\{r.get\('doc_id'\) for r in d\}\) >= 10" \
+      'grep -qF "No collection is off the profile."'; do
+    [[ "$(grep -cE -- "$needle" <<<"$1")" -eq 1 ]] || printf '%s\n' "$needle"
+  done
+}
+[[ -z "$(missing_mvv_needles "$mvv_body")" ]] \
+  && ok "dg_run_mvv keeps every MVV check predicate, each once (plan, start, both jobs done, both sources 404, note and theme survival, rank, aspect, meta, assignments, empty second --all)" \
+  || bad "dg_run_mvv lost or duplicated: $(missing_mvv_needles "$mvv_body" | tr '\n' ';')"
+# Positive control: delete ONE predicate line (the aspect check's), keeping its request and its message.
+[[ -n "$(missing_mvv_needles "$(grep -v "d.get('collection')=='\$DG_VOY_COLL' and d.get('problem_formulation')" <<<"$mvv_body")")" ]] \
+  && ok "a dg_run_mvv with only the aspect predicate removed is noticed (positive control)" \
+  || bad "the MVV pin does not notice a removed predicate"
+gone_body="$(code_of "$GATE" | sed -n '/^dg_mvv_require_gone()[[:space:]]*{/,/^}/p')"
+grep -qE '\[ "\$DG_CODE" = "404" \] \|\| dg_fail' <<<"$gone_body" && grep -qE 'dg_expect_200 .*the control' <<<"$gone_body" \
+  && ok "dg_mvv_require_gone demands a 404 for the source and a 200 for the live control" \
+  || bad "dg_mvv_require_gone lost its 404 demand or its 200 control"
+# The key and the write opt-in: the client is keyed only after the before-search and before the Voyage boot,
+# and the opt-in is a command prefix, never exported.
+mvv_line_of() { local hits; hits="$(grep -nE -- "$1" <<<"$mvv_body" | cut -d: -f1)"; printf '%s' "${hits%%$'\n'*}"; }
+before_l="$(mvv_line_of '^[[:space:]]*dg_mvv_search "\$DG_BGE_COLL,')"
+keyed_l="$(mvv_line_of '^[[:space:]]*DG_MVV_CLIENT_KEYED=1')"
+boot_l="$(mvv_line_of '^[[:space:]]*dg_start_engine')"
+[[ -n "$before_l" && -n "$keyed_l" && -n "$boot_l" && "$before_l" -lt "$keyed_l" && "$keyed_l" -lt "$boot_l" ]] \
+  && ok "the client is keyed after the before-search ($before_l) and before the Voyage-profile boot ($keyed_l < $boot_l)" \
+  || bad "client keying order: before-search=$before_l keyed=$keyed_l boot=$boot_l"
+[[ "$(code_of "$GATE" | grep -cE 'export[[:space:]]+NX_ALLOW_PROD_WRITE')" -eq 0 ]] \
+  && ok "NX_ALLOW_PROD_WRITE is never exported (a prefix on the Phase 6 client calls only)" \
+  || bad "the gate exports NX_ALLOW_PROD_WRITE"
+
 # The keyed_voyage leg (nexus-8errq) runs after the tally and before the banner, demands exactly the
 # count the local-service gate deselects, and exits 1 on a short count.
 cm_line="$(line_of "$GATE" '^dg_run_keyed_voyage_tests[[:space:]]*$')"

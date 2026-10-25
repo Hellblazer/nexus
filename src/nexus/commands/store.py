@@ -9,6 +9,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+from nexus.commands._helpers import read_stdin_utf8
 from nexus.corpus import (
     EmbeddingProfileMismatchError,
     LocalVoyageCredentialMissingError,
@@ -82,7 +83,7 @@ def put_cmd(
     if source == "-":
         if not title:
             raise click.ClickException("--title is required when reading from stdin (-)")
-        content = sys.stdin.read().removeprefix("\ufeff")
+        content = read_stdin_utf8()
     else:
         path = Path(source)
         if not path.exists():

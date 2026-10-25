@@ -14,9 +14,12 @@ monkeypatches on ``nexus.config.default_db_path`` reach the live
 binding via attribute access at call time. The ``from x import y``
 form captures ``y`` at import time and silently bypasses the patch.
 """
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
+
+import click
 
 from nexus import config as _config
 
@@ -30,6 +33,7 @@ __all__ = [
     "emit_retry_summary",
     "raise_identity_drop_exception",
     "raise_identity_drop_exception_for_file",
+    "read_stdin_utf8",
     "reset_identity_drop_collectors",
     "resolve_confirmed_write_failure_doc_ids",
     "t2_handle",
@@ -43,6 +47,33 @@ __all__ = [
 #: ``ctx.obj["verbose"]`` in ``src/nexus/cli.py``), never a replacement of
 #: it, so nothing that dict already carries is disturbed.
 T2_SHARED_CLIENT_CTX_KEY = "_t2_shared_client"
+
+_STDIN_NOT_UTF8 = (
+    "stdin is not valid UTF-8; pass the file path instead, or pipe UTF-8 "
+    "(in Windows PowerShell 5.1 set `$OutputEncoding = [Text.UTF8Encoding]::new($false)`)."
+)
+
+
+def read_stdin_utf8() -> str:
+    """Read all of stdin as UTF-8 text, the same on every platform.
+
+    Python decodes a piped stdin with the locale encoding, the ANSI code page on
+    Windows (cp1252), which keeps a BOM as three characters and mangles every
+    non-ASCII character (7.86.1 shakeout). So read the bytes and decode them here:
+    ``utf-8-sig`` drops a leading BOM, and CRLF / lone CR become LF as text-mode
+    stdin does (bytes skip that translation). A stdin with no ``.buffer`` (a
+    text-only replacement) falls back to its own text read. Non-UTF-8 input raises
+    a ``ClickException`` that names the remedy and never echoes the input, since
+    ``nx config set --stdin`` reads secrets through this.
+    """
+    buf = getattr(sys.stdin, "buffer", None)
+    if buf is None:
+        return sys.stdin.read().removeprefix("\ufeff")
+    try:
+        text = buf.read().decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise click.ClickException(_STDIN_NOT_UTF8) from None
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def t2_shared_client_from_context() -> "httpx.Client | None":

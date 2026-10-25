@@ -85,7 +85,7 @@
         <tbody>
           {% for c in health_checks %}
           <tr>
-            <td style="width:1.5rem;">{% if c.ok %}<span style="color:var(--console-ok);">&#x2713;</span>{% else %}<span style="color:var(--console-err);">&#x2717;</span>{% endif %}</td>
+            <td style="width:1.5rem;">{% if c.ok %}<span style="color:var(--console-ok);">&#x2713;</span>{% elif c.warn %}<span style="color:var(--console-warn);">&#x26A0;</span>{% else %}<span style="color:var(--console-err);">&#x2717;</span>{% endif %}</td>
             <td>{{ c.label }}</td>
             <td><small style="color:var(--console-muted);">{{ c.detail }}</small></td>
           </tr>

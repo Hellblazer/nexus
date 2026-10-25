@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
-import sys
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +9,7 @@ import httpx
 import structlog
 
 from nexus.commands._helpers import default_db_path as _default_db_path
-from nexus.commands._helpers import t2_handle
+from nexus.commands._helpers import read_stdin_utf8, t2_handle
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.ttl import parse_ttl
@@ -90,7 +89,7 @@ def put_cmd(
     the deleted ``nx daemon t2 start`` until that sub-stage's review.
     """
     if content == "-":
-        content = sys.stdin.read()
+        content = read_stdin_utf8()
     try:
         ttl_days = parse_ttl(ttl)
     except ValueError as exc:

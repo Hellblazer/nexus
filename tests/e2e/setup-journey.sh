@@ -99,7 +99,7 @@ _uv_host build --wheel --out-dir "$WORK/wheels" "$REPO_ROOT" >"$WORK/build.log" 
 
 echo "== the client: a venv with the MCP SDK"
 _uv_host venv --python 3.12 "$WORK/client" >"$WORK/client.log" 2>&1 || { tail -20 "$WORK/client.log" >&2; _fail "the client venv did not build"; }
-_uv_host pip install --python "$WORK/client/bin/python" "mcp>=1.0,<2" >>"$WORK/client.log" 2>&1 \
+_uv_host pip install --python "$WORK/client/bin/python" "mcp>=1.19,<2" >>"$WORK/client.log" 2>&1 \
     || { tail -20 "$WORK/client.log" >&2; _fail "the MCP SDK did not install (offline: it must be in the seed's cache)"; }
 
 ARGS=(--seed-dir "$SEED" --work "$WORK/boxes" --uv "$UV" --uv-python-dir "$UV_PY_DIR" --wheels "$WORK/wheels" --only "$ONLY")

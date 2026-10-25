@@ -117,6 +117,10 @@ These always-on rules are repeated here because no file read triggers them:
 
 Use **beads** (`bd`) for issue tracking. Find work with `bd ready`; claim with `bd update <id> --claim`; close with `bd close <id>`. Use `nx memory put` for project-context notes that persist across sessions. See `docs/contributing.md` § Git Workflow for branch naming (`feature/<bead-id>-<description>`).
 
+## Cross-session board
+
+Each session keeps one T2 entry in project `threads`, titled with its session name (from ListAgents), updated with `memory_put` (no ttl) at phase boundaries (a thread starts, a push, a wait on someone, done), not per step. One `## <the work in plain words>` block per open thread, with `ref:`, `state:`, `waiting_on:` and `needs_sam:` lines; delete the block when the work is done. Each field is one line. A decision only Sam can make goes in `needs_sam:` and is also a bead labelled `needs-sam`, with that bead's id in the thread's `ref:` so the board shows it once. Sam reads the board in `nx console`, Threads tab.
+
 ## Settings
 
 User-global permission settings live in `~/.claude/settings.json`. Never write to `settings.local.json` — it must remain `{}`.

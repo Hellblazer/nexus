@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Threads · nx console{% endblock %}
+{% block content %}
+<div style="display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.25rem;">
+  <h2 style="margin:0;">Threads</h2>
+  <button hx-get="/threads/refresh" hx-target="#threads-board"
+          class="secondary outline"
+          style="margin-left: auto; padding: 0.15rem 0.5rem; font-size: 0.75rem;">Refresh</button>
+</div>
+<p class="thread-notice" style="margin-top:0;">What each Claude session is working on, and what is waiting for you.</p>
+
+<div id="threads-board" hx-get="/threads/refresh" hx-trigger="every 60s" hx-swap="innerHTML">
+  {% include "threads/_board.html" %}
+</div>
+{% endblock %}

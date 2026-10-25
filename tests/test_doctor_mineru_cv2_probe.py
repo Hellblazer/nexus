@@ -63,7 +63,7 @@ def test_a_cv2_that_cannot_load_is_red_and_names_the_repair(fake_cv2, capsys) ->
     row = next(ln for ln in out.splitlines() if "cv2" in ln and "↳" not in ln)
     assert "✗" in row and LIBGL_ERROR in row
     assert "headless" in out
-    assert pdf_stack.INSTALL_COMMAND in out
+    assert pdf_stack.repair_command() in out  # this layout's command (the plan's), not the generation-only constant
     # the do_parse row is still green: that is exactly the gap this row closes
     assert any("MinerU import" in ln and "✓" in ln for ln in out.splitlines())
 

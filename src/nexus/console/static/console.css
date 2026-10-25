@@ -139,20 +139,6 @@ table code {
   color: var(--console-muted);
 }
 
-/* Activity stream — left border per event type */
-.event-row {
-  border-left: 3px solid var(--pico-primary);
-  transition: background 0.1s;
-}
-
-.event-row.doc {
-  border-left-color: var(--console-ok);
-}
-
-.event-row.link {
-  border-left-color: var(--pico-primary);
-}
-
 /* Filter bar */
 details > summary {
   font-size: 0.8rem;
@@ -173,13 +159,66 @@ details .grid input {
   padding: 0.25rem 0.4rem;
 }
 
-/* Campaign rows — clickable */
-tr[hx-get] {
-  cursor: pointer;
+/* Threads board */
+.thread-card {
+  border-left: 3px solid var(--console-ok);
+  padding: 0.4rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: rgba(255,255,255,0.02);
+  border-radius: 0 4px 4px 0;
 }
 
-tr[hx-get]:hover {
-  background: rgba(255,255,255,0.06) !important;
+.thread-card header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0;
+  margin-bottom: 0.2rem;
+  border: none;
+  background: none;
+}
+
+.thread-card.stale {
+  border-left-color: var(--console-muted);
+  opacity: 0.55;
+}
+
+.thread-headline {
+  font-size: 1.15rem;
+  font-weight: bold;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.thread-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.thread-list li {
+  padding: 0.2rem 0.5rem;
+  margin: 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--console-border);
+}
+
+.thread-list li:last-child {
+  border-bottom: none;
+}
+
+.thread-list li.needs-sam {
+  background: rgba(255,152,0,0.14);
+  box-shadow: inset 3px 0 0 var(--console-warn);
+}
+
+.quiet-sessions {
+  margin-top: 0.5rem;
+}
+
+.thread-notice {
+  color: var(--console-muted);
+  font-size: 0.8rem;
+  margin: 0.2rem 0 0.5rem;
 }
 
 /* Stat counters */

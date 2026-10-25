@@ -265,7 +265,8 @@ def test_absent_on_a_gap_box_says_the_gap_and_the_remedy_not_the_install_command
     _stack(monkeypatch, "absent", "docling, MinerU and torch are not installed")
     monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("base_only", str(tmp_path / "svc")))
     (row,) = health._check_pdf_support()
-    assert row.label == "PDF support" and row.ok and row.warn, "informational, but not a plain pass"
+    assert row.label == "PDF support" and not row.ok and row.warn, "a warning, not a plain pass"
+    _renders_as_soft_warning(row)
     assert "msvcp140_atomic_wait.dll" in row.detail and str(tmp_path / "svc") in row.detail
     assert "cannot be installed yet" in row.detail
     assert "nx upgrade" in row.detail and pdf_stack.VCRT_URL in row.detail
@@ -287,6 +288,14 @@ def test_absent_on_a_box_without_a_gap_keeps_the_first_use_wording(monkeypatch) 
     (row,) = health._check_pdf_support()
     assert row.ok and not row.warn
     assert "installs it on first use" in row.detail and pdf_stack.INSTALL_COMMAND in row.detail
+
+
+def _renders_as_soft_warning(row) -> None:
+    """A warning row prints ⚠ and leaves the exit code alone. The 7.86.1 shakeout found
+    rows built ok=True, warn=True: ok wins in the renderer, so they printed a green ✓."""
+    out, _ = health.format_health_for_cli([row], local_mode=True)
+    assert f"{health._SOFT_WARN} {row.label}" in out, out
+    assert health.health_exit_code([row]) == health.EXIT_HEALTHY
 
 
 # ── two OpenCV builds in one environment (nexus-11x9o) ────────────────────────
@@ -311,7 +320,8 @@ def test_both_opencv_builds_off_linux_is_a_warning_not_red(monkeypatch) -> None:
     _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
     setattr_in(monkeypatch, health, "sys.platform", "darwin")
     row = health._check_pdf_support()[0]
-    assert row.ok and row.warn
+    assert not row.ok and row.warn
+    _renders_as_soft_warning(row)
     assert pdf_stack.INSTALL_COMMAND in row.fix_suggestions[0]
 
 

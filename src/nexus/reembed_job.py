@@ -283,6 +283,134 @@ def discover_command(target: str) -> str:
     return f"nx taxonomy discover --collection {target}"
 
 
+@dataclass(frozen=True)
+class Undiscovered:
+    """:func:`undiscovered`'s answer: the targets that need a discover, and those whose size could not be read."""
+
+    targets: list[str]
+    unjudged: list[str]
+
+
+def undiscovered(
+    jobs: Iterable[dict],
+    *,
+    live: set[str],
+    ran: dict[str, str],
+    count: Callable[[str], int],
+    min_chunks: int,
+) -> Undiscovered:
+    """Targets of finished jobs (``done``, ``done_with_skips``) that no taxonomy discover has run on since their job.
+
+    RDR-210 Technical Design 4: without ``--wait``, the doctor names the discover command until one has run.
+    *ran* is ``{collection: iso}``, the latest time a discover RAN on it without failing: the client's recorded
+    attempt (``nx taxonomy discover`` and ``nx index`` both record one, whether or not it formed topics) or the
+    engine's ``last_discover_at``, whichever is newer. Keying on the run, not on topics, is what lets the named
+    command always clear the row: discover writes no topics when the target already has them or clusters to all
+    noise. A target is left out when it is no longer *live* (deleted, superseded or never registered: nothing to
+    discover), when a run is at or after the job's end (compared to the second, the stamps' resolution), or when
+    it holds fewer than *min_chunks* chunks (discover builds nothing there). *count* is called only for targets
+    still in question; one that raises is listed in ``unjudged`` and the others are still judged.
+    """
+    from datetime import datetime  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    def when(iso: object) -> datetime | None:
+        try:
+            t = datetime.fromisoformat(str(iso).replace("Z", "+00:00")) if iso else None
+        except ValueError:
+            return None
+        return None if t is None or t.tzinfo is None else t.replace(microsecond=0)
+
+    finished: dict[str, datetime] = {}
+    for j in jobs:
+        target, at = j.get("target_collection"), when(j.get("finished_at"))
+        if j.get("state") in DISCOVER_STATES and target and at is not None:
+            finished[str(target)] = max(at, finished.get(str(target), at))
+    targets: list[str] = []
+    unjudged: list[str] = []
+    for target, at in sorted(finished.items()):
+        if target not in live:
+            continue
+        last = when(ran.get(target))
+        if last is not None and last >= at:
+            continue
+        try:
+            if count(target) < min_chunks:
+                continue
+        except Exception as exc:  # noqa: BLE001 — one unreadable target must not hide the others
+            _log.debug("reembed_undiscovered_count_failed", target=target, error=str(exc))
+            unjudged.append(target)
+            continue
+        targets.append(target)
+    return Undiscovered(targets, unjudged)
+
+
+def _later(a: str, b: str | None) -> bool:
+    """Whether ISO time *a* is after *b* (a missing or unparseable *b* loses), compared as instants, not strings:
+    the engine and the client write different ISO forms (an offset or a ``Z``)."""
+    from datetime import datetime  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    def parse(v: str | None) -> datetime | None:
+        try:
+            t = datetime.fromisoformat(v.replace("Z", "+00:00")) if v else None
+        except ValueError:
+            return None
+        return t if t is not None and t.tzinfo is not None else None
+
+    pa, pb = parse(a), parse(b)
+    return pa is not None and (pb is None or pa > pb)
+
+
+def undiscovered_targets(jobs: Iterable[dict]) -> Undiscovered:
+    """:func:`undiscovered` over the live engine. Raises on a failed listing read; the doctor row catches it.
+
+    Reads nothing without a finished job. Otherwise: the routing listing (live, current collections; catalog only),
+    the client's recorded discover attempts, the engine's discover stamps for the targets, and a chunk count for
+    each target still in question.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.db.t2.taxonomy_compute import MIN_DISCOVER_CHUNKS  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
+        TAXONOMY_DISCOVER_HEALTH_PROJECT,
+        parse_taxonomy_discover_health,
+    )
+
+    jobs = list(jobs)
+    targets = sorted({
+        str(j["target_collection"]) for j in jobs
+        if j.get("state") in DISCOVER_STATES and j.get("target_collection")
+    })
+    if not targets:
+        return Undiscovered([], [])
+    t3 = make_t3()
+    live = {
+        str(r.get("name")) for r in t3.list_collections(routing=True)
+        if r.get("lifecycle_state", "live") == "live" and not r.get("superseded_by")
+    } & set(targets)
+    ran: dict[str, str] = {}
+    mem = HttpMemoryStore()
+    try:
+        for e in mem.get_all(TAXONOMY_DISCOVER_HEALTH_PROJECT):
+            name = str((e or {}).get("title", ""))
+            rec = parse_taxonomy_discover_health((e or {}).get("content", ""))
+            if name in live and rec.get("last_outcome") == "success" and rec.get("last_attempt_at"):
+                ran[name] = str(rec["last_attempt_at"])
+    finally:
+        mem.close()
+    if live:
+        tax = HttpTaxonomyStore()
+        try:
+            stamps = tax.get_last_discover_stamps(sorted(live))
+        finally:
+            tax.close()
+        for name, stamp in stamps.items():
+            at = (stamp or {}).get("last_discover_at")
+            if at and _later(str(at), ran.get(name)):
+                ran[name] = str(at)
+    return undiscovered(jobs, live=live, ran=ran, count=lambda t: int(t3.count(t)), min_chunks=MIN_DISCOVER_CHUNKS)
+
+
 class WaitError(RuntimeError):
     """A job being waited on is no longer in the engine's status (it was never there, or the engine lost it)."""
 

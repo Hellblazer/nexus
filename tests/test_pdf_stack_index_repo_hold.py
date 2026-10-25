@@ -28,6 +28,9 @@ import pytest
 from click.testing import CliRunner
 
 from nexus import pdf_stack
+from nexus.commands import self_cmd
+
+_REAL_INSTALL_PLAN = pdf_stack.install_plan
 
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
@@ -210,11 +213,10 @@ def test_the_since_head_base_does_not_advance_past_a_held_pdf(repo, monkeypatch)
     assert advanced == ["HEAD1"], "control: a clean run advances the base"
 
 
-def test_the_cli_exits_69_after_code_and_prose_with_the_command_in_the_output(repo, monkeypatch) -> None:
-    """The whole path through `nx index repo`: refuse, code indexed, Done., exit 69."""
+def _index_repo_cli(repo, monkeypatch):
+    """Run `nx index repo` for real under the hidden stack; returns ``(result, mocks)``."""
     from nexus.cli import main
 
-    _hide_stack(monkeypatch)
     _commit_all(repo)  # the CLI wants a repository root, and the walk lists tracked files
     monkeypatch.setattr("nexus.mcp_infra._engine_file_key", lambda: "test")
     monkeypatch.setattr("nexus.mcp_infra.engine_process_uptime_seconds", lambda *a, **k: None)
@@ -228,6 +230,13 @@ def test_the_cli_exits_69_after_code_and_prose_with_the_command_in_the_output(re
     run = _Run()
     with _doubles(run, _db()) as mocks, patch("nexus.commands.index._registry", return_value=_reg()):
         result = CliRunner().invoke(main, ["index", "repo", str(repo)])
+    return result, mocks
+
+
+def test_the_cli_exits_69_after_code_and_prose_with_the_command_in_the_output(repo, monkeypatch) -> None:
+    """The whole path through `nx index repo`: refuse, code indexed, Done., exit 69."""
+    _hide_stack(monkeypatch)
+    result, mocks = _index_repo_cli(repo, monkeypatch)
 
     assert result.exit_code == 69, result.output
     assert mocks["_index_code_file"].call_count == 1, "code is indexed before the exit"
@@ -235,6 +244,20 @@ def test_the_cli_exits_69_after_code_and_prose_with_the_command_in_the_output(re
     assert "1 PDF(s) were NOT indexed" in result.output
     assert "nx self install --extras pdf" in result.output
     assert "Done." in result.output
+
+
+def test_the_cli_names_the_legacy_trees_repair_not_the_generation_only_one(repo, monkeypatch) -> None:
+    """On a uv tool tree `--extras` is refused ("this nx is not running from one"), so the run
+    failure line must carry the plan's plain `nx self install` (7.86.1 shakeout, nexus-11x9o)."""
+    _hide_stack(monkeypatch)
+    monkeypatch.setattr(pdf_stack, "install_plan", _REAL_INSTALL_PLAN)  # the real plan, over a legacy layout
+    monkeypatch.setattr(self_cmd, "running_generation", lambda: Path("/uv/tools/conexus"))
+    monkeypatch.setattr(self_cmd, "_running_from_legacy_tool_install", lambda: True)
+    result, _mocks = _index_repo_cli(repo, monkeypatch)
+
+    assert result.exit_code == 69, result.output
+    assert "Run: nx self install   then re-run `nx index repo`." in result.output
+    assert "--extras pdf" not in result.output
 
 
 # ── the offline box: a network or installer failure names the way through ────

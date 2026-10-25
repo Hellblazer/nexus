@@ -1418,6 +1418,21 @@ def torch_backend_hint(
     )
 
 
+def split_build_failure(message: str) -> tuple[str, str]:
+    """``(advice, uv_output)`` for a generation-build failure *message*.
+
+    Every build failure here is ``[generation build failed:\\n]<advice>\\n\\nuv output...:\\n<uv's
+    text>``, the advice (the index, macOS-floor and cu128 hints above) leading and uv's own
+    text last. A caller that shows only a tail of the message must keep the advice, which is
+    the part written for a person; this is where the two are told apart. *message* with no
+    ``uv output`` label has no advice: ``("", message)``."""
+    head, sep, rest = message.partition("\n\nuv output")
+    if not sep:
+        return "", message
+    advice = head.strip().removeprefix("generation build failed:").strip()
+    return advice, rest.partition(":\n")[2]
+
+
 def _with_platform_hint(detail: str) -> str:
     """*detail* with the macOS-floor hint above it when it applies."""
     hint = platform_failure_hint(detail)

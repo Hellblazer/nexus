@@ -37,3 +37,5 @@ next client release. A deferred entry is exempt from the release-window
 "ledger must be empty" rule above -- still declared there is correct, not
 stale -- and stays exactly where it is until moved back deliberately.
 
+
+---

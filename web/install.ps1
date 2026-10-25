@@ -50,7 +50,7 @@ when claude is on the PATH, and sets up the storage service if you ask for it.
 Usage: install.ps1 [--local | --cloud | --cli-only] [--autostart | --no-autostart] [--slim]
 
   --local          Run the storage service on this machine. Downloads about 0.8 GB
-                   in all on macOS and 0.9 GB on Linux (Windows is not measured),
+                   in all on macOS and 1.0 GB on Linux (Windows is not measured),
                    PDF support included. Runs `nx init`, in local mode even when a
                    service address is already configured.
   --cloud          Use a managed service. Runs `nx config init`, which asks for the
@@ -63,7 +63,7 @@ Usage: install.ps1 [--local | --cloud | --cli-only] [--autostart | --no-autostar
                    as --yes.
   --no-autostart   With --local: do not start the service at login. Passed to
                    `nx init` as --no-autostart.
-  --slim           Leave PDF support out: the download falls to about 0.2 GB for the
+  --slim           Leave PDF support out: the download falls to about 0.25 GB for the
                    command-line tool (about 0.55 GB with --local). The first PDF you
                    index then fetches it (`nx self install --extras pdf` does it
                    ahead of time).
@@ -73,11 +73,15 @@ Typing this command is your consent to install the command-line tool, so the
 script does not ask about that. It installs uv first when uv is missing, using
 the uv project's own installer. When nx is already installed it skips the build
 and says so. By default the build installs everything, PDF support included
-(docling, MinerU and torch): it downloads about 0.45 GB on macOS and 0.6 GB on Linux
+(docling, MinerU and torch): it downloads about 0.5 GB on macOS and 0.6 GB on Linux
 for the command-line tool, and the service adds the rest of the --local figure. The
-sizes were measured on 7.85.0 on macOS and Linux (2026-10-24). Disk use is about 1.8 to
-2.2 GB for the command-line tool and 2.5 to 2.9 GB with --local. Windows sizes were not
+sizes were measured on 7.86.0 on macOS and Linux (2026-10-25). Disk use is about 2.0 to
+2.3 GB for the command-line tool and 2.8 to 3.0 GB with --local. Windows sizes were not
 measured. None of these figures is a promise.
+
+Platforms: Windows 11 on x64. If you run this script under PowerShell on a Mac, that is
+an Apple Silicon Mac on macOS 14 or later (the pinned onnxruntime ships macOS 14 wheels
+only); on Linux, x86-64 or arm64.
 
 With no service flag, the script asks one question on the terminal, before it
 downloads anything. With no terminal attached and no flag, it installs the
@@ -114,7 +118,7 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
     function Select-Mode {
         Say ''
         Say 'How should Nexus run its storage service?'
-        Say '  1) local     run it on this machine (downloads about 0.8 GB on macOS, 0.9 GB on Linux; Windows not measured)'
+        Say '  1) local     run it on this machine (downloads about 0.8 GB on macOS, 1.0 GB on Linux; Windows not measured)'
         Say '  2) cloud     use a managed service (you type its address and token)'
         Say '  3) CLI only  install the command-line tool and nothing else'
         for ($tries = 0; $tries -lt 3; $tries++) {
@@ -317,6 +321,9 @@ passes --no-autostart. A login unit is never registered without an explicit yes.
             if ($buildCode -ne 0) { Stop-Install 1 'install.ps1: the build failed (see the lines above). Nothing else was done.' }
             if (-not (Find-Cli)) {
                 Stop-Install 1 ('install.ps1: the build finished but nx was not found in ' + $layoutBin + '. Open a new terminal and run this again.')
+            }
+            if ($state.Slim) {
+                Say 'PDF support was left out (-slim). The first PDF you index installs it; to add it now, run: nx self install --extras pdf'
             }
         }
 

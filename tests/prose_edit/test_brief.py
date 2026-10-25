@@ -294,7 +294,7 @@ def test_the_live_style_sheet_treatments_all_match_the_real_site_page_skill() ->
 # ---------------------------------------------------------------------------
 
 ORDER = ["## 1. Exemplars", "## 2. Voice card", "## 3. Style sheet", "## 4. Not a defect",
-         "## 5. Budget", "## 6. Prefer cutting"]
+         "## 5. Budget", "## 6. Cut redundancy, unpack compression"]
 
 
 def test_the_brief_carries_each_layer_in_the_rdr_order_with_the_later_layer_winning(
@@ -322,7 +322,7 @@ def test_the_brief_carries_each_layer_in_the_rdr_order_with_the_later_layer_winn
     assert "genre_map" not in sheet and "notes/=how-to" not in sheet  # routing data, not guidance
     assert "OLD-REJECTED" in text[positions[3]:positions[4]]
     assert "7" in text[positions[4]:positions[5]]
-    assert "Prefer cutting to rewriting" in text[positions[5]:]
+    assert "Cut what repeats:" in text[positions[5]:]
     assert "voice_card" in text[positions[1]:positions[2]]
 
 
@@ -639,8 +639,85 @@ def test_the_agent_body_carries_the_diagnostic_questions_and_the_protections() -
     body = AGENT.read_text(encoding="utf-8").lower()
     for needle in ("open with its claim", "actor", "end on what matters", "reader new to the project",
                    "qualifier", "voice card", "refrain", "tricolon", "never rewrite a whole section",
-                   "budget", "prefer cutting"):
+                   "budget", "cut what repeats"):
         assert needle in body, needle
+
+
+PARSE_ROW = "| Can a reader parse this on the first pass? |"
+PARSE_TRIGGERS = ("three or more nouns in a row, the head noun counted",
+                  "a verb coined ad hoc from a noun (not one in common technical use such as log, cache, index or queue)",
+                  "an inanimate subject with a verb for people or animals",
+                  "an insertion of more than about eight words between subject and verb",
+                  'a clause of more than about eight words missing its optional "that"')
+PARSE_EXCEPTIONS = ("a term the document defines, or a house term on the voice card", "an identifier or code",
+                    "a verb technical English uses for things (fails, returns, refuses, reads, writes, accepts)",
+                    "density the voice card lists as deliberate")
+PREFIXES = ("`noun stack:`", "`coined verb:`", "`inanimate subject:`", "`dependency:`", "`optional word:`")
+
+
+def _row(body: str, opening: str) -> str:
+    rows = [line for line in body.splitlines() if line.startswith(opening)]
+    assert len(rows) == 1, opening
+    return rows[0]
+
+
+def test_the_agent_carries_the_parse_row_with_its_triggers_genres_and_exceptions() -> None:
+    row = _row(AGENT.read_text(encoding="utf-8"), PARSE_ROW)
+    propose, leave = row.split(" | ")[1:3]
+    assert propose.startswith("The brief's genre is rdr, reference-doc, how-to or exploration-essay, and the "
+                              "sentence has ")
+    assert "changelog" not in propose and "commit-message" not in propose
+    for trigger in PARSE_TRIGGERS:
+        assert trigger in propose, trigger
+    for exception in PARSE_EXCEPTIONS:
+        assert exception.lower() in leave.lower(), exception
+
+
+def test_the_agent_rules_allow_a_lengthening_edit_and_keep_the_guard_against_invented_content() -> None:
+    body = AGENT.read_text(encoding="utf-8")
+    assert "- Prefer cutting. A cut has an empty new string." not in body
+    assert ("- Cut what repeats. A cut has an empty new string. An edit may add words when that makes the "
+            "sentence parse on the first reading (the parse row). Never put in a claim, number, name, source or "
+            "example the text does not contain.") in body
+    assert ('- Never cut an optional "that" or a genitive "of"; under the parse row, restoring an optional "that" '
+            "is an edit.") in body
+    assert ("- An edit made under the parse row starts its reason with one of " + ", ".join(PREFIXES[:4]) + " or "
+            + PREFIXES[4] + ".") in body
+    assert "- A query raised by the parse row starts its text with the same prefix." in body
+    assert "- When the brief says cut-only, the parse row does not apply and no edit adds words." in body
+
+
+def test_no_agent_line_outside_the_cut_only_rule_forbids_adding_words() -> None:
+    lines = [line for line in AGENT.read_text(encoding="utf-8").lower().splitlines()
+             if not line.startswith("- when the brief says cut-only")]
+    # the two licences are removed from their lines, not the lines skipped, so a ban added beside one is still seen
+    lines = [line.replace("may add words", "").replace("adds the words a first reading needs", "") for line in lines]
+    for phrase in ("prefer cutting", "add words", "adds words", "add no words", "only remove", "only shorten",
+                   "only cut", "never lengthen", "never make a sentence longer", "no longer than", "should only"):
+        hits = [line for line in lines if phrase in line]
+        assert not hits, (phrase, hits)
+
+
+def test_the_voice_card_names_house_terms_for_the_parse_rows_exception() -> None:
+    body = AGENT.read_text(encoding="utf-8")
+    assert "- house terms: a stacked or coined construction the author uses repeatedly, or one the document defines;" in body
+
+
+def test_the_agents_example_shows_a_prefixed_edit_and_a_prefixed_query() -> None:
+    block = json.loads(re.findall(r"```json\n(.*?)\n```", AGENT.read_text(encoding="utf-8"), re.DOTALL)[0])
+    prefixes = tuple(p.strip("`") for p in PREFIXES)
+    assert any(e["reason"].startswith(prefixes) and len(e["new"]) > len(e["old"]) for e in block["edits"])
+    assert any(q["text"].startswith(prefixes) for q in block["queries"])
+
+
+def test_the_unpack_genres_and_the_cut_genres_partition_every_genre() -> None:
+    mod = _module()
+    assert set(mod.UNPACK_GENRES) | {"changelog", "commit-message"} == set(mod.GENRES)
+    assert not set(mod.UNPACK_GENRES) & {"changelog", "commit-message"}
+
+
+def test_the_skill_description_names_unpacking() -> None:
+    assert "unpack" in _frontmatter(SKILL)["description"]
 
 
 def test_the_skill_has_frontmatter_and_names_only_real_helper_verbs() -> None:

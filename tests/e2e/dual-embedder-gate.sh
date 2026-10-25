@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dual-embedder functional gate (RDR-210 Phase 5 Step 1, bead nexus-8x0tg).
+# Dual-embedder functional gate (RDR-210 Phase 5 Step 1, bead nexus-8x0tg; Phase 6 scenarios, nexus-s08oe).
 #
 # WHY THIS EXISTS. No other gate boots a local engine KEYED (RDR-210 Gap 6): the
 # local-service gate runs keyless and bge-768 only, by design. The engine from
@@ -7,8 +7,8 @@
 # it, and until this script nothing proved that end to end: a bge collection and a
 # Voyage collection in one database, both written, both searched, both still
 # searchable after a restart, and one search over both returning hits from both.
-# This is the first half of the Minimum Viable Validation (the rest, `re-embed
-# --all`, is the Phase 6 scenarios).
+# With the Phase 6 scenarios (step 6 below) it runs the whole Minimum Viable
+# Validation.
 #
 # AN ABSENT KEY IS A FAILURE, NEVER A SKIP (the nexus-moht0 vacuous-gate doctrine).
 # A gate that skip-passes when its dependency is missing proves nothing about the
@@ -51,13 +51,19 @@
 #          requires hits from each.
 #      Pass 2 also requires the engine's process_start_time to differ from pass 1.
 #   5. A tally refuses unless each of the four searches ran once per pass.
-#   6. Runs the three keyed_voyage tests in tests/test_integration.py with the key and
+#   6. The Phase 6 scenarios: seeds source-backed documents (one with an aspect row) and
+#      a `nx store put` note on the bge side, switches the install to the Voyage profile,
+#      and runs `nx collection re-embed --all --wait`: the same documents come back from a
+#      search before and after, each job ends done and its source is deleted, the aspect
+#      row survives re-homed to the target, the target has a taxonomy_meta row and topic
+#      assignments from --wait's discover, and a second --all plans nothing.
+#   7. Runs the three keyed_voyage tests in tests/test_integration.py with the key and
 #      the Voyage profile in their environment, on the suite's own keyed engine
 #      substrate (nexus-8errq); exactly three must pass. Then prints the pass banner.
-#   7. Tears everything down (engine, PG, scratch), even on failure.
+#   8. Tears everything down (engine, PG, scratch), even on failure.
 #
-# The Voyage collections make real Voyage API calls (a handful of embeddings, a few
-# hundred tokens a run), so the gate costs a fraction of a cent and needs the network. It is run on
+# The Voyage collections make real Voyage API calls (a handful of embeddings, and the
+# re-embed moves about 20 chunks: under a thousand tokens a run, capped at 200,000), so the gate costs a fraction of a cent and needs the network. It is run on
 # demand and by the release battery leg (nexus-oc2bk), not on every push.
 #
 # Usage:
@@ -593,6 +599,239 @@ print(sum(all(k.tag in ('system-out', 'system-err', 'properties') for k in c) fo
   echo "[dual-gate] ok ($DG_PASSED): keyed_voyage tests: $passed of $DG_KEYED_VOYAGE_EXPECTED passed on the keyed substrate"
 }
 
+# ── The Phase 6 scenarios (RDR-210 Minimum Viable Validation, nexus-s08oe) ──
+# The install switches to the Voyage profile and `nx collection re-embed --all --wait` moves every bge
+# collection to its Voyage sibling: the gate's bge collection (its pass chunks plus a theme set of
+# source-backed documents, one of them carrying an aspect row) and a `nx store put` note's collection.
+# Checks: the same documents come back from a search before and after; the job ends done and the source
+# is deleted; the aspect row survives, re-homed to the target; --wait's taxonomy discover gave the target
+# a taxonomy_meta row and topic assignments (the real-engine check the verb tests only mock); and a
+# second --all plans nothing. The theme documents are two sets of seven near-duplicates on unrelated
+# subjects, so HDBSCAN (min_cluster_size 5) forms topics out of them: sklearn's HDBSCAN never selects the
+# root cluster (allow_single_cluster is off), so ONE tight group comes back as all noise and discover
+# writes no topics and no taxonomy_meta row (first live run, 2026-10-25: ten near-duplicates, 0 topics).
+DG_MVV_THEME_DOCS=14
+DG_MVV_QUERY="gate mvv re-embedding moves documents between embedding families $DG_UID"
+DG_MVV_TOKEN_CAP=200000
+DG_MVV_TUMBLERS=""
+DG_MVV_CHASHES=""
+DG_MVV_ASPECT_DOC=""
+DG_MVV_NOTE_COLL=""
+DG_MVV_RANK_TEXT=""
+DG_MVV_RANK_CHASH=""
+
+# dg_mvv_client ARGS...: the real client against the scratch install, stdout to $DG_DIR/client.out and
+# stderr to $DG_DIR/client.err; returns the client's exit status. The client's write guard refuses a write
+# from a dev checkout without a stated reason (nexus-a2qhz), and these writes go to this run's own engine.
+# Once the install is on the Voyage profile (DG_MVV_CLIENT_KEYED=1) the client gets the key too, as a
+# Voyage-profile install's client has it from config.yml: --wait's discover refuses a Voyage local.embed_model
+# with no key (live run, 2026-10-25). Through dg_with_key, so the key is in the environment, never argv.
+DG_MVV_WRITE_REASON="dual-embedder-gate Phase 6: self-provisioned throwaway engine in a scratch NEXUS_CONFIG_DIR (nexus-s08oe)"
+DG_MVV_CLIENT_KEYED=0
+dg_mvv_client() {
+  local run=()
+  [ "$DG_MVV_CLIENT_KEYED" -eq 1 ] && run=(dg_with_key)
+  NX_ALLOW_PROD_WRITE="$DG_MVV_WRITE_REASON" NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" \
+    ${run[@]+"${run[@]}"} uv run nx "$@" </dev/null >"$DG_DIR/client.out" 2>"$DG_DIR/client.err"
+}
+
+dg_mvv_client_fail() {
+  DG_CODE="n/a"
+  echo "[dual-gate]   client stdout: $(cat "$DG_DIR/client.out")" >&2
+  echo "[dual-gate]   client stderr: $(cat "$DG_DIR/client.err")" >&2
+  dg_fail "$1"
+}
+
+# dg_mvv_search CORPUS [QUERY]: one search over CORPUS through the real client (QUERY defaults to the MVV query).
+# $DG_DIR/resp.json gets the chunk ids it returned (content-addressed, so a moved chunk keeps its id), the
+# doc_ids, the chunk ids per collection and the top hit's id; the raw client output is kept in
+# $DG_DIR/search.json and printed when a check on it fails.
+dg_mvv_search() {
+  dg_mvv_client search "${2:-$DG_MVV_QUERY}" --corpus "$1" --json --no-rerank --no-threshold --n 50 \
+    || dg_mvv_client_fail "nx search over $1 exited non-zero"
+  cp "$DG_DIR/client.out" "$DG_DIR/search.json"
+  "$E2E_PYTHON" -c "import json, sys
+rows = json.load(open(sys.argv[1]))
+by_coll = {}
+for r in rows:
+    if r.get('id'):
+        by_coll.setdefault(r.get('collection') or '', set()).add(r['id'])
+json.dump({'ids': sorted({r.get('id') for r in rows if r.get('id')}),
+           'doc_ids': sorted({r.get('doc_id') for r in rows if r.get('doc_id')}),
+           'by_coll': {c: sorted(v) for c, v in by_coll.items()},
+           'top': rows[0].get('id') if rows else None}, open(sys.argv[2], 'w'))" \
+    "$DG_DIR/search.json" "$DG_DIR/resp.json" || dg_fail "could not read the search results of $1"
+}
+
+# dg_mvv_search_check DESC EXPR: dg_check on a dg_mvv_search result; a failure prints the raw results first.
+dg_mvv_search_check() {
+  if ! dg_holds "$2"; then
+    DG_CODE="n/a"
+    echo "[dual-gate]   search results: $("$E2E_PYTHON" -c "import json
+print(json.dumps([{k: r.get(k) for k in ('id', 'doc_id', 'collection', 'title')} for r in json.load(open('$DG_DIR/search.json'))]))")" >&2
+    dg_fail "$1"
+  fi
+  dg_ok "$1"
+}
+
+# dg_mvv_require_gone COLLECTION: the catalog has no row for COLLECTION (404), where the same route answers 200
+# for the live Voyage collection, so the 404 is not a wrong path or tenant. A superseded source that a job kept
+# (kept_tombstoned, kept_by_flag, kept_residue) still has its row and fails here.
+dg_mvv_require_gone() {
+  dg_request GET "/v1/catalog/collections/get?name=$DG_VOY_COLL"
+  dg_expect_200 "GET /v1/catalog/collections/get ($DG_VOY_COLL, the control)"
+  dg_request GET "/v1/catalog/collections/get?name=$1"
+  [ "$DG_CODE" = "404" ] || dg_fail "the source collection $1 still has a catalog row (deleted means 404)"
+  dg_ok "the source collection $1 is deleted (404; the live Voyage collection answers 200 on the same route)"
+}
+
+# dg_mvv_seed: under the bge profile, the theme documents (each a real file, registered by its path) in one
+# combined write to the bge collection, an aspect row on the first, and one `nx store put` note. Two stand-ins,
+# both fair for the move because the job re-embeds the stored chunk text and joins satellite rows by doc_id
+# (RDR-210 Technical Design 4): the documents are registered and written over HTTP the way the client writes
+# a manifest, not through `nx index`; and the aspect row is upserted directly, not by the extractor.
+dg_mvv_seed() {
+  local i path title doc text chash body docs_json="" chunks_json=""
+  mkdir -p "$SCRATCH/mvv"
+  for i in $(seq 1 "$DG_MVV_THEME_DOCS"); do
+    path="$SCRATCH/mvv/theme-$i.md"
+    if [ $((i % 2)) -eq 1 ]; then
+      text="gate mvv $DG_UID theme document $i: re-embedding moves documents between embedding families"
+    else
+      text="gate mvv $DG_UID theme document $i: autumn apple harvest and cider pressing in the orchard"
+    fi
+    printf '%s\n' "$text" > "$path"
+    title="gate-mvv-theme-$i-$DG_UID"
+    body="$("$E2E_PYTHON" -c "import json, sys;print(json.dumps({'owner_prefix':'$DG_OWNER_PREFIX','title':sys.argv[1],'content_type':'knowledge','file_path':sys.argv[2]}))" "$title" "$path")"
+    dg_request POST /v1/catalog/doc/register "$body"
+    dg_expect_200 "POST /v1/catalog/doc/register (mvv theme $i)"
+    doc="$("$E2E_PYTHON" -c "import json;print(json.load(open('$DG_DIR/resp.json')).get('tumbler',''))")"
+    [ -n "$doc" ] || dg_fail "register mvv theme document $i returned no tumbler"
+    chash="$("$E2E_PYTHON" -c "import hashlib, sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" "$text")"
+    docs_json="$docs_json$("$E2E_PYTHON" -c "import json, sys;print(json.dumps({'doc_id':sys.argv[1],'rows':[{'position':0,'chash':sys.argv[2]}]}))" "$doc" "$chash")"$'\n'
+    chunks_json="$chunks_json$("$E2E_PYTHON" -c "import json, sys;print(json.dumps({'chash':sys.argv[1],'text':sys.argv[2],'metadata':{'source':'gate-mvv','chunk_text_hash':sys.argv[1]}}))" "$chash" "$text")"$'\n'
+    DG_MVV_TUMBLERS="$DG_MVV_TUMBLERS $doc"
+    if [ -z "$DG_MVV_RANK_TEXT" ]; then DG_MVV_RANK_TEXT="$text"; DG_MVV_RANK_CHASH="$chash"; fi
+    DG_MVV_CHASHES="$DG_MVV_CHASHES $chash"
+    [ -n "$DG_MVV_ASPECT_DOC" ] || DG_MVV_ASPECT_DOC="$doc $path"
+  done
+  printf '%s' "$docs_json" > "$DG_DIR/mvv_docs.jsonl"
+  printf '%s' "$chunks_json" > "$DG_DIR/mvv_chunks.jsonl"
+  body="$("$E2E_PYTHON" -c "import json, sys
+docs = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+chunks = [json.loads(l) for l in open(sys.argv[2]) if l.strip()]
+print(json.dumps({'collection': sys.argv[3], 'docs': docs, 'chunks': chunks}))" \
+    "$DG_DIR/mvv_docs.jsonl" "$DG_DIR/mvv_chunks.jsonl" "$DG_BGE_COLL")"
+  dg_request POST /v1/catalog/manifest/write_many "$body"
+  dg_expect_200 "POST /v1/catalog/manifest/write_many (mvv theme set)"
+  dg_check "write the $DG_MVV_THEME_DOCS mvv theme chunks to the bge collection -> chunks_written==$DG_MVV_THEME_DOCS" \
+    "d.get('chunks_written')==$DG_MVV_THEME_DOCS"
+
+  local adoc apath
+  read -r adoc apath <<<"$DG_MVV_ASPECT_DOC"
+  body="$("$E2E_PYTHON" -c "import json, sys
+print(json.dumps({'collection': sys.argv[1], 'source_path': sys.argv[2], 'doc_id': sys.argv[3],
+  'source_uri': 'file://' + sys.argv[2], 'problem_formulation': 'gate mvv aspect ' + sys.argv[4],
+  'proposed_method': 'move the document', 'experimental_datasets': [], 'experimental_baselines': [],
+  'experimental_results': '', 'extras': {}, 'confidence': 0.9, 'extracted_at': '2026-10-25T00:00:00Z',
+  'model_version': 'gate', 'extractor_name': 'gate-dual', 'salient_sentences': []}))" \
+    "$DG_BGE_COLL" "$apath" "$adoc" "$DG_UID")"
+  dg_request POST /v1/aspects/upsert "$body"
+  dg_expect_200 "POST /v1/aspects/upsert (mvv aspect)"
+  dg_check "write an aspect row for the first mvv theme document -> written" "d.get('written') is True"
+
+  printf 'gate mvv %s note: re-embedding moves documents between embedding families\n' "$DG_UID" > "$SCRATCH/mvv/note.txt"
+  NX_ALLOW_PROD_WRITE="$DG_MVV_WRITE_REASON" NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx store put - --collection gate-mvv-notes \
+    --title "gate-mvv-note-$DG_UID" <"$SCRATCH/mvv/note.txt" >"$DG_DIR/client.out" 2>"$DG_DIR/client.err" \
+    || dg_mvv_client_fail "the store put of the mvv note exited non-zero"
+  DG_MVV_NOTE_COLL="$(awk '/^Stored: / { print $NF }' "$DG_DIR/client.out")"
+  case "$DG_MVV_NOTE_COLL" in
+    knowledge__*__bge-base-en-v15-768__v*) dg_ok "the store put wrote the note to a bge collection ($DG_MVV_NOTE_COLL)" ;;
+    *) dg_mvv_client_fail "the store put did not report a bge-768 knowledge collection (got '$DG_MVV_NOTE_COLL')" ;;
+  esac
+}
+
+# dg_run_mvv: the scenario, from the bge-profile engine of pass 2 to a second, empty --all.
+dg_run_mvv() {
+  local target body adoc apath
+  echo "[dual-gate] ── Phase 6: re-embed --all (Minimum Viable Validation) ──"
+  dg_mvv_seed
+  dg_mvv_search "$DG_BGE_COLL,$DG_MVV_NOTE_COLL"
+  dg_mvv_search_check "before: one search returns every mvv theme chunk and document from the bge collection" \
+    "set('$DG_MVV_CHASHES'.split()) <= set(d['by_coll'].get('$DG_BGE_COLL', [])) and set('$DG_MVV_TUMBLERS'.split()) <= set(d['doc_ids'])"
+  dg_mvv_search_check "before: ...and the note from the note's bge collection" \
+    "len(d['by_coll'].get('$DG_MVV_NOTE_COLL', [])) == 1"
+  cp "$DG_DIR/resp.json" "$DG_DIR/mvv_before.json"
+
+  echo "[dual-gate] switching the install to the Voyage profile and restarting the engine"
+  NX_LOCAL=1 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx daemon service stop
+  dg_set_embed_choice voyage-context-3
+  DG_MVV_CLIENT_KEYED=1
+  dg_start_engine
+  dg_read_lease
+  dg_version_check
+
+  dg_mvv_client collection re-embed --all || dg_mvv_client_fail "re-embed --all (dry run) exited non-zero"
+  grep -qF "dry-run: 2 job(s) would start" "$DG_DIR/client.out" \
+    || dg_mvv_client_fail "re-embed --all plans exactly the two bge collections"
+  { grep -qF "$DG_BGE_COLL" "$DG_DIR/client.out" && grep -qF "$DG_MVV_NOTE_COLL" "$DG_DIR/client.out"; } \
+    || dg_mvv_client_fail "re-embed --all's plan names both bge collections"
+  dg_ok "re-embed --all (dry run) plans the two bge collections"
+
+  dg_mvv_client collection re-embed --all --no-dry-run --yes --wait --token-cap "$DG_MVV_TOKEN_CAP" \
+    || dg_mvv_client_fail "re-embed --all --no-dry-run --yes --wait exited non-zero"
+  sed 's/^/[dual-gate]   re-embed: /' "$DG_DIR/client.out"
+  echo "[dual-gate] re-embed --all --wait exited 0 (every job finished and discover ran without error)"
+
+  dg_request GET /v1/vectors/reembed/status
+  dg_expect_200 "GET /v1/vectors/reembed/status"
+  dg_check "the job on the bge collection ended done with the Voyage collection as its target" \
+    "any(j.get('source_collection')=='$DG_BGE_COLL' and j.get('state')=='done' and j.get('target_collection')=='$DG_VOY_COLL' for j in (d.get('jobs', d) if isinstance(d, dict) else d))"
+  target="$("$E2E_PYTHON" -c "import json
+d = json.load(open('$DG_DIR/resp.json'))
+jobs = d.get('jobs', d) if isinstance(d, dict) else d
+print(next((j.get('target_collection') or '' for j in jobs if j.get('source_collection')=='$DG_MVV_NOTE_COLL' and j.get('state')=='done'), ''))")" \
+    || dg_fail "could not read the note's job from GET /v1/vectors/reembed/status"
+  case "$target" in
+    knowledge__*__voyage-context-3__v*) dg_ok "the job on the note's collection ended done, into $target" ;;
+    *) dg_fail "no done job moved $DG_MVV_NOTE_COLL to a voyage-context-3 sibling (target '$target')" ;;
+  esac
+
+  dg_mvv_require_gone "$DG_BGE_COLL"
+  dg_mvv_require_gone "$DG_MVV_NOTE_COLL"
+
+  dg_mvv_search "$DG_VOY_COLL,$target"
+  dg_mvv_search_check "after: the same search over the Voyage targets returns every chunk and document it returned before" \
+    "set(json.load(open('$DG_DIR/mvv_before.json'))['ids']) <= set(d['ids']) and set(json.load(open('$DG_DIR/mvv_before.json'))['doc_ids']) <= set(d['doc_ids'])"
+  dg_mvv_search_check "after: ...the theme chunks from the Voyage collection and the note from its Voyage sibling" \
+    "set('$DG_MVV_CHASHES'.split()) <= set(d['by_coll'].get('$DG_VOY_COLL', [])) and json.load(open('$DG_DIR/mvv_before.json'))['by_coll']['$DG_MVV_NOTE_COLL'] == d['by_coll'].get('$target')"
+  # The vectors are real, not just present: a document's own text finds it first after the move.
+  dg_mvv_search "$DG_VOY_COLL" "$DG_MVV_RANK_TEXT"
+  dg_mvv_search_check "after: the first theme document's own text ranks it first in the Voyage collection" \
+    "d['top'] == '$DG_MVV_RANK_CHASH'"
+
+  read -r adoc apath <<<"$DG_MVV_ASPECT_DOC"
+  dg_request GET "/v1/aspects/get_by_doc_id?doc_id=$adoc"
+  dg_expect_200 "GET /v1/aspects/get_by_doc_id ($adoc)"
+  dg_check "the moved document's aspect row survived the source delete, re-homed to the Voyage collection" \
+    "d.get('collection')=='$DG_VOY_COLL' and d.get('problem_formulation')=='gate mvv aspect $DG_UID'"
+
+  dg_request GET "/v1/taxonomy/meta/last_count?collection=$DG_VOY_COLL"
+  dg_expect_200 "GET /v1/taxonomy/meta/last_count ($DG_VOY_COLL; 404 means discover wrote no taxonomy_meta row)"
+  dg_check "--wait's discover wrote a taxonomy_meta row for the Voyage target" \
+    "d.get('count', 0) >= $DG_MVV_THEME_DOCS"
+  body="$("$E2E_PYTHON" -c "import json, sys;print(json.dumps({'doc_ids': sys.argv[1].split()}))" "$DG_MVV_CHASHES")"
+  dg_request POST /v1/taxonomy/assignments/for_docs "$body"
+  dg_expect_200 "POST /v1/taxonomy/assignments/for_docs (mvv theme chunks)"
+  dg_check "--wait's discover assigned topics to at least 10 of the $DG_MVV_THEME_DOCS moved theme chunks" \
+    "len({r.get('doc_id') for r in d}) >= 10"
+
+  dg_mvv_client collection re-embed --all || dg_mvv_client_fail "the second re-embed --all exited non-zero"
+  grep -qF "No collection is off the profile." "$DG_DIR/client.out" \
+    || dg_mvv_client_fail "a second re-embed --all plans nothing"
+  dg_ok "a second re-embed --all plans nothing (No collection is off the profile.)"
+}
+
 # ── 3-5. Seed the Voyage collection, boot the bge-profile keyed engine, then run both passes around a restart ──
 dg_seed_voyage_collection
 dg_start_engine
@@ -603,5 +842,6 @@ dg_run_pass 1
 dg_restart_engine
 dg_run_pass 2
 dg_require_tally
+dg_run_mvv
 dg_run_keyed_voyage_tests
 echo "[dual-gate] DUAL-EMBEDDER GATE PASSED"

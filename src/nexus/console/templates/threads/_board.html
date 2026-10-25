@@ -1,0 +1,79 @@
+{# A glance-cold page: one sentence, then the asks, then the sessions. No raw field names. #}
+<p class="thread-asof ts">As of {{ as_of }}</p>
+{# headline is built from fixed strings, integers and format_age output only, never entry text; |safe keeps its apostrophe literal. #}
+<p class="thread-headline">{{ headline | safe }}</p>
+{% if not beads.ok %}
+<p class="thread-notice">Could not read the list of beads waiting on you: {{ beads.error }}.</p>
+{% endif %}
+{% if t2_error %}
+<p class="thread-notice">{{ t2_error }}</p>
+{% endif %}
+{% for title in board.unreadable %}
+<p class="thread-notice">Could not read {{ title }}.</p>
+{% endfor %}
+
+{% if asks.count %}
+<section class="needs-you">
+  <h3>Needs you</h3>
+  <ul class="thread-list">
+    {% for i in asks.threads %}
+    <li class="needs-sam">
+      <strong>{{ i.thread.needs_sam }}</strong>
+      <span class="ts">&mdash; asked by {{ i.session }} on &ldquo;{{ i.thread.title }}&rdquo;, updated {{ i.age }}</span>
+      {% if i.thread.refs %}<small class="ts">&nbsp;{{ i.thread.refs | join(", ") }}</small>{% endif %}
+    </li>
+    {% endfor %}
+    {% for a in asks.beads %}
+    {% set b = a.bead %}
+    <li class="needs-sam">
+      <strong>{{ b.title }}</strong>
+      <span class="ts">&mdash;
+        {% if b.assignee %}assigned to {{ b.assignee }}{% else %}not assigned{% endif %}{% if b.updated %}, updated {{ age_of(b.updated) }}{% endif %}</span>
+      <small class="ts">&nbsp;{{ b.id }}{% if b.priority is not none %} &middot; P{{ b.priority }}{% endif %}</small>
+      {% for r in a.raised_by %}<br><small class="ts">raised by {{ r.session }} on &ldquo;{{ r.thread.title }}&rdquo;: {{ r.thread.needs_sam }}</small>{% endfor %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="thread-sessions">
+  <h3>Sessions</h3>
+  {% if not board.cards and not t2_error %}
+  <p class="thread-notice">No Claude session has reported in yet.</p>
+  {% endif %}
+
+  {% macro session_card(card) %}
+  <article class="thread-card {% if card.stale %}stale{% endif %}">
+    <header>
+      <strong>{{ card.session.name }}</strong>
+      <span class="ts">updated {{ card.age }}</span>
+    </header>
+    {% if card.session.threads %}
+    <ul class="thread-list">
+      {% for t in card.session.threads %}
+      <li {% if has_value(t.needs_sam) %}class="needs-sam"{% endif %}>
+        {{ t.title }}{% if t.state %}: {{ t.state }}{% endif %}
+        {% if has_value(t.waiting_on) %}<span class="ts">&middot; waiting on {{ t.waiting_on }}</span>{% endif %}
+        {% if has_value(t.needs_sam) %}<span class="ts">&middot; needs you: {{ t.needs_sam }}</span>{% endif %}
+        {% if t.refs %}<small class="ts">&nbsp;{{ t.refs | join(", ") }}</small>{% endif %}
+        {% for n in t.notes %}<br><small class="ts">{{ n }}</small>{% endfor %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="thread-notice">No threads listed.</p>
+    {% endif %}
+    {% for n in card.session.notes %}<small class="ts">{{ n }}</small><br>{% endfor %}
+  </article>
+  {% endmacro %}
+
+  {% for card in board.active %}{{ session_card(card) }}{% endfor %}
+
+  {% if board.quiet %}
+  <details class="quiet-sessions">
+    <summary>{{ board.quiet | length }} quiet session{{ "s" if board.quiet | length != 1 }} (no update in over a day)</summary>
+    {% for card in board.quiet %}{{ session_card(card) }}{% endfor %}
+  </details>
+  {% endif %}
+</section>
