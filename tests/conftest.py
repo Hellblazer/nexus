@@ -318,8 +318,91 @@ _suite_lease_release = None
 _SUITE_LEASE_UNGUARDED_ENV = "NX_SUITE_LEASE_UNGUARDED"
 
 
+#: Explicit opt-out of the laptop heavy-run guard, for a run that needs claude, bd or
+#: this machine's credentials and so cannot go through ``lab-remote``.
+_LOCAL_HEAVY_ENV = "NX_LOCAL_HEAVY"
+
+#: A ``lab-run`` grant exports these (``tests/_tmp_root.py`` reads LAB_CPUS the same
+#: way); ``lab-remote``'s host copy also sets LAB_REMOTE.
+_LAB_GRANT_ENV: tuple[str, ...] = ("LAB_CPUS", "LAB_MEM_MB")
+_LAB_REMOTE_ENV = "LAB_REMOTE"
+
+
+def _lab_run_grant_present(env) -> bool:
+    return any((env.get(name) or "").strip() for name in _LAB_GRANT_ENV)
+
+
+def _xdist_worker_count(config) -> int | None:
+    """Workers this run will spawn, after ``_clamp_xdist_workers``; ``None`` for no xdist.
+
+    An ``-n auto`` that xdist has not resolved to an integer (still a string here)
+    counts as more than one: only the clamp can bring it to 1, and the clamp
+    writes an integer.
+    """
+    raw = getattr(config.option, "numprocesses", None)
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        return 2
+    return None
+
+
+def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -> None:
+    """Refuse an xdist run that boots the engine on a Mac laptop outside a lab-run grant.
+
+    The global rule already says any ``-n`` run is heavy and belongs on ``lab-remote``;
+    several sessions share one laptop, and a parallel substrate run per session
+    starves all of them. This enforces it (nexus-tvt6u). It refuses only when ALL
+    hold: macOS, no lab-run grant (and not ``lab-remote``'s host copy), the run
+    boots the engine substrate, and xdist will run more than one worker. A scoped
+    serial run, ``NX_TEST_T2_SUBSTRATE=none`` and a nested pytest are never
+    refused. ``NX_LOCAL_HEAVY=1`` opts out for a run that needs claude, bd or the
+    laptop's credentials, and says so. Controller-only, like ``_take_suite_lease``.
+    """
+    import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+    platform = _sys.platform if platform is None else platform
+    env = os.environ if env is None else env
+    if platform != "darwin" or _lab_run_grant_present(env) or (env.get(_LAB_REMOTE_ENV) or "").strip():
+        return
+    if not _selected_t2_substrate_boots_engine():
+        return
+    try:
+        workers = _xdist_worker_count(config)
+        if workers is None or workers <= 1:
+            return
+        from tests import _suite_lease  # noqa: PLC0415 — deferred: test-support module
+
+        if _suite_lease.inside_a_holder():
+            return  # a nested pytest: its outer run passed this check
+        if (env.get(_LOCAL_HEAVY_ENV) or "").strip() == "1":
+            _sys.stderr.write(
+                f"laptop heavy run: {_LOCAL_HEAVY_ENV}=1 set; running {workers} xdist workers "
+                "against the engine substrate on this machine, outside a lab-run grant\n"
+            )
+            _sys.stderr.flush()
+            return
+        import shlex  # noqa: PLC0415
+
+        params = getattr(config, "invocation_params", None)
+        args = list(getattr(params, "args", None) or _sys.argv[1:])
+    except Exception as exc:  # noqa: BLE001 — the guard must never break collection on its own bug
+        _sys.stderr.write(f"laptop heavy-run guard skipped on its own error: {exc!r}\n")
+        return
+    pytest.exit(
+        f"laptop heavy run: refusing to start. This is a Mac with no lab-run grant, and the run "
+        f"boots the engine substrate under xdist with {workers} workers; several sessions share "
+        f"this laptop. {_LOCAL_HEAVY_ENV}=1 runs it here anyway (for a run that needs claude, bd or "
+        "this laptop's credentials); NX_TEST_T2_SUBSTRATE=none needs no engine. Run it on chas: "
+        f"lab-remote -c lab-l -- uv run pytest {shlex.join(str(a) for a in args)}",
+        returncode=75,
+    )
+
+
 def _take_suite_lease() -> None:
-    """Hold the box for THIS substrate-heavy run, and refuse a second one.
+    """Hold the box for THIS substrate-heavy run; queue behind a live holder.
 
     The build lease made the box single-writer for Maven and the gate above
     already refuses a suite while a build holds it. But the suite took no
@@ -327,6 +410,16 @@ def _take_suite_lease() -> None:
     exhaust the machine-wide SysV shared-memory budget and report thousands
     of setup errors that read as breakage rather than contention
     (nexus-6qp25).
+
+    A second run QUEUES by default (nexus-tvt6u): several sessions share one
+    box, and contention between them is ordinary, so it waits up to
+    ``DEFAULT_WAIT_SECONDS`` for the holder and then runs, printing who it
+    waits for once a minute. ``NX_SUITE_LEASE_WAIT=0`` keeps the immediate
+    exit 75. A run that is still refused after the wait exits 75 naming the
+    holder. ``NX_SUITE_LEASE_UNGUARDED=1`` runs on at once unless a wait was
+    asked for by name. Inside a lab-run grant (LAB_CPUS or LAB_MEM_MB set) the
+    lease is skipped: lab-run is the one queue there, and this stays the
+    fallback for a run with no grant.
 
     Gated on the same predicate as the build check -- only a run that will
     boot the engine competes for that budget, so `=none` runs take nothing
@@ -348,25 +441,33 @@ def _take_suite_lease() -> None:
         if _suite_lease.inside_a_holder():
             return
 
+        # Inside a lab-run grant the scheduler is the gate: lab-run queues the run
+        # before it starts, so a second lease here would be a second queue behind
+        # the first. The lease stays the fallback for a run with no grant.
+        if _lab_run_grant_present(os.environ):
+            return
+
+        wait = _suite_lease_wait_seconds()
         held = _suite_lease.holder()
         if held is not None:
-            wait = _suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0
             if wait == 0 and not _suite_lease_unguarded():
                 _suite_lease.record_refusal()  # nexus-jqk5c: this exit never reaches acquire, which logs the rest
                 pytest.exit(
-                    "suite lease: refusing to start — another substrate-heavy "
-                    f"run holds this box ({held}). Two at once exhaust the "
+                    f"suite lease: refusing to start. The lease is held by {held}; "
+                    "NX_SUITE_LEASE_WAIT=0 is set, so this run does not queue. "
+                    "Two substrate-heavy runs at once exhaust the "
                     "machine-wide shared-memory budget and report contention "
-                    "as thousands of setup errors (nexus-6qp25). Wait for it, "
-                    "set NX_SUITE_LEASE_WAIT=1 to queue behind it, or "
+                    "as thousands of setup errors (nexus-6qp25). Unset "
+                    "NX_SUITE_LEASE_WAIT to wait for it, or "
                     "NX_TEST_T2_SUBSTRATE=none for a run that needs no engine. "
                     + _suite_lease.recovery_hint(),
                     returncode=75,
                 )
         _suite_lease_release = _suite_lease.acquire(
             _suite_lease_label(),
-            wait_seconds=_suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0,
+            wait_seconds=wait,
             unguarded=_suite_lease_unguarded(),  # nexus-jqk5c: marks a bypassed refusal in the events log
+            on_wait=lambda who, waited: _announce_suite_lease_wait(who, waited, wait),
         )
         if _suite_lease_release is None:
             # Held past the wait, or another run took it between the check
@@ -382,8 +483,8 @@ def _take_suite_lease() -> None:
                 )
             else:
                 pytest.exit(
-                    f"suite lease: refusing to run — {who} still holds this box "
-                    "after the wait (or won the race for it). Two substrate-heavy "
+                    f"suite lease: refusing to run. The lease is held by {who} after waiting "
+                    f"{wait} s (or it won the race for the lease); two substrate-heavy "
                     "runs at once exhaust the machine-wide shared-memory budget "
                     "(nexus-6qp25). Re-run when it finishes, or set "
                     f"{_SUITE_LEASE_UNGUARDED_ENV}=1 to run without the guard. "
@@ -398,15 +499,39 @@ def _take_suite_lease() -> None:
         _sys.stderr.write(f"suite-lease gate skipped on its own error: {exc!r}\n")
 
 
+def _announce_suite_lease_wait(who: str, waited_s: float, budget_s: float) -> None:
+    """One progress line for a queued run; also what keeps watched_pytest.py's stall clock from firing."""
+    import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+    _sys.stderr.write(
+        f"suite lease: waiting for {who}; waited {int(waited_s)} s of {int(budget_s)} s, "
+        "will start when it finishes\n"
+    )
+    _sys.stderr.flush()
+
+
 def _suite_lease_unguarded() -> bool:
     # Exactly "1", like the rest of this file's opt-ins: `false`, `no`, `off` and a
     # typo must not turn the guard off (round-3 review L3).
     return os.environ.get(_SUITE_LEASE_UNGUARDED_ENV, "").strip() == "1"
 
 
-def _suite_lease_wait_requested() -> bool:
+def _suite_lease_wait_seconds() -> int:
+    """How long this run queues behind a live holder: 0 (do not queue) or ``DEFAULT_WAIT_SECONDS``.
+
+    Queueing is the default (nexus-tvt6u). ``NX_SUITE_LEASE_WAIT=0`` opts out; any
+    other non-empty value (``1``) asks for the wait by name. The one exception to
+    "unset means wait" is the unguarded escape, which means "run now": with it
+    set and no explicit wait the run does not queue first.
+    """
+    from tests import _suite_lease  # noqa: PLC0415 — deferred, as in _take_suite_lease
+
     raw = os.environ.get("NX_SUITE_LEASE_WAIT", "").strip()
-    return bool(raw) and raw != "0"
+    if raw == "0":
+        return 0
+    if not raw and _suite_lease_unguarded():
+        return 0
+    return _suite_lease.DEFAULT_WAIT_SECONDS
 
 
 def _suite_lease_label() -> str:
@@ -651,6 +776,7 @@ def pytest_sessionstart(session):
     if _is_controller_or_serial:
         _capture_real_manager_env()
     if _is_controller_or_serial:
+        _refuse_heavy_laptop_run(session.config)
         _gate_on_build_lease()
         _take_suite_lease()
         _preflight_engine_substrate()

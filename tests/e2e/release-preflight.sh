@@ -29,7 +29,7 @@
 # NON-VACUITY: a check whose dependency is absent reports SKIP and the run
 # ends UNVERIFIED (exit 2), never PASSED. "Could not check" is not "fine".
 set -uo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 # `cmd | head -1` pipes a producer into an early-exit consumer, which
 # tests/test_pipefail_early_exit_consumer_lint.py forbids under `set -o
@@ -52,6 +52,26 @@ record () { # status, name, detail
   printf '  [%s] %s%s\n' "$1" "$2" "${3:+ -- $3}"
 }
 
+# lease_refusal_detail OUTPUT: "suite lease held by <holder>" when OUTPUT carries the
+# suite lease's pytest.exit banner ("Exit: suite lease: refusing to start|run. The
+# lease is held by <holder>; ..." or "... held by <holder> after waiting N s ..."),
+# else nothing. Anchored on pytest's own "Exit: " prefix so a test that merely
+# QUOTES the refusal in a failing assertion is not mistaken for it. No pipe into an
+# early-exit consumer (tests/test_pipefail_early_exit_consumer_lint.py).
+lease_refusal_detail () {
+  local line holder
+  line="$(printf '%s' "$1" | grep -aE 'Exit: suite lease: refusing to (start|run)\.')"
+  [ -n "$line" ] || return 0
+  line="$(first_line "$line")"
+  case "$line" in
+    *'The lease is held by '*) holder="${line#*The lease is held by }" ;;
+    *) holder="unknown (the refusal line carries no holder)" ;;
+  esac
+  holder="${holder%%;*}"
+  holder="${holder%% after waiting*}"
+  printf 'suite lease held by %s' "$holder" | cut -c1-160
+}
+
 check () { # name, command...
   local name="$1"; shift
   local out rc
@@ -64,6 +84,16 @@ check () { # name, command...
     # The detail line is what the next person reads -- it must name the cause.
     local detail stripped
     stripped="$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*m//g')"
+    # A pytest leg that exits through the suite lease (tests/conftest.py
+    # _take_suite_lease: another substrate-heavy run held the box for the whole
+    # wait, or NX_SUITE_LEASE_WAIT=0) prints one pytest.exit banner and no test
+    # output at all, so every pattern below used to miss it and the leg read as
+    # a broken test. Name the lease and its holder instead (nexus-tvt6u).
+    detail="$(lease_refusal_detail "$stripped")"
+    if [ -n "$detail" ]; then
+      record FAIL "$name" "$detail"
+      return 0
+    fi
     detail="$(printf '%s' "$stripped" \
       | grep -aE '^(FAILED|E  +|FATAL)|GATE (FAILED|UNVERIFIABLE|BLOCKED)|assert' \
       | sed -e 's/^E  *//' | cut -c1-160)"
@@ -83,6 +113,10 @@ check () { # name, command...
     record FAIL "$name" "$(first_line "$detail")"
   fi
 }
+
+# Sourced with RELEASE_PREFLIGHT_SOURCE_ONLY=1, the script defines its helpers and
+# stops (tests/test_release_preflight_lease_detail.py drives `check` that way).
+[ "${RELEASE_PREFLIGHT_SOURCE_ONLY:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ] && return 0
 
 # Step 0: refresh remote refs. ci-evidence reads origin/main's live branch
 # protection and the ledger check reads tags; release.yml checks out with

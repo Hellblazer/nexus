@@ -204,6 +204,8 @@ def _child(tmp_path: Path, mode: str, **extra: str) -> subprocess.CompletedProce
     drop = {
         "NX_TEST_T2_SUBSTRATE", "NX_BUILD_LEASE_WAIT", "NX_SUITE_LEASE_HELD_BY",
         "NX_SUITE_LEASE_WAIT", "NEXUS_PG_BIN", "NX_SUITE_LEASE_UNGUARDED",
+        # A lab-run grant makes the child's suite lease step aside (nexus-tvt6u).
+        "LAB_CPUS", "LAB_MEM_MB", "LAB_REMOTE", "NX_LOCAL_HEAVY",
         # The HOME fence pins this to the REAL cache; the child's XDG_CACHE_HOME
         # below is what keeps it off the operator's cache.
         "NX_TEST_SUBSTRATE_CACHE",
@@ -276,7 +278,7 @@ def test_the_preflight_runs_after_the_suite_lease_gate(tmp_path: Path) -> None:
     lease.mkdir(parents=True)
     (lease / "pid").write_text(f"{os.getpid()}\n")
     (lease / "label").write_text("a peer run\n")
-    proc = _child(tmp_path, "missing_jar")
+    proc = _child(tmp_path, "missing_jar", NX_SUITE_LEASE_WAIT="0")  # queueing is the default (nexus-tvt6u)
     out = proc.stdout + proc.stderr
     assert proc.returncode == 75, out
     assert "suite lease: refusing to start" in out, out
