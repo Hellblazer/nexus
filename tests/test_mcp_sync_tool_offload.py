@@ -174,7 +174,12 @@ def test_an_async_tool_is_left_alone(_restore_from_function) -> None:
         return "ok"
 
     (tool,) = [t for t in mcp._tool_manager.list_tools() if t.name == "already_async"]
-    assert tool.fn is already_async
+    # The offload adds nothing. The nexus-6b6hq failure wrapper, when it is
+    # installed, is the only layer allowed around the original body.
+    fn = tool.fn
+    if getattr(fn, "_nx_failure_wrapped", False):
+        fn = fn.__wrapped__
+    assert fn is already_async
     asyncio.run(mcp._tool_manager.call_tool("already_async", {}))
     assert seen == ["ran"]
 

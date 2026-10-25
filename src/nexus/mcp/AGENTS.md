@@ -67,6 +67,7 @@ A separate runtime fire-once test (`test_index_pdf_fires_document_hook_exactly_o
 
 ## Hot rules
 
+- **A tool failure returns through `_fail(...)`** (`_tool_failure.fail`, nexus-6b6hq). The mark makes the registration-boundary patch (`_sdk_patches._patch_tool_failure_is_error`) answer the client `isError: true` with the content FastMCP would have sent for the plain value; an unmarked `"Error: ..."` or `{"error": ...}` reaches the client as a success. `_mcp_tool_error` already marks. The marked value equals the plain one, so in-process callers see no change. List tools fail the same way: `[]` means only no results. The `hook_*` tools are exempt (`EXEMPT_TOOL_PREFIXES`); `nx_answer`'s `[non-answer]` text is never marked. The lint `test_no_failure_return_is_left_unmarked` catches a literal failure return without the mark; a failure built in a variable first is invisible to it.
 - **Always use full MCP tool names.** `mcp__plugin_<plugin>_<server>__<tool>`. Short names fail at runtime (no resolution layer exists).
 - **Register, don't import.** Add new hook consumers via `HookRegistry.register_*` (or extend `install_default_hooks` for load-bearing defaults), not by direct call. CI's drift guard will reject the bypass.
 - **The chash-before-taxonomy ordering invariant is gone.** RDR-187 retired `chash_dual_write_batch_hook`; the remaining batch consumers (`taxonomy_assign_batch_hook`, `manifest_write_batch_hook`) have no registration-order dependency on each other.

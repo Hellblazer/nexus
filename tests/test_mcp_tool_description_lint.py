@@ -503,10 +503,16 @@ def _dict_literal_return_keys(scope_node: ast.AST) -> frozenset[str] | None:
     keys: set[str] = set()
     found_any = False
     for ret in _iter_own_returns(scope_node):
-        if not isinstance(ret.value, ast.Dict):
+        value = ret.value
+        # nexus-6b6hq: a failure return is wrapped in ``_fail(...)``; its
+        # keys still reach the client, so look through the mark.
+        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                and value.func.id == "_fail" and len(value.args) == 1):
+            value = value.args[0]
+        if not isinstance(value, ast.Dict):
             continue
         literal_keys = {
-            k.value for k in ret.value.keys
+            k.value for k in value.keys
             if isinstance(k, ast.Constant) and isinstance(k.value, str)
         }
         if literal_keys and literal_keys != {"error"}:

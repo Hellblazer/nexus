@@ -50,7 +50,8 @@ This file documents common error handling patterns for agents.
 ### T2 Memory Errors
 
 **Write reported an error**:
-- Error: the tool returns a string beginning `Error: ` from a memory/store/scratch tool
+- Error: a memory/store/scratch tool call comes back as an error result
+  (`isError: true`), its text beginning `Error: `
 - Cause: the service backing that tier is unreachable, or the session's token
   was rejected (a T1 401 says so explicitly and names reconnecting the MCP
   server as the remedy)

@@ -282,6 +282,83 @@ def _patch_sync_tool_offload() -> str:
     return "applied"
 
 
+def _patch_tool_failure_is_error() -> str:
+    """Turn a tool's marked failure return into an ``isError`` result.
+
+    nexus-6b6hq. Not an SDK defect: the SDK reports a RAISED exception as
+    ``isError``, but rewords it as ``Error executing tool <name>: ...``, and
+    our tools return their failures instead of raising them, because their
+    module-level names are also called in-process. Wrapping at the same
+    ``Tool.from_function`` boundary as the offload patch, for the same reason
+    given there: the module-level names stay exactly as they are, and only
+    what FastMCP registers changes. The wrapped body returns a
+    ``CallToolResult`` built by the SDK's own ``_convert_to_content`` from the
+    unmarked value, which FastMCP passes through untouched
+    (``FuncMetadata.convert_result``), so the content reaches the client
+    byte-identical and only ``isError`` changes. What counts as a failure is in ``_tool_failure``.
+
+    Applied after the offload patch and outside it: the failure wrapper keeps
+    a sync body sync, and the offload wrapper then moves it off the loop.
+
+    Returns a short status string naming what happened, for the caller to log.
+    """
+    try:
+        from mcp.server.fastmcp.tools.base import Tool  # noqa: PLC0415 — SDK internal, probed
+        from mcp.server.fastmcp.utilities.func_metadata import (  # noqa: PLC0415 — SDK internal, probed
+            FuncMetadata,
+        )
+    except Exception as exc:  # noqa: BLE001 — boundary: a moved symbol must not kill startup
+        return f"unavailable: {exc}"
+
+    from nexus.mcp._tool_failure import (  # noqa: PLC0415 — only on the patch path
+        failures_as_error_results,
+        is_exempt,
+    )
+
+    current = Tool.__dict__.get("from_function")
+    if current is None:
+        return "unavailable: Tool has no from_function"
+    if getattr(current, "_nx_failure_patched", False):
+        return "already applied"
+
+    convert = getattr(FuncMetadata, "convert_result", None)
+    if convert is None:
+        return "unavailable: FuncMetadata has no convert_result"
+    try:
+        source = inspect.getsource(convert)
+    except (OSError, TypeError) as exc:
+        return f"skipped: cannot read convert_result source ({exc})"
+    try:
+        from mcp.server.fastmcp.utilities.func_metadata import (  # noqa: PLC0415, F401 — SDK internal, probed
+            _convert_to_content,
+        )
+    except Exception as exc:  # noqa: BLE001 — boundary: a moved symbol must not kill startup
+        return f"unavailable: {exc}"
+    if "CallToolResult" not in source:
+        # The SDK no longer passes a returned CallToolResult through, so a
+        # wrapped failure would be serialized as an ordinary success.
+        return "unavailable: convert_result does not pass a CallToolResult through"
+
+    underlying = current.__func__ if isinstance(current, classmethod) else current
+
+    def from_function_failures_as_errors(cls: Any, fn: Any, *args: Any, **kwargs: Any) -> Any:
+        name = kwargs.get("name") or getattr(fn, "__name__", "")
+        if not is_exempt(name):
+            fn = failures_as_error_results(fn)
+        return underlying(cls, fn, *args, **kwargs)
+
+    from_function_failures_as_errors._nx_failure_patched = True  # type: ignore[attr-defined]
+    patched = classmethod(from_function_failures_as_errors)
+    patched._nx_failure_patched = True  # type: ignore[attr-defined]
+    # Carry the offload's flag forward: it sits underneath this wrapper, and
+    # without the flag a second apply_sdk_patches() would stack another offload
+    # on top instead of reporting "already applied".
+    if getattr(current, "_nx_patched", False):
+        patched._nx_patched = True  # type: ignore[attr-defined]
+    Tool.from_function = patched  # type: ignore[assignment]
+    return "applied"
+
+
 def report_sdk_patches(log: Any, results: dict[str, str], **extra: Any) -> None:
     """Emit one line per patch status, at INFO.
 
@@ -319,6 +396,10 @@ def apply_sdk_patches() -> dict[str, str]:
         results["sync_tool_offload"] = _patch_sync_tool_offload()
     except Exception as exc:  # noqa: BLE001 — boundary: no patch may kill startup
         results["sync_tool_offload"] = f"failed: {exc}"
+    try:
+        results["tool_failure_is_error"] = _patch_tool_failure_is_error()
+    except Exception as exc:  # noqa: BLE001 — boundary: no patch may kill startup
+        results["tool_failure_is_error"] = f"failed: {exc}"
 
     # INFO, not DEBUG. These patches are the difference between a transport
     # that survives a fan-out and one that does not, and at DEBUG under an

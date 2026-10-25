@@ -53,6 +53,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 # with hook_auto_approve (bead nexus-q02nx.4). See nexus/mcp/hooks.py's
 # module docstring for the full contract.
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
+from nexus.mcp._tool_failure import fail as _fail
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
@@ -183,7 +184,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     # points to `nx doctor`; the generic "may be unreachable" hint below would repeat it.
     if isinstance(e, _ServiceNotReadyError):
         _log.warning(f"mcp_{tool}_service_not_ready", error=text)
-        return f"Error: {text}"
+        return _fail(f"Error: {text}")
 
     _log.error(f"mcp_{tool}_failed", error=text, exc_info=True)
 
@@ -198,18 +199,18 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     if SESSION_UNAUTHORIZED_MARKER in text:
         if HEAL_RECOVERED_SUFFIX in text:
             return (
-                f"Error: {text}\n"
+                _fail(f"Error: {text}\n"
                 "The borrowed T1 (scratch) session token was revoked (its owner "
                 "exited), and this process re-minted its own token for the "
                 "session (nexus-k9sec) -- the retry on the fresh token still "
                 "failed authorization, so the token was not the cause. Reconnect "
                 "the conexus MCP/extension; if the same failure recurs "
                 "immediately, the service-side auth state needs direct "
-                "investigation."
+                "investigation.")
             )
         if HEAL_ADOPTED_SUFFIX in text:
             return (
-                f"Error: {text}\n"
+                _fail(f"Error: {text}\n"
                 "The MCP session's T1 (scratch) session token had rotated, and "
                 "the automatic self-heal (nexus-g5hzk) DID adopt a fresh token "
                 "and retry — the retry itself still failed authorization. The "
@@ -218,11 +219,11 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
                 "authorization. Reconnect the conexus MCP/extension so the "
                 "store is rebuilt from scratch; if the same failure recurs "
                 "immediately after reconnecting, the service-side auth state "
-                "needs direct investigation."
+                "needs direct investigation.")
             )
         if HEAL_REMINT_SUFFIX in text:
             return (
-                f"Error: {text}\n"
+                _fail(f"Error: {text}\n"
                 "The session-lease self-heal (nexus-g5hzk) found nothing "
                 "fresher, but the data-token re-mint (nexus-wrwb7) DID mint a "
                 "fresh bearer and retried — the retry still failed "
@@ -231,11 +232,11 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
                 "may be gone or its refresh loop stopped — an inference, not "
                 "an observation). Reconnect the conexus MCP/extension so a "
                 "fresh session-scoped token is minted; a bare CLI self-heals "
-                "on its next invocation."
+                "on its next invocation.")
             )
         if HEAL_DECLINED_SUFFIX in text:
             return (
-                f"Error: {text}\n"
+                _fail(f"Error: {text}\n"
                 "The MCP session's T1 (scratch) session token is no longer valid, "
                 "AND the automatic self-heal already failed: on this 401 the store "
                 "re-read the owner-republished session lease and found no fresh "
@@ -244,28 +245,28 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
                 "loop died — reconnect the conexus MCP/extension so a fresh "
                 "session-scoped token is minted. A bare CLI self-heals on its "
                 "next invocation; a live MCP session can adopt a rotated token "
-                "from the lease but cannot MINT one mid-conversation."
+                "from the lease but cannot MINT one mid-conversation.")
             )
         # No heal-outcome suffix present (an older/hand-built exception
         # string) — fall back to the stage-agnostic guidance rather than
         # guessing which case applies.
         return (
-            f"Error: {text}\n"
+            _fail(f"Error: {text}\n"
             "The MCP session's T1 (scratch) session token is no longer valid. "
             "Reconnect the conexus MCP/extension so a fresh session-scoped "
             "token is minted. A bare CLI self-heals on its next invocation; a "
             "live MCP session can adopt a rotated token from the lease but "
-            "cannot MINT one mid-conversation."
+            "cannot MINT one mid-conversation.")
         )
     if isinstance(e, (ConnectionError, TimeoutError)) or any(
         m in text.lower() for m in _CONNECTION_ERROR_MARKERS
     ):
         return (
-            f"Error: {text}\n"
+            _fail(f"Error: {text}\n"
             "The nexus backing service may be unreachable — check the daemon is "
-            "running with `nx doctor` (and `nx daemon service status`)."
+            "running with `nx doctor` (and `nx daemon service status`).")
         )
-    return f"Error: {text}"
+    return _fail(f"Error: {text}")
 
 
 #: Generous backstop for an assembled MCP text result (nexus-2xjge audit).
@@ -3544,7 +3545,7 @@ def search(
     if not 1 <= limit <= MAX_QUERY_RESULTS:
         msg = (f"limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
                "Page with offset for more.")
-        return {"error": msg} if structured else f"Error: {msg}"
+        return _fail({"error": msg}) if structured else _fail(f"Error: {msg}")
     return _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
@@ -4172,8 +4173,8 @@ def search_metadata_scoped(
 
         t3 = _get_t3()
         if not is_service_backed(t3):
-            return ("Error: search_metadata_scoped requires an HttpVectorClient-backed "
-                    "T3 (unavailable only against the in-memory test double)")
+            return (_fail("Error: search_metadata_scoped requires an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)"))
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -4191,9 +4192,9 @@ def search_metadata_scoped(
                 "$and" in parsed or "$or" in parsed
                 or any(isinstance(v, dict) for v in parsed.values())
             ):
-                return ("Error: search_metadata_scoped `where` is equality-only "
+                return (_fail("Error: search_metadata_scoped `where` is equality-only "
                         "(KEY=VALUE, comma-separated); comparison operators "
-                        "(>=, <=, >, <, !=) are not supported in service mode")
+                        "(>=, <=, >, <, !=) are not supported in service mode"))
             where_map = parsed or None
         # nexus-3l6gz / nexus-hg745: one combined-query call per
         # embedding-model group, ALL-OR-NOTHING (a group's exception
@@ -4298,8 +4299,8 @@ def search_topic_scoped(
 
         t3 = _get_t3()
         if not is_service_backed(t3):
-            return ("Error: search_topic_scoped requires an HttpVectorClient-backed "
-                    "T3 (unavailable only against the in-memory test double)")
+            return (_fail("Error: search_topic_scoped requires an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)"))
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -4409,8 +4410,8 @@ def search_graph_hop(
 
         t3 = _get_t3()
         if not is_service_backed(t3):
-            return ("Error: search_graph_hop requires an HttpVectorClient-backed "
-                    "T3 (unavailable only against the in-memory test double)")
+            return (_fail("Error: search_graph_hop requires an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)"))
         seed_list = [seeds] if isinstance(seeds, str) else list(seeds)
         seed_list = [s for s in seed_list if s]
         if not seed_list:
@@ -4427,9 +4428,9 @@ def search_graph_hop(
             "$and" in where_dict or "$or" in where_dict
             or any(isinstance(v, dict) for v in where_dict.values())
         ):
-            return ("Error: search_graph_hop `where` is equality-only "
+            return (_fail("Error: search_graph_hop `where` is equality-only "
                     "(KEY=VALUE, comma-separated); comparison operators "
-                    "(>=, <=, >, <, !=) are not supported in service mode")
+                    "(>=, <=, >, <, !=) are not supported in service mode"))
         # nexus-3l6gz / nexus-hg745: one combined-query call per
         # embedding-model group, ALL-OR-NOTHING (a group's exception
         # propagates and aborts the whole merge — no silent partial
@@ -4572,12 +4573,12 @@ def search_aspect_scoped(
 
         t3 = _get_t3()
         if not is_service_backed(t3):
-            return ("Error: search_aspect_scoped requires an HttpVectorClient-backed "
-                    "T3 (unavailable only against the in-memory test double)")
+            return (_fail("Error: search_aspect_scoped requires an HttpVectorClient-backed "
+                    "T3 (unavailable only against the in-memory test double)"))
         if field and field not in HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST:
-            return (f"Error: search_aspect_scoped field {field!r} is not a known "
+            return (_fail(f"Error: search_aspect_scoped field {field!r} is not a known "
                     f"aspect field; allowed: "
-                    f"{sorted(HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST)}")
+                    f"{sorted(HttpVectorClient.ASPECT_SCOPED_FIELD_ALLOWLIST)}"))
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
@@ -4590,9 +4591,9 @@ def search_aspect_scoped(
                 "$and" in parsed or "$or" in parsed
                 or any(isinstance(v, dict) for v in parsed.values())
             ):
-                return ("Error: search_aspect_scoped `where` is equality-only "
+                return (_fail("Error: search_aspect_scoped `where` is equality-only "
                         "(KEY=VALUE, comma-separated); comparison operators "
-                        "(>=, <=, >, <, !=) are not supported in service mode")
+                        "(>=, <=, >, <, !=) are not supported in service mode"))
             where_map = parsed or None
         # nexus-3l6gz / nexus-hg745: one combined-query call per embedding-model
         # group, ALL-OR-NOTHING. See _grouped_combined_query for the full contract.
@@ -4797,7 +4798,7 @@ def query(
             from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             cat = _get_catalog()
             if cat is None:
-                return "Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'"
+                return _fail("Error: catalog not initialized — catalog params (author, content_type, follow_links, subtree) require 'nx catalog setup'")
 
             # GH #1527 (nexus-qiah5): a registered owner NAME is accepted
             # wherever a subtree tumbler is; the owner table maps it.
@@ -4806,12 +4807,12 @@ def query(
                 try:
                     subtree = resolve_owner_scope(cat, subtree)
                 except OwnerScopeError as exc:
-                    return f"Error: subtree {exc}"
+                    return _fail(f"Error: subtree {exc}")
             # Guard: document-level subtree address (3+ segments) cannot have descendants
             if subtree:
                 subtree_depth = len(subtree.split("."))
                 if subtree_depth >= 3:
-                    return f"Error: subtree '{subtree}' is a document-level address — use an owner prefix (e.g., '{'.'.join(subtree.split('.')[:2])}') to search a subtree"
+                    return _fail(f"Error: subtree '{subtree}' is a document-level address — use an owner prefix (e.g., '{'.'.join(subtree.split('.')[:2])}') to search a subtree")
 
             # ── CATALOG-PARAM PATH (nexus-rzqto; dance deleted nexus-2bqpn) ──
             # Catalog params route through the combined-query SQL functions
@@ -4844,9 +4845,9 @@ def query(
             from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             if not is_service_backed(t3):
                 return (
-                    "Error: query catalog params (author, content_type, "
+                    _fail("Error: query catalog params (author, content_type, "
                     "follow_links, subtree) require an HttpVectorClient-backed "
-                    "T3 (unavailable only against the in-memory test double)"
+                    "T3 (unavailable only against the in-memory test double)")
                 )
             _where_dict = _parse_where_str(where)
             _operator_where = bool(_where_dict) and (
@@ -4855,14 +4856,14 @@ def query(
             )
             if _operator_where:
                 return (
-                    "Error: query catalog params (author, content_type, "
+                    _fail("Error: query catalog params (author, content_type, "
                     "follow_links, subtree) combined with an operator-shaped "
                     "`where` ($and/$or, or a comparison operator like "
                     "{'k': {'$gte': ...}}) are not supported — the combined-"
                     "query path supports equality-only `where` with catalog "
                     "params. Use (a) an equality-only `where`, (b) the "
                     "`search` tool (chunk-level, retains full operator "
-                    "support), or (c) drop the catalog params."
+                    "support), or (c) drop the catalog params.")
                 )
             # Broad corpus target: the SQL functions filter by catalog
             # metadata internally, so pass the full corpus set.
@@ -5584,7 +5585,7 @@ def store_put(
     """
     try:
         if not content:
-            return "Error: content is required"
+            return _fail("Error: content is required")
         days = parse_ttl(ttl)
         # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): pass None
         # through verbatim rather than coercing to 0 — parse_ttl already
@@ -5669,7 +5670,7 @@ def store_put(
                 # not this call could confirm it (nexus-z0o2p.35, M5). A refusal changes nothing.
                 _page_cache_invalidate()
                 _invalidate_collections_cache()
-            return f"Error: store_put: {message}"
+            return _fail(f"Error: store_put: {message}")
 
         # A committed write makes any cached page burst stale — drop it so a
         # same-identity search re-fetches (batch-f1655f55 critique).
@@ -5746,7 +5747,7 @@ def store_put(
         # A write that did not store returned above, before any of this post-store work ran; a note
         # whose STAMP failed is stored, so it is recorded above and reported here.
         if stamp_message is not None:
-            return f"Error: store_put: {stamp_message}"
+            return _fail(f"Error: store_put: {stamp_message}")
         split_note = (
             f" ({len(pieces)} chunks, split to the embedding model's token window)"
             if len(pieces) > 1 else ""
@@ -5804,7 +5805,7 @@ def store_get(
     """
     try:
         if not doc_id:
-            return "Error: doc_id is required"
+            return _fail("Error: doc_id is required")
         t3 = _get_t3()
         # nexus-mgqs8: the bare name spans every knowledge collection; any
         # other name is one collection and behaves exactly as before.
@@ -6138,7 +6139,8 @@ def store_get_many(
     under an `[id]` line and a trailing `Missing: ...` line, or, when
     `structured=True`, `{contents, missing, section_types, source_notes}`
     (`source_notes` names the collection each entry was found in), or
-    `{contents, missing, error}` if the batch fetch itself failed.
+    `{contents, missing, error}` as an error result if the batch fetch
+    itself failed.
 
     Constraints:
     - `ids` accepts a comma-separated string, a flat list, or a list of
@@ -6417,7 +6419,7 @@ def store_get_many(
             # but the failure must still be logged server-side (nexus-yttqr): a silent
             # swallow here is exactly the diagnostic hole this bead closes.
             _log.error("mcp_store_get_many_failed", error=str(e), exc_info=True)
-            return {"contents": [], "missing": [], "error": f"store_get_many failed: {e}"}
+            return _fail({"contents": [], "missing": [], "error": f"store_get_many failed: {e}"})
         return _mcp_tool_error("store_get_many", e)
 
 
@@ -6698,7 +6700,7 @@ def memory_put(
     """
     try:
         if not content:
-            return "Error: content is required"
+            return _fail("Error: content is required")
         # Translate empty strings to None so MemoryStore.put's
         # fall-back chain (NX_AGENT env, resolve_active_session_id) takes
         # over rather than persisting literal empty strings.
@@ -6849,7 +6851,7 @@ def memory_delete(
     """
     try:
         if not project or not title:
-            return "Error: project and title are required"
+            return _fail("Error: project and title are required")
         with _t2_ctx() as db:
             deleted = db.delete(project=project, title=title)
         if deleted:
@@ -6945,7 +6947,7 @@ def memory_consolidate(
     try:
         if action == "find-overlaps":
             if not project:
-                return "Error: project is required for find-overlaps"
+                return _fail("Error: project is required for find-overlaps")
             with _t2_ctx() as db:
                 pairs = db.find_overlapping_memories(
                     project=project,
@@ -6961,15 +6963,15 @@ def memory_consolidate(
 
         elif action == "merge":
             if keep_id <= 0 or not delete_ids or not merged_content:
-                return "Error: merge requires keep_id>0, delete_ids, and merged_content"
+                return _fail("Error: merge requires keep_id>0, delete_ids, and merged_content")
             try:
                 del_ids = [int(x.strip()) for x in delete_ids.split(",") if x.strip()]
             except ValueError:
-                return "Error: delete_ids must be comma-separated integers"
+                return _fail("Error: delete_ids must be comma-separated integers")
             if not del_ids:
-                return "Error: delete_ids must contain at least one integer ID"
+                return _fail("Error: delete_ids must contain at least one integer ID")
             if keep_id in del_ids:
-                return f"Error: keep_id ({keep_id}) must not appear in delete_ids"
+                return _fail(f"Error: keep_id ({keep_id}) must not appear in delete_ids")
             # Safety gate: merges deleting more than one entry require
             # explicit confirmation. Dry-run returns a preview without
             # modifying T2 (matches catalog_link_bulk's pattern).
@@ -6977,7 +6979,7 @@ def memory_consolidate(
                 with _t2_ctx() as db:
                     keep_entry = db.get(id=keep_id)
                 if keep_entry is None:
-                    return f"Error: keep_id {keep_id} not found"
+                    return _fail(f"Error: keep_id {keep_id} not found")
                 preview = (
                     f"[DRY RUN] Would merge:\n"
                     f"  keep: [{keep_id}] {keep_entry['title']}\n"
@@ -6987,8 +6989,8 @@ def memory_consolidate(
                 return preview
             if len(del_ids) > 1 and not confirm_destructive:
                 return (
-                    f"Error: would delete {len(del_ids)} entries — set "
-                    f"confirm_destructive=True to proceed, or dry_run=True to preview"
+                    _fail(f"Error: would delete {len(del_ids)} entries — set "
+                    f"confirm_destructive=True to proceed, or dry_run=True to preview")
                 )
             with _t2_ctx() as db:
                 db.merge_memories(
@@ -7000,7 +7002,7 @@ def memory_consolidate(
 
         elif action == "flag-stale":
             if not project:
-                return "Error: project is required for flag-stale"
+                return _fail("Error: project is required for flag-stale")
             with _t2_ctx() as db:
                 stale = db.flag_stale_memories(project=project, idle_days=idle_days)
             if not stale:
@@ -7012,7 +7014,7 @@ def memory_consolidate(
             return "\n".join(lines)
 
         else:
-            return f"Error: unknown action {action!r}. Use: find-overlaps, merge, flag-stale"
+            return _fail(f"Error: unknown action {action!r}. Use: find-overlaps, merge, flag-stale")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("memory_consolidate", e)
 
@@ -7049,7 +7051,7 @@ def scratch(
 
         if action == "put":
             if not content:
-                return "Error: content is required for put"
+                return _fail("Error: content is required for put")
             agent_arg = agent if agent else ""  # T1.put falls back to NX_AGENT env
             doc_id = t1.put(content=content, tags=tags, agent=agent_arg)
             _record_tier_write(
@@ -7061,7 +7063,7 @@ def scratch(
 
         elif action == "search":
             if not query:
-                return "Error: query is required for search"
+                return _fail("Error: query is required for search")
             results = t1.search(query, n_results=limit)
             if not results:
                 return f"{prefix}No results."
@@ -7090,7 +7092,7 @@ def scratch(
 
         elif action == "get":
             if not entry_id:
-                return "Error: entry_id is required for get"
+                return _fail("Error: entry_id is required for get")
             entry = t1.get(entry_id)
             if entry is None:
                 # nexus-zpw6: surface candidate list when the prefix
@@ -7110,7 +7112,7 @@ def scratch(
 
         elif action == "delete":
             if not entry_id:
-                return "Error: entry_id is required for delete"
+                return _fail("Error: entry_id is required for delete")
             deleted = t1.delete(entry_id)
             if deleted:
                 return f"{prefix}Deleted: {entry_id}"
@@ -7126,7 +7128,7 @@ def scratch(
             return f"{prefix}Not found or not owned: {entry_id}"
 
         else:
-            return f"Error: unknown action {action!r}. Use: put, search, list, get, delete"
+            return _fail(f"Error: unknown action {action!r}. Use: put, search, list, get, delete")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("scratch", e)
 
@@ -7159,13 +7161,13 @@ def scratch_manage(
 
         elif action == "promote":
             if not project or not title:
-                return "Error: project and title are required for promote"
+                return _fail("Error: project and title are required for promote")
             with _t2_ctx() as t2:
                 report = t1.promote(entry_id, project=project, title=title, t2=t2)
             return f"{prefix}Promoted: {entry_id} -> {project}/{title} (action={report.action})"
 
         else:
-            return f"Error: unknown action {action!r}. Use: flag, promote"
+            return _fail(f"Error: unknown action {action!r}. Use: flag, promote")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("scratch_manage", e)
 
@@ -7248,7 +7250,7 @@ def plan_save(
     """
     try:
         if not query or not plan_json:
-            return "Error: query and plan_json are required"
+            return _fail("Error: query and plan_json are required")
         # nexus-fiovt: refuse verb-less writes. The plan library is
         # verb-dimensional; a NULL-verb plan pollutes it (77/116 rows on the
         # 2026-07-05 audit) — it can false-match non-verb-filtered nx_answer
@@ -7596,7 +7598,7 @@ def tuple_rd(
             )
         return [_tuple_row_to_dict(r) for r in rows]
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_rd", e).removeprefix("Error: ")}]
+        return _fail([{"error": _mcp_tool_error("tuple_rd", e).removeprefix("Error: ")}])
 
 
 @mcp.tool(
@@ -7643,7 +7645,7 @@ def tuple_in(
         row, claim_id = result
         return {"tuple": _tuple_row_to_dict(row, fresh_claim=True), "claim_id": claim_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_in", e).removeprefix("Error: ")}
+        return _fail({"error": _mcp_tool_error("tuple_in", e).removeprefix("Error: ")})
 
 
 _REPLY_FIELDS: frozenset[str] = frozenset(ReplySpec.__dataclass_fields__)
@@ -7801,7 +7803,7 @@ def tuple_renew(
         )
         return {"lease_until": lease_until.isoformat()}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_renew", e).removeprefix("Error: ")}
+        return _fail({"error": _mcp_tool_error("tuple_renew", e).removeprefix("Error: ")})
 
 
 @mcp.tool(
@@ -7854,7 +7856,7 @@ def tuple_registry() -> dict:
         with _t2_ctx() as db:
             return db.tuples.registry()
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_registry", e).removeprefix("Error: ")}
+        return _fail({"error": _mcp_tool_error("tuple_registry", e).removeprefix("Error: ")})
 
 
 @mcp.tool(
@@ -7897,7 +7899,7 @@ def tuple_list(
             out.append({"_pagination": {"next_cursor": next_cursor}})
         return out
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_list", e).removeprefix("Error: ")}]
+        return _fail([{"error": _mcp_tool_error("tuple_list", e).removeprefix("Error: ")}])
 
 
 @mcp.tool(
@@ -7925,7 +7927,7 @@ def tuple_stats(
             c = db.tuples.subspace_stats(subspace)
         return _tuple_census_to_dict(c)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_stats", e).removeprefix("Error: ")}
+        return _fail({"error": _mcp_tool_error("tuple_stats", e).removeprefix("Error: ")})
 
 
 @mcp.tool(
@@ -7997,7 +7999,7 @@ def mailbox_send(
         tuple_id, address, address_kind = _t2_index_write(_send, op="mailbox_send")
         return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("mailbox_send", e).removeprefix("Error: ")}
+        return _fail({"error": _mcp_tool_error("mailbox_send", e).removeprefix("Error: ")})
 
 
 def _current_subscription_session_id() -> str:
@@ -8139,7 +8141,7 @@ def tuple_subscriptions() -> list[dict]:
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         return subs.entries()
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_subscriptions", e).removeprefix("Error: ")}]
+        return _fail([{"error": _mcp_tool_error("tuple_subscriptions", e).removeprefix("Error: ")}])
 
 
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────
@@ -8158,7 +8160,7 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
     """
     try:
         if not doc_id:
-            return "Error: doc_id is required"
+            return _fail("Error: doc_id is required")
         t3 = _get_t3()
         col_name = t3_collection_name(collection, t3=t3)
         # nexus-b6enc C4: delete asymmetry — a store_put-origin catalog row
@@ -8819,7 +8821,7 @@ def traverse(
 
     # SC-16: mutual exclusion.
     if link_types and purpose:
-        return {"error": "traverse: specify link_types OR purpose, not both"}
+        return _fail({"error": "traverse: specify link_types OR purpose, not both"})
 
     # Normalise seeds to a list.
     if isinstance(seeds, str):
@@ -8846,7 +8848,7 @@ def traverse(
 
     catalog = _get_catalog()
     if catalog is None:
-        return {"error": "traverse: catalog not available"}
+        return _fail({"error": "traverse: catalog not available"})
 
     from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
@@ -10652,7 +10654,7 @@ async def nx_answer(
             try:
                 scope = resolve_owner_scope(_scope_cat, scope, strict=False)
             except OwnerScopeError as exc:
-                return f"Error: scope {exc}"
+                return _fail(f"Error: scope {exc}")
 
     from nexus.mcp_infra import get_t1_plan_cache  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
     from nexus.plans.budget_default import (  # noqa: PLC0415 — deferred for startup cost; call-time import so a test's monkeypatch on the module attribute is honored every call (RDR-196 .p3c, nexus-nyry9.21)
@@ -12699,7 +12701,8 @@ async def nx_answer_report(
     `continuation=True`; it lets `nx answer-runs` report an honest
     unreported rate instead of treating every un-paired handoff as a
     silent failure. Best-effort: returns `{ok, recorded, continuation_id}`,
-    or `{ok: False, recorded: False, error}` if the write itself failed.
+    or `{ok: False, recorded: False, error}` as an error result if the write
+    itself failed.
     """
     excerpt = (final_text_excerpt or "")[:500]
     marker = (
@@ -12721,7 +12724,7 @@ async def nx_answer_report(
             )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller
         _warn_telemetry_drop("nx_answer_runs", exc)
-        return {"ok": False, "recorded": False, "continuation_id": continuation_id, "error": str(exc)}
+        return _fail({"ok": False, "recorded": False, "continuation_id": continuation_id, "error": str(exc)})
     return {"ok": True, "recorded": True, "continuation_id": continuation_id}
 
 

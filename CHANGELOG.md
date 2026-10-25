@@ -11,6 +11,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A failing MCP tool now answers `isError: true`** (nexus-6b6hq). Tools reported failures as successful results whose text said they failed, in several shapes (`Error: ...` text, an `{"error": ...}` object, a one-item list holding one), so a client could not tell a failure from an empty answer. Those failures are now MCP error results on both servers, carrying the same content as before; only the flag changes. List tools (`tuple_rd`, `tuple_list`, the catalog `search`, and the rest) fail the same way, so an empty list always means no results. Unchanged: `nx_answer`'s `[non-answer: ...]` text, the `hook_*` tools, which fail open, and the six tools that already raised (`setup`, `setup_status`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit`, `daemon_uninstall`).
+
 - **A re-embed resume, and the `kept_tombstoned` re-entry, are refused with the missing piece named when the engine cannot embed for the target's model** (nexus-6zchp, follow-up to nexus-q6t89; engine change, local engine only). A start already refused this; a resume with the target present, and the re-entry, skipped the check and ran into another failed batch. A resume whose target is gone is unchanged.
 
 ## [7.86.1] - 2026-10-25
