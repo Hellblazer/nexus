@@ -1308,7 +1308,11 @@ def _print_store_put_integrity_text(report: dict) -> None:
                 f"chunk_count={d['chunk_count']} "
                 f"manifest={d['manifest_count']}"
             )
-        click.echo("  Remediate: nx catalog reconcile")
+        click.echo(
+            "  Remediate: nx catalog reconcile (rebuilds a manifest with no "
+            "rows; marks one with some rows for re-index, which re-indexing "
+            "its source clears)"
+        )
     if report["ghosts"]:
         click.echo(
             f"  GHOSTS — row with zero manifest AND zero chunks "

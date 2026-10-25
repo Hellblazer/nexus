@@ -7074,7 +7074,10 @@ def _run_index(
         # "current" forever — and the post-store manifest hooks that
         # skipped files never trigger can never repair it. This pass
         # rebuilds those manifests from the T3 chunks already stored (NO
-        # re-embedding) via the shared heal core. PLACEMENT IS LOAD-BEARING
+        # re-embedding) via the shared heal core. A gapped doc that already
+        # has rows is not written into: the core fails its fence and the
+        # NEXT run re-indexes it (Pass 1 feeds StalenessCache.never_fresh;
+        # nexus-8o06q). PLACEMENT IS LOAD-BEARING
         # (critique 4711f521 Critical): it runs AFTER per-file indexing so
         # gaps created by THIS run's own manifest-write hook are healed
         # too, and BEFORE the prune passes below so the manifest-keyed GC
@@ -7116,12 +7119,17 @@ def _run_index(
                     heal = heal_manifest_gaps(
                         _cat.by_owner(_heal_owner), _cat, _mk_t3, _mk_writer,
                     )
-                    if heal.reconciled or heal.lost or heal.write_failed:
+                    if (heal.reconciled or heal.lost or heal.reindex
+                            or heal.write_failed):
                         _phase(
                             f"Catalog manifest self-heal: "
                             f"{heal.reconciled} restored"
                             + (f", {len(heal.lost)} chunks LOST (real gap)"
                                if heal.lost else "")
+                            + (f", {len(heal.reindex)} marked for re-index "
+                               "(the next nx index repo re-indexes those "
+                               "whose source it walks)"
+                               if heal.reindex else "")
                             + (f", {heal.write_failed} write failure(s)"
                                if heal.write_failed else "")
                         )
@@ -7132,6 +7140,8 @@ def _run_index(
                         reconciled=heal.reconciled,
                         write_failed=heal.write_failed,
                         lost=len(heal.lost),
+                        reindex=len(heal.reindex),
+                        skipped_indexing=len(heal.skipped_indexing),
                         never_chunked=len(heal.never_chunked),
                         elapsed_s=round(time.monotonic() - _t, 1),
                     )
