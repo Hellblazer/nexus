@@ -39,12 +39,3 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 ---
-
-## Awaiting the next release or plugin cut (pinned: v7.86.2)
-
-ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `tool-spill/hooks/register.ts` (nexus-121ke): new opt-in plugin conexus-tool-spill. In the main conversation only (subagents and, unless `includeHeadless` is on, `claude -p` runs are left alone), a Bash result over `limit` bytes (default 4000) is written to `<temp dir>/claude-tool-spill-<user>/<tool_use_id>.txt` and the model sees the first `head` bytes (1400) and the last `tail` bytes (800) of each stream, cut at line ends, with a note between them naming the file, the middle lines cut and how many of them mention an error or failure. A Read of a whole file over the limit is cut with the next offset and a limit to use; a Read with an offset or limit, an instruction file, an errored or denied call, output Claude Code already persisted, and every other tool pass untouched. Install with `/plugin install conexus-tool-spill@nexus-plugins`; it replaces any machine-local copy of the mod, and nothing changes for anyone who does not install it.
-- `tool-spill/hooks/hooks.json` (nexus-121ke): names the hooks module of conexus-tool-spill.
-- `tool-spill/.claude-plugin/plugin.json` (nexus-121ke): manifest of conexus-tool-spill, with the `limit`, `head`, `tail` and `includeHeadless` userConfig options.
-- `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-121ke): the fallback plugin set, used only when no marketplace.json is reachable, now names conexus-tool-spill too, so an installed copy of it is kept in version lockstep on that path.
