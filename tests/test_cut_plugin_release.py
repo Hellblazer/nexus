@@ -163,15 +163,22 @@ def _mini_nexus(
         # ledger entries, and a marketplace entry still pinned at the
         # client tag, which does not contain the directory.
         entry_version = "0.0.1" if payload == "newplugin-badversion" else VERSION
+        # "newplugin-unmapped": a new entry whose path is outside the
+        # prefix map, so no changed path ever maps to its name.
+        entry_name, entry_path = (
+            ("mystery-mod", "mystery")
+            if payload == "newplugin-unmapped"
+            else ("conexus-tool-spill", "tool-spill")
+        )
         if payload != "newplugin-nomanifest":
-            _write(repo, "tool-spill/.claude-plugin/plugin.json", "{}\n")
-        _write(repo, "tool-spill/hooks/register.ts", "v1 ships\n")
+            _write(repo, f"{entry_path}/.claude-plugin/plugin.json", "{}\n")
+        _write(repo, f"{entry_path}/hooks/register.ts", "v1 ships\n")
         data = json.loads((repo / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
         data["plugins"].append(
             {
-                "name": "conexus-tool-spill",
+                "name": entry_name,
                 "version": entry_version,
-                "source": {"source": "git-subdir", "path": "tool-spill", "ref": BASE_TAG},
+                "source": {"source": "git-subdir", "path": entry_path, "ref": BASE_TAG},
             }
         )
         _write(repo, ".claude-plugin/marketplace.json", json.dumps(data, indent=2))
@@ -465,6 +472,19 @@ class TestNewPluginEntersThroughACut:
     ) -> None:
         repo = _mini_nexus(tmp_path, payload="newplugin-badversion")
         with pytest.raises(CutRefused, match="conexus-tool-spill.*not the client version"):
+            _cut(repo)
+
+    def test_a_new_entry_outside_the_prefix_map_is_refused(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """A new entry whose directory the channel's prefix map does not know
+        never lands in `moved`, so its ref could not be moved to the cut's
+        tag: the cut refuses it rather than pin a tag without its files."""
+        repo = _mini_nexus(tmp_path, payload="newplugin-unmapped")
+        with pytest.raises(
+            CutRefused,
+            match="mystery-mod is not listed on origin/main and no path under its prefix changed",
+        ):
             _cut(repo)
 
     def test_a_new_entry_whose_directory_has_no_manifest_is_refused(

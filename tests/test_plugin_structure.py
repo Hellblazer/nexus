@@ -437,10 +437,11 @@ def _frontmatter_description(path: Path) -> str | None:
 # files (skills, agents, commands) the lint must examine. A new skill, agent
 # or command changes the count on purpose: the pin makes the addition visible
 # here, and the undescribed check below stops a file with no description from
-# dropping out of the walk unnoticed. sn ships none today.
+# dropping out of the walk unnoticed. sn and tool-spill ship none today.
 _DESCRIPTION_SURFACES: dict[str, tuple[Path, int]] = {
     "conexus": (PLUGIN_DIR, 67),
     "sn": (REPO_ROOT / "sn", 0),
+    "tool-spill": (REPO_ROOT / "tool-spill", 0),
 }
 
 
@@ -476,6 +477,44 @@ class TestDescriptionsCarryNoAngleBrackets:
             "update _DESCRIPTION_SURFACES if a skill, agent or command was added or removed"
         )
         assert not offenders, "\n".join(offenders)
+
+
+class TestToolSpillManifestMatchesModule:
+    """nexus-121ke review: the module's fallback constants and the manifest's
+    userConfig defaults are two spellings of the same default, and a manifest
+    that says 8000 while the module says 4000 passed every TypeScript test
+    (the engine fills the manifest default in before the module sees it).
+    `claude plugin test` is by hand, so this keeps the two from drifting in CI.
+    """
+
+    ROOT = REPO_ROOT / "tool-spill"
+
+    def test_userconfig_defaults_equal_the_modules_constants(self) -> None:
+        manifest = json.loads(
+            (self.ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        source = (self.ROOT / "hooks" / "register.ts").read_text(encoding="utf-8")
+        user_config = manifest["userConfig"]
+        pairs = {"limit": "DEFAULT_LIMIT", "head": "DEFAULT_HEAD", "tail": "DEFAULT_TAIL"}
+        checked = 0
+        for option, constant in pairs.items():
+            found = re.search(rf"const {constant} = ([0-9_]+)", source)
+            assert found, f"register.ts no longer declares {constant}"
+            assert user_config[option]["default"] == int(found.group(1).replace("_", "")), (
+                f"plugin.json default for {option!r} differs from register.ts {constant}"
+            )
+            checked += 1
+        assert user_config["includeHeadless"]["default"] is False
+        assert checked == 3, "non-vacuity: the default comparison examined nothing"
+
+    def test_every_option_the_module_reads_is_declared(self) -> None:
+        manifest = json.loads(
+            (self.ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        source = (self.ROOT / "hooks" / "register.ts").read_text(encoding="utf-8")
+        read = set(re.findall(r"options\.(\w+)", source))
+        assert read == {"limit", "head", "tail", "includeHeadless"}, read
+        assert read <= set(manifest["userConfig"]), "an option is read but not declared"
 
 
 class TestSkillListingByteBudget:
@@ -931,7 +970,7 @@ class TestHooks:
             "check."
         )
 
-    @pytest.mark.parametrize("plugin_dir", ["conexus", "sn"])
+    @pytest.mark.parametrize("plugin_dir", ["conexus", "sn", "tool-spill"])
     def test_plugin_json_has_only_recognised_keys(self, plugin_dir: str) -> None:
         """Claude Desktop's plugin sync warns on, and the store strips, any
         plugin.json key outside the manifest reference (nexus-0nskc: 'bugs'

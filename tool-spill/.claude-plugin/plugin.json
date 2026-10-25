@@ -1,7 +1,7 @@
 {
   "name": "conexus-tool-spill",
   "version": "7.86.1",
-  "description": "Opt-in: main-session tool results over a size limit are written to a file; the model sees the head and the path, so a big read costs a few KB of context instead of all of it.",
+  "description": "Opt-in: a main-session Bash output or whole-file Read over a size limit is cut to its head and tail (Bash: the full text goes to a file), so a big read costs a few KB of context instead of all of it. Replaces any machine-local copy of the mod.",
   "author": {
     "name": "Hal Hildebrand",
     "url": "https://github.com/Hellblazer"
@@ -12,14 +12,26 @@
     "limit": {
       "type": "number",
       "title": "Spill limit (bytes)",
-      "description": "A main-session tool result larger than this many bytes is cut. Results at or under it pass unchanged.",
+      "description": "A main-session Bash result or whole-file Read larger than this many bytes is cut. Results at or under it pass unchanged.",
       "default": 4000
     },
     "head": {
       "type": "number",
       "title": "Head kept (bytes)",
-      "description": "How many bytes of a cut result the model still sees, trimmed back to a line end. Capped at the spill limit.",
-      "default": 2000
+      "description": "Bytes kept from the start of a cut result, trimmed back to a line end. With the tail it is scaled down to fit the spill limit.",
+      "default": 1400
+    },
+    "tail": {
+      "type": "number",
+      "title": "Tail kept (bytes)",
+      "description": "Bytes kept from the end of a cut Bash result, where a script's verdict usually sits. Zero or less restores the default.",
+      "default": 800
+    },
+    "includeHeadless": {
+      "type": "boolean",
+      "title": "Cut headless runs too",
+      "description": "Also cut results in claude -p runs (nx_answer operators, headless critics). Off by default: a headless run has no one to follow the note.",
+      "default": false
     }
   }
 }
