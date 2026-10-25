@@ -35,12 +35,12 @@ ASK THE USER FIRST, once, and act only on the answer. Show only the choices that
 
 | Choice | What happens | Download |
 |---|---|---|
-| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk |
-| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
-| CLI only | Install the CLI and decide about a service later | about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk |
+| Local | Install the CLI and run a Nexus service on this machine | about 0.8 GB down (1.0 GB on Linux), 2.8 to 3.0 GB on disk |
+| Cloud | Install the CLI and connect it to a managed service you have an address, token and tenant for | about 0.5 GB down (0.6 GB on Linux), 2.0 to 2.3 GB on disk |
+| CLI only | Install the CLI and decide about a service later | about 0.5 GB down (0.6 GB on Linux), 2.0 to 2.3 GB on disk |
 | Not now | Nothing is installed | none |
 
-These sizes include PDF support (docling, MinerU and torch). They were measured on 7.85.0 on macOS and Linux (2026-10-24); Windows was not measured. They are not a promise. Slim (`setup` with `slim` true) leaves PDF support out: about 0.25 GB less to download on macOS, 0.37 GB on Linux, and 0.85 GB less on disk on macOS and 1.3 GB on Linux, and the first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out.
+These sizes include PDF support (docling, MinerU and torch). They were measured on 7.86.0 on macOS and Linux (2026-10-25); Windows was not measured. They are not a promise. Slim (`setup` with `slim` true) leaves PDF support out: about 0.28 GB less to download on macOS, 0.39 GB on Linux, and 1.0 GB less on disk on macOS and 1.3 GB on Linux, and the first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out.
 
 With Local, also ask whether the service should start when the user logs in: yes registers a login unit, and no means the user starts the service again after each reboot.
 

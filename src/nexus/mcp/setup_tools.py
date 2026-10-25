@@ -52,20 +52,20 @@ _SCRIPT_TIMEOUT_SECONDS: float = 60.0
 # -- the sizes of the default install (kept equal to the stand-in's copy) ---------------------
 #
 # The default install includes the PDF stack (nexus-2k66t.4.9, Sam 2026-10-23: install everything
-# by default). The figures are measured on 7.85.0 on macOS and Linux, 2026-10-24 (nexus-2k66t.4.10, T2
-# nexus/install-size-measurement-2026-10-24); Windows was not measured. tests/test_install_size_rows.py
+# by default). The figures are measured on 7.86.0 on macOS and Linux, 2026-10-25 (nexus-2k66t.4.10, T2
+# nexus/install-size-measurement-2026-10-24, re-measured on 7.86.0 on 2026-10-25); Windows was not measured. tests/test_install_size_rows.py
 # pins every place a user chooses an install.
 
-LOCAL_SIZE_UP_TO: str = "about 0.8 GB to download (0.9 GB on Linux), 2.5 to 2.9 GB on disk"
-CLI_SIZE_UP_TO: str = "about 0.45 GB to download (0.6 GB on Linux), 1.8 to 2.2 GB on disk"
+LOCAL_SIZE_UP_TO: str = "about 0.8 GB to download (1.0 GB on Linux), 2.8 to 3.0 GB on disk"
+CLI_SIZE_UP_TO: str = "about 0.5 GB to download (0.6 GB on Linux), 2.0 to 2.3 GB on disk"
 
 SIZES_NOTE: str = (
-    "These sizes include PDF support (docling, MinerU and torch). They were measured on 7.85.0 on macOS and Linux; "
+    "These sizes include PDF support (docling, MinerU and torch). They were measured on 7.86.0 on macOS and Linux; "
     "Windows was not measured. They are not a promise."
 )
 SLIM_LINE: str = (
-    "Slim (setup with slim true) leaves PDF support out: about 0.25 GB less to download on macOS, 0.37 GB on Linux, "
-    "and 0.85 GB less on disk on macOS and 1.3 GB on Linux. The first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out."
+    "Slim (setup with slim true) leaves PDF support out: about 0.28 GB less to download on macOS, 0.39 GB on Linux, "
+    "and 1.0 GB less on disk on macOS and 1.3 GB on Linux. The first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out."
 )
 
 # -- the tools, as the application sees them ----------------------------------------------

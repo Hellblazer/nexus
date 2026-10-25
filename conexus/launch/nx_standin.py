@@ -118,14 +118,14 @@ NOT_INSTALLED: str = (
 
 
 #: The sizes of the default install, which includes the PDF stack (nexus-2k66t.4.9, Sam 2026-10-23:
-#: install everything by default). The figures are MEASURED on 7.85.0 on macOS and Linux, 2026-10-24
-#: (nexus-2k66t.4.10, T2 nexus/install-size-measurement-2026-10-24); Windows was not measured. Pinned by
+#: install everything by default). The figures are MEASURED on 7.86.0 on macOS and Linux, 2026-10-25
+#: (nexus-2k66t.4.10, T2 nexus/install-size-measurement-2026-10-24, re-measured on 7.86.0 on 2026-10-25); Windows was not measured. Pinned by
 #: tests/test_install_size_rows.py in every place a user chooses an install.
-LOCAL_SIZE: str = "about 0.8 GB down (0.9 GB on Linux), 2.5 to 2.9 GB on disk"
-CLI_SIZE: str = "about 0.45 GB down (0.6 GB on Linux), 1.8 to 2.2 GB on disk"
+LOCAL_SIZE: str = "about 0.8 GB down (1.0 GB on Linux), 2.8 to 3.0 GB on disk"
+CLI_SIZE: str = "about 0.5 GB down (0.6 GB on Linux), 2.0 to 2.3 GB on disk"
 #: The same two sizes in the sentence form the tool descriptions use ("up to about ...").
-LOCAL_SIZE_UP_TO: str = "about 0.8 GB to download (0.9 GB on Linux), 2.5 to 2.9 GB on disk"
-CLI_SIZE_UP_TO: str = "about 0.45 GB to download (0.6 GB on Linux), 1.8 to 2.2 GB on disk"
+LOCAL_SIZE_UP_TO: str = "about 0.8 GB to download (1.0 GB on Linux), 2.8 to 3.0 GB on disk"
+CLI_SIZE_UP_TO: str = "about 0.5 GB to download (0.6 GB on Linux), 2.0 to 2.3 GB on disk"
 
 #: The one question's choices, as the record gives them (RDR-228 "The one question"),
 #: with the sizes it measured. The session-start hook (``nx_setup_notice.py``) imports
@@ -145,12 +145,12 @@ QUESTION_TABLE: str = (
 #: same measurement's: dropping docling, MinerU and torch takes 237 MB off the download on macOS,
 #: 371 MB on Linux, and 847 MB off the disk on macOS, 1272 MB on Linux.
 SIZES_NOTE: str = (
-    "These sizes include PDF support (docling, MinerU and torch). They were measured on 7.85.0 on macOS and Linux; "
+    "These sizes include PDF support (docling, MinerU and torch). They were measured on 7.86.0 on macOS and Linux; "
     "Windows was not measured. They are not a promise."
 )
 SLIM_LINE: str = (
-    "Slim (setup with slim true) leaves PDF support out: about 0.25 GB less to download on macOS, 0.37 GB on Linux, "
-    "and 0.85 GB less on disk on macOS and 1.3 GB on Linux. The first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out."
+    "Slim (setup with slim true) leaves PDF support out: about 0.28 GB less to download on macOS, 0.39 GB on Linux, "
+    "and 1.0 GB less on disk on macOS and 1.3 GB on Linux. The first PDF indexed then installs it. Offer slim only if the user asks to leave PDF support out."
 )
 
 #: What Local adds to the question, and what a no means.
@@ -175,10 +175,10 @@ BROKEN_PHRASE: str = "Nexus is installed but cannot start; setup repairs it"
 
 #: What the repair asks and costs: it builds the CLI again (the work of ``cli-only``).
 BROKEN_REPAIR: str = (
-    "Setup repairs it by building the CLI again, up to about 0.45 GB to download (0.6 GB on Linux) and several minutes, "
+    "Setup repairs it by building the CLI again, up to about 0.5 GB to download (0.6 GB on Linux) and several minutes, "
     "PDF support included; slim true leaves that out. "
     "ASK THE USER FIRST and act only on the answer: cli-only repairs the CLI, local repairs it and also sets up "
-    "or starts a service on this machine (up to about 0.8 GB, 0.9 GB on Linux), cloud repairs it and connects it to a managed "
+    "or starts a service on this machine (up to about 0.8 GB, 1.0 GB on Linux), cloud repairs it and connects it to a managed "
     "service, not-now leaves it."
 )
 
@@ -245,7 +245,7 @@ def setup_text(platform: str | None = None, broken: str | None = None, mode: str
             "Show the user the command below and let them decide. "
             "It is for the user to run in a terminal; do not run it yourself unless the user asks you to.\n\n"
             f"    {REPAIR_COMMAND}\n\n"
-            "It builds the CLI again, PDF support included (leave out `--extras pdf` to skip it): up to about 0.45 GB to download "
+            "It builds the CLI again, PDF support included (leave out `--extras pdf` to skip it): up to about 0.5 GB to download "
             "(0.6 GB on Linux) and several minutes. Afterwards the user "
             f"reconnects the `nexus` server ({RECONNECT_HOW}).\n\n"
             f"Commands for each operating system, and troubleshooting: {INSTALL_PAGE}"
@@ -253,12 +253,12 @@ def setup_text(platform: str | None = None, broken: str | None = None, mode: str
     if mode == "cloud":
         third = (
             "third asks for the managed service's address, token and tenant (the tenant for a mint credential) and saves them, "
-            "and downloads no service. Together they download about 0.45 GB (0.6 GB on Linux) and take several minutes."
+            "and downloads no service. Together they download about 0.5 GB (0.6 GB on Linux) and take several minutes."
         )
     else:
         third = (
             "third downloads and starts the local service and asks whether to start it at login. "
-            "Together they download about 0.8 GB (0.9 GB on Linux) and take several minutes."
+            "Together they download about 0.8 GB (1.0 GB on Linux) and take several minutes."
         )
     return (
         f"{NOT_INSTALLED}\n\n"

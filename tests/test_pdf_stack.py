@@ -449,7 +449,7 @@ def test_the_install_goes_through_perform_self_install_with_the_pdf_extra_and_th
     assert calls == [{"add_extras": ("pdf",), "version": "9.8.7", "progress": True}]
     err = capsys.readouterr().err
     assert "Installing PDF support for conexus 9.8.7" in err
-    assert "370 MB" in err and "kept by future upgrades" in err
+    assert "390 MB" in err and "kept by future upgrades" in err
 
 
 # ── the PDFs a refusing run left behind ──────────────────────────────────────

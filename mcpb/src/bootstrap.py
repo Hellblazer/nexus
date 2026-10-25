@@ -395,7 +395,7 @@ def _apply_pdf(bundle_dir, environ=None, platform=None):
     if want:
         line = (
             "[conexus-mcpb] PDF support is on (the include_pdf setting): the sync installs conexus[pdf]%s."
-            % (", about 0.25 GB more to download and 0.85 GB more on disk on macOS" if changed else "")
+            % (", about 0.28 GB more to download and 1.0 GB more on disk on macOS" if changed else "")
         )
         if _pdf_runtime_gap(environ, platform):
             line += (

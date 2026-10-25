@@ -174,7 +174,7 @@ def perform_self_install(
 
     *progress* (nexus-2k66t.4.2) passes the builder's stderr (uv's download
     progress) through to this process's stderr while it runs, for the
-    on-demand PDF install, where a 370 MB fetch with no output reads as a hang.
+    on-demand PDF install, where a 390 MB fetch with no output reads as a hang.
     Failure diagnosis reads the same captured text either way.
 
     *add_extras* (nexus-pffc4) MERGES with the receipt's existing extras —
@@ -226,9 +226,10 @@ def perform_self_install(
     tools = install_layout.tools_dir()
     bin_dir = install_layout.bin_dir()
     if bootstrap:
-        # The plugin's setup (conexus/launch/nx_setup.py) and the stand-in's REPAIR_COMMAND pass
-        # `--extras pdf` by default (not a user's request for it on this machine), so a bootstrap
-        # is never "asked". web/install.ps1 and web/install.sh pass no extras.
+        # The plugin's setup (conexus/launch/nx_setup.py), the stand-in's REPAIR_COMMAND and the
+        # web installers (web/install.sh, web/install.ps1) pass `--extras pdf` by default (--slim
+        # and -slim leave it off); that is not a user's request for it on this machine, so a
+        # bootstrap is never "asked".
         return _bootstrap_install(
             install_dir, tools, bin_dir, version=version, extras=new_extras, dry_run=dry_run,
             progress=progress, pdf_note=pdf_note,

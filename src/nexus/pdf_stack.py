@@ -83,8 +83,8 @@ VCRT_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
 #: Said once, on stderr, before uv starts (the design's wording).
 INSTALL_NOTICE = (
-    "Installing PDF support for conexus {version}: about 240 MB (macOS) / 370 MB (Linux) "
-    "download, 0.85 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow on first "
+    "Installing PDF support for conexus {version}: about 285 MB (macOS) / 390 MB (Linux) "
+    "download, 1.0 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow on first "
     "use: about 0.5 GB, plus 1.2 GB for the first PDF with formulas."
 )
 
@@ -271,7 +271,7 @@ def state() -> StackState:
 def policy() -> str:
     """``install`` (the default) or ``refuse``. ``NX_PDF_STACK`` wins over the
     ``pdf_stack.auto_install`` config key. An unreadable value refuses: a
-    typo must not start a 370 MB download."""
+    typo must not start a 390 MB download."""
     raw = os.environ.get(POLICY_ENV, "").strip().lower()
     if raw:
         if raw in (POLICY_INSTALL, POLICY_REFUSE):
