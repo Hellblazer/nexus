@@ -148,7 +148,7 @@ every changeset this RDR adds is ordered after `vectors-030`, and a function
 `vectors-030` defines (for example `quarantine_restore_chunks`) is redefined
 with its four-column write sites intact and stays under
 `PlpgsqlCheckGateTest`. The manifest's new `embedding_model` column
-(`vectors-030-model-tenant-partition-functions.xml` lines 786-791) is what lets Phase 2 rewrite `chash_conformance_report` without
+(`vectors-030-model-tenant-partition-functions.xml` lines 786-791) lets Phase 2 rewrite `chash_conformance_report` without
 parsing.
 
 ## Context
@@ -206,7 +206,7 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
   `6d9e7d124`), with the reopen trigger "a field report of a mint-time name
   whose segments disagree with the row it registered". *Source: RDR-204 lines
   754-763; T2 `229-research-1`.*
-- **✅ Verified** (source search) — Of the three load-bearing sites the bead
+- **✅ Verified** (source search) — Of the three essential sites the bead
   named, `_is_same_model_passthrough` is deleted (`3ccf25a48`), engine dim
   dispatch reads the registry, and the 4-segment guard is still live at
   `src/nexus/db/t3.py:733-742`, with the rename gate at
@@ -228,7 +228,7 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
      `health.py:8916`, `mcp/core.py:3731`, `search_engine.py:660`.
      *T2 `229-research-3`.*
   2. *Client, second ring outside the census* (75 calls): see T2
-     `229-research-4` for the full list by helper. The load-bearing ones are
+     `229-research-4` for the full list by helper. The decisive ones are
      chunk metadata `embedding_model` taken from the name
      (`db/http_vector_client.py:3211-3214`, `db/t3.py:919-921`,
      `catalog/note_write.py:260`), the indexers' target model
