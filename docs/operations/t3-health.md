@@ -56,7 +56,7 @@ TUMBLER_OR_TITLE` (`index_state`) instead: the write-path fail-closed
 verify-then-stamp (`CatalogRepository.completeIndexRun`) already refuses
 to mark a document `complete` unless its manifest was verified whole at
 write time, so `index_state != 'complete'` is the current signal that
-`nx index <path> --force` is worth running. `nx catalog verify
+`nx index repo <path> --force` (or `pdf`, `md`, `rdr`) is worth running. `nx catalog verify
 --collection NAME` still detects per-document manifest damage
 client-side, independent of the retired engine functions, if you need a
 `referenced`/`present`/`missing` breakdown for a specific collection.

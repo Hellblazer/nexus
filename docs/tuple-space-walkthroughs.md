@@ -143,27 +143,29 @@ An idle lock still expires at its `out` time plus the template's 7-day retention
 
 ## Cross-instance request and ack
 
-A request from one instance to another is the same mailbox with an instance name as the address. Both instances on the box mint against one tenant, so `mailbox/conexus-58` is reachable from the nexus session and vice versa. The requester parks an `in` on its own mailbox for the ack. The peer answers with `ack(reply=...)` (RDR-206): the reply lands in the requester's mailbox and the request is consumed, in one transaction, so there is no longer a separate `out` call that a crash could land between. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
+A request from one session to another is the same mailbox, addressed by session id. The sender does not type the id: `mailbox_send(to="conexus-58", ...)` looks the name up in `directory/conexus-58` and writes to `mailbox/<that session id>` (instance-name addressing was retired at RDR-208 Phase 3). Both sessions on the box mint against one tenant, so each mailbox is reachable from the other. The requester parks an `in` on its own mailbox, which is its own session id, for the ack. The peer answers with `ack(reply=...)` (RDR-206): the reply lands in the requester's mailbox and the request is consumed, in one transaction, so there is no longer a separate `out` call that a crash could land between. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant N as nexus-a6 (requester)
+    participant N as nexus-a6 session (requester, id S-a6)
     participant E as Engine (shared tenant)
-    participant C as conexus-58 (peer instance)
+    participant C as conexus-58 session (peer, id S-58)
 
-    N->>E: out mailbox/conexus-58 kind request correlation_id r-41 nonce r-41
+    N->>E: mailbox_send to conexus-58: rd directory/conexus-58
+    E-->>N: session_id S-58
+    N->>E: out mailbox/S-58 kind request correlation_id r-41 nonce r-41
     E-->>N: tuple_id
     loop until an ack or the caller's own deadline
-        N->>E: in mailbox/nexus-a6 to nexus-a6 claimant=nexus-a6 timeout_s=25
+        N->>E: in mailbox/S-a6 to S-a6 claimant=S-a6 timeout_s=25
         E-->>N: None at the 25 s cap, probe result, loop
     end
-    C->>E: in mailbox/conexus-58 to conexus-58 claimant=conexus-58 lease_s=300
+    C->>E: in mailbox/S-58 to S-58 claimant=S-58 lease_s=300
     E-->>C: the request tuple, claim c9
     C->>C: deploy engine, re-gate
-    C->>E: ack c9 reply: subspace mailbox/nexus-a6, keys {to nexus-a6}, dims {kind ack, correlation_id r-41}
+    C->>E: ack c9 reply: subspace mailbox/S-a6, keys {to S-a6}, dims {kind ack, correlation_id r-41}
     Note over E: c9 consumed and the reply written in the SAME transaction (RDR-206). The reply's nonce is the engine's own, hex(request tuple id), never the caller's, and its id is digested under its own label, so no out can reproduce it (nexus-b747g)
-    E->>E: signal waiters on mailbox/nexus-a6
+    E->>E: signal waiters on mailbox/S-a6
     E-->>N: the ack tuple, claim c10
     N->>E: ack c10
 ```

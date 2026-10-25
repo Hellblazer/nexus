@@ -1,5 +1,7 @@
 # RDR-225 cloud deploy and abort runbook (vectors-030-1 and vectors-031)
 
+> **EXECUTED 2026-10-07** on `engine-service-v0.1.150` (nexus-3wh8d.20): the walk committed at 16:15:55Z in 7m53s with exact counts, and RDR-225 is closed. Kept as the record, and as the shape for the next partitioning walk.
+
 Operator runbook for the engine tag that carries changeset `vectors-030-1`, which partitions `nexus.chunks` and
 `nexus.taxonomy_centroids` by embedding model, then by tenant, and `vectors-031-1` and `-2`, which give every read
 function a model and a tenant predicate so each search reads one leaf. Written for nexus-3wh8d.26 from the deploy-shape

@@ -6,6 +6,13 @@ index --uuid`, this gives you a hands-off path from "I drop a PDF
 into DT" to "the PDF is indexed in Nexus" without ever opening a
 terminal.
 
+**Before you arm a rule:** PDF support is an optional install. On a slim install the
+first PDF `nx dt index` fetches the PDF stack (docling, MinerU and torch, most of the
+install's download) or stops with exit 69, 75 or 70 and a command to run
+(`src/nexus/pdf_stack.py`). Inside a smart rule that is a silent multi-gigabyte
+background fetch or a failure you only see in the log. Run `nx self install --extras pdf`
+once by hand, and confirm with `nx doctor`, before the rule goes live.
+
 This recipe covers the v1 smart-rule pattern, the macOS folder-action
 alternative, error handling, and the concurrency caveat that bites
 batch imports.
@@ -50,8 +57,8 @@ Key points:
   shell metacharacters, but it's free defence).
 - The trailing `&` backgrounds each invocation so the smart rule
   returns control to DT immediately. Without it, DT blocks the UI
-  thread for the duration of the index call (Voyage embed + ChromaDB
-  upsert; commonly 1-3 seconds per PDF).
+  thread for the duration of the index call (embed + vector
+  upsert; a few seconds per PDF once PDF support is installed).
 - `>> ~/Library/Logs/nexus-smart-rule.log 2>&1` captures both stdout
   and stderr to a known location. DT's smart-rule UI shows only the
   AppleScript exit status; without a log file, debugging a failing

@@ -6,11 +6,12 @@ Start on the site, then find your section below by what you're trying to do.
 - [Getting started](https://hellblazer.github.io/nexus/getting-started.html) — twelve lessons inside Claude Code: your first search, memory, scratch, knowledge, RDRs, and push delivery
 - [Working with RDRs](https://hellblazer.github.io/nexus/rdr.html) — the RDR lifecycle as it's practised, in eight lessons
 
-`docs/*.md` is living reference documentation — kept current with the codebase and safe to trust as-is. `docs/rdr/*.md` is a different thing entirely: an append-only historical decision log (227+ RDR files, plus per-RDR post-mortems) capturing the reasoning behind past design choices, some since superseded. If you're looking for a how-to or a current design reference, stay in `docs/`; only dig into `docs/rdr/` when you need the "why" behind a decision.
+`docs/*.md` is living reference documentation — kept current with the codebase and safe to trust as-is. `docs/rdr/*.md` is a different thing entirely: an append-only historical decision log (230+ RDR files, plus per-RDR post-mortems) capturing the reasoning behind past design choices, some since superseded. If you're looking for a how-to or a current design reference, stay in `docs/`; only dig into `docs/rdr/` when you need the "why" behind a decision.
 
 ## New user
 
 - [Getting Started](getting-started.md) — Install, first index + search, the Claude Code plugin, troubleshooting
+- [Installing on Windows](windows-install.md): Windows 11 x64, prerequisites, the step-by-step path, signing and application-control limits
 - [Desktop Deployment](desktop-deployment.md) — All three Claude surfaces (chat, Cowork, Code) and the host daemon lifecycle
 - [MCP Hosts](mcp-hosts.md): run the stdio MCP server in Cursor, Codex CLI, Gemini CLI, VS Code Copilot or another host, and what stays Claude-only
 - [Managed Onboarding](managed-onboarding.md) — Use the hosted managed service instead of a local stack
@@ -28,21 +29,21 @@ Start on the site, then find your section below by what you're trying to do.
 
 - [Configuration](configuration.md) — Config hierarchy, `.nexus.yml`, environment variables, logging
 - [Container Integration](container-integration.md) — Daemon model for containers and Cowork
-- [Agent Lifecycle & Operations](operations/agent-lifecycle.md) — Install → provision → run → upgrade → uninstall: the state model + the three walkthroughs
+- [Agent Lifecycle & Operations](operations/agent-lifecycle.md) — Install → provision → run → upgrade → uninstall: the state model, then each stage in turn
 - [Migration Runbook](migration-runbook.md) — Operator's manual order of operations, quiescence, rollback, and the deprecation window
 - [Privacy Policy](privacy-policy.md) — What data nexus stores and where
-- [`operations/`](operations/) — Operator runbooks: [Apple code signing](operations/apple-code-signing.md), [audit-membership interpretation](operations/audit-membership-interpretation.md), [T3 health checks (historical template)](operations/t3-health.md), [Tuple space](operations/tuple-space.md) — the three `nx doctor` rows, dead-letter triage, sweep reading
-- [`runbooks/`](runbooks/) — One-off operational runbooks for specific incidents/phases: [RDR-191 Phase 5 cloud FK runbook](runbooks/rdr-191-phase5-cloud-fk.md), [RDR-225 cloud deploy and abort runbook](runbooks/rdr-225-cloud-deploy.md)
+- [`operations/`](operations/) — Operator runbooks: [Apple code signing](operations/apple-code-signing.md), [audit-membership interpretation](operations/audit-membership-interpretation.md), [T3 health checks (historical template)](operations/t3-health.md), [engine reaper](operations/engine-reaper.md), [ownerless-write cutover](operations/ownerless-write-cutover.md) (executed 2026-10-12; kept as the record), [Tuple space](operations/tuple-space.md) — the seven `nx doctor` tuple rows, dead-letter triage, sweep reading
+- [`runbooks/`](runbooks/) — One-off operational runbooks for specific incidents/phases: [RDR-191 Phase 5 cloud FK runbook](runbooks/rdr-191-phase5-cloud-fk.md), [RDR-225 cloud deploy and abort runbook](runbooks/rdr-225-cloud-deploy.md) (executed 2026-10-07), [RDR-225 tenant removal](runbooks/rdr-225-tenant-removal.md)
 
 ## Contributor reference
 
 - [Contributing](contributing.md) — Dev setup, testing, code style, release process
 - [Architecture](architecture.md) — Reference architecture, module map, design decisions
+- [Named workflows](workflows.md): the repo-local Workflow-tool scripts in `.claude/workflows/` (pressure test, dead-wire census)
 - [Benchmarking](benchmarking.md) — `scripts/bench/` harnesses: retrieval-quality scoring (RDR-090) and the operator quality proxy (RDR-196 .p2a)
 - [Wire Contract Pending](wire-contract-pending.md) — Ledger of engine/client wire-contract pairings deployed ahead of their client half (nexus-1vogq tripwire)
 - [Tuple Space](tuple-space.md) — reference for the RDR-205 coordination substrate: engine and client (`nx tuple`, the `tuple_*` MCP tools) shipped together in conexus 7.41.0, paired with `engine-service-v0.1.114`; [walkthroughs](tuple-space-walkthroughs.md)
 - [`testing/`](testing/) — [6.0.0 plugin surface coverage matrix](testing/6.0.0-plugin-surface-coverage-matrix.md)
-- [`tutorial/`](tutorial/) — **In progress, not on `main`.** The tutorial-recording pipeline lives on the `wip/tutorial` branch; this directory on `main` is a placeholder.
 
 ## Reference
 
@@ -76,4 +77,4 @@ Historical and exploratory material — design reasoning, forensic records, and 
 
 ## Origins
 
-Nexus synthesizes patterns from mgrep (UX, citation format), SeaGOAT (git frecency scoring, hybrid search), Arcaneum (PDF extraction pipeline), and Mixedbread (cloud vector store, succeeded by self-hosted ChromaDB and now by the native nexus-service over Postgres 17 + pgvector). Three storage tiers, no raw content storage outside the source repos, and a specification-before-code workflow recorded across 227+ RDRs.
+Nexus synthesizes patterns from mgrep (UX, citation format), SeaGOAT (git frecency scoring, hybrid search), Arcaneum (PDF extraction pipeline), and Mixedbread (cloud vector store, succeeded by self-hosted ChromaDB and now by the native nexus-service over Postgres 17 + pgvector). Three storage tiers, no raw content storage outside the source repos, and a specification-before-code workflow recorded across 230+ RDRs.

@@ -515,7 +515,7 @@ Do NOT run `uv publish` or `twine upload` manually: the Release workflow handles
 ### 10. Watch and verify the Release workflow
 
 ```bash
-gh run watch                                   # wait for Release workflow green
+gh api repos/Hellblazer/nexus/commits/<merge-sha>/check-runs --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'   # read once; re-read later, never `gh run watch` or a polling loop (AGENTS.md worktree rule 7)
 ```
 
 One job must complete: `Build and publish to PyPI`. (2026-07-06 CI-cost
@@ -651,7 +651,7 @@ nx --version                 # must print X.Y.Z
 ## See also
 
 - `.claude/rules/releases-and-engine.md` § Cutting a release (a pointer to this file; this file is canonical for the procedure)
-- `docs/contributing.md#release-process` (long form — Step-by-step checklist, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
+- `docs/contributing.md#release-process` (long form: the plugin channel cut, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
 - `feedback_invoke_release_skill.md` (memory entry: invoke this skill, do not freehand)
 - `feedback_post_release_reinstall.md` (memory entry: reinstall after tag)
 - `feedback_release_discipline.md` (memory entry: full suite before tag, not after)
