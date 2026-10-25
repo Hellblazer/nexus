@@ -40,7 +40,7 @@ RELEASE_CONSTRAINTS = REPO_ROOT / "src" / "nexus" / "_install" / "constraints.tx
 STAGER = REPO_ROOT / "scripts" / "stage_mcpb_constraints.py"
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 
-#: The lock has 219 pins; the stager's floor is 200.
+#: The lock has 222 pins (7.86.0); the stager's floor is 200.
 _FLOOR = 200
 
 

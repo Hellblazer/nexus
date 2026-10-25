@@ -142,8 +142,8 @@ QUESTION_TABLE: str = (
 )
 
 #: What the sizes are, and the one line for the slim install (nexus-2k66t.4.9). The savings are the
-#: same measurement's: dropping docling, MinerU and torch takes 237 MB off the download on macOS,
-#: 371 MB on Linux, and 847 MB off the disk on macOS, 1272 MB on Linux.
+#: 7.86.0 measurement's: dropping docling, MinerU and torch takes about 285 MB off the download on
+#: macOS, 390 MB on Linux, and about 1.0 GB off the disk on macOS, 1.3 GB on Linux.
 SIZES_NOTE: str = (
     "These sizes include PDF support (docling, MinerU and torch). They were measured on 7.86.0 on macOS and Linux; "
     "Windows was not measured. They are not a promise."

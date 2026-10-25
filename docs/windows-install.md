@@ -227,7 +227,7 @@ some files twice: uv installs packages as hardlinks to the copies in its cache
 environment is mostly the same data under a second name. That sharing was not
 measured with a hardlink-aware tool on Windows. The same kind of install on
 Linux (CLI only, conexus 7.86.0, PDF support included) shows the effect: 2.2 GB in uv's cache and
-2.1 GB in the install occupy 2.3 GB together.
+2.25 GB in the install (generation plus Python) occupy 2.3 GB together.
 
 ## 4. Claude Code and the plugin
 

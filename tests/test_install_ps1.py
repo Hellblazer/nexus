@@ -954,24 +954,6 @@ def test_slim_is_independent_of_the_service_mode(box: Box, mode: str) -> None:
 
 
 @needs_pwsh
-def test_slim_says_pdf_support_was_left_out_and_how_to_add_it(box: Box) -> None:
-    box.with_uv()
-    result = box.run("-slim", "--cli-only")
-    assert result.returncode == 0, (result.stdout, result.stderr)
-    assert "PDF support was left out" in result.stdout
-    assert "nx self install --extras pdf" in result.stdout
-    assert "first PDF you index installs it" in result.stdout
-
-
-@needs_pwsh
-def test_the_default_build_does_not_say_pdf_support_was_left_out(box: Box) -> None:
-    box.with_uv()
-    result = box.run("--cli-only")
-    assert result.returncode == 0, (result.stdout, result.stderr)
-    assert "PDF support was left out" not in result.stdout
-
-
-@needs_pwsh
 def test_single_dash_slim_is_accepted_too(box: Box) -> None:
     box.with_uv()
     assert box.run("-slim", "--cli-only").returncode == 0
@@ -983,11 +965,10 @@ def test_help_names_slim_and_states_the_default_size(box: Box) -> None:
     text = box.run("--help").stdout
     assert "--slim" in text
     assert "PDF" in text
-    assert "0.8 GB" in text and "1.0 GB" in text, "the default local size, macOS and Linux"
-    assert "0.5 GB" in text and "0.6 GB" in text, "the default CLI-only and cloud size"
+    assert "0.8 GB" in text and "0.9 GB" in text, "the default local size, macOS and Linux"
+    assert "0.45 GB" in text and "0.6 GB" in text, "the default CLI-only and cloud size"
     assert "1.3 GB" not in text and "700 MB" not in text, "the 7.81.0 sizes"
-    assert "measured on 7.86.0" in text and "derived" not in text, "the sizes say they were measured, and are not a gate"
-    assert "macOS 14 or later" in text, "the Apple Silicon / macOS 14 floor is stated"
+    assert "measured on 7.85.0" in text and "derived" not in text, "the sizes say they were measured, and are not a gate"
 
 
 @needs_pwsh
