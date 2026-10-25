@@ -256,9 +256,21 @@ def test_store_put_strips_a_leading_utf8_bom(runner, mock_store, tmp_path, monke
     assert seen == ["hello bom", "hello bom"]
 
 
-def test_store_put_stdin_is_read_as_utf8_whatever_the_locale(mock_store, monkeypatch):
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("\ufeffcaf\u00e9", "caf\u00e9"),
+        ("line one\r\nline two\r\n", "line one\nline two\n"),
+        ("old mac\rline", "old mac\nline"),
+        ("\ufeff\u00fcber\r\n\u4e2d\u6587\r\n", "\u00fcber\n\u4e2d\u6587\n"),
+    ],
+    ids=["bom-and-accent", "crlf", "lone-cr", "bom-nonascii-crlf"],
+)
+def test_store_put_stdin_is_read_as_utf8_whatever_the_locale(mock_store, monkeypatch, raw, expected):
     """On Windows a piped stdin decodes with the ANSI code page (cp1252): the BOM came through
-    as U+00EF U+00BB U+00BF and an e-acute as two characters (7.86.1 shakeout, Windows leg)."""
+    as U+00EF U+00BB U+00BF and an e-acute as two characters (7.86.1 shakeout, Windows leg).
+    Reading bytes also skips text-mode newline translation, so CRLF must be normalised to LF
+    here, as it is for the file path and for a text-mode stdin (review round 2)."""
     import click  # noqa: PLC0415
     from click.testing import CliRunner  # noqa: PLC0415
 
@@ -272,9 +284,9 @@ def test_store_put_stdin_is_read_as_utf8_whatever_the_locale(mock_store, monkeyp
     runner = CliRunner(charset="cp1252")
     runner.invoke(
         main, ["store", "put", "--collection", "fixture-subject", "-", "--title", "t"],
-        input="\ufeffcaf\u00e9".encode("utf-8"),
+        input=raw.encode("utf-8"),
     )
-    assert seen == ["caf\u00e9"]
+    assert seen == [expected]
 
 
 def test_store_put_stdin_that_is_not_utf8_says_so(runner, mock_store):
@@ -282,6 +294,7 @@ def test_store_put_stdin_that_is_not_utf8_says_so(runner, mock_store):
         main, ["store", "put", "--collection", "fixture-subject", "-", "--title", "t"], input=b"caf\xe9",
     )
     assert result.exit_code != 0 and "stdin is not valid UTF-8" in result.output
+    assert "pass the file path instead" in result.output and "OutputEncoding" in result.output
 
 
 def test_store_put_invalid_ttl_shows_error(runner, mock_store, tmp_path):

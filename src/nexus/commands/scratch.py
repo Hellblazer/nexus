@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import functools
-import sys
 from typing import Any
 
 import click
 
+from nexus.commands._helpers import read_stdin_utf8
 from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
 
 
@@ -117,7 +117,7 @@ def put_cmd(content: str, tags: str, persist: bool, project: str, title: str) ->
     Use '-' as CONTENT to read from stdin.
     """
     if content == "-":
-        content = sys.stdin.read()
+        content = read_stdin_utf8()
     t1 = _t1()
     doc_id = t1.put(content=content, tags=tags, persist=persist,
                     flush_project=project, flush_title=title)

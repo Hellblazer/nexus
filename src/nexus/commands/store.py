@@ -9,6 +9,7 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+from nexus.commands._helpers import read_stdin_utf8
 from nexus.corpus import (
     EmbeddingProfileMismatchError,
     LocalVoyageCredentialMissingError,
@@ -82,17 +83,7 @@ def put_cmd(
     if source == "-":
         if not title:
             raise click.ClickException("--title is required when reading from stdin (-)")
-        # Bytes, decoded as UTF-8 here: Python decodes a piped stdin with the locale encoding,
-        # the ANSI code page on Windows (cp1252), which kept the BOM and mangled every
-        # non-ASCII character (7.86.1 shakeout).
-        buf = getattr(sys.stdin, "buffer", None)
-        if buf is None:
-            content = sys.stdin.read().removeprefix("\ufeff")
-        else:
-            try:
-                content = buf.read().decode("utf-8-sig")
-            except UnicodeDecodeError:
-                raise click.ClickException("stdin is not valid UTF-8.")
+        content = read_stdin_utf8()
     else:
         path = Path(source)
         if not path.exists():

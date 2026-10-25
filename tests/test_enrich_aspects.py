@@ -371,7 +371,7 @@ class TestDeterministicCostEstimate:
         # Reports the no-API-cost branch, not the measured-estimate branch.
         assert "deterministic parser" in result.output
         assert "$0" in result.output
-        assert "mean of measured" not in result.output
+        assert "typical for paper-sized" not in result.output
 
     def test_dry_run_knowledge_collection_still_reports_measured_cost(
         self, env, monkeypatch: pytest.MonkeyPatch,
@@ -391,7 +391,7 @@ class TestDeterministicCostEstimate:
             enrich, ["aspects", "knowledge__delos", "--dry-run"],
         )
         assert result.exit_code == 0, result.output
-        assert "mean of measured claude-haiku-4-5-20251001 dispatches" in result.output
+        assert "model claude-haiku-4-5-20251001;" in result.output
         assert f"${3 * _PER_PAPER_COST_USD:.2f}" in result.output
 
 
@@ -916,6 +916,48 @@ class TestRejectedRowsAndBackendGate:
         assert NO_BACKEND_MESSAGE in result.output, result.output
         assert calls == [], "nothing may be dispatched when no backend can run"
 
+    def test_explicit_cli_backend_with_no_claude_on_path_is_refused(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """NX_LLM_BACKEND=cli resolves to "cli" whatever is on PATH, so the real
+        resolver passed this gate and every document then failed at the spawn."""
+        _, _, cat = env
+        _register_entries(cat, ["/papers/p1.pdf"])
+        monkeypatch.setenv("NX_LLM_BACKEND", "cli")
+        monkeypatch.setattr("shutil.which", lambda name, *a, **k: None)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.aspect_extractor.extract_aspects",
+            lambda content, source_path, collection, **_kw: calls.append(source_path),
+        )
+        result = CliRunner().invoke(
+            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert result.exit_code != 0, result.output
+        assert NO_BACKEND_MESSAGE in result.output, result.output
+        assert calls == []
+
+    def test_explicit_cli_backend_with_claude_on_path_passes_the_gate(
+        self, env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Positive control for the refusal above: the same setup with a claude on PATH runs."""
+        _, _, cat = env
+        _register_entries(cat, ["/papers/p1.pdf"])
+        monkeypatch.setenv("NX_LLM_BACKEND", "cli")
+        monkeypatch.setattr("shutil.which", lambda name, *a, **k: "/usr/local/bin/claude")
+        calls: list[str] = []
+
+        def _extract(content, source_path, collection, **_kw):
+            calls.append(source_path)
+            return _make_record(source_path=source_path)
+
+        monkeypatch.setattr("nexus.aspect_extractor.extract_aspects", _extract)
+        result = CliRunner().invoke(
+            enrich, ["aspects", "knowledge__delos", "--validate-sample", "0"],
+        )
+        assert NO_BACKEND_MESSAGE not in result.output, result.output
+        assert calls == ["/papers/p1.pdf"]
+
     def test_dry_run_is_not_gated_on_a_backend(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -946,8 +988,11 @@ class TestRejectedRowsAndBackendGate:
         )
         result = CliRunner().invoke(enrich, ["aspects", "knowledge__delos", "--dry-run"])
         assert result.exit_code == 0, result.output
-        assert "upper bound: assumes paper-sized documents" in result.output
-        assert "a one-line note measured $0.0035" in result.output
+        assert "typical for paper-sized documents" in result.output
+        assert "mean of three measured papers, $0.13-0.31 each, 54k-109k prompt tokens" in result.output
+        assert "far lower for short notes (one measured at $0.0035)" in result.output
+        # $0.20 is a mean, not a ceiling: a claim of a bound is the defect this pins.
+        assert "upper bound" not in result.output
 
 
 # ── --re-extract --extractor-version ─────────────────────────────────────────

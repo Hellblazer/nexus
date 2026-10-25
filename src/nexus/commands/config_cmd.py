@@ -2,12 +2,12 @@
 """nx config — manage credentials and settings."""
 import os
 import stat
-import sys
 from pathlib import Path
 
 import click
 import yaml
 
+from nexus.commands._helpers import read_stdin_utf8
 from nexus.config import (
     CREDENTIALS,
     NON_SECRET_CREDENTIALS,
@@ -153,7 +153,7 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
         raise click.UsageError("Give the value one way: inline, --stdin or --from-file.")
     if from_stdin or from_file is not None:
         key = key_value
-        raw = sys.stdin.read() if from_stdin else _read_private_file(from_file)
+        raw = read_stdin_utf8() if from_stdin else _read_private_file(from_file)
         value = raw.rstrip("\r\n")
         if not value.strip():
             raise click.UsageError("The value read was empty; nothing was set.")

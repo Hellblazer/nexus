@@ -1064,13 +1064,16 @@ _PER_PAPER_COST_USD = 0.20
 # collection of short notes it is far too high: the 7.86.1 shakeout measured
 # $0.0035 for a one-line note on the same model (aspect_extractor_usage log:
 # cost_usd=0.00350840, claude-haiku-4-5-20251001, 5.4 s), against the $0.20 this
-# constant puts on it. The estimate therefore reads as an upper bound; a
-# per-document figure scaled by size needs per-model rates this module does not
-# hold, so it is not attempted here.
+# constant puts on it. It is NOT an upper bound: a mean of three papers measured
+# $0.131-$0.306, so a larger paper or a retry costs more than the line says. The
+# estimate reads as "typical for paper-sized documents"; a per-document figure
+# scaled by size needs per-model rates this module does not hold, so it is not
+# attempted here.
 _MEASURED_SHORT_NOTE_COST_USD = 0.0035
 _COST_BASIS = (
-    "upper bound: assumes paper-sized documents, 54k-109k prompt tokens each; "
-    f"a one-line note measured ${_MEASURED_SHORT_NOTE_COST_USD}"
+    "typical for paper-sized documents (mean of three measured papers, "
+    "$0.13-0.31 each, 54k-109k prompt tokens); far lower for short notes "
+    f"(one measured at ${_MEASURED_SHORT_NOTE_COST_USD})"
 )
 
 # The write floor on aspect confidence: the engine's upsert refuses a row below
@@ -1287,7 +1290,7 @@ def enrich_aspects(
         # the per-document actual lands in the aspect_extractor_usage log.
         cost_str = (
             f"Estimated cost: ~${cost_estimate:.2f} "
-            f"(mean of measured {config.model_version} dispatches; {_COST_BASIS})"
+            f"(model {config.model_version}; {_COST_BASIS})"
         )
     # nexus-kk4ut: a knowledge__* collection is routed PER DOCUMENT
     # (nexus-kmbys) — select_config's `config` is only the prefix's base
@@ -1348,10 +1351,18 @@ def _require_llm_backend() -> None:
     from nexus.operators.llm_backend import DispatchRequest, resolve_backend_name  # noqa: PLC0415 — deferred command-local import; keeps CLI startup light
     from nexus.operators.llm_types import OperatorError  # noqa: PLC0415 — deferred, as above
 
+    import shutil  # noqa: PLC0415 — deferred, as above
+    from nexus.operators.llm_backend import NO_BACKEND_MESSAGE  # noqa: PLC0415 — deferred, as above
+
     try:
-        resolve_backend_name(DispatchRequest(prompt="", json_schema=None))
+        name = resolve_backend_name(DispatchRequest(prompt="", json_schema=None))
     except OperatorError as exc:  # NoBackendAvailableError is a subclass
         raise click.ClickException(str(exc)) from exc
+    # An explicit NX_LLM_BACKEND=cli resolves to "cli" whatever is on PATH (the spawn is
+    # meant to fail later with a clear message); here that failure is the per-document
+    # [Errno 2] run this gate exists to stop, so check PATH.
+    if name == "cli" and shutil.which("claude") is None:
+        raise click.ClickException(NO_BACKEND_MESSAGE)
 
 
 def _aspect_identity(entry) -> str:
@@ -1642,7 +1653,7 @@ def _dry_run_predict_skips(
         actual_cost = (len(entries) - skipped) * _PER_PAPER_COST_USD
         click.echo(
             f"  Predicted actual cost (excluding skips): ~${actual_cost:.2f} "
-            f"(mean of measured dispatches on the configured model; {_COST_BASIS})"
+            f"({_COST_BASIS})"
         )
 
 
