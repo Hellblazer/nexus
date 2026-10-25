@@ -191,6 +191,13 @@ _rc_wheels=("$WHEELS"/conexus-*.whl)
 RC_WHEEL="${_rc_wheels[0]}"
 RC_VERSION="$(basename "$RC_WHEEL" | cut -d- -f2)"
 echo "rc wheel: $RC_WHEEL (conexus $RC_VERSION)"
+# UV_FIND_LINKS puts the candidate wheel beside PyPI, so an --old-version equal to the
+# candidate's resolves to the candidate itself and leg u tests nothing old (nexus-anuzd:
+# develop at 7.85.0 with the default 7.85.0 wrote installer_schema 2).
+if want u && [ "$OLD_VERSION" = "$RC_VERSION" ]; then
+    echo "leg u needs an --old-version below the candidate's $RC_VERSION (the local wheel would stand in for it)" >&2
+    exit 2
+fi
 
 if want f; then
     NEXT_VERSION="$("$E2E_PYTHON" - "$RC_VERSION" <<'PY'
