@@ -2865,7 +2865,7 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
         "Both write site-packages/cv2/, so which one loads depends on install order"
     )
     return HealthResult(
-        label="PDF support", ok=not on_linux, warn=not on_linux,
+        label="PDF support", ok=False, warn=not on_linux,
         detail=(
             f"{detail}; but both opencv-python and opencv-python-headless are installed. "
             f"{consequence}. This install ignored the release's uv overrides."
@@ -2924,7 +2924,7 @@ def _check_pdf_support() -> list[HealthResult]:
         gap = pdf_stack._windows_runtime_gap()  # noqa: SLF001
         if gap is not None:
             return [HealthResult(
-                label="PDF support", ok=True, warn=True,
+                label="PDF support", ok=False, warn=True,
                 detail=(
                     f"not installed, and it cannot be installed yet. {pdf_stack._gap_sentence(gap)}"  # noqa: SLF001
                     f"{pdf_stack._runtime_ways()} PDF support then installs on first use{held_note}{owed_note}"  # noqa: SLF001
@@ -2961,7 +2961,7 @@ def _check_installer_rebuild() -> list[HealthResult]:
     if note is None:
         return []
     return [HealthResult(
-        label="Dependency lock", ok=True, warn=True, detail=note,
+        label="Dependency lock", ok=False, warn=True, detail=note,
         fix_suggestions=[f"Rebuild with the release's lock: {pdf_stack.REBUILD_RETRY_COMMAND}"],
     )]
 

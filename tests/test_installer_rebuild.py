@@ -393,7 +393,10 @@ def test_the_doctor_row_is_a_warning_with_the_retry_command_when_the_rebuild_is_
 
     (row,) = health._check_installer_rebuild()
     assert row.label == "Dependency lock"
-    assert row.ok and row.warn and not row.fatal, "a warning, not red: the install keeps working"
+    assert not row.ok and row.warn and not row.fatal, "a warning, not red: the install keeps working"
+    out, _ = health.format_health_for_cli([row], local_mode=True)
+    assert f"{health._SOFT_WARN} Dependency lock" in out, out
+    assert health.health_exit_code([row]) == health.EXIT_HEALTHY
     assert "nx upgrade" in row.detail
     assert row.fix_suggestions and "nx upgrade" in row.fix_suggestions[0]
 

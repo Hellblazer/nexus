@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Three `nx doctor` warnings showed as a green check** (nexus-9b0ih). Found in the 7.86.1 shakeout. Three rows were built as passing rows that also carry a warning, and a passing row always prints ✓, so each one showed a green check beside its warning text and its suggested fix. The three rows: PDF support when two OpenCV builds are installed (off Linux; on Linux it stays red), PDF support on a Windows box that cannot load the stack yet, and the Dependency lock row when the lock rebuild is owed. They now print ⚠. The exit code does not change.
+
 ### Changed
 - **Installer pages (published to the site 2026-10-25, ahead of the next client release):** `install.sh --slim` and `install.ps1 -slim` now print that PDF support was left out and how to add it (`nx self install --extras pdf`, or it installs on the first PDF you index), and both `--help` texts state the macOS 14 on Apple Silicon floor (nexus-h6wwq).
 
