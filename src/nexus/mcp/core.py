@@ -12692,7 +12692,7 @@ async def nx_answer_report(
     )],
     ok: Annotated[bool, Field(description="Whether the reduction completed successfully.")],
     final_text_excerpt: Annotated[str, Field(
-        description="Optional short excerpt of the caller's reduction output, for diagnostic visibility; capped to 500 chars.",
+        description="Accepted for compatibility and never stored: the report cannot tell whether the nx_answer run had trace=False.",
     )] = "",
 ) -> dict:
     """Report that an `nx_answer` continuation handoff was completed by the caller.
@@ -12704,12 +12704,15 @@ async def nx_answer_report(
     or `{ok: False, recorded: False, error}` as an error result if the write
     itself failed.
     """
-    excerpt = (final_text_excerpt or "")[:500]
-    marker = (
+    # nexus-i9bzg: the excerpt is caller text, and every nx_answer arm
+    # redacts caller text under trace=False. The handoff row of such a run is
+    # itself "[redacted]", so nothing here can learn the run's trace setting:
+    # the row keeps the marker only. No reader uses more than the marker.
+    del final_text_excerpt
+    final_text = (
         f"{NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX} "
         f"continuation_id={continuation_id} ok={ok}]"
     )
-    final_text = f"{marker} {excerpt}" if excerpt else marker
     try:
         with _t2_ctx() as db:
             db.telemetry.record_nx_answer_run(
