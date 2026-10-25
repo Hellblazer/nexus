@@ -39,15 +39,3 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 ---
-
-## Awaiting the next release or plugin cut (pinned: v7.86.1)
-
-ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/skills/rdr-accept-checklist/SKILL.md` (nexus-cyztb): step 7.4 calls `nx_enrich_beads` once per implementation bead and appends each non-empty result unchanged to the bead's notes with `bd update --append-notes`; the caller then sets `epic_bead:` in T2. The tool returns text and writes nothing, so before this the enrichment had nowhere to go.
-- `conexus/skills/enrich-plan/SKILL.md` (nexus-cyztb): says the tool writes nothing and how the caller appends its result.
-- `conexus/skills/composition-probe/SKILL.md` (nexus-cyztb): `metadata.coordinator` is set with `bd update --set-metadata`, not by `nx_enrich_beads`.
-
-## Deferred to the next client release
-
-- `conexus/resources/agent-shared/ERROR_HANDLING.md` (nexus-6b6hq): a memory/store/scratch write error now arrives as an MCP error result (`isError: true`) whose text begins `Error: `, not as a success string. Deferred because the same bead changes the MCP servers in `src/nexus/mcp/`.
