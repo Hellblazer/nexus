@@ -730,7 +730,6 @@ def test_cluster_by_semantic_discards_the_boosted_order():
     assert "hybrid_score" not in out
 
 
-@pytest.mark.t2_tenant
 def test_cluster_by_keeps_every_per_document_row_of_a_shared_chunk():
     """nexus-tko2w: a ``section_type`` where on a chunk several documents hold returns it once per
     document, so one chunk id arrives twice, each row carrying its own ``doc_id``. The cluster-order
@@ -749,8 +748,11 @@ def test_cluster_by_keeps_every_per_document_row_of_a_shared_chunk():
                          metadata={"doc_id": "1.1.2", "section_type": "body", "frecency_score": 0.0}),
         ]
 
+    # No T1 session: the search trace it would record is best-effort, and skipping it keeps the
+    # test off storage, so it needs no tenant (the storage-touch ratchet).
     with patch("nexus.search_engine.search_cross_corpus", fake), \
-         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG), \
+         patch("nexus.mcp.core._get_t1", side_effect=RuntimeError("no T1 in this test")):
         out = _search_render(query="cluster duplicate ids", corpus="code__test",
                              cluster_by="semantic", structured=True)
 
