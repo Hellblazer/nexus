@@ -1,5 +1,11 @@
 # Changelog
 
+## [7.86.1] - 2026-10-25
+
+Plugin version aligned with conexus 7.86.1. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included).
+
+- **The setup command and the stand-in carry the install sizes re-measured on 7.86.0** (nexus-q04tu). `commands/setup.md` and `launch/nx_standin.py`: Local about 0.8 GB down (1.0 GB on Linux), 2.8 to 3.0 GB on disk; Cloud and CLI only about 0.5 GB down (0.6 GB on Linux), 2.0 to 2.3 GB on disk; the PDF stack is about 285 MB down and 1.0 GB on disk on macOS, 390 MB and 1.3 GB on Linux. The stand-in's `setup` tool description matches the real server's.
+
 ## [7.86.0] - 2026-10-25
 
 Plugin version aligned with conexus 7.86.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied, the deferred ones included):

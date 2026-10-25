@@ -37,16 +37,3 @@ next client release. A deferred entry is exempt from the release-window
 "ledger must be empty" rule above -- still declared there is correct, not
 stale -- and stays exactly where it is until moved back deliberately.
 
----
-
-
-
-## Awaiting the next release or plugin cut (pinned: v7.86.0)
-
-ONE PATH PER BULLET, on the bullet's FIRST line.
-
-
-## Deferred to the next client release
-
-- `conexus/commands/setup.md` (nexus-q04tu): the setup command's install-size rows and slim line carry the figures re-measured on 7.86.0 (Local about 0.8 GB down, 2.8 to 3.0 GB on disk; Cloud and CLI only about 0.5 GB down, 2.0 to 2.3 GB on disk). Deferred because the same bead changes user-facing strings in `src/`.
-- `conexus/launch/nx_standin.py` (nexus-q04tu): the stand-in's size rows, the `setup` tool description and its repair and manual commands carry the same re-measured figures as the real server's `src/nexus/mcp/setup_tools.py`. Deferred because the same bead changes user-facing strings in `src/`.
