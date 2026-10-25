@@ -1287,11 +1287,15 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
         # failed, and a future check unrelated to MinerU that also prints
         # ✗ would false-positive this one. The verdict function parses
         # every MinerU-carrying line by name.
-        _nx doctor --check-mineru >"$LOGS/mineru-doctor.log" 2>&1
+        # A red row exits 1 (7.86.1), and under `set -e` a bare call would abort the script
+        # here, before the log is printed or _fail runs. Keep the rc for the message; the
+        # verdict stays the log's.
+        mineru_doctor_rc=0
+        _nx doctor --check-mineru >"$LOGS/mineru-doctor.log" 2>&1 || mineru_doctor_rc=$?
         MINERU_DOCTOR_VERDICT="$(_mineru_doctor_verdict < "$LOGS/mineru-doctor.log")"
         if [ "$MINERU_DOCTOR_VERDICT" != "OK" ]; then
             cat "$LOGS/mineru-doctor.log" >&2
-            _fail "nx doctor --check-mineru: ${MINERU_DOCTOR_VERDICT#FAIL|} — see $LOGS/mineru-doctor.log (nexus-gqrg0 class)"
+            _fail "nx doctor --check-mineru (rc=$mineru_doctor_rc): ${MINERU_DOCTOR_VERDICT#FAIL|} — see $LOGS/mineru-doctor.log (nexus-gqrg0 class)"
         fi
 
         # a since-deleted sandbox gate's proven identity shape (its 3b/11 step):

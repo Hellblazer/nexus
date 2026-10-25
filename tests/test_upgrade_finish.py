@@ -32,6 +32,7 @@ from nexus.upgrade_finish import (
     restart_stale,
     unload_stale_t2_launchagent,
     unload_stale_service_launchagent,
+    upgrade_invocation,
 )
 from tests._module_seam import module_time, patch_in, patch_time, setattr_in
 
@@ -4354,8 +4355,11 @@ class TestFinishPassUnderNxUpgrade:
         assert line is not None and "7.86.0 -> 7.86.1" in line
         assert "NEEDS HUMAN" not in line, line
         assert "run `nx upgrade`" not in line, line
-        assert "service (pid 64750) is the storage service — this `nx upgrade` cycles it" in line
-        assert "data rung 'rdr192-manifest-backfill' pending — this `nx upgrade` converges it" in line
+        assert "service (pid 64750) is the storage service — this `nx upgrade` cycles it next" in line
+        assert "data rung 'rdr192-manifest-backfill' pending — this `nx upgrade` runs it next" in line
+        # "converges" is a claim the line cannot make: the rung can defer (lock held, census
+        # deadline, engine unreachable, the --auto deadline) or the run can raise first.
+        assert "converges" not in line, line
 
     @pytest.mark.parametrize("argv", [["doctor"], ["index", "repo", "."], ["daemon", "restart-stale"]])
     def test_any_other_command_keeps_the_needs_human_lines(self, tmp_path, monkeypatch, argv):
@@ -4369,8 +4373,35 @@ class TestFinishPassUnderNxUpgrade:
         assert "NEEDS HUMAN: service (pid 64750)" in line, line
         assert "run `nx upgrade`" in line, line
 
+    @pytest.mark.parametrize("argv", [["upgrade", "--help"], ["upgrade", "-h"], ["upgrade", "--yes", "--help"]])
+    def test_upgrade_help_runs_nothing_so_it_keeps_the_lines(self, tmp_path, monkeypatch, argv):
+        """`nx upgrade --help` prints usage and exits: it will not run the rung or cycle the service."""
+        assert upgrade_invocation(argv) is None
+        line = self._finish(tmp_path, monkeypatch, argv)
+        assert "NEEDS HUMAN: service (pid 64750) is the storage service — cycle it" in line, line
+        assert "data rung 'rdr192-manifest-backfill' pending — run `nx upgrade`" in line, line
+
+    def test_the_root_group_takes_only_flags(self):
+        """`upgrade_invocation` takes the first non-dash token to be the subcommand, which is only
+        right while every root option is a flag: a value-taking option (`nx --config PATH upgrade`)
+        would make it read PATH as the subcommand and silently misclassify. Add such an option and
+        this fails, so the parser is revisited with it."""
+        import click  # noqa: PLC0415
+
+        from nexus.cli import main  # noqa: PLC0415
+
+        ctx = click.Context(main, resilient_parsing=True)
+        params = main.get_params(ctx)
+        assert params, "the root group lists no params; this pin would pass vacuously"
+        assert {"version", "verbose"} <= {p.name for p in params}
+        offenders = [
+            p.name for p in params
+            if "--help" not in getattr(p, "opts", ()) and not (isinstance(p, click.Option) and p.is_flag)
+        ]
+        assert offenders == [], f"root params that take a value: {offenders}"
+
     def test_skip_t3_does_not_cycle_the_service_so_that_line_stays(self, tmp_path, monkeypatch):
         """`--skip-t3` suppresses the process cycle (commands/upgrade.py), but the ladder still walks."""
         line = self._finish(tmp_path, monkeypatch, ["upgrade", "--skip-t3"])
         assert "NEEDS HUMAN: service (pid 64750) is the storage service — cycle it" in line, line
-        assert "data rung 'rdr192-manifest-backfill' pending — this `nx upgrade` converges it" in line
+        assert "data rung 'rdr192-manifest-backfill' pending — this `nx upgrade` runs it next" in line

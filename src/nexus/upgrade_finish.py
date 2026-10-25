@@ -324,7 +324,7 @@ def invocation_is_preview(argv: list[str] | None = None) -> bool:
 class UpgradeInvocation:
     """What the running ``nx upgrade`` does next, as the finish pass can know it from argv."""
 
-    walks_ladder: bool  # every pending data rung converges in this command
+    walks_ladder: bool  # this command runs every pending data rung next (a rung may still defer)
     cycles_service: bool  # the stale storage service is cycled by this command
 
 
@@ -341,12 +341,19 @@ def upgrade_invocation(argv: list[str] | None = None) -> UpgradeInvocation | Non
     ``--skip-t3`` (commands/upgrade.py). A preview does neither, so it is ``None``, and
     every other command keeps the lines: nothing there will do the work.
 
-    The root group takes only flags, so the subcommand is the first token that is not one.
+    A `--help` or `-h` after `upgrade` prints usage and runs nothing, so it is ``None``
+    too. The words say "next", not "converges": a rung can defer (lock held, census
+    deadline, engine unreachable, the ``--auto`` deadline) or the run can raise before the
+    ladder, and the line cannot know which.
+
+    The root group takes only flags, so the subcommand is the first token that is not one
+    (tests/test_upgrade_finish.py pins that: a value-taking root option would make this
+    misread the option's value as the subcommand).
     """
     args = list(sys.argv[1:] if argv is None else argv)
     if next((a for a in args if not a.startswith("-")), None) != "upgrade":
         return None
-    if PREVIEW_ARGV_FLAG in args:
+    if PREVIEW_ARGV_FLAG in args or "--help" in args or "-h" in args:
         return None
     return UpgradeInvocation(walks_ladder=True, cycles_service="--skip-t3" not in args)
 
@@ -960,7 +967,7 @@ def restart_stale(
         elif proc.kind == "service":
             if upgrade_cycles_service:
                 actions.append(
-                    f"service (pid {proc.pid}) is the storage service — this `nx upgrade` cycles it"
+                    f"service (pid {proc.pid}) is the storage service — this `nx upgrade` cycles it next"
                 )
                 continue
             remedy = (
@@ -3183,7 +3190,7 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
         if upgrade_walks_ladder:
             # The running command IS `nx upgrade`: it walks this rung next, so telling a
             # person to run it would be asking for the work already under way.
-            lines.append(f"data rung '{rung.name}' pending — this `nx upgrade` converges it")
+            lines.append(f"data rung '{rung.name}' pending — this `nx upgrade` runs it next")
         elif rung.name == "chash-rekey":
             lines.append(
                 "chash-rekey PENDING — chash citations for existing content "

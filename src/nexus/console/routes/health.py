@@ -30,6 +30,8 @@ def _collect_health_data() -> dict[str, Any]:
             checks.append({
                 "label": r.label,
                 "ok": r.ok,
+                # ok=False, warn=True is a soft warning, not a failure (HealthResult).
+                "warn": r.warn,
                 "detail": r.detail,
                 "fix_suggestions": r.fix_suggestions,
             })
