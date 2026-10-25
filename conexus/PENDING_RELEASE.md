@@ -37,3 +37,7 @@ next client release. A deferred entry is exempt from the release-window
 "ledger must be empty" rule above -- still declared there is correct, not
 stale -- and stays exactly where it is until moved back deliberately.
 
+
+## Deferred to the next client release
+
+- `conexus/resources/agent-shared/ERROR_HANDLING.md` (nexus-6b6hq): a memory/store/scratch write error now arrives as an MCP error result (`isError: true`) whose text begins `Error: `, not as a success string. Deferred because the same bead changes the MCP servers in `src/nexus/mcp/`.
