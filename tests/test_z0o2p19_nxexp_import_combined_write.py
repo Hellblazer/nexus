@@ -1315,7 +1315,8 @@ class _StubOwnerReader:
     def resolve_many(self, tumblers):
         mk = lambda t, k, st: type("E", (), {  # noqa: E731
             "physical_collection": "docs__s", "source_uri": f"file:///{t}", "title": t,
-            "content_type": "pdf", "index_content_hash": k, "index_state": st})()
+            "content_type": "pdf", "index_content_hash": k, "index_state": st,
+            "meta": {"content_hash": k} if t == "1.1.1" else {}})()
         return {"1.1.1": mk("1.1.1", _KA, self._state_a), "1.1.2": mk("1.1.2", "cd" * 32, "complete")}
 
 
@@ -1325,6 +1326,10 @@ def test_export_writes_the_owners_key_only_when_complete_and_its_manifest_rows(s
     assert owners["c1"]["index_content_hash"] == key_a and owners["c1"]["manifest_rows"] == 2
     assert owners["c2"]["source_uri"] == "file:///1.1.1"          # the lower tumbler owns the shared chunk
     assert owners["c3"]["index_content_hash"] == "cd" * 32 and owners["c3"]["manifest_rows"] == 3
+    # nexus-3ajpd: the catalog's own record that the key is a file hash: the registration holds
+    # the same value (1.1.1 does; 1.1.2 registered without one) and the document is complete.
+    assert owners["c1"]["key_registered"] is (state_a == "complete")
+    assert owners["c3"]["key_registered"] is False
 
 
 def _native_pdf(cat, owner, coll: str, name: str, key: str, texts: list[str]) -> str:
@@ -1373,6 +1378,21 @@ def test_a_whole_imported_pdf_keeps_its_native_key_and_joins_a_native_copy_a_tru
         by_title = {e.title: e for e in copies}
         assert by_title["a"].index_content_hash == ka, by_title["a"]
         assert by_title["b"].index_content_hash not in (kb, ka), by_title["b"]   # truncated: unique key
+
+        # nexus-3ajpd invariant: an import never writes a fence or derived key into a chunk's
+        # ``content_hash``; every chunk keeps the exported record's own value. The exporter's chunk-row
+        # witness (:func:`_note_source_evidence`) can only MISS because of this: a key no chunk carries
+        # is never trusted, so the document gets the unique key (never a wrong one).
+        exported = {r["id"]: r["metadata"].get("content_hash") for r in _read_nxexp(f)}
+        assert len(exported) >= 4 and all(v in (ka, kb) for v in exported.values()), exported   # non-vacuous
+        stored = client.get_collection(dst).get(ids=list(exported), include=["metadatas"])
+        stored_hash = {i: m.get("content_hash") for i, m in zip(stored["ids"], stored["metadatas"])}
+        assert stored_hash == exported, (stored_hash, exported)
+        derived = {e.index_content_hash for e in copies}
+        # exactly one key beyond a's: b's own unique one (a copy that got a third key, or b stamped
+        # with a's, would fail this; ``b in derived`` could not, derived being built from the copies)
+        assert derived - {ka} == {by_title["b"].index_content_hash}, derived
+        assert not (derived - {ka}) & set(stored_hash.values()), "a derived key landed on a chunk"
 
         writer = make_catalog_writer()
         try:

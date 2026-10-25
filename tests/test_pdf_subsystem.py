@@ -278,6 +278,16 @@ class TestIndexPdfPipeline:
         }
         mock_t3 = MagicMock()
         mock_t3.get_or_create_collection.return_value = mock_col
+        # nexus-3ajpd: the skip is decided from the catalog document (a
+        # 'complete' fence at the file's hash, then one chunk of its own
+        # manifest with the target model), so the catalog side is told that.
+        monkeypatch.setattr(
+            "nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", content_hash),
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer._own_chunk_metadata",
+            lambda col, doc_id: col.get(limit=1, include=["metadatas"])["metadatas"][0],
+        )
 
         # nexus-sghyo: see test_upserts_chunks_with_real_extraction above.
         # embed_fn is never actually invoked here (staleness skip fires

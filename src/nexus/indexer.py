@@ -1233,9 +1233,10 @@ def _catalog_hook(
     ``stale_fence_doc_ids``: every EXISTING document whose reported
     ``index_state`` is ``'complete'`` has ``tumbler -> index_content_hash``
     added in place, from the same owner-scoped fetch. The orchestrator
-    overlays it onto the staleness caches, which otherwise key a doc's
-    content hash off content-addressed chunk metadata that is never
-    refreshed (see ``indexer_utils.apply_catalog_content_hashes``).
+    overlays it onto the staleness caches, whose own entries carry no hash
+    (a chunk row's ``content_hash`` is the last writer's, not this
+    document's; see ``indexer_utils.apply_catalog_content_hashes``), so a
+    document absent from this map is stale.
 
     ``on_phase`` (nexus-jg3x5): the orchestrator's ``[post]`` phase channel.
     When supplied, each link generator that can do work for this batch
@@ -5948,9 +5949,11 @@ def _run_index(
 
     if delta_changed is not None:
         # nexus-fltb4: the delta files are known-changed; the caches exist to
-        # SKIP unchanged files, which the delta already excludes. Empty caches
-        # route the (small) delta set through the per-file staleness path,
-        # which still no-ops content-identical rewrites.
+        # SKIP unchanged files, which the delta already excludes. The caches
+        # are empty StalenessCache objects (not None), so check_staleness takes
+        # its cached branch and every delta file is a cache miss: a delta file
+        # always re-indexes, a content-identical rewrite included (the engine
+        # skips re-embedding chunks it already holds).
         code_staleness = StalenessCache()
         docs_staleness = StalenessCache()
         rdr_staleness = StalenessCache()

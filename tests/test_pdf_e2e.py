@@ -59,7 +59,7 @@ def _stub_fence_complete(monkeypatch):
     DELIBERATELY DECOUPLED from the engine's Postgres that
     ``complete_index_run`` verifies chunk presence against — these tests
     prove the PDF E2E pipeline (extraction, chunking, local embedding,
-    chunk-level staleness skip via ``_manifest_is_fully_present``) minus
+    fence-first staleness skip, nexus-3ajpd) minus
     fence/catalog integration. Once ``.4`` wired real begin/complete calls
     into ``_index_document``/``pipeline_index_pdf``, the engine's genuine
     verify-then-stamp correctly (but irrelevantly, for this file's scope)
@@ -150,15 +150,25 @@ class TestIndexPdfE2E:
 
         RUNFENCE topology note (nexus-5xn3k.3): this harness writes chunks to
         a raw EphemeralClient T3 deliberately decoupled from the engine
-        catalog's Postgres, so the engine-side manifest_verify correctly
-        reports every chunk missing and would force a re-index. The fence's
-        real coverage lives in tests/test_5xn3k_staleness_three_way.py and
-        the .7 integration gate; this test pins the chunk-level staleness
-        skip, so the verify fallthrough is pinned open here (same pattern as
+        catalog's Postgres, so the catalog knows nothing of these chunks. The
+        fence's real coverage lives in tests/test_5xn3k_staleness_three_way.py
+        and the .7 integration gate; this test pins the skip itself, so the
+        catalog side is told (nexus-3ajpd, the skip is decided from the
+        catalog document): the fence reads 'complete' at the file's hash and
+        the manifest probe reads the collection's first row (same pattern as
         test_doc_indexer's decoupled-T3 test).
         """
+        from nexus.doc_indexer import _sha256
+
+        file_hash = _sha256(simple_pdf)
         with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
-             patch("nexus.doc_indexer._manifest_is_fully_present", return_value=True):
+             patch("nexus.doc_indexer._index_fence_state", return_value=("complete", file_hash)), \
+             patch(
+                 "nexus.doc_indexer._own_chunk_metadata",
+                 side_effect=lambda col, doc_id: next(
+                     iter(col.get(limit=1, include=["metadatas"])["metadatas"]), None,
+                 ),
+             ):
             first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
             second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3, embed_fn=_local_embed)
 

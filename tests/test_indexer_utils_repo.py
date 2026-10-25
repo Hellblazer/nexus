@@ -202,6 +202,9 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("nexus.doc_indexer.index_model_for_collection", lambda n: "model")
     monkeypatch.setattr("nexus.doc_indexer._vector_with_retry", fake_chroma_retry)
     monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id", fake_register)
+    # nexus-3ajpd: the skip is decided from the catalog document; this test is
+    # about the path handed to registration, so the verdict is stubbed current.
+    monkeypatch.setattr("nexus.doc_indexer._document_is_current", lambda *a, **k: True)
 
     # nexus-sghyo (2026-08-06): ambient mode is service mode by default, and
     # with no ``t3=`` passed, index_pdf resolves its db handle via
@@ -295,7 +298,9 @@ class TestStalenessCache:
 
         cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
+        # nexus-3ajpd: presence and model only; the hash slot is filled from
+        # the catalog fence (apply_catalog_content_hashes), never from a row.
+        assert cache.by_doc_id == {"1.1.1": ("", "model-code")}
         assert not hasattr(cache, "by_source_path")
 
     def test_build_resolves_phase3_chunks_via_catalog_manifest(self) -> None:
@@ -331,14 +336,14 @@ class TestStalenessCache:
             cache = build_staleness_cache(col)
 
         # by_doc_id resolved from the manifest, NOT from absent metadata.
-        assert cache.by_doc_id == {"1.1.42": ("hash-a", "model-code")}
+        assert cache.by_doc_id == {"1.1.42": ("", "model-code")}
         fake_cat.docs_for_chashes.assert_called_once()
 
     def test_build_skips_chunks_missing_required_fields(self) -> None:
-        """Chunks without content_hash or embedding_model (corrupted
-        metadata, partial backfill) are skipped — the cache only holds
-        rows with both load-bearing fields, so a hit always implies a
-        real comparison can succeed."""
+        """Chunks without an embedding_model (corrupted metadata, partial
+        backfill) are skipped. nexus-3ajpd: ``content_hash`` is no longer
+        load-bearing here (the cache never records a chunk row's hash), so a
+        row without one still proves the document has a chunk in T3."""
         col = MagicMock(spec=["get", "name"])
         col.get.return_value = {
             "ids": ["good", "no-hash", "no-model"],
@@ -354,7 +359,7 @@ class TestStalenessCache:
         }
 
         cache = build_staleness_cache(col)
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
+        assert cache.by_doc_id == {"1.1.1": ("", "model-code"), "1.1.2": ("", "x")}
 
     def test_build_returns_empty_on_chroma_error(self) -> None:
         """A failure inside the paginated sweep yields an empty cache
@@ -385,7 +390,7 @@ class TestStalenessCache:
 
         cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
+        assert cache.by_doc_id == {"1.1.1": ("", "model-code")}
         col.get_all_metadata.assert_called_once()
         col.get.assert_not_called()
 
@@ -416,7 +421,7 @@ class TestStalenessCache:
 
         cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
+        assert cache.by_doc_id == {"1.1.1": ("", "model-code")}
         col.get_all_metadata.assert_called_once()
         col.get.assert_called()
 
@@ -690,36 +695,40 @@ class TestStalenessCache:
             f"cache path leaked to col.get: {col.get.call_args_list}"
         )
 
-    def test_check_staleness_falls_back_to_chroma_when_no_cache(self) -> None:
-        """``cache=None`` (the default) preserves the legacy per-file
-        Chroma roundtrip. Critical for back-compat: any direct caller
-        that has not migrated to the cache stays on the original
-        path with the same retry/quota semantics.
-        """
+    def test_check_staleness_without_a_cache_reads_the_catalog_document(self) -> None:
+        """``cache=None`` (a direct caller; every ``nx index repo`` call site
+        passes a cache) decides from the catalog document, as ``nx index
+        md`` / ``pdf`` do (nexus-3ajpd): a ``'complete'`` fence at the file's
+        hash and one chunk of the document's own manifest in T3 with the
+        target model. It never matches ``content_hash`` on a chunk row."""
         col = MagicMock(spec=["get", "name"])
-        col.get.return_value = {
-            "metadatas": [
-                {
-                    "doc_id": "1.1.1",
-                    "content_hash": "hash-a",
-                    "embedding_model": "model-code",
-                },
-            ],
-        }
-
         with patch(
-            "nexus.indexer_utils._vector_with_retry",
-            side_effect=lambda fn, **kw: fn(**kw),
+            "nexus.doc_indexer._index_fence_state", return_value=("complete", "hash-a"),
+        ), patch(
+            "nexus.doc_indexer._own_chunk_metadata",
+            return_value={"embedding_model": "model-code", "content_hash": "somebody-else"},
         ):
-            result = check_staleness(
+            assert check_staleness(
                 col=col, source_file="src/a.py",
                 content_hash="hash-a", embedding_model="model-code",
                 doc_id="1.1.1",
                 # no cache=
-            )
-
-        assert result is True
-        assert col.get.call_count == 1
+            ) is True
+            # a different file hash or model is stale
+            assert check_staleness(
+                col=col, source_file="src/a.py",
+                content_hash="hash-NEW", embedding_model="model-code", doc_id="1.1.1",
+            ) is False
+            assert check_staleness(
+                col=col, source_file="src/a.py",
+                content_hash="hash-a", embedding_model="model-other", doc_id="1.1.1",
+            ) is False
+        # no doc_id: nothing to read a fence for
+        assert check_staleness(
+            col=col, source_file="src/a.py",
+            content_hash="hash-a", embedding_model="model-code", doc_id="",
+        ) is False
+        assert col.get.call_count == 0
 
     def test_check_staleness_legacy_path_source_path_index_deleted_as_dead_code(
         self,

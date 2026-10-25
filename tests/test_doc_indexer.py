@@ -956,6 +956,22 @@ class TestTheStampComesLast:
         assert rerun[0] == "write" and rerun[-1] == "complete" and "batch-hook" in rerun, rerun
 
 
+def _registered_but_not_just_minted(monkeypatch) -> None:
+    """The REAL pre-flight registration, reporting the Document as not minted
+    by this call. nexus-3ajpd: the skip gate (and so the read the t952k tests
+    fail) is bypassed for a Document the call itself mints (nexus-o19i0), so a
+    test of the gate registers for real and reports the row as pre-existing."""
+    import nexus.doc_indexer as di
+
+    real_register = di._register_or_lookup_doc_id
+
+    def _register(*args, with_created=False, **kwargs):
+        out = real_register(*args, with_created=with_created, **kwargs)
+        return (out[0], False) if with_created else out
+
+    monkeypatch.setattr(di, "_register_or_lookup_doc_id", _register)
+
+
 @pytest.mark.t2_tenant
 class TestIndexPdfPreFenceVectorFailure:
     """nexus-t952k half 2: a vector-store failure between pre-flight
@@ -967,7 +983,12 @@ class TestIndexPdfPreFenceVectorFailure:
     /v1/vectors/get 400) AFTER registration had already landed the row,
     and index_state was never touched — none of index_pdf's existing
     fence try/except blocks (embed/upsert, streaming, incremental) cover
-    this earlier window."""
+    this earlier window.
+
+    nexus-3ajpd: the read in that window is now the skip gate's presence
+    probe (one chunk of the document's own manifest, reached only when the
+    catalog fence says 'complete' at this file's hash), so the failure is
+    injected at the gate."""
 
     def test_incremental_check_failure_marks_fence_failed(
         self, sample_pdf, mock_t3, empty_col,
@@ -978,14 +999,16 @@ class TestIndexPdfPreFenceVectorFailure:
         from nexus.doc_indexer import index_pdf
 
         doc_id = "1.1.t952k-prefence-pdf"
-        empty_col.get.side_effect = RuntimeError("t952k prefence boom")
 
         def _register_side_effect(*args, with_created=False, **kwargs):
-            return (doc_id, True) if with_created else doc_id
+            return (doc_id, False) if with_created else doc_id
 
         with patch(
             "nexus.doc_indexer._register_or_lookup_doc_id",
             side_effect=_register_side_effect,
+        ), patch(
+            "nexus.doc_indexer._document_is_current",
+            side_effect=RuntimeError("t952k prefence boom"),
         ), patch("nexus.doc_indexer._fence_begin") as mock_begin, \
              patch("nexus.doc_indexer._fence_fail") as mock_fail:
             with pytest.raises(RuntimeError, match="t952k prefence boom"):
@@ -997,7 +1020,7 @@ class TestIndexPdfPreFenceVectorFailure:
         mock_fail.assert_called_once_with(doc_id, "t952k prefence boom")
 
     def test_incremental_check_failure_marks_index_state_failed_end_to_end(
-        self, sample_pdf, mock_t3, empty_col,
+        self, sample_pdf, mock_t3, empty_col, monkeypatch,
     ):
         """End-to-end against the REAL catalog substrate (mirrors
         tests/integration/test_2t63u_collection_reconcile.py's pattern for
@@ -1006,7 +1029,11 @@ class TestIndexPdfPreFenceVectorFailure:
         after this run, via the REAL pre-flight registration."""
         from nexus.doc_indexer import index_pdf
 
-        empty_col.get.side_effect = RuntimeError("t952k prefence e2e boom")
+        _registered_but_not_just_minted(monkeypatch)
+        monkeypatch.setattr(
+            "nexus.doc_indexer._document_is_current",
+            MagicMock(side_effect=RuntimeError("t952k prefence e2e boom")),
+        )
 
         with pytest.raises(RuntimeError, match="t952k prefence e2e boom"):
             index_pdf(
@@ -1027,15 +1054,19 @@ class TestIndexDocumentPreFenceVectorFailure:
     """nexus-t952k half 2, markdown/prose sibling: ``index_markdown``
     pre-flights registration BEFORE calling ``_index_document`` (unlike
     ``index_pdf``, which registers inline) — this function's own
-    incremental staleness read carries the identical pre-fence gap."""
+    skip gate carries the identical pre-fence gap."""
 
     @pytest.mark.t2_tenant
     def test_incremental_check_failure_marks_index_state_failed_end_to_end(
-        self, sample_md, mock_t3, empty_col,
+        self, sample_md, mock_t3, empty_col, monkeypatch,
     ):
         from nexus.doc_indexer import index_markdown
 
-        empty_col.get.side_effect = RuntimeError("t952k prefence md boom")
+        _registered_but_not_just_minted(monkeypatch)
+        monkeypatch.setattr(
+            "nexus.doc_indexer._document_is_current",
+            MagicMock(side_effect=RuntimeError("t952k prefence md boom")),
+        )
 
         with pytest.raises(RuntimeError, match="t952k prefence md boom"):
             index_markdown(sample_md, corpus="t952k-prefence-md", t3=mock_t3)
@@ -1388,38 +1419,34 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     source_path nor doc_id and the staleness check correctly cannot
     detect "unchanged" — re-index would proceed every time.
 
-    nexus-5xn3k.3 (RUNFENCE): the fence's "unknown state" fallback
-    (``_manifest_is_fully_present``) now asks the catalog SERVICE's own
-    ``manifest/verify`` — an engine-side SQL anti-join that only sees chunks
-    living in THAT SAME Postgres (design memo §3.2: "post-RDR-155 both
-    tables live in the same Postgres"). This test injects a raw ephemeral
-    ChromaDB client as *t3* specifically to avoid needing a full
-    pgvector-backed vector store for a local-embedder unit test — a
-    deliberately DECOUPLED T3 substrate the real production topology never
-    has. Against a real (test-scoped) service catalog, the engine's verify
-    correctly reports every chunk "missing" (it was never written to the
-    engine's own tables), which would force a spurious re-index and is
-    ORTHOGONAL to what this test actually verifies (the local-embedder
-    fallback + doc_id-keyed identity match). Bypassed here; the RUNFENCE
+    nexus-5xn3k.3 (RUNFENCE): this test injects a raw ephemeral client as
+    *t3* specifically to avoid needing a full pgvector-backed vector store for
+    a local-embedder unit test: a deliberately DECOUPLED T3 substrate the real
+    production topology never has. Against a real (test-scoped) service
+    catalog the engine's completion verify would refuse the stamp (the chunks
+    were never written to the engine's own tables), so the fence calls are
+    stubbed and the fence read is told 'complete' (below). The RUNFENCE
     mechanism itself has its own dedicated coverage
     (tests/test_5xn3k_staleness_three_way.py et al.).
-
-    nexus-5xn3k.4: the ``_manifest_is_fully_present`` bypass above is only
-    reached via ``_index_run_fresh``'s "unknown state" fallback — but since
-    .4 wires up a REAL ``_fence_begin``/``_fence_complete`` call against the
-    live catalog, the fence state for this doc_id would genuinely become
-    "indexing" (begin succeeds; complete is refused against this same
-    decoupled T3 for the same reason as the paragraph above) and
-    ``_index_run_fresh`` would short-circuit via its "indexing" branch
-    BEFORE ever consulting ``_manifest_is_fully_present``. Stub both fence
-    calls too so the fence stays "unknown" here, matching this test's
-    stated intent of bypassing RUNFENCE entirely.
     """
-    monkeypatch.setattr(
-        "nexus.doc_indexer._manifest_is_fully_present", lambda *a, **k: True,
-    )
     monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
     monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
+    # nexus-3ajpd: the skip is decided from the catalog document. This test's
+    # chunks live in a decoupled local T3 the catalog engine knows nothing of
+    # (see above), so the catalog side is told: the fence reads 'complete' at
+    # the file's hash and the manifest probe reads the local collection's
+    # first row, which keeps the test on what it is about (the local model
+    # stamp the re-index compares against).
+    from nexus.doc_indexer import _sha256  # noqa: PLC0415 — this test only
+
+    _file_hash = _sha256(sample_md)
+    monkeypatch.setattr(
+        "nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", _file_hash),
+    )
+    monkeypatch.setattr(
+        "nexus.doc_indexer._own_chunk_metadata",
+        lambda col, doc_id: next(iter(col.get(limit=1, include=["metadatas"])["metadatas"]), None),
+    )
     # nexus-sghyo (2026-08-06): embed_fn dispatch reads ambient
     # is_vector_service_mode() regardless of the injected t3= handle —
     # an explicit chroma opt-out is still the only way to reach the
@@ -1557,28 +1584,44 @@ def test_index_raises_credentials_missing_when_cloud_mode_explicit(
 
 
 
-def _registered_before(path, corpus: str, content_type: str) -> None:
+def _registered_before(path, corpus: str, content_type: str, monkeypatch) -> None:
     """Make the catalog agree with a T3 double that says "already indexed".
 
-    A skip-path test mocks T3 as holding this file's hash. Before
+    A skip-path test mocks T3 as holding this file's chunk. Before
     nexus-o19i0 the catalog side was left untold: the indexer minted a
     brand-new Document in the same call and skipped anyway, which is the
     defect (a byte-identical file at a second path registered with no
     chunks). A Document the call itself mints is now never skipped, so a
     test about the skip path registers the Document first, as a real
     earlier index run would have.
+
+    nexus-3ajpd: the skip is decided from the CATALOG DOCUMENT (a
+    ``'complete'`` fence at the file's hash, then one chunk of its own
+    manifest present in T3), so the catalog side is also told that: the
+    fence read reports ``complete`` at this file's hash and the manifest
+    probe reads the T3 double's first row. The staleness semantics have their
+    own tests (tests/test_3ajpd_staleness_from_catalog.py); these tests are
+    about what the gate's callers do with the verdict.
     """
-    from nexus.doc_indexer import _register_or_lookup_doc_id
+    from nexus.doc_indexer import _register_or_lookup_doc_id, _sha256
 
     # physical_collection is left empty: registration is keyed on the file's
     # path, which is what makes the indexer's own call find this Document.
     _register_or_lookup_doc_id(path, corpus, content_type=content_type, physical_collection="")
+    file_hash = _sha256(path)
+    monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", file_hash))
+
+    def _first_row(col, doc_id):
+        metas = col.get(limit=1, include=["metadatas"]).get("metadatas") or []
+        return metas[0] if metas else None
+
+    monkeypatch.setattr("nexus.doc_indexer._own_chunk_metadata", _first_row)
 
 
 @pytest.mark.t2_tenant
 def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
-    _registered_before(sample_pdf, "mybook", "paper")
+    _registered_before(sample_pdf, "mybook", "paper", monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_col = MagicMock()
     mock_col.get.return_value = {
@@ -2118,7 +2161,7 @@ def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch, owner_w
 ])
 def test_index_pdf_hash_match_model_check(stored_model, expected_result, sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
-    _registered_before(sample_pdf, "mybook", "paper")
+    _registered_before(sample_pdf, "mybook", "paper", monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_chunk, mock_extract = _make_pdf_mocks()
     mock_col = MagicMock()
@@ -2173,7 +2216,7 @@ def test_index_pdf_skips_unchanged_content_when_the_row_is_unreadable(sample_pdf
     re-index. The row-read path itself is pinned by the ``_target_model`` unit tests. One
     tenant case per site: the provisioned-tenant ceiling is at its limit."""
     set_credentials(monkeypatch)
-    _registered_before(sample_pdf, "mybook", "paper")
+    _registered_before(sample_pdf, "mybook", "paper", monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_chunk, mock_extract = _make_pdf_mocks()
     mock_col = MagicMock()
@@ -2193,7 +2236,7 @@ def test_index_pdf_skips_unchanged_content_when_the_row_is_unreadable(sample_pdf
 def test_index_markdown_skips_unchanged_content_when_the_row_is_unreadable(sample_md, monkeypatch, cloud_mode):
     """The ``_index_document`` site of nexus-s8r5o and nexus-7jy5r: the same one case."""
     set_credentials(monkeypatch)
-    _registered_before(sample_md, "test", "prose")
+    _registered_before(sample_md, "test", "prose", monkeypatch)
     content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": ["existing"], "metadatas": [{"content_hash": content_hash, "embedding_model": _BGE}]}
@@ -2325,7 +2368,7 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, c
 @pytest.mark.t2_tenant
 def test_force_default_false_still_skips(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
-    _registered_before(sample_pdf, "mybook", "paper")
+    _registered_before(sample_pdf, "mybook", "paper", monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_col = MagicMock()
     mock_col.get.return_value = {
@@ -2583,7 +2626,7 @@ def test_index_markdown_return_metadata_true_returns_dict(sample_md, monkeypatch
 @pytest.mark.t2_tenant
 def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_md, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
-    _registered_before(sample_md, "test", "prose")
+    _registered_before(sample_md, "test", "prose", monkeypatch)
     content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
     mock_col = MagicMock()
     mock_col.get.return_value = {

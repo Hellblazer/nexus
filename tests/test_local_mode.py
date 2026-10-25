@@ -536,9 +536,21 @@ class TestLocalStaleness:
         ids=["same-skip", "changed-hash", "changed-model"],
     )
     def test_staleness(
-        self, local_db: T3Database, query_hash: str, query_model: str, expected: bool
+        self, local_db: T3Database, monkeypatch, query_hash: str, query_model: str, expected: bool
     ) -> None:
         from nexus.indexer_utils import check_staleness
+
+        # nexus-3ajpd: the per-file decision reads the catalog document (a
+        # 'complete' fence at the file's hash) and then one chunk of its own
+        # manifest for the model. The fence is stubbed to the stored hash; the
+        # manifest probe reads the stored chunk from the real local T3.
+        monkeypatch.setattr(
+            "nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", "abc123"),
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer._own_chunk_metadata",
+            lambda col, doc_id: col.get(ids=["chunk1"], include=["metadatas"])["metadatas"][0],
+        )
 
         # RDR-103 Phase 5: pre-create with strict=False so the test
         # can keep its legacy 2-segment fixture name.

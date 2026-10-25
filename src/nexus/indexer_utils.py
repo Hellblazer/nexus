@@ -18,7 +18,6 @@ from pathlib import Path
 import structlog
 
 from nexus.bounded_subprocess import run_bounded
-from nexus.retry import _vector_with_retry
 
 _log = structlog.get_logger(__name__)
 
@@ -809,23 +808,32 @@ def is_gitignored(path: Path, repo_root: Path) -> bool:
 @dataclass
 class StalenessCache:
     """Pre-fetched ``{lookup_key: (content_hash, embedding_model)}`` map
-    for a single ChromaDB collection.
+    for a single collection.
 
-    Built once by :func:`build_staleness_cache` from a single paginated
-    sweep of the collection's chunk metadata; consumed many times by
+    Built once by :func:`build_staleness_cache` from a single sweep of the
+    collection's chunk metadata; consumed many times by
     :func:`check_staleness` so per-file checks become O(1) dict lookups
-    instead of O(N) ChromaDB roundtrips.
+    instead of O(N) service roundtrips.
 
     One index:
 
     - ``by_doc_id`` keys on the catalog tumbler. Chunks no longer carry
       ``doc_id`` (RDR-108 Phase 3): each chunk's ``chunk_text_hash`` is
-      resolved to its document(s) through the catalog manifest, and the
-      value is the fence hash where the catalog has one
-      (``apply_catalog_content_hashes``, nexus-vayt7), else the chunk's
-      first-writer hash. A doc with no chunk in T3 is absent from this
-      index, which the cached ``check_staleness`` treats as a cache miss
-      → "stale" → re-index → ghost-chunk healed.
+      resolved to its document(s) through the catalog manifest. The key's
+      PRESENCE says the document still has a chunk in T3 and the value's
+      model says which embedder wrote it. The value's hash starts EMPTY
+      and is filled only from the catalog: ``apply_catalog_content_hashes``
+      (nexus-vayt7) writes the fence hash for a document fenced
+      ``'complete'`` (nexus-3ajpd). A chunk row's own ``content_hash`` is
+      never copied in: chunks are content-addressed, one row per
+      (collection, chunk text), and its metadata merge is last-writer-wins
+      (``PgVectorRepository.mergeMetadata``), so the value on a shared row
+      is whichever document wrote it last, not this document's file hash.
+      A document with no ``'complete'`` fence keeps the empty hash and
+      reads as stale, which re-indexes it once and stamps its fence. A doc
+      with no chunk in T3 is absent from this index, which the cached
+      ``check_staleness`` treats as a cache miss → "stale" → re-index →
+      ghost-chunk healed.
 
     nexus-afudo (2026-08-05): ``by_source_path`` DELETED as dead code —
     RDR-102 D2 (83ac62c7, 2026-05-02) hard-removed ``source_path`` from
@@ -886,12 +894,17 @@ def apply_catalog_content_hashes(
     (``index_state='complete'``, ``index_content_hash``), written by the
     same producer from the same digest ``check_staleness`` is handed.
     Chunk metadata cannot carry it: chunks are content-addressed, one row
-    per distinct text per collection, stamped by whichever file wrote the
-    text first and never rewritten (RDR-181 embed-skip). On the nexus
-    checkout that left 536 of 1818 code docs reading as changed on every
-    run while the catalog said 'complete' with the current hash for
+    per distinct text per collection, and an upsert merges metadata
+    last-writer-wins (``PgVectorRepository.mergeMetadata``, on the insert,
+    the conflict and the RDR-181 embed-skip paths alike), so a row's
+    ``content_hash`` is whichever document wrote the text last. On the
+    nexus checkout that left 536 of 1818 code docs reading as changed on
+    every run while the catalog said 'complete' with the current hash for
     2114 of 2122 (measured 2026-09-04: ~650 of 2370 unchanged files
     re-embedded and re-uploaded per post-commit run, ~10 min each).
+    ``build_staleness_cache`` therefore records no hash at all (nexus-3ajpd);
+    this overlay is the ONLY source of a document's hash in the cache, and a
+    document it does not reach (no ``'complete'`` fence) is stale.
 
     Only docs already PRESENT in ``by_doc_id`` are rewritten: presence
     proves the doc still has chunks in T3. A doc the catalog calls
@@ -1135,11 +1148,17 @@ def build_staleness_cache(col: object) -> StalenessCache:
     for meta in metadatas:
         if not meta:
             continue
-        content_hash = meta.get("content_hash", "")
         model = meta.get("embedding_model", "")
-        if not (content_hash and model):
+        if not model:
             continue
-        value = (content_hash, model)
+        # nexus-3ajpd: presence and model only. The hash slot stays empty;
+        # ``apply_catalog_content_hashes`` fills it from the document's
+        # 'complete' fence. A chunk row's ``content_hash`` is the last
+        # writer's (``PgVectorRepository.mergeMetadata``), so on a shared
+        # chunk it is another document's file hash, and recording it here
+        # made a changed file read current (or an unchanged one stale)
+        # whenever the catalog had no fence to override it.
+        value = ("", model)
         doc_id = meta.get("doc_id", "")
         shared_with: list[str] = []
         if not doc_id:
@@ -1148,20 +1167,10 @@ def build_staleness_cache(col: object) -> StalenessCache:
                 doc_id = chash_to_doc.get(chash, "")
                 shared_with = chash_to_docs.get(chash, [])
         if doc_id:
-            # nexus-vayt7: the value recorded here is the chunk's FIRST
-            # writer's hash, not a document property (RDR-181 embed-skip
-            # never rewrites an existing row). It is the fallback for docs
-            # the catalog has no 'complete' fence for; the orchestrator
-            # overlays the fence hash via ``apply_catalog_content_hashes``
-            # for the rest. Presence (the key) is what matters: it proves
-            # the doc still has chunks in T3, which the ghost-heal miss
-            # relies on. A shared chunk never overwrites a value a doc's
-            # own unique chunk already recorded.
-            if len(shared_with) > 1:
-                for other in shared_with:
-                    cache.by_doc_id.setdefault(other, value)
-            else:
-                cache.by_doc_id[doc_id] = value
+            # Presence is what matters: it proves the doc still has chunks
+            # in T3, which the ghost-heal miss relies on.
+            for owner in (shared_with if len(shared_with) > 1 else [doc_id]):
+                cache.by_doc_id.setdefault(owner, value)
         # nexus-afudo: by_source_path population DELETED as dead code —
         # see StalenessCache's docstring. No chunk written since RDR-102
         # D2 (2026-05-02) carries a source_path key.
@@ -1179,61 +1188,67 @@ def check_staleness(
 ) -> bool:
     """Return True if the file is already indexed with an identical hash and model.
 
+    The document's hash of record is the catalog's RUNFENCE
+    (``index_state == 'complete'`` and ``index_content_hash``), never a chunk
+    row's ``content_hash``: chunks are content-addressed, one row per chunk
+    text per collection, and the row's metadata is the LAST writer's, so a
+    chunk shared by two documents carries one of their file hashes
+    (nexus-3ajpd). Both execution modes decide from the fence.
+
     Two execution modes:
 
-    - **Cached (preferred when the orchestrator passes a cache).**
-      Looks up ``doc_id`` in :attr:`StalenessCache.by_doc_id`. Pure
-      dict lookup, no ChromaDB roundtrip. The orchestrator builds the
-      cache once per collection via :func:`build_staleness_cache`
-      before the per-file loop, so ``nx index repo`` on a healthy repo
-      (most files current) pays one paginated sweep instead of one
-      Chroma query per file. A file with no ``doc_id`` (legacy /
-      catalog-absent caller) is an unconditional cache miss — see
-      nexus-afudo below.
-    - **Per-file (back-compat).** When *cache* is ``None``, performs a
-      ChromaDB ``get()`` wrapped in ``_vector_with_retry``. The retry
-      logic is part of the staleness check's contract — callers must
-      NOT wrap this call. Direct test callers and any caller that has
-      not migrated to the cache stay on this path.
+    - **Cached (what ``nx index repo`` passes).** Looks up ``doc_id`` in
+      :attr:`StalenessCache.by_doc_id`, whose hash slot
+      :func:`apply_catalog_content_hashes` filled from the fence. Pure dict
+      lookup, no service roundtrip. The orchestrator builds the cache once
+      per collection via :func:`build_staleness_cache` before the per-file
+      loop, so ``nx index repo`` on a healthy repo (most files current) pays
+      one sweep instead of one query per file. A file with no ``doc_id``
+      (legacy / catalog-absent caller) is an unconditional cache miss, and
+      so is a document the overlay did not reach (no ``'complete'`` fence).
+    - **Per-file.** When *cache* is ``None``, reads the document's fence and
+      probes one of its own manifest chunks for presence and model
+      (``doc_indexer._document_is_current``, the gate ``nx index md`` /
+      ``pdf`` use). Every ``nx index repo`` call site passes a cache, so this
+      is reached only by a direct caller.
 
     Args:
-        col: ChromaDB collection object. Unused when *cache* is supplied.
+        col: Collection handle. Used only by the per-file mode.
         source_file: Path (or string) of the source file being checked.
         content_hash: SHA-256 hex digest of the current file content.
         embedding_model: Target embedding model name.
-        doc_id: Catalog ``doc_id`` for the file. When non-empty (RDR-101
-            Phase 4, nexus-dcym), the chunk lookup keys on ``doc_id`` so
-            that the staleness check stays consistent across renames and
-            owner-scope changes. Empty means unconditional "stale" (see
-            nexus-afudo below) — every production caller
+        doc_id: Catalog ``doc_id`` for the file. Empty means unconditional
+            "stale" (see nexus-afudo below) — every production caller
             (code_indexer.py, prose_indexer.py, indexer.py's PDF path)
-            supplies a real catalog-resolved doc_id or falls through
-            this fast-fail; there is no source_path-keyed lookup left
-            to fall back to.
-        cache: Optional :class:`StalenessCache`. When supplied the
-            check is a dict lookup; when ``None`` the check is a Chroma
-            roundtrip.
+            supplies a real catalog-resolved doc_id or falls through this
+            fast-fail; there is no source_path-keyed lookup left to fall back
+            to.
+        cache: Optional :class:`StalenessCache`.
 
     Returns:
-        True when the stored chunk has the same content_hash AND embedding_model,
+        True when the document's fence says a completed run verified this
+        content hash and a chunk of the document carries the target model,
         meaning the file is current and can be skipped.  False otherwise.
 
-    nexus-afudo (2026-08-05): the ``source_path``-keyed fallback (both
-    the cached ``StalenessCache.by_source_path`` lookup and the
-    uncached ``where={"source_path": ...}`` Chroma query) was DELETED
+    nexus-afudo (2026-08-05): the ``source_path``-keyed fallback was DELETED
     as dead code. RDR-102 D2 (83ac62c7, 2026-05-02) hard-removed
-    ``source_path`` from ``make_chunk_metadata`` — the single factory
-    every writer routes through — so no chunk written since then has
-    ever carried the key, and the fallback could only ever match a
-    genuinely pre-2026-05-02 legacy row. A live-store probe (field>=!
-    boundary-value existence test) found zero such rows across 13
-    representative collections (~115k chunks), extending nexus-tbkk1's
-    original 6-collection / ~47k-chunk probe to the code__/docs__/rdr__
-    collections this module's callers (``nx index repo``) actually
-    write. Empty ``doc_id`` now returns False immediately (no query,
-    no dict lookup) — behaviorally identical to the deleted fallback,
-    which always missed in production, just without the doomed I/O.
+    ``source_path`` from ``make_chunk_metadata`` — the single factory every
+    writer routes through — so no chunk written since then has ever carried
+    the key. A live-store probe found zero such rows across 13
+    representative collections (~115k chunks). Empty ``doc_id`` returns False
+    immediately (no query, no dict lookup).
+
+    nexus-3ajpd: the per-file mode used to match ``content_hash`` on a chunk
+    row collection-wide and ignore ``doc_id`` (the nexus-o19i0 shape: a
+    byte-identical file at a second path read as fresh, and a document whose
+    chunks another document wrote last read as stale). Both are gone with the
+    chunk-row read.
     """
+    if not content_hash:
+        # An empty hash has no identity to compare, and the cache's "no
+        # fence hash known" value is the empty string: never let the two
+        # match.
+        return False
     if cache is not None:
         if not doc_id:
             # No catalog doc_id for this file (legacy / catalog-absent
@@ -1248,42 +1263,17 @@ def check_staleness(
         stored = cache.by_doc_id.get(doc_id)
         # Cache miss when the caller has a doc_id heals a ghost
         # chunk by treating the file as stale: re-index will write
-        # a chunk carrying doc_id metadata and the next sweep
-        # populates by_doc_id for it. Mirrors the Chroma-path
-        # behaviour at indexer_utils.check_staleness:291.
+        # the document's chunks and manifest and the next sweep
+        # populates by_doc_id for it.
         if stored is None:
             return False
         return stored == (content_hash, embedding_model)
 
-    # UNCACHED BRANCH, keep it unreachable from ``nx index repo``. It matches on
-    # content_hash collection-wide and ignores doc_id, the shape nexus-o19i0
-    # fixed in doc_indexer: a byte-identical file at a second path would read
-    # as fresh and register with no chunks. Every repo-index call site passes
-    # a StalenessCache (build_staleness_cache), whose lookup above is keyed on
-    # doc_id and treats a miss as stale. Do not drop that cache in a refactor.
-    # RDR-108 Phase 3 (nexus-bdag): chunks no longer carry ``doc_id`` —
-    # the catalog ``document_chunks`` manifest is authoritative. Query
-    # by ``content_hash`` (a file-level fingerprint that all chunks of
-    # the same file share). An empty content_hash has no identity to
-    # query by — see the nexus-afudo docstring note above; unconditional
-    # "treat as stale" rather than a doomed source_path query.
-    if not content_hash:
+    if not doc_id:
         return False
-    existing = _vector_with_retry(
-        col.get,  # type: ignore[attr-defined]
-        where={"content_hash": content_hash},
-        include=["metadatas"],
-        limit=1,
-    )
-    if not existing["metadatas"]:
-        return False
-    stored = existing["metadatas"][0]
-    if (
-        stored.get("content_hash") != content_hash
-        or stored.get("embedding_model") != embedding_model
-    ):
-        return False
-    return True
+    from nexus.doc_indexer import _document_is_current  # noqa: PLC0415 — circular-dep avoidance (nexus.doc_indexer imports this module)
+
+    return _document_is_current(col, doc_id, content_hash, embedding_model, True)
 
 
 def build_context_prefix(

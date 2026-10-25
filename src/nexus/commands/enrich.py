@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -60,12 +60,21 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     return _lookup
 
 
-def _catalog_titles_by_content_hash(collection: str) -> dict[str, str]:
-    """nexus-g276c: ``index_content_hash -> title`` for every catalog row in
-    *collection*. The chunk-side ``content_hash`` is the same digest, so a
-    title group's chunks map to their catalog row without a ``doc_id`` on
-    the chunk. Empty on any catalog failure; the lookup then falls back to
-    the chunk title, the pre-fix behaviour."""
+def _catalog_owner_titles(collection: str, chunk_ids: Iterable[str]) -> dict[str, dict[str, str]]:
+    """nexus-g276c / nexus-3ajpd: ``chunk id -> {owning document tumbler: its
+    catalog title}`` for the live documents of *collection* whose manifest
+    holds the chunk. A chunk id is the chunk's content hash (chash), so the
+    manifest binds a chunk to its documents without a ``doc_id`` on the chunk.
+
+    The binding is the document's own, not the chunk row's ``content_hash``:
+    a chunk row is shared by every document holding that text and its
+    ``content_hash`` is the last writer's file hash, so a title looked up by
+    that hash named whichever document wrote the chunk last. A chunk several
+    documents hold maps to all of them. Empty on any catalog failure; the
+    lookup then falls back to the chunk title, the pre-fix behaviour."""
+    wanted = sorted({c for c in chunk_ids if c})
+    if not wanted:
+        return {}
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
@@ -73,7 +82,9 @@ def _catalog_titles_by_content_hash(collection: str) -> dict[str, str]:
         if reader is None:
             return {}
         try:
-            entries = reader.list_by_collection(collection)
+            by_chash = reader.docs_for_chashes(wanted)
+            tumblers = sorted({t for ts in by_chash.values() for t in ts})
+            entries = reader.resolve_many(tumblers) if tumblers else {}
         finally:
             close = getattr(reader, "close", None)
             if close is not None:
@@ -81,11 +92,38 @@ def _catalog_titles_by_content_hash(collection: str) -> dict[str, str]:
     except Exception:  # noqa: BLE001 — best-effort catalog read; the chunk title is the fallback
         _log.debug("enrich_catalog_titles_unavailable", collection=collection, exc_info=True)
         return {}
-    return {
-        e.index_content_hash: e.title
-        for e in entries
-        if getattr(e, "index_content_hash", "") and getattr(e, "title", "")
-    }
+    out: dict[str, dict[str, str]] = {}
+    for chash, tumblers in by_chash.items():
+        owners = {
+            t: entries[t].title
+            for t in tumblers
+            if t in entries
+            and getattr(entries[t], "title", "")
+            and getattr(entries[t], "physical_collection", "") == collection
+        }
+        if owners:
+            out[chash] = owners
+    return out
+
+
+def _catalog_title_for_chunks(
+    chunk_ids: Iterable[str], owner_titles: dict[str, dict[str, str]],
+) -> str:
+    """The catalog title of THE document that owns every one of *chunk_ids*
+    that the manifest names an owner for, or ``""`` when that is not exactly
+    one title (no chunk has an owner, the chunks belong to different
+    documents, or the documents holding them all carry different titles).
+
+    A title group's chunks can include chunks shared with other documents, so
+    the documents holding ALL of them is the intersection of the per-chunk
+    owner sets: one shared chunk does not turn the title into the other
+    document's, and a group that mixes two documents' chunks yields none."""
+    ids = [c for c in chunk_ids if c in owner_titles]
+    if not ids:
+        return ""
+    common = set.intersection(*(set(owner_titles[c]) for c in ids))
+    titles = {t for c in ids for d, t in owner_titles[c].items() if d in common}
+    return next(iter(titles)) if len(titles) == 1 else ""
 
 
 def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
@@ -359,7 +397,6 @@ def run_bib_enrichment(
     # through to fuzzy title search at the backend.
     title_to_ids: dict[str, list[str]] = {}
     title_to_source_paths: dict[str, set[str]] = {}
-    title_to_content_hashes: dict[str, set[str]] = {}
     already_enriched = 0
     total_chunks = 0
     offset = 0
@@ -381,9 +418,6 @@ def run_bib_enrichment(
             if not title:
                 continue
             title_to_ids.setdefault(title, []).append(chunk_id)
-            content_hash = meta.get("content_hash", "") or ""
-            if content_hash:
-                title_to_content_hashes.setdefault(title, set()).add(content_hash)
             sp = meta.get("source_path", "") or ""
             if sp:
                 title_to_source_paths.setdefault(title, set()).add(sp)
@@ -402,12 +436,15 @@ def run_bib_enrichment(
     # the full title, so the fuzzy fallback ran on the fragment and matched
     # a stranger. Grouping stays keyed on the chunk title (that is what the
     # chunks carry); the LOOKUP uses the catalog title when the group's
-    # chunks map to exactly one catalog row whose title differs.
-    catalog_titles = _catalog_titles_by_content_hash(collection)
-
+    # chunks map to exactly one catalog row whose title differs. nexus-3ajpd:
+    # the mapping is the catalog manifest's (chunk id -> owning documents), not
+    # the chunk row's content_hash, which is the last writer's.
     titles_to_process = list(title_to_ids.items())
     if limit > 0:
         titles_to_process = titles_to_process[:limit]
+    owner_titles = _catalog_owner_titles(
+        collection, (cid for _t, cids in titles_to_process for cid in cids),
+    )
 
     click.echo(
         f"Collection '{collection}': {total_chunks} total chunks, "
@@ -428,19 +465,13 @@ def run_bib_enrichment(
 
         title_source_paths = sorted(title_to_source_paths.get(title, set()))
         lookup_title = title
-        catalog_title_set = {
-            catalog_titles[h]
-            for h in title_to_content_hashes.get(title, set())
-            if h in catalog_titles
-        }
-        if len(catalog_title_set) == 1:
-            (catalog_title,) = catalog_title_set
-            if catalog_title != title:
-                _log.info(
-                    "enrich_lookup_title_from_catalog",
-                    chunk_title=title, catalog_title=catalog_title,
-                )
-                lookup_title = catalog_title
+        catalog_title = _catalog_title_for_chunks(chunk_ids, owner_titles)
+        if catalog_title and catalog_title != title:
+            _log.info(
+                "enrich_lookup_title_from_catalog",
+                chunk_title=title, catalog_title=catalog_title,
+            )
+            lookup_title = catalog_title
         # Extract the record's DOI/arXiv identifiers once, up front, when
         # either the OpenAlex primary path or the DT-CrossRef gap-fill will
         # need them. Sharing the scan keeps the chunk read single-pass.

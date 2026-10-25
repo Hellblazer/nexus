@@ -1,32 +1,33 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-5xn3k.3 RUNFENCE: the staleness three-way, driven at BOTH gates.
 
-Design memo (T2 nexus "5xn3k-design-2026-08-02") §3.4:
+Design memo (T2 nexus "5xn3k-design-2026-08-02") §3.1 and §3.4, as amended by
+T2 nexus/5xn3k-design-amendment-2026-10-26 (Sam's ruling, applied in nexus-3ajpd):
 
-    fresh  <=>  a chunk matches (content_hash, embedding_model)  [today's condition]
-           AND  entry.index_state == 'complete'
+    fresh  <=>  entry.index_state == 'complete'
            AND  entry.index_content_hash == content_hash
+           AND  one chunk of the document's own manifest is present in T3
+                with the target embedding model
 
-    * 'indexing' / 'failed'      -> stale, definitively. No probe.
-    * NULL / absent field        -> fall through to manifest/verify (ONE
-                                     engine call, via _manifest_is_fully_present).
-    * verify unreachable          -> fail open at WARNING.
+    * 'indexing' / 'failed'      -> stale, definitively. No T3 probe.
+    * NULL / absent field        -> stale. The fence has nothing to say and
+                                     no other document-level record carries
+                                     the hash a completed run verified.
+    * fence unreadable            -> stale, logged at WARNING.
 
-RDR-191 PHASE 6 REBASE (nexus-o8dil.33), 2026-08-15: the manifest-chunk FK
-makes `_manifest_is_fully_present`'s underlying question provably always
-True (see its own docstring) — it is now a bare `return True`, never calls
-`manifest_verify`, and never fails or warns. The 'unknown' fall-through
-branch tests below are rebased accordingly: the branch still runs (no probe
-skipped), but the probe itself is a no-op that always says "fresh" — the
-distinction this file still proves is DEFINITIVE-no-probe (complete/
-indexing/failed, unaffected by Phase 6) vs FALL-THROUGH (unknown, still
-reaches `_manifest_is_fully_present`, which Phase 6 changed the answer of).
+Before nexus-3ajpd the gate began with ``col.get(where={"content_hash": h},
+limit=1)`` and a NULL fence fell through to a verify that was a bare
+``return True`` since RDR-191 Phase 6, so a document with no fence
+skipped on any chunk row stamped with its hash. A chunk row is shared by every
+document holding that text and carries the LAST writer's hash, so that read
+judged an unchanged document stale and a changed one current;
+``tests/test_3ajpd_staleness_from_catalog.py`` pins those scenarios.
 
 Both `_index_document` (the prose gate) and `index_pdf` (the PDF gate) share
-the SAME decision helper, `_index_run_fresh` — this file drives BOTH real
+the SAME decision helper, `_document_is_current` — this file drives BOTH real
 gate functions (not just the helper in isolation) so a future edit that
-re-inlines the old two-condition check at only one of the two call sites is
-caught here, not later.
+re-inlines a different check at only one of the two call sites is caught
+here, not later.
 
 Both gates are made cheap to drive past the "not fresh" branch by mocking
 their chunk-producing callback (``chunk_fn`` for ``_index_document``,
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import structlog
@@ -71,9 +73,8 @@ class _Entry:
 
 
 class _Col:
-    """T3 collection stub: only the initial chunk-hash existence check
-    (`where=..., include=["metadatas"], limit=1`) is exercised — the manifest
-    presence check moved server-side (RUNFENCE) and no longer touches T3."""
+    """T3 collection stub: the presence-and-model probe of one chunk the
+    document's own manifest names (`ids=[chash], include=["metadatas"]`)."""
 
     def __init__(self, existing_meta: list[dict]) -> None:
         self._existing_meta = existing_meta
@@ -81,6 +82,8 @@ class _Col:
 
     def get(self, where=None, include=None, limit=None, ids=None, **kw):
         self.get_calls.append({"where": where, "ids": ids})
+        if where is not None:
+            raise AssertionError(f"no gate may probe T3 by metadata any more: {where}")
         return {"metadatas": self._existing_meta}
 
 
@@ -120,16 +123,19 @@ class _FakeCat:
         self.by_doc_id_calls += 1
         return self.entry
 
-    # the fall-through verify (_manifest_is_fully_present) — UNUSED as of
-    # RDR-191 Phase 6 (nexus-o8dil.33): the function no longer calls
-    # manifest_verify at all (it is a bare `return True`). Kept as a spy so
-    # tests can assert manifest_verify_calls == 0 (the regression this
-    # rebase pins), rather than deleting the double and losing that check.
+    # the retired fall-through verify — UNUSED since RDR-191 Phase 6
+    # (nexus-o8dil.33); nexus-3ajpd deleted its caller. Kept as a spy so
+    # tests can assert manifest_verify_calls == 0 (no gate probes the engine's
+    # verify), rather than deleting the double and losing that check.
     def manifest_verify(self, doc_id: str):
         self.manifest_verify_calls += 1
         if self.verify_exc is not None:
             raise self.verify_exc
         return self.verify_result
+
+    # the presence probe (_own_chunk_metadata): the document's own manifest
+    def get_manifest(self, doc_id: str):
+        return [SimpleNamespace(chash="c" * 64, position=0)]
 
     def close(self) -> None:
         pass  # _register_or_lookup_doc_id closes both reader and writer
@@ -197,59 +203,21 @@ def test_prose_failed_is_stale_no_probe(monkeypatch) -> None:
     assert cat.manifest_verify_calls == 0, "'failed' is definitive — no probe"
 
 
-def test_prose_unknown_falls_through_to_verify_clean_skips(monkeypatch) -> None:
+def test_prose_unknown_fence_is_stale(monkeypatch) -> None:
+    """nexus-3ajpd: a NULL fence has nothing to say, so the document is
+    indexed (which stamps its fence). It used to skip on a chunk row matched
+    by content_hash, which is the last writer's hash and not this document's."""
     entry = _Entry("1.1.1", None, "")
-    result, chunk_fn, cat = _run_prose_gate(
-        monkeypatch, entry, verify_result={"referenced": 2, "present": 2, "missing": 0},
-    )
-    assert chunk_fn.call_count == 0, "a clean verify must still skip"
-    assert cat.manifest_verify_calls == 0, (
-        "RDR-191 Phase 6: _manifest_is_fully_present no longer calls "
-        "manifest_verify at all"
-    )
-
-
-def test_prose_unknown_falls_through_no_longer_re_indexes_on_a_stale_verify_result(
-    monkeypatch,
-) -> None:
-    """RDR-191 Phase 6 rebase (nexus-o8dil.33) of the former
-    test_prose_unknown_falls_through_to_verify_missing_is_stale: the
-    manifest-chunk FK makes 'missing' provably always False, so
-    _manifest_is_fully_present no longer calls manifest_verify or branches
-    on its result at all. A verify_result claiming missing chunks (were it
-    ever consulted) would no longer change the outcome — the document
-    always reads as fresh and skips. This is a POSITIVE proof the fixture
-    is provided but ignored, not merely "nothing happens": the fixture uses
-    the SAME shape the old test used to force a re-index, to make clear the
-    behavior changed, not that the fixture was silently dropped."""
-    entry = _Entry("1.1.1", None, "")
-    result, chunk_fn, cat = _run_prose_gate(
-        monkeypatch, entry, verify_result={"referenced": 3, "present": 1, "missing": 2},
-    )
-    assert chunk_fn.call_count == 0, (
-        "the FK makes 'missing' unreachable; the document now always "
-        "reads as fresh regardless of the (unconsulted) verify_result"
-    )
+    result, chunk_fn, cat = _run_prose_gate(monkeypatch, entry)
+    assert chunk_fn.call_count == 1, "no fence, no skip"
     assert cat.manifest_verify_calls == 0
 
 
-def test_prose_unknown_verify_unreachable_no_longer_touches_the_catalog(monkeypatch) -> None:
-    """RDR-191 Phase 6 rebase of the former
-    test_prose_unknown_verify_unreachable_fails_open_and_warns: there is no
-    verify call left to be unreachable, so verify_exc (were it ever
-    consulted) changes nothing and no WARNING is logged — the fail-open
-    behavior is now unconditional truth, not a caught exception."""
-    entry = _Entry("1.1.1", None, "")
-    result, chunk_fn, cat = _run_prose_gate(
-        monkeypatch, entry, verify_exc=RuntimeError("engine unreachable"),
-    )
-    assert chunk_fn.call_count == 0, "the document reads as fresh and skips unconditionally"
-    assert cat.manifest_verify_calls == 0
-
-
-def test_prose_fence_read_itself_unreadable_fails_open_and_warns(monkeypatch, caplog) -> None:
-    """The entry lookup (by_doc_id) itself throws — distinct from the
-    manifest_verify fallback throwing. Must ALSO fail open at WARNING."""
+def test_prose_fence_read_itself_unreadable_is_stale_and_warns(monkeypatch, caplog) -> None:
+    """The entry lookup (by_doc_id) itself throws. The document reads as
+    stale (nothing says it is current) and the failure logs at WARNING,
+    never DEBUG: a fence that silently stops working recreates the ac4id bug
+    one layer up."""
     _configure_structlog_to_stdlib()
 
     monkeypatch.setattr("nexus.doc_indexer._sha256", lambda path: CONTENT_HASH)
@@ -268,7 +236,7 @@ def test_prose_fence_read_itself_unreadable_fails_open_and_warns(monkeypatch, ca
             Path("/tmp/nexus-5xn3k-threeway/doc.md"), "testowner", chunk_fn, t3,
             collection_name=COLLECTION, embed_fn=_dummy_embed, force=False,
         )
-    assert chunk_fn.call_count == 0, "a clean fallback verify must still skip"
+    assert chunk_fn.call_count == 1, "an unreadable fence never reads as current"
     assert any(
         r.msg == "index_fence_read_failed" and r.levelname == "WARNING"
         for r in caplog.records
@@ -329,39 +297,9 @@ def test_pdf_failed_is_stale_no_probe(monkeypatch, tmp_path) -> None:
     assert cat.manifest_verify_calls == 0
 
 
-def test_pdf_unknown_falls_through_to_verify_clean_skips(monkeypatch, tmp_path) -> None:
+def test_pdf_unknown_fence_is_stale(monkeypatch, tmp_path) -> None:
+    """nexus-3ajpd: mirrors the prose gate."""
     entry = _Entry("1.1.1", None, "")
-    result, pdf_chunks_mock, cat = _run_pdf_gate(
-        monkeypatch, tmp_path, entry, verify_result={"referenced": 2, "present": 2, "missing": 0},
-    )
-    assert pdf_chunks_mock.call_count == 0
-    assert cat.manifest_verify_calls == 0, (
-        "RDR-191 Phase 6: _manifest_is_fully_present no longer calls "
-        "manifest_verify at all"
-    )
-
-
-def test_pdf_unknown_falls_through_no_longer_re_indexes_on_a_stale_verify_result(
-    monkeypatch, tmp_path,
-) -> None:
-    """RDR-191 Phase 6 rebase (nexus-o8dil.33) of the former
-    test_pdf_unknown_falls_through_to_verify_missing_is_stale — mirrors the
-    prose-gate sibling test's rebase rationale."""
-    entry = _Entry("1.1.1", None, "")
-    result, pdf_chunks_mock, cat = _run_pdf_gate(
-        monkeypatch, tmp_path, entry, verify_result={"referenced": 3, "present": 1, "missing": 2},
-    )
-    assert pdf_chunks_mock.call_count == 0, (
-        "the FK makes 'missing' unreachable; the document now always "
-        "reads as fresh regardless of the (unconsulted) verify_result"
-    )
-    assert cat.manifest_verify_calls == 0
-
-
-def test_pdf_unknown_verify_unreachable_no_longer_touches_the_catalog(monkeypatch, tmp_path) -> None:
-    entry = _Entry("1.1.1", None, "")
-    result, pdf_chunks_mock, cat = _run_pdf_gate(
-        monkeypatch, tmp_path, entry, verify_exc=RuntimeError("engine unreachable"),
-    )
-    assert pdf_chunks_mock.call_count == 0, "the document reads as fresh and skips unconditionally"
+    result, pdf_chunks_mock, cat = _run_pdf_gate(monkeypatch, tmp_path, entry)
+    assert pdf_chunks_mock.call_count == 1
     assert cat.manifest_verify_calls == 0

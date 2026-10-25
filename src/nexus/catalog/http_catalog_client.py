@@ -1085,9 +1085,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # unaffected. manifest_verify/manifest_verify_all are READS whose
     # result other callers (the doctor sweep, `nx catalog verify`) need to
     # tell apart from a real "verified clean" 200, so they raise like any
-    # other read method; the ONE caller that must fail open on an
-    # unreachable verify (_manifest_is_fully_present, doc_indexer.py) owns
-    # that fail-open+WARNING contract itself.
+    # other read method. (The one caller that used to fail open on an
+    # unreachable verify, doc_indexer._manifest_is_fully_present, is gone;
+    # see the retirement note below.)
     # ══════════════════════════════════════════════════════════════════════
 
     def begin_index_run_many(
@@ -1247,11 +1247,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # nexus.manifest_verify(text) itself is KEPT server-side — completeIndexRun
     # depends on it internally — but this client no longer has a route to
     # reach it, since the ONE prior caller of this method
-    # (doc_indexer._manifest_is_fully_present) is now a structural no-op:
-    # the FK guarantees any manifest row that exists already references a
-    # real chunk, so the "missing" question this method answered is
-    # provably always 0 for any row that could reach this call. See
-    # doc_indexer.py's _manifest_is_fully_present for the full trace.
+    # (doc_indexer._manifest_is_fully_present) became a structural no-op and
+    # was then deleted (nexus-3ajpd): the FK guarantees any manifest row that
+    # exists already references a real chunk, so the "missing" question this
+    # method answered is provably always 0 for any row that could reach this
+    # call.
 
     def relation_counts(self, relations: list[str]) -> dict[str, int]:
         """Tenant-scoped row counts for migration-verify relations.

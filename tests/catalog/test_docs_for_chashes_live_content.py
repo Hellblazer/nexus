@@ -205,4 +205,6 @@ class TestBuildStalenessCacheLiveContent:
 
         # Exact assertion, not an inequality: the "0 docs" bug returns
         # ``{}`` here; content is real (non-toy) proof this round-trips.
-        assert cache.by_doc_id == {_TUMBLER: ("content-hash-a", "model-code")}
+        # nexus-3ajpd: presence and model only; the chunk row's hash is the last writer's, so the
+        # hash slot stays empty for the catalog fence overlay to fill.
+        assert cache.by_doc_id == {_TUMBLER: ("", "model-code")}

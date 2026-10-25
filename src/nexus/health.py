@@ -10360,10 +10360,29 @@ def _check_gc_audit_non_empty_after_purge() -> list[HealthResult]:
 #: this comment instead.
 _STALE_INDEXING_THRESHOLD_HOURS = 6.0
 
+#: The re-index consequence of a NULL fence, stated once for every doctor
+#: branch that counts the pre-baseline NULL-fence population (nexus-3ajpd; Sam's
+#: ruling T2 nexus/5xn3k-design-amendment-2026-10-26). Scope, against
+#: ``doc_indexer._index_run_fresh`` / ``_document_is_current``: a NULL fence is
+#: stale, but the one-time re-index happens only when the document's source is
+#: indexed again, and the run after that skips it only when the document has a
+#: chunk of its own manifest to probe. So: a file-backed document that yields
+#: chunks re-indexes once; a zero-chunk document re-indexes on every run
+#: (pre-existing); a note or other non-repo document has no source file in an
+#: index walk and waits until its source is indexed again.
+_NULL_FENCE_REINDEX_NOTE = (
+    "a file-backed document that yields chunks is stale until its next index "
+    "run re-indexes it once and stamps its fence (no re-embed; nothing is "
+    "backfilled ahead of that run); a document with no chunks re-indexes on "
+    "every run, and a note or other non-repo document waits until its source "
+    "is indexed again"
+)
+
 #: v7.3.0 tag time (UTC) — the first PUBLIC release in which EVERY producer
 #: stamps the index-run fence (nexus-vw594 F1, commit f55435eb). Used ONLY to
 #: separate a document whose producer was legitimately unfenced when it was
-#: written (permanent no-backfill debt — expected, needs no action) from a
+#: written (permanent no-backfill debt — expected; no --force, see
+#: ``_NULL_FENCE_REINDEX_NOTE`` for what the next index run does) from a
 #: genuine producer regression (a document indexed AFTER full coverage
 #: shipped that still carries no stamp).
 #:
@@ -10732,7 +10751,7 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
         )
         # Truncated candidates were never anchor-filtered, so they are
         # UNATTRIBUTED — excluded from `legacy` rather than folded into
-        # "predate the anchor, need no action", which would contradict the
+        # "predate the anchor, need no --force", which would contradict the
         # truncation note in the same message (code-review-expert, 2026-08-11).
         legacy = (
             reported_null - post_anchor_count - undated_reported_null
@@ -10740,8 +10759,8 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
         )
         legacy_note = (
             f" The other {legacy} reported-but-NULL document(s) predate "
-            f"{anchor.isoformat()} and need no action (no legacy backfill by "
-            "design)."
+            f"{anchor.isoformat()} and need no --force: "
+            f"{_NULL_FENCE_REINDEX_NOTE}."
             if legacy > 0 else ""
         )
         undated_note = (
@@ -10909,8 +10928,7 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
             attributed = reported_null - undated_reported_null
             extra = (
                 f"; {attributed} unstamped document(s) predate this install's "
-                "fence baseline and need no action (no legacy backfill by "
-                "design)"
+                f"fence baseline and need no --force: {_NULL_FENCE_REINDEX_NOTE}"
                 if attributed else ""
             )
             if undated_reported_null:
@@ -10934,7 +10952,7 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
                 f"{reported_null - undated_reported_null} indexed before full "
                 "producer coverage shipped "
                 f"{_PRODUCER_FENCE_RELEASE_DT.date().isoformat()}, not "
-                "backfilled by design, no action needed"
+                f"backfilled by design, no --force needed: {_NULL_FENCE_REINDEX_NOTE}"
                 + (
                     f"; {undated_reported_null} carry no usable indexed_at "
                     "and cannot be attributed to either side of that date"

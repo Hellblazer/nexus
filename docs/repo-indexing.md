@@ -219,9 +219,16 @@ Configuration merges over global config at `~/.config/nexus/config.yml` (repo wi
 
 ## Staleness and Incremental Indexing
 
-Every chunk stores a `content_hash` (SHA-256 of the file contents) and `embedding_model`
-in its T3 chunk metadata. On re-index, if both match the stored values, the file is skipped
-entirely — no re-chunking, no re-embedding, no API calls.
+A file is skipped on re-index when its catalog document says it is current: the index-run
+fence is `complete` at the file's SHA-256 and a chunk of the document is present in T3 with the
+current `embedding_model`. Nothing is re-chunked, re-embedded or sent. The hash is read from the
+catalog document, not from T3 chunk metadata: a chunk is stored once per distinct text, so a chunk
+two files share carries the `content_hash` of whichever wrote it last. A file with no `complete`
+fence (indexed before the fence existed, or a failed or interrupted run) is indexed on the next
+run, and its completion records the fence. After that the file is skipped, provided the document
+has at least one chunk of its own to check: a file that yields no chunks is indexed on every run.
+A note or other document with no source file in an index walk is indexed again only when its
+source is.
 
 When a file is deleted from the repository, the pruning pass removes its orphaned chunks
 from both collections. When a file's classification changes (e.g., `.nexus.yml` update

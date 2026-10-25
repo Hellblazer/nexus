@@ -45,7 +45,11 @@ def _fresh_registration_cache():
 
 def _ordered_db(events: list[str]) -> MagicMock:
     """A vector-client double whose ``col.get`` records its call, and whose
-    injectable registrar records registration, so the order is observable."""
+    injectable registrar records registration, so the order is observable.
+
+    nexus-3ajpd: the incremental-sync decision reads T3 only for a document
+    whose catalog fence says 'complete' at this hash, so the tests below stand
+    in for that decision (``_ordered_gate``) and record when it runs."""
     writer = MagicMock()
     writer.register_collection.side_effect = lambda name, **kw: events.append(
         f"register:{name}"
@@ -64,6 +68,17 @@ def _ordered_db(events: list[str]) -> MagicMock:
     return db
 
 
+def _ordered_gate(events: list[str]):
+    """Stands in for ``doc_indexer._document_is_current``: the decision that
+    reads the catalog document and, when its fence is complete, one T3 row."""
+
+    def _gate(*_a, **_kw):
+        events.append("read")
+        return False
+
+    return _gate
+
+
 def test_index_document_registers_before_the_incremental_read(tmp_path: Path):
     events: list[str] = []
     db = _ordered_db(events)
@@ -73,7 +88,7 @@ def test_index_document_registers_before_the_incremental_read(tmp_path: Path):
     # An empty chunk_fn keeps the tail (embed/upsert) trivial; the point
     # under test is the ordering of registration and the pre-check read.
     with patch.object(doc_indexer, "_vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
-         patch.object(doc_indexer, "_identity_where", return_value={"x": "y"}):
+         patch.object(doc_indexer, "_document_is_current", side_effect=_ordered_gate(events)):
         doc_indexer._index_document(
             md, "ft04v16-first-index", lambda *a, **k: [], t3=db,
             collection_name=name,
@@ -94,7 +109,7 @@ def test_registration_uses_the_db_registrar_the_write_path_honours(tmp_path: Pat
     md.write_text("# t\n\nbody\n")
     name = "docs__ft04v16-registrar__bge-base-en-v15-768__v1"
     with patch.object(doc_indexer, "_vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
-         patch.object(doc_indexer, "_identity_where", return_value={"x": "y"}), \
+         patch.object(doc_indexer, "_document_is_current", side_effect=_ordered_gate(events)), \
          patch("nexus.catalog.factory.make_catalog_writer", side_effect=AssertionError("default registrar must not be used when the db carries one")):
         doc_indexer._index_document(
             md, "ft04v16-registrar", lambda *a, **k: [], t3=db,

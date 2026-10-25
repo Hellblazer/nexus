@@ -3172,6 +3172,18 @@ class TestCheckStaleIndexingRuns:
         assert "no catalog" in r.detail
 
 
+def _assert_null_fence_scope_stated(detail: str) -> None:
+    """nexus-3ajpd: the one-time re-index is scoped, not universal. The row
+    must say a zero-chunk document re-indexes on every run (the chunk-presence
+    probe has nothing to find) and that a note or other non-repo document
+    waits until its source is indexed again, not that every NULL-fence
+    document re-indexes once and then skips."""
+    assert "a file-backed document that yields chunks" in detail
+    assert "a document with no chunks re-indexes on every run" in detail
+    assert "non-repo document waits until its source is indexed again" in detail
+    assert "each is stale" not in detail
+
+
 class TestDoctorFenceCoverageDistinction:
     """nexus-vw594 F3 (production test #4, root cause of nexus-biq4x):
     ``_check_stale_indexing_runs`` must distinguish "index_state reported
@@ -3336,7 +3348,7 @@ class TestDoctorFenceCoverageDistinction:
             git merge-base --is-ancestor f55435eb v7.2.0   # non-zero
 
         so a genuine producer regression landing in the 08-07..08-09 gap was
-        silently absorbed into the "legacy, no action needed" bucket. Same
+        silently absorbed into the "legacy, no --force needed" bucket. Same
         defect class the bead exists to close, merely narrower — and NO
         fixture in this class exercised that window, which is exactly why the
         wrong anchor survived a green suite.
@@ -3365,7 +3377,7 @@ class TestDoctorFenceCoverageDistinction:
         """nexus-apig6 (code-review-expert, 2026-08-11): a reported-but-NULL
         document with NO usable ``indexed_at`` cannot be attributed to either
         side of the coverage boundary. The summary must not fold it into the
-        "indexed before full producer coverage shipped, no action needed"
+        "indexed before full producer coverage shipped, no --force needed"
         claim — that asserts something no evidence supports, which is the
         exact overclaiming class this whole bead is about.
         """
@@ -3831,7 +3843,30 @@ class TestDoctorFenceCoverageDistinction:
         assert "chroma://code__nexus/regressed.py" in r.detail
         assert "legacy0.py" not in r.detail
         assert "other 5 reported-but-NULL document(s)" in r.detail
-        assert "need no action" in r.detail
+        # nexus-3ajpd: a NULL-fence document is stale, so the note must say it
+        # re-indexes once on its next index run, never that it "needs no action".
+        assert "re-indexes it once and stamps its fence" in r.detail
+        assert "need no action" not in r.detail
+        _assert_null_fence_scope_stated(r.detail)
+
+    def test_ok_summary_says_pre_baseline_null_documents_reindex_once(self, monkeypatch) -> None:
+        """nexus-3ajpd: the ok=True summary names the pre-baseline NULL-fence
+        population (a NULL fence is stale since 3ajpd) and must say it
+        re-indexes once on its next index run, not that it needs no action."""
+        entries = [
+            self._entry(
+                index_state=None, index_state_reported=True,
+                indexed_at="2026-07-01T00:00:00+00:00",
+                source_uri=f"chroma://code__nexus/legacy{i}.py",
+            )
+            for i in range(3)
+        ] + [self._baseline()]
+        r = self._run(monkeypatch, entries)
+        assert r.ok is True
+        assert "3 unstamped document(s) predate" in r.detail
+        assert "re-indexes it once and stamps its fence" in r.detail
+        assert "need no action" not in r.detail
+        _assert_null_fence_scope_stated(r.detail)
 
     def test_reported_null_before_fence_release_stays_ok_with_honest_message(self, monkeypatch) -> None:
         """Quiescent case (nexus-biq4x's own prescribed fix): the fence is
@@ -3849,6 +3884,12 @@ class TestDoctorFenceCoverageDistinction:
         assert r.ok is True
         assert "predates the index-run fence" not in r.detail
         assert "fence live" in r.detail
+        # nexus-3ajpd: the quiescent branch counts the same NULL-fence
+        # population, so it states the same scoped re-index consequence
+        # instead of "not backfilled by design, no action needed".
+        assert "re-indexes it once and stamps its fence" in r.detail
+        assert "no action needed" not in r.detail
+        _assert_null_fence_scope_stated(r.detail)
 
     def test_mixed_corpus_checked_and_reported_null_both_warn(self, monkeypatch) -> None:
         """CRITICAL regression (substantive-critic, T2

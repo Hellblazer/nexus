@@ -83,7 +83,9 @@ def test_doc_indexer_index_document_leaf_fallback_matches_shared_helper(tmp_path
     chunk_fn = MagicMock(return_value=[])  # short-circuits at `if not prepared: return 0`
     # before doc_id/catalog registration is ever reached.
 
-    with patch("nexus.corpus.effective_embedding_model_for_writes", return_value=_FAKE_MODEL):
+    # nexus-3ajpd: the skip gate reads the catalog document; the path is stubbed unnamed.
+    with patch("nexus.corpus.effective_embedding_model_for_writes", return_value=_FAKE_MODEL), \
+            patch("nexus.doc_indexer._doc_id_for_path", return_value=""):
         expected = docs_leaf_fallback_collection_name(_UNDERSCORE_CORPUS)
         result = _index_document(
             doc_path, _UNDERSCORE_CORPUS, chunk_fn, t3,

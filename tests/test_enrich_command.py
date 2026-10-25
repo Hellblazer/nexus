@@ -717,6 +717,7 @@ def test_enrich_looks_up_by_catalog_title_when_chunk_title_is_a_fragment(
         {"title": fragment, "content_hash": "h1"},
         {"title": fragment, "content_hash": "h1"},
     ]
+    # nexus-3ajpd: the catalog manifest binds both chunks to one document.
     mock_retry.side_effect = [
         {"ids": ["c1", "c2"], "metadatas": chunk_meta},   # paginated scan
         {"ids": ["c1", "c2"], "metadatas": chunk_meta},   # re-fetch before update
@@ -728,8 +729,8 @@ def test_enrich_looks_up_by_catalog_title_when_chunk_title_is_a_fragment(
     mock_t3_factory.return_value = mock_db
 
     with patch(
-        "nexus.commands.enrich._catalog_titles_by_content_hash",
-        return_value={"h1": full},
+        "nexus.commands.enrich._catalog_owner_titles",
+        return_value={"c1": {"1.1.1": full}, "c2": {"1.1.1": full}},
     ), patch("nexus.commands.enrich._catalog_enrich_hook") as hook:
         result = CliRunner().invoke(
             enrich, ["bib", "knowledge__test", "--delay", "0", "--source", "s2"],
