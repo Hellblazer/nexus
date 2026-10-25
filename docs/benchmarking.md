@@ -3,7 +3,8 @@
 `scripts/bench/` is the benchmark-harness package (importable as `bench`,
 via `pythonpath = ["scripts"]` in `pyproject.toml`). It holds two
 independent harnesses that measure different things — do not conflate
-them:
+them — plus the study scripts `operator_proxy_ab.py`, `model_tier_study.py`
+and `synthesis_tier_study.py`, which this page does not describe:
 
 ## Retrieval bench (RDR-090)
 
@@ -71,7 +72,9 @@ two more pairs at the same 0.7333, corroborating rather than resolving
 the thin margin — 3 of 4 pairs now land at exactly 0.7333, which is a
 repeated observation, not a single outlier. `.p2c` may not flip `verify`
 on this proxy's evidence alone — see the working T2 entry's variance
-table and the bd comment on nexus-nyry9.16.
+table and the bd comment on nexus-nyry9.16. Outcome: `check` and `verify` did
+join the flipped set on 2026-08-21 (nexus-3mea3, Sam decision), on the
+three-arm model-tier study's evidence, not on this proxy's.
 
 ```
 uv run python scripts/bench/operator_proxy.py --model sonnet

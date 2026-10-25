@@ -71,7 +71,7 @@ so a worktree and its parent produce identical collection names.
 Additionally, markdown files under RDR paths (default: `docs/rdr/`) are indexed into a
 separate `rdr__*` collection via the batch markdown indexer.
 
-**Note**: All collections use the same embedding model for both index and query. Mixing models produces random noise. `voyage-context-3` uses Contextualized Chunk Embeddings (CCE) for `docs__*`, `rdr__*`, `knowledge__*`. Single-chunk documents are embedded via `contextualized_embed(inputs=[[chunk]])`.
+**Note**: All collections use the same embedding model for both index and query. Mixing models produces random noise. `voyage-context-3` uses Contextualized Chunk Embeddings (CCE) for `docs__*`, `rdr__*`, `knowledge__*`.
 
 ## Code Chunking
 
@@ -145,7 +145,7 @@ chunk's semantic meaning for retrieval, improving recall for algorithm-level que
 domain-specific codebases where many files share vocabulary.
 
 Each chunk carries metadata: `filename`, `source_path`, `file_extension`,
-`programming_language`, `line_start`, `line_end`, `chunk_index`, `chunk_count`,
+`programming_language`, `line_start`, `line_end`,
 `ast_chunked` (bool), `class_name`, `method_name`, `content_hash`, `frecency_score`,
 `embedding_model`, `git_commit_hash`, `git_project_name`, `git_branch`, `git_remote_url`.
 
@@ -250,14 +250,14 @@ so scripts gating on exit code should account for it. See [CLI Reference — nx 
 ## Transient Error Resilience
 
 All nexus-service network calls (staleness checks, upserts, deletes, queries) are wrapped
-with `_chroma_with_retry` — an exponential backoff helper in `retry.py` (the name is
-historical; it now wraps the `/v1/vectors` HTTP calls to the service). If a call raises a
+with `_vector_with_retry` — an exponential backoff helper in `retry.py` (renamed from
+`_chroma_with_retry` at RDR-155 P4b; it wraps the `/v1/vectors` HTTP calls to the service). If a call raises a
 transient error (HTTP 502/503/504/429, or a transport-level error such as `ConnectError` or
 `ReadTimeout`), it is retried up to 5 times with delays of 2 → 4 → 8 → 16 → 30 s (capped).
-Non-retryable errors (400, 401, 403, 404) raise immediately without retry.
+Non-retryable errors (400, 401, 403, 404) raise immediately without retry. An upsert that times out is not retried either: it raises `VectorUpsertTimeoutError`, because the engine may still be writing the batch.
 
 Each retry attempt is logged at WARNING level with the event key
-`chroma_transient_error_retry`. After 5 failed attempts the original exception propagates
+`vector_transient_error_retry`. After 5 failed attempts the original exception propagates
 and the indexing job fails fast.
 
 This means a single transient 504 from the nexus-service endpoint no longer aborts a
@@ -273,13 +273,11 @@ This means `nx catalog search` and `nx catalog links` work immediately after ind
 
 ## Taxonomy Auto-Discovery
 
-> **Note:** Taxonomy *discovery*, *rebuild*, and per-document
-> *assignment* run on the nexus-service backend: they fetch embeddings
-> server-side and persist topics + centroids through the service (nexus-7ydks).
-> `nx index repo` discovers and assigns normally. Two operations are still
-> being ported (`nexus-7ydks`): `nx taxonomy split` / `project` and the
-> automatic cross-collection projection pass — they are not yet ported to the
-> service backend and refuse cleanly there.
+> **Note:** The whole taxonomy runs on the nexus-service backend: embeddings are
+> read server-side and topics + centroids persist through the service
+> (nexus-7ydks), and `nx taxonomy split`, `nx taxonomy project`, and the
+> automatic cross-collection projection pass run there too (their
+> service-backend refusal was removed at nexus-i711w).
 
 After indexing completes, `nx index repo` automatically runs topic discovery on the new or updated collections. HDBSCAN clusters the collection's embeddings to find natural topic groupings, and each cluster first takes its top three c-TF-IDF terms as a label, which a short descriptive phrase then replaces: the phrase comes from the LLM backend every nexus LLM step uses: the `claude` CLI when it is on PATH, otherwise an Anthropic API key (`nx config set anthropic_api_key`), see [Configuration](configuration.md#llm-backend). With neither, the term label stays. The results are stored in T2 and surfaced by `nx search` as topic filters.
 

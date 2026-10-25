@@ -76,7 +76,7 @@ plan_json:
 
 ### What makes a good description
 
-`plan_match` is a cosine / FTS5 retrieval against the synthesised
+`plan_match` is a cosine / PG full-text retrieval against the synthesised
 `match_text` payload, whose prefix is the description text. Rule of
 thumb: write what would come out of the mouth of an agent that
 should invoke this plan.
@@ -182,7 +182,7 @@ Signature:
 - tool: traverse
   args:
     seeds: [<tumbler>] | $stepN.tumblers
-    depth: 1..3                    # capped at Catalog._MAX_GRAPH_DEPTH (3) per SC-4
+    depth: 1..3                    # capped at _TRAVERSE_MAX_DEPTH (3, mcp/core.py) per SC-4
     direction: out | in | both     # default: both
     link_types: [...]              # OR purpose — exactly one
     purpose: <registered-name>
@@ -217,13 +217,12 @@ this shape in downstream steps. The common pattern:
   scope: {taxonomy_domain: code}
 ```
 
-### `_MAX_GRAPH_NODES = 500`
+### `MAX_GRAPH_NODES = 500`
 
-`Catalog.graph_many` caps the merged frontier across all
+The engine (`CatalogRepository.MAX_GRAPH_NODES`) caps the merged frontier across all
 (seed, link_type) fan-out calls at 500 nodes. When the cap is hit:
 
-- A structured warning `graph_many_node_limit` logs, naming the seed
-  count and link-type list.
+- The engine logs a structured warning `graph_node_limit`.
 - Partial results are returned — `tumblers` / `collections` reflect
   whatever the BFS surfaced before the cap.
 - The plan run continues with the partial result. Downstream steps
@@ -239,7 +238,7 @@ Every scope above `personal` is a git-tracked YAML path:
 
 | Scope | Location | Promotion |
 |-------|----------|-----------|
-| `personal` | T2 only (local plans DB) | `plan_save` at runtime |
+| `personal` | T2 only (engine Postgres) | `plan_save` at runtime |
 | `rdr-<slug>` | `docs/rdr/<slug>/plans.yml` (peer to the RDR) | `nx plan reseed` when RDR is `status: accepted` |
 | `project` | `.nexus/plans/*.yml` or `.nexus/plans.yml` | `nx plan reseed` |
 | `repo` | umbrella `.nexus/plans/_repo.yml` | `nx plan reseed` (umbrella detection) |
@@ -249,14 +248,14 @@ A plan authored at one scope can be *promoted* — copied to a higher
 scope with a new dimension map. Promotion flow (tool surface in
 RDR-079) is out of scope here; forward-reference only.
 
-**Lifecycle ops deferred:** `nx plan promote` CLI, `nx plan audit`
-CLI, and RDR-close hooks for plan seeding / archival all ship in
-**RDR-079** (not RDR-078). The `verb:plan-promote, strategy:propose`
+**Lifecycle ops:** there is no `nx plan promote` or `nx plan audit` CLI
+verb. Plan audit shipped as the MCP tool `nx_plan_audit`; promotion has no
+surface. The `verb:plan-promote, strategy:propose`
 meta-seed (Phase 4d) that once stood in for the audit CLI was retired
 (commit af1b292bc, `RETIRED_TEMPLATE_DIMENSIONS` in `seed_loader.py`)
 — it required caller-supplied bindings `nx_answer` cannot bind, so it
 was never offerable in practice. There is no builtin plan-promote
-template today; the deferred lifecycle ops above remain the path.
+template today.
 
 ## Bindings
 
@@ -452,10 +451,9 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
   flags a stale global tier. Run after any plugin install to
   confirm `nx plan reseed` seeded the 12 builtins (see
   [Plan-Centric Retrieval § The 12 builtin scenario templates](plan-centric-retrieval.md#the-12-builtin-scenario-templates)).
-- `nx plan repair` (RDR-092 Phase 0d) backfills `verb` / `name` /
-  `dimensions` on legacy NULL-dimension rows using a 20-rule stem
-  dictionary + wh-fallback, and lists `backfill-low-conf` rows for
-  manual review. Idempotent.
+- `nx plan repair` (RDR-092 Phase 0d) was removed in 7.0.0 with the local plan
+  library; `nx plan` now has `delete`, `disable`, `enable`, `hygiene`, `list`,
+  `reseed`, `set-scope` and `show`.
 
 ## See also
 

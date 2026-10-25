@@ -28,7 +28,7 @@ question
   │  cosine FLOOR — and only the floor — lifted, rank by raw
   │  cosine inside that pool ─────────────────────────────────► hit → Match(confidence=None)
   │
-  └─ FTS5 fallback (no T1 cache, or nothing above hit) ───────► hit → Match(confidence=None)
+  └─ full-text fallback (no T1 cache, or nothing above hit) ───────► hit → Match(confidence=None)
   │
   │  (no match)
   │
@@ -83,7 +83,7 @@ by raw cosine, which keeps relative discriminating power inside a
 small same-verb pool (e.g. distinguishing a discovery-shaped question
 from a synthesis-shaped one) even though it had no absolute power
 across the whole library. The returned `Match` carries
-`confidence=None` — the same sentinel the FTS5 fallback uses, for the
+`confidence=None` — the same sentinel the full-text fallback uses, for the
 same reason: the cosine number is not what admitted it.
 
 ### Typed binding derivation
@@ -135,7 +135,7 @@ Key mechanics:
   new operators opt in explicitly only if pure, cost-bounded, and
   failure-meaningful at bundle granularity.
 
-Both lanes of `plan_match` (T1 cosine, T2 FTS5) key off the same
+Both lanes of `plan_match` (T1 cosine, T2 full-text) key off the same
 `match_text` payload synthesised at save time; see
 [§match_text synthesis](#match_text-synthesis) below.
 
@@ -151,9 +151,9 @@ Every plan in the library pins a **dimensional identity**:
 
 | Dimension | Required | Example values |
 |-----------|----------|----------------|
-| `verb` | yes | `research`, `review`, `analyze`, `debug`, `document`, `query`, `lookup`, `plan-author`, `plan-inspect`, `plan-promote` |
+| `verb` | yes | `research`, `review`, `analyze`, `debug`, `document`, `query`, `lookup` |
 | `scope` | yes | `global`, `project`, `rdr-<slug>`, `personal` |
-| `strategy` | default `"default"` | `default`, `security`, `performance`, `propose`, `dimensions` |
+| `strategy` | default `"default"` | `default`, `security`, `performance` |
 | `object` | optional | `change-set`, `rdr`, `module`, `test-suite` |
 | `domain` | optional | `security`, `compliance`, `ml-systems`, `frontend` |
 
@@ -220,15 +220,16 @@ cross-corpus compare) were retired previously as redundant with
 `research-default` and `analyze-default` respectively.
 `tests/test_builtin_plans.py` now fails CI on any template requiring a
 typed binding that is neither defaulted nor derivable (see
-[binding_infer](#typed-binding-derivation) below), so a shipped-but-
+[binding_infer](#typed-binding-derivation) above), so a shipped-but-
 unofferable template cannot recur silently.
 
 ## match_text synthesis
 
 Both lanes of `plan_match` key off a single payload:
 
-- **T1 cosine:** the `plans__session` ChromaDB collection embeds each
-  plan's `match_text` via the local ONNX MiniLM function.
+- **T1 cosine:** an in-process `InMemoryVectorClient` collection
+  (`plans__session`, one per MCP server) embeds each plan's `match_text` via the
+  local ONNX MiniLM function.
 - **T2 full-text search:** `nexus.plans.fts_vector`, a generated
   `STORED` `TSVECTOR` column on the `nexus.plans` table, indexes
   `match_text` (`to_tsvector('english', …)`, weight A), `tags`
@@ -364,7 +365,7 @@ fallback, prefix semantics).
 
 Three signals that a class of questions needs its own plan template:
 
-1. **FTS5 keeps missing**: the same intent in paraphrased form doesn't
+1. **Full-text keeps missing**: the same intent in paraphrased form doesn't
    match an existing plan's description, so callers re-decompose the same
    DAG.  The `plan_match` metrics (`match_count`, `match_conf_sum`) will
    show this — high `match_count` with many calls falling through to the

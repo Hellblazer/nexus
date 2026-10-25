@@ -30,7 +30,7 @@ nx catalog show "Inverting Schema Mappings"
 nx catalog show 1.8.14                   # same thing, by tumbler
 ```
 
-Shows full metadata plus all links in and out. The tumbler is a permanent address — once assigned, it never changes, even if the document is deleted and the catalog is compacted.
+Shows full metadata plus all links in and out. The tumbler is a permanent address — once assigned, it never changes, even if the document is deleted.
 
 ## Point one document at another (aliases)
 
@@ -144,7 +144,7 @@ You don't have to register documents manually. Every indexing pathway does it au
 | `nx enrich aspects <collection>` | Extracts structured per-paper aspects (RDR-089) into T2 ``document_aspects`` |
 | MCP `store_put` | Knowledge entries stored by agents |
 
-After `nx enrich bib`, run `nx catalog setup` again (or `nx catalog generate-links`) to create citation links from the newly fetched references.
+After `nx enrich bib`, run `nx catalog generate-links` to create citation links from the newly fetched references.
 
 ### Taxonomy and topic links
 
@@ -163,7 +163,7 @@ query(question="related work", follow_links="cites")         # citation-enriched
 
 For simple scoped queries, `query()` with catalog params is a single MCP call — no agent dispatch needed. For complex analytical queries (compare, extract, generate), call `mcp__plugin_conexus_nexus__nx_answer` directly — it runs `plan_match` against the library, executes the best match via `plan_run`, and falls through to an inline planner on miss. The former `/conexus:query` skill pointer to `nx_answer` was retired (RDR-080 consolidation replaced the earlier query-planner + analytical-operator agent pair).
 
-Individual catalog MCP tools on the `nexus-catalog` server use short names without the `catalog_` prefix (since RDR-062). The 10 registered tools are: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`. Full names follow the pattern `mcp__plugin_conexus_nexus-catalog__<tool>` (e.g., `mcp__plugin_conexus_nexus-catalog__search`). Three operations (`unlink`, `link_audit`, `link_bulk`) are demoted — they are plain Python functions not exposed on the MCP surface.
+Individual catalog MCP tools on the `nexus-catalog` server use short names without the `catalog_` prefix (since RDR-062). The 10 registered tools are: `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats`. Full names follow the pattern `mcp__plugin_conexus_nexus-catalog__<tool>` (e.g., `mcp__plugin_conexus_nexus-catalog__search`). Three operations (`catalog_unlink`, `catalog_link_audit`, `catalog_link_bulk`) are demoted — they are plain Python functions not exposed on the MCP surface.
 
 Agents also create links during their work — the debugger creates `relates` links between findings, and the developer creates `implements` links to RDRs. The `nx_tidy` MCP tool (formerly the knowledge-tidier agent, RDR-080) is read-only: it reports a consolidated summary and suggested actions but performs no writes, `supersedes` links included — a caller acts on its suggestions manually.
 
@@ -214,6 +214,7 @@ A **purpose** is a human-named alias for a list of catalog link types. Plan temp
 | `documentation-for` | `implements`, `implements-heuristic`, `cites` | Inverse of `find-implementations`: code back to docs that describe it |
 | `soft-relations` | `relates`, `comments` | Loose semantic associations; lower-confidence than `find-implementations` |
 | `all-implementations` | `implements` | Strict-only — excludes `implements-heuristic`. For audits that need verified mappings |
+| `factual-evidence` | `cites`, `implements`, `relates` | Walk from a paper, RDR or chunk to the documents that cite it, implement it or relate to it; the graph context the `hybrid-factual-lookup` plan builds for factual questions |
 
 `resolve_purpose("find-implementations")` returns the link-type list filtered against the catalog's known set. Unknown purpose name returns an empty list (traverse short-circuits). Unknown link type within a known purpose is dropped with a structured warning; the valid subset is returned.
 
@@ -252,7 +253,7 @@ nx taxonomy project <src>         # cross-collection projection (RDR-075/077)
 Topic taxonomy improves search through three mechanisms:
 
 - **Topic boost** — results that share a topic cluster receive a distance reduction (same topic: -0.1; linked topics via catalog graph: -0.05). Automatic, no parameter needed.
-- **Topic grouping** — when `search()` is called with `cluster_by="semantic"` (the default for agents), Nexus groups results by topic label. Falls back to Ward hierarchical clustering when topic coverage is below 50%.
+- **Topic grouping** — when `search()` is called with `cluster_by="semantic"`, Nexus groups results by topic label. Falls back to Ward hierarchical clustering when topic coverage is below 50%.
 - **Topic-scoped search** — pre-filter results to a specific topic: `search(query="extraction pipeline", topic="Math-aware PDF Extraction")`.
 
 ### Cross-collection projection
@@ -398,10 +399,10 @@ Set `NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1` in the **client's** environment to byp
 ### Backfill and recovery
 
 ```bash
-nx catalog backfill            # re-populate catalog from T3 + backfill chunk_text_hash
+nx catalog backfill            # re-populate catalog from T3
 ```
 
-`backfill` re-discovers documents from existing T3 collections and registered repos without re-indexing. Also adds `chunk_text_hash` metadata to any chunks missing it. Use after data recovery or if the catalog gets out of sync with T3.
+`backfill` re-discovers documents from existing T3 collections and registered repos without re-indexing. Use after data recovery or if the catalog gets out of sync with T3.
 
 #### Recovery bundle: `nx catalog export` / `nx catalog import`
 
@@ -446,7 +447,6 @@ Locked format decisions (design of record: T2
   silently expiring recovered content would be the worse failure. Re-set
   TTLs after import if you need them.
 
-Missing `chunk_text_hash` metadata on an upgraded store is the ladder's job, not a verb's: run `nx upgrade`.
 
 ```bash
 nx catalog reconcile --dry-run    # preview manifest-gap repairs
@@ -481,11 +481,11 @@ Use `coverage` to track link graph completeness. Use `orphans` to find documents
 ### Link generation
 
 ```bash
-nx catalog link-generate                # full batch scan — all linkers
-nx catalog link-generate --dry-run      # preview without creating
+nx catalog generate-links               # full batch scan — all linkers
+nx catalog generate-links --dry-run     # preview without creating
 ```
 
-Normal `nx index repo` runs generate links incrementally (only for newly indexed files). Use `link-generate` for the full O(n×m) batch scan after bulk imports or initial setup.
+Normal `nx index repo` runs generate links incrementally (only for newly indexed files). Use `generate-links` for the full O(n×m) batch scan after bulk imports or initial setup.
 
 ### Housekeeping
 
@@ -523,8 +523,8 @@ Two dispositions, reported per row:
   redirect and is left unchanged; one whose successor is gone is a ghost.
 - **Dormant** — collections still referenced somewhere but with no vector
   stats row (nothing to embed or read). `--apply` flips `lifecycle_state`
-  to `dormant`; the row itself is not deleted — see [Storage Tiers §
-  Collections](collections.md#rule-6-lifecycle-goes-through-the-catalog)
+  to `dormant`; the row itself is not deleted — see [Choosing and Naming Collections §
+  Rule 6](collections.md#rule-6-lifecycle-goes-through-the-catalog)
   for the `lifecycle_state` filter (`live`, `quarantine`, `dormant`,
   `disputed`).
 
