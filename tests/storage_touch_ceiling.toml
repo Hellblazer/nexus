@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4939
+provisioned_tests = 4944
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
@@ -52,6 +52,12 @@ tolerance_tests = 0
 # catalog_search tests over real catalog rows, plus a query-description test moved to the tenant-free
 # tests/test_catalog_search_description.py in this commit), tests/test_rdr_084_plan_grow.py 5->7 (two F14 tests that
 # read the saved plan id back from the real plan store). 13 need their tenant; the DDL-per-run ratchet is untouched.
+# 4939 -> 4944 (nexus-jypmj.1.1, nexus-jypmj.1.2, 2026-10-25, Sam's ruling): five RDR-232 Phase 1 tests need the real
+# engine. tests/test_rdr232_golden_fixture.py::test_rdr084_fixture_non_vacuity_and_pre_change_baseline writes the
+# self-contained ART RDR-084 fixture (two owners, over 300 linked code chunks) and runs the unmodified runner over it.
+# tests/test_rdr232_reserved_bindings.py, consolidated from 16 tenant cases to 4: the nx_answer bindings test, the
+# plan-library save-path refusal, the saved-plan exclusion on the T1 and FTS match paths, and project ART resolving
+# through the real catalog owner registry. Each fails with its code deleted; the DDL-per-run ratchet is untouched.
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
