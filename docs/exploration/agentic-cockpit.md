@@ -3,11 +3,12 @@
 > **Historical record** (kept by decision, nexus-z93bq). The design was superseded
 > by RDR-127 (see banner below); kept as a source record for RDR-111, RDR-118, RDR-119 and RDR-212.
 
-> **SCRAPPED ARCHITECTURE**: this exploration is written atop RDR-110 (semantic
+> **ABANDONED ARCHITECTURE**: this exploration is written atop RDR-110 (semantic
 > tuple space), RDR-111 (ORB agentic-cockpit substrate), RDR-112 (storage-as-service
-> container boundary), and RDR-113 (host trust model) — all four are `status: scrapped`.
+> container boundary), and RDR-113 (host trust model) — all four are `status: abandoned`.
 > The surviving successor is [RDR-127: Substrate-Decoupled Surface Rendering](../rdr/rdr-127-substrate-decoupled-surface-rendering.md)
-> (`status: accepted`). Kept in-tree as historical record of the design exploration;
+> (`status: closed`, implemented). The tuple space that shipped is a different
+> design: see RDR-211, RDR-212 and JDR-001/002, not RDR-110's. Kept in-tree as historical record of the design exploration;
 > do NOT use as a current-state reference.
 
 A design exploration. **Not a workflow engine spec.** The workflow engine

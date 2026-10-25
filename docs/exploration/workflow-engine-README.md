@@ -3,8 +3,8 @@
 > **Historical record** (kept by decision, nexus-z93bq): index of the May 2026
 > workflow-engine exploration, which no RDR adopted. Not current design.
 
-Four artifacts on disk, all gitignored, all indexed. Read them in the
-order below; each builds on the previous.
+Four tracked artifacts in this directory. Read them in the order below; each
+builds on the previous.
 
 ## What this is
 
@@ -16,10 +16,11 @@ these documents are inputs to the next round of synthesis on it, not a
 greenfield design.
 
 Source paper: [Parmar 2026](https://arxiv.org/abs/2605.00827) —
-indexed locally as `knowledge__workflow-engine` (79 chunks).
+indexed in May 2026 as `knowledge__workflow-engine` (79 chunks; a pre-RDR-103
+collection name).
 
-Canonical MCP + ext-apps reference material: `docs__mcp-protocol`
-(460 chunks). Includes the full SEP-1865 ext-apps spec
+Canonical MCP + ext-apps reference material, as indexed in May 2026:
+`docs__mcp-protocol` (460 chunks). Includes the full SEP-1865 ext-apps spec
 (2026-01-26), SEP-1686 Tasks proposal with community thread, and
 MCP core spec for transports / lifecycle / resources / tools. Cite
 from this corpus when verifying any ext-apps or MCP-protocol claim
@@ -66,7 +67,7 @@ The substantive design. ~1990 lines. Cuts across:
   considered and reasons; v1 / v2 / substrate / experiments / deferred
   lists; open architectural questions.
 
-Indexed: `docs__workflow-engine` (101 chunks).
+Indexed in May 2026: `docs__workflow-engine` (101 chunks).
 
 ### 2. `workflow-engine-synthesis.md` — landscape position
 
@@ -87,7 +88,7 @@ Most of this is now folded into the main doc's "Adjacent workflow
 systems" section, but the synthesis remains the source-of-truth for
 the citation trail.
 
-Indexed: `docs__workflow-engine` (9 chunks).
+Indexed in May 2026: `docs__workflow-engine` (9 chunks).
 
 ### 3. `workflow-engine-brainstorm.md` — adjacent design space
 
@@ -111,7 +112,7 @@ Eight of the twelve are folded into the main doc's "Design space kept
 open" section with status and rationale. The brainstorm document
 retains the full sketches for reference.
 
-Indexed: `docs__workflow-engine` (14 chunks).
+Indexed in May 2026: `docs__workflow-engine` (14 chunks).
 
 ### 4. (Reference) Parmar 2026 paper
 

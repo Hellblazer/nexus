@@ -135,11 +135,14 @@ or a hardcoded edit.
 
 Projection rows use a prefer-higher UPSERT (RDR-077 RF-5 / Phase 2):
 
-    ON CONFLICT(doc_id, topic_id) DO UPDATE SET
-        similarity  = MAX(COALESCE(stored, -1.0), incoming),
-        assigned_at = <refresh if incoming wins>,
-        source_collection = <refresh if incoming wins>,
+    ON CONFLICT (doc_id, topic_id) DO UPDATE SET
+        similarity  = GREATEST(COALESCE(stored, -1.0), EXCLUDED.similarity),
+        assigned_at = <EXCLUDED.assigned_at if incoming wins>,
+        source_collection = <EXCLUDED.source_collection if incoming wins>,
         assigned_by = 'projection'
+
+The store is Postgres behind the engine (`TaxonomyRepository`), so this is
+`GREATEST` and `EXCLUDED`, not SQLite's two-argument `MAX`.
 
 Rules in effect:
 
@@ -150,10 +153,10 @@ Rules in effect:
 - **Source refresh only when incoming wins.** If the new match is
   stronger, `assigned_at` and `source_collection` update to reflect
   that match's origin. Ties do not refresh.
-- **Legacy NULL-safe.** `COALESCE(stored_similarity, -1.0)` ensures any
+- **Legacy NULL-safe.** `COALESCE(stored, -1.0)` ensures any
   pre-RDR-077 row (NULL similarity) is promoted on the first
   projection write, since any real cosine exceeds `-1.0`.
-- **HDBSCAN, centroid, and manual rows keep `INSERT OR IGNORE`
+- **HDBSCAN, centroid, and manual rows keep `ON CONFLICT DO NOTHING`
   idempotency.** Only projection rows use UPSERT. This keeps
   clustering-time writes cheap and avoids silently replacing a
   hand-curated label via a model re-run.
@@ -172,14 +175,29 @@ did not. Run `nx taxonomy project --backfill` or a targeted
 
 See RDR-077 RF-9 and the Phase 5 bead notes for implementation.
 
+## Recovery
+
+Two flags undo a bad state without touching the database by hand.
+
+- `nx taxonomy project <src> --prune-below-threshold` deletes the projection
+  assignments whose stored raw cosine is below the corpus threshold (your
+  `--threshold`, else the per-prefix default above). Use it to undo a pass
+  that admitted weak matches (GH #1528). With `--backfill` it prunes every
+  corpus prefix instead of one source.
+- `nx taxonomy audit -c <src> --fix-doc-count` previews `topics.doc_count` drift
+  and adding `--yes` applies the correction. It is the repeatable form of
+  the engine's boot-time recount and the remedy the `nx doctor`
+  "topics.doc_count drift" row names. The recount covers every topic in the
+  tenant; `-c` only limits what is displayed.
+
 ## Troubleshooting
 
 **All projections report ICF=0 or empty map.** `N_effective < 2` —
 only one distinct `source_collection` has projection rows. Either the
 corpus really is single-source, or the write path did not populate
-`source_collection` for these rows. Check
-`SELECT DISTINCT source_collection FROM topic_assignments WHERE
-assigned_by = 'projection'`.
+`source_collection` for these rows. `nx taxonomy hubs --explain` prints a
+`sources=` list under each hub, and `nx taxonomy audit --collection <src>`
+reports the projection assignments that originate from one source.
 
 **Hubs dominate the ranking.** Enable `--use-icf`. If hubs persist
 after that, look at `nx taxonomy hubs --explain` for which generic
