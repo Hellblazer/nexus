@@ -514,11 +514,25 @@ N/A (a prefix test per URI on input and output).
 
 ### Contradiction Check
 
-To be completed at gate.
+Read end to end before the gate (2026-10-26). The Approach, Technical Design steps 1-7,
+the old-client table in step 3, Decisions and the Test Plan agree on the three rules:
+store `nx-note://`, accept both spellings on input, render `chroma://` to any request
+without `X-Nexus-Note-Uri: nx-note`. Step 4 (rename) and step 4a (the other moves) use
+the same `NoteUri.moveTo`, and the Test Plan has a scenario for each move. The
+"no rollback" ruling (Decisions 1) matches step 5's empty rollback. Line numbers in
+Gap 2 and Technical Design are as of 2026-10-23; the gate's re-read found
+`rollback_minted_catalog_entry` at `store_hook.py:1185` (cited at `:1119` in research),
+so an implementer re-reads each site before editing rather than trusting the number.
 
 ### Assumption Verification
 
-To be completed at gate.
+Nine research records (`nexus_rdr/231-research-1` to `-9`): six verified by source
+search and one documented, re-checked against develop on 2026-10-26; two assumed, the
+two Critical Assumptions that need production data. Both are checked before the engine
+tag, not at gate: the `columnsHolding` sweep for `chroma://` on a restored cloud copy,
+and the step 5 census per tenant. If the census finds a pair, Decisions 2 applies
+(merge, then deploy). The third Critical Assumption, route coverage, is verified by
+source search and pinned by `NoteUriRouteGateTest`.
 
 #### API Verification
 
@@ -528,7 +542,12 @@ To be completed at gate.
 
 ### Scope Verification
 
-To be completed at gate.
+In scope: Gaps 1 to 4, each with a Technical Design step (Gap 1 and 2: steps 1 and 6;
+Gap 3: steps 2, 3 and 6; Gap 4: steps 4 and 4a). Added beyond the originating beads:
+the highlight rename in Gap 4, found while folding nexus-ql5m5 in, because leaving one
+move unrewritten would keep Gap 4 open. Out of scope: applied changelogs that mention
+`chroma://` in comments (never edited), `engine_version.py` release history, and any
+refusal of `chroma://` (step 7 keeps it readable forever).
 
 ### Cross-Cutting Concerns
 
@@ -539,7 +558,14 @@ To be completed at gate.
 
 ### Proportionality
 
-To be completed at gate.
+The defect is a misleading name, and the fix is a tenant-wide data rewrite, a new
+request header, legacy rendering on every note-carrying response, and a route gate
+test. That is large for a name. Two things make it the smallest safe version: a
+client-only rename duplicates notes for every un-upgraded client (Gap 3), and the
+legacy-rendering cost sits in three renderers (step 3). The work rides an engine tag
+already planned, and Gap 4 is a real correctness bug (stale URIs after a re-home)
+that this change fixes on the way. Priority stays low; deferring it costs only the
+misleading name.
 
 ## Decisions
 
