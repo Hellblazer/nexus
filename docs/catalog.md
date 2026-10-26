@@ -447,7 +447,8 @@ Locked format decisions (design of record: T2
   run 0 to n-1 (a lost leading or middle row; a lost final row is not
   detected), is left out of the bundle rather than exported short; the export
   names it (`have a piece missing from the store or a gap in their
-  manifest`) and the bundle header counts it (`notes_incomplete`). A note
+  manifest`), the bundle header counts it (`notes_incomplete`), and the command
+  exits 1 with the bundle written, so a scripted reinstall stops there. A note
   with every piece gone counts as a ghost, as does every note of a
   collection the engine no longer has registered. Any other store read
   error stops the export with a non-zero exit and no bundle, so an
@@ -468,9 +469,10 @@ Locked format decisions (design of record: T2
   counted), takes the chunk row's values only when the row is that note's
   own write, by the expiry sweep's rule (`note_ttl.row_written_by`): the
   row's `catalog_doc_id` is the note's tumbler and its `title` the note's
-  title. A row with no stamp is nobody's, even when the note is the only
-  owner left, since a departed co-owner's values stay on the row
-  (nexus-6pfgb.34); an untitled note never matches, and a note brought in
+  title. A row with no stamp is nobody's for `ttl_days`, even when the note
+  is the only owner left, since a departed co-owner's values stay on the
+  row (nexus-6pfgb.34); for `tags` and `category` alone it counts when the
+  note is the chunk's sole live owner (nexus-6pfgb.35); an untitled note never matches, and a note brought in
   by an `.nxexp` import does not unless the destination minted the source
   box's tumbler for it (its rows keep the source's stamp). Otherwise it
   exports with them empty and the export summary counts it when the row

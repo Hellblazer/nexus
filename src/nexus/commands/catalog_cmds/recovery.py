@@ -84,9 +84,11 @@ def export_cmd(output: Path) -> None:
             f"  note keys not recovered: {summary.note_keys_unrecovered} note(s) whose own tags, "
             "category and ttl_days are not in the catalog (stored by nx 7.87.0 or earlier, or "
             "brought in by an .nxexp import) and whose chunk row cannot be shown to be their own "
-            "write; they export with those empty (ttl_days permanent). To keep a note's values, "
-            "re-put it with its tags, category and TTL using a current client, then export again; "
-            "take the values from your own records, since the chunk row may hold another note's:"
+            "write; they export with some or all of those empty (ttl_days permanent; tags and "
+            "category are still taken when the note is the chunk's only owner and no note stamped "
+            "the row). To keep a note's values, re-put it with its tags, category and TTL using a "
+            "current client, then export again; take the values from your own records, since the "
+            "chunk row may hold another note's:"
         )
         notes = summary.note_keys_unrecovered_notes
         for collection, title in notes[:_UNRECOVERED_TITLES_SHOWN]:
@@ -100,6 +102,16 @@ def export_cmd(output: Path) -> None:
             f"  WARNING: {summary.unresolvable_link_endpoints} link endpoint(s) "
             "could not be resolved to a source_uri and were omitted"
         )
+    if summary.notes_incomplete:
+        # nexus-6pfgb.37 (Sam): the bundle is written for inspection, but it does not hold every note,
+        # so a scripted export-then-reinstall must stop here. Ghosts have nothing left to save and
+        # do not change the exit status.
+        click.echo(
+            f"  {summary.notes_incomplete} note(s) are not in the bundle (listed above); "
+            "do not reinstall from it until they are dealt with",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
 
 
 @click.command("import")

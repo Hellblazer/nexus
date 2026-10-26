@@ -935,7 +935,9 @@ content** — the two things a reinstall cannot regenerate. Identity is
 carried (import re-embeds through the note writer `store_put` uses, so the
 bundle survives an embedding-mode change); import is idempotent and
 reports every unresolvable link or failed note without aborting the rest,
-and exits non-zero when any note did not verify.
+and exits non-zero when any note did not verify. Export exits non-zero
+when it left a note out (a split note with a piece missing), after
+writing the bundle and naming the note.
 See `docs/catalog.md` § Recovery bundle for the format contract. For an
 embedding-preserving per-collection backup use `nx store export COLLECTION`
 (`.nxexp`) instead.

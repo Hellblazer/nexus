@@ -245,6 +245,7 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
 
 def export_knowledge_doc(
     entry: CatalogEntry, manifest_rows: list, rows_by_chash: dict[str, dict], summary: ExportSummary,
+    owners_by_chash: dict[str, list[str]] | None = None,
 ) -> dict | None:
     """Build one ``knowledge_doc`` record from the note's manifest rows and the chunk rows
     :func:`export_bundle` read for its collection (*rows_by_chash*); ``None`` when the note cannot be
@@ -266,12 +267,16 @@ def export_knowledge_doc(
     when the row is this note's own write (:func:`nexus.catalog.note_ttl.row_written_by`: the row's
     ``catalog_doc_id`` is this entry's tumbler AND its ``title`` this entry's title), the first such
     piece in position order: every piece of one put carries that put's values, and a piece another
-    note shares may have been restamped by it. A row a later note wrote, a row no note write stamped,
-    and a row carrying a stale ``.nxexp`` stamp under another title are not, whoever else holds the
-    chunk now: a row is not rewritten when a co-owner leaves, so being the only owner left says
-    nothing about who wrote it (nexus-6pfgb.34). Otherwise the record carries none and *summary*
-    counts the note, when a piece row held a value that was dropped. ``ttl_days`` is a positive
-    integer or ``None``.
+    note shares may have been restamped by it. A row a later note wrote and a row carrying a stale
+    ``.nxexp`` stamp under another title are not, whoever else holds the chunk now: a row is not
+    rewritten when a co-owner leaves (nexus-6pfgb.34).
+
+    A row no note write stamped is nobody's for ``ttl_days``, since a TTL a departed co-owner left on it
+    would make a permanent note expire after import. For ``tags`` and ``category`` alone, a wrong value
+    being cosmetic, such a row counts when this note is the chunk's sole live owner
+    (*owners_by_chash*, from :func:`export_bundle`'s one owner lookup): the first such piece in
+    position order (Sam, nexus-6pfgb.35 option B). *summary* counts the note when a piece row held a
+    value the record does not carry. ``ttl_days`` is a positive integer or ``None``.
     """
     ordered = sorted(manifest_rows, key=lambda r: r.position)
     pieces = [rows_by_chash.get(mrow.chash) for mrow in ordered]
@@ -300,7 +305,20 @@ def export_knowledge_doc(
             keys = _row_keys(written)
         else:
             keys = {"tags": "", "category": "", "ttl_days": None}
-            if any(k["tags"] or k["category"] or k["ttl_days"] for k in map(_row_keys, rows)):
+            me = str(entry.tumbler)
+            sole = next((
+                piece for mrow, piece in zip(ordered, rows)
+                if not piece.get("catalog_doc_id")
+                and set((owners_by_chash or {}).get(mrow.chash, [])) == {me}
+            ), None)
+            if sole is not None:
+                keys.update(tags=_row_keys(sole)["tags"], category=_row_keys(sole)["category"])
+            dropped = any(
+                (k["tags"] and not keys["tags"]) or (k["category"] and not keys["category"])
+                or (k["ttl_days"] and not keys["ttl_days"])
+                for k in map(_row_keys, rows)
+            )
+            if dropped:
                 summary.note_keys_unrecovered += 1
                 summary.note_keys_unrecovered_notes.append((entry.physical_collection, entry.title or ""))
                 _log.info(
@@ -336,6 +354,27 @@ def _collection_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, 
             raise
         _log.warning("recovery_export_collection_unregistered", collection=collection, pieces=len(chashes))
         return {}
+
+
+def _sole_owner_candidates_owners(
+    reader: Any, selected: list[tuple[CatalogEntry, str, list]], rows_by_collection: dict[str, dict[str, dict]],
+) -> dict[str, list[str]]:
+    """``chash -> live owner tumblers`` for the pieces whose ownership can decide a record's tags and
+    category (:func:`export_knowledge_doc`, nexus-6pfgb.35 option B): unstamped piece rows of keyless
+    notes none of whose pieces is their own write. One ``docs_for_chashes`` lookup for all of them, and
+    none at all when there are none."""
+    wanted: list[str] = []
+    for entry, _leg, mrows in selected:
+        if _own_note_keys(entry) is not None:
+            continue
+        rows_by_chash = rows_by_collection.get(entry.physical_collection, {})
+        pieces = [(m.chash, rows_by_chash.get(m.chash)) for m in mrows]
+        if any(p is not None and row_written_by(entry.tumbler, p, owner_title=entry.title) for _c, p in pieces):
+            continue
+        wanted.extend(c for c, p in pieces if p is not None and not p.get("catalog_doc_id"))
+    if not wanted:
+        return {}
+    return reader.docs_for_chashes(list(dict.fromkeys(wanted)))
 
 
 def _row_keys(row: dict) -> dict[str, Any]:
@@ -466,8 +505,11 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
         collection: _collection_rows(t3, collection, list(dict.fromkeys(chashes)))
         for collection, chashes in chashes_by_collection.items()
     }
+    owners_by_chash = _sole_owner_candidates_owners(reader, selected, rows_by_collection)
     for entry, _leg, rows in selected:
-        rec = export_knowledge_doc(entry, rows, rows_by_collection[entry.physical_collection], summary)
+        rec = export_knowledge_doc(
+            entry, rows, rows_by_collection[entry.physical_collection], summary, owners_by_chash,
+        )
         if rec is not None:
             docs.append(rec)
 

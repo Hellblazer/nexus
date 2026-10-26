@@ -199,7 +199,9 @@ def test_catalog_export_names_the_split_notes_left_out_for_a_missing_piece(tmp_p
     monkeypatch.setattr("nexus.db.make_t3", lambda: object())
 
     result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, "nexus-6pfgb.37: a bundle missing notes fails the export"
+    assert "22 note(s) are not in the bundle" in result.output
+    assert (tmp_path / "r.jsonl").exists(), "the bundle is still written for inspection"
     assert "WARNING: 22 note(s) written as several pieces have a piece missing" in result.output
     assert '    knowledge__x: "split-18"\n' in result.output and "split-19" not in result.output
     assert "... and 2 more" in result.output
@@ -233,3 +235,18 @@ def test_catalog_export_reports_an_unreachable_local_store_without_a_traceback(t
     assert result.exit_code == 1, result.output
     assert "connection refused" in result.output and "No bundle was written" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_catalog_export_exits_zero_when_only_ghosts_were_skipped(tmp_path, monkeypatch):
+    """nexus-6pfgb.37: a ghost has nothing left to save, so it does not fail the export."""
+    def _fake_export(reader, t3, path):
+        path.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": 1}) + "\n")
+        return ExportSummary(docs_exported=3, ghosts_skipped=4)
+
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
+    monkeypatch.setattr("nexus.catalog.recovery_bundle.export_bundle", _fake_export)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+
+    result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
+    assert result.exit_code == 0, result.output
+    assert "ghosts skipped (rows with no live content): 4" in result.output
