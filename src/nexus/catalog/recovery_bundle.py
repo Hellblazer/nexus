@@ -53,6 +53,7 @@ from typing import Any, Callable, Iterable
 import structlog
 
 from nexus.aspect_readers import FILE_ROUTED_PREFIXES, uri_for
+from nexus.catalog.note_ttl import row_written_by
 from nexus.catalog.types import CatalogEntry
 
 _log = structlog.get_logger(__name__)
@@ -125,9 +126,9 @@ class ExportSummary:
     single_chunk_violations: int = 0
     unresolvable_link_endpoints: int = 0
     #: Notes whose catalog entry holds none of its own note keys (written before nexus-6pfgb.5, or
-    #: stored with none of them) while the chunk row carries a tags, category or ttl_days value that
-    #: may be another note's (the row's last writer is not this note, or its owner is unknown and
-    #: another live document holds the chunk): the record carries none.
+    #: stored with none of them before nexus-6pfgb.15) while the chunk row carries a tags, category or
+    #: ttl_days value that is not provably its own (the row's ``catalog_doc_id`` and ``title`` are not
+    #: both this note's): the record carries none.
     note_keys_unrecovered: int = 0
 
 
@@ -237,9 +238,7 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
     writes it, so a note stored with every other key unset still has an answer (all empty, and not
     counted as unrecovered). An entry with none is a legacy one, or a note stored with every key
     unset before nexus-6pfgb.15. :func:`export_knowledge_doc` lets the chunk row fill such an entry only
-    through the row's last-writer gate: the row's ``catalog_doc_id`` is this entry's tumbler or,
-    for a row with none, the chunk has one live owner (a fallback that can take a departed
-    co-owner's values; see ``docs/storage-tiers.md``).
+    when :func:`nexus.catalog.note_ttl.row_written_by` says the row is this note's own write.
     """
     from nexus.catalog.store_hook import NOTE_META_KEYS  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
 
@@ -253,42 +252,8 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
     }
 
 
-def _chunk_has_other_owner(
-    reader: Any, entries: dict[str, CatalogEntry], targets: list[tuple[CatalogEntry, str]],
-) -> dict[str, bool]:
-    """For each of *targets* (``(entry, chash)``), keyed by the entry's tumbler: does a live document
-    other than that one hold the chunk? One batched ``docs_for_chashes`` for all of them.
-
-    A chash is catalog-wide but a chunk row is one per collection, so only an owner whose catalog
-    entry is in the same collection shares the row; an owner this walk has no entry for counts as
-    sharing (the safe side). When the lookup fails every target reads as shared: a value the row may
-    have taken from another note is never copied on a guess.
-    """
-    if not targets:
-        return {}
-    chashes = sorted({chash for _entry, chash in targets})
-    try:
-        holders = reader.docs_for_chashes(chashes)
-    except Exception:  # noqa: BLE001 — an owner lookup failure must not abort the export; the notes stay unrecovered and counted
-        _log.warning("recovery_export_owner_lookup_failed", chashes=len(chashes))
-        return {str(e.tumbler): True for e, _c in targets}
-    shared: dict[str, bool] = {}
-    for entry, chash in targets:
-        others = False
-        for owner in holders.get(chash) or ():
-            if str(owner) == str(entry.tumbler):
-                continue
-            other = entries.get(str(owner))
-            if other is None or other.physical_collection == entry.physical_collection:
-                others = True
-                break
-        shared[str(entry.tumbler)] = others
-    return shared
-
-
 def export_knowledge_doc(
-    t3: Any, entry: CatalogEntry, manifest_rows: list, *,
-    shared_chunk: bool = True, summary: ExportSummary | None = None,
+    t3: Any, entry: CatalogEntry, manifest_rows: list, *, summary: ExportSummary | None = None,
 ) -> dict | None:
     """Build one ``knowledge_doc`` record; ``None`` when the chunk is gone
     from T3 (reported by the caller, never raised).
@@ -297,12 +262,13 @@ def export_knowledge_doc(
     (nexus-6pfgb.5): two notes with identical text share one chunk row, and the row carries only the
     last writer's. An entry with none of the note keys (written before nexus-6pfgb.5, or stored with
     none of them before nexus-6pfgb.15 made every put write ``put_at``) takes the row's values only
-    when the row's last writer is this note: every note
-    write stamps its ``catalog_doc_id`` on the row and a later write by another note replaces it. A
-    row with no ``catalog_doc_id`` at all (no note write stamped it) is taken only when
-    *shared_chunk* is false (the chunk has a single live owner). Otherwise the record carries none
-    and *summary* counts the note, when the row held a value that was dropped. ``ttl_days`` is a
-    positive integer or ``None``.
+    when the row is this note's own write (:func:`nexus.catalog.note_ttl.row_written_by`: the row's
+    ``catalog_doc_id`` is this entry's tumbler AND its ``title`` this entry's title). A row a later
+    note wrote, a row no note write stamped, and a row carrying a stale ``.nxexp`` stamp under another
+    title are not, whoever else holds the chunk now: a row is not rewritten when a co-owner leaves,
+    so being the only owner left says nothing about who wrote it (nexus-6pfgb.34). Otherwise the
+    record carries none and *summary* counts the note, when the row held a value that was dropped.
+    ``ttl_days`` is a positive integer or ``None``.
     """
     chash = manifest_rows[0].chash
     row = t3.get_by_id(entry.physical_collection, chash)
@@ -321,9 +287,7 @@ def export_knowledge_doc(
             "category": row.get("category", "") or "",
             "ttl_days": _positive_ttl(row.get("ttl_days")),
         }
-        row_owner = str(row.get("catalog_doc_id") or "")
-        row_is_ours = row_owner == str(entry.tumbler) if row_owner else not shared_chunk
-        if row_is_ours:
+        if row_written_by(entry.tumbler, row, owner_title=entry.title):
             keys = row_keys
         else:
             keys = {"tags": "", "category": "", "ttl_days": None}
@@ -451,17 +415,8 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     manifests = reader.get_manifests([str(e.tumbler) for e in candidates]) if candidates else {}
     docs: list[dict] = []
     selected = select_store_put_documents(entries, manifests, summary)
-    # One owner lookup for every note with no key of its own: only those can need the row.
-    by_tumbler = {str(e.tumbler): e for e in entries}
-    shared = _chunk_has_other_owner(
-        reader, by_tumbler,
-        [(entry, rows[0].chash) for entry, _leg, rows in selected if _own_note_keys(entry) is None],
-    )
     for entry, _leg, rows in selected:
-        rec = export_knowledge_doc(
-            t3, entry, rows,
-            shared_chunk=shared.get(str(entry.tumbler), True), summary=summary,
-        )
+        rec = export_knowledge_doc(t3, entry, rows, summary=summary)
         if rec is None:
             summary.ghosts_skipped += 1
             continue

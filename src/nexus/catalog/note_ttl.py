@@ -110,7 +110,8 @@ def row_written_by(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bo
 
     A row with no ``catalog_doc_id`` (written before the stamp, or by a path that omits it) is nobody's:
     ``False``, never a fall-back to "the only owner left". The expiry sweep asks this before reading a
-    row's TTL as a note's; the recovery-bundle export will adopt it (nexus-6pfgb.14).
+    row's TTL as a note's, and the recovery-bundle export before taking a keyless note's row values
+    (nexus-6pfgb.34).
     """
     if not isinstance(row_meta, dict) or not owner_title:
         return False

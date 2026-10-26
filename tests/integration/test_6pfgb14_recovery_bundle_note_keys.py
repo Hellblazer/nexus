@@ -111,8 +111,9 @@ def test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys(
                  ttl_days=7, source_agent="agent-b")
     assert b.status == STORED, b.reason
     row = client.get_by_id(collection, a.chunk_ids[0])
-    # The engine returns the last writer's catalog_doc_id in the row's metadata: the signal the export gates on.
-    assert row["catalog_doc_id"] == b.catalog_doc_id and row["ttl_days"] == 7
+    # The engine returns the last writer's catalog_doc_id and title in the row's metadata: the pair
+    # note_ttl.row_written_by reads, the signal the export gates on (nexus-6pfgb.34).
+    assert row["catalog_doc_id"] == b.catalog_doc_id and row["title"] == "keyed-B" and row["ttl_days"] == 7
     moved = put_note(content=body + " (moved)", collection=collection, title="keyed-B", tags="beta",
                      category="finding", ttl_days=7, source_agent="agent-b")
     assert moved.status == STORED, moved.reason
@@ -135,7 +136,7 @@ def test_a_note_stored_with_no_keys_that_wrote_the_row_last_exports_the_rows_val
     a = put_note(content=body, collection=collection, title="unset-A")
     assert b.status == STORED and a.status == STORED, (b.reason, a.reason)
     row = client.get_by_id(collection, a.chunk_ids[0])
-    assert row["catalog_doc_id"] == a.catalog_doc_id
+    assert row["catalog_doc_id"] == a.catalog_doc_id and row["title"] == "unset-A"
     assert (row["tags"], row["category"], row["ttl_days"]) == ("", "", None)
 
     summary, docs = _exported(client, tmp_path, collection)
