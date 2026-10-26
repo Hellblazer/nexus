@@ -125,23 +125,42 @@ def test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys(
     assert summary.note_keys_unrecovered == unrecovered
 
 
-def test_a_note_stored_with_no_keys_that_wrote_the_row_last_exports_the_rows_values(t2_service_env, tmp_path):
-    """B (keys) then A (every key unset) store the same text: A's write replaced the row's keys, tags
-    and category with its own empties and ttl_days with null, so the row holds nothing of B's."""
+def _put_keyless(**kw):
+    """``put_note`` as a client before nexus-6pfgb.5 wrote it: the chunk row carries the put's tags,
+    category and ttl_days, the catalog entry none of them (and no ``put_at``)."""
+    real = store_hook.catalog_store_hook_tracked
+
+    def _hook(*args, **kwargs):
+        return real(*args, **{**kwargs, "tags": "", "category": "", "ttl_days": None,
+                               "source_agent": "", "put_at": ""})
+
+    with patch.object(store_hook, "catalog_store_hook_tracked", _hook):
+        return put_note(**kw)
+
+
+def test_a_keyless_note_that_wrote_its_own_row_exports_the_rows_values(t2_service_env, tmp_path):
+    """B (keys) then A, a pre-catalog-keys put with tags, category and a TTL of its own, store the same
+    text. A's entry holds no note key; the row is A's write (A's stamp, A's title) and holds A's values,
+    so the export carries them through ``row_written_by``'s accept branch (nexus-6pfgb.34). B is not
+    the row's writer and keeps its own catalog keys."""
     client = HttpVectorClient(tenant=t2_service_env)
     collection = t3_collection_name("6pfgb14-lastwriter", t3=client)
-    body = "6pfgb14 body written last by a note with no keys"
+    body = "6pfgb14 body written last by a note whose keys are only on the row"
     b = put_note(content=body, collection=collection, title="keyed-B", tags="beta", category="finding",
                  ttl_days=7, source_agent="agent-b")
-    a = put_note(content=body, collection=collection, title="unset-A")
+    a = _put_keyless(content=body, collection=collection, title="legacy-A", tags="alpha",
+                     category="design", ttl_days=30, source_agent="agent-a")
     assert b.status == STORED and a.status == STORED, (b.reason, a.reason)
+    a_meta = make_catalog_reader().by_source_uri(uri_for(collection, "legacy-A")).meta or {}
+    assert [k for k in NOTE_META_KEYS if k in a_meta] == [], a_meta
     row = client.get_by_id(collection, a.chunk_ids[0])
-    assert row["catalog_doc_id"] == a.catalog_doc_id and row["title"] == "unset-A"
-    assert (row["tags"], row["category"], row["ttl_days"]) == ("", "", None)
+    assert row["catalog_doc_id"] == a.catalog_doc_id and row["title"] == "legacy-A"
+    assert (row["tags"], row["category"], row["ttl_days"]) == ("alpha", "design", 30)
 
     summary, docs = _exported(client, tmp_path, collection)
 
-    assert (docs["unset-A"]["tags"], docs["unset-A"]["category"], docs["unset-A"]["ttl_days"]) == ("", "", None)
+    assert (docs["legacy-A"]["tags"], docs["legacy-A"]["category"], docs["legacy-A"]["ttl_days"]) == (
+        "alpha", "design", 30)
     assert (docs["keyed-B"]["tags"], docs["keyed-B"]["category"], docs["keyed-B"]["ttl_days"]) == (
         "beta", "finding", 7)
     assert summary.note_keys_unrecovered == 0

@@ -22,6 +22,10 @@ from pathlib import Path
 import click
 
 
+#: How many unrecovered note titles ``nx catalog export`` prints before summarising the rest.
+_UNRECOVERED_TITLES_SHOWN: int = 20
+
+
 @click.command("export")
 @click.argument("output", type=click.Path(dir_okay=False, writable=True, path_type=Path))
 def export_cmd(output: Path) -> None:
@@ -50,10 +54,17 @@ def export_cmd(output: Path) -> None:
         )
     if summary.note_keys_unrecovered:
         click.echo(
-            f"  note keys not recovered: {summary.note_keys_unrecovered} note(s) with none of "
-            "their own tags, category and ttl_days in the catalog whose chunk row may hold "
-            "another note's; they export with those empty"
+            f"  note keys not recovered: {summary.note_keys_unrecovered} note(s) whose own tags, "
+            "category and ttl_days are not in the catalog (stored before 7.87.0, or brought in by "
+            "an .nxexp import) and whose chunk row cannot be shown to be their own write; they "
+            "export with those empty (ttl_days permanent). To keep a note's values, re-put it "
+            "with its tags, category and TTL using a current client, then export again:"
         )
+        titles = summary.note_keys_unrecovered_titles
+        for title in titles[:_UNRECOVERED_TITLES_SHOWN]:
+            click.echo(f"    {title or '(untitled)'}")
+        if len(titles) > _UNRECOVERED_TITLES_SHOWN:
+            click.echo(f"    ... and {len(titles) - _UNRECOVERED_TITLES_SHOWN} more")
     if summary.unresolvable_link_endpoints:
         click.echo(
             f"  WARNING: {summary.unresolvable_link_endpoints} link endpoint(s) "

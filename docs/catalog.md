@@ -456,7 +456,8 @@ Locked format decisions (design of record: T2
   row's `catalog_doc_id` is the note's tumbler and its `title` the note's
   title. A row with no stamp is nobody's, even when the note is the only
   owner left, since a departed co-owner's values stay on the row
-  (nexus-6pfgb.34). Otherwise it
+  (nexus-6pfgb.34); an untitled note, and a note brought in by an `.nxexp`
+  import (whose rows keep the source box's stamp), never match. Otherwise it
   exports with them empty and the export summary counts it when the row
   held a value (`note keys not recovered`). Import restarts a note's TTL
   clock: the expiry is `ttl_days` from the import, not from the original
