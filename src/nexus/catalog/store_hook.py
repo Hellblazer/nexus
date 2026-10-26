@@ -662,7 +662,11 @@ def resolve_knowledge_doc_for_chash(
     logs at WARNING — rather than acting on an arbitrary pick or every
     candidate: acting on the wrong one (or deleting/reconciling onto all of
     them) is a worse outcome than leaving one ghost row for the periodic
-    ``nx catalog gc`` sweep to reap.
+    ``nx catalog gc`` sweep to reap. One exception: an UNTITLED put
+    (``title == ""``) that finds several untitled candidates returns the
+    lowest tumbler, since untitled documents sharing the text are
+    interchangeable and treating them as ambiguous minted another on every
+    later untitled put (nexus-6pfgb.31).
 
     *log_event* names the calling site (e.g. ``"catalog_store_hook_dedup"``)
     so the ambiguity warning is attributable to dedup vs. delete-path vs.

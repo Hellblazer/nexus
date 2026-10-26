@@ -211,12 +211,17 @@ def test_an_untitled_put_then_another_makes_one_untitled_document(cat):
     assert len(cat.docs) == 2
 
 
-def test_two_untitled_documents_sharing_the_text_do_not_multiply_with_every_untitled_put(cat):
+@pytest.mark.parametrize("lower_first", [False, True], ids=["higher-seeded-first", "lower-seeded-first"])
+def test_two_untitled_documents_sharing_the_text_do_not_multiply_with_every_untitled_put(cat, lower_first):
     """nexus-6pfgb.31 round 2: two untitled documents (concurrent first puts leave them) made every later
     untitled put ambiguous, so each minted another (2 -> 5 after 3 puts). A put reconciles onto the
-    LOWEST tumbler instead, however the catalog orders the matches."""
-    higher = cat.seed("", source_uri="", tumbler="1.1.10")
-    lower = cat.seed("", source_uri="", tumbler="1.1.9")
+    LOWEST tumbler instead, however the catalog orders the matches (both seed orders)."""
+    if lower_first:
+        lower = cat.seed("", source_uri="", tumbler="1.1.9")
+        higher = cat.seed("", source_uri="", tumbler="1.1.10")
+    else:
+        higher = cat.seed("", source_uri="", tumbler="1.1.10")
+        lower = cat.seed("", source_uri="", tumbler="1.1.9")
 
     results = [_put("", ttl_days=1) for _ in range(3)]
 
