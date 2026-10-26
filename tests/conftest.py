@@ -350,13 +350,14 @@ def _xdist_worker_count(config) -> int | None:
 
 
 def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -> None:
-    """Refuse an xdist run that boots the engine on a Mac laptop outside a lab-run grant.
+    """Refuse an xdist run whose engine substrate can boot, on a Mac laptop outside a lab-run grant.
 
     The global rule already says any ``-n`` run is heavy and belongs on ``lab-remote``;
     several sessions share one laptop, and a parallel substrate run per session
     starves all of them. This enforces it (nexus-tvt6u). It refuses only when ALL
-    hold: macOS, no lab-run grant (and not ``lab-remote``'s host copy), the run
-    boots the engine substrate, and xdist will run more than one worker. A scoped
+    hold: macOS, no lab-run grant (and not ``lab-remote``'s host copy), the run's
+    ``NX_TEST_T2_SUBSTRATE`` is not ``none`` (so the engine CAN boot: which tests
+    boot it is not known until they run), and xdist will run more than one worker. A scoped
     serial run, ``NX_TEST_T2_SUBSTRATE=none`` and a nested pytest are never
     refused. ``NX_LOCAL_HEAVY=1`` opts out for a run that needs claude, bd or the
     laptop's credentials, and says so. Controller-only, like ``_take_suite_lease``.
@@ -393,7 +394,8 @@ def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -
         return
     pytest.exit(
         f"laptop heavy run: refusing to start. This is a Mac with no lab-run grant, and the run "
-        f"boots the engine substrate under xdist with {workers} workers; several sessions share "
+        f"is under xdist with {workers} workers with an engine substrate that can boot "
+        f"(NX_TEST_T2_SUBSTRATE is not none); several sessions share "
         f"this laptop. {_LOCAL_HEAVY_ENV}=1 runs it here anyway (for a run that needs claude, bd or "
         "this laptop's credentials); NX_TEST_T2_SUBSTRATE=none needs no engine. Run it on chas: "
         f"lab-remote -c lab-l -- uv run pytest {shlex.join(str(a) for a in args)}",
@@ -401,7 +403,7 @@ def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -
     )
 
 
-def _take_suite_lease() -> None:
+def _take_suite_lease(*, platform: str | None = None) -> None:
     """Hold the box for THIS substrate-heavy run; queue behind a live holder.
 
     The build lease made the box single-writer for Maven and the gate above
@@ -417,9 +419,13 @@ def _take_suite_lease() -> None:
     waits for once a minute. ``NX_SUITE_LEASE_WAIT=0`` keeps the immediate
     exit 75. A run that is still refused after the wait exits 75 naming the
     holder. ``NX_SUITE_LEASE_UNGUARDED=1`` runs on at once unless a wait was
-    asked for by name. Inside a lab-run grant (LAB_CPUS or LAB_MEM_MB set) the
-    lease is skipped: lab-run is the one queue there, and this stays the
-    fallback for a run with no grant.
+    asked for by name. Inside a lab-run grant (LAB_CPUS or LAB_MEM_MB set) on a
+    non-macOS box the lease is skipped: lab-run is the queue there, and this
+    stays the fallback for a run with no grant. On macOS a grant is admission
+    and accounting only (no cap), and ``tests/e2e/macos-guest/host.sh`` guard
+    and hold read the ``suite`` lease to keep a VM run off a running suite, so
+    the lease is taken there grant or no grant. ``platform`` is injected, as in
+    ``_refuse_heavy_laptop_run``.
 
     Gated on the same predicate as the build check -- only a run that will
     boot the engine competes for that budget, so `=none` runs take nothing
@@ -441,10 +447,14 @@ def _take_suite_lease() -> None:
         if _suite_lease.inside_a_holder():
             return
 
-        # Inside a lab-run grant the scheduler is the gate: lab-run queues the run
-        # before it starts, so a second lease here would be a second queue behind
-        # the first. The lease stays the fallback for a run with no grant.
-        if _lab_run_grant_present(os.environ):
+        # Inside a lab-run grant on Linux the scheduler is the gate: lab-run queues
+        # the run before it starts, so a second lease here would be a second queue
+        # behind the first. The lease stays the fallback for a run with no grant. NOT
+        # on macOS: a lab-mac grant is admission only, and the macos-guest host.sh
+        # guard/hold see a running suite only through this lease.
+        import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+        if _lab_run_grant_present(os.environ) and (_sys.platform if platform is None else platform) != "darwin":
             return
 
         wait = _suite_lease_wait_seconds()

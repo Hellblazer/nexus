@@ -73,7 +73,7 @@ def test_a_leg_refused_by_the_suite_lease_names_the_lease_and_its_holder(
 def test_the_lint_leg_shape_is_recognised_too(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """lint_leg_check returns 1 with the tail of the output, not pytest's 75."""
     msg = _refusal_message(monkeypatch, tmp_path, "0")
-    line = _check(BANNER.format(msg=msg), rc=1)
+    line = _check("Exit: " + msg + "\n" + BANNER.format(msg=msg), rc=1)  # the tail the leg prints: pytest's line, then the banner
     assert "suite lease held by pid" in line, line
 
 
@@ -82,5 +82,63 @@ def test_an_ordinary_red_still_gets_the_old_fallback() -> None:
 
 
 def test_a_failing_test_that_merely_quotes_the_refusal_is_not_rewritten() -> None:
-    line = _check("tests/x.py:1: quoted: suite lease: refusing to start. The lease is held by pid 1 (x)", rc=1)
+    """pytest's assertion-rewrite output indents a quoted string behind ``E   ``; the ``Exit: ``
+    text is mid-line there, which only the line-start anchor tells from pytest's own line."""
+    quoted = (
+        "    def test_x():\n"
+        ">       assert 'Exit: suite lease: refusing to start. The lease is held by pid 1 (x)' == ''\n"
+        "E       AssertionError: assert 'Exit: suite lease: refusing to start. The lease is held by pid 1 (x)' == ''\n"
+        "E         Exit: suite lease: refusing to start. The lease is held by pid 1 (x)\n"
+        "FAILED tests/x.py::test_x"
+    )
+    line = _check(quoted, rc=1)
     assert "suite lease held by" not in line, line
+
+
+def test_the_banner_alone_is_not_the_exit_line() -> None:
+    """The ``! _pytest.outcomes.Exit: ... !`` banner is mid-line; pytest's own line is what is matched."""
+    line = _check(BANNER.format(msg="suite lease: refusing to start. The lease is held by pid 1 (x)"), rc=1)
+    assert "suite lease held by" not in line, line
+
+
+# -- no pytest leg of the preflight may queue on the suite lease (nexus-tvt6u) ----------------
+
+
+def test_no_pytest_leg_of_the_preflight_can_queue_behind_another_run(tmp_path: Path) -> None:
+    """The preflight's contract is seconds-scale, and a pytest leg that takes the suite lease
+    waits up to 30 minutes behind another session's full suite with no output (``check``
+    captures it). Every pytest leg must therefore run with ``NX_TEST_T2_SUBSTRATE=none`` (no
+    lease) or ``NX_SUITE_LEASE_WAIT=0`` (refuse at once). The real script runs from a copy in a
+    scratch tree with a stub ``uv`` that records each call's environment."""
+    root = tmp_path / "tree"
+    (root / "tests" / "e2e" / "lib").mkdir(parents=True)
+    (root / "tests" / "e2e" / "release-preflight.sh").write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+    (root / "tests" / "e2e" / "lib" / "mandatory_pins.sh").write_text(
+        "MANDATORY_PIN_MARK_EXPR=pin\nMANDATORY_PIN_EXPECTED=2\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "uv-calls"
+    uv = bin_dir / "uv"
+    uv.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s|%s|%s\\n" "${{NX_TEST_T2_SUBSTRATE-UNSET}}" "${{NX_SUITE_LEASE_WAIT-UNSET}}" "$*" >> {log}\n'
+        'case "$*" in\n'
+        '  *--collect-only*) printf "a::b\\nc::d\\n" ;;\n'
+        '  *"-m lint"*) echo "500 passed in 1.00s" ;;\n'
+        "esac\n"
+        "exit 0\n", encoding="utf-8")
+    uv.chmod(0o755)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("NX_TEST_T2_SUBSTRATE", "NX_SUITE_LEASE_WAIT", "RELEASE_PREFLIGHT_SOURCE_ONLY")}
+    env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", GITHUB_TOKEN="stub")
+    proc = subprocess.run(["bash", str(root / "tests" / "e2e" / "release-preflight.sh")],
+                          capture_output=True, text=True, env=env, timeout=120, cwd=str(root))
+    assert "PREFLIGHT PASSED" in proc.stdout, proc.stdout + proc.stderr
+    calls = [line.split("|", 2) for line in log.read_text(encoding="utf-8").splitlines()]
+    pytest_calls = [(sub, wait, args) for sub, wait, args in calls if "pytest" in args.split()]
+    # ci-evidence-contexts, mandatory-pins (collect + run), the lint leg, pin-tests: five calls, counted so
+    # a leg that stops reaching pytest cannot turn this into a pass over nothing.
+    assert len(pytest_calls) == 5, calls
+    for sub, wait, args in pytest_calls:
+        assert sub == "none" or wait == "0", f"a preflight pytest leg can queue on the suite lease: {args}"

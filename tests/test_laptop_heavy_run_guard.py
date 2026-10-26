@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The laptop heavy-run guard (nexus-tvt6u): an xdist run that boots the engine on a Mac
-laptop, with no lab-run grant, goes to ``lab-remote`` instead of starving the other sessions.
+"""The laptop heavy-run guard (nexus-tvt6u): an xdist run whose engine substrate can
+boot (``NX_TEST_T2_SUBSTRATE`` is not ``none``) on a Mac laptop, with no lab-run grant, goes to ``lab-remote`` instead of starving the other sessions.
 
 The platform and the environment are injected, so none of this depends on the host being a
 Mac or on a grant being present. The one run-through that reads the real environment
@@ -23,7 +23,7 @@ _SUBSTRATE_ENV = "NX_TEST_T2_SUBSTRATE"
 def gate(monkeypatch: pytest.MonkeyPatch):
     """The real conftest module, with the engine-substrate predicate on and no nesting."""
     module = sys.modules["tests.conftest"]
-    monkeypatch.delenv(_SUBSTRATE_ENV, raising=False)  # unset means "optin": boots the engine
+    monkeypatch.delenv(_SUBSTRATE_ENV, raising=False)  # unset means "optin": the engine can boot
     monkeypatch.setattr(_suite_lease, "inside_a_holder", lambda: False)
     for name in ("LAB_CPUS", "LAB_MEM_MB", "LAB_REMOTE", "NX_LOCAL_HEAVY", "NX_SUITE_LEASE_WAIT",
                  module._SUITE_LEASE_UNGUARDED_ENV):
@@ -51,6 +51,8 @@ def test_a_mac_xdist_substrate_run_with_no_grant_is_refused_with_the_lab_remote_
     assert err.value.returncode == 75
     assert "laptop heavy run: refusing to start" in err.value.msg
     assert "lab-remote -c lab-l -- uv run pytest tests/db -n 4 -k 'a b'" in err.value.msg
+    # The predicate is "substrate is not none" (the engine CAN boot), and the message must not claim more.
+    assert "NX_TEST_T2_SUBSTRATE is not none" in err.value.msg and "boots the engine" not in err.value.msg
 
 
 def test_an_unresolved_n_auto_counts_as_more_than_one(gate) -> None:
@@ -106,7 +108,8 @@ def test_a_nested_pytest_inside_a_holder_is_not_refused(gate, monkeypatch: pytes
 # -- inside a grant the lease steps aside; with no grant it is the fallback ----------------
 
 
-def test_a_lab_run_grant_skips_the_suite_lease_entirely(gate, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_a_lab_run_grant_off_macos_skips_the_suite_lease_entirely(gate, monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
     taken: list[str] = []
     monkeypatch.setattr(gate, "_selected_t2_substrate_boots_engine", lambda: True)
     monkeypatch.setattr(gate, "_suite_lease_release", None)
@@ -114,8 +117,34 @@ def test_a_lab_run_grant_skips_the_suite_lease_entirely(gate, monkeypatch: pytes
     monkeypatch.setattr(_suite_lease, "acquire", lambda *a, **k: taken.append("acquire"))
     monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "0")  # would be an immediate refusal against that holder
     monkeypatch.setenv("LAB_CPUS", "8")
-    _run_expecting_to_go_ahead(gate._take_suite_lease)  # does not raise, does not acquire
+    _run_expecting_to_go_ahead(gate._take_suite_lease, platform=platform)  # does not raise, does not acquire
     assert taken == [] and gate._suite_lease_release is None
+
+
+@pytest.mark.parametrize("grant", ["LAB_CPUS", "LAB_MEM_MB"])
+def test_a_lab_run_grant_on_macos_still_takes_the_suite_lease(gate, monkeypatch: pytest.MonkeyPatch, grant: str) -> None:
+    """hellmini's lab-mac grant is admission and accounting only (no cap), and
+    tests/e2e/macos-guest/host.sh guard and hold read the ``suite`` lease to keep a VM run off a
+    running suite: a grant must not hide the suite from them."""
+    taken: list[str] = []
+    monkeypatch.setattr(gate, "_selected_t2_substrate_boots_engine", lambda: True)
+    monkeypatch.setattr(gate, "_suite_lease_release", None)
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: None)
+    monkeypatch.setattr(_suite_lease, "acquire", lambda *a, **k: taken.append("acquire") or (lambda: None))
+    monkeypatch.setenv(grant, "8")
+    _run_expecting_to_go_ahead(gate._take_suite_lease, platform="darwin")
+    assert taken == ["acquire"]
+
+
+def test_a_lab_run_grant_on_macos_queues_behind_a_hold(gate, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate, "_selected_t2_substrate_boots_engine", lambda: True)
+    monkeypatch.setattr(gate, "_suite_lease_release", None)
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: "pid 4242 (mac-guest vm)")
+    monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "0")
+    monkeypatch.setenv("LAB_MEM_MB", "10240")
+    with pytest.raises(pytest.exit.Exception) as err:
+        gate._take_suite_lease(platform="darwin")
+    assert err.value.returncode == 75 and "pid 4242 (mac-guest vm)" in err.value.msg
 
 
 def test_without_a_grant_the_lease_is_still_taken(gate, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -66,7 +66,9 @@ if ! g merge --no-edit origin/main >/dev/null 2>&1; then
     echo "back-merge: $LEDGER resolved to main's version (the cut emptied the entries it shipped)"
 fi
 
-VERIFY_CMD="${PLUGIN_CUT_BACK_MERGE_VERIFY_CMD:-NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 uv run pytest tests/test_plugin_release_drift_ledger.py -q}"
+# NX_TEST_T2_SUBSTRATE=none: the drift contract needs no engine (77 passed, 0 skipped under
+# none, 2026-10-25), so it takes no suite lease and does not queue behind another run.
+VERIFY_CMD="${PLUGIN_CUT_BACK_MERGE_VERIFY_CMD:-NX_TEST_T2_SUBSTRATE=none NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 uv run pytest tests/test_plugin_release_drift_ledger.py -q}"
 if [ "$VERIFY" = 1 ]; then
     if ! (cd "$REPO" && bash -c "$VERIFY_CMD"); then
         echo "back-merge: develop's drift contract is RED after the merge — a ledger entry develop added after the cut was dropped by the resolution; re-add it, commit, and re-run the contract" >&2

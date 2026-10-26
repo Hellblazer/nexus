@@ -24,7 +24,10 @@
 # ADMISSION CRITERIA -- a check belongs here only if it is genuinely release-
 # BLOCKING and deterministic (no ambient service, no sandbox HOME). Anything
 # slower stays in the battery proper. This file must never grow into a second
-# battery.
+# battery. A pytest leg here runs with NX_TEST_T2_SUBSTRATE=none (or, if it ever
+# needs the engine, NX_SUITE_LEASE_WAIT=0) so it never queues on the suite lease
+# behind another session's run, silently, for up to 30 minutes
+# (tests/test_release_preflight_lease_detail.py pins this).
 #
 # NON-VACUITY: a check whose dependency is absent reports SKIP and the run
 # ends UNVERIFIED (exit 2), never PASSED. "Could not check" is not "fine".
@@ -55,12 +58,14 @@ record () { # status, name, detail
 # lease_refusal_detail OUTPUT: "suite lease held by <holder>" when OUTPUT carries the
 # suite lease's pytest.exit banner ("Exit: suite lease: refusing to start|run. The
 # lease is held by <holder>; ..." or "... held by <holder> after waiting N s ..."),
-# else nothing. Anchored on pytest's own "Exit: " prefix so a test that merely
-# QUOTES the refusal in a failing assertion is not mistaken for it. No pipe into an
-# early-exit consumer (tests/test_pipefail_early_exit_consumer_lint.py).
+# else nothing. Anchored at LINE START on pytest's own "Exit: " line (pytest writes it
+# to stderr on its own line before the "! _pytest.outcomes.Exit: ... !" banner), so a
+# failing test whose assertion QUOTES the refusal ("E   ... Exit: suite lease: ...",
+# or the banner's mid-line "_pytest.outcomes.Exit:") is not mistaken for it. No pipe
+# into an early-exit consumer (tests/test_pipefail_early_exit_consumer_lint.py).
 lease_refusal_detail () {
   local line holder
-  line="$(printf '%s' "$1" | grep -aE 'Exit: suite lease: refusing to (start|run)\.')"
+  line="$(printf '%s' "$1" | grep -aE '^Exit: suite lease: refusing to (start|run)\.')"
   [ -n "$line" ] || return 0
   line="$(first_line "$line")"
   case "$line" in
@@ -134,7 +139,9 @@ check "wire-contract-ledger"      uv run python scripts/check_engine_release_flo
 # 2. THE 13.5-MINUTE ONE. Markers disabled so the integration-marked live
 #    branch-protection drift test actually RUNS -- under default selection it
 #    is deselected and this proves nothing.
-check "ci-evidence-contexts"      uv run pytest tests/scripts/test_check_release_ci_evidence.py -q -m ""
+#    NX_TEST_T2_SUBSTRATE=none: it needs no engine (40 passed, 0 skipped under none,
+#    2026-10-25), so it takes no suite lease and never queues behind another run.
+check "ci-evidence-contexts"      env NX_TEST_T2_SUBSTRATE=none uv run pytest tests/scripts/test_check_release_ci_evidence.py -q -m ""
 
 # 3. The GitHub-backed `mandatory_regression_pin` tests (nexus-z0o2p.41), run
 #    here under the operator's REAL HOME where gh auth exists. They need `gh`
@@ -182,7 +189,10 @@ check "mandatory-pins"            mandatory_pins_run
 #    executed and trip on a perfectly good run.
 lint_leg_check () {
   local out plain
-  out="$(NO_COLOR=1 uv run pytest -m lint -q 2>&1)"
+  # NX_TEST_T2_SUBSTRATE=none, as ci.yml's test-lint job runs it ("pure-Python AST/regex/
+  # manifest scanners with no T2 dependency"): measured 2026-10-25 under none, 2208
+  # passed and 4 skipped (none for the substrate), so no engine and no suite lease.
+  out="$(NX_TEST_T2_SUBSTRATE=none NO_COLOR=1 uv run pytest -m lint -q 2>&1)"
   plain="$(printf '%s' "$out" | sed -e 's/\x1b\[[0-9;]*m//g')"
   # No `| grep -q` here: that is the very pattern this leg lints for. Match
   # against the captured variable instead, exactly as the lint's own remedy
@@ -195,7 +205,9 @@ lint_leg_check () {
 check "lint-leg+floor"            lint_leg_check
 #    The pin tests that are NOT lint-marked (engine version, release ledgers,
 #    PG bundle parity, deadline ordering).
-check "pin-tests"                 uv run pytest -q -p no:cacheprovider \
+#    NX_TEST_T2_SUBSTRATE=none: none of them needs the engine (120 passed, 0 skipped
+#    under none, 2026-10-25), so none takes the suite lease.
+check "pin-tests"                 env NX_TEST_T2_SUBSTRATE=none uv run pytest -q -p no:cacheprovider \
                                     tests/test_engine_version.py tests/test_plugin_release_drift_ledger.py \
                                     tests/test_ci_release_ledger_gate.py tests/test_pg_bundle_version_parity.py \
                                     tests/test_embed_deadline_default_ordering.py

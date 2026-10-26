@@ -678,6 +678,35 @@ class TestBackMerge:
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
 
+    def test_the_default_verify_command_runs_without_the_engine_substrate(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """The drift contract needs no engine, so the default verify must run with
+        NX_TEST_T2_SUBSTRATE=none: any other value takes the suite lease and the
+        verify then queues, silently, behind another session's full suite for up to
+        30 minutes (nexus-tvt6u). A stub ``uv`` records the environment it is run in."""
+        repo = _mini_nexus(tmp_path)
+        branch = _cut(repo)["branch"]
+        _merge_cut_into_origin_main(repo, branch)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        seen = tmp_path / "uv-seen"
+        uv = bin_dir / "uv"
+        uv.write_text(
+            f'#!/bin/sh\nprintf "%s|%s|%s\\n" "$NX_TEST_T2_SUBSTRATE" "$NX_REQUIRE_PLUGIN_DRIFT_CHECK" "$*" > {seen}\n',
+            encoding="utf-8",
+        )
+        uv.chmod(0o755)
+        # The outer run's own substrate must not leak in: it would make the script's setting unobservable.
+        scrubbed = ("PLUGIN_CUT_BACK_MERGE_VERIFY_CMD", "NX_TEST_T2_SUBSTRATE")
+        env = {k: v for k, v in os.environ.items() if k not in scrubbed}
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+        proc = subprocess.run(["bash", str(BACK_MERGE), str(repo)], capture_output=True, text=True, env=env)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert seen.read_text(encoding="utf-8").strip() == (
+            "none|1|run pytest tests/test_plugin_release_drift_ledger.py -q"
+        )
+
     def test_a_failed_resolution_commit_aborts_the_merge(self, tmp_path: pathlib.Path) -> None:
         """If the resolution commit itself fails (a rejecting hook stands in
         for GPG/disk), the script must not leave the checkout mid-merge."""

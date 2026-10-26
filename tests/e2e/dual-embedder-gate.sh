@@ -573,7 +573,8 @@ dg_seed_voyage_collection() {
 # Voyage local.embed_model, and, like every integration test, they run on the suite's own engine
 # substrate (built from this tree's jar), which inherits the key and NX_EMBED_PROFILE=voyage from this
 # environment; under the bge profile the engine refuses a new Voyage collection. NX_SUITE_LEASE_WAIT=1
-# queues behind another substrate run on the box instead of refusing (the first live run met one).
+# is the suite lease's default since nexus-tvt6u (queue behind another substrate run on the box
+# instead of refusing; the first live run met one); the export stays so this leg queues even if that default moves.
 # NX_BUILD_LEASE_WAIT does the same for the build lease: the release battery runs this leg beside
 # local-service-gate.sh, which holds that lease while it stamps release.properties, and without the
 # wait the substrate refused at once and the leg went red with no verdict (7.85.0 battery, 2026-10-23).
