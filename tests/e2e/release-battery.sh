@@ -2,6 +2,7 @@
 # Release battery driver (nexus-mfage fix B item 4, nexus-fp7ez item d).
 #
 #   tests/e2e/release-battery.sh [--max-parallel N] [--only a,b,c] [--skip-preflight] [--plan]
+#                                [--plugin-only vX.Y.Z]
 #
 # Five legs and a preflight (cleanup step 11, nexus-0r1uz; dual nexus-oc2bk; resolve nexus-2k66t.4.4):
 #   mvv    tests/e2e/fresh-install-mvv.sh                              the core install invariant
@@ -22,6 +23,19 @@
 #
 # Concurrency is asserted, not assumed (nexus-mfage AC5): the group's
 # start/end stamps must overlap, or the run is red with CONCURRENCY NOT PROVEN.
+#
+# --plugin-only vX.Y.Z (nexus-rbmja.3; vX.Y.Z = the last client tag, the branch
+# base): the plugin-only fast lane. scripts/check_plugin_only_eligibility.py
+# --base vX.Y.Z runs first; anything but ELIGIBLE refuses the battery (exit 2)
+# before a leg starts. lsg, pkgup, mvv, dual and resolve are shown in the table as
+# SKIPPED(plugin-only: inputs identical to vX.Y.Z), never omitted, and two legs
+# defined only in this mode run in the group:
+#   skew      tests/e2e/hook-cli-skew/run.sh             the plugin against every CLI in the field
+#   lockstep  tests/e2e/plugin-lockstep-tests.sh         the plugin/CLI lockstep tests
+# The closing line then names the mode, and a plugin-only run never prints a bare
+# "RELEASE BATTERY PASSED". The unit suite is not a leg here or in the full mode
+# (the release skill runs it serial to the battery); the lint bucket and the pin
+# tests are inside the preflight. --only and --plan compose.
 set -uo pipefail
 (( BASH_VERSINFO[0] >= 4 )) || { echo "bash >= 4 required (found $BASH_VERSION)" >&2; exit 2; }
 export NO_COLOR=1
@@ -35,6 +49,8 @@ MAX_PARALLEL="${MAX_PARALLEL:-4}"
 ONLY=""
 SKIP_PREFLIGHT=0
 PLAN_ONLY=0
+PLUGIN_ONLY=0
+PLUGIN_ONLY_BASE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
@@ -43,11 +59,18 @@ while [ $# -gt 0 ]; do
     --only=*) ONLY="${1#--only=}"; shift ;;
     --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
     --plan) PLAN_ONLY=1; shift ;;
+    --plugin-only) [ $# -ge 2 ] || { echo "--plugin-only needs the last client tag (vX.Y.Z)" >&2; exit 2; }
+                   PLUGIN_ONLY=1; PLUGIN_ONLY_BASE="$2"; shift 2 ;;
+    --plugin-only=*) PLUGIN_ONLY=1; PLUGIN_ONLY_BASE="${1#--plugin-only=}"; shift ;;
     -h|--help) sed -n '2,/^set -uo pipefail/p' "$0" | sed '$d'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "--max-parallel must be a positive integer" >&2; exit 2; }
+if [ "$PLUGIN_ONLY" = 1 ]; then
+  [[ "$PLUGIN_ONLY_BASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "--plugin-only wants the last client tag as vX.Y.Z (got '$PLUGIN_ONLY_BASE')" >&2; exit 2; }
+fi
 # >>> BEGIN moving-tree guard (nexus-57cvk) -- extracted verbatim by
 # tests/test_release_battery_refuses_moving_tree.py; keep both markers.
 #
@@ -109,6 +132,20 @@ fi
 source "$REPO_ROOT/tests/e2e/lib/python.sh"
 e2e_python_resolve || exit 2
 
+# Plugin-only mode: the eligibility gate runs FIRST, before the work dir or any leg exists. Eligible
+# means exit 0 AND its own PASSED verdict line; a gate that exits 0 and says nothing proves nothing
+# (the nexus-f2g8u class), so that refuses too, as does UNVERIFIED (could-not-check is never a pass).
+if [ "$PLUGIN_ONLY" = 1 ]; then
+  ELIG_OUT="$("$E2E_PYTHON" scripts/check_plugin_only_eligibility.py --base "$PLUGIN_ONLY_BASE" 2>&1)"; ELIG_RC=$?
+  ELIG_LAST="$(printf '%s\n' "$ELIG_OUT" | grep -v '^[[:space:]]*$' | tail -1 || true)"
+  if [ "$ELIG_RC" -ne 0 ] || [ "$ELIG_LAST" != "PLUGIN-ONLY ELIGIBILITY PASSED" ]; then
+    [ -z "$ELIG_OUT" ] || printf '%s\n' "$ELIG_OUT" >&2
+    echo "BATTERY REFUSED: plugin-only mode: ${ELIG_LAST:-(no verdict line; eligibility exit $ELIG_RC)}" >&2
+    exit 2
+  fi
+  printf '%s\n' "$ELIG_OUT"
+fi
+
 # Short root on purpose: leg HOMEs nest .config/nexus/postgres under it, and
 # keeping the root short keeps every per-leg path (logs, datadirs) short. It is
 # not a unix-socket guard: the bundled PG is TCP-only (unix_socket_directories
@@ -150,7 +187,7 @@ _reap_our_clusters() {
 }
 trap _reap_our_clusters EXIT INT TERM
 
-echo "RELEASE BATTERY: work=$WORK max-parallel=$MAX_PARALLEL tree=$(git rev-parse --short HEAD)$(git diff --quiet && git diff --cached --quiet || printf ' (dirty)')"
+echo "RELEASE BATTERY: work=$WORK max-parallel=$MAX_PARALLEL tree=$(git rev-parse --short HEAD)$(git diff --quiet && git diff --cached --quiet || printf ' (dirty)')${PLUGIN_ONLY_BASE:+ mode=plugin-only base=$PLUGIN_ONLY_BASE}"
 
 # ── leg table ────────────────────────────────────────────────────────────────
 declare -A LEG_CMD LEG_VERDICT LEG_STATUS LEG_START LEG_END LEG_RC LEG_LINE LEG_PHASE
@@ -177,6 +214,18 @@ define_leg dual       group  "DUAL-EMBEDDER GATE (PASSED|FAILED)"       tests/e2
 # macOS 13 negative control. Network, no install; release battery and by hand only,
 # never the default suite. Offline self-test: tests/e2e/constraints_resolve_gate_test.sh.
 define_leg resolve    group  "CONSTRAINTS RESOLVE GATE (PASSED|FAILED)" tests/e2e/constraints-resolve-gate.sh
+
+# nexus-rbmja.3: the plugin-only fast lane. The five legs above stay in the table and are marked
+# SKIPPED, never omitted (their inputs are the last client tag's, byte for byte, which the
+# eligibility gate above just proved); the two legs below exist only in this mode.
+PLUGIN_SKIPPED=0
+if [ "$PLUGIN_ONLY" = 1 ]; then
+  for leg in lsg pkgup mvv dual resolve; do
+    LEG_STATUS[$leg]="SKIPPED(plugin-only: inputs identical to $PLUGIN_ONLY_BASE)"; PLUGIN_SKIPPED=$((PLUGIN_SKIPPED+1))
+  done
+  define_leg skew       group  "HOOK-CLI SKEW GATE (PASSED|FAILED)"       tests/e2e/hook-cli-skew/run.sh
+  define_leg lockstep   group  "PLUGIN LOCKSTEP TESTS (PASSED|FAILED)"    tests/e2e/plugin-lockstep-tests.sh
+fi
 
 ONLY_SKIPPED=0
 if [ -n "$ONLY" ]; then
@@ -210,14 +259,17 @@ start_leg() {
   LEG_PID[$leg]=$!
 }
 declare -A LEG_PID
-# The closing lines, and the battery's exit status. Reads RED, ONLY_SKIPPED.
+# The closing lines, and the battery's exit status. Reads RED, ONLY_SKIPPED, PLUGIN_ONLY, PLUGIN_SKIPPED.
 battery_verdict() {  # battery_verdict <red-count>
-  local red="$1" why=() joined
+  local red="$1" why=() joined mode=""
   [ "${ONLY_SKIPPED:-0}" -eq 0 ] || why+=("${ONLY_SKIPPED} leg(s) skipped by --only")
+  [ "$PLUGIN_ONLY" != 1 ] || mode="PLUGIN-ONLY vs ${PLUGIN_ONLY_BASE}: ${PLUGIN_SKIPPED} leg(s) skipped by design"
   if [ "$red" -eq 0 ]; then
     if [ "${#why[@]}" -gt 0 ]; then
       joined="$(printf '%s; ' "${why[@]}")"
-      echo "RELEASE BATTERY PASSED (PARTIAL: ${joined%; } — not a release verdict)"
+      echo "RELEASE BATTERY PASSED (PARTIAL: ${joined%; } — not a release verdict${mode:+; $mode})"
+    elif [ -n "$mode" ]; then
+      echo "RELEASE BATTERY PASSED ($mode)"
     else
       echo "RELEASE BATTERY PASSED"
     fi
@@ -301,7 +353,9 @@ GROUP_T1=$(date +%s)
 BATTERY_T1=$(date +%s)
 echo
 echo "RELEASE BATTERY REPORT (logs: $LOGS)"
-printf '%-11s %-22s %8s  %s\n' LEG STATUS WALL_S VERDICT
+STATUS_W=22
+for leg in "${ORDER[@]}"; do [ "${#LEG_STATUS[$leg]}" -le "$STATUS_W" ] || STATUS_W="${#LEG_STATUS[$leg]}"; done
+printf '%-11s %-*s %8s  %s\n' LEG "$STATUS_W" STATUS WALL_S VERDICT
 RED=0; SERIAL_SUM=0; MAX_OVERLAP=0
 for leg in "${ORDER[@]}"; do
   wall=""
@@ -309,7 +363,7 @@ for leg in "${ORDER[@]}"; do
     wall=$(( LEG_END[$leg] - LEG_START[$leg] ))
     [ "${LEG_PHASE[$leg]}" = group ] && SERIAL_SUM=$(( SERIAL_SUM + wall ))
   fi
-  printf '%-11s %-22s %8s  %s\n' "$leg" "${LEG_STATUS[$leg]}" "$wall" "${LEG_LINE[$leg]}"
+  printf '%-11s %-*s %8s  %s\n' "$leg" "$STATUS_W" "${LEG_STATUS[$leg]}" "$wall" "${LEG_LINE[$leg]}"
   case "${LEG_STATUS[$leg]}" in PASSED|SKIPPED*|"NOT RUN"*) ;; *) RED=$((RED+1)) ;; esac
 done
 # max overlap of the group's [start,end] intervals: the AC5 proof
