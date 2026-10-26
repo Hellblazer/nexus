@@ -45,7 +45,7 @@ Passed through whole:
 - a `Read` with an `offset` or a `limit`: the model sliced it itself, so following the note, or reading a slice of a spill file, costs nothing extra and is never cut again;
 - a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `REGISTER.md`, or anything under a `skills/`, `agents/`, `commands/` or `rules/` directory, so a large source file under, say, `src/nexus/commands/` also passes whole; either path separator, any case);
 - `Bash` output Claude Code has already moved to a file of its own (past about 30 KB: `persistedOutputPath`, `rawOutputPath`, or output that starts with its `<persisted-output>` marker; output that only quotes the marker further in is still cut), and image output;
-- a `Bash` call whose command names the spill directory: it is reading a spill file back (`sed -n`, `head`, `grep` on it), and cutting it again would only spill the spill (Claude Code's own cap of about 30 KB still applies);
+- a `Bash` call whose command names the spill directory, up to 4 times `limit` (16 KB by default, the slice the `Read` note suggests): it is reading a spill file back (`sed -n`, `head`, `grep` on it), and cutting it would only spill the spill. The match is on the directory's name, `claude-tool-spill-<user>`, so `$TMPDIR/...`, a `cd` into it and either separator count. A larger read is cut and saved like any other;
 - every call a subagent makes;
 - every call in a headless run, unless `includeHeadless` is on.
 

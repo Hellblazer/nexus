@@ -597,26 +597,53 @@ test('another tool returning a Bash-shaped or Read-shaped result passes whole', 
 
 // ---------------------------------------------------------------- Bash: reading a spill file back (nexus-i9a1p)
 
-test('a Bash command that reads a spill file back passes whole and spills nothing', async ($, on) => {
+const SPILL = '/var/tmp/x/claude-tool-spill-sam'
+
+// Each command names the spill directory in a different spelling; each output is 10 KB, over the limit and under 4x.
+for (const command of [
+  `sed -n 10,900p ${SPILL}/toolu_1.txt`,
+  'sed -n 1,400p "$TMPDIR/claude-tool-spill-sam/toolu_1.txt"',
+  'cd /var/tmp/x/claude-tool-spill-sam && head -c 10000 toolu_1.txt',
+  'type C:\\Temp\\claude-tool-spill-sam\\toolu_1.txt',
+  `ls ${SPILL}; head -c 10000 ${SPILL}/toolu_1.txt`,
+  `ls ${SPILL}`,
+]) {
+  test(`a Bash read of a spill file under 4x the limit passes whole: ${command}`, async ($, on) => {
+    const writes = spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
+    const stdout = exact(10_000)
+    on('tool.call', () => BIG_BASH(stdout))
+
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+
+    expect(r.result).toEqual({ stdout, stderr: '' })
+    expect(writes).toHaveLength(0)
+  })
+}
+
+test('a Bash read of a spill file over 4x the limit is cut and saved like any other', async ($, on) => {
   const writes = spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
-  const stdout = lines(1_000)
+  const stdout = lines(2_000)
+  expect(size(stdout)).toBeGreaterThan(16_000)
   on('tool.call', () => BIG_BASH(stdout))
 
-  const r: any = await $.tool.call({ tool: 'Bash', command: 'sed -n 10,900p /var/tmp/x/claude-tool-spill-sam/toolu_1.txt' })
-
-  expect(r.result).toEqual({ stdout, stderr: '' })
-  expect(writes).toHaveLength(0)
-})
-
-test('a command that only shares a prefix with the spill directory is still cut', async ($, on) => {
-  const writes = spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
-  on('tool.call', () => BIG_BASH(lines(1_000)))
-
-  const r: any = await $.tool.call({ tool: 'Bash', command: 'cat /var/tmp/x/claude-tool-spill-samuel/a.txt' })
+  const r: any = await $.tool.call({ tool: 'Bash', command: `cat ${SPILL}/toolu_1.txt` })
 
   expect(writes).toHaveLength(1)
+  expect(writes[0].text).toBe(stdout)
   expect(r.result.stdout).toContain('[tool-spill:')
 })
+
+for (const command of ['cat /var/tmp/x/claude-tool-spill-samuel/a.txt', 'cat /var/tmp/x/claude-tool-spill-sam.bak']) {
+  test(`a path that only shares a prefix with the spill directory is still cut: ${command}`, async ($, on) => {
+    const writes = spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
+    on('tool.call', () => BIG_BASH(exact(10_000)))
+
+    const r: any = await $.tool.call({ tool: 'Bash', command })
+
+    expect(writes).toHaveLength(1)
+    expect(r.result.stdout).toContain('[tool-spill:')
+  })
+}
 
 test('the Bash note points at a sliced Read of the spill file', async ($, on) => {
   const writes = spy(on)

@@ -47,7 +47,7 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `tool-spill/hooks/register.ts` (nexus-i9a1p): a Bash command that names the spill directory (reading a spill file back with `sed`, `head` or `grep`) passes whole instead of being cut and spilled again, and the note says to read a slice with the Read tool, which is never cut
+- `tool-spill/hooks/register.ts` (nexus-i9a1p): a Bash command that names the spill directory (reading a spill file back with `sed`, `head` or `grep`, in any spelling of the path) passes whole up to 4 times the limit instead of being cut and spilled again, and the note says to read a slice with the Read tool, which is never cut
 
 ## Deferred to the next client release
 
