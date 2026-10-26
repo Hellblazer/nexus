@@ -172,6 +172,96 @@ def _assert_named_source_and_primary_evidence(fx, reader):
     return primary
 
 
+def _assert_t2_lifecycle_stream(fx, reader) -> None:
+    """nexus-jypmj.1.7 (A7): the T2 lifecycle stream against the real catalog and the real T2 client,
+    and a real second tenant. The two RDR-084 documents have T2 records under the same titles in two
+    projects (`<owner name>_rdr`) with different content, so a read of the wrong project shows in the
+    text; a code document is a non-RDR source; the second tenant holds a decoy under the SAME project
+    name and owns none of the first tenant's catalog."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.db.t2.http_memory_store import HttpMemoryStore
+    from nexus.mcp_infra import t2_ctx
+    from nexus.plans.evidence import OwnerResolution, SourceRef
+    from nexus.plans.lifecycle_stream import read_lifecycle_stream
+    from nexus.plans.primary_evidence import resolve_named_sources
+    from nexus.plans.reserved_stream import ReservedStream
+    from tests._engine_substrate import ensure_engine, minted_test_tenant
+
+    def owner(tumbler):
+        return OwnerResolution("resolved", tumbler, (("project", tumbler),))
+
+    def life(refs, qualifier, cat=reader, t2_get=None, resolution=None):
+        res = resolution or resolve_named_sources([SourceRef.parse(r) for r in refs], qualifier, cat=cat)
+        if t2_get is not None:
+            return res, read_lifecycle_stream(res, cat=cat, t2_get=t2_get)
+        with t2_ctx() as db:
+            return res, read_lifecycle_stream(res, cat=cat, t2_get=lambda p, t: db.get(project=p, title=t))
+
+    # 1. the ART source reads the ART project, and only it
+    res, art = life(["RDR-084"], owner(fx.art_owner))
+    assert res.sources[0].rdr_number == 84
+    assert [(r.kind, r.project, r.title, r.text) for r in art.records] == [
+        ("metadata", g.ART_T2_PROJECT, "084", g.ART_T2_RECORDS["084"].strip()),
+        ("gate-latest", g.ART_T2_PROJECT, "084-gate-latest", g.ART_T2_RECORDS["084-gate-latest"].strip())]
+    assert art.reads <= 8 and art.sources[0].status == "read"
+    assert not any("Nexus plan-hygiene" in r.text for r in art.records), "no Nexus record reaches an ART RDR"
+    # 2. the Nexus source reads the Nexus project
+    _, nexus = life(["RDR-084"], owner(fx.nexus_owner))
+    assert {r.project for r in nexus.records} == {g.NEXUS_T2_PROJECT}
+    assert [r.text for r in nexus.records] == [v.strip() for v in g.NEXUS_T2_RECORDS.values()]
+    # 3. no qualifier, two projects: ambiguous, no stream, and the envelope row says why
+    _, ambiguous = life(["RDR-084"], OwnerResolution("none"))
+    assert ambiguous.records == () and ambiguous.reads == 0
+    assert ambiguous.sources[0].status == "not_resolved" and "candidates" in ambiguous.sources[0].detail
+    # 4. a code document named by its tumbler is a non-RDR source: no stream, no T2 read
+    code_res, code = life([fx.code_docs[0]], OwnerResolution("none"))
+    assert code_res.sources[0].status == "resolved" and code_res.sources[0].rdr_number is None
+    assert code.records == () and code.reads == 0 and code.sources[0].status == "not_rdr"
+    # 5. the same RDR named by its tumbler resolves to an RDR and reads the same records
+    tumbler_res, by_tumbler = life([fx.art_rdr], OwnerResolution("none"))
+    assert tumbler_res.sources[0].rdr_number == 84
+    assert [r.text for r in by_tumbler.records] == [r.text for r in art.records]
+    # 6. the records lead the reserved share and the share cap evicts chunks, never them
+    stream = ReservedStream.from_evidence(None, extra=art.reserved_items())
+    assert stream is not None and [i.raw for i in stream.items] == [r.text for r in art.records]
+
+    # 7. a second tenant: it holds a decoy record under the first tenant's PROJECT NAME, owns none of
+    # the first tenant's catalog, and gets no stream for the first tenant's source.
+    state = ensure_engine()
+    with minted_test_tenant(state) as (_tenant_b, token_b):
+        memory_b = HttpMemoryStore(base_url=state["base_url"], _token=token_b)
+        cat_b = HttpCatalogClient(base_url=state["base_url"], _token=token_b)
+        try:
+            memory_b.put(project=g.ART_T2_PROJECT, title="084", content="TENANT B DECOY", tags="rdr")
+            # the first tenant still reads its own record, not the decoy under the same coordinates
+            _, again = life(["RDR-084"], owner(fx.art_owner))
+            assert [r.text for r in again.records] == [r.text for r in art.records]
+            # the second tenant cannot reach the first tenant's source: its catalog has no such owner,
+            # and a hand-built resolved source (bypassing the resolver) still finds no owner row
+            res_b, b_stream = life(
+                ["RDR-084"], owner(fx.art_owner), cat=cat_b,
+                t2_get=lambda p, t: memory_b.get(project=p, title=t))
+            assert res_b.sources[0].status == "unresolved", res_b.sources[0]
+            assert b_stream.records == () and b_stream.reads == 0
+            assert b_stream.sources[0].status == "not_resolved"
+            forced = res_b.__class__(sources=(res.sources[0],))  # tenant A's resolved source, handed to tenant B
+            _, b_forced = life(
+                [], OwnerResolution("none"), cat=cat_b, resolution=forced,
+                t2_get=lambda p, t: memory_b.get(project=p, title=t))
+            assert b_forced.records == () and b_forced.reads == 0, "no owner row, so no T2 read at all"
+            assert b_forced.sources[0].status == "project_undetermined"
+            # and with the project forced, tenant B's T2 returns its own decoy, never tenant A's record
+            assert memory_b.get(project=g.ART_T2_PROJECT, title="084-gate-latest") is None
+            assert memory_b.get(project=g.NEXUS_T2_PROJECT, title="084") is None
+        finally:
+            cat_b.close()
+            memory_b.close()
+    print(
+        f"RDR232-LIFECYCLE art_records={len(art.records)} art_reads={art.reads} art_chars={art.chars} "
+        f"nexus_records={len(nexus.records)} ambiguous_reads={ambiguous.reads} code_reads={code.reads} "
+        f"tenant_b_reads={b_forced.reads} tenant_b_records={len(b_forced.records)}")
+
+
 def _assert_primary_stream_reaches_the_reducer(fx, run, primary) -> None:
     """nexus-jypmj.1.6: the reserved primary stream is merged ahead of the plan's own inputs at the
     first operator (the builtin's ``rank``, explicit ``inputs`` of both hydrated streams). Every
@@ -302,6 +392,7 @@ def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> Non
     run = asyncio.run(g.run_lookup_retrieval(art.text, scope=scope, bindings=bindings))
     search_by_corpus = _assert_vector_stream_contained(fx, run)
     primary = _assert_named_source_and_primary_evidence(fx, reader)
+    _assert_t2_lifecycle_stream(fx, reader)
     _assert_primary_stream_reaches_the_reducer(fx, run, primary)
     traverse_by_corpus = _assert_graph_stream_contained(fx, run)
 

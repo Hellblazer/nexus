@@ -178,6 +178,9 @@ class ResolvedSource:
     candidates: tuple[SourceCandidate, ...] = ()
     candidates_truncated: bool = False
     detail: str = ""
+    #: The RDR number the resolved document's own path carries (``docs/rdr/rdr-084-....md``), or
+    #: ``None`` when the document is not an RDR file. The lifecycle stream (nexus-jypmj.1.7) keys on it.
+    rdr_number: int | None = None
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -190,6 +193,7 @@ class ResolvedSource:
             "candidates": [asdict(c) for c in self.candidates],
             "candidates_truncated": self.candidates_truncated,
             "detail": self.detail,
+            "rdr_number": self.rdr_number,
         }
 
 
@@ -334,6 +338,7 @@ def _resolved(ref: SourceRef, entry: CatalogEntry, qualified: bool,
         ref=ref, status="resolved", tumbler=str(entry.tumbler), title=entry.title,
         file_path=entry.file_path, collection=entry.physical_collection,
         chunk_count=entry.chunk_count, qualified=qualified, candidates=candidates,
+        rdr_number=_key_number(entry),
     )
 
 

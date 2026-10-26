@@ -37,6 +37,27 @@ MODEL_TOKEN = "bge-base-en-v15-768__v1"
 
 ART_PROJECT = "ART"
 NEXUS_PROJECT = "Nexus"
+
+#: The fixture's repo owner names, and the T2 projects the RDR tooling would use for them
+#: (``<repo>_rdr``). The lifecycle stream (nexus-jypmj.1.7) derives the project from the owner's name.
+ART_OWNER_NAME = "art-rdr232-fixture"
+NEXUS_OWNER_NAME = "nexus-rdr232-fixture"
+ART_T2_PROJECT = f"{ART_OWNER_NAME}_rdr"
+NEXUS_T2_PROJECT = f"{NEXUS_OWNER_NAME}_rdr"
+
+#: The RDR-084 T2 records of each project: same titles, different content, so a stream that read the
+#: wrong project is visible in the text. Invented content.
+ART_T2_RECORDS: dict[str, str] = {
+    "084": "id: RDR-084\nprefix: ART\ntitle: LIST PARSE Canonical Consolidation\nstatus: accepted\n"
+           "accepted_date: 2026-03-10\n",
+    "084-gate-latest": "outcome: PASSED\ndate: 2026-03-09\nround: 3\nsummary: ART list-parse gate passed with "
+                       "observation O1 on adapter removal order\n",
+}
+NEXUS_T2_RECORDS: dict[str, str] = {
+    "084": "id: RDR-084\nprefix: NEX\ntitle: Plan Library Hygiene for Grown Plans\nstatus: draft\n",
+    "084-gate-latest": "outcome: BLOCKED\ndate: 2026-03-02\nround: 1\nsummary: Nexus plan-hygiene gate blocked on "
+                       "the merge rule\n",
+}
 ART_REF = "RDR-084@ART"
 NEXUS_REF = "RDR-084@Nexus"
 
@@ -204,8 +225,8 @@ def build_rdr084_fixture() -> Fixture:
     counts = {"code_chunks": 0, "links": 0}
 
     with HttpCatalogClient() as cat:
-        art_owner = str(cat.register_owner("art-rdr232-fixture", "repo", repo_hash="rdr232-fx-art"))
-        nexus_owner = str(cat.register_owner("nexus-rdr232-fixture", "repo", repo_hash="rdr232-fx-nexus"))
+        art_owner = str(cat.register_owner(ART_OWNER_NAME, "repo", repo_hash="rdr232-fx-art"))
+        nexus_owner = str(cat.register_owner(NEXUS_OWNER_NAME, "repo", repo_hash="rdr232-fx-nexus"))
 
         def put(owner: str, kind: str, title: str, file_path: str, pieces: list[str],
                 source: str, facets: list[frozenset[str]]) -> str:
@@ -262,6 +283,18 @@ def build_rdr084_fixture() -> Fixture:
             for i, t in enumerate(docs):
                 cat.link(t, rdr, "implements" if i % 2 == 0 else "relates", "rdr232-fixture")
                 counts["links"] += 1
+
+    # The RDRs' T2 lifecycle records (nexus-jypmj.1.7): the ambient tenant's, under each owner's
+    # `<repo>_rdr` project.
+    from nexus.db.t2.http_memory_store import HttpMemoryStore
+
+    memory = HttpMemoryStore()
+    try:
+        for project, records in ((ART_T2_PROJECT, ART_T2_RECORDS), (NEXUS_T2_PROJECT, NEXUS_T2_RECORDS)):
+            for title, content in records.items():
+                memory.put(project=project, title=title, content=content, tags="rdr")
+    finally:
+        memory.close()
 
     return Fixture(
         art_owner=art_owner, nexus_owner=nexus_owner, art_rdr=art_rdr, nexus_rdr=nexus_rdr,

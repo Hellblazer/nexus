@@ -5448,6 +5448,26 @@ The envelope has five RDR-232 keys, all always present:
   was built. A document with more than `max_manifest_rows_read` (3000)
   manifest rows is spread-sampled after the catalog reply; the reply itself
   is not yet limited by the service.
+- `lifecycle_stream` (nexus-jypmj.1.7): the T2 metadata record and latest gate
+  record of a resolved RDR source, `{sources: [{source, status, project,
+  rdr_number, detail}], records: [{source, project, title, kind, chars,
+  chars_full, kept, truncated}], reads, chars, caps_hit, caps}`. The records
+  lead the reserved share (their bodies are in the reduction's input, not in
+  this key). `status` is `read`, `no_records`, `not_rdr` (a resolved document
+  that is not an RDR file), `not_resolved` (ambiguous or unresolved; no
+  stream), `project_undetermined`, `read_failed` or `over_cap`. The T2
+  project is `<owner name>_rdr` for the repo owner holding the resolved
+  document, never taken from the request; an owner that is not a repo owner,
+  has no name, or is not in the catalog leaves it undetermined and nothing is
+  read. Titles are tried as `84`, `084`, `RDR-84`, `RDR-084`, then
+  `<shape>-gate-latest`, with exact reads only. `caps` is `{max_records: 6,
+  max_reads: 24, max_record_chars: 4000, max_chars: 18000}`; a cut or refused
+  record is named in `kept`, `truncated` and `caps_hit`. `None` when no source
+  was named or the run took the single-step fast path. Text mode adds an
+  `[evidence request: ...]` line for an undetermined project, a failed or
+  empty read, an over-cap source or a cut record. `named_sources[].rdr_number`
+  is the RDR number the resolved document's path carries (`null` when it is
+  not an RDR file).
 
 ### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
 

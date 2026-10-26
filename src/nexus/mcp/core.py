@@ -127,6 +127,7 @@ from nexus.mcp import subscriptions as _subscriptions
 from nexus.mcp import channel as _channel
 
 if TYPE_CHECKING:
+    from nexus.plans.lifecycle_stream import LifecycleStream
     from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
     from nexus.plans.reserved_stream import ReservedStream
 
@@ -10044,8 +10045,43 @@ def _nx_answer_named_sources(request: EvidenceRequest) -> NamedSourceResolution 
     return resolve_named_sources(request.sources, request.owner, cat=cat)
 
 
+async def _nx_answer_lifecycle_stream(
+    resolution: NamedSourceResolution | None,
+) -> "LifecycleStream | None":
+    """Read the resolved RDR sources' T2 lifecycle records (RDR-232, nexus-jypmj.1.7, A7).
+
+    ``None`` when no source was named, with no catalog or T2 call. The reads are exact
+    ``get(project, title)`` calls through the same tenant-bound T2 context every other ``nx_answer``
+    T2 access uses, bounded by ``LifecycleCaps``; blocking I/O, so it runs in a worker thread. It
+    never raises: a T2 that cannot be opened is reported per source.
+    """
+    if resolution is None or not resolution.sources:
+        return None
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.lifecycle_stream import LifecycleStream, read_lifecycle_stream  # noqa: PLC0415 — deferred; matches this module's convention
+
+    try:
+        cat = _get_catalog()
+    except Exception as exc:  # noqa: BLE001 — a missing catalog leaves the project undetermined, which is disclosed
+        _log.warning("nx_answer_lifecycle_catalog_unavailable", error=str(exc))
+        cat = None
+
+    def _read() -> "LifecycleStream | None":
+        with _t2_ctx() as db:
+            return read_lifecycle_stream(
+                resolution, cat=cat, t2_get=lambda project, title: db.get(project=project, title=title),
+            )
+
+    try:
+        return await asyncio.to_thread(_read)
+    except Exception as exc:  # noqa: BLE001 — an unreadable T2 is disclosed, never a failed answer
+        _log.warning("nx_answer_lifecycle_stream_failed", error=str(exc))
+        return LifecycleStream.unavailable(resolution, f"{type(exc).__name__} opening T2")
+
+
 async def _nx_answer_primary_stream(
     resolution: NamedSourceResolution | None,
+    lifecycle: "LifecycleStream | None" = None,
 ) -> "tuple[PrimaryEvidence | None, ReservedStream | None]":
     """Read the resolved named sources and build the reserved stream (RDR-232, nexus-jypmj.1.6).
 
@@ -10054,6 +10090,10 @@ async def _nx_answer_primary_stream(
     resolved, so a run without one is byte-identical to before. The read is blocking catalog and
     T3 I/O, so it runs in a worker thread; it never raises, and a failure is disclosed as an
     unread source, not a failed answer.
+
+    *lifecycle* (nexus-jypmj.1.7) supplies the T2 records of a resolved RDR; they lead the reserved
+    share, ahead of the chunks, and do not depend on the T3 read: a failed chunk read still yields a
+    stream of the records.
     """
     if resolution is None or not resolution.resolved():
         return None, None
@@ -10061,6 +10101,7 @@ async def _nx_answer_primary_stream(
     from nexus.plans.primary_evidence import select_primary_evidence, t3_chunk_fetcher  # noqa: PLC0415 — deferred; matches this module's convention
     from nexus.plans.reserved_stream import ReservedStream  # noqa: PLC0415 — deferred; matches this module's convention
 
+    records = lifecycle.reserved_items() if lifecycle is not None else ()
     try:
         cat = _get_catalog()
         fetch = t3_chunk_fetcher(_get_t3())
@@ -10069,8 +10110,8 @@ async def _nx_answer_primary_stream(
         )
     except Exception as exc:  # noqa: BLE001 — an unreadable source is disclosed, never a failed answer
         _log.warning("nx_answer_primary_evidence_failed", error=str(exc))
-        return None, None
-    return evidence, ReservedStream.from_evidence(evidence)
+        return None, ReservedStream.from_evidence(None, extra=records)
+    return evidence, ReservedStream.from_evidence(evidence, extra=records)
 
 
 def _autoalias_bindings(
@@ -11184,6 +11225,8 @@ async def nx_answer(
     # just before plan_run, never on the single_query fast path (it has no operator step).
     _primary_evidence: "PrimaryEvidence | None" = None
     _reserved_stream: "ReservedStream | None" = None
+    # nexus-jypmj.1.7: the T2 lifecycle records of a resolved RDR source, read just before plan_run.
+    _lifecycle: "LifecycleStream | None" = None
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -11273,6 +11316,7 @@ async def nx_answer(
                 *_evidence_request.disclosures(),
                 *(_primary_evidence.disclosures() if _primary_evidence else ()),
                 *(_reserved_stream.disclosures() if _reserved_stream else ()),
+                *(_lifecycle.disclosures() if _lifecycle else ()),
                 *(
                     _named_sources.disclosures(
                         owner_failure_disclosed=_evidence_request.owner.status in ("conflict", "unresolved"),
@@ -11399,6 +11443,12 @@ async def nx_answer(
             # had no reduction to feed (the single_query fast path).
             "primary_evidence": _primary_evidence.to_wire() if _primary_evidence else None,
             "reserved_stream": _reserved_stream.report() if _reserved_stream else None,
+            # RDR-232 Phase 1 (nexus-jypmj.1.7, A7): the T2 lifecycle records (metadata and latest
+            # gate record) of a resolved RDR source: {sources: [{source, status, project, rdr_number,
+            # detail}], records: [{source, project, title, kind, chars, chars_full, kept, truncated}],
+            # reads, chars, caps_hit, caps}. None when no source was named or the run took the
+            # single_query fast path.
+            "lifecycle_stream": _lifecycle.to_wire() if _lifecycle else None,
             # RDR-232 Phase 1 (nexus-jypmj.1.2): the caller's evidence
             # request read from the reserved bindings (source, owner,
             # project) and a subtree scope: {source, source_error, owner:
@@ -12435,7 +12485,9 @@ async def nx_answer(
     _plan_run_kwargs: dict[str, Any] = {}
     # RDR-232 (nexus-jypmj.1.6): the reserved primary stream, passed only when a named source
     # resolved and yielded evidence (the same "only pass when set" rule as the kwargs below).
-    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources)
+    # nexus-jypmj.1.7: the resolved RDR's T2 lifecycle records ride the same stream, ahead of the chunks.
+    _lifecycle = await _nx_answer_lifecycle_stream(_named_sources)
+    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle)
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream
     if deadline is not None:

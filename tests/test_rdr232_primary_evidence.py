@@ -101,7 +101,8 @@ class FakeCatalog:
 
     def get_owner_by_prefix(self, prefix: str) -> dict | None:
         self.calls.append(("get_owner_by_prefix", {"prefix": prefix}))
-        return {"tumbler_prefix": prefix} if prefix in self.owners else None
+        names = {ART_OWNER: "ART", NEXUS_OWNER: "nexus"}
+        return {"tumbler_prefix": prefix, "name": names.get(prefix, prefix), "owner_type": "repo"} if prefix in self.owners else None
 
     def resolve(self, tumbler: Any, *, follow_alias: bool = True) -> CatalogEntry | None:
         self.calls.append(("resolve", {"tumbler": str(tumbler)}))
@@ -296,6 +297,22 @@ def test_a_document_tumbler_source_must_exist_and_sit_inside_the_qualifier() -> 
     (outside,) = resolve_named_sources([ok], _resolved(NEXUS_OWNER), cat=cat).sources
     assert outside.status == "unresolved" and "1.1" in outside.detail
     assert cat.count("find") == 0, "a tumbler names its document; there is nothing to search for"
+
+
+def test_a_resolved_source_carries_the_rdr_number_of_its_document_or_none() -> None:
+    """nexus-jypmj.1.7: the T2 lifecycle stream keys on it, for an RDR id and for a tumbler alike."""
+    cat, t3 = FakeCatalog(), FakeT3()
+    _two_projects(cat, t3)
+    _doc(cat, t3, "1.2.50", "src/art/listparse/mod_01.py", ["def f(): pass"], ctype="code")
+    _doc(cat, t3, "1.2.51", "docs/rdr/post-mortem/rdr-084-list-parse.md", ["x"])
+    (by_id,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    (by_tumbler,) = resolve_named_sources([SourceRef.parse(ART_DOC)], _resolved(None), cat=cat).sources
+    (code,) = resolve_named_sources([SourceRef.parse("1.2.50")], _resolved(None), cat=cat).sources
+    (post_mortem,) = resolve_named_sources([SourceRef.parse("1.2.51")], _resolved(None), cat=cat).sources
+    assert (by_id.rdr_number, by_tumbler.rdr_number) == (84, 84)
+    assert code.status == "resolved" and code.rdr_number is None
+    assert post_mortem.status == "resolved" and post_mortem.rdr_number is None, "not directly inside an rdr/ directory"
+    assert by_id.to_wire()["rdr_number"] == 84
 
 
 # ── Bounds ────────────────────────────────────────────────────────────────────────────────
@@ -719,7 +736,10 @@ def test_a_golden_required_source_label_maps_to_a_source_ref_and_a_project() -> 
 # ── nx_answer: the resolution reaches the caller ──────────────────────────────────────────
 
 
-async def _answer(cat: FakeCatalog, *, bindings: dict, structured: bool, t3: FakeT3 | None = None) -> Any:
+async def _answer(
+    cat: FakeCatalog, *, bindings: dict, structured: bool, t3: FakeT3 | None = None,
+    t2_records: dict[tuple[str, str], str] | None = None,
+) -> Any:
     """``nx_answer`` over a one-step ad-hoc plan, the catalog replaced by *cat*. The same
     patches ``test_rdr232_reserved_bindings._text_answer`` uses, plus the catalog."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -738,6 +758,9 @@ async def _answer(cat: FakeCatalog, *, bindings: dict, structured: bool, t3: Fak
     result.step_records = []
     db_stub = MagicMock()
     db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+    records = t2_records or {}
+    db_stub.get.side_effect = lambda project=None, title=None, id=None: (
+        {"project": project, "title": title, "content": records[(project, title)]} if (project, title) in records else None)
     with patch("nexus.plans.matcher.plan_match", return_value=[]), \
          patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
          patch("nexus.plans.runner.plan_run", AsyncMock(return_value=result)), \
@@ -771,8 +794,18 @@ async def test_nx_answer_says_so_when_a_named_source_is_ambiguous_and_when_it_re
     # The ad-hoc plan is one search step: no operator consumed the primary evidence it read, and
     # the notice says so (nexus-jypmj.1.6). Nothing else is added for a clean resolution.
     assert env["final_text"].endswith("the answer is 42")
-    assert env["final_text"].count("[evidence request:") == 1 and "was not merged into a reduction" in env["final_text"]
+    # ... except that this RDR has no T2 records, which the lifecycle stream says (nexus-jypmj.1.7).
+    assert env["final_text"].count("[evidence request:") == 2 and "was not merged into a reduction" in env["final_text"]
+    assert "no T2 lifecycle records" in env["final_text"] and "ART_rdr" in env["final_text"]
+    assert env["lifecycle_stream"]["sources"][0]["status"] == "no_records" and env["lifecycle_stream"]["records"] == []
     assert env["primary_evidence"]["selected_items"] == 1 and env["reserved_stream"]["merged"] is False
+
+    # With its records in T2 the same call reserves them ahead of the chunk, through the real wiring.
+    records = {("ART_rdr", "084"): "id: RDR-084\nstatus: accepted", ("ART_rdr", "084-gate-latest"): "outcome: PASSED"}
+    env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True, t3=t3, t2_records=records)
+    assert [r["kind"] for r in env["lifecycle_stream"]["records"]] == ["metadata", "gate-latest"]
+    assert env["reserved_stream"]["reserved_items"] == 3, "two T2 records and the one chunk"
+    assert env["final_text"].count("[evidence request:") == 1 and "no T2 lifecycle records" not in env["final_text"]
 
     env = await _answer(cat, bindings={"source": "RDR-084", "owner": "9.9"}, structured=True)
     (src,) = env["named_sources"]["sources"]
@@ -780,4 +813,4 @@ async def test_nx_answer_says_so_when_a_named_source_is_ambiguous_and_when_it_re
 
     env = await _answer(cat, bindings={"concept": "x"}, structured=True)
     assert env["named_sources"] is None, "no named source: nothing was resolved and no catalog call was made"
-    assert cat.count("find") == 3
+    assert cat.count("find") == 4
