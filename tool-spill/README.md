@@ -35,7 +35,7 @@ It hooks `tool.call` and touches only `Bash` and `Read`, and only in the main co
 
 | Tool | Result over the limit |
 |---|---|
-| `Bash` | Each stream longer than `head` + `tail` is cut to the first `head` bytes and the last `tail` bytes, at line ends. A note between them gives the size, the line count, the number of middle lines cut, how many of those mention an error or failure (`error`, `fail`, `traceback`, `panic`, `exception`, `fatal`, `denied`, `not found`, `no such`, `cannot`, `refused`, `timed out`, `unable`; a count, not a verdict), and the path of the full output (stdout, then stderr after a `--- stderr ---` line). A script's verdict on its last line, even with exit code 0, is in the tail. |
+| `Bash` | Each stream longer than `head` + `tail` is cut to the first `head` bytes and the last `tail` bytes, at line ends. A note between them gives the size, the line count, the number of middle lines cut, how many of those mention an error or failure (`error`, `fail`, `traceback`, `panic`, `exception`, `fatal`, `denied`, `not found`, `no such`, `cannot`, `refused`, `timed out`, `unable`; a count, not a verdict), and the path of the full output (stdout, then stderr after a `--- stderr ---` line), with a pointer to read a slice of it with the `Read` tool. A script's verdict on its last line, even with exit code 0, is in the tail. |
 | `Read` (whole file) | The text is cut to the first `head` + `tail` bytes, with a note giving the line count, the `offset` to read next and a `limit` to use, and a reminder not to `Edit` text the model has not seen. Nothing is written: the file is already on disk. |
 
 Passed through whole:
@@ -45,6 +45,7 @@ Passed through whole:
 - a `Read` with an `offset` or a `limit`: the model sliced it itself, so following the note, or reading a slice of a spill file, costs nothing extra and is never cut again;
 - a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `REGISTER.md`, or anything under a `skills/`, `agents/`, `commands/` or `rules/` directory, so a large source file under, say, `src/nexus/commands/` also passes whole; either path separator, any case);
 - `Bash` output Claude Code has already moved to a file of its own (past about 30 KB: `persistedOutputPath`, `rawOutputPath`, or output that starts with its `<persisted-output>` marker; output that only quotes the marker further in is still cut), and image output;
+- a `Bash` call whose command names the spill directory: it is reading a spill file back (`sed -n`, `head`, `grep` on it), and cutting it again would only spill the spill (Claude Code's own cap of about 30 KB still applies);
 - every call a subagent makes;
 - every call in a headless run, unless `includeHeadless` is on.
 

@@ -594,3 +594,37 @@ test('another tool returning a Bash-shaped or Read-shaped result passes whole', 
   }
   expect(writes).toHaveLength(0)
 })
+
+// ---------------------------------------------------------------- Bash: reading a spill file back (nexus-i9a1p)
+
+test('a Bash command that reads a spill file back passes whole and spills nothing', async ($, on) => {
+  const writes = spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
+  const stdout = lines(1_000)
+  on('tool.call', () => BIG_BASH(stdout))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'sed -n 10,900p /var/tmp/x/claude-tool-spill-sam/toolu_1.txt' })
+
+  expect(r.result).toEqual({ stdout, stderr: '' })
+  expect(writes).toHaveLength(0)
+})
+
+test('a command that only shares a prefix with the spill directory is still cut', async ($, on) => {
+  const writes = spy(on, { TMPDIR: '/var/tmp/x/', USER: 'sam' })
+  on('tool.call', () => BIG_BASH(lines(1_000)))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'cat /var/tmp/x/claude-tool-spill-samuel/a.txt' })
+
+  expect(writes).toHaveLength(1)
+  expect(r.result.stdout).toContain('[tool-spill:')
+})
+
+test('the Bash note points at a sliced Read of the spill file', async ($, on) => {
+  const writes = spy(on)
+  on('tool.call', () => BIG_BASH(lines(1_000)))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'seq 1000' })
+
+  const { note } = parts(r.result.stdout)
+  expect(note).toContain(`Full output: ${writes[0].path}`)
+  expect(note).toContain('with the Read tool (offset and limit; a sliced Read is never cut)')
+})
