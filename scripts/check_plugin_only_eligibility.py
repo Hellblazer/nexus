@@ -71,15 +71,22 @@ FREE_PREFIXES: tuple[str, ...] = ("tests/", "docs/")
 FREE_EXACT: tuple[str, ...] = ("CHANGELOG.md", "conexus/PENDING_RELEASE.md")
 #: The machinery that gates this lane. It lives under ``tests/`` but is not free:
 #: an eligible diff that edited the eligibility call or the lockstep leg would
-#: change its own gate.
+#: change its own gate. That covers the scripts the battery runs or sources in
+#: this mode (preflight, tests/e2e/lib) and the tests that pin this script, the
+#: channel allowlist it imports, and the battery mode.
 HARNESS_EXACT: tuple[str, ...] = (
     "tests/e2e/release-battery.sh",
+    "tests/e2e/release-preflight.sh",
     "tests/e2e/plugin-lockstep-tests.sh",
     "tests/e2e/plugin-delivery-proof.sh",
     "tests/test_plugin_lockstep.py",
     "tests/hooks/test_lockstep_survives_cli_skew.py",
+    "tests/test_plugin_channel.py",
+    "tests/scripts/test_check_plugin_only_eligibility.py",
+    "tests/scripts/test_release_battery_end_to_end.py",
+    "tests/scripts/test_plugin_lockstep_wrapper.py",
 )
-HARNESS_PREFIXES: tuple[str, ...] = ("tests/e2e/hook-cli-skew/",)
+HARNESS_PREFIXES: tuple[str, ...] = ("tests/e2e/hook-cli-skew/", "tests/e2e/lib/")
 #: Git modes that are not a regular file: symlink, submodule.
 SPECIAL_MODES: frozenset[str] = frozenset({"120000", "160000"})
 

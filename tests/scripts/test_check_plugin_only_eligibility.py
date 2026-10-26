@@ -610,6 +610,13 @@ def test_base_must_be_a_client_tag(repo: Path, base: str) -> None:
         "tests/e2e/hook-cli-skew/new_file.py",
         "tests/test_plugin_lockstep.py",
         "tests/hooks/test_lockstep_survives_cli_skew.py",
+        "tests/e2e/release-preflight.sh",
+        "tests/e2e/lib/python.sh",
+        "tests/e2e/lib/mandatory_pins.sh",
+        "tests/test_plugin_channel.py",
+        "tests/scripts/test_check_plugin_only_eligibility.py",
+        "tests/scripts/test_release_battery_end_to_end.py",
+        "tests/scripts/test_plugin_lockstep_wrapper.py",
     ],
 )
 def test_the_gating_harness_is_not_free_under_tests(repo: Path, path: str) -> None:
