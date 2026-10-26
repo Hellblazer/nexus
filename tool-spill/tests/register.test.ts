@@ -13,8 +13,9 @@ const size = (s: string) => new TextEncoder().encode(s).length
 const BIG_BASH = (stdout: string, extra: object = {}) => ({ result: { stdout, stderr: '', ...extra } })
 const NOTE = /\n\[tool-spill:[^\]]*\]\n?/
 
-// `env` is what $TMPDIR, $USER and friends answer (unlisted ones are unset); `surfaces` what the session draws on.
-function spy(on: any, env: Record<string, string> = {}, surfaces: string[] = ['terminal']) {
+// `env` is what $TMPDIR, $USER and friends answer (unlisted ones are unset); `surfaces` what the session draws on;
+// `checkExit` what the private-directory check exits with. The returned list carries `checks`, the argv of each check.
+function spy(on: any, env: Record<string, string> = {}, surfaces: string[] = ['terminal'], checkExit = 0) {
   mock.env(on, env)
   on('session.surfaces', () => ({ value: surfaces }))
   const writes: { path: string; text: string }[] = []
@@ -22,7 +23,17 @@ function spy(on: any, env: Record<string, string> = {}, surfaces: string[] = ['t
     writes.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
-  return writes
+  const checks = privateDirCheck(on, checkExit)
+  return Object.assign(writes, { checks })
+}
+
+function privateDirCheck(on: any, exitCode = 0) {
+  const checks: string[][] = []
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+    checks.push([...e.argv])
+    return { value: { exitCode, stdout: '', stderr: '' } }
+  })
+  return checks
 }
 
 // A cut Bash text split into what comes before the note, the note and what comes after.
@@ -273,6 +284,7 @@ test('a failed spill-directory lookup is not remembered: the next spill tries ag
     writes.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
+  privateDirCheck(on)
   let asked = 0
   on('env.get', (_: unknown, e: { name: string }) => {
     if (e.name === 'TMPDIR' && asked++ === 0) throw new Error('env unavailable')
@@ -415,6 +427,97 @@ test('$USER wins over $LOGNAME and $USERNAME, and the name is made path-safe', a
   await $.tool.call({ tool: 'Bash', command: 'x' })
 
   expect(writes[0].path).toMatch(/^\/tmp\/claude-tool-spill-a_b_.._c\/[A-Za-z0-9_.-]+\.txt$/)
+})
+
+test('the first spill makes the directory private: /bin/sh runs the check with the directory as $1', async ($, on) => {
+  const writes = spy(on, { TMPDIR: '/tmp', USER: 'sam' })
+  on('tool.call', () => BIG_BASH(lines(1_000)))
+
+  await $.tool.call({ tool: 'Bash', command: 'x' })
+
+  expect(writes.checks).toHaveLength(1)
+  const [sh, flag, script, name, dir] = writes.checks[0]
+  expect([sh, flag, name, dir]).toEqual(['/bin/sh', '-c', 'tool-spill', '/tmp/claude-tool-spill-sam'])
+  for (const step of ['umask 077', '[ -L "$1" ] && exit 3', '$(id -u)', 'chmod 700 "$1"']) expect(script).toContain(step)
+  expect(writes[0].path.startsWith('/tmp/claude-tool-spill-sam/')).toBe(true)
+})
+
+test('a directory the check refuses (a symlink, another user owns it) turns spilling off: output passes whole', async ($, on) => {
+  const writes = spy(on, { USER: 'sam' }, ['terminal'], 5)
+  const toasts: string[] = []
+  on('ui.toast', (_: unknown, e: { text: string }) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const stdout = lines(1_000)
+  on('tool.call', () => BIG_BASH(stdout))
+
+  const first: any = await $.tool.call({ tool: 'Bash', command: 'one' })
+  const second: any = await $.tool.call({ tool: 'Bash', command: 'two' })
+
+  expect(first.result.stdout).toBe(stdout)
+  expect(second.result.stdout).toBe(stdout)
+  expect(writes).toHaveLength(0)
+  expect(writes.checks).toHaveLength(1) // the refusal is kept, not checked per output
+  expect(toasts).toHaveLength(1) // said once, not per output
+  expect(toasts[0]).toContain('/tmp/claude-tool-spill-sam')
+  expect(toasts[0]).toContain('exit 5')
+})
+
+test('the check runs before every spill: temp cleanup can remove the directory mid-session', async ($, on) => {
+  const writes = spy(on)
+  on('tool.call', () => BIG_BASH(lines(1_000)))
+
+  await $.tool.call({ tool: 'Bash', command: 'one' })
+  await $.tool.call({ tool: 'Bash', command: 'two' })
+
+  expect(writes).toHaveLength(2)
+  expect(writes.checks).toHaveLength(2)
+})
+
+test('a POSIX temp dir with a backslash in its name is still checked', async ($, on) => {
+  const writes = spy(on, { TMPDIR: '/tmp/a\\b', USER: 'sam' })
+  on('tool.call', () => BIG_BASH(lines(1_000)))
+
+  await $.tool.call({ tool: 'Bash', command: 'x' })
+
+  expect(writes.checks).toHaveLength(1)
+  expect(writes.checks[0][4]).toBe('/tmp/a\\b/claude-tool-spill-sam')
+})
+
+test('a check that cannot run is not kept: output passes whole and the next spill checks again', async ($, on) => {
+  mock.env(on, {})
+  on('session.surfaces', () => ({ value: ['terminal'] }))
+  const writes: { path: string }[] = []
+  on('fs.write', (_: unknown, e: { path: string }) => {
+    writes.push({ path: e.path })
+    return { value: undefined }
+  })
+  let runs = 0
+  on('process.run', () => {
+    if (runs++ === 0) throw new Error('cannot start /bin/sh')
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  const stdout = lines(1_000)
+  on('tool.call', () => BIG_BASH(stdout))
+
+  const first: any = await $.tool.call({ tool: 'Bash', command: 'one' })
+  expect(first.result.stdout).toBe(stdout)
+  expect(writes).toHaveLength(0)
+
+  await $.tool.call({ tool: 'Bash', command: 'two' })
+  expect(runs).toBe(2)
+  expect(writes).toHaveLength(1)
+})
+
+test('a Windows temp dir is per-user already: no check runs and the output spills', async ($, on) => {
+  const writes = spy(on, { TEMP: 'C:\\Users\\sam\\AppData\\Local\\Temp', USERNAME: 'sam' })
+  on('tool.call', () => BIG_BASH(lines(1_000)))
+
+  await $.tool.call({ tool: 'Bash', command: 'x' })
+
+  expect(writes.checks).toHaveLength(0)
+  expect(writes).toHaveLength(1)
 })
 
 // ---------------------------------------------------------------- headless runs
@@ -617,6 +720,7 @@ for (const command of [
 
     expect(r.result).toEqual({ stdout, stderr: '' })
     expect(writes).toHaveLength(0)
+    expect(writes.checks).toHaveLength(0) // nothing is written, so the directory check does not run
   })
 }
 

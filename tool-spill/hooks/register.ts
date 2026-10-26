@@ -16,7 +16,8 @@ import type { Engine, Register } from 'claude-code'
 // Options (userConfig, all validated): `limit` 4000 bytes, `head` 1400, `tail` 800, `includeHeadless` false. A
 // non-positive or non-numeric number falls back to its default; head and tail are scaled down together when they
 // would not fit in `limit`. The spill directory is `<temp dir>/claude-tool-spill-<user>`, the temp dir being $TMPDIR,
-// else $TEMP, else $TMP, else /tmp, and the user $USER, else $LOGNAME, else $USERNAME, else `user`.
+// else $TEMP, else $TMP, else /tmp, and the user $USER, else $LOGNAME, else $USERNAME, else `user`. On a POSIX host
+// each spill first makes that directory owner-only (`PRIVATE_DIR`); one it cannot make private turns spilling off.
 
 const DEFAULT_LIMIT = 4_000
 const DEFAULT_HEAD = 1_400
@@ -102,19 +103,45 @@ function squeeze(text: string, headMax: number, tailMax: number, where: string, 
   return t ? `${h}${note}\n${t}` : h + note
 }
 
-// Resolved on the first spill. A failed resolution is not kept: the next spill tries again.
-let spillDir: Promise<string> | undefined
+function spillDir(base: string, user: string): string {
+  return `${base.replace(/[\\/]+$/, '')}/claude-tool-spill-${user.replace(/[^A-Za-z0-9_.-]/g, '_')}`
+}
 
-function dirOf($: Engine): Promise<string> {
-  spillDir ??= (async () => {
-    const base = (await $.env.get('TMPDIR')) || (await $.env.get('TEMP')) || (await $.env.get('TMP')) || '/tmp'
-    const user = (await $.env.get('USER')) || (await $.env.get('LOGNAME')) || (await $.env.get('USERNAME')) || 'user'
-    return `${base.replace(/[\\/]+$/, '')}/claude-tool-spill-${user.replace(/[^A-Za-z0-9_.-]/g, '_')}`
-  })().catch(err => {
-    spillDir = undefined
-    throw err
-  })
-  return spillDir
+// Run by /bin/sh with the directory as $1: create it owner-only, refuse a symbolic link or one another user owns
+// (a peer on a shared /tmp can create the name first), then set it to 700. Exit 0 means only this user can list it
+// or read what is spilled into it. `$.fs` takes no mode, so this is the one place the mode is set.
+const PRIVATE_DIR = [
+  'umask 077',
+  'mkdir -p -- "$1" 2>/dev/null',
+  '[ -L "$1" ] && exit 3',
+  '[ -d "$1" ] || exit 4',
+  '[ "$(ls -ldn -- "$1" | awk \'{print $3}\')" = "$(id -u)" ] || exit 5',
+  'chmod 700 "$1" || exit 6',
+].join('\n')
+
+// A Windows temp dir ($TEMP under the user's profile, a drive or a UNC path) is per-user already, and there is no
+// /bin/sh to ask.
+const WINDOWS_PATH = /^[A-Za-z]:[\\/]|^\\\\/
+
+// The spill directory, from the environment on every call (a failed lookup throws and the output passes whole).
+async function dirOf($: Engine): Promise<string> {
+  const base = (await $.env.get('TMPDIR')) || (await $.env.get('TEMP')) || (await $.env.get('TMP')) || '/tmp'
+  const user = (await $.env.get('USER')) || (await $.env.get('LOGNAME')) || (await $.env.get('USERNAME')) || 'user'
+  return spillDir(base, user)
+}
+
+// Whether `dir` is private, checked before every spill: temp cleanup can remove it mid-session, and `$.fs.write`
+// would make it again with default modes. A refusal is kept for the module's life and one toast says why; a check
+// that could not run is not kept, and the next spill tries again.
+async function isPrivate($: Engine, dir: string, state: { refused?: boolean }): Promise<boolean> {
+  if (state.refused) return false
+  if (WINDOWS_PATH.test(dir)) return true
+  const { exitCode } = await $.process.run(['/bin/sh', '-c', PRIVATE_DIR, 'tool-spill', dir], { timeoutMs: 5_000 })
+  if (exitCode === 0) return true
+  state.refused = true
+  $.ui.toast(`tool-spill is off for this session: ${dir} is a link, not a directory, or not yours ` +
+    `(check exit ${exitCode}), so output passes whole.`)
+  return false
 }
 
 // Whether `command` names the spill directory: its basename (`claude-tool-spill-<user>`), so `$TMPDIR/...`, a `cd`
@@ -143,6 +170,7 @@ export const register: Register = (on, options) => {
     TAIL = LIMIT - HEAD
   }
   const INCLUDE_HEADLESS = options.includeHeadless === true
+  const spill: { refused?: boolean } = {}
 
   on('tool.call', async ($, e, next) => {
     const res: any = await next(e)
@@ -166,6 +194,7 @@ export const register: Register = (on, options) => {
         const input: any = e
         if (typeof input.command === 'string' && namesSpillDir(input.command, dir) &&
             size <= LIMIT * SPILL_READ_FACTOR) return res
+        if (!(await isPrivate($, dir, spill))) return res
         const path = `${dir}/${e.tool_use_id.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`
         const where = `Full output: ${path}. Read a slice of it with the Read tool (offset and limit; a sliced Read ` +
           'is never cut) or hand it to a subagent; do not re-run the command.'
