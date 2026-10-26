@@ -10,6 +10,7 @@ forbids another). Each test names the claim it pins.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
@@ -45,17 +46,34 @@ class FakeCatalog:
         return self.owners.get(prefix)
 
 
+class FakeClock:
+    """A monotonic clock the test moves by hand (``FakeT2`` advances it by ``cost`` per read)."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
 class FakeT2:
     """Exact ``get`` over a ``{(project, title): content}`` map. The only method; no search or listing
-    exists on it, so an unbounded read is not expressible through the seam."""
+    exists on it, so an unbounded read is not expressible through the seam. With a *clock*, each read
+    costs *cost* seconds on it, and the ``timeout`` the stream passed is recorded."""
 
-    def __init__(self, rows: dict[tuple[str, str], str], fail_on: set[str] | None = None) -> None:
+    def __init__(self, rows: dict[tuple[str, str], str], fail_on: set[str] | None = None,
+                 clock: FakeClock | None = None, cost: float = 0.0) -> None:
         self.rows = rows
         self.gets: list[tuple[str, str]] = []
+        self.timeouts: list[float | None] = []
         self.fail_on = fail_on or set()
+        self.clock, self.cost = clock, cost
 
-    def get(self, project: str, title: str) -> dict | None:
+    def get(self, project: str, title: str, timeout: float | None = None) -> dict | None:
         self.gets.append((project, title))
+        self.timeouts.append(timeout)
+        if self.clock is not None:
+            self.clock.now += self.cost
         if project in self.fail_on:
             raise ConnectionError("t2 down")
         content = self.rows.get((project, title))
@@ -91,10 +109,10 @@ def _resolution(*sources: ResolvedSource) -> NamedSourceResolution:
     return NamedSourceResolution(sources=tuple(sources))
 
 
-def _read(resolution, *, t2=None, cat=None, caps=DEFAULT_LIFECYCLE_CAPS) -> tuple[LifecycleStream, FakeT2, FakeCatalog]:
+def _read(resolution, *, t2=None, cat=None, caps=DEFAULT_LIFECYCLE_CAPS, **kw) -> tuple[LifecycleStream, FakeT2, FakeCatalog]:
     t2 = t2 or FakeT2(_rows())
     cat = cat or FakeCatalog(_owners())
-    stream = read_lifecycle_stream(resolution, cat=cat, t2_get=t2.get, caps=caps)
+    stream = read_lifecycle_stream(resolution, cat=cat, t2_get=t2.get, caps=caps, **kw)
     assert stream is not None
     return stream, t2, cat
 
@@ -237,7 +255,8 @@ def test_the_caps_are_stated_in_one_object_and_on_the_wire() -> None:
     assert caps.max_records < RESERVED_SHARE_MAX, "records are a small part of the reserved share"
     stream, _, _ = _read(_resolution(_src()))
     assert stream.to_wire()["caps"] == caps.to_wire()
-    assert set(caps.to_wire()) == {"max_records", "max_reads", "max_record_chars", "max_chars"}
+    assert set(caps.to_wire()) == {
+        "max_records", "max_reads", "max_record_chars", "max_chars", "max_seconds", "call_timeout_seconds"}
 
 
 def test_a_record_over_the_character_cap_is_cut_and_disclosed() -> None:
@@ -278,6 +297,8 @@ def test_the_record_cap_holds_inside_one_source_too() -> None:
     stream, _, _ = _read(_resolution(_src()), caps=caps)
     assert [r.kind for r in stream.records] == ["metadata"], "the gate record is not admitted past the cap"
     assert "max_records" in stream.caps_hit and stream.sources[0].status == "read"
+    assert any("max_records" in line for line in stream.disclosures()), (
+        "a cut inside a source that stays 'read' is still told to the reader")
 
 
 def test_reads_are_capped_whatever_the_sources_hold() -> None:
@@ -299,6 +320,188 @@ def test_an_empty_record_body_is_not_a_record() -> None:
     rows = {("ART_rdr", "084"): "   \n", ("ART_rdr", "084-gate-latest"): ART_GATE}
     stream, _, _ = _read(_resolution(_src()), t2=FakeT2(rows))
     assert [r.kind for r in stream.records] == ["gate-latest"]
+
+
+# ── 4b. the time budget: the reads stop at the deadline and say so ────────────────────────────
+
+
+def test_the_deadline_stops_the_reads_and_shrinks_each_call_timeout() -> None:
+    clock = FakeClock()
+    t2 = FakeT2({}, clock=clock, cost=1.0)
+    stream, _, _ = _read(
+        _resolution(_src(), _src("RDR-085", rdr_number=85)), t2=t2, deadline=clock() + 2.6, clock=clock)
+    assert len(t2.gets) == 3, "reads at 2.6, 1.6 and 0.6 seconds left; the fourth would be past the deadline"
+    assert t2.timeouts == pytest.approx([2.6, 1.6, 0.6]), "each call gets what is left, never the client default"
+    assert "deadline" in stream.caps_hit
+    assert [o.status for o in stream.sources] == ["read_capped", "over_cap"], (
+        "the lookup the deadline cut is not 'no_records', and the source after it is not read at all")
+    assert any("deadline" in line for line in stream.disclosures())
+
+
+def test_the_deadline_is_met_by_a_slow_t2_not_by_the_client_default() -> None:
+    clock = FakeClock()
+    t2 = FakeT2({}, clock=clock, cost=40.0)  # each read burns far more than the budget
+    stream, _, _ = _read(_resolution(_src()), t2=t2, deadline=clock() + 5.0, clock=clock)
+    assert len(t2.gets) == 1 and "deadline" in stream.caps_hit and t2.timeouts[0] <= 5.0
+
+
+def test_without_a_deadline_the_fixed_ceiling_bounds_the_run_and_each_call() -> None:
+    clock = FakeClock()
+    caps = replace(DEFAULT_LIFECYCLE_CAPS, max_seconds=2.6)
+    t2 = FakeT2({}, clock=clock, cost=1.0)
+    stream, _, _ = _read(_resolution(_src()), t2=t2, caps=caps, clock=clock)
+    assert len(t2.gets) == 3 and "deadline" in stream.caps_hit
+    clock2 = FakeClock()
+    t2b = FakeT2({}, clock=clock2, cost=0.0)
+    _read(_resolution(_src()), t2=t2b, clock=clock2)
+    assert max(t2b.timeouts) <= DEFAULT_LIFECYCLE_CAPS.call_timeout_seconds, "no call outlives the per-call ceiling"
+
+
+def test_a_deadline_already_past_reads_nothing() -> None:
+    clock = FakeClock()
+    t2 = FakeT2(_rows(), clock=clock)
+    stream, _, _ = _read(_resolution(_src()), t2=t2, deadline=clock() - 1.0, clock=clock)
+    assert t2.gets == [] and stream.records == () and "deadline" in stream.caps_hit
+    assert stream.sources[0].status == "over_cap"
+
+
+# ── 4c. every cap that cut something is told to the reader ───────────────────────────────────
+
+
+def _capped_streams() -> dict[str, LifecycleStream]:
+    clock = FakeClock()
+    out: dict[str, LifecycleStream] = {}
+    out["max_records"], _, _ = _read(_resolution(_src()), caps=replace(DEFAULT_LIFECYCLE_CAPS, max_records=1))
+    out["max_reads"], _, _ = _read(_resolution(_src()), caps=replace(DEFAULT_LIFECYCLE_CAPS, max_reads=1))
+    out["max_chars"], _, _ = _read(
+        _resolution(_src()), t2=FakeT2({("ART_rdr", "084"): "m" * 400, ("ART_rdr", "084-gate-latest"): "g" * 400}),
+        caps=replace(DEFAULT_LIFECYCLE_CAPS, max_record_chars=400, max_chars=500))
+    out["deadline"], _, _ = _read(
+        _resolution(_src()), t2=FakeT2(_rows(), clock=clock, cost=1.0), deadline=clock() + 1.5, clock=clock)
+    return out
+
+
+@pytest.mark.parametrize("cap", ["max_records", "max_reads", "max_chars", "deadline"])
+def test_every_cap_that_cut_something_has_a_text_line(cap: str) -> None:
+    stream = _capped_streams()[cap]
+    assert cap in stream.caps_hit, f"the scenario must hit {cap}: {stream.caps_hit}"
+    assert any(cap in line for line in stream.disclosures()), (cap, stream.disclosures())
+
+
+def test_a_lookup_cut_by_a_cap_is_read_capped_never_no_records() -> None:
+    caps = replace(DEFAULT_LIFECYCLE_CAPS, max_reads=3)
+    stream, t2, _ = _read(_resolution(_src()), t2=FakeT2({}), caps=caps)
+    assert len(t2.gets) == 3 and "max_reads" in stream.caps_hit
+    (outcome,) = stream.sources
+    assert outcome.status == "read_capped", "three of the four titles were asked; the record may exist under the fourth"
+    assert any("max_reads" in line for line in stream.disclosures())
+    assert not any("no T2 lifecycle records" in line for line in stream.disclosures())
+
+
+def test_a_source_that_is_not_an_rdr_gets_a_one_line_notice() -> None:
+    stream, t2, _ = _read(_resolution(_src("1.2.50", rdr_number=None)))
+    assert t2.gets == [] and stream.sources[0].status == "not_rdr"
+    assert [line for line in stream.disclosures() if "1.2.50" in line and "not an RDR" in line]
+
+
+def test_metadata_without_a_gate_record_says_the_gate_record_is_absent() -> None:
+    stream, _, _ = _read(_resolution(_src()), t2=FakeT2({("ART_rdr", "084"): ART_META}))
+    assert [r.kind for r in stream.records] == ["metadata"] and stream.sources[0].status == "read"
+    assert any("no latest gate record" in line and "ART_rdr" in line for line in stream.disclosures())
+
+
+def test_a_gate_record_without_metadata_says_the_metadata_record_is_absent() -> None:
+    stream, _, _ = _read(_resolution(_src()), t2=FakeT2({("ART_rdr", "084-gate-latest"): ART_GATE}))
+    assert [r.kind for r in stream.records] == ["gate-latest"]
+    assert any("no metadata record" in line for line in stream.disclosures())
+
+
+def test_both_records_present_has_no_absence_notice() -> None:
+    stream, _, _ = _read(_resolution(_src()))
+    assert stream.disclosures() == []
+
+
+# ── 4d. the same RDR named twice is read and admitted once ───────────────────────────────────
+
+
+def test_the_same_rdr_named_by_id_and_by_tumbler_is_read_once() -> None:
+    caps = replace(DEFAULT_LIFECYCLE_CAPS, max_records=2)
+    rows = {**_rows(), ("ART_rdr", "085"): "meta 85", ("ART_rdr", "085-gate-latest"): "gate 85"}
+    stream, t2, _ = _read(
+        _resolution(_src("RDR-084"), _src(ART_TUMBLER), _src("RDR-085", rdr_number=85)), t2=FakeT2(rows), caps=caps)
+    assert [r.text for r in stream.records] == [ART_META.strip(), ART_GATE.strip()]
+    assert [o.status for o in stream.sources][:2] == ["read", "duplicate"]
+    assert len(t2.gets) == 3, "the second naming costs no T2 read"
+    assert "max_records" in stream.caps_hit and stream.sources[2].status == "over_cap", (
+        "the cap is spent on distinct records only: the third source finds it spent, not the duplicate")
+    stream2, _, _ = _read(
+        _resolution(_src("RDR-084"), _src(ART_TUMBLER), _src("RDR-085", rdr_number=85)), t2=FakeT2(rows))
+    assert len(stream2.records) == 4 and stream2.sources[2].status == "read"
+    assert len({(r.project, r.title) for r in stream2.records}) == 4
+
+
+# ── 4d2. the project-naming rule is the one the RDR tooling and the indexer share ────────────
+
+
+def _run_git(*args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True, capture_output=True)
+
+
+def test_the_gate_project_name_and_the_registered_owner_name_agree_for_a_main_checkout_and_a_worktree(tmp_path) -> None:
+    """``_project_for`` reads ``<owner name>_rdr``. The RDR tooling writes ``_gate_repo_name(root)`` and the
+    indexer registers the owner as ``_repo_identity(repo)[0]``; if they ever diverge, every lifecycle read
+    addresses a project nothing was written to. Pinned for the main checkout and a linked worktree."""
+    from nexus.commands.rdr import _gate_repo_name
+    from nexus.repo_identity import _repo_identity, _repo_identity_with_main
+
+    main = tmp_path / "lifecycle-pin-repo"
+    main.mkdir()
+    _run_git("-C", str(main), "init", "-q")
+    _run_git("-C", str(main), "commit", "-q", "--allow-empty", "-m", "x")
+    linked = tmp_path / "linked-worktree"
+    _run_git("-C", str(main), "worktree", "add", "-q", "-b", "feature/x", str(linked))
+    names = {
+        "gate main": _gate_repo_name(str(main)), "gate worktree": _gate_repo_name(str(linked)),
+        "indexer main": _repo_identity(main)[0], "indexer worktree": _repo_identity(linked)[0],
+        "indexer with-main worktree": _repo_identity_with_main(linked)[0],
+    }
+    assert set(names.values()) == {"lifecycle-pin-repo"}, names
+
+
+def test_the_indexer_registers_the_owner_under_the_repo_identity_name() -> None:
+    import inspect
+
+    from nexus import indexer
+
+    src = inspect.getsource(indexer)
+    assert "_repo_basename, _repo_hash = _repo_identity(repo)" in src and "repo_name=_repo_basename," in src
+    assert 'name=repo_name,\n                owner_type="repo"' in src, (
+        "the catalog hook registers the repo owner under its repo_name argument")
+
+
+# ── 4e. the reserved tokens: none is a prefix of another ─────────────────────────────────────
+
+
+def test_no_reserved_token_is_a_prefix_of_another() -> None:
+    stream = _lifecycle_stream(3)
+    tokens = [i.token for i in stream.items]
+    assert len(set(tokens)) == len(tokens)
+    for a in tokens:
+        assert not any(b != a and b.startswith(a) for b in tokens), (a, tokens)
+
+
+def test_a_rank_that_drops_the_metadata_record_and_keeps_the_gate_record_counts_one_drop() -> None:
+    stream = _lifecycle_stream(0)
+    assert [i.raw for i in stream.items] == [ART_META.strip(), ART_GATE.strip()]
+    _hydrate("rank", {"inputs": ["s"], "criterion": "c"}, stream)
+    survivors = [stream.items[1].text]  # the rank kept the gate record only
+    with reserved_scope(stream):
+        set_reserved_step(1, feeds_from=("operator_rank",))
+        _hydrate_operator_args("generate", {"context": survivors, "instruction": "i"})
+    assert stream.report()["dropped_before_terminal"] == {"step": 1, "missing": 1, "of": 2}
+    assert stream.is_primary_text(survivors[0]) and not stream.is_primary_text("unrelated")
 
 
 # ── 5. inside the reserved share: truncation and the operator cap never evict a record ───────
@@ -368,41 +571,79 @@ def test_a_records_only_stream_is_built_when_the_document_yields_no_chunks() -> 
 # ── 6. nx_answer wiring ──────────────────────────────────────────────────────────────────────
 
 
+def _memory_db(fake: FakeT2, *, delay: float = 0.0) -> MagicMock:
+    """A T2 stand-in whose ``memory.get`` is the fake's; everything wider raises."""
+    db = MagicMock()
+    kwargs: list[dict] = []
+
+    def _get(project=None, title=None, id=None, *, timeout=None, retry_read_timeout=True):  # noqa: A002
+        kwargs.append({"timeout": timeout, "retry_read_timeout": retry_read_timeout})
+        if delay:
+            time.sleep(delay)
+        return fake.get(project, title, timeout)
+
+    db.memory_get_kwargs = kwargs
+    db.memory.get.side_effect = _get
+    for banned in ("search", "list_entries", "get_all", "resolve_title", "get_projects_with_prefix"):
+        getattr(db.memory, banned).side_effect = AssertionError(f"unbounded T2 read: {banned}")
+        getattr(db, banned).side_effect = AssertionError(f"unbounded T2 read: {banned}")
+    db.get.side_effect = AssertionError("the facade get has no timeout: read through db.memory")
+    return db
+
+
 @pytest.mark.asyncio
-async def test_nx_answer_lifecycle_reads_exact_titles_through_the_t2_context_and_nothing_wider() -> None:
+async def test_nx_answer_lifecycle_reads_exact_titles_through_the_shared_t2_transport_and_nothing_wider() -> None:
     from nexus.mcp import core as mcp_core
 
-    db = MagicMock()
     fake = FakeT2(_rows())
-    db.get.side_effect = lambda project=None, title=None, id=None: fake.get(project, title)
-    for banned in ("search", "list_entries", "get_all", "resolve_title"):
-        getattr(db, banned).side_effect = AssertionError(f"unbounded T2 read: {banned}")
+    db = _memory_db(fake)
     cat = FakeCatalog(_owners())
-    with patch.object(mcp_core, "_t2_ctx") as ctx, patch.object(mcp_core, "_get_catalog", return_value=cat):
-        ctx.return_value.__enter__.return_value = db
+    with patch.object(mcp_core, "_t2_ctx", side_effect=AssertionError("a fresh T2Database per call")), \
+         patch.object(mcp_core, "_t2_index_write", lambda fn, **_kw: fn(db)), \
+         patch.object(mcp_core, "_get_catalog", return_value=cat):
         life = await mcp_core._nx_answer_lifecycle_stream(_resolution(_src()))
     assert life is not None and [r.kind for r in life.records] == ["metadata", "gate-latest"]
     assert fake.gets == [("ART_rdr", "84"), ("ART_rdr", "084"), ("ART_rdr", "084-gate-latest")]
+    assert all(k["retry_read_timeout"] is False and 0 < k["timeout"] <= DEFAULT_LIFECYCLE_CAPS.call_timeout_seconds
+               for k in db.memory_get_kwargs), "a clamped timeout is never retried at the same clamp"
 
 
 @pytest.mark.asyncio
 async def test_nx_answer_lifecycle_is_none_without_a_named_source_and_never_opens_t2() -> None:
     from nexus.mcp import core as mcp_core
 
-    with patch.object(mcp_core, "_t2_ctx") as ctx:
+    with patch.object(mcp_core, "_t2_ctx") as ctx, patch.object(mcp_core, "_t2_index_write") as write:
         assert await mcp_core._nx_answer_lifecycle_stream(None) is None
     ctx.assert_not_called()
+    write.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_nx_answer_lifecycle_survives_an_unopenable_t2() -> None:
     from nexus.mcp import core as mcp_core
 
-    with patch.object(mcp_core, "_t2_ctx", side_effect=ConnectionError("down")), \
+    with patch.object(mcp_core, "_t2_index_write", side_effect=ConnectionError("down")), \
          patch.object(mcp_core, "_get_catalog", return_value=FakeCatalog(_owners())):
         life = await mcp_core._nx_answer_lifecycle_stream(_resolution(_src()))
     assert life is not None and life.records == ()
     assert life.sources[0].status == "read_failed" and "ConnectionError" in life.sources[0].detail
+
+
+@pytest.mark.asyncio
+async def test_nx_answer_lifecycle_honours_the_answer_deadline_against_a_slow_t2() -> None:
+    from nexus.mcp import core as mcp_core
+
+    fake = FakeT2({})
+    db = _memory_db(fake, delay=0.2)
+    t0 = time.monotonic()
+    with patch.object(mcp_core, "_t2_index_write", lambda fn, **_kw: fn(db)), \
+         patch.object(mcp_core, "_get_catalog", return_value=FakeCatalog(_owners())):
+        life = await mcp_core._nx_answer_lifecycle_stream(
+            _resolution(_src(), _src("RDR-085", rdr_number=85)), deadline=t0 + 0.5)
+    elapsed = time.monotonic() - t0
+    assert life is not None and "deadline" in life.caps_hit
+    assert elapsed < 1.2, f"16 sequential reads of 0.2 s would take 3.2 s; the deadline stopped them at {elapsed:.2f}s"
+    assert 1 <= len(fake.gets) <= 4 and life.sources[0].status == "read_capped"
 
 
 @pytest.mark.asyncio

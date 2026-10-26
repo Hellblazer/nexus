@@ -180,7 +180,7 @@ def _assert_t2_lifecycle_stream(fx, reader) -> None:
     name and owns none of the first tenant's catalog."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.db.t2.http_memory_store import HttpMemoryStore
-    from nexus.mcp_infra import t2_ctx
+    from nexus.mcp_infra import t2_index_write
     from nexus.plans.evidence import OwnerResolution, SourceRef
     from nexus.plans.lifecycle_stream import read_lifecycle_stream
     from nexus.plans.primary_evidence import resolve_named_sources
@@ -194,8 +194,9 @@ def _assert_t2_lifecycle_stream(fx, reader) -> None:
         res = resolution or resolve_named_sources([SourceRef.parse(r) for r in refs], qualifier, cat=cat)
         if t2_get is not None:
             return res, read_lifecycle_stream(res, cat=cat, t2_get=t2_get)
-        with t2_ctx() as db:
-            return res, read_lifecycle_stream(res, cat=cat, t2_get=lambda p, t: db.get(project=p, title=t))
+        # the shared transport nx_answer itself reads through (core._nx_answer_lifecycle_stream)
+        return res, read_lifecycle_stream(res, cat=cat, t2_get=lambda p, t, timeout: t2_index_write(
+            lambda db: db.memory.get(project=p, title=t, timeout=timeout, retry_read_timeout=False)))
 
     # 1. the ART source reads the ART project, and only it
     res, art = life(["RDR-084"], owner(fx.art_owner))
@@ -240,14 +241,14 @@ def _assert_t2_lifecycle_stream(fx, reader) -> None:
             # and a hand-built resolved source (bypassing the resolver) still finds no owner row
             res_b, b_stream = life(
                 ["RDR-084"], owner(fx.art_owner), cat=cat_b,
-                t2_get=lambda p, t: memory_b.get(project=p, title=t))
+                t2_get=lambda p, t, timeout: memory_b.get(project=p, title=t, timeout=timeout, retry_read_timeout=False))
             assert res_b.sources[0].status == "unresolved", res_b.sources[0]
             assert b_stream.records == () and b_stream.reads == 0
             assert b_stream.sources[0].status == "not_resolved"
             forced = res_b.__class__(sources=(res.sources[0],))  # tenant A's resolved source, handed to tenant B
             _, b_forced = life(
                 [], OwnerResolution("none"), cat=cat_b, resolution=forced,
-                t2_get=lambda p, t: memory_b.get(project=p, title=t))
+                t2_get=lambda p, t, timeout: memory_b.get(project=p, title=t, timeout=timeout, retry_read_timeout=False))
             assert b_forced.records == () and b_forced.reads == 0, "no owner row, so no T2 read at all"
             assert b_forced.sources[0].status == "project_undetermined"
             # and with the project forced, tenant B's T2 returns its own decoy, never tenant A's record

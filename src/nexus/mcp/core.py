@@ -10047,13 +10047,19 @@ def _nx_answer_named_sources(request: EvidenceRequest) -> NamedSourceResolution 
 
 async def _nx_answer_lifecycle_stream(
     resolution: NamedSourceResolution | None,
+    *,
+    deadline: float | None = None,
 ) -> "LifecycleStream | None":
     """Read the resolved RDR sources' T2 lifecycle records (RDR-232, nexus-jypmj.1.7, A7).
 
     ``None`` when no source was named, with no catalog or T2 call. The reads are exact
-    ``get(project, title)`` calls through the same tenant-bound T2 context every other ``nx_answer``
-    T2 access uses, bounded by ``LifecycleCaps``; blocking I/O, so it runs in a worker thread. It
-    never raises: a T2 that cannot be opened is reported per source.
+    ``get(project, title)`` calls through the shared ``_t2_index_write`` transport (the process's one
+    pooled ``T2Database``, keyed by the endpoint and bearer, so the tenant binding is the one every
+    other ``nx_answer`` T2 access has) rather than a fresh ``T2Database`` of eight pools per call,
+    bounded by ``LifecycleCaps``; blocking I/O, so it runs in a worker thread. *deadline* is
+    ``nx_answer``'s own absolute ``time.monotonic()`` deadline: the thread cannot be cancelled, so each
+    read is given what is left of the budget as its timeout and is not retried at that clamp. It never
+    raises: a T2 that cannot be reached is reported per source.
     """
     if resolution is None or not resolution.sources:
         return None
@@ -10066,11 +10072,15 @@ async def _nx_answer_lifecycle_stream(
         _log.warning("nx_answer_lifecycle_catalog_unavailable", error=str(exc))
         cat = None
 
+    def _get(project: str, title: str, timeout: float) -> "dict[str, Any] | None":
+        # db.memory.get, not the facade's get: only the store takes a per-call timeout.
+        return _t2_index_write(
+            lambda db: db.memory.get(project=project, title=title, timeout=timeout, retry_read_timeout=False),
+            op="lifecycle_get",
+        )
+
     def _read() -> "LifecycleStream | None":
-        with _t2_ctx() as db:
-            return read_lifecycle_stream(
-                resolution, cat=cat, t2_get=lambda project, title: db.get(project=project, title=title),
-            )
+        return read_lifecycle_stream(resolution, cat=cat, t2_get=_get, deadline=deadline)
 
     try:
         return await asyncio.to_thread(_read)
@@ -12486,7 +12496,7 @@ async def nx_answer(
     # RDR-232 (nexus-jypmj.1.6): the reserved primary stream, passed only when a named source
     # resolved and yielded evidence (the same "only pass when set" rule as the kwargs below).
     # nexus-jypmj.1.7: the resolved RDR's T2 lifecycle records ride the same stream, ahead of the chunks.
-    _lifecycle = await _nx_answer_lifecycle_stream(_named_sources)
+    _lifecycle = await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
     _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle)
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream

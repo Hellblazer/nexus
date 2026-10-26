@@ -23,10 +23,18 @@ Bounds, all in :class:`LifecycleCaps` and all disclosed: the reads are exact ``g
 calls (no search, no listing), at most four title shapes for the metadata record and four for the gate
 record per source; records admitted, T2 reads, characters per record and characters in total are
 capped. A record past a cap is cut or not admitted and the cut is stated.
+
+Time. The reads are sequential and blocking, and a thread cannot be cancelled once it is running, so the
+bound has to be inside each call. The run has a monotonic budget (the smaller of ``max_seconds`` and the
+caller's own deadline, ``nx_answer``'s ``budget_seconds``); every read is handed what is left of it, at
+most ``call_timeout_seconds``, as its timeout, and a read that is not worth starting (under a quarter of a
+second left) is not made. The caller's ``t2_get`` is told to give a timed-out read up rather than retry it
+at the same clamp.
 """
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
@@ -50,9 +58,13 @@ __all__ = [
     "read_lifecycle_stream",
 ]
 
-#: ``(project, title) -> entry | None``: the T2 client's exact ``get``. The only T2 call this module
-#: makes, so an unbounded read (search, listing) is not expressible through it.
-T2Get = Callable[[str, str], "dict[str, Any] | None"]
+#: ``(project, title, timeout_seconds) -> entry | None``: the T2 client's exact ``get``, told how long it
+#: may take. The only T2 call this module makes, so an unbounded read (search, listing) is not
+#: expressible through it.
+T2Get = Callable[[str, str, float], "dict[str, Any] | None"]
+
+#: A read is not started with less than this left of the budget (a shorter timeout is "do not try").
+_MIN_CALL_SECONDS: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -67,8 +79,12 @@ class LifecycleCaps:
     max_record_chars: int = 4_000
     #: Characters of record body kept across all admitted records (a cut marker is not counted).
     max_chars: int = 18_000
+    #: Seconds the whole lookup may take (the caller's own deadline can make it shorter).
+    max_seconds: float = 20.0
+    #: Seconds one T2 read may take (what is left of the budget can make it shorter).
+    call_timeout_seconds: float = 5.0
 
-    def to_wire(self) -> dict[str, int]:
+    def to_wire(self) -> dict[str, int | float]:
         return asdict(self)
 
 
@@ -112,12 +128,16 @@ class LifecycleRecord:
 
 SourceStatus = Literal[
     "read", "no_records", "not_rdr", "not_resolved", "project_undetermined", "read_failed", "over_cap",
+    "read_capped", "duplicate",
 ]
 
 
 @dataclass(frozen=True)
 class SourceLifecycle:
-    """What happened to one named source: ``read`` (at least one record admitted), or why not."""
+    """What happened to one named source: ``read`` (at least one record admitted; ``detail`` then names
+    a record that is absent), or why not. ``read_capped`` is a lookup a cap cut before it found a record
+    (the record may exist), never to be read as ``no_records``; ``duplicate`` is a source naming an RDR
+    an earlier source already read."""
 
     source: str
     status: SourceStatus
@@ -178,8 +198,8 @@ class LifecycleStream:
         }
 
     def disclosures(self) -> list[str]:
-        """Text notices for what the stream could not deliver. A source that is not an RDR, or that
-        did not resolve, costs no line here (the named-source notices say why it did not resolve)."""
+        """Text notices for what the stream could not deliver or delivered cut. A source that did not
+        resolve costs no line here (the named-source notices say why it did not resolve)."""
         lines: list[str] = []
         for s in self.sources:
             if s.status == "project_undetermined":
@@ -193,6 +213,18 @@ class LifecycleStream:
                 lines.append(f"[evidence request: {s.source}: no T2 lifecycle records: {s.detail}]")
             elif s.status == "over_cap":
                 lines.append(f"[evidence request: {s.source}: T2 lifecycle records not read: {s.detail}]")
+            elif s.status == "read_capped":
+                lines.append(
+                    f"[evidence request: {s.source}: the T2 lifecycle lookup was cut short, so a record may "
+                    f"exist that was not found: {s.detail}]"
+                )
+            elif s.status == "not_rdr":
+                lines.append(
+                    f"[evidence request: {s.source}: the resolved document is not an RDR, so it has no T2 "
+                    "lifecycle records]"
+                )
+            elif s.status == "read" and s.detail:
+                lines.append(f"[evidence request: {s.source}: {s.detail}]")
         for r in self.records:
             if r.truncated:
                 lines.append(
@@ -200,44 +232,75 @@ class LifecycleStream:
                     f"truncated to the first {r.kept} (max_record_chars {self.caps.max_record_chars}, "
                     f"max_chars {self.caps.max_chars})]"
                 )
-        if "max_chars" in self.caps_hit:
-            lines.append(
-                f"[evidence request: T2 lifecycle records reached the max_chars limit of {self.caps.max_chars}; "
-                "text past it was not kept]"
-            )
+        for name in self.caps_hit:
+            lines.append(_CAP_NOTICES[name].format(caps=self.caps))
         return lines
+
+
+#: One notice per cap that cut something, whatever the source's own status says.
+_CAP_NOTICES: dict[str, str] = {
+    "max_records": "[evidence request: T2 lifecycle records reached the max_records limit of {caps.max_records}; "
+                   "records past it were not admitted]",
+    "max_reads": "[evidence request: T2 lifecycle lookups reached the max_reads limit of {caps.max_reads} reads; "
+                 "titles past it were not tried]",
+    "max_chars": "[evidence request: T2 lifecycle records reached the max_chars limit of {caps.max_chars}; "
+                 "text past it was not kept]",
+    "deadline": "[evidence request: T2 lifecycle lookups stopped at the deadline (at most {caps.max_seconds} s, "
+                "or the answer's own budget if that was shorter); titles past it were not tried]",
+}
 
 
 class _Run:
     """The budget of one call."""
 
-    def __init__(self, caps: LifecycleCaps, t2_get: T2Get) -> None:
-        self.caps, self.t2_get = caps, t2_get
+    def __init__(self, caps: LifecycleCaps, t2_get: T2Get, *, deadline: float | None,
+                 clock: Callable[[], float]) -> None:
+        self.caps, self.t2_get, self.clock = caps, t2_get, clock
+        end = clock() + caps.max_seconds
+        self.end = end if deadline is None else min(end, deadline)
         self.reads = 0
         self.chars = 0
         self.records: list[LifecycleRecord] = []
         self.numbers: list[int] = []
         self.caps_hit: list[str] = []
         self.t2_failure: str | None = None
+        #: The cap that cut the current source's lookup, or ``None``; reset per source.
+        self.cut: str | None = None
+        #: ``(project, rdr number) -> the source value that read it``, so a second naming reads nothing.
+        self.seen: dict[tuple[str, int], str] = {}
+        self.admitted: set[tuple[str, str]] = set()
 
     def hit(self, name: str) -> None:
         if name not in self.caps_hit:
             self.caps_hit.append(name)
 
+    def out_of_time(self) -> bool:
+        """True (and the cap recorded) when too little of the time budget is left to start a read."""
+        if self.end - self.clock() < _MIN_CALL_SECONDS:
+            self.hit("deadline")
+            return True
+        return False
+
     def read(self, project: str, title: str) -> dict[str, Any] | None:
+        """One exact ``get``, given what is left of the budget (at most the per-call ceiling)."""
+        timeout = min(self.end - self.clock(), self.caps.call_timeout_seconds)
         self.reads += 1
-        entry = self.t2_get(project, title)
+        entry = self.t2_get(project, title, timeout)
         return entry if isinstance(entry, dict) else None
 
     def admit(self, source: str, project: str, title: str, kind: Literal["metadata", "gate-latest"],
               content: str, number: int) -> int:
         """1 when the record was admitted (possibly cut), else 0."""
+        if (project, title) in self.admitted:
+            return 0
         if len(self.records) >= self.caps.max_records:
             self.hit("max_records")
+            self.cut = "max_records"
             return 0
         room = self.caps.max_chars - self.chars
         if room <= 0:
             self.hit("max_chars")
+            self.cut = "max_chars"
             return 0
         limit = min(self.caps.max_record_chars, room)
         body = content.strip()
@@ -246,19 +309,37 @@ class _Run:
         if cut and limit < self.caps.max_record_chars:
             self.hit("max_chars")
         self.chars += min(len(body), limit)
+        self.admitted.add((project, title))
         self.records.append(LifecycleRecord(source, project, title, kind, text, len(body), cut, min(len(body), limit)))
         self.numbers.append(number)
         return 1
 
     def first_present(self, project: str, titles: tuple[str, ...]) -> tuple[str, str] | None:
-        """``(title, content)`` of the first title with a non-blank record, within the read cap."""
+        """``(title, content)`` of the first title with a non-blank record, within the read cap and the
+        time budget. A cap that stops the search before every title was tried sets ``self.cut``."""
         for title in titles:
             if self.reads >= self.caps.max_reads:
                 self.hit("max_reads")
+                self.cut = "max_reads"
+                return None
+            if self.out_of_time():
+                self.cut = "deadline"
                 return None
             entry = self.read(project, title)
             if entry and str(entry.get("content") or "").strip():
                 return title, str(entry["content"])
+        return None
+
+    def spent(self) -> str | None:
+        """The cap that is already used up before a source starts (recorded), else ``None``."""
+        if len(self.records) >= self.caps.max_records:
+            self.hit("max_records")
+            return "max_records"
+        if self.reads >= self.caps.max_reads:
+            self.hit("max_reads")
+            return "max_reads"
+        if self.out_of_time():
+            return "deadline"
         return None
 
 
@@ -289,37 +370,60 @@ def _read_source(source: ResolvedSource, cat: NamedSourceCatalog | None, run: _R
     if run.t2_failure is not None:
         return SourceLifecycle(value, "read_failed", rdr_number=number,
                                detail=f"{run.t2_failure} (not retried in this call)")
-    if len(run.records) >= run.caps.max_records or run.reads >= run.caps.max_reads:
-        run.hit("max_records" if len(run.records) >= run.caps.max_records else "max_reads")
-        return SourceLifecycle(
-            value, "over_cap", rdr_number=number,
-            detail=f"the lifecycle caps ({run.caps.max_records} records, {run.caps.max_reads} reads) were already reached",
-        )
     project, why = _project_for(source, cat)
     if not project:
         return SourceLifecycle(value, "project_undetermined", rdr_number=number, detail=why)
+    first = run.seen.get((project, number))
+    if first is not None:
+        return SourceLifecycle(
+            value, "duplicate", project=project, rdr_number=number,
+            detail=f"the same RDR and project as source {first}; its records are read and counted once",
+        )
+    run.seen[(project, number)] = value
+    if (spent := run.spent()) is not None:
+        limit = {"max_records": f"{run.caps.max_records} records", "max_reads": f"{run.caps.max_reads} reads",
+                 "deadline": "time budget"}[spent]
+        return SourceLifecycle(
+            value, "over_cap", project=project, rdr_number=number,
+            detail=f"the lifecycle {spent} limit ({limit}) was already reached",
+        )
 
     shapes = rdr_title_shapes(number)
     admitted = 0
+    run.cut = None
+    meta = gate = None
     try:
         meta = run.first_present(project, shapes)
         if meta is not None:
             admitted += run.admit(value, project, meta[0], "metadata", meta[1], number)
-        # the gate record is keyed by the same shape as the metadata record when both were written together
-        first = meta[0] if meta is not None else None
-        gate_shapes = ((first,) if first else ()) + tuple(s for s in shapes if s != first)
-        gate = run.first_present(project, tuple(f"{s}{_GATE_SUFFIX}" for s in gate_shapes))
-        if gate is not None:
-            admitted += run.admit(value, project, gate[0], "gate-latest", gate[1], number)
+        if run.cut is None:
+            # the gate record is keyed by the same shape as the metadata record when both were written together
+            first_shape = meta[0] if meta is not None else None
+            gate_shapes = ((first_shape,) if first_shape else ()) + tuple(x for x in shapes if x != first_shape)
+            gate = run.first_present(project, tuple(f"{x}{_GATE_SUFFIX}" for x in gate_shapes))
+            if gate is not None:
+                admitted += run.admit(value, project, gate[0], "gate-latest", gate[1], number)
     except Exception as exc:  # noqa: BLE001 — a failed T2 read is disclosed, never a failed answer
         _log.warning("lifecycle_stream_t2_read_failed", source=value, project=project, error=str(exc))
         run.t2_failure = f"{type(exc).__name__} reading T2 project {project}"
         return SourceLifecycle(value, "read_failed", project=project, rdr_number=number, detail=run.t2_failure)
+    label = f"RDR-{number:03d} in T2 project {project}"
     if admitted:
-        return SourceLifecycle(value, "read", project=project, rdr_number=number)
+        detail = ""
+        if run.cut is None:
+            if meta is None:
+                detail = f"no metadata record for {label}"
+            elif gate is None:
+                detail = f"no latest gate record for {label}"
+        return SourceLifecycle(value, "read", project=project, rdr_number=number, detail=detail)
+    if run.cut is not None:
+        return SourceLifecycle(
+            value, "read_capped", project=project, rdr_number=number,
+            detail=f"the {run.cut} limit stopped the lookup for {label}",
+        )
     return SourceLifecycle(
         value, "no_records", project=project, rdr_number=number,
-        detail=f"no usable metadata or gate-latest record for RDR-{number:03d} in T2 project {project}",
+        detail=f"no usable metadata or gate-latest record for {label}",
     )
 
 
@@ -329,15 +433,20 @@ def read_lifecycle_stream(
     cat: NamedSourceCatalog | None,
     t2_get: T2Get,
     caps: LifecycleCaps = DEFAULT_LIFECYCLE_CAPS,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> LifecycleStream | None:
     """The T2 lifecycle stream for the resolved RDR sources. ``None`` when no source was named.
 
     Only a ``resolved`` source whose document is an RDR (``rdr_number``) is read; an ambiguous,
     unresolved or non-RDR source gets a per-source outcome and no records. Never raises.
+
+    *deadline* is an absolute time on *clock* (``time.monotonic`` by default): the caller's own budget.
+    The run also stops at ``caps.max_seconds`` from its start, whichever is sooner.
     """
     if resolution is None or not resolution.sources:
         return None
-    run = _Run(caps, t2_get)
+    run = _Run(caps, t2_get, deadline=deadline, clock=clock)
     outcomes: list[SourceLifecycle] = []
     for source in resolution.sources:
         if source.status != "resolved" or source.rdr_number is None or not source.tumbler:

@@ -704,10 +704,10 @@ def test_extra_records_lead_the_share_and_the_share_cap_never_evicts_them() -> N
     evidence = PrimaryEvidence(items=tuple(_chunk(i) for i in range(RESERVED_SHARE_MAX + 5)))
     stream = ReservedStream.from_evidence(evidence, extra=extra)
     assert stream is not None and len(stream.items) == RESERVED_SHARE_MAX
-    assert stream.items[0].raw == "gate: PASSED" and stream.items[0].token == "primary:rdr-084-gate"
+    assert stream.items[0].raw == "gate: PASSED" and stream.items[0].token == "primary:rdr-084-gate#"
     assert stream.over_share_dropped == 6, "five over the share plus the one the record displaced"
     _, args = _hydrate("generate", {"inputs": ["s"], "instruction": "i"}, stream)
-    assert args["context"].startswith("[primary record RDR-084 gate record; primary:rdr-084-gate]\ngate: PASSED")
+    assert args["context"].startswith("[primary record RDR-084 gate record; primary:rdr-084-gate#]\ngate: PASSED")
 
 
 def test_a_record_only_stream_is_built_and_an_empty_one_is_not() -> None:

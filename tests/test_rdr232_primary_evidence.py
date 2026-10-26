@@ -738,7 +738,7 @@ def test_a_golden_required_source_label_maps_to_a_source_ref_and_a_project() -> 
 
 async def _answer(
     cat: FakeCatalog, *, bindings: dict, structured: bool, t3: FakeT3 | None = None,
-    t2_records: dict[tuple[str, str], str] | None = None,
+    t2_records: dict[tuple[str, str], str] | None = None, plan_run_calls: list | None = None,
 ) -> Any:
     """``nx_answer`` over a one-step ad-hoc plan, the catalog replaced by *cat*. The same
     patches ``test_rdr232_reserved_bindings._text_answer`` uses, plus the catalog."""
@@ -759,11 +759,14 @@ async def _answer(
     db_stub = MagicMock()
     db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
     records = t2_records or {}
-    db_stub.get.side_effect = lambda project=None, title=None, id=None: (
+    db_stub.memory.get.side_effect = lambda project=None, title=None, id=None, **_kw: (
         {"project": project, "title": title, "content": records[(project, title)]} if (project, title) in records else None)
+    plan_run = AsyncMock(return_value=result)
+    if plan_run_calls is not None:
+        plan_run_calls.append(plan_run)
     with patch("nexus.plans.matcher.plan_match", return_value=[]), \
          patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
-         patch("nexus.plans.runner.plan_run", AsyncMock(return_value=result)), \
+         patch("nexus.plans.runner.plan_run", plan_run), \
          patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
          patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
          patch("nexus.mcp.core.scratch", return_value="ok"), \
@@ -814,3 +817,21 @@ async def test_nx_answer_says_so_when_a_named_source_is_ambiguous_and_when_it_re
     env = await _answer(cat, bindings={"concept": "x"}, structured=True)
     assert env["named_sources"] is None, "no named source: nothing was resolved and no catalog call was made"
     assert cat.count("find") == 4
+
+
+@pytest.mark.asyncio
+async def test_nx_answer_hands_plan_run_a_reserved_stream_that_leads_with_the_two_t2_records() -> None:
+    """The call site itself (nexus-jypmj.1.7): nx_answer reads the lifecycle stream and passes it to the
+    primary-stream builder, and the stream ``plan_run`` receives holds the two T2 records ahead of the
+    chunk. Removing the ``_lifecycle`` argument at the call site leaves the chunk alone and fails this."""
+    cat, t3 = FakeCatalog(), FakeT3()
+    _two_projects(cat, t3)
+    records = {("ART_rdr", "084"): "id: RDR-084\nstatus: accepted", ("ART_rdr", "084-gate-latest"): "outcome: PASSED"}
+    runs: list = []
+    env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True, t3=t3,
+                        t2_records=records, plan_run_calls=runs)
+    (run,) = runs
+    stream = run.call_args.kwargs["reserved_stream"]
+    assert [i.raw for i in stream.items[:2]] == ["id: RDR-084\nstatus: accepted", "outcome: PASSED"]
+    assert len(stream.items) == 3 and stream.items[2].chash, "the chunk follows the two records"
+    assert env["lifecycle_stream"]["reads"] <= 8

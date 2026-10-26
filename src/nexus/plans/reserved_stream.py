@@ -76,8 +76,13 @@ class ReservedItem:
     @classmethod
     def record(cls, ident: str, text: str, *, label: str = "") -> ReservedItem:
         """A reserved item that is not a T3 chunk (the T2 lifecycle records, nexus-jypmj.1.7):
-        no chash, so only the text dedupe applies. *ident* names it in the header and the token."""
-        token = f"primary:{ident}"
+        no chash, so only the text dedupe applies. *ident* names it in the header and the token.
+
+        The token ends in ``#`` (and a ``#`` inside *ident* is escaped), so no record token is a prefix
+        of another: ``primary:t2:P/084#`` is not found inside ``primary:t2:P/084-gate-latest#``, which
+        the substring checks in :meth:`ReservedStream.observe` and ``is_primary_text`` need to count one
+        dropped record as one."""
+        token = f"primary:{ident.replace('#', '%23')}#"
         head = f"{label}; " if label else ""
         return cls(token=token, chash="", raw=text, text=f"[primary record {head}{token}]\n{text}")
 

@@ -5396,7 +5396,10 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has five RDR-232 keys, all always present:
+The envelope has six RDR-232 keys, all always present (`scope_diagnostics`,
+`evidence_request`, `named_sources`, `primary_evidence`, `reserved_stream` and
+`lifecycle_stream`; the first is `[]` and the other five `null` when they have
+nothing to report):
 
 - `scope_diagnostics` (nexus-jypmj.1.3): a list with one entry per
   corpus-taking retrieval step the caller's `scope` reached,
@@ -5455,17 +5458,25 @@ The envelope has five RDR-232 keys, all always present:
   lead the reserved share (their bodies are in the reduction's input, not in
   this key). `status` is `read`, `no_records`, `not_rdr` (a resolved document
   that is not an RDR file), `not_resolved` (ambiguous or unresolved; no
-  stream), `project_undetermined`, `read_failed` or `over_cap`. The T2
+  stream), `project_undetermined`, `read_failed`, `over_cap`, `read_capped`
+  (a cap cut the lookup before a record was found, so one may exist) or
+  `duplicate` (the same RDR and project as an earlier source; read once). The T2
   project is `<owner name>_rdr` for the repo owner holding the resolved
   document, never taken from the request; an owner that is not a repo owner,
   has no name, or is not in the catalog leaves it undetermined and nothing is
   read. Titles are tried as `84`, `084`, `RDR-84`, `RDR-084`, then
-  `<shape>-gate-latest`, with exact reads only. `caps` is `{max_records: 6,
-  max_reads: 24, max_record_chars: 4000, max_chars: 18000}`; a cut or refused
-  record is named in `kept`, `truncated` and `caps_hit`. `None` when no source
-  was named or the run took the single-step fast path. Text mode adds an
-  `[evidence request: ...]` line for an undetermined project, a failed or
-  empty read, an over-cap source or a cut record. `named_sources[].rdr_number`
+  `<shape>-gate-latest`, with exact reads only, through the shared T2
+  transport. `caps` is `{max_records: 6, max_reads: 24, max_record_chars: 4000,
+  max_chars: 18000, max_seconds: 20.0, call_timeout_seconds: 5.0}`; each read
+  gets what is left of `max_seconds` or of the answer's own `budget_seconds`
+  (at most `call_timeout_seconds`) as its timeout, and none is retried at that
+  clamp. A cut or refused record is named in `kept`, `truncated` and
+  `caps_hit` (`max_records`, `max_reads`, `max_chars`, `deadline`). `None` when
+  no source was named or the run took the single-step fast path. Text mode adds
+  an `[evidence request: ...]` line for an undetermined project, a failed or
+  empty read, a source that is not an RDR, a source with only one of its two
+  records, an over-cap or cut-short source, a cut record, and every cap in
+  `caps_hit`. `named_sources[].rdr_number`
   is the RDR number the resolved document's path carries (`null` when it is
   not an RDR file).
 
