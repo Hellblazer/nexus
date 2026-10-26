@@ -6,6 +6,7 @@ Plugin version aligned with conexus 7.86.3. These plugin changes become live at 
 
 - **A third plugin, `conexus-tool-spill`, installs from the marketplace** (nexus-121ke). `tool-spill/`: in the main conversation, a Bash or Read result over the size limit goes to a file and the model sees its head (Bash: head and tail of each stream, with a count of error lines in the cut middle) and the path. Opt-in: `/plugin install conexus-tool-spill@nexus-plugins`; `limit`, `head`, `tail` and `includeHeadless` are its settings.
 - **The lockstep hook's fallback plugin set names `conexus-tool-spill`** (nexus-121ke). `hooks/scripts/version_lockstep_hook.py`, used only when no marketplace.json is reachable.
+- **The orchestration skill's Working Rules name the decisions that need a sequential-thinking call** (nexus-rkats). `skills/orchestration/reference.md`: a closed list replaces "before every decision".
 
 ## [7.86.2] - 2026-10-25
 
