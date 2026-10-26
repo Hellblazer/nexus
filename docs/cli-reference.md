@@ -5495,7 +5495,12 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   only: the title never picks a document), or by a registered project name
   (matched case-insensitively against the owner names) that is not the
   session's; both give the `candidates` ambiguity, and `active_project.reason`
-  says the inference was set aside. `active_project` (present once the tier was
+  says the inference was set aside. The title counts only with at least two
+  distinctive words ("in detail" vetoes nothing). If the owner names cannot be
+  read while the question has a word that could name a project, the inference
+  is declined and the reason says "name check unavailable". A number the
+  session's project does not hold resolves to the other project's document and
+  the text says the active project holds no such number. `active_project` (present once the tier was
   consulted) is `{applied, reliable, owner, name, reason}`; when it is not
   applied, `reason` says why and an ambiguous source stays `candidates`. An
   inferred owner qualifies source resolution only: it never narrows the vector
@@ -5505,9 +5510,11 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   then carries `source_origin: "question"` and `sources` holds the ids read from
   the text, at most 3 resolved per request (the rest are in
   `named_sources.dropped`). A range (`RDR-078 through RDR-095`) keeps its two
-  ends as sources and is listed in `named_sources.ranges` and in a text notice
+  ends as sources (the second end may be a bare number: `RDR-078 through 095`)
+  and is listed in `named_sources.ranges` and in a text notice
   ("range RDR-078 to RDR-095 not expanded: RDR-079 to RDR-094 not resolved"):
-  the numbers between are not resolved. A `source` binding wins and replaces them. A source
+  the numbers between are not resolved. `Compare RDR-078 to RDR-095` is a
+  comparison of two documents, not a range. A `source` binding wins and replaces them. A source
   read from the question is never an owner: only an `owner` or `project` binding
   narrows the secondary streams. `None` when no reserved binding was passed and
   the question names no RDR.

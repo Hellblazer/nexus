@@ -17,6 +17,10 @@ The rules, and what holds each:
   a source read from the question prints no notice; I4/I5/F9 the stages never raise and share one budget;
 * S1 to S3 and F6: the tier runs off the loop, checks the host's variable before the catalog, reports an
   inference the resolver set aside, and runs its default path unpatched.
+
+The confirmation round (N1 to N5, at the end of the file): a fallback to another project's document is never
+silent; an unreadable owner registry declines the inference; a title vetoes only with two distinctive words;
+a bare second number ends a range; a comparison is not a range.
 """
 
 from __future__ import annotations
@@ -31,12 +35,13 @@ import pytest
 import yaml
 
 from nexus.mcp import core
-from nexus.plans.active_project import REMEDY, ActiveProject, apply_active_project
+from nexus.plans.active_project import REMEDY, ActiveProject, apply_active_project, registered_owner_names
 from nexus.plans.evidence import OwnerResolution, SourceRange, SourceRef, build_evidence_request
 from nexus.plans.primary_evidence import (
     DEFAULT_CAPS,
     NamedSourceResolution,
     ResolvedSource,
+    distinctive_title_words,
     resolve_named_sources,
     title_hint_match,
 )
@@ -221,6 +226,7 @@ def test_the_host_limit_and_the_remedy_are_stated_where_users_read_them(tmp_path
 def test_a_collection_name_scope_declines_the_tier_even_with_a_reliable_project(tmp_path: Path) -> None:
     tier = apply_active_project(
         OwnerResolution("none"), ActiveProject(True, owner=ART_OWNER, name="ART"), scope=ART_COL,
+        registered=frozenset(),
     )
     assert tier.applied is False and tier.owner.status == "none" and "collection" in tier.reason
     env, _r, _l, _c = _run(tmp_path, scope=ART_COL, project=ART_OWNER)
@@ -311,9 +317,10 @@ def test_an_inference_over_a_number_no_other_project_holds_leaves_no_ambiguity(t
 
 
 def test_a_plain_unique_resolution_of_a_question_source_prepends_no_notice(tmp_path: Path) -> None:
+    """The session's own project holds the number and no other does: nothing is in doubt."""
     env, _r, _l, _c = _run(
         tmp_path, question="What does RDR-160 say?", project=ART_OWNER,
-        extra_docs=(("1.1.5160", "docs/rdr/rdr-160-solo.md"),),
+        extra_docs=(("1.2.5160", "docs/rdr/rdr-160-solo.md", ART_COL),),
     )
     (src,) = _sources(env)
     assert src["status"] == "resolved" and src["origin"] == "question", "the premise: it resolved"
@@ -508,3 +515,217 @@ def test_the_envelope_keeps_the_inference_when_a_source_used_it() -> None:
     settled = core._nx_answer_settle_inference(inferred, unused)
     assert settled.owner.status == "none" and settled.active_project["applied"] is False
     assert core._nx_answer_settle_inference(request, unused) is request, "no inference was made, nothing to settle"
+
+
+# ── N1: a fallback to another project's document is never silent ─────────────────────────────────────────
+
+FALLBACK_LINE = "the active project (owner 1.2) holds no RDR-160, so it was not used"
+
+
+def test_a_question_source_the_reliable_session_project_does_not_hold_says_so_and_keeps_its_ledger_line(
+    tmp_path: Path,
+) -> None:
+    """An ART session asks about RDR-160 and only Nexus holds it. The document read is another project's, by
+    elimination: the text says so, the ledger keeps the project-qualifier doubt, and the envelope says no
+    inference was applied."""
+    env, _r, _l, _c = _run(
+        tmp_path, question="What does RDR-160 say?", project=ART_OWNER,
+        extra_docs=(("1.1.5160", "docs/rdr/rdr-160-solo.md"),),
+    )
+    (src,) = _sources(env)
+    assert (src["status"], src["tumbler"], src["inferred"], src["origin"]) == ("resolved", "1.1.5160", False, "question")
+    (line,) = [ln for ln in _notices(env) if "was not used" in ln]
+    assert FALLBACK_LINE in line and "1.1.5160" in line, line
+    assert "source_unqualified" in _codes(env), "the doubt stays in the request ledger"
+    wire = env["evidence_request"]
+    assert wire["owner"]["status"] == "none" and wire["active_project"]["applied"] is False
+
+
+def test_the_fallback_notice_says_a_single_step_plan_does_not_read_the_document() -> None:
+    fell_back = ResolvedSource(
+        ref=SourceRef.parse("RDR-160"), status="resolved", tumbler="1.1.5160", fallback=FALLBACK_LINE, detail=FALLBACK_LINE,
+    )
+    plain = ResolvedSource(ref=SourceRef.parse("RDR-160"), status="resolved", tumbler="1.1.5160")
+    multi = NamedSourceResolution(sources=(fell_back,), origin="question").disclosures()
+    single = NamedSourceResolution(sources=(fell_back,), origin="question").disclosures(primary_stream=False)
+    (multi_line,) = multi
+    (single_line,) = single
+    assert FALLBACK_LINE in multi_line and "not read as evidence" not in multi_line
+    assert FALLBACK_LINE in single_line and "the document is not read as evidence" in single_line
+    assert NamedSourceResolution(sources=(plain,), origin="question").disclosures(primary_stream=False) == []
+
+
+def test_the_ledger_withdraws_the_unqualified_line_only_for_a_source_that_did_not_fall_back(tmp_path: Path) -> None:
+    """A source the session's project could not hold keeps its line; a source with no doubt loses it."""
+    env, _r, _l, _c = _run(
+        tmp_path, question="What do RDR-160 and RDR-161 say?", project=ART_OWNER,
+        extra_docs=(("1.1.5160", "docs/rdr/rdr-160-solo.md"), ("1.2.5161", "docs/rdr/rdr-161-solo.md", ART_COL)),
+    )
+    subjects = {a["subject"] for a in env["request_coverage"]["ambiguities"] if a["code"] == "source_unqualified"}
+    assert subjects == {"RDR-160"}, subjects
+
+
+# ── N2: an unreadable owner registry fails closed ──────────────────────────────────────────────────────
+
+
+def test_the_tier_declines_when_the_registry_is_unreadable_and_the_question_has_a_candidate_word() -> None:
+    nexus_session = ActiveProject(True, owner=NEXUS_OWNER, name="nexus")
+    none = OwnerResolution("none")
+    tier = apply_active_project(none, nexus_session, scope="", project_names=("ART",), registered=None)
+    assert tier.applied is False and tier.owner.status == "none"
+    assert "name check unavailable" in tier.reason and "ART" in tier.reason and REMEDY in tier.reason
+    # nothing to check, nothing to fail: a question with no candidate word needs no registry
+    assert apply_active_project(none, nexus_session, scope="", project_names=(), registered=None).applied is True
+    assert apply_active_project(none, nexus_session, scope="", project_names=(" ",), registered=None).applied is True
+    # an empty registry that WAS read is not an unreadable one
+    assert apply_active_project(none, nexus_session, scope="", project_names=("ART",), registered=frozenset()).applied is True
+
+
+def test_the_registry_reader_says_unreadable_as_none_and_never_as_an_empty_set() -> None:
+    class Broken:
+        def list_owners(self) -> list[dict]:
+            raise RuntimeError("engine unreachable")
+
+    assert registered_owner_names(Broken()) is None
+    assert registered_owner_names(None) is None
+    assert registered_owner_names(SessionCatalog()) == frozenset({"art", "nexus"})
+
+
+def test_a_registry_that_fails_to_list_declines_the_inference_end_to_end(tmp_path: Path) -> None:
+    """``Summarize the ART RDR-084`` from a Nexus session must not become Nexus's RDR-084 because the registry
+    that would have shown ``ART`` is a project could not be read."""
+    def break_registry(cat: SessionCatalog) -> None:
+        def boom(*_a: object, **_k: object) -> list[dict]:
+            raise RuntimeError("engine unreachable")
+
+        cat.list_owners = boom  # type: ignore[method-assign]
+
+    env, _r, _l, _c = _run(tmp_path, question="Summarize the ART RDR-084.", project=NEXUS_OWNER, configure=break_registry)
+    (src,) = _sources(env)
+    assert src["status"] == "candidates" and src["tumbler"] is None and src["inferred"] is False
+    tier = env["evidence_request"]["active_project"]
+    assert tier["applied"] is False and "name check unavailable" in tier["reason"]
+    assert env["evidence_request"]["owner"]["status"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_handle_that_fails_when_the_registry_is_fetched_declines_the_inference_too() -> None:
+    """Detection is stubbed reliable, so the only catalog fetch left is the registry's own (in production it is
+    the second, after detection's)."""
+    def get_catalog() -> object:
+        raise RuntimeError("catalog handle lost")
+
+    request = build_evidence_request({"source": "RDR-084"}, scope="rdr", name_lookup=str)
+    reliable = ActiveProject(True, owner=NEXUS_OWNER, name="nexus")
+    with patch.object(core, "_get_catalog", get_catalog), \
+         patch("nexus.plans.active_project.detect_active_project", return_value=reliable):
+        got = await core._nx_answer_active_project(request, ("ART",), scope="rdr", deadline=None)
+        assert got.owner.status == "none" and got.active_project["applied"] is False
+        assert "name check unavailable" in got.active_project["reason"]
+        # no candidate word: the registry is never fetched, so the same failure changes nothing
+        again = await core._nx_answer_active_project(request, (), scope="rdr", deadline=None)
+    assert again.owner.status == "inferred" and again.active_project["applied"] is True
+
+
+# ── N3: the title veto needs two distinctive words ─────────────────────────────────────────────────────
+
+
+def _detail_pane_catalog() -> FakeCatalog:
+    """ART's RDR-084 is titled "Detail pane"; Nexus's is "plan library growth"."""
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, ART_DOC, "docs/rdr/RDR-084-detail-pane.md", ["# ART RDR-084\nbody"], collection=ART_COL)
+    _doc(cat, t3, NEXUS_DOC, "docs/rdr/rdr-084-plan-library-growth.md", ["# Nexus RDR-084\nbody"], collection=NEXUS_COL)
+    return cat
+
+
+NEXUS_INFERRED = OwnerResolution("inferred", NEXUS_OWNER, (("active_project", NEXUS_OWNER),))
+
+
+@pytest.mark.parametrize("hint", ["in detail", "RDR-084 detail", "the detail", "detail"])
+def test_a_title_hint_with_one_distinctive_word_never_vetoes(hint: str) -> None:
+    (src,) = resolve_named_sources([RDR084], NEXUS_INFERRED, cat=_detail_pane_catalog(), title_hints={"RDR-084": [hint]}).sources
+    assert (src.status, src.tumbler, src.inferred) == ("resolved", NEXUS_DOC, True), hint
+
+
+def test_a_title_hint_with_two_distinctive_words_still_vetoes() -> None:
+    (src,) = resolve_named_sources(
+        [RDR084], NEXUS_INFERRED, cat=_detail_pane_catalog(), title_hints={"RDR-084": ["Detail pane"]},
+    ).sources
+    assert src.status == "candidates" and src.tumbler is None and not src.inferred
+    assert "not inferred" in src.detail
+
+
+def test_the_incident_title_still_vetoes_from_a_nexus_session() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _two_projects(cat, t3)
+    (src,) = resolve_named_sources(
+        [RDR084], NEXUS_INFERRED, cat=cat, title_hints={"RDR-084": ["LIST PARSE Canonical Consolidation"]},
+    ).sources
+    assert src.status == "candidates" and src.tumbler is None
+
+
+def test_the_distinctive_words_of_a_hint_exclude_stopwords_short_words_and_the_rdr_id() -> None:
+    assert distinctive_title_words("in detail") == {"detail"}
+    assert distinctive_title_words("RDR-084 detail", 84) == {"detail"}
+    assert distinctive_title_words("RDR-084 detail") == {"084", "detail"}, "without the number the id is a word"
+    assert distinctive_title_words("the and for", 84) == frozenset()
+    assert distinctive_title_words("LIST PARSE Canonical Consolidation", 84) == {"list", "parse", "canonical", "consolidation"}
+
+
+# ── N4: a bare second number ends a range ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("wording", [
+    "RDR-078 through 095", "RDR-078 thru 095", "RDR-078 until 095", "rdr-078 through 095", "RDR-078 \u2013 095",
+    "RDR-78 through 95",
+])
+def test_a_bare_second_number_ends_a_range_with_the_same_disclosure(wording: str) -> None:
+    cov = derive_request_coverage(f"Trace {wording} and its gates.", scope="rdr")
+    assert [(r.start, r.end) for r in cov.source_ranges] == [(78, 95)], wording
+    assert [s.value for s in cov.named_sources] == ["RDR-078", "RDR-095"], "the bare end is a source too"
+    assert cov.source_ranges[0].disclosure() == RANGE_LINE
+
+
+@pytest.mark.parametrize("text", [
+    "RDR-078 to 095", "RDR-078 through 10 phases", "RDR-084-2026", "RDR-078 through the gate", "RDR-078 and 095",
+])
+def test_a_bare_number_that_is_not_a_range_end_is_not_reported_as_one(text: str) -> None:
+    cov = derive_request_coverage(f"Explain {text}.", scope="rdr")
+    assert cov.source_ranges == (), text
+    assert "RDR-095" not in [s.value for s in cov.named_sources], text
+
+
+def test_the_bare_range_is_disclosed_in_the_answer(tmp_path: Path) -> None:
+    docs = (("1.1.9078", "docs/rdr/rdr-078-plan-first.md"), ("1.1.9095", "docs/rdr/rdr-095-scope-aware.md"))
+    env, _r, _l, _c = _run(tmp_path, question="Trace RDR-078 through 095 and its gates.", extra_docs=docs)
+    assert [s["source"]["value"] for s in _sources(env)] == ["RDR-078", "RDR-095"]
+    assert env["named_sources"]["ranges"] == [{"start": "RDR-078", "end": "RDR-095", "not_resolved": "RDR-079 to RDR-094"}]
+    assert f"[evidence request: {RANGE_LINE}]" in env["final_text"].splitlines()
+
+
+# ── N5: a comparison is not a range ────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("question", [
+    "Compare RDR-078 to RDR-095.", "compare RDR-078 to RDR-095 in detail", "Contrast RDR-078 to RDR-095.",
+    "Compare the decisions in RDR-078 to RDR-095.", "What is the difference between RDR-078 to RDR-095?",
+])
+def test_a_comparison_connector_is_not_a_range(question: str) -> None:
+    cov = derive_request_coverage(question, scope="rdr")
+    assert cov.source_ranges == (), question
+    assert [s.value for s in cov.named_sources] == ["RDR-078", "RDR-095"], "both are still sources"
+
+
+@pytest.mark.parametrize("question", [
+    "Trace RDR-078 to RDR-095.", "Compare the gates. Trace RDR-078 to RDR-095.",
+    "Compare RDR-078 through RDR-095.", "Contrast the drift in RDR-078 until RDR-095.",
+])
+def test_a_range_stays_a_range_unless_a_comparison_leads_its_to(question: str) -> None:
+    assert [(r.start, r.end) for r in derive_request_coverage(question, scope="rdr").source_ranges] == [(78, 95)], question
+
+
+def test_a_comparison_prints_no_range_line_in_the_answer(tmp_path: Path) -> None:
+    docs = (("1.1.9078", "docs/rdr/rdr-078-plan-first.md"), ("1.1.9095", "docs/rdr/rdr-095-scope-aware.md"))
+    env, _r, _l, _c = _run(tmp_path, question="Compare RDR-078 to RDR-095.", extra_docs=docs)
+    assert env["named_sources"]["ranges"] == []
+    assert "not expanded" not in env["final_text"]

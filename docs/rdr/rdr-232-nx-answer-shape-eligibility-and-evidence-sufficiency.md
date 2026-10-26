@@ -628,6 +628,25 @@ candidates, which is honest but not the requested synthesis. Phase 2 builds
 and verifies the active-project tier as part of A5, and its proof includes the
 unmodified call.
 
+How the active-project tier decides (added 2026-10-26, nexus-jypmj.2.4,
+approved by Sam). The session's project is reliable only in Claude Code, where
+the server starts in the session's project directory and that directory maps
+to a registered catalog owner; Desktop and Cowork start it elsewhere, so there
+the tier never applies and the caller passes `owner` or `project`. A reliable
+project qualifies an unqualified source the way an explicit owner would, but
+it is a guess about intent, so the question's own words can overrule it. If
+the question names a different registered project, or carries a title of two
+or more distinctive words that fits another project's document and not the
+session project's, the tier declines and the result is the ambiguity naming
+every candidate; the title never picks a document. With no such evidence, a
+reliable session resolves its own project's RDR and discloses the inference.
+If the session's project holds no such RDR, resolution falls back to the
+unqualified lookup and the answer text says the active project was not used.
+An inferred owner never narrows the secondary streams. RDR ids read from the
+question text go through the same tiers as a `source` binding, at most three
+per request (a calibration parameter for Phase 2 measurement), and a range
+such as "RDR-078 through RDR-095" is disclosed as not expanded.
+
 `scope` cannot carry the qualifier for this call: it takes one token, either a
 corpus prefix such as `rdr` or a catalog subtree such as `1.2`
 (`_nx_answer_normalize_scope`, research 16), and this call needs both. The
@@ -1318,7 +1337,11 @@ extracted, and an explicit `project="ART"` or `owner="1.2"` binding resolves
 without guessing. The recorded question has no `ART` token, so this binding is
 required rather than implied. The unmodified call, with no binding, resolves
 through the active-project tier when the server session's project is ART, and
-returns an ambiguity result otherwise. Lookup-only plan 473 is ineligible, and
+returns an ambiguity result otherwise: from an unreliable host, and from a
+reliable session of another project, where the question's ART title vetoes the
+inference (see "How the active-project tier decides" in section 1). A
+title-less question from a reliable session of another project resolves that
+project's RDR, disclosed as inferred. Lookup-only plan 473 is ineligible, and
 unknown-grown plans cannot bypass the gate. A generic route or inline planner
 receives the coverage request. No facet-coverage guarantee is claimed.
 
@@ -1743,3 +1766,4 @@ remain coherent without it.
   verified in production (research 19-21). Section 2a adds the owner-narrowing
   rule for secondary streams (nexus-jypmj.1.18), approved by Sam.
 - 2026-10-26: Section 2a replaces the subtree forwarding sentence with the shipped subtree-filter rule (nexus-jypmj.1.16), approved by Sam.
+- 2026-10-26: Section 1 states how the active-project tier decides (reliability, the project-name and title veto, the fallback notice, question-text sources, the range disclosure) and the Phase 2 proof states what "otherwise" means for the unmodified call (nexus-jypmj.2.4), approved by Sam.

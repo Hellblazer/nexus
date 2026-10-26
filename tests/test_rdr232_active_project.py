@@ -121,6 +121,7 @@ def _request(bindings: dict[str, Any] | None = None, scope: str = "") -> Evidenc
 
 def _with_active_project(request: EvidenceRequest, active: ActiveProject, **kw: Any) -> EvidenceRequest:
     kw.setdefault("scope", "")
+    kw.setdefault("registered", frozenset())
     tier = apply_active_project(request.owner, active, **kw)
     return replace(request, owner=tier.owner, active_project=tier.to_wire())
 
@@ -263,7 +264,7 @@ def test_an_owner_that_is_not_an_owner_tumbler_is_not_reliable(tmp_path: Path, j
         cat, environ=environ, getcwd=lambda: cwd, owner_of=lambda _c, _r: junk,
     )
     assert not active.reliable and not active.owner and "not an owner tumbler" in active.reason
-    forced = apply_active_project(OwnerResolution("none"), ActiveProject(True, owner=junk, name="x"), scope="")
+    forced = apply_active_project(OwnerResolution("none"), ActiveProject(True, owner=junk, name="x"), scope="", registered=frozenset())
     assert forced.applied is False and forced.owner.status == "none"
 
 
@@ -293,7 +294,7 @@ def test_a_corpus_scope_alone_never_selects_a_project(tmp_path: Path, scope: str
     request = _request(scope=scope)
     assert request.owner.status == "none", "a corpus scope names no project"
     unreliable = ActiveProject(False, reason="no project directory was declared")
-    tier = apply_active_project(request.owner, unreliable, scope=scope)
+    tier = apply_active_project(request.owner, unreliable, scope=scope, registered=frozenset())
     assert tier.owner.status == "none" and tier.applied is False
     (src,) = resolve_named_sources(request.sources, tier.owner, cat=cat).sources
     assert src.status == "candidates" and src.tumbler is None
@@ -302,7 +303,9 @@ def test_a_corpus_scope_alone_never_selects_a_project(tmp_path: Path, scope: str
 def test_with_a_reliable_active_project_a_corpus_scope_still_contributes_nothing(tmp_path: Path) -> None:
     """The project comes from the session, never from ``scope="rdr"``: the contribution says so."""
     cat, _t3, environ, cwd = _session(tmp_path)
-    tier = apply_active_project(_request(scope="rdr").owner, _detect(cat, environ, cwd), scope="rdr")
+    tier = apply_active_project(
+        _request(scope="rdr").owner, _detect(cat, environ, cwd), scope="rdr", registered=frozenset(),
+    )
     assert tier.owner.status == "inferred"
     assert dict(tier.owner.contributions) == {"active_project": ART_OWNER}, "no scope contribution"
 
@@ -311,7 +314,7 @@ def test_a_catalog_subtree_scope_is_the_owner_scope_tier_and_the_active_project_
     cat, _t3, environ, cwd = _session(tmp_path)
     active = _detect(cat, environ, cwd)
     for scope in (NEXUS_OWNER, "1", f"{NEXUS_OWNER}.3996"):
-        tier = apply_active_project(_request(scope=scope).owner, active, scope=scope)
+        tier = apply_active_project(_request(scope=scope).owner, active, scope=scope, registered=frozenset())
         assert tier.applied is False and tier.owner.status != "inferred", scope
 
 
@@ -417,11 +420,16 @@ def test_a_project_the_question_names_that_is_not_the_active_one_withholds_the_i
     cat, _t3, environ, cwd = _session(tmp_path, NEXUS_OWNER)
     active = _detect(cat, environ, cwd)
     assert active.reliable and active.name == "nexus"
-    tier = apply_active_project(OwnerResolution("none"), active, scope="", project_names=("ART",))
+    registry = {"art", "nexus"}
+    tier = apply_active_project(OwnerResolution("none"), active, scope="", project_names=("ART",), registered=registry)
     assert tier.owner.status == "none" and tier.applied is False
     assert "ART" in tier.reason and "nexus" in tier.reason
-    assert apply_active_project(OwnerResolution("none"), active, scope="", project_names=("NEXUS",)).applied is True
-    assert apply_active_project(OwnerResolution("none"), active, scope="", project_names=()).applied is True
+    assert apply_active_project(
+        OwnerResolution("none"), active, scope="", project_names=("NEXUS",), registered=registry,
+    ).applied is True
+    assert apply_active_project(
+        OwnerResolution("none"), active, scope="", project_names=(), registered=registry,
+    ).applied is True
 
 
 # ── the wire and the stage ───────────────────────────────────────────────────────────────────────────────

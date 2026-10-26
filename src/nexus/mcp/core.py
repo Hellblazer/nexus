@@ -10464,18 +10464,21 @@ async def _nx_answer_active_project(
     from nexus.plans import active_project as _ap  # noqa: PLC0415 — deferred; matches this module's convention
     from nexus.plans.primary_evidence import DEFAULT_CAPS  # noqa: PLC0415 — deferred; matches this module's convention
 
-    def _detect() -> "tuple[_ap.ActiveProject, frozenset[str]]":
+    def _detect() -> "tuple[_ap.ActiveProject, frozenset[str] | None]":
         # The catalog is fetched inside detect_active_project, after the environment and directories agree.
         active = _ap.detect_active_project(None, get_catalog=_get_catalog)
-        registered: frozenset[str] = frozenset()
+        # Nothing to vouch for when the question has no candidate word. With candidates, an unreadable registry
+        # is None, and the tier then declines (a name check that did not run is not a pass, nexus-jypmj.2.4).
+        registered: frozenset[str] | None = frozenset()
         if active.reliable and project_names:
             try:
                 registered = _ap.registered_owner_names(_get_catalog())
             except Exception as exc:  # noqa: BLE001 — no registry means no name can be vouched for
                 _log.warning("nx_answer_active_project_registry_unavailable", error=type(exc).__name__)
+                registered = None
         return active, registered
 
-    registered: frozenset[str] = frozenset()
+    registered: frozenset[str] | None = frozenset()
     try:
         active, registered = await asyncio.wait_for(
             asyncio.to_thread(_detect), timeout=_nx_answer_seconds_left(DEFAULT_CAPS.max_seconds, deadline),
@@ -11879,9 +11882,11 @@ async def nx_answer(
     # A source the resolver resolved to exactly one document has nothing left to tell apart, so its
     # "no project qualifier" ambiguity (derived before resolution) is withdrawn. One the active project
     # chose among documents that other projects also hold keeps a distinct `source_inferred` line instead.
+    # One the session's project could not hold (`fallback`) was resolved to ANOTHER project's document by
+    # elimination, not confirmed by any qualifier: its line stays (nexus-jypmj.2.4, confirmation N1).
     if _named_sources is not None:
         _request_coverage = _request_coverage.without_unqualified_for(
-            (s.ref.value for s in _named_sources.resolved()),
+            (s.ref.value for s in _named_sources.resolved() if not s.fallback),
             inferred_over={
                 s.ref.value: (
                     f"{s.ref.value} was resolved to {s.tumbler} by the session's project, inferred; "

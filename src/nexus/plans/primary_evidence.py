@@ -225,8 +225,8 @@ class ResolvedSource:
     #: How many registered documents carrying this number sit in OTHER projects than the qualifier's (the ones
     #: the qualifier left out). An inferred choice with ``foreign`` above 0 is the case the inference mattered in.
     foreign: int = 0
-    #: The part of ``detail`` that only says an inferred qualifier was set aside because the active project holds
-    #: no such number (the result is the unqualified one). A source read from the question does not print it.
+    #: The part of ``detail`` that says an inferred qualifier was set aside because the active project holds
+    #: no such number (the result is the unqualified one, another project's document). Every origin prints it.
     fallback: str = ""
 
     def to_wire(self) -> dict[str, Any]:
@@ -332,11 +332,12 @@ class NamedSourceResolution:
                         f"[evidence request: named source {name} resolved to {s.tumbler} but was not "
                         f"owner-qualified (pass owner or project to pin it){tail}]"
                     )
-                shown = s.detail
-                if from_question and s.fallback and shown.startswith(s.fallback):
-                    shown = shown[len(s.fallback):].lstrip("; ")  # the set-aside inference changed nothing for the reader
-                if shown:  # a choice among sibling files, and the files passed over (nexus-xho6c)
-                    lines.append(f"[evidence request: named source {name} resolved to {s.tumbler}: {shown}]")
+                # A fallback is never silent, from the question or not: the session's project was reliable and held no
+                # such number, so the document read is another project's (nexus-jypmj.2.4, confirmation N1). The
+                # plain unique match with no reliable project has no fallback and stays silent.
+                caveat = tail if from_question and s.fallback else ""
+                if s.detail:  # the fallback, a choice among sibling files, and the files passed over (nexus-xho6c)
+                    lines.append(f"[evidence request: named source {name} resolved to {s.tumbler}: {s.detail}{caveat}]")
             elif s.status == "candidates":
                 names = ", ".join(c.tumbler for c in s.candidates)
                 lines.append(
@@ -828,6 +829,20 @@ def _title_words(text: str) -> frozenset[str]:
     return frozenset(w for w in _TITLE_WORD.findall(text.lower()) if len(w) >= 3 and w not in _TITLE_STOP)
 
 
+#: A title hint vetoes an inference only if it has at least this many distinctive words. The hint is whatever
+#: follows the id in the topic sentence ("in detail", "and its gate record"), so a one-word hint is as likely a
+#: filler as a title (nexus-jypmj.2.4, confirmation N3).
+TITLE_VETO_MIN_WORDS = 2
+
+
+def distinctive_title_words(hint: str, number: int | None = None) -> frozenset[str]:
+    """The words of a title *hint* that can tell one document from another: not a stopword, not shorter than
+    three characters, and not the RDR id (``rdr`` and, given *number*, the number itself)."""
+    return frozenset(
+        w for w in _title_words(hint) if not (number is not None and w.isdigit() and int(w) == number)
+    )
+
+
 def title_hint_match(entry: CatalogEntry, hints: Sequence[str]) -> float:
     """The best share (0 to 1) of any one title *hint*'s words found in the document's title or file name.
 
@@ -881,6 +896,7 @@ def _resolve_rdr(
         fallback = f"the active project (owner {qualifier.owner}) holds no {ref.value}, so it was not used"
         qualifier = None
         scoped = list(found)
+    title_hints = [h for h in title_hints if len(distinctive_title_words(h, number)) >= TITLE_VETO_MIN_WORDS]
     if qualifier is not None and qualifier.inferred and title_hints and scoped and len(found) > len(scoped):
         # The question carries a title for this number. If the session's project's document does not fit it and
         # another project's does, the session's project is the wrong guess: the title VETOES the inference (it

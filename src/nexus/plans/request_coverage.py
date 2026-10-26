@@ -863,12 +863,30 @@ def _rdr_sources(text: str) -> tuple[SourceRef, ...]:
         ref = SourceRef.parse(f"RDR-{int(m.group(1))}")
         if ref not in found:
             found.append(ref)
+    # A range's bare second end ("RDR-078 through 095") has no RDR prefix of its own, so the scan above misses it.
+    for rng in _source_ranges(text):
+        for end in (rng.start_value, rng.end_value):
+            ref = SourceRef.parse(end)
+            if ref not in found:
+                found.append(ref)
     return tuple(found)
 
 
 #: ``RDR-078 through RDR-095``, ``RDR-078 to RDR-095``, ``RDR-078 - RDR-095`` (any dash), ``RDR-078 until RDR-095``.
+#: The second end may be a bare number after a range word or a dash (``RDR-078 through 095``) when it is written
+#: at least as wide as the first (``078 through 095``, never ``078 through 10``); a bare number after plain
+#: ``to`` or a hyphen is not a range (``RDR-078 to 10 phases``, ``RDR-084-2026``).
 _RDR_RANGE = re.compile(
-    r"\bRDR[-_ ]?(\d{1,4})\s*(?:through(?:\s+to)?|thru|until|till|to|-|\u2013|\u2014)\s*RDR[-_ ]?(\d{1,4})\b",
+    r"\bRDR[-_ ]?(\d{1,4})\s*(?P<conn>through(?:\s+to)?|thru|until|till|to|-|\u2013|\u2014)\s*"
+    r"(?:RDR[-_ ]?(\d{1,4})|(?P<bare>\d{1,4}))\b",
+    re.IGNORECASE,
+)
+#: A comparison opens the sentence that holds ``RDR-078 to RDR-095``: the two are compared, not a span
+#: (``Compare RDR-078 to RDR-095``, ``contrast RDR-078 to RDR-095``). Only the connector ``to`` is read this
+#: way; ``through``, ``until`` and a dash still name a span after a comparison verb.
+_COMPARISON_LEAD = re.compile(
+    r"\b(?:compar(?:e|es|ed|ing|ison)|contrast(?:s|ed|ing)?|differences?|diff|distinguish(?:es|ed|ing)?|versus|vs)\b"
+    r"[^.?!;\n]{0,60}$",
     re.IGNORECASE,
 )
 
@@ -878,7 +896,13 @@ def _source_ranges(text: str) -> tuple[SourceRange, ...]:
     ends as sources and discloses the rest (RDR-232: no requested clause is silently dropped)."""
     out: list[SourceRange] = []
     for m in _RDR_RANGE.finditer(text):
-        rng = SourceRange(int(m.group(1)), int(m.group(2)))
+        conn = m.group("conn").lower()
+        bare = m.group("bare")
+        if bare is not None and (conn in ("to", "-") or len(bare) < len(m.group(1))):
+            continue
+        if conn == "to" and _COMPARISON_LEAD.search(text[: m.start()]):
+            continue
+        rng = SourceRange(int(m.group(1)), int(m.group(3) if bare is None else bare))
         if rng not in out:
             out.append(rng)
     return tuple(out)

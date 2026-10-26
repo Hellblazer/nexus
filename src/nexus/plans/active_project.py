@@ -176,18 +176,22 @@ def _detect(
     return ActiveProject(True, owner=tumbler, name=str(row.get("name") or ""))
 
 
-def registered_owner_names(cat: Any) -> frozenset[str]:
-    """The registered owner names, case-folded; empty when the catalog cannot say. Never raises.
+def registered_owner_names(cat: Any) -> frozenset[str] | None:
+    """The registered owner names, case-folded, or ``None`` when the registry cannot be read. Never raises.
 
     A name in the question counts as a project only if it is in this set (``nexus`` and ``Nexus`` both are, ``in
-    detail`` is not). Blocking catalog I/O: call it from a worker thread.
+    detail`` is not). ``None`` is not an empty registry: :func:`apply_active_project` reads it as "no name can
+    be vouched for" and declines to infer while the question has a word that could name a project. Blocking
+    catalog I/O: call it from a worker thread.
     """
+    if cat is None:
+        return None
     try:
-        rows = cat.list_owners() if cat is not None else []
+        rows = cat.list_owners()
         return frozenset(str(r.get("name") or "").strip().casefold() for r in rows if isinstance(r, Mapping)) - {""}
-    except Exception as exc:  # noqa: BLE001 — an unreadable registry means no name can be vouched for
+    except Exception as exc:  # noqa: BLE001 — an unreadable registry is reported as None, never raised
         _log.warning("active_project_owner_names_failed", error=type(exc).__name__)
-        return frozenset()
+        return None
 
 
 @dataclass(frozen=True)
@@ -222,7 +226,7 @@ def apply_active_project(
     *,
     scope: str | None,
     project_names: Sequence[str] = (),
-    registered: Collection[str] | None = None,
+    registered: Collection[str] | None,
 ) -> ActiveProjectTier:
     """The third tier: the active project qualifies a request that no explicit tier qualified.
 
@@ -238,7 +242,9 @@ def apply_active_project(
     qualifier, but a registered project name that is not the active project's is evidence the session's
     project is not what the question means, so the inference is withheld and the ambiguity stands. A word counts
     only if it matches a name in *registered* (case-insensitively; ``in detail`` and ``Summarize`` are no
-    project). ``registered=None`` counts every word, for a caller that already filtered.
+    project). *registered* has no default: ``None`` says the registry could not be read, and then, if the
+    question has any word that could name a project, the inference is declined (``name check unavailable``)
+    rather than made on a check that did not run. A caller that has already filtered passes the filtered names.
     """
     if owner.status != "none":
         return _decline(owner, active, "an explicit owner, project or owner-scope qualifier was given")
@@ -250,8 +256,16 @@ def apply_active_project(
         return _decline(owner, active, active.reason)
     if not _OWNER_RE.match(active.owner):
         return _decline(owner, active, "the active project's owner is not an owner tumbler")
-    known = None if registered is None else {r.casefold() for r in registered}
-    named = [n.strip() for n in project_names if n.strip() and (known is None or n.strip().casefold() in known)]
+    words = [n.strip() for n in project_names if n.strip()]
+    if words and registered is None:
+        return _decline(
+            owner, active,
+            f"the question has {', '.join(repr(w) for w in dict.fromkeys(words))} where a project name could stand, "
+            f"and the catalog's owner names could not be read to check it (name check unavailable), so the session's "
+            f"project was not inferred; {REMEDY}",
+        )
+    known = {r.casefold() for r in registered or ()}
+    named = [n for n in words if n.casefold() in known]
     if named and any(n.strip().casefold() != active.name.casefold() for n in named):
         return _decline(
             owner, active,
