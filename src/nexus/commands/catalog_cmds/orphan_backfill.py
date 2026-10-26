@@ -316,13 +316,13 @@ def apply_csv_cmd(
 )
 @click.option(
     "--dry-run/--no-dry-run", default=True,
-    help="Report-only (default).",
+    help="Report-only (default): prints what would be linked and skipped.",
 )
 def link_existing_cmd(
     collection: str, match_by: str, also_synthetic: bool,
     owner: str, dry_run: bool,
 ) -> None:
-    """Link T3 chunks to EXISTING catalog Documents in a collection.
+    """Link MANIFEST-LESS T3 chunks to EXISTING catalog Documents in a collection.
 
     \b
     Two strategies:
@@ -331,13 +331,29 @@ def link_existing_cmd(
                           Use when chunks carry MCP-style title metadata
                           (e.g. knowledge__knowledge).
       --by content_hash   Match T3 chunk's ``content_hash`` metadata to
-                          catalog ``documents.head_hash`` in the
-                          collection. Use when chunks are PDF-shaped
-                          with no title (e.g. docs__default).
+                          the Document's file-content hash
+                          (``index_content_hash``, else
+                          ``meta.content_hash``). Use when chunks are
+                          PDF-shaped with no title (e.g. docs__default).
+                          A hash two Documents share matches neither.
 
-    Writes ``document_chunks`` manifest rows but does NOT create new
-    Documents. With ``--also-synthetic``, unlinked chunks fall through
-    to synthetic-mode registration.
+    A chunk row is shared by every Document holding that text and its
+    ``title`` and ``content_hash`` are the last writer's, so a match is
+    only a candidate. Only chunks no live Document's manifest names (in
+    this collection) are linked; one the target Document already holds,
+    and one another live Document owns, are skipped and counted. A chunk
+    whose only owner is a Document in the trash, or that an earlier
+    version of the target left behind (nothing names it), counts as
+    manifest-less and IS linked. A title two live Documents share
+    matches neither; its group is skipped and counted. The dry run prints
+    the same link counts; it stops before the ``--also-synthetic`` step,
+    so it does not count the chunks that step would leave alone.
+
+    Writes ``document_chunks`` manifest rows (after the Document's
+    current rows) but does NOT create new Documents. With
+    ``--also-synthetic``, chunks of groups with no matching Document fall
+    through to synthetic-mode registration, except those a live Document
+    already owns.
     """
     from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415  — command-local import (nexus.catalog.orphan_backfill)
     from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415  — command-local import (nexus.catalog.tumbler)
@@ -347,36 +363,44 @@ def link_existing_cmd(
     cat = _cat_cmd._get_catalog()
     t3 = make_t3()
 
-    if dry_run:
-        # nexus-xnz0o: use list_by_collection() to count matching docs (uniform API).
-        # Avoids direct _db access for this diagnostic-only count.
-        coll_docs = cat.list_by_collection(collection)
-        if match_by == "title":
-            count = sum(1 for e in coll_docs if e.title)
-        else:
-            count = sum(1 for e in coll_docs if e.head_hash)
+    # The dry run walks the same chunks and makes the same decisions as the
+    # real run and writes nothing, so its link counts are the run's link counts
+    # (it returns before the --also-synthetic step, which it does not count).
+    verb = "Would link" if dry_run else "Linked"
+    skips = ob.LinkSkips()
+
+    def _say_skips() -> None:
         click.echo(
-            f"Existing catalog Documents with {match_by}: {count}"
+            f"Skipped {skips.held_by_target} chunks the target Document already holds."
         )
-        # nexus-at2ff: the handle, not ``._client`` (absent on HttpVectorClient).
-        col = t3.get_collection(name=collection)
-        click.echo(f"T3 chunks in {collection}: {col.count()}")
-        click.echo("\n(dry-run) --no-dry-run to write manifest rows.")
-        return
+        click.echo(
+            f"Skipped {skips.owned_elsewhere} chunks another live Document of "
+            f"this collection owns."
+        )
+        if skips.ambiguous_titles:
+            click.echo(
+                f"Skipped {skips.ambiguous_titles} title groups "
+                f"({skips.ambiguous_title_chunks} chunks) whose title names more "
+                f"than one live Document."
+            )
 
     if match_by == "title":
         click.echo(f"Gathering T3 chunks for {collection}...")
         groups = ob.gather_titled_chunks(t3, collection)
         click.echo(f"  {len(groups)} title groups")
         linked_chunks, linked_docs, unlinked = ob.link_by_title(
-            cat, collection, groups,
+            cat, collection, groups, dry_run=dry_run, skips=skips,
         )
         click.echo(
-            f"Linked {linked_chunks} chunks across {linked_docs} "
+            f"{verb} {linked_chunks} chunks across {linked_docs} "
             f"existing Documents."
         )
+        _say_skips()
         unlinked_total = sum(len(g.chunks) for g in unlinked)
         click.echo(f"Unlinked: {len(unlinked)} groups, {unlinked_total} chunks")
+        if dry_run:
+            click.echo("\n(dry-run) --no-dry-run to write manifest rows.")
+            return
         if also_synthetic and unlinked:
             if not owner:
                 owner_str = _get_owner_for(collection)
@@ -385,23 +409,31 @@ def link_existing_cmd(
             owner_t = Tumbler.parse(owner_str)
             sdocs, slinks = ob.register_synthetic(
                 cat, owner_t, collection, _without_deleted(cat, collection, unlinked),
+                skips=skips, skip_owned=True,
             )
             click.echo(
                 f"Synthetic fallback: registered {sdocs} Documents, "
-                f"linked {slinks} chunks."
+                f"linked {slinks} chunks, skipped {skips.synthetic_owned} chunks "
+                f"a live Document already owns."
             )
     else:  # content_hash
         click.echo(
-            f"Linking by content_hash → head_hash for {collection}..."
+            f"Linking by content_hash → the Document's file-content hash "
+            f"(index_content_hash, else meta.content_hash) for {collection}..."
         )
         linked_chunks, linked_docs, unmatched = ob.link_by_content_hash(
-            cat, t3, collection,
+            cat, t3, collection, dry_run=dry_run, skips=skips,
         )
         click.echo(
-            f"Linked {linked_chunks} chunks across {linked_docs} "
+            f"{verb} {linked_chunks} chunks across {linked_docs} "
             f"existing Documents."
         )
-        click.echo(f"Unmatched chunks (no head_hash match): {unmatched}")
+        _say_skips()
+        click.echo(
+            f"Unmatched chunks (content_hash names no single Document): {unmatched}"
+        )
+        if dry_run:
+            click.echo("\n(dry-run) --no-dry-run to write manifest rows.")
 
 
 def register(group: click.Group) -> None:
