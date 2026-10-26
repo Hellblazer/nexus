@@ -951,13 +951,60 @@ def _resolve_value(
     return value
 
 
+#: A ``$stepN.field`` token anywhere in a string (:data:`_STEPREF_RE` is the anchored, whole-value form).
+_EMBEDDED_STEPREF_RE = re.compile(r"\$step\d+\.[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _find_unsubstitutable_step_ref(value: Any, *, in_dict: bool = False) -> str | None:
+    """The first ``$stepN.field`` token in *value* that :func:`_resolve_value` would leave as text.
+
+    It substitutes a string only when the whole string is the one token, and does not look inside a
+    dict at all; lists resolve element-wise. So a token inside a longer string, or anywhere inside a
+    dict (at any depth, whole-value or not), reaches the tool as the literal ``$stepN.field``.
+    """
+    if isinstance(value, str):
+        found = _EMBEDDED_STEPREF_RE.search(value)
+        if found is None or (not in_dict and _STEPREF_RE.match(value)):
+            return None
+        return found.group(0)
+    if isinstance(value, list):
+        children: Any = value
+    elif isinstance(value, dict):
+        children, in_dict = value.values(), True
+    else:
+        return None
+    for child in children:
+        if (token := _find_unsubstitutable_step_ref(child, in_dict=in_dict)) is not None:
+            return token
+    return None
+
+
+def _reject_unsubstitutable_step_refs(raw_args: dict[str, Any], step_index: int | None) -> None:
+    """Fail loud before dispatch on a step arg that holds a ``$stepN.field`` the runner cannot
+    substitute (nexus-jypmj.1.19). Reads the RAW plan args, never the resolved ones: ``$intent``
+    resolves to the caller's question, which may itself contain ``$step`` text."""
+    for key, val in raw_args.items():
+        token = _find_unsubstitutable_step_ref(val)
+        if token is not None:
+            where = "a step" if step_index is None else f"step {step_index + 1}"
+            raise PlanRunStepRefError(
+                ref=token,
+                reason=(
+                    f"{where} arg {key!r} holds it inside other text or an object, where it is "
+                    "not substituted; an arg is exactly one $stepN.<field> reference or a list of them"
+                ),
+            )
+
+
 def _resolve_args(
     args: dict[str, Any],
     *,
     bindings: dict[str, Any],
     step_outputs: list[dict[str, Any]],
     deferred_step_indices: set[int] | None = None,
+    step_index: int | None = None,
 ) -> dict[str, Any]:
+    _reject_unsubstitutable_step_refs(args, step_index)
     return {
         key: _resolve_value(
             val, bindings=bindings, step_outputs=step_outputs,
@@ -1523,6 +1570,7 @@ def _validate_var_refs(
                     "rejected before any step dispatched"
                 ),
             )
+        _reject_unsubstitutable_step_refs(args, step_index)
         found: set[str] = set()
         for val in args.values():
             _scan_var_refs(val, found)
@@ -3015,7 +3063,7 @@ async def _plan_run_impl(
                     b_raw_args = bstep.get("args", {}) or {}
                     b_resolved = _resolve_args(
                         b_raw_args, bindings=merged, step_outputs=step_outputs,
-                        deferred_step_indices=deferred_indices,
+                        deferred_step_indices=deferred_indices, step_index=bi,
                     )
                     # nexus-4jj40: strip a literal $intent from any
                     # items/inputs-shaped list arg before it reaches the
@@ -3086,7 +3134,7 @@ async def _plan_run_impl(
                         b_raw_args = bstep.get("args", {}) or {}
                         b_resolved = _resolve_args(
                             b_raw_args, bindings=merged,
-                            step_outputs=step_outputs,
+                            step_outputs=step_outputs, step_index=bi,
                         )
                         # nexus-4jj40: see the main bundle path's identical
                         # call above -- this is the oversized-bundle,
@@ -3314,7 +3362,7 @@ async def _plan_run_impl(
             scope = step.get("scope")
 
             resolved = _resolve_args(
-                raw_args, bindings=merged, step_outputs=step_outputs,
+                raw_args, bindings=merged, step_outputs=step_outputs, step_index=index,
             )
             # nexus-4jj40: strip a literal $intent from any items/inputs-
             # shaped list arg before this step dispatches -- see

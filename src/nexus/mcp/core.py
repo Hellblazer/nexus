@@ -9274,8 +9274,11 @@ Each requires hydrated text as input — NOT ids/tumblers.
       - Output: {summary: str}
 
   generate(template, context, cited=false)
-      - `template` is a natural-language instruction; `context` is a
-        string (similar rules as summarize.content).
+      - `template` is a natural-language instruction; `context` follows
+        the rules of summarize.content: one $stepN.field reference, a
+        JSON list of them, or a literal string with no reference in it.
+        To pass several sources write context=[$step3.contents,
+        $step4.contents], never one string that quotes them.
       - Output: {text: str}
 
 === Correct chain patterns ===
@@ -9299,6 +9302,11 @@ Pattern B (operator auto-hydration shortcut):
   $stepN.<field> — e.g. $step1.ids, $step2.contents.  Never $stepN alone.
   The <field> must be one the tool actually returns (see output contracts
   above).  A mismatch fails with PlanRunStepRefError.
+  An argument value is EITHER exactly one $stepN.<field> reference OR a JSON
+  list of such references.  Never put a reference inside other text
+  ("Code: $step3.contents") or inside an object ({"a": "$step3.contents"}):
+  the runner does not substitute it, and the run fails with
+  PlanRunStepRefError before any step dispatches.
 
 === Forbidden tools ===
   Do NOT emit mcp__plugin_conexus_nexus-catalog__* names — use traverse.

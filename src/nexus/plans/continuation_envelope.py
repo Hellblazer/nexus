@@ -183,7 +183,7 @@ def _compose_shape_a(
         raw_args = step.get("args", {}) or {}
         resolved = _resolve_args(
             raw_args, bindings=bindings, step_outputs=step_outputs,
-            deferred_step_indices=deferred_indices,
+            deferred_step_indices=deferred_indices, step_index=bi,
         )
         source_collections = (
             resolved.get("collections") if "ids" in resolved else None
@@ -303,7 +303,7 @@ def _compose_shape_b(
     tool = _extract_tool_name(step)
     raw_args = step.get("args", {}) or {}
     scope = step.get("scope")
-    resolved = _resolve_args(raw_args, bindings=bindings, step_outputs=step_outputs)
+    resolved = _resolve_args(raw_args, bindings=bindings, step_outputs=step_outputs, step_index=bi)
     _check_embedding_domain(bi, tool, scope, resolved)
     resolved = _apply_scope_to_args(
         tool, scope, resolved, bindings=bindings, step_outputs=step_outputs,
