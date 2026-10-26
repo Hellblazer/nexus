@@ -71,12 +71,9 @@ GUIDANCE_IMPERATIVE = (
     "- a validated finding about to go unstored, or a phase/RDR boundary: "
     "`store_put`, `memory_put`; `phase-review-gate`\n"
     "\n"
-    "Call sequential thinking before: dispatching an agent; choosing a fix, "
-    "or another after one fails; acting on a verdict, test result or "
-    "measurement; push, merge, bead close; anything hard to undo. Routing "
-    "table, review "
-    "gate, skill routing, working rules: `orchestration` skill. Skills "
-    "change; check, do not recall.\n"
+    "Sequential thinking before dispatch, a fix, reading a result, "
+    "push/close, irreversible acts. Routing, review gate, rules: "
+    "`orchestration` skill; check it, do not recall.\n"
 )
 
 
