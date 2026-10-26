@@ -24,12 +24,13 @@
 # `.tmp.*`, `.gone.*`, `.lock.*` and `.lock-dead.*` families older than 12 h is debris; the next
 # cold build removes it.
 #
-# BUILD LOCK: one builder per key. `mkdir .lock.<key>` is the atomic claim; the holder writes
-# `owner` and refreshes `heartbeat` every NX_SHARED_VENV_HEARTBEAT seconds (15) from a background
-# loop that exits when the script does, SIGKILL included. Waiters judge liveness by the heartbeat
-# age: older than NX_SHARED_VENV_DEAD seconds (60) the holder is dead, and a waiter renames the lock
-# aside, removes it and the dead builder's tmp dir, and takes the lock itself. After every wait the
-# waiter re-checks the entry and re-takes the lock, so a failed builder costs one rebuild, never N.
+# BUILD LOCK: one builder per key. `mkdir .lock.<key>` plus the exclusive (O_EXCL) creation of its
+# `owner` file is the atomic claim (mkdir(1) alone is not: see claim_lock); the holder refreshes
+# `heartbeat` every NX_SHARED_VENV_HEARTBEAT seconds (15) from a background loop that exits when the
+# script does, SIGKILL included. Waiters judge liveness by the heartbeat age: older than
+# NX_SHARED_VENV_DEAD seconds (60) the holder is dead, and a waiter renames the lock aside, removes
+# it and the dead builder's tmp dir, and takes the lock itself. After every wait the waiter re-checks
+# the entry and re-takes the lock, so a failed builder costs one rebuild, never N.
 # The wait is bounded by NX_SHARED_VENV_WAIT (600 s); past it the job falls back to its own sync.
 #
 # THE SHARED INTERPRETER IS NEVER STARTED. The entry's bin/python is a symlink to the builder's
@@ -262,9 +263,11 @@ print(max(0, int(time.time() - newest)))
 }
 
 hold_lock() {
-  # held is set only once the owner is written: release_lock removes a lock only when its owner
-  # names us, so a lock we made and could not write into is removed here, not left owner-less.
-  if ! touch -- "$lockdir/heartbeat" 2>/dev/null || ! printf '%s\n' "$me" > "$lockdir/owner" 2>/dev/null; then
+  # claim_lock created `owner` exclusively; it is never rewritten here, because a plain `>` is a
+  # path-based open that, during a take-over race, could land in a lock now made by someone else.
+  # held is set only once the heartbeat is written: release_lock removes a lock only when its owner
+  # names us, so a lock we made and could not write into is removed here, not left behind.
+  if ! touch -- "$lockdir/heartbeat" 2>/dev/null; then
     # Only what we wrote, then rmdir, which fails on a lock another job has made its own meanwhile.
     rm -f -- "$lockdir/heartbeat" "$lockdir/owner" 2>/dev/null || true
     rmdir -- "$lockdir" 2>/dev/null || true
@@ -314,10 +317,36 @@ take_over_lock() {
   remove_tree "$gone"
 }
 
+# claim_lock: 0 when THIS process now holds the lock directory, 1 otherwise.
+#
+# MKDIR(1) IS NOT A MUTEX EVERYWHERE (nexus-x8sk8, same class as nexus-bo01z). uutils coreutils 0.8.0,
+# /usr/bin/mkdir on Ubuntu 26.04 (chas), checks for the path and then creates it, and reports the
+# EEXIST of a lost race as success: 4 of 200 racing pairs both exited 0 there (GNU: 0 of 200). So the
+# claim is the EXCLUSIVE creation of `owner` inside the directory: noclobber makes bash open it
+# O_EXCL, a syscall no userland tool can soften, and mkdir only makes the directory exist. Of any
+# number of racers whose mkdir "succeeded", one creates `owner`; the rest see it exist and lose.
+# `owner` is written exactly once, here: hold_lock does not rewrite it (a path-based `>` could land
+# in a lock a take-over has handed to someone else). A mkdir that made the directory but cannot
+# write into it (no `owner` anywhere) is a filesystem error, not contention: the directory is
+# dropped and the job falls back, as hold_lock does for its heartbeat.
+claim_lock() {
+  if ! mkdir -- "$lockdir" 2>/dev/null; then
+    [ -d "$lockdir" ] || warn_fallback "cannot create the build lock $lockdir"   # not a held lock: a real fault
+    return 1
+  fi
+  (set -C; printf '%s\n' "$me" > "$lockdir/owner") 2>/dev/null && return 0
+  # A mkdir that "succeeded" for a lost race can find the directory already released and gone (the
+  # winner built and removed it first): that is a lost claim, not a fault, and the caller re-checks.
+  if [ ! -e "$lockdir/owner" ] && [ -d "$lockdir" ]; then
+    rmdir -- "$lockdir" 2>/dev/null || true   # fails, correctly, on a lock another job has made its own
+    warn_fallback "cannot write into the build lock $lockdir"
+  fi
+  return 1
+}
+
 # 0: we hold the lock. 1: someone else does (or just took it over); the caller waits and re-checks.
 acquire_lock() {
-  if mkdir -- "$lockdir" 2>/dev/null; then hold_lock; return 0; fi
-  [ -d "$lockdir" ] || warn_fallback "cannot create the build lock $lockdir"
+  if claim_lock; then hold_lock; return 0; fi
   local age
   age="$(lock_age "$lockdir" 2>/dev/null)" || return 1  # released since the mkdir
   if [ "$age" -gt "$dead_after" ]; then take_over_lock; fi

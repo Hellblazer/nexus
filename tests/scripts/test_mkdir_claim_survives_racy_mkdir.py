@@ -19,49 +19,15 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
 import subprocess
-import sys
 import time
 from pathlib import Path
+
+from _racy_mkdir import executable, racy_mkdir_bin
 
 _REPO = Path(__file__).resolve().parents[2]
 _LEASE_LIB = _REPO / "scripts" / "lib" / "build-lease.sh"
 _INSTALLER = _REPO / "src" / "nexus" / "_install" / "install_generation.sh"
-
-# -p passes straight through: only a bare mkdir is a claim, and a stand-in that
-# failed `mkdir -p <existing>` would break unrelated setup. The racer that really
-# created the directory returns 0.5 s later than the ones that lost, so a loser
-# always reaches its next step first: the order in which a claim built on
-# "mkdir, then write the pid" lets two holders in. The create itself is
-# os.mkdir, never the host's mkdir(1): on a uutils host that would report the
-# lost race as success too, and the log of lost races would stay empty. Each
-# check that passes leaves a file in the ``checked`` directory beside the log, so
-# a test can start a racer only once another is inside its window.
-_RACY_MKDIR = """#!/bin/bash
-for a in "$@"; do case "$a" in -p|--parents) exec "{real}" "$@" ;; -*) ;; *) p="$a" ;; esac; done
-if [ -e "$p" ]; then echo "mkdir: cannot create directory '$p': File exists" >&2; exit 1; fi
-: > "{log}.checked/$$"
-sleep 0.3
-if "{py}" -c 'import os, sys; os.mkdir(sys.argv[1])' "$p" 2>/dev/null; then sleep 0.5
-else echo "$p" >> "{log}"; fi
-exit 0
-"""
-
-
-def _executable(path: Path, body: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
-def _racy_mkdir_bin(tmp_path: Path) -> tuple[Path, Path]:
-    shim, log = tmp_path / "bin", tmp_path / "raced"
-    real = shutil.which("mkdir")
-    assert real
-    _executable(shim / "mkdir", _RACY_MKDIR.format(real=real, log=log, py=sys.executable))
-    (tmp_path / "raced.checked").mkdir()
-    return shim, log
 
 
 def _race(tmp_path: Path, scripts: list[str], env: dict[str, str], go: Path,
@@ -111,7 +77,7 @@ def _lease_racer(i: int, tmp_path: Path, go: Path, release: Path, *, after: str 
 
 
 def test_build_lease_fresh_claim_has_one_holder_under_racy_mkdir(tmp_path: Path) -> None:
-    shim, log = _racy_mkdir_bin(tmp_path)
+    shim, log = racy_mkdir_bin(tmp_path)
     env = _lease_env(tmp_path, shim)
     go, release = tmp_path / "go", tmp_path / "release"
     racers = 6
@@ -128,7 +94,7 @@ def test_build_lease_fresh_claim_has_one_holder_under_racy_mkdir(tmp_path: Path)
 def test_build_lease_stale_reclaim_has_one_holder_under_racy_mkdir(tmp_path: Path) -> None:
     """The reclaim path re-creates the lease with its own mkdir, after renaming
     the stale one away. Fresh acquirers that arrive in that gap race it."""
-    shim, log = _racy_mkdir_bin(tmp_path)
+    shim, log = racy_mkdir_bin(tmp_path)
     env = _lease_env(tmp_path, shim)
     dead = subprocess.run(["bash", "-c", "echo $$"], capture_output=True, text=True,
                           check=True).stdout.strip()
@@ -155,7 +121,7 @@ def _stub_tools(bin_dir: Path, inside: Path, release: Path) -> None:
     ``date`` pins the stamp so every racer collides on the same second."""
     real_date = shutil.which("date")
     assert real_date
-    _executable(bin_dir / "uv", f"""#!/bin/bash
+    executable(bin_dir / "uv", f"""#!/bin/bash
 if [ "$1" = venv ]; then
     for a in "$@"; do t="$a"; done
     echo "$t" > "{inside}/$PPID"
@@ -163,14 +129,14 @@ if [ "$1" = venv ]; then
 fi
 exit 1
 """)
-    _executable(bin_dir / "date", f"""#!/bin/bash
+    executable(bin_dir / "date", f"""#!/bin/bash
 [ "$*" = "-u +%Y%m%dT%H%M%SZ" ] && {{ echo 20261007T120000Z; exit 0; }}
 exec "{real_date}" "$@"
 """)
 
 
 def test_install_generation_claim_is_exclusive_under_racy_mkdir(tmp_path: Path) -> None:
-    shim, log = _racy_mkdir_bin(tmp_path)
+    shim, log = racy_mkdir_bin(tmp_path)
     inside, release, go = tmp_path / "inside", tmp_path / "release", tmp_path / "go"
     inside.mkdir()
     _stub_tools(shim, inside, release)
@@ -199,3 +165,76 @@ def test_install_generation_claim_is_exclusive_under_racy_mkdir(tmp_path: Path) 
     # Every racer reached its build, and no two were building into the same tree.
     assert len(claimed) == racers, (claimed, errs)
     assert len(set(claimed)) == racers, (sorted(claimed), errs)
+
+
+# ---- tests/e2e/lib/lock.sh (nexus-x8sk8) ---------------------------------------------------------
+# lock_acquire does not claim with mkdir: mkdir only makes a pid-unique staging directory, and the
+# claim is the `mv` of that populated directory onto the lock path plus a pid readback. Two lanes
+# prove it: the racy mkdir (which cannot collide on a unique name, so no race is logged here, only
+# that the shim ran), and an `mv` that nests into an existing directory and exits 0, the shape
+# every non-Linux mv has and the one a uutils mv may add under a race.
+
+_LOCK_LIB = _REPO / "tests" / "e2e" / "lib" / "lock.sh"
+
+# Every mv waits at a barrier until all racers are at their mv (so all passed lock.sh's
+# `[[ ! -e lockdir ]]` check while the lock path was vacant), then staggers by arrival rank: the
+# first moves its staging dir onto the lock path, the rest find a directory there, nest into it and
+# exit 0. Each nest is logged, so the test can assert it was exercised.
+_NESTING_MV = """#!/bin/bash
+for a in "$@"; do src="$dst"; dst="$a"; done
+: > "{arrivals}/$$"
+for _ in $(seq 1 100); do
+    [ "$(ls "{arrivals}" | wc -l)" -ge {racers} ] && break
+    sleep 0.05
+done
+rank=$(ls "{arrivals}" | awk -v me="$$" '$1 + 0 <= me + 0' | wc -l | tr -d ' ')
+sleep "0.${{rank}}5"
+if [ -d "$dst" ]; then
+    echo "$src -> $dst" >> "{nested}"
+    "{real}" "$src" "$dst/"
+    exit 0
+fi
+exec "{real}" "$@"
+"""
+
+
+def _lock_racer(i: int, tmp_path: Path, go: Path, release: Path, lockdir: Path) -> str:
+    return (f'. {_LOCK_LIB}\nwhile [ ! -e {go} ]; do :; done\n'
+            f'lock_acquire {lockdir} 0 2>/dev/null || exit $?\n'
+            f': > {tmp_path}/held-{i}\nwhile [ ! -e {release} ]; do sleep 0.05; done\n'
+            f'lock_release {lockdir}\n')
+
+
+def test_lock_acquire_has_one_holder_under_racy_mkdir(tmp_path: Path) -> None:
+    shim, _log = racy_mkdir_bin(tmp_path)
+    env = {**os.environ, "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"}
+    go, release, lockdir = tmp_path / "go", tmp_path / "release", tmp_path / "lock"
+    racers = 6
+    holders, procs = _race(tmp_path, [_lock_racer(i, tmp_path, go, release, lockdir)
+                                      for i in range(racers)], env, go, release)
+    # lock_acquire's staging names are pid-unique, so no mkdir loses a race; what the shim proves is
+    # that every racer's mkdir went through it (and so through the widened window).
+    assert len(list((tmp_path / "raced.checked").iterdir())) >= racers, "the racy mkdir never ran"
+    assert holders == 1, (holders, [p.returncode for p in procs])
+    assert sorted(p.returncode for p in procs) == [0] + [1] * (racers - 1), \
+        [p.returncode for p in procs]
+
+
+def test_lock_acquire_has_one_holder_when_mv_nests_into_the_claimed_lock(tmp_path: Path) -> None:
+    racers = 6
+    real_mv = shutil.which("mv")
+    assert real_mv
+    arrivals, nested = tmp_path / "arrivals", tmp_path / "nested"
+    arrivals.mkdir()
+    shim = tmp_path / "bin"
+    executable(shim / "mv", _NESTING_MV.format(arrivals=arrivals, nested=nested, real=real_mv,
+                                               racers=racers))
+    env = {**os.environ, "PATH": f"{shim}{os.pathsep}{os.environ['PATH']}"}
+    go, release, lockdir = tmp_path / "go", tmp_path / "release", tmp_path / "lock"
+    holders, procs = _race(tmp_path, [_lock_racer(i, tmp_path, go, release, lockdir)
+                                      for i in range(racers)], env, go, release)
+    assert nested.exists() and nested.read_text(encoding="utf-8").strip(), \
+        "no mv nested into the claimed lock: the test proved nothing"
+    assert holders == 1, (holders, [p.returncode for p in procs])
+    assert sorted(p.returncode for p in procs) == [0] + [1] * (racers - 1), \
+        [p.returncode for p in procs]
