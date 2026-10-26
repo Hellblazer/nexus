@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.87.1] - 2026-10-26
+
+Pairs with engine-service-v0.1.165 (`REQUIRED_ENGINE_VERSION` unchanged from 7.87.0). A plugin-only release cut off the 7.87.0 tag through the plugin-only fast lane (nexus-rbmja): the `nx` code is 7.87.0's, and only the conexus-tool-spill mod changes.
+
+### Fixed
+- **conexus-tool-spill keeps its spill directory private on a shared box** (nexus-a9e7j). The spill files hold full command output, and on a Linux box several users share they sat in a world-readable `/tmp` directory. Each spill now first makes the directory owner-only (mode 700) through `/bin/sh`, since the mod's file write takes no mode. A symbolic link, a file, or a directory another user owns in its place turns spilling off for the session with one toast, and output then passes whole. On Windows a drive or UNC temp path runs no process and spills as before. `tool-spill/hooks/register.ts`, `tool-spill/README.md`.
+- **conexus-tool-spill no longer re-cuts a Bash read of its own spill file** (nexus-i9a1p). Following the note with `sed -n`, `head` or `grep` on the saved file produced an output over the limit that was cut and saved again, so a long output could take several nested spills to read. A Bash command that names the spill directory (`claude-tool-spill-<user>`, in any spelling: the full path, `$TMPDIR/...`, a `cd` into it, either separator) now passes whole up to 4 times `limit` (16 KB by default); a larger read is cut and saved like any other, so nothing is lost when an unrelated command happens to name the directory. The note now says to read a slice with the Read tool, which the mod never cuts. `tool-spill/hooks/register.ts`, `tool-spill/README.md`.
+
 ## [7.87.0] - 2026-10-26
 
 Pairs with engine-service-v0.1.165 (`REQUIRED_ENGINE_VERSION` raised from 0.1.164), deployed to the cloud on 2026-10-26 at 14:49Z ahead of this tag. Its two changesets (catalog-046-1, vectors-038-1) change no existing data. The cloud's data-token mint limits were raised with that deploy (burst 40, 10 a minute per credential and tenant, 40 a minute in all). This release ships RDR-232 Phase 1 for `nx_answer`, the engine halves of per-document section labels and `where` filters, the superseded-collection skips, the data-token refresh fix, the conexus-tool-spill fixes, the plugin-only fast lane that replaces the anchored plugin channel, and the removal of the subagent git-integrity check.

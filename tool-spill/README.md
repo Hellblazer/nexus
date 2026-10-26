@@ -35,7 +35,7 @@ It hooks `tool.call` and touches only `Bash` and `Read`, and only in the main co
 
 | Tool | Result over the limit |
 |---|---|
-| `Bash` | Each stream longer than `head` + `tail` is cut to the first `head` bytes and the last `tail` bytes, at line ends. A note between them gives the size, the line count, the number of middle lines cut, how many of those mention an error or failure (`error`, `fail`, `traceback`, `panic`, `exception`, `fatal`, `denied`, `not found`, `no such`, `cannot`, `refused`, `timed out`, `unable`; a count, not a verdict), and the path of the full output (stdout, then stderr after a `--- stderr ---` line). A script's verdict on its last line, even with exit code 0, is in the tail. |
+| `Bash` | Each stream longer than `head` + `tail` is cut to the first `head` bytes and the last `tail` bytes, at line ends. A note between them gives the size, the line count, the number of middle lines cut, how many of those mention an error or failure (`error`, `fail`, `traceback`, `panic`, `exception`, `fatal`, `denied`, `not found`, `no such`, `cannot`, `refused`, `timed out`, `unable`; a count, not a verdict), and the path of the full output (stdout, then stderr after a `--- stderr ---` line), with a pointer to read a slice of it with the `Read` tool. A script's verdict on its last line, even with exit code 0, is in the tail. |
 | `Read` (whole file) | The text is cut to the first `head` + `tail` bytes, with a note giving the line count, the `offset` to read next and a `limit` to use, and a reminder not to `Edit` text the model has not seen. Nothing is written: the file is already on disk. |
 
 Passed through whole:
@@ -45,6 +45,7 @@ Passed through whole:
 - a `Read` with an `offset` or a `limit`: the model sliced it itself, so following the note, or reading a slice of a spill file, costs nothing extra and is never cut again;
 - a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `REGISTER.md`, or anything under a `skills/`, `agents/`, `commands/` or `rules/` directory, so a large source file under, say, `src/nexus/commands/` also passes whole; either path separator, any case);
 - `Bash` output Claude Code has already moved to a file of its own (past about 30 KB: `persistedOutputPath`, `rawOutputPath`, or output that starts with its `<persisted-output>` marker; output that only quotes the marker further in is still cut), and image output;
+- a `Bash` call whose command names the spill directory, up to 4 times `limit` (16 KB by default, the slice the `Read` note suggests): it is reading a spill file back (`sed -n`, `head`, `grep` on it), and cutting it would only spill the spill. The match is on the directory's name, `claude-tool-spill-<user>`, so `$TMPDIR/...`, a `cd` into it and either separator count. A larger read is cut and saved like any other;
 - every call a subagent makes;
 - every call in a headless run, unless `includeHeadless` is on.
 
@@ -67,7 +68,7 @@ A number that is not positive falls back to its default. When `head` + `tail` wo
 
 ## Where the files go
 
-`<temp dir>/claude-tool-spill-<user>/<tool_use_id>.txt`. The temp dir is the first of `$TMPDIR`, `$TEMP` and `$TMP` that is set, else `/tmp` (on macOS that is already a per-user folder under `/var/folders`). The user is the first of `$USER`, `$LOGNAME` and `$USERNAME` that is set, else `user`, made path-safe. The plugin cannot set file permissions: on a shared Linux `/tmp` the directory gets the process's default mode, so on a shared host point `TMPDIR` at a private directory. The mod never deletes spill files; the operating system's temp cleanup does. If the directory cannot be resolved or a file cannot be written, the result passes uncut.
+`<temp dir>/claude-tool-spill-<user>/<tool_use_id>.txt`. The temp dir is the first of `$TMPDIR`, `$TEMP` and `$TMP` that is set, else `/tmp` (on macOS that is already a per-user folder under `/var/folders`). The user is the first of `$USER`, `$LOGNAME` and `$USERNAME` that is set, else `user`, made path-safe. Before each spill the plugin makes that directory private through `/bin/sh`: it creates it with mode 700, or sets an existing one of yours to 700. It checks every time because temp cleanup can remove the directory mid-session. If the name is a symbolic link, a file, or belongs to another user (on a shared `/tmp` a peer can create it first), the plugin shows one notice and does not spill for the rest of the session; every output passes whole. If `/bin/sh` cannot be started, that output passes whole and the next spill tries again. On Windows (a temp dir that starts with a drive letter or `\\`) the temp dir is already per-user and no check runs. The mod never deletes spill files; the operating system's temp cleanup does. If the directory cannot be resolved or a file cannot be written, the result passes uncut.
 
 ## Develop and test
 

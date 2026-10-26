@@ -8,17 +8,22 @@ import type { Engine, Register } from 'claude-code'
 //   Bash: the full text goes to a file; the model gets the head and the tail of each stream (cut at line ends), a
 //         note between them naming the file, how many middle lines were cut and how many of those mention an error
 //         or a failure. A failure on the last line, or an error buried in the middle, is therefore never silent.
+//         A command that names the spill directory (reading a spill file back) passes whole up to 4 times the
+//         limit, so a slice of a spill is not spilled again; past that it is cut like any other.
 //   Read: a whole-file read only. A read the model sliced itself (offset or limit) passes whole, so following the
 //         note costs nothing extra, and instruction files (skills, agents, rules, AGENTS.md, CLAUDE.md) pass whole.
 //
 // Options (userConfig, all validated): `limit` 4000 bytes, `head` 1400, `tail` 800, `includeHeadless` false. A
 // non-positive or non-numeric number falls back to its default; head and tail are scaled down together when they
 // would not fit in `limit`. The spill directory is `<temp dir>/claude-tool-spill-<user>`, the temp dir being $TMPDIR,
-// else $TEMP, else $TMP, else /tmp, and the user $USER, else $LOGNAME, else $USERNAME, else `user`.
+// else $TEMP, else $TMP, else /tmp, and the user $USER, else $LOGNAME, else $USERNAME, else `user`. On a POSIX host
+// each spill first makes that directory owner-only (`PRIVATE_DIR`); one it cannot make private turns spilling off.
 
 const DEFAULT_LIMIT = 4_000
 const DEFAULT_HEAD = 1_400
 const DEFAULT_TAIL = 800
+// A Bash read of a spill file passes whole up to this many times the limit.
+const SPILL_READ_FACTOR = 4
 // Either separator, so a Windows path matches too.
 const INSTRUCTIONS = /(^|[\\/])(SKILL|AGENTS|CLAUDE|CLAUDE\.local|REGISTER)\.md$|[\\/](skills|agents|commands|rules)[\\/]/i
 const ERRORISH = /error|fail|traceback|panic|exception|fatal|denied|not found|no such|cannot|refused|timed out|unable/i
@@ -98,19 +103,57 @@ function squeeze(text: string, headMax: number, tailMax: number, where: string, 
   return t ? `${h}${note}\n${t}` : h + note
 }
 
-// Resolved on the first spill. A failed resolution is not kept: the next spill tries again.
-let spillDir: Promise<string> | undefined
+function spillDir(base: string, user: string): string {
+  return `${base.replace(/[\\/]+$/, '')}/claude-tool-spill-${user.replace(/[^A-Za-z0-9_.-]/g, '_')}`
+}
 
-function dirOf($: Engine): Promise<string> {
-  spillDir ??= (async () => {
-    const base = (await $.env.get('TMPDIR')) || (await $.env.get('TEMP')) || (await $.env.get('TMP')) || '/tmp'
-    const user = (await $.env.get('USER')) || (await $.env.get('LOGNAME')) || (await $.env.get('USERNAME')) || 'user'
-    return `${base.replace(/[\\/]+$/, '')}/claude-tool-spill-${user.replace(/[^A-Za-z0-9_.-]/g, '_')}`
-  })().catch(err => {
-    spillDir = undefined
-    throw err
-  })
-  return spillDir
+// Run by /bin/sh with the directory as $1: create it owner-only, refuse a symbolic link or one another user owns
+// (a peer on a shared /tmp can create the name first), then set it to 700. Exit 0 means only this user can list it
+// or read what is spilled into it. `$.fs` takes no mode, so this is the one place the mode is set.
+const PRIVATE_DIR = [
+  'umask 077',
+  'mkdir -p -- "$1" 2>/dev/null',
+  '[ -L "$1" ] && exit 3',
+  '[ -d "$1" ] || exit 4',
+  '[ "$(ls -ldn -- "$1" | awk \'{print $3}\')" = "$(id -u)" ] || exit 5',
+  'chmod 700 "$1" || exit 6',
+].join('\n')
+
+// A Windows temp dir ($TEMP under the user's profile, a drive or a UNC path) is per-user already, and there is no
+// /bin/sh to ask.
+const WINDOWS_PATH = /^[A-Za-z]:[\\/]|^\\\\/
+
+// The spill directory, from the environment on every call (a failed lookup throws and the output passes whole).
+async function dirOf($: Engine): Promise<string> {
+  const base = (await $.env.get('TMPDIR')) || (await $.env.get('TEMP')) || (await $.env.get('TMP')) || '/tmp'
+  const user = (await $.env.get('USER')) || (await $.env.get('LOGNAME')) || (await $.env.get('USERNAME')) || 'user'
+  return spillDir(base, user)
+}
+
+// Whether `dir` is private, checked before every spill: temp cleanup can remove it mid-session, and `$.fs.write`
+// would make it again with default modes. A refusal is kept for the module's life and one toast says why; a check
+// that could not run is not kept, and the next spill tries again.
+async function isPrivate($: Engine, dir: string, state: { refused?: boolean }): Promise<boolean> {
+  if (state.refused) return false
+  if (WINDOWS_PATH.test(dir)) return true
+  const { exitCode } = await $.process.run(['/bin/sh', '-c', PRIVATE_DIR, 'tool-spill', dir], { timeoutMs: 5_000 })
+  if (exitCode === 0) return true
+  state.refused = true
+  $.ui.toast(`tool-spill is off for this session: ${dir} is a link, not a directory, or not yours ` +
+    `(check exit ${exitCode}), so output passes whole.`)
+  return false
+}
+
+// Whether `command` names the spill directory: its basename (`claude-tool-spill-<user>`), so `$TMPDIR/...`, a `cd`
+// into it and either separator count, followed by the end or a character a sanitised user name cannot hold, so a
+// sibling that merely shares the prefix (`claude-tool-spill-samuel` beside `claude-tool-spill-sam`) does not.
+function namesSpillDir(command: string, dir: string): boolean {
+  const name = dir.slice(Math.max(dir.lastIndexOf('/'), dir.lastIndexOf('\\')) + 1)
+  for (let i = command.indexOf(name); i >= 0; i = command.indexOf(name, i + 1)) {
+    const after = command[i + name.length]
+    if (after === undefined || !/[A-Za-z0-9_.-]/.test(after)) return true
+  }
+  return false
 }
 
 // A session that draws on no surface is a plain `claude -p` run.
@@ -127,6 +170,7 @@ export const register: Register = (on, options) => {
     TAIL = LIMIT - HEAD
   }
   const INCLUDE_HEADLESS = options.includeHeadless === true
+  const spill: { refused?: boolean } = {}
 
   on('tool.call', async ($, e, next) => {
     const res: any = await next(e)
@@ -143,9 +187,17 @@ export const register: Register = (on, options) => {
             out.trimStart().startsWith('<persisted-output>')) return res
         if (!INCLUDE_HEADLESS && await isHeadless($)) return res
 
-        const path = `${await dirOf($)}/${e.tool_use_id.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`
-        const where = `Full output: ${path}. Read a slice of that file (offset and limit) or hand it to a subagent; ` +
-          'do not re-run the command.'
+        const dir = await dirOf($)
+        // A command that reads a spill file back (sed, head, grep on it) is following a note, so it may bring in up to
+        // SPILL_READ_FACTOR times the limit, the size of the slice the Read note suggests, before it too is cut and
+        // saved; under that, cutting it would only spill a spill (nexus-i9a1p).
+        const input: any = e
+        if (typeof input.command === 'string' && namesSpillDir(input.command, dir) &&
+            size <= LIMIT * SPILL_READ_FACTOR) return res
+        if (!(await isPrivate($, dir, spill))) return res
+        const path = `${dir}/${e.tool_use_id.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`
+        const where = `Full output: ${path}. Read a slice of it with the Read tool (offset and limit; a sliced Read ` +
+          'is never cut) or hand it to a subagent; do not re-run the command.'
         const stdout = squeeze(out, HEAD, TAIL, where, '')
         const stderr = squeeze(err, HEAD, TAIL, where, 'stderr ')
         if (stdout === out && stderr === err) return res
