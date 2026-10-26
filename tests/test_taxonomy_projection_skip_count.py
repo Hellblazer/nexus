@@ -110,7 +110,7 @@ def test_backfill_total_counts_rows_written_not_submitted(monkeypatch, registry,
     _run_backfill(store, object(), persist=True)  # type: ignore[arg-type]
 
     # LIVE_A -> LIVE_B and LIVE_B -> LIVE_A each submit 2 rows, the engine writes 1 and skips 1.
-    assert "Backfill complete: 2 assignments," in capsys.readouterr().out
+    assert "Backfill complete: 2 assignments (2 skipped, superseded targets)," in capsys.readouterr().out
 
 
 def test_discover_projection_counts_rows_written_and_says_what_was_skipped(

@@ -2431,7 +2431,7 @@ def _project_cross_collections(
     chroma_client: Any,
     *,
     threshold: float = 0.85,
-) -> int:
+) -> tuple[int, int, int, int]:
     """Project each collection against the others and persist the assignments.
 
     Returns ``(assignments written, collections with an incomplete source

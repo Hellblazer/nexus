@@ -2943,6 +2943,13 @@ def _persist_assignments_counted(
     # pairs written at discover time while ``hubs`` (live query) moved
     # ahead. Cost is one aggregate + upsert per persist call.
     t2_index_write(lambda db: db.taxonomy.refresh_projection_links())
+    if skipped and quiet:
+        # A quiet caller prints nothing, so the skip goes to the log instead
+        # (nexus-h2v0l review); the non-quiet path says it on the echo below.
+        _log.warning(
+            "taxonomy_projection_skipped_superseded",
+            source_collection=source_collection, written=written, skipped=skipped,
+        )
     if not quiet:
         click.echo(
             f"Persisted {written} projection assignment(s)"
@@ -3009,6 +3016,7 @@ def _run_backfill(
     icf_map = taxonomy.compute_icf_map(use_cache=True) if use_icf else None
 
     total_assigned = 0
+    total_skipped = 0
     total_novel = 0
     for i, src in enumerate(collections, 1):
         targets = [c for c in collections if c != src]
@@ -3047,13 +3055,16 @@ def _run_backfill(
             total_novel += novel
 
             if persist and result.get("chunk_assignments"):
-                total_assigned += _persist_assignments(result["chunk_assignments"], src)
+                written, skipped = _persist_assignments_counted(result["chunk_assignments"], src)
+                total_assigned += written
+                total_skipped += skipped
         except Exception as e:  # noqa: BLE001 - per-item skip surfaced to user via click.echo
             click.echo(f"    Skipped: {e}")
 
     click.echo(
-        f"Backfill complete: {total_assigned} assignments, {total_novel} novel chunks "
-        f"across {len(collections)} collections."
+        f"Backfill complete: {total_assigned} assignments"
+        + (f" ({total_skipped} skipped, superseded targets)" if total_skipped else "")
+        + f", {total_novel} novel chunks across {len(collections)} collections."
     )
 
 

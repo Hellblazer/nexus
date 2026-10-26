@@ -138,6 +138,35 @@ class TestPersistAssignmentsCountsWhatTheEngineWrote:
         monkeypatch.setattr(store, "_post", lambda *a: pytest.fail("no post"), raising=False)
         assert store.persist_assignments_counted([]) == (0, 0)
 
+    def test_a_retried_attempt_counts_each_page_once(self, monkeypatch) -> None:
+        # The registration retry re-runs the whole page loop; the page the failed
+        # attempt already wrote must not be summed twice. Registration and the retry
+        # wrapper are stubbed, so no tenant is provisioned (the CI tenant ceiling).
+        monkeypatch.setattr(corpus, "ensure_collection_registered", lambda *a, **k: None)
+
+        def retry_once(collection, fn, **_kw):
+            try:
+                return fn()
+            except httpx.HTTPStatusError:
+                return fn()
+
+        monkeypatch.setattr(corpus, "write_with_registration_retry", retry_once)
+        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+        calls = {"n": 0}
+
+        def post(path, body):
+            calls["n"] += 1
+            if calls["n"] == 2:  # page 2 of attempt 1: the stale-registration 422
+                raise _http_422("collection 'code__h2v0l-retry' is not registered for tenant 'nexus'")
+            return {"persisted": len(body["assignments"]) - 1, "skipped_superseded": 1}
+
+        monkeypatch.setattr(store, "_post", post, raising=False)
+        counted = store.persist_assignments_counted(
+            _rows_with_collection(1200, "code__h2v0l-retry", by="projection"),
+        )
+        assert counted == (1198, 2)  # one 1000-row page + one 200-row page, once each
+        assert calls["n"] == 4
+
 
 @pytest.mark.t2_tenant
 class TestPersistAssignmentsBatchSelfHeals:
@@ -212,30 +241,6 @@ class TestPersistAssignmentsBatchSelfHeals:
         assert len(posts[0]["assignments"]) == 2
         # Registered once up front, once more after the stale-cache eviction.
         assert writer.register_collection.call_count == 2
-
-    def test_retry_after_stale_registration_counts_each_page_once(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # nexus-h2v0l: the retry re-runs the whole page loop; the page the
-        # failed attempt already wrote must not be summed twice.
-        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
-        self._fake_writer(monkeypatch)
-        calls = {"n": 0}
-
-        def post(path, body):
-            calls["n"] += 1
-            if calls["n"] == 2:  # page 2 of attempt 1: the stale-registration 422
-                raise _http_422(
-                    "collection 'code__h2v0l-retry' is not registered for tenant 'nexus'"
-                )
-            return {"persisted": len(body["assignments"]) - 1, "skipped_superseded": 1}
-
-        monkeypatch.setattr(store, "_post", post, raising=False)
-        counted = store.persist_assignments_counted(
-            _rows_with_collection(1200, "code__h2v0l-retry", by="projection"),
-        )
-        assert counted == (1198, 2)  # one 1000-row page + one 200-row page, once each
-        assert calls["n"] == 4
 
     def test_batch_different_422_is_not_retried(
         self, monkeypatch: pytest.MonkeyPatch,
