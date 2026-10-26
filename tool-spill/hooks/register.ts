@@ -8,6 +8,7 @@ import type { Engine, Register } from 'claude-code'
 //   Bash: the full text goes to a file; the model gets the head and the tail of each stream (cut at line ends), a
 //         note between them naming the file, how many middle lines were cut and how many of those mention an error
 //         or a failure. A failure on the last line, or an error buried in the middle, is therefore never silent.
+//         A command that names the spill directory (reading a spill file back) passes whole.
 //   Read: a whole-file read only. A read the model sliced itself (offset or limit) passes whole, so following the
 //         note costs nothing extra, and instruction files (skills, agents, rules, AGENTS.md, CLAUDE.md) pass whole.
 //
@@ -113,6 +114,16 @@ function dirOf($: Engine): Promise<string> {
   return spillDir
 }
 
+// Whether `command` names `dir` itself: followed by a separator, a quote, a space or the end, so a sibling directory
+// that merely shares the prefix (`claude-tool-spill-samuel` beside `claude-tool-spill-sam`) does not count.
+function namesDir(command: string, dir: string): boolean {
+  for (let i = command.indexOf(dir); i >= 0; i = command.indexOf(dir, i + 1)) {
+    const after = command[i + dir.length]
+    if (after === undefined || /[\\/\s'"]/.test(after)) return true
+  }
+  return false
+}
+
 // A session that draws on no surface is a plain `claude -p` run.
 async function isHeadless($: Engine): Promise<boolean> {
   return (await $.session.surfaces()).length === 0
@@ -143,9 +154,14 @@ export const register: Register = (on, options) => {
             out.trimStart().startsWith('<persisted-output>')) return res
         if (!INCLUDE_HEADLESS && await isHeadless($)) return res
 
-        const path = `${await dirOf($)}/${e.tool_use_id.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`
-        const where = `Full output: ${path}. Read a slice of that file (offset and limit) or hand it to a subagent; ` +
-          'do not re-run the command.'
+        const dir = await dirOf($)
+        // A command that reads a spill file back (sed, head, grep on it) is following a note: cutting it again would
+        // spill a spill (nexus-i9a1p). Claude Code's own cap still bounds it.
+        const input: any = e
+        if (typeof input.command === 'string' && namesDir(input.command, dir)) return res
+        const path = `${dir}/${e.tool_use_id.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`
+        const where = `Full output: ${path}. Read a slice of it with the Read tool (offset and limit; a sliced Read ` +
+          'is never cut) or hand it to a subagent; do not re-run the command.'
         const stdout = squeeze(out, HEAD, TAIL, where, '')
         const stderr = squeeze(err, HEAD, TAIL, where, 'stderr ')
         if (stdout === out && stderr === err) return res
