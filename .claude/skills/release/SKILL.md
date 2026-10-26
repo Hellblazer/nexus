@@ -714,12 +714,15 @@ not eligible.
 
 **3. Bump (Steps 3, 4, 5).** The same surfaces as Step 3 (`pyproject.toml`,
 `mcpb/pyproject.toml`, `mcpb/manifest.json`, `.claude-plugin/marketplace.json`
-version and `source.ref` for every plugin, every `plugin.json`, `uv.lock` via
-Step 5's `uv sync`), both changelogs, and `conexus/PENDING_RELEASE.md` emptied of
-the entries that shipped. The engine pin does not move, and a diff that touches
-`src/` or `scripts/` is refused, so do not run `scripts/regen-install-constraints.sh`
-unless `uv sync` changed a dependency (in which case this is not a fast-lane
-release). Steps 4a and 4b do not apply. The new `CHANGELOG.md` section must name
+version and `source.ref` for every plugin, every `plugin.json`, `uv.lock`), both
+changelogs, and `conexus/PENDING_RELEASE.md` emptied of the entries that shipped.
+In `uv.lock` change only the `version` line under `name = "conexus"` and confirm
+with `uv lock --check`; do not run Step 5's `uv sync`. A local uv newer than the
+one that wrote the tag's lock rewrites the whole file (on 7.87.1 it added
+`revision = 2` and changed platform markers on a dozen dependencies), and that is
+churn the base tag's tested wheel never had. The engine pin does not move, and a
+diff that touches `src/` or `scripts/` is refused, so do not run
+`scripts/regen-install-constraints.sh` either. Steps 4a and 4b do not apply. The new `CHANGELOG.md` section must name
 its engine pairing as its first `engine-service-v` mention, for example `Pairs
 with engine-service-vA.B.C (REQUIRED_ENGINE_VERSION unchanged from X.Y.Z)`
 (A.B.C is the engine tag the base tag's own CHANGELOG section names),
@@ -775,13 +778,19 @@ Step 11b's back-merge of `main` into `develop`.
 The back-merge is not trivially clean in this lane (Step 11b's remark assumes the
 release branch contained develop; this one did not). Expect conflicts in both
 changelogs and the ledger, and resolve them by hand; there is no helper script.
+On 7.87.1 only `CHANGELOG.md` conflicted: the ledger merged cleanly to develop's
+side, because each cherry-pick's ledger conflict was resolved to the tag's side, so
+main never changed the file. Clean is not done: delete the shipped entries and
+move the `## Awaiting the next release (pinned: ...)` heading to vX.Y.N by hand.
 Changelogs, in this order: develop's `## [Unreleased]` first, with the entries that
 shipped in X.Y.N deleted from it, then main's `## [X.Y.N]` section, then the older
 sections. `conexus/PENDING_RELEASE.md`: develop's side minus the entries that
 shipped (the deferred ones and any plugin commit not picked stay pending). A
 later develop edit to a file whose entry you removed still differs from the new
 pin, so keep or re-add an entry for it; `tests/test_plugin_release_drift_ledger.py`
-fails on an undeclared file or a stale entry.
+fails on an undeclared file or a stale entry. Commit the merge before running that
+test: it compares committed HEAD with the pin, so before the commit it reports the
+version surfaces as undeclared drift.
 
 **7. Post-publish.** Once Step 11 shows PyPI at X.Y.N, on the laptop (it needs the
 `claude` CLI), run Step 11c exactly as written (`tests/e2e/fresh-install-mvv.sh
