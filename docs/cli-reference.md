@@ -5427,8 +5427,26 @@ and the other seven `null` when they have nothing to report):
   `[scope conflict: ...]` line after any leading `[non-answer: ...]` or
   `[budget exhausted ...]` marker. A run in which every retrieval step
   conflicted is recorded, but counts no success or failure for the plan: the
-  scope was the caller's. A catalog-subtree scope is reported as
-  `subtree_not_intersected` and is not intersected with plan corpora.
+  scope was the caller's. A catalog-subtree scope is a filter, never a corpus
+  (nexus-jypmj.1.16), and it does not depend on the step's corpus. On `query` and
+  `search_metadata_scoped` it becomes the step's own `subtree` argument whatever
+  the corpus is (none, `all` or a list): `outcome: "subtree_filtered"`, the
+  corpus left as it was, or the default (`knowledge,code,docs,rdr`) when the
+  step named none. The single-step fast path sends the same `subtree` to `query`
+  and reports the same outcome. The other retrieval tools (`search`,
+  `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`) have no
+  subtree filter: the step runs exactly as it would with no scope and is
+  reported `outcome: "subtree_not_applied"` with a `detail` naming the tool. A
+  document-level address (three or more segments, such as `1.2.4686`) is not a
+  subtree filter and `query` rejects it, so it is passed to no step and every
+  retrieval step is `subtree_not_applied` (`detail`: "a document-level address
+  is not a subtree filter"); it still resolves a named source. A step that sets
+  its own `subtree` keeps it, also `subtree_not_applied`. Every
+  `subtree_not_applied` step is named in the text answer, in a
+  `[scope not applied: scope '1.2' could not filter step 1 (search): ...]` line,
+  so a caller without the structured envelope sees it. A step pinned through
+  `collection` or `collections` keeps its pin
+  (`outcome: "unscoped_collection_pin"`). A subtree never narrows by owner.
   An explicit owner (nexus-jypmj.1.18: the `owner` or `project` binding; a
   catalog-subtree `scope` is not one) adds one more entry per
   corpus-taking step, `scope_kind: "owner"`, with `caller_scope` the owner
@@ -5495,8 +5513,22 @@ and the other seven `null` when they have nothing to report):
   reduction, not the items. Text mode adds a `[evidence request: ...]` line when
   a read stream was never merged or items were dropped. `None` when no stream
   was built. A document with more than `max_manifest_rows_read` (3000)
-  manifest rows is spread-sampled after the catalog reply; the reply itself
-  is not yet limited by the service.
+  manifest rows is spread-sampled after the catalog reply. The read itself is
+  capped on what it requests (nexus-jypmj.1.17): documents are read smallest
+  recorded chunk count first, in calls that fit the cap, and once the rows read
+  reach it no further manifest is requested (`status: "manifest_not_read"`,
+  `max_manifest_rows_read` in `caps_hit`). The cap is soft: a call that fit
+  when planned, or one document larger than what is left, takes the rows read
+  past it, so rows read can reach the cap plus one document (a single named
+  source larger than the cap is still read). The order and the grouping use the
+  chunk count the catalog records for a document; a count recorded as 0 or too
+  low reads that document early and can put it in one call with others, while
+  the stop uses the rows actually returned. A document never requested says why
+  in `not_read_reason` and in its `[evidence request: ...]` line:
+  `max_manifest_rows_read`, `deadline` (`caps_hit` has `deadline`), or
+  `earlier_request_failed: <ExceptionType>` (an earlier manifest call raised;
+  only the documents of that call are `manifest_error`). One document's own
+  reply is still whole, because the service has no row limit.
 - `lifecycle_stream` (nexus-jypmj.1.7): the T2 metadata record and latest gate
   record of a resolved RDR source, `{sources: [{source, status, project,
   rdr_number, detail}], records: [{source, project, title, kind, chars,

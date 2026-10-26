@@ -530,7 +530,9 @@ class PlanResult:
     #: scope_kind, outcome, resolved_corpus}``. ``outcome`` is a
     #: :data:`nexus.plans.evidence.NarrowStatus`: ``conflict`` (the step was skipped),
     #: ``narrowed``, ``within_scope``, ``scope_applied``, ``scope_all``,
-    #: ``subtree_not_intersected`` or ``unscoped_collection_pin`` (a step pinned through
+    #: ``subtree_filtered`` (a catalog subtree became the step's own ``subtree`` filter, whatever its
+    #: corpus; nexus-jypmj.1.16), ``subtree_not_applied`` (the subtree could not filter the step, which ran
+    #: as it would without a scope, with a ``detail``) or ``unscoped_collection_pin`` (a step pinned through
     #: ``collection``/``collections`` keeps today's behaviour). An explicit owner (the
     #: ``_nx_owners`` binding, nexus-jypmj.1.18) adds one more entry per step with ``scope_kind``
     #: ``owner`` (the owners and ``removed_collections`` ride along; a ``conflict`` skips the step).
@@ -595,6 +597,12 @@ _RETRIEVAL_TOOLS: frozenset[str] = frozenset(
 #: missing-scope defect rather than the tool simply having no such args.
 _CORPUS_QUERY_TOOLS: frozenset[str] = _RETRIEVAL_TOOLS - {"store_get_many"}
 
+#: The :data:`_CORPUS_QUERY_TOOLS` that take a catalog ``subtree`` filter (RDR-232 section 2a,
+#: nexus-jypmj.1.16). A caller's catalog-subtree scope reaches a step of one of these through that
+#: argument, whatever its corpus; any other retrieval tool runs as before and the step is disclosed.
+#: ``tests/test_rdr232_caller_scope.py`` pins this set to the tools' real signatures.
+_SUBTREE_FILTER_TOOLS: frozenset[str] = frozenset({"query", "search_metadata_scoped"})
+
 #: Args keys that may carry a collection name. The runner extracts
 #: candidates from these to validate the cross-embedding guard, and
 #: skips corpus injection when any of these are populated.
@@ -606,7 +614,9 @@ _COLLECTION_ARG_KEYS: tuple[str, ...] = ("collection", "collections")
 #: requiring plan-library schema changes. RDR-232 section 2a
 #: (nexus-jypmj.1.3): a corpus-prefix or collection scope NARROWS the
 #: corpus a plan declares (a conflict skips the step); it fills in when the
-#: plan declares none.
+#: plan declares none. A catalog-subtree scope is never a corpus
+#: (nexus-jypmj.1.16): it filters a step through the tool's ``subtree``
+#: argument (:func:`_apply_caller_scope_to_args`).
 _CALLER_SCOPE_BINDING: str = "_nx_scope"
 
 #: Last-resort ``corpus`` default for a ``search``/``query`` retrieval
@@ -1307,8 +1317,16 @@ def _apply_caller_scope_to_args(
         the unchanged input and the CALLER skips the step. The step is never run unscoped.
       * A step pinned through ``collection``/``collections`` keeps today's behaviour (the plan
         wins) and is reported as ``unscoped_collection_pin``.
-      * A catalog-subtree scope is not a corpus and is not intersected: it keeps the
-        zs1d forwarding (it fills a missing ``corpus`` and nothing else).
+      * A catalog-subtree scope is a filter and never a corpus (nexus-jypmj.1.16; forwarded as
+        ``corpus`` it resolved to no collection), so it does not depend on the step's corpus
+        (none, ``all``, a list). On :data:`_SUBTREE_FILTER_TOOLS` (``query``,
+        ``search_metadata_scoped``) it becomes the step's ``subtree`` argument
+        (``subtree_filtered``) and the corpus stays what it was, or the default when it had none.
+        A tool with no subtree filter runs unchanged and is reported ``subtree_not_applied``; so
+        is a document-depth address (not a subtree filter) and a step that sets its own
+        ``subtree``, which it keeps. :func:`nexus.plans.evidence.narrow_subtree` decides, and the
+        ``single_query`` fast path in ``nx_answer`` calls the same function. A subtree never
+        narrows by owner (nexus-jypmj.1.18).
       * No scope binding is a no-op and returns ``(args, None)``.
 
     The narrowing is ``None`` exactly when the scope did not reach the step. The same helper
@@ -1324,6 +1342,7 @@ def _apply_caller_scope_to_args(
         CorpusNarrowing,
         ScopeConstraint,
         narrow_corpus,
+        narrow_subtree,
     )
 
     scope = ScopeConstraint.parse(override)
@@ -1332,14 +1351,25 @@ def _apply_caller_scope_to_args(
         return args, CorpusNarrowing(
             "unscoped_collection_pin", plan_corpus or None, plan_corpus or None, scope,
         )
+    if scope.kind == "subtree":
+        # A subtree is a filter and never a corpus: the step's corpus (none, ``all`` or a list) is left as it is.
+        narrowing, subtree = narrow_subtree(
+            args.get("corpus"), scope, tool=tool, takes_subtree=tool in _SUBTREE_FILTER_TOOLS,
+            own_subtree=str(args.get("subtree") or ""),
+        )
+        out = dict(args)
+        if subtree:
+            out["subtree"] = subtree
+        if narrowing.status == "subtree_filtered" and tool == "search_metadata_scoped" and not out.get("corpus"):
+            # the tool's own corpus default has no rdr; a plan step reads the same default ``query`` does
+            out["corpus"] = _PLAN_STEP_DEFAULT_CORPUS
+        return out, narrowing
     narrowing = narrow_corpus(args.get("corpus"), scope)
     if narrowing.conflict:
         return args, narrowing
     out = dict(args)
     if narrowing.corpus is not None:
         out["corpus"] = narrowing.corpus
-    elif scope.kind == "subtree":
-        out["corpus"] = scope.value
     return out, narrowing
 
 
@@ -3614,6 +3644,8 @@ async def _plan_run_impl(
                     "tool": tool,
                     "corpus": resolved.get("corpus", ""),
                     "query": resolved.get("query") or resolved.get("question") or "",
+                    # nexus-jypmj.1.16: a catalog-subtree filter the step ran under is part of what it searched.
+                    **({"subtree": resolved["subtree"]} if resolved.get("subtree") else {}),
                 })
 
             # nexus-h33x8.6 a4: an active deadline threads the REMAINING

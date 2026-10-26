@@ -366,8 +366,8 @@ def test_scope_discriminator() -> None:
         pytest.param(COLLECTION, "rdr__1", "conflict", None, id="a-string-prefix-is-not-a-segment-match"),
         pytest.param("code", "all", "scope_all", "code", id="scope-all-restricts-nothing"),
         pytest.param(None, "all", "scope_all", "all", id="scope-all-with-no-plan-corpus"),
-        pytest.param("code", "1.2", "subtree_not_intersected", "code", id="subtree-is-not-intersected"),
-        pytest.param(None, "1.2", "subtree_not_intersected", None, id="subtree-with-no-plan-corpus"),
+        pytest.param("code", "1.2", "subtree_not_applied", "code", id="subtree-is-never-a-corpus"),
+        pytest.param(None, "1.2", "subtree_not_applied", None, id="subtree-with-no-plan-corpus"),
     ],
 )
 def test_narrow_corpus_rule(plan_corpus, scope: str, status: str, corpus: str | None) -> None:
@@ -449,7 +449,12 @@ def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan
         pytest.param("code", "rdr", [], id="plan-pinned-to-code-conflicts-and-query-is-not-called"),
         pytest.param("knowledge,code,docs,rdr", "1.61",
                      [{"corpus": "knowledge,code,docs,rdr", "subtree": "1.61"}],
-                     id="subtree-scope-keeps-its-forwarding-and-is-not-intersected"),
+                     id="subtree-scope-filters-a-pinned-corpus-like-the-runner-does"),
+        pytest.param("all", "1.61", [{"corpus": "all", "subtree": "1.61"}], id="subtree-scope-filters-corpus-all"),
+        pytest.param(None, "1.61", [{"corpus": "knowledge,code,docs,rdr", "subtree": "1.61"}],
+                     id="subtree-scope-filters-a-corpus-less-step-on-the-default"),
+        pytest.param("code,docs", "1.2.4686", [{"corpus": "code,docs", "subtree": ""}],
+                     id="document-depth-scope-is-not-passed-as-a-filter"),
         pytest.param("knowledge,code,docs,rdr", "",
                      [{"corpus": "knowledge,code,docs,rdr", "subtree": ""}], id="no-scope-unchanged"),
     ],
@@ -540,3 +545,237 @@ def test_every_step_conflicting_gives_the_no_match_notice_that_names_the_conflic
     assert "code" in env["final_text"] and "docs" in env["final_text"] and "rdr" in env["final_text"]
     assert env["final_text"].count("scope conflict") == 1, "named once, not repeated by a second notice"
     assert len(env["scope_diagnostics"]) == 2
+
+
+
+
+# ── nexus-jypmj.1.16: a catalog-subtree scope is a filter, whatever the step's corpus ───────────
+#
+# A subtree such as 1.2 used to be forwarded as `corpus`, which resolves to no collection. It now
+# rides as the tool's own `subtree` argument on `query` and `search_metadata_scoped` for a step with
+# no corpus, `all` or a list alike, and the corpus is left as it is. The other retrieval tools have no
+# subtree filter: the step runs as it did, and the answer text says the scope did not reach it. A
+# document-depth address (1.2.4686) is not a subtree filter at all and is disclosed, never passed.
+
+DEFAULT_CORPUS = "knowledge,code,docs,rdr"
+FILTER_TOOLS = ("query", "search_metadata_scoped")
+NO_FILTER_TOOLS = ("search", "search_topic_scoped", "search_graph_hop", "search_aspect_scoped")
+
+
+def _step(tool: str, corpus: object = None, **extra) -> dict:
+    args: dict = {("question" if tool == "query" else "query"): "$intent", **extra}
+    if corpus is not None:
+        args["corpus"] = corpus
+    return {"tool": tool, "args": args}
+
+
+def _subtree_calls(plan: dict, scope: str = "1.2", **bindings):
+    result, rec = _run(_match(plan), {"intent": "q", "_nx_scope": scope, **bindings})
+    return result, rec
+
+
+CORPUS_SHAPES = [
+    pytest.param(None, id="no-corpus"),
+    pytest.param("all", id="corpus-all"),
+    pytest.param("code,docs", id="corpus-list"),
+    pytest.param(["code", "docs"], id="corpus-list-valued"),
+]
+
+
+@pytest.mark.parametrize("tool", FILTER_TOOLS)
+@pytest.mark.parametrize("corpus", CORPUS_SHAPES)
+def test_a_subtree_filters_a_query_or_metadata_step_whatever_its_corpus(tool: str, corpus) -> None:
+    result, rec = _subtree_calls({"steps": [_step(tool, corpus)]})
+    (called, args), = rec.calls
+    assert called == tool and args["subtree"] == "1.2", args
+    if corpus is None:
+        assert args["corpus"] == DEFAULT_CORPUS, "no corpus falls to the default (rdr included), never to the subtree"
+    else:
+        assert args["corpus"] == corpus, "a pinned corpus is left as it is"
+    (diag,) = result.scope_diagnostics
+    assert (diag["outcome"], diag["tool"], diag["scope_kind"]) == ("subtree_filtered", tool, "subtree")
+    assert not any(isinstance(o, dict) and "scope_conflict" in o for o in result.steps), "no step is skipped"
+    assert result.resolved_step_args[0]["subtree"] == "1.2"
+
+
+@pytest.mark.parametrize("tool", NO_FILTER_TOOLS)
+@pytest.mark.parametrize("corpus", CORPUS_SHAPES)
+def test_a_step_on_a_tool_with_no_subtree_filter_runs_as_before_and_is_disclosed(tool: str, corpus) -> None:
+    from nexus.plans.evidence import scope_unapplied_notice
+
+    plan = {"steps": [_step(tool, corpus)]}
+    result, rec = _subtree_calls(plan)
+    _unscoped, rec0 = _run(_match(plan), {"intent": "q"})
+    assert rec.calls == rec0.calls, "the step runs exactly as it does with no scope: not skipped, not filtered"
+    assert "subtree" not in rec.calls[0][1]
+    (diag,) = result.scope_diagnostics
+    assert (diag["outcome"], diag["tool"], diag["caller_scope"]) == ("subtree_not_applied", tool, "1.2")
+    assert tool in diag["detail"] and "no catalog subtree" in diag["detail"]
+    assert not any(isinstance(o, dict) and "scope_conflict" in o for o in result.steps)
+    notice = scope_unapplied_notice(result.scope_diagnostics)
+    assert notice == f"[scope not applied: scope '1.2' could not filter step 1 ({tool}): {diag['detail']}]"
+
+
+@pytest.mark.parametrize("tool", (*FILTER_TOOLS, *NO_FILTER_TOOLS))
+@pytest.mark.parametrize("corpus", CORPUS_SHAPES)
+def test_a_document_depth_scope_is_never_passed_as_a_filter_and_is_disclosed(tool: str, corpus) -> None:
+    from nexus.plans.evidence import scope_unapplied_clauses
+
+    plan = {"steps": [_step(tool, corpus)]}
+    result, rec = _subtree_calls(plan, scope="1.2.4686")
+    _unscoped, rec0 = _run(_match(plan), {"intent": "q"})
+    assert rec.calls == rec0.calls, "the step runs as it would with no scope; the address is not truncated to an owner"
+    (diag,) = result.scope_diagnostics
+    assert (diag["outcome"], diag["detail"]) == ("subtree_not_applied", "a document-level address is not a subtree filter")
+    assert scope_unapplied_clauses(result.scope_diagnostics) == [
+        f"scope '1.2.4686' could not filter step 1 ({tool}): a document-level address is not a subtree filter"
+    ]
+
+
+def test_a_subtree_of_two_segments_is_an_owner_filter_and_three_is_a_document() -> None:
+    from nexus.plans.evidence import ScopeConstraint
+
+    assert not ScopeConstraint.parse("1.2").is_document_address
+    assert ScopeConstraint.parse("1.2.4686").is_document_address
+    assert not ScopeConstraint.parse("rdr").is_document_address
+
+
+def test_a_pinned_collection_step_is_still_reported_unscoped_under_a_subtree() -> None:
+    plan = {"steps": [{"tool": "query", "args": {"question": "q", "collection": CODE_COLLECTION}}]}
+    result, rec = _subtree_calls(plan)
+    assert "subtree" not in rec.calls[0][1]
+    assert [d["outcome"] for d in result.scope_diagnostics] == ["unscoped_collection_pin"]
+
+
+def test_a_taxonomy_domain_step_keeps_its_corpus_and_a_query_step_is_still_filtered() -> None:
+    plan = {"steps": [
+        {"tool": "query", "args": {"question": "$intent"}, "scope": {"taxonomy_domain": "code"}},
+        {"tool": "search", "args": {"query": "$intent"}, "scope": {"taxonomy_domain": "code"}},
+    ]}
+    result, rec = _subtree_calls(plan)
+    (_q, qargs), (_s, sargs) = rec.calls
+    assert qargs["subtree"] == "1.2" and qargs["corpus"] != "1.2"
+    assert "subtree" not in sargs and sargs["corpus"] != "1.2"
+    assert [d["outcome"] for d in result.scope_diagnostics] == ["subtree_filtered", "subtree_not_applied"]
+
+
+def test_a_step_with_its_own_subtree_keeps_it_and_says_the_scope_did_not_apply() -> None:
+    plan = {"steps": [{"tool": "query", "args": {"question": "$intent", "subtree": "1.9"}}]}
+    result, rec = _subtree_calls(plan)
+    (_t, args), = rec.calls
+    assert args["subtree"] == "1.9", "the plan's own catalog filter is not replaced by the caller's"
+    (diag,) = result.scope_diagnostics
+    assert diag["outcome"] == "subtree_not_applied" and "'1.9'" in diag["detail"]
+
+
+def test_a_subtree_scope_alone_never_narrows_by_owner() -> None:
+    plan = {"steps": [{"tool": "query", "args": {"question": "$intent"}}]}
+    result, rec = _subtree_calls(plan)
+    assert rec.calls[0][1]["corpus"] == DEFAULT_CORPUS, "no owner expansion of the corpus"
+    assert all(d["scope_kind"] != "owner" for d in result.scope_diagnostics)
+
+
+@pytest.mark.parametrize("corpus", [None, "all", "knowledge,code,docs,rdr", "code"])
+@pytest.mark.parametrize("scope", ["1.2", "1.2.4686"])
+def test_runner_and_single_query_fast_path_agree_on_args_and_outcome(corpus, scope: str) -> None:
+    plan = {"steps": [_step("query", corpus)]}
+    result, rec = _subtree_calls(plan, scope=scope)
+    (_t, runner_args), = rec.calls
+    env, fast_calls = _drive_nx_answer(_single_query_match(corpus), scope=scope, structured=True)
+    (fast,) = fast_calls
+    assert {k: runner_args.get(k, "") for k in ("corpus", "subtree")} == {k: fast[k] for k in ("corpus", "subtree")}
+    (runner_diag,) = result.scope_diagnostics
+    (fast_diag,) = env["scope_diagnostics"]
+    assert runner_diag == fast_diag, "same outcome, same corpus fields, same detail"
+    assert runner_diag["outcome"] == ("subtree_not_applied" if scope == "1.2.4686" else "subtree_filtered")
+
+
+def test_subtree_filter_tool_set_is_the_set_of_corpus_tools_whose_signature_has_a_subtree_parameter() -> None:
+    import inspect
+
+    import nexus.mcp.core as core
+    from nexus.plans import runner
+
+    takes_subtree = {
+        name for name in runner._CORPUS_QUERY_TOOLS
+        if "subtree" in inspect.signature(getattr(core, name)).parameters
+    }
+    assert takes_subtree == set(runner._SUBTREE_FILTER_TOOLS) == set(FILTER_TOOLS)
+    assert set(runner._CORPUS_QUERY_TOOLS) == set(FILTER_TOOLS) | set(NO_FILTER_TOOLS)
+
+
+def test_every_builtin_query_and_metadata_step_is_filtered_by_a_subtree_scope_and_the_rest_are_named() -> None:
+    from nexus.plans.evidence import scope_unapplied_clauses
+
+    filtered = unapplied = 0
+    for path in sorted(BUILTIN_DIR.glob("*.yml")):
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        dims = data["dimensions"]
+        match = _builtin(dims["strategy"], dims["verb"])
+        steps = data["plan_json"]["steps"]
+        result, rec = _run(match, {**_BINDINGS, "_nx_scope": "1.2"}, cut=_first_operator(steps))
+        retrieval = [(t, a) for t, a in rec.calls if t in RETRIEVAL]
+        assert len(retrieval) == len(result.scope_diagnostics) == len(result.resolved_step_args), path.name
+        for (tool, args), diag in zip(retrieval, result.scope_diagnostics, strict=True):
+            if tool in FILTER_TOOLS:
+                assert args.get("subtree") == "1.2", (path.name, tool, args)
+                assert diag["outcome"] == "subtree_filtered", (path.name, diag)
+                filtered += 1
+            else:
+                assert "subtree" not in args, (path.name, tool, args)
+                assert diag["outcome"] == "subtree_not_applied" and tool in diag["detail"], (path.name, diag)
+                unapplied += 1
+        assert len(scope_unapplied_clauses(result.scope_diagnostics)) == sum(
+            1 for t, _a in retrieval if t not in FILTER_TOOLS
+        ), path.name
+        assert not any(isinstance(o, dict) and "scope_conflict" in o for o in result.steps), path.name
+    expected_filtered = sum(1 for rows in PRE_CHANGE_RESOLVED_CORPORA.values() for _i, t, _c in rows if t in FILTER_TOOLS)
+    expected_unapplied = sum(1 for rows in PRE_CHANGE_RESOLVED_CORPORA.values() for _i, t, _c in rows if t not in FILTER_TOOLS)
+    assert (filtered, unapplied) == (expected_filtered, expected_unapplied)
+    assert filtered >= 8 and unapplied >= 7, "non-vacuity: the sweep examined the builtins' real retrieval steps"
+
+
+def test_a_subtree_filtered_step_records_its_subtree_in_the_resolved_args_and_the_basis_text() -> None:
+    from nexus.mcp.core import _render_zero_evidence_step_basis_text
+
+    plan = {"steps": [
+        _step("query"),
+        {"tool": "search", "args": {"query": "$intent", "corpus": "code"}},
+    ]}
+    result, _rec = _subtree_calls(plan)
+    assert result.resolved_step_args[0]["subtree"] == "1.2"
+    assert "subtree" not in result.resolved_step_args[1], "a step the subtree did not reach ran under no filter"
+    text = _render_zero_evidence_step_basis_text(resolved_step_args=result.resolved_step_args, plan_json=None)
+    assert f"step0=query(corpus={DEFAULT_CORPUS!r}, subtree='1.2', query='q')" in text
+    assert "step1=search(corpus='code', query='q')" in text
+
+
+def test_the_unapplied_scope_reaches_the_answer_text_from_a_real_runner_result() -> None:
+    plan = {"steps": [
+        _step("search", "all"),
+        {"tool": "summarize", "args": {"content": "reduce the evidence"}},
+    ]}
+    result, _rec = _run(_match(plan, default_bindings={"intent": "q"}, required=["intent"]),
+                        {"intent": "q", "_nx_scope": "1.2"}, cut=1)
+    match = _match(plan, default_bindings={"intent": "q"}, required=["intent"])
+    text, _ = _drive_nx_answer(match, scope="1.2", plan_run_result=result)
+    line = "scope '1.2' could not filter step 1 (search): search takes no catalog subtree"
+    assert text.count(line) == 1, text
+    assert text.splitlines()[0].startswith("[scope not applied:"), text
+    env, _ = _drive_nx_answer(match, scope="1.2", structured=True, plan_run_result=result)
+    assert [d["outcome"] for d in env["scope_diagnostics"]] == ["subtree_not_applied"]
+    assert line in env["final_text"]
+
+
+def test_an_unapplied_document_scope_is_named_in_the_text_even_when_every_step_returned_nothing() -> None:
+    steps = [{"ids": [], "tumblers": []}, {"text": "summary of nothing"}]
+    diag = {
+        "step_index": 0, "tool": "query", "plan_corpus": "all", "caller_scope": "1.2.4686",
+        "scope_kind": "subtree", "outcome": "subtree_not_applied", "resolved_corpus": "all",
+        "detail": "a document-level address is not a subtree filter",
+    }
+    res = _plan_run_result(steps, [diag])
+    match = _match({"steps": [_step("query", "all"), {"tool": "summarize", "args": {"inputs": "$step1.ids"}}]},
+                   default_bindings={"intent": "q"}, required=["intent"])
+    text, _ = _drive_nx_answer(match, scope="1.2.4686", plan_run_result=res)
+    assert "could not filter step 1 (query): a document-level address is not a subtree filter" in text

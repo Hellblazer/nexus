@@ -9683,7 +9683,8 @@ def _render_zero_evidence_step_basis_text(
         return "; ".join(
             f"step{a.get('step_index')}={a.get('tool', '')}"
             f"(corpus={str(a.get('corpus') or '')!r}, "
-            f"query={str(a.get('query') or '')!r})"
+            + (f"subtree={str(a['subtree'])!r}, " if a.get("subtree") else "")
+            + f"query={str(a.get('query') or '')!r})"
             + (" [skipped]" if a.get("skipped") else "")
             for a in resolved_step_args
         )
@@ -11264,10 +11265,13 @@ async def nx_answer(
             "A corpus scope narrows the corpus a plan declares (a plan entry under "
             "the scope is kept, \"all\" becomes the scope); a retrieval step whose "
             "corpus has nothing under the scope is skipped and reported in the "
-            "envelope's scope_diagnostics. A catalog subtree filters only the "
-            "single-step query() fast path; on a multi-step plan it is not "
-            "intersected with the plan's corpora, and a step with no corpus of "
-            "its own searches nothing under it."
+            "envelope's scope_diagnostics. A catalog subtree is a filter, never a corpus: "
+            "it filters every query and search_metadata_scoped step, whatever its corpus "
+            "(outcome subtree_filtered). A step on a tool with no subtree filter "
+            "(search, search_topic_scoped, search_graph_hop, search_aspect_scoped) runs "
+            "unscoped, and so does any step under a document-level address such as "
+            "1.2.4686; both are named in the answer text and in scope_diagnostics "
+            "(outcome subtree_not_applied)."
         ),
     )] = "",
     context: Annotated[str, Field(description="Supplementary caller-supplied context for the plan matcher.")] = "",
@@ -11682,12 +11686,20 @@ async def nx_answer(
         from nexus.plans.evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
             scope_conflict_clauses,
             scope_conflict_notice,
+            scope_unapplied_clauses,
+            scope_unapplied_notice,
         )
 
         _scope_clauses = scope_conflict_clauses(_scope_diagnostics)
         _scope_notice = (
             None if all(c in text for c in _scope_clauses)
             else scope_conflict_notice(_scope_diagnostics)
+        )
+        # nexus-jypmj.1.16: steps a catalog-subtree scope could not filter ran unscoped; the caller sees
+        # that in the text, not only in the structured envelope.
+        _unapplied_notice = (
+            None if all(c in text for c in scope_unapplied_clauses(_scope_diagnostics))
+            else scope_unapplied_notice(_scope_diagnostics)
         )
         _scope_normalized_text = (
             f"[scope: {_scope_normalized['given']!r} is a comma-list; scope takes one corpus prefix or catalog "
@@ -11697,6 +11709,7 @@ async def nx_answer(
         _extra_lines = [
             line for line in (
                 _budget_warning_text, _dropped_reduce_text, _scope_normalized_text, _scope_notice,
+                _unapplied_notice,
                 *_evidence_request.disclosures(),
                 *(_primary_evidence.disclosures() if _primary_evidence else ()),
                 *(_reserved_stream.disclosures() if _reserved_stream else ()),
@@ -12658,14 +12671,23 @@ async def nx_answer(
             # here, by the same rule (nexus.plans.evidence.narrow_corpus). A
             # corpus-prefix or collection scope narrows ``corpus`` and is NOT
             # passed as ``subtree`` (query() rejects a non-tumbler subtree as an
-            # unknown owner); a catalog-subtree scope is not intersected and
-            # keeps riding ``subtree``. A conflict skips the step: the no-match
-            # notice names it and query() is never called.
-            from nexus.plans.evidence import ScopeConstraint, narrow_corpus  # noqa: PLC0415 — deferred; matches this module's convention
+            # unknown owner). A catalog-subtree scope is a filter: it rides ``subtree``
+            # whatever the plan's corpus (none, ``all`` or a list), exactly as the
+            # runner sends it to a ``query`` step (nexus.plans.evidence.narrow_subtree,
+            # nexus-jypmj.1.16), and a document-depth address is not passed at all. A
+            # conflict skips the step: the no-match notice names it and query() is
+            # never called.
+            from nexus.plans.evidence import ScopeConstraint, narrow_corpus, narrow_subtree  # noqa: PLC0415 — deferred; matches this module's convention
 
             _single_query_fast_path = True
             _fast_scope = ScopeConstraint.parse(scope)
-            _fast_narrowing = narrow_corpus(step_args.get("corpus") or None, _fast_scope)
+            _fast_subtree = ""
+            if _fast_scope.kind == "subtree":
+                _fast_narrowing, _fast_subtree = narrow_subtree(
+                    step_args.get("corpus") or None, _fast_scope, tool="query", takes_subtree=True,
+                )
+            else:
+                _fast_narrowing = narrow_corpus(step_args.get("corpus") or None, _fast_scope)
             if _fast_scope.kind != "none":
                 _scope_diagnostics.append(
                     _fast_narrowing.to_diagnostic(step_index=0, tool="query")
@@ -12717,7 +12739,7 @@ async def nx_answer(
                         )
                     else:
                         corpus = str(_fast_owner_args["corpus"])
-            fast_subtree = _fast_scope.value if _fast_scope.kind == "subtree" else ""
+            fast_subtree = _fast_subtree
             try:
                 limit = int(step_args.get("limit", 10))
             except (TypeError, ValueError):

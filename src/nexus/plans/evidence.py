@@ -33,8 +33,9 @@ import it without a cycle. Resolving the named source to a document is a later s
 
 The second half of the module is the caller's corpus scope over a plan's declared corpora
 (RDR-232 section 2a, nexus-jypmj.1.3): :class:`ScopeConstraint` classifies the ``scope`` string,
-:func:`narrow_corpus` applies the narrowing rule to one step's corpus, and
-:func:`scope_conflict_notice` renders the disclosure line. The runner and the ``single_query`` fast
+:func:`narrow_corpus` applies the narrowing rule to one step's corpus,
+:func:`narrow_subtree` decides what a catalog-subtree scope does to a step (nexus-jypmj.1.16), and
+:func:`scope_conflict_notice` and :func:`scope_unapplied_notice` render the disclosure lines. The runner and the ``single_query`` fast
 path both call them, so the rule lives once.
 """
 
@@ -66,11 +67,14 @@ __all__ = [
     "check_no_reserved_declarations",
     "declared_reserved_names",
     "narrow_corpus",
+    "narrow_subtree",
     "reserved_binding_declarations",
     "resolve_owner_qualifier",
     "scope_conflict_clauses",
     "scope_conflict_notice",
     "scope_subtree",
+    "scope_unapplied_clauses",
+    "scope_unapplied_notice",
     "split_reserved",
 ]
 
@@ -596,6 +600,14 @@ class ScopeConstraint:
         return cls("corpus_prefix", text)
 
     @property
+    def is_document_address(self) -> bool:
+        """Whether this is a catalog subtree of document depth (``1.2.4686``): three or more segments.
+
+        Such an address names one document and has no descendants, so ``query`` rejects it as a
+        subtree filter. It stays valid for resolving a named source (nexus-jypmj.1.4)."""
+        return self.kind == "subtree" and len(self.value.split(".")) >= 3
+
+    @property
     def narrows_corpus(self) -> bool:
         """Whether the scope is a corpus (prefix or collection) rather than a subtree."""
         return self.kind in ("corpus_prefix", "collection")
@@ -627,7 +639,8 @@ NarrowStatus = Literal[
     "within_scope",             # every plan entry was already under the scope
     "conflict",                 # no plan entry overlaps the scope: the step is skipped
     "scope_all",                # scope `all` restricts nothing
-    "subtree_not_intersected",  # a catalog subtree is not a corpus and is not intersected
+    "subtree_filtered",         # a catalog subtree became the step's own `subtree` filter; its corpus is untouched
+    "subtree_not_applied",      # a catalog subtree could not filter the step, which ran as it would without a scope
     "unscoped_collection_pin",  # pinned through collection(s): the plan wins (reported only)
 ]
 
@@ -640,6 +653,9 @@ class CorpusNarrowing:
     corpus: str | None
     plan_corpus: str | None
     scope: ScopeConstraint
+    #: Why a ``subtree_not_applied`` happened (the tool takes no subtree, the scope is a document
+    #: address, the step sets its own subtree); the disclosure quotes it. Empty otherwise.
+    detail: str = ""
 
     @property
     def conflict(self) -> bool:
@@ -647,7 +663,7 @@ class CorpusNarrowing:
 
     def to_diagnostic(self, *, step_index: int, tool: str) -> dict[str, Any]:
         """The wire form carried in ``PlanResult.scope_diagnostics`` and the envelope."""
-        return {
+        diagnostic: dict[str, Any] = {
             "step_index": step_index,
             "tool": tool,
             "plan_corpus": self.plan_corpus,
@@ -656,6 +672,9 @@ class CorpusNarrowing:
             "outcome": self.status,
             "resolved_corpus": self.corpus,
         }
+        if self.detail:
+            diagnostic["detail"] = self.detail
+        return diagnostic
 
 
 def _corpus_entries(plan_corpus: object) -> list[str]:
@@ -681,15 +700,19 @@ def narrow_corpus(plan_corpus: object, scope: ScopeConstraint) -> CorpusNarrowin
     scope. No overlap is a ``conflict``: the caller does not run the step unscoped and does not
     drop the scope.
 
-    A catalog-subtree scope is not a corpus and is returned as ``subtree_not_intersected`` with
-    the plan's corpus untouched; the caller keeps its existing forwarding for it.
+    A catalog-subtree scope is not a corpus: this function returns the plan's corpus untouched as
+    ``subtree_not_applied``. What a subtree does for a step depends on the tool, so callers route a
+    subtree scope through :func:`narrow_subtree` first.
     """
     entries = _corpus_entries(plan_corpus)
     plan_text = ",".join(entries) or None
     if scope.kind == "none":
         return CorpusNarrowing("no_scope", plan_text, plan_text, scope)
     if scope.kind == "subtree":
-        return CorpusNarrowing("subtree_not_intersected", plan_text, plan_text, scope)
+        return CorpusNarrowing(
+            "subtree_not_applied", plan_text, plan_text, scope,
+            detail="a catalog subtree is not a corpus; narrow_subtree decides the subtree filter",
+        )
     if scope.value == "all":
         return CorpusNarrowing("scope_all", plan_text or "all", plan_text, scope)
     if not entries:
@@ -707,6 +730,42 @@ def narrow_corpus(plan_corpus: object, scope: ScopeConstraint) -> CorpusNarrowin
         return CorpusNarrowing("conflict", None, plan_text, scope)
     status: NarrowStatus = "within_scope" if kept == entries else "narrowed"
     return CorpusNarrowing(status, ",".join(kept), plan_text, scope)
+
+
+def narrow_subtree(
+    plan_corpus: object, scope: ScopeConstraint, *, tool: str, takes_subtree: bool, own_subtree: str = "",
+) -> tuple[CorpusNarrowing, str]:
+    """``(narrowing, subtree)``: what a catalog-subtree *scope* does to one retrieval step
+    (RDR-232 section 2a, nexus-jypmj.1.16). *subtree* is the value for the tool's own ``subtree``
+    argument, ``""`` when nothing is passed.
+
+    The subtree is a filter and never a corpus, and it does not depend on the step's corpus: a
+    corpus of ``all``, a list or none is left as it is.
+
+      * *takes_subtree* (``query``, ``search_metadata_scoped``): the subtree becomes the step's
+        filter, ``subtree_filtered``. A step that sets its own *own_subtree* keeps it
+        (``subtree_not_applied``).
+      * Any other tool has no subtree filter: the step runs as before, ``subtree_not_applied``,
+        with a ``detail`` naming the tool.
+      * A document-depth address is not a subtree filter (``query`` rejects it): every step runs
+        as it would without a scope, ``subtree_not_applied``.
+
+    The runner and the ``single_query`` fast path both call this, so they agree on the args and on
+    the outcome.
+    """
+    entries = _corpus_entries(plan_corpus)
+    plan_text = ",".join(entries) or None
+
+    def _not_applied(detail: str, passed: str = "") -> tuple[CorpusNarrowing, str]:
+        return CorpusNarrowing("subtree_not_applied", plan_text, plan_text, scope, detail=detail), passed
+
+    if scope.is_document_address:
+        return _not_applied("a document-level address is not a subtree filter")
+    if not takes_subtree:
+        return _not_applied(f"{tool} takes no catalog subtree")
+    if own_subtree:
+        return _not_applied(f"the step sets its own subtree {own_subtree!r}, which it keeps", own_subtree)
+    return CorpusNarrowing("subtree_filtered", plan_text, plan_text, scope), scope.value
 
 
 def scope_conflict_clauses(diagnostics: object) -> list[str]:
@@ -737,3 +796,24 @@ def scope_conflict_notice(diagnostics: object) -> str | None:
     """The one-line text-mode disclosure for skipped steps, or ``None`` when nothing conflicted."""
     clauses = scope_conflict_clauses(diagnostics)
     return f"[scope conflict: {'; '.join(clauses)}]" if clauses else None
+
+
+def scope_unapplied_clauses(diagnostics: object) -> list[str]:
+    """One clause per step a catalog-subtree scope could not filter (``subtree_not_applied``),
+    1-indexed for a human reader. The step ran as it would without the scope: this is a
+    disclosure, not a skip (nexus-jypmj.1.16)."""
+    clauses: list[str] = []
+    for d in diagnostics if isinstance(diagnostics, list) else []:
+        if isinstance(d, dict) and d.get("outcome") == "subtree_not_applied":
+            why = str(d.get("detail") or "").strip() or "the scope could not reach it"
+            clauses.append(
+                f"scope {d.get('caller_scope')!r} could not filter step "
+                f"{int(d.get('step_index', 0)) + 1} ({d.get('tool', '?')}): {why}"
+            )
+    return clauses
+
+
+def scope_unapplied_notice(diagnostics: object) -> str | None:
+    """The one-line text-mode disclosure for steps a subtree scope did not filter, or ``None``."""
+    clauses = scope_unapplied_clauses(diagnostics)
+    return f"[scope not applied: {'; '.join(clauses)}]" if clauses else None

@@ -763,8 +763,18 @@ empty-retrieval path (no-match notice) and the notice names the conflict.
 Steps pinned through `collection`/`collections` keep today's behavior (the
 plan wins) and are reported as unscoped in the diagnostics; narrowing them is
 not part of this RDR. A catalog-subtree scope (for example `1.2`) is not a
-corpus and is not intersected; it keeps its current forwarding (inferred, not
-read: how a subtree value behaves once forwarded as `corpus` was not traced).
+corpus and is not intersected with one (nexus-jypmj.1.16). Forwarded as
+`corpus` it resolved to no collection, so a step with no corpus of its own
+searched nothing. `query` and `search_metadata_scoped` take it as their own
+`subtree` filter whatever the step's corpus pin (none, `all` or a list), and
+the corpus is left as it was, or the RDR-200 default when the step named none.
+The other retrieval tools (`search`, `search_topic_scoped`,
+`search_graph_hop`, `search_aspect_scoped`) have no subtree filter: the step
+runs as before and the text notice names it, as the envelope does. A
+document-level address (`1.2.4686`) is never a filter, because `query` rejects
+it; it is not passed or cut to its owner, and every retrieval step is reported
+as not applied. A subtree never narrows by owner (see the owner paragraph at
+the end of this section).
 
 The rule lives in two places, because single-step `query` plans never reach
 the runner. `nx_answer` classifies a matched plan with exactly one `query`
@@ -773,7 +783,10 @@ or the RDR-200 default and passes the caller's scope as `subtree`
 (`mcp/core.py:9468-9505`, `11740-11800`). Both `corpus-coverage-check` and
 `document-discovery` take that path. The fast path applies the same
 narrowing and conflict rule to its corpus before calling `query`; a
-corpus-prefix scope then goes into `corpus`, not `subtree`. The continuation
+corpus-prefix scope then goes into `corpus`, not `subtree`. A subtree scope
+goes into `subtree` whatever the corpus pin, by the same function the runner
+uses, so the two report the same outcome (`subtree_filtered`, or
+`subtree_not_applied` for a document-level address). The continuation
 path re-runs the runner's helpers (`plans/continuation_envelope.py:302-309`)
 and gets the rule through `_apply_caller_scope_to_args`.
 
@@ -1729,3 +1742,4 @@ remain coherent without it.
 - 2026-10-26: Phase 1 closed. Key Discoveries record A2, A6 and A7 as
   verified in production (research 19-21). Section 2a adds the owner-narrowing
   rule for secondary streams (nexus-jypmj.1.18), approved by Sam.
+- 2026-10-26: Section 2a replaces the subtree forwarding sentence with the shipped subtree-filter rule (nexus-jypmj.1.16), approved by Sam.

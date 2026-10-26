@@ -53,3 +53,10 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/README.md` (nexus-i93tz): the cumulative-cap table counts 2 rules again and names the removal; a paragraph says the git-write guard is frozen except for real incidents and lists the routes it does not cover.
 - `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (nexus-i93tz): docstring only, no logic change; the KNOWN LIMITS text gains the frozen-guard paragraph and the accepted not-covered routes.
 - `conexus/skills/rdr-create/SKILL.md` (nexus-3piej): Step 2 confirms `{repo}_rdr/NNN` is free in T2 (only a not-found answer; a record or an ambiguous-prefix answer means held) before the file is created, because `memory_put` upserts by title and silently replaced RDR-233's record on 2026-10-26; the step also says what the preamble's new held-elsewhere list and incomplete-scan notice mean.
+
+## Deferred to the next client release
+
+ONE PATH PER BULLET, on the bullet's FIRST line.
+
+- `conexus/skills/nexus/SKILL.md` (nexus-jypmj.1.16): the `nx_answer` `scope="1.2"` example says a catalog subtree filters `query` and `search_metadata_scoped` steps and that a `search` step runs unscoped and is named in the answer.
+- `conexus/skills/nexus/reference.md` (nexus-jypmj.1.16): the `scope` parameter row says a subtree is a filter and never a corpus, which tools it reaches, that a document-level address filters nothing, and the `[scope not applied: ...]` line and `subtree_not_applied` outcome that disclose it.

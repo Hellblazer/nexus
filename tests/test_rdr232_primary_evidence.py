@@ -76,8 +76,9 @@ class FakeCatalog:
 
     def __init__(
         self, entries: Sequence[CatalogEntry] = (), manifests: dict[str, list[ManifestRow]] | None = None,
-        owners: Sequence[str] = (ART_OWNER, NEXUS_OWNER),
+        owners: Sequence[str] = (ART_OWNER, NEXUS_OWNER), repo_roots: dict[str, str] | None = None,
     ) -> None:
+        self.repo_roots = repo_roots or {}
         self.entries = list(entries)
         self.manifests = manifests or {}
         self.owners = set(owners)
@@ -102,7 +103,12 @@ class FakeCatalog:
     def get_owner_by_prefix(self, prefix: str) -> dict | None:
         self.calls.append(("get_owner_by_prefix", {"prefix": prefix}))
         names = {ART_OWNER: "ART", NEXUS_OWNER: "nexus"}
-        return {"tumbler_prefix": prefix, "name": names.get(prefix, prefix), "owner_type": "repo"} if prefix in self.owners else None
+        if prefix not in self.owners:
+            return None
+        row = {"tumbler_prefix": prefix, "name": names.get(prefix, prefix), "owner_type": "repo"}
+        if prefix in self.repo_roots:
+            row["repo_root"] = self.repo_roots[prefix]
+        return row
 
     def resolve(self, tumbler: Any, *, follow_alias: bool = True) -> CatalogEntry | None:
         self.calls.append(("resolve", {"tumbler": str(tumbler)}))
@@ -835,3 +841,244 @@ async def test_nx_answer_hands_plan_run_a_reserved_stream_that_leads_with_the_tw
     assert [i.raw for i in stream.items[:2]] == ["id: RDR-084\nstatus: accepted", "outcome: PASSED"]
     assert len(stream.items) == 3 and stream.items[2].chash, "the chunk follows the two records"
     assert env["lifecycle_stream"]["reads"] <= 8
+
+
+# ── nexus-jypmj.1.17: a stale-owner registration of the qualified project's own file ─────────
+#
+# Legacy RDRs were registered under an owner that is no longer the project's current one; only the
+# source_uri under the project's docs/rdr/ shows they are its own. The qualifier names the current
+# owner, so the resolver passes that owner's docs/rdr/ prefix and rdr_canonical admits them.
+
+STALE_OWNER = "1.10"
+
+
+def _stale_catalog(tmp_path, *, with_current: bool = False, stale_root=None, repo_root: bool = True,
+                   root_value: str | None = None, stale_ctype: str = "rdr"):
+    from nexus.catalog.rdr_canonical import rdr_source_prefix
+
+    root = tmp_path / "ART"
+    other = tmp_path / "elsewhere"
+    roots = {ART_OWNER: root_value if root_value is not None else str(root)} if repo_root else {}
+    cat, t3 = FakeCatalog(repo_roots=roots), FakeT3()
+    prefix = rdr_source_prefix(stale_root if stale_root is not None else root)
+    stale = _doc(cat, t3, "1.10.5", ART_PATH, ["# old\nbody"], collection=NEXUS_COL, ctype=stale_ctype)
+    cat.entries[-1] = replace(stale, source_uri=prefix + ART_PATH.rsplit("/", 1)[-1])
+    if with_current:
+        _doc(cat, t3, ART_DOC, ART_PATH, ["# new\nbody"], collection=ART_COL)
+    return cat, t3, other
+
+
+def test_a_qualified_request_admits_a_stale_owner_registration_of_the_projects_own_file(tmp_path) -> None:
+    cat, _t3, _ = _stale_catalog(tmp_path)
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    assert (src.status, src.tumbler, src.qualified) == ("resolved", "1.10.5", True), src.detail
+    (unq,) = resolve_named_sources([RDR084], _resolved(None), cat=cat).sources
+    assert (unq.status, unq.tumbler) == ("resolved", "1.10.5"), "the unqualified request already resolved it"
+
+
+def test_the_qualified_projects_current_registration_wins_over_its_stale_one(tmp_path) -> None:
+    cat, _t3, _ = _stale_catalog(tmp_path, with_current=True)
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    assert (src.status, src.tumbler) == ("resolved", ART_DOC), src.detail
+
+
+def test_a_registration_under_another_owner_whose_file_is_not_the_projects_stays_ignored(tmp_path) -> None:
+    cat, _t3, other = _stale_catalog(tmp_path, stale_root=tmp_path / "elsewhere")
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    assert src.status == "unresolved" and "1 in other projects ignored" in src.detail
+
+
+def test_an_owner_with_no_repo_root_admits_by_owner_only_as_before(tmp_path) -> None:
+    cat, _t3, _ = _stale_catalog(tmp_path, repo_root=False)
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    assert src.status == "unresolved" and "1 in other projects ignored" in src.detail
+
+
+def test_a_foreign_rdr_registration_does_not_hide_the_projects_stale_prose_one(tmp_path) -> None:
+    cat, t3, _ = _stale_catalog(tmp_path, stale_ctype="prose")
+    _doc(cat, t3, NEXUS_DOC, NEXUS_PATH, ["# Nexus RDR-084\nbody"], collection=NEXUS_COL, ctype="rdr")
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    assert (src.status, src.tumbler, src.qualified) == ("resolved", "1.10.5", True), src.detail
+    assert [c["content_type"] for n, c in cat.calls if n == "find"] == ["rdr", "prose"], "the prose pass ran"
+    (unq,) = resolve_named_sources([RDR084], _resolved(None), cat=cat).sources
+    assert (unq.status, unq.tumbler) == ("resolved", NEXUS_DOC), "unqualified: prose is read only without an rdr hit"
+
+
+def test_a_qualified_rdr_hit_the_qualifier_admits_ends_the_search_before_prose(tmp_path) -> None:
+    cat, t3, _ = _stale_catalog(tmp_path, with_current=True, stale_ctype="prose")
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    assert (src.status, src.tumbler) == ("resolved", ART_DOC), src.detail
+    assert [c["content_type"] for n, c in cat.calls if n == "find"] == ["rdr"]
+
+
+def test_two_stale_registrations_and_no_current_one_are_candidates_not_a_guess(tmp_path) -> None:
+    from nexus.catalog.rdr_canonical import rdr_source_prefix
+
+    cat, t3, _ = _stale_catalog(tmp_path)
+    second = _doc(cat, t3, "1.11.7", ART_PATH, ["# older\nbody"], collection=NEXUS_COL, ctype="rdr")
+    cat.entries[-1] = replace(second, source_uri=rdr_source_prefix(tmp_path / "ART") + ART_PATH.rsplit("/", 1)[-1])
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    assert src.status == "candidates" and src.tumbler is None, src.detail
+    assert sorted(c.tumbler for c in src.candidates) == ["1.10.5", "1.11.7"]
+
+
+def test_a_document_depth_qualifier_does_not_admit_a_stale_registration(tmp_path) -> None:
+    cat, t3, _ = _stale_catalog(tmp_path)
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_DOC), cat=cat).sources
+    assert src.status == "unresolved" and "1 in other projects ignored" in src.detail, src.detail
+    _doc(cat, t3, ART_DOC, ART_PATH, ["# new\nbody"], collection=ART_COL)
+    (cur,) = resolve_named_sources([RDR084], _resolved(ART_DOC), cat=cat).sources
+    assert (cur.status, cur.tumbler) == ("resolved", ART_DOC), cur.detail
+
+
+def test_a_relative_repo_root_degrades_to_owner_only_matching(tmp_path) -> None:
+    from nexus.plans.primary_evidence import _owner_source_prefix
+
+    assert _owner_source_prefix({"repo_root": "relative/ART"}) == ""
+    assert _owner_source_prefix({"repo_root": ""}) == "" and _owner_source_prefix({}) == ""
+    assert _owner_source_prefix({"repo_root": str(tmp_path / "ART")}).endswith("/ART/docs/rdr/")
+    # the stale registration sits under the prefix a relative root would resolve to against the cwd:
+    # it must NOT be admitted by a prefix invented from the process's working directory
+    cat, _t3, _ = _stale_catalog(tmp_path, stale_root="relative/ART", root_value="relative/ART")
+    (src,) = resolve_named_sources([RDR084], _resolved(ART_OWNER), cat=cat).sources
+    assert src.status == "unresolved" and "1 in other projects ignored" in src.detail, src.detail
+
+
+# ── nexus-jypmj.1.17: the manifest read is capped before it pulls, not only after ─────────────
+
+
+def _three_docs(rows: int):
+    cat, t3 = FakeCatalog(), FakeT3()
+    refs = []
+    for i, tumbler in enumerate(("1.2.10", "1.2.11", "1.2.12")):
+        _doc(cat, t3, tumbler, f"docs/rdr/rdr-0{10 + i}-doc-{i}.md", _sectioned(rows, tag=str(i)))
+        refs.append(SourceRef.parse(f"RDR-0{10 + i}"))
+    return cat, t3, refs
+
+
+def test_no_further_manifest_is_requested_once_the_rows_read_reach_the_cap() -> None:
+    cat, t3, refs = _three_docs(30)
+    caps = replace(DEFAULT_CAPS, max_manifest_rows_read=50, max_manifest_rows=50)
+    _res, primary = _select(cat, t3, refs, caps=caps)
+    pulled = [d for n, c in cat.calls if n == "get_manifests" for d in c["doc_ids"]]
+    assert pulled == ["1.2.10", "1.2.11"], "the third document is never requested"
+    first, second, third = primary.documents
+    assert (first.status, second.status, third.status) == ("ok", "ok", "manifest_not_read")
+    assert third.selected_rows == 0 and third.partial is True
+    assert "max_manifest_rows_read" in primary.caps_hit
+    assert any("RDR-012" in line and "not read" in line for line in primary.disclosures())
+    assert {i.doc_id for i in primary.items} == {"1.2.10", "1.2.11"}
+
+
+def test_manifests_within_the_cap_are_one_call_exactly_as_before() -> None:
+    cat, t3, refs = _three_docs(30)
+    _res, primary = _select(cat, t3, refs)
+    assert [c["doc_ids"] for n, c in cat.calls if n == "get_manifests"] == [["1.2.10", "1.2.11", "1.2.12"]]
+    assert [d.status for d in primary.documents] == ["ok", "ok", "ok"]
+    assert "max_manifest_rows_read" not in primary.caps_hit
+
+
+def _pulled(cat: FakeCatalog) -> list[list[str]]:
+    return [list(c["doc_ids"]) for n, c in cat.calls if n == "get_manifests"]
+
+
+def test_the_smallest_declared_documents_are_read_first_so_a_cap_costs_the_largest() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, "1.2.10", "docs/rdr/rdr-010-big.md", _sectioned(40, tag="big"))
+    _doc(cat, t3, "1.2.11", "docs/rdr/rdr-011-small.md", _sectioned(5, tag="small"))
+    _doc(cat, t3, "1.2.12", "docs/rdr/rdr-012-mid.md", _sectioned(30, tag="mid"))
+    caps = replace(DEFAULT_CAPS, max_manifest_rows_read=30)
+    sources = [SourceRef.parse("RDR-010"), SourceRef.parse("RDR-011"), SourceRef.parse("RDR-012")]
+    _res, primary = _select(cat, t3, sources, caps=caps)
+    assert _pulled(cat) == [["1.2.11"], ["1.2.12"]], "small then mid, one call each; big is never requested"
+    assert [(d.source, d.status) for d in primary.documents] == [
+        ("RDR-010", "manifest_not_read"), ("RDR-011", "ok"), ("RDR-012", "ok"),
+    ], "the largest document is the one the cap drops"
+    assert primary.caps_hit == ("max_manifest_rows_read",)
+
+
+def test_the_cap_is_soft_by_one_document_and_a_lone_source_larger_than_it_is_still_read() -> None:
+    cat, t3, refs = _three_docs(30)
+    caps = replace(DEFAULT_CAPS, max_manifest_rows_read=50, max_manifest_rows=50)
+    _res, primary = _select(cat, t3, refs, caps=caps)
+    read = sum(d.manifest_rows for d in primary.documents if d.status == "ok")
+    assert read == 60 and 50 < read <= 50 + 30, "rows read reach the cap plus at most one document"
+    lone, t3b = FakeCatalog(), FakeT3()
+    _doc(lone, t3b, "1.2.10", "docs/rdr/rdr-010-huge.md", _sectioned(80, tag="huge"))
+    _res, one = _select(lone, t3b, [SourceRef.parse("RDR-010")], caps=caps)
+    assert [d.status for d in one.documents] == ["ok"] and one.documents[0].manifest_rows == 80
+
+
+@pytest.mark.parametrize("recorded", [0, 2], ids=["recorded-zero", "recorded-understated"])
+def test_a_misrecorded_chunk_count_reorders_the_read_but_the_stop_uses_the_rows_returned(recorded: int) -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, "1.2.10", "docs/rdr/rdr-010-liar.md", _sectioned(60, tag="liar"), declared_count=recorded)
+    _doc(cat, t3, "1.2.11", "docs/rdr/rdr-011-small.md", _sectioned(3, tag="small"))
+    _doc(cat, t3, "1.2.12", "docs/rdr/rdr-012-next.md", _sectioned(48, tag="next"))
+    caps = replace(DEFAULT_CAPS, max_manifest_rows_read=50, max_manifest_rows=50)
+    sources = [SourceRef.parse("RDR-010"), SourceRef.parse("RDR-011"), SourceRef.parse("RDR-012")]
+    _res, primary = _select(cat, t3, sources, caps=caps)
+    # the order and the grouping trust the recorded count: the liar sorts first and shares a call with the
+    # small one, so that call reads 63 rows against a cap of 50; the stop then counts the rows returned
+    assert _pulled(cat) == [["1.2.10", "1.2.11"]]
+    assert [d.status for d in primary.documents] == ["ok", "ok", "manifest_not_read"]
+    assert primary.documents[0].manifest_rows == 60
+
+
+def test_a_manifest_not_read_at_the_deadline_says_the_deadline_and_not_the_cap() -> None:
+    cat, t3, refs = _three_docs(30)
+    now = [0.0]
+    real = cat.get_manifests
+
+    def slow(doc_ids: list[str]):
+        got = real(doc_ids)
+        now[0] += 100.0  # the first call outlasts the whole read budget
+        return got
+
+    cat.get_manifests = slow  # type: ignore[method-assign]
+    caps = replace(DEFAULT_CAPS, max_manifest_rows_read=50, max_manifest_rows=50, max_seconds=10.0)
+    res = resolve_named_sources(refs, _resolved(ART_OWNER), cat=cat, caps=caps, clock=lambda: now[0])
+    primary = select_primary_evidence(res, cat=cat, fetch_chunks=t3.fetch, caps=caps, clock=lambda: now[0])
+    assert [d.status for d in primary.documents] == ["ok", "manifest_not_read", "manifest_not_read"]
+    assert [d.not_read_reason for d in primary.documents] == ["", "deadline", "deadline"]
+    assert "deadline" in primary.caps_hit and "max_manifest_rows_read" not in primary.caps_hit
+    lines = [line for line in primary.disclosures() if "was not read" in line]
+    assert len(lines) == 2 and all("deadline" in line and "cap on rows read" not in line for line in lines), lines
+
+
+def test_documents_never_requested_after_a_failed_batch_are_not_read_with_the_failure_as_the_reason() -> None:
+    cat, t3, refs = _three_docs(30)
+    real = cat.get_manifests
+
+    def second_call_fails(doc_ids: list[str]):
+        if len(_pulled(cat)) == 1:
+            cat.calls.append(("get_manifests", {"doc_ids": list(doc_ids)}))
+            raise RuntimeError("engine unreachable")
+        return real(doc_ids)
+
+    cat.get_manifests = second_call_fails  # type: ignore[method-assign]
+    caps = replace(DEFAULT_CAPS, max_manifest_rows_read=50, max_manifest_rows=50)
+    _res, primary = _select(cat, t3, refs, caps=caps)
+    assert _pulled(cat) == [["1.2.10"], ["1.2.11"]], "the third document was never requested"
+    first, second, third = primary.documents
+    assert (first.status, second.status, third.status) == ("ok", "manifest_error", "manifest_not_read")
+    assert third.not_read_reason == "earlier_request_failed: RuntimeError"
+    assert primary.caps_hit == (), "a failure is not a cap"
+    assert any(
+        "RDR-012" in line and "an earlier manifest request failed (RuntimeError)" in line and "never requested" in line
+        for line in primary.disclosures()
+    )
+    assert any("RDR-011" in line and "could not be read" in line for line in primary.disclosures())
+
+
+def test_a_failing_manifest_call_is_a_manifest_error_for_the_documents_of_that_call() -> None:
+    cat, t3, refs = _three_docs(30)
+
+    def boom(doc_ids: list[str]):
+        cat.calls.append(("get_manifests", {"doc_ids": list(doc_ids)}))
+        raise RuntimeError("engine unreachable")
+
+    cat.get_manifests = boom  # type: ignore[method-assign]
+    _res, primary = _select(cat, t3, refs)
+    assert [d.status for d in primary.documents] == ["manifest_error"] * 3
+    assert primary.items == ()

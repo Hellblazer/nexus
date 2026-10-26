@@ -34,6 +34,7 @@ Merging this evidence ahead of the plan's inputs is :mod:`nexus.plans.reserved_s
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections import defaultdict, deque
@@ -45,7 +46,9 @@ import structlog
 
 from nexus.catalog.rdr_canonical import (
     group_rdr_candidates,
+    is_in_repo,
     rdr_key_of,
+    rdr_source_prefix,
     resolve_canonical_tumbler,
 )
 from nexus.catalog.tumbler import Tumbler
@@ -289,6 +292,10 @@ def _comparable(a: Tumbler, b: Tumbler) -> bool:
 class _Qualifier:
     owner: Tumbler
     document: Tumbler | None  # set when the qualifier is document depth (scope 1.2.4686)
+    #: The ``file://`` prefix of the owner's own ``docs/rdr/`` tree (``rdr_source_prefix`` of the owner's
+    #: ``repo_root``), or ``""`` for an owner with no repo root. It lets ``rdr_canonical`` admit a stale-owner
+    #: registration of the project's own file; empty degrades to owner-only matching.
+    source_prefix: str = ""
 
     @property
     def text(self) -> str:
@@ -371,7 +378,18 @@ def _qualifier(owner: OwnerResolution, calls: _Calls) -> tuple[_Qualifier | None
             f"owner {owner_addr} is not in the catalog (the qualifier {owner.tumbler} names no "
             "registered owner); nothing was searched"
         )
-    return _Qualifier(owner_addr, tumbler if tumbler.depth >= 3 else None), ""
+    return _Qualifier(
+        owner_addr, tumbler if tumbler.depth >= 3 else None, _owner_source_prefix(row),
+    ), ""
+
+
+def _owner_source_prefix(row: Mapping[str, Any]) -> str:
+    """The owner's ``docs/rdr/`` source prefix, derived as the other ``rdr_canonical`` callers do
+    (:func:`~nexus.catalog.rdr_canonical.rdr_source_prefix` of the repo root); ``""`` without one."""
+    root = row.get("repo_root")
+    if not root or not isinstance(root, str) or not os.path.isabs(root):
+        return ""  # a relative root names no place: owner-only matching, as for an owner with no root
+    return rdr_source_prefix(root)
 
 
 def _unresolved(ref: SourceRef, detail: str, **kw: Any) -> ResolvedSource:
@@ -410,28 +428,32 @@ def _resolve_tumbler(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls
 def _resolve_rdr(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, caps: PrimaryEvidenceCaps) -> ResolvedSource:
     number = ref.number or 0
     query = f"RDR-{number:03d}"
+    def admitted(e: CatalogEntry) -> bool:
+        """The project's own: registered under the qualified owner, or (a stale owner) a file under that
+        owner's docs/rdr/. rdr_canonical's one admission gate answers it; the document-depth qualifier
+        still has to agree. Without a qualifier every candidate is admitted."""
+        return qualifier is None or (
+            is_in_repo(e, qualifier.owner, qualifier.source_prefix)
+            and (qualifier.document is None or _comparable(e.tumbler, qualifier.document))
+        )
+
     found: list[CatalogEntry] = []
     truncated = False
     try:
-        for content_type in ("rdr", "prose"):  # legacy prose registrations only if there are no rdr ones
+        # Legacy prose registrations are read only when the rdr ones hold no candidate the qualifier admits:
+        # another project's rdr-typed RDR-084 must not hide this project's stale prose registration of it.
+        for content_type in ("rdr", "prose"):
             rows = calls.find(query, content_type, caps.max_candidates_per_lookup)
             truncated = truncated or len(rows) >= caps.max_candidates_per_lookup
-            found = [e for e in rows if not e.alias_of and _key_number(e) == number]
-            if found:
+            found += [e for e in rows if not e.alias_of and _key_number(e) == number]
+            if any(admitted(e) for e in found):
                 break
     except Exception as exc:  # noqa: BLE001 — reported, never raised
         _log.warning("named_source_find_failed", source=ref.value, error=str(exc))
         return _unresolved(ref, calls.failed(ref.value, exc))
 
-    scoped = found
-    foreign = 0
-    if qualifier is not None:
-        scoped = [
-            e for e in found
-            if e.tumbler.owner_address() == qualifier.owner
-            and (qualifier.document is None or _comparable(e.tumbler, qualifier.document))
-        ]
-        foreign = len(found) - len(scoped)
+    scoped = [e for e in found if admitted(e)]
+    foreign = len(found) - len(scoped)
     candidates = tuple(SourceCandidate.of(e) for e in scoped)
     where = f" under {qualifier.text}" if qualifier is not None else ""
     note = f" ({foreign} in other projects ignored)" if foreign else ""
@@ -454,7 +476,7 @@ def _resolve_rdr(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, ca
         )
     (key, group), = groups.items()
     owners = {e.tumbler.owner_address() for e in group}
-    if len(owners) > 1:
+    if qualifier is None and len(owners) > 1:  # a qualifier already chose the project; its stale owners are its own
         return ResolvedSource(
             ref=ref, status="candidates", candidates=candidates, qualified=False,
             detail=(f"{ref.value} exists in {len(owners)} projects ({', '.join(sorted(str(o) for o in owners))}); "
@@ -463,7 +485,9 @@ def _resolve_rdr(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, ca
     # One basename identity under one owner: the canonical rule decides among the registrations
     # (an rdr registration beats a legacy prose one; two of a kind are not guessed between).
     owner = qualifier.owner if qualifier is not None else next(iter(owners))
-    winner = resolve_canonical_tumbler(group, owner, repo_source_prefix="", rdr_key=key)
+    winner = resolve_canonical_tumbler(
+        group, owner, repo_source_prefix=qualifier.source_prefix if qualifier is not None else "", rdr_key=key,
+    )
     if winner is None:
         return ResolvedSource(
             ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None,
@@ -594,7 +618,10 @@ class DocumentCoverage:
     source: str
     doc_id: str
     title: str
-    status: Literal["ok", "no_manifest", "manifest_error"]
+    status: Literal["ok", "no_manifest", "manifest_error", "manifest_not_read"]
+    #: Why a ``manifest_not_read`` document was never requested: ``max_manifest_rows_read``, ``deadline``,
+    #: or ``earlier_request_failed: <ExceptionType>``. ``""`` for every other status.
+    not_read_reason: str = ""
     manifest_rows: int = 0
     manifest_rows_expected: int = 0
     rows_hydrated: int = 0
@@ -660,6 +687,18 @@ class PrimaryEvidence:
             who = f"{d.source} ({d.doc_id})"
             if d.status == "no_manifest":
                 lines.append(f"[evidence request: {who} has no manifest in the catalog; no primary evidence was read]")
+                continue
+            if d.status == "manifest_not_read":
+                if d.not_read_reason == "deadline":
+                    why = "the read reached its deadline before it was requested"
+                elif d.not_read_reason.startswith("earlier_request_failed"):
+                    failure = d.not_read_reason.partition(": ")[2]
+                    why = "an earlier manifest request failed" + (f" ({failure})" if failure else "") + ", so it was never requested"
+                else:
+                    why = "the manifests already read reached the cap on rows read"
+                lines.append(
+                    f"[evidence request: the manifest of {who} was not read: {why}; no primary evidence was read from it]"
+                )
                 continue
             if d.status == "manifest_error":
                 lines.append(f"[evidence request: the manifest of {who} could not be read; no primary evidence was read]")
@@ -780,6 +819,57 @@ def _picks(rows: list[_Row], quota: int) -> list[_Row]:
     return [rows[i] for i in chosen]
 
 
+def _read_manifests(
+    cat: NamedSourceCatalog, docs: Sequence[ResolvedSource], caps: PrimaryEvidenceCaps, *,
+    end: float, clock: Callable[[], float], caps_hit: list[str],
+) -> tuple[dict[str, list[ManifestRow]], set[str], dict[str, str]]:
+    """``(manifests, failed, unread)``: the manifests of *docs* pulled under the read cap (nexus-jypmj.1.17).
+
+    ``get_manifests`` has no row limit, so the cap acts on what is requested. The documents go in
+    ascending order of the chunk count the catalog RECORDS for them, grouped into calls whose recorded
+    counts fit what is left of ``caps.max_manifest_rows_read`` (a document that does not fit goes alone).
+    The order and the grouping rely on the recorded count; the stop uses the rows actually returned.
+    Once the rows read reach the cap, or the deadline passes, the remaining documents are not requested:
+    ``unread`` maps each to the reason (``max_manifest_rows_read`` or ``deadline``) and ``caps_hit`` names
+    it. The cap is soft by one document: a call that fits when planned, or a document larger than what is
+    left, can take the rows read past the cap, so the rows read can reach the cap plus one document (a
+    single named source larger than the cap must still be read). A call that raises leaves its documents
+    ``failed``; every later document was never requested and is ``unread`` with the failure as its reason.
+    When the recorded counts fit the cap this is one call, as before. One document's own reply is still
+    whole: only the service could limit that.
+    """
+    tumblers = {d.tumbler: d.chunk_count for d in docs if d.tumbler}
+    order = sorted(tumblers, key=lambda t: tumblers[t])  # stable: ties keep request order
+    manifests: dict[str, list[ManifestRow]] = {}
+    failed: set[str] = set()
+    unread: dict[str, str] = {}
+    pulled = i = 0
+    while i < len(order):
+        if i and (pulled >= caps.max_manifest_rows_read or clock() >= end):
+            reason = "max_manifest_rows_read" if pulled >= caps.max_manifest_rows_read else "deadline"
+            caps_hit.append(reason)
+            unread.update(dict.fromkeys(order[i:], reason))
+            break
+        room = caps.max_manifest_rows_read - pulled
+        batch = [order[i]]
+        planned = max(tumblers[order[i]], 0)
+        i += 1
+        while i < len(order) and planned + max(tumblers[order[i]], 0) <= room:
+            planned += max(tumblers[order[i]], 0)
+            batch.append(order[i])
+            i += 1
+        try:
+            got = cat.get_manifests(batch)
+        except Exception as exc:  # noqa: BLE001 — reported per document, never raised
+            _log.warning("primary_evidence_manifest_failed", error=str(exc))
+            failed.update(batch)
+            unread.update(dict.fromkeys(order[i:], f"earlier_request_failed: {type(exc).__name__}"))
+            break
+        manifests.update(got)
+        pulled += sum(len(rows) for rows in got.values())
+    return manifests, failed, unread
+
+
 def select_primary_evidence(
     resolution: NamedSourceResolution,
     *,
@@ -807,16 +897,11 @@ def select_primary_evidence(
 
     if clock() >= end:
         return PrimaryEvidence(caps_hit=("deadline",), caps=caps)
-    try:
-        manifests = cat.get_manifests([d.tumbler for d in docs if d.tumbler])
-        manifest_failed = False
-    except Exception as exc:  # noqa: BLE001 — reported per document, never raised
-        _log.warning("primary_evidence_manifest_failed", error=str(exc))
-        manifests, manifest_failed = {}, True
+    caps_hit: list[str] = []
+    manifests, manifest_failed, manifest_unread = _read_manifests(cat, docs, caps, end=end, clock=clock, caps_hit=caps_hit)
 
     # 1. rows per document, then a row allowance per document (small documents whole,
     #    the rest share what is left, sampled evenly)
-    caps_hit: list[str] = []
     all_rows: list[list[ManifestRow]] = []
     for d in docs:
         rows = sorted((r for r in manifests.get(d.tumbler or "", []) if r.chash), key=lambda r: r.position)
@@ -907,7 +992,12 @@ def select_primary_evidence(
         )
         no_manifest = not rows
         coverage_base.append({
-            "status": "manifest_error" if manifest_failed else ("no_manifest" if no_manifest else "ok"),
+            "status": (
+                "manifest_error" if d.tumbler in manifest_failed
+                else "manifest_not_read" if d.tumbler in manifest_unread
+                else "no_manifest" if no_manifest else "ok"
+            ),
+            "not_read_reason": manifest_unread.get(d.tumbler or "", ""),
             "manifest_rows": n_rows,
             "manifest_rows_expected": d.chunk_count if rows and d.chunk_count != n_rows else 0,
             "rows_hydrated": len(built),
