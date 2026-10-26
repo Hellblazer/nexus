@@ -647,16 +647,30 @@ differs; every step it points at runs exactly as written above. Design record:
 T2 `nexus/design-plugin-only-fast-lane.md`.
 
 Base tag is vX.Y.Z (the last client tag), the new release is vX.Y.N with N = Z+1.
+Steps 0 (beyond the floor check in item 4 below) and 6d do not apply: the engine
+pin does not move and no migration ships.
 
 **1. When to use it.** The plugin fixes waiting in `conexus/PENDING_RELEASE.md`
 are worth shipping now, and there is no open release PR (a release PR already in
 flight is the normal release). If `src/`, `service/`, a dependency file or the
-engine pin has to move, cut a normal release instead. The lane's base tag must
-be a release that already carries this machinery
-(`scripts/check_plugin_only_eligibility.py` and the battery's `--plugin-only`
-mode): the one that pins `engine-service-v0.1.165`, or later. A branch off an
-older tag has neither, and the gate rightly refuses `scripts/` in the diff.
-There is no exemption.
+engine pin has to move, cut a normal release instead. The lane is open only
+while the newest published `engine-service-v*` tag is the one the base tag pins:
+`release.yml` runs `check_engine_release_floor.py` at tag time, its pin-currency
+check goes red when a newer engine tag exists, and the only remedy (bumping
+`REQUIRED_ENGINE_VERSION`) is a `src/` change this lane refuses. A red there
+closes the lane: cut a normal release.
+
+The base tag must itself carry the lane's machinery, because the gate refuses
+`scripts/` and the harness in the diff and there is no exemption. The releaser
+checks it, instead of trusting a version number:
+
+```bash
+git cat-file -e vX.Y.Z:scripts/check_plugin_only_eligibility.py
+git cat-file -e vX.Y.Z:tests/e2e/plugin-delivery-proof.sh
+git show vX.Y.Z:tests/e2e/release-battery.sh | grep -q -- '--plugin-only'
+```
+
+Any non-zero exit means the base tag predates the lane: normal release.
 
 **2. Branch off the tag, never off `develop`.** In a sibling worktree of the primary
 checkout (see "Where to run the battery"):
@@ -664,20 +678,30 @@ checkout (see "Where to run the battery"):
 ```bash
 git fetch origin --tags
 git worktree add ../nexus-wt/release-vX.Y.N -b release/vX.Y.N vX.Y.Z
-# list the plugin commits since the base tag, oldest first, and match them to the
-# ledger's entries (each entry names its bead); skip entries under "Deferred to
-# the next client release"
+# the ledger names the entries to ship (each entry names its bead); skip those
+# under "Deferred to the next client release". This log only helps you FIND
+# their commits: pick the ledger's commits, not everything the range lists.
 git log --reverse --format='%h %s' vX.Y.Z..origin/develop -- conexus sn tool-spill .claude-plugin/marketplace.json
 git cherry-pick -x <sha> [<sha> ...]     # -x records the develop sha in each message
 ```
 
 The nx code under test is the tag's own, so there is no main/develop skew and
 Step 7's pre-merge of `main` has nothing to do. A conflict in `CHANGELOG.md` or
-`conexus/PENDING_RELEASE.md` is resolved by keeping the release branch's side (`git checkout --ours <file>`
-during the pick); the bump commit writes both. A commit that also touches `src/` or `service/` cannot be
-cherry-picked whole: that entry waits for a normal release. A change that names
-an nx verb the tag lacks fails the existing verb-rot test in the preflight; it
-is not eligible either.
+`conexus/PENDING_RELEASE.md` is resolved with the release branch's side, because
+the bump commit writes both:
+
+```bash
+git checkout --ours CHANGELOG.md conexus/PENDING_RELEASE.md   # whichever conflicted
+git add CHANGELOG.md conexus/PENDING_RELEASE.md
+git cherry-pick --continue
+```
+
+A conflict in a plugin file means the pick depends on a commit you skipped:
+`git cherry-pick --abort`, and defer that entry and every entry that builds on
+it to the next normal release. A commit that also touches `src/` or `service/`
+cannot be cherry-picked whole either: that entry waits. A change that names an
+nx verb the tag lacks fails the existing verb-rot test in the preflight; it is
+not eligible.
 
 **3. Bump (Steps 3, 4, 5).** The same surfaces as Step 3 (`pyproject.toml`,
 `mcpb/pyproject.toml`, `mcpb/manifest.json`, `.claude-plugin/marketplace.json`
@@ -693,58 +717,80 @@ with engine-service-vA.B.C (REQUIRED_ENGINE_VERSION unchanged from X.Y.Z)`
 or the preflight's pin-tests fail (`tests/test_engine_version.py`, nexus-9gggv).
 Commit it all as one `chore(release): conexus X.Y.N` commit.
 
-**4. Eligibility gate.** On the committed HEAD:
+**4. Eligibility and floor gates.** On the committed HEAD:
 
 ```bash
 uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z   # last line must be PLUGIN-ONLY ELIGIBILITY PASSED
+uv run python scripts/check_engine_release_floor.py                    # must exit 0 before the PR (item 1: red closes the lane)
 ```
 
-Exit 1 lists each offending path and why; exit 2 means it could not check. Neither
-is a pass.
+For the eligibility script, exit 1 lists each offending path and why; exit 2 means
+it could not check. Neither is a pass.
 
 **5. Gates.** From the release worktree with a clean tree (the mode refuses
 uncommitted or untracked paths, and refuses `--skip-preflight`):
 
 ```bash
+lab-remote -c lab-l -- python3 scripts/watched_pytest.py --stall 180 --status /tmp/fastlane-X.Y.N.json -- uv run pytest -n auto   # the unit suite: a hand step, SERIAL to the battery (Common Mistakes), not a leg; the status file stays outside the worktree
 tests/e2e/release-battery.sh --plugin-only vX.Y.Z
-lab-remote -c lab-l -- uv run pytest -n auto      # the unit suite: a hand step, SERIAL to the battery (Common Mistakes), not a leg
 ```
 
 The battery runs the eligibility gate again, then the preflight (which holds the
-lint bucket and the pin tests), the hook-CLI skew leg and the plugin-lockstep
-leg. `lsg`, `pkgup`, `mvv`, `dual` and `resolve` are shown as `SKIPPED(plugin-only: ...)`,
-never omitted, and the closing line names the mode and the skipped count; a
-plain `RELEASE BATTERY PASSED` is not what this lane prints. **Accepted risk:**
-those five legs are skipped because the wheel and the engine are identical to the
-base tag's but for the version, not because their inputs are identical:
+lint bucket and the pin tests, so Step 1's separate lint run is covered), the
+hook-CLI skew leg and the plugin-lockstep leg. `lsg`, `pkgup`, `mvv`, `dual` and
+`resolve` are shown as `SKIPPED(plugin-only: ...)`, never omitted, and the closing
+line names the mode and the skipped count; a plain `RELEASE BATTERY PASSED` is
+not what this lane prints. **Accepted risk:** those five legs, and Step 1's
+integration suite, are skipped because the wheel and the engine are identical to
+the base tag's but for the version, not because their inputs are identical:
 `resolve`, `mvv`, `pkgup` and `dual` also depend on package indexes and keys that
 change with time, so a dependency or index break since the base tag goes
 undetected by a plugin-only run. The evidence for skipping is one measured
-identical-code bump (2026-10-26, all six legs passed). Then Step 8's pre-push
+identical-code bump (2026-10-26, all six legs passed). Step 11c below stays in the
+lane as the post-publish control for exactly this risk. Then Step 8's pre-push
 greps, unchanged.
 
-**6. Publish.** The normal flow, with the same human gates: Step 7's PR to `main`
-(merge, never squash), Sam's "tag and push" (Step 9; its paired-release deploy
-paragraph does not apply, because the engine pin is unchanged), Step 10 (release.yml
-publishes the identical nx code under the new version), Step 11, then Step 11b's
-back-merge of `main` into `develop`. The back-merge conflicts in
-`conexus/PENDING_RELEASE.md` and the changelogs: keep develop's side of the ledger
-minus the entries that shipped (the deferred ones and any plugin commit not
-picked stay pending), and keep both sides of each changelog. There is no helper
-script for it.
+**6. Publish.** The normal flow, with the same human gates, except at Step 7: the
+branch from item 2 already exists and is built off the tag, so skip Step 7's
+branch-creation and pre-merge lines and run only its push and
+`gh pr create --base main` from that branch. Before Step 9, re-run the
+eligibility script on the exact PR head (`git rev-parse HEAD` equals
+`git rev-parse origin/release/vX.Y.N`; a later push re-opens items 4 and 5).
+Then merge (never squash), Sam's "tag and push" (Step 9; its paired-release
+deploy paragraph does not apply, because the engine pin is unchanged), Step 10
+(release.yml publishes the identical nx code under the new version), Step 11, and
+Step 11b's back-merge of `main` into `develop`.
 
-**7. Post-publish (replaces Step 11c in this lane).** Once Step 11 shows PyPI at
-X.Y.N, on the laptop (it needs the `claude` CLI):
+The back-merge is not trivially clean in this lane (Step 11b's remark assumes the
+release branch contained develop; this one did not). Expect conflicts in both
+changelogs and the ledger, and resolve them by hand; there is no helper script.
+Changelogs, in this order: develop's `## [Unreleased]` first, with the entries that
+shipped in X.Y.N deleted from it, then main's `## [X.Y.N]` section, then the older
+sections. `conexus/PENDING_RELEASE.md`: develop's side minus the entries that
+shipped (the deferred ones and any plugin commit not picked stay pending). A
+later develop edit to a file whose entry you removed still differs from the new
+pin, so keep or re-add an entry for it; `tests/test_plugin_release_drift_ledger.py`
+fails on an undeclared file or a stale entry.
+
+**7. Post-publish.** Once Step 11 shows PyPI at X.Y.N, on the laptop (it needs the
+`claude` CLI), run Step 11c exactly as written (`tests/e2e/fresh-install-mvv.sh
+--published X.Y.N` and the `--package-upgrade` leg with `NEXUS_TARGET_RELEASE`;
+they are the only check of the published bytes), and in addition:
 
 ```bash
 tests/e2e/plugin-delivery-proof.sh --prev X.Y.Z --new X.Y.N   # must print PLUGIN DELIVERY PROOF PASSED; exit 2 (UNVERIFIED) is not a pass
 ```
 
 It installs the previous release in a scrubbed HOME, runs Claude Code's normal
-plugin update and checks that the new plugin files arrived. Then Step 12 (the
-`nx --version` check), and restart sessions together, as after any release: a
-plugin update says "Restart to apply" and only a restarted session loads it. No
-Windows guest leg.
+plugin update and checks that the new plugin files arrived; with no `--source` it
+also adds the real GitHub marketplace and checks every plugin's version and
+`source.ref`. What it does not cover is a running session's in-session
+auto-update. Then Step 12 (the `nx --version` check), and restart sessions
+together, as after any release: a plugin update says "Restart to apply" and only a
+restarted session loads it. No Windows guest leg.
+
+For the first real use of this lane, paste the eligibility output, the battery
+table and the delivery-proof verdict into bead nexus-rbmja.13.
 
 The releaser is human: the AI prepares the branch and runs the gates; Sam says
 "cut the release" and pushes the tag.

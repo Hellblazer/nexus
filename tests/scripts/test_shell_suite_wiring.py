@@ -208,6 +208,11 @@ SUITES = [
     # nexus-u67ow: lib/python.sh, the one-interpreter resolver the e2e harness uses in place of a
     # bare python3 (hellmini's is 3.9.6). Stub interpreters on a PATH of their own; 37 measured.
     _Suite("tests/e2e/lib/python_test.sh", 37),
+    # nexus-rbmja.7: the offline self-test of tests/e2e/plugin-delivery-proof.sh (a stub claude and a
+    # fixture repo; no network, no real claude). 73 measured: delivery, stale cache, stale installPath,
+    # missing installPath, deleted-file-left, wrong/absent registry after install, the real-marketplace
+    # leg, UNVERIFIED cases and the HOME/env/git/python canaries.
+    _Suite("tests/e2e/plugin_delivery_proof_test.sh", 73),
 ]
 
 

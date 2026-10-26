@@ -19,11 +19,25 @@
 #   2. Advance the marketplace the way a release does (vNEW's marketplace.json),
 #      then run `claude plugin marketplace update` and `claude plugin update
 #      <plugin>@<marketplace>` for each plugin. Not uninstall+install, not nx.
-#   3. Assert installed_plugins.json says NEW for every plugin, and that every
-#      WITNESS file (changed between vPREV and vNEW under the marketplace's
-#      plugin directories) in the plugin cache is byte-identical to the tag's
-#      copy (a deleted file must be gone). An empty witness set is a FAILURE:
-#      a proof over nothing proves nothing.
+#   3. Assert installed_plugins.json says PREV for every plugin right after the
+#      install (before any update), and NEW after the update, each with an
+#      installPath that is a directory (an entry without one FAILS; no path is
+#      guessed), and that every WITNESS file (changed between vPREV and vNEW
+#      under the marketplace's plugin directories) under that installPath is
+#      byte-identical to the tag's copy (a deleted file must be gone). An empty
+#      witness set is a FAILURE: a proof over nothing proves nothing. The
+#      verdict also counts the witnesses that are not plugin.json manifests.
+#   4. Without --source (a real post-publish run), also add the REAL GitHub
+#      marketplace (`claude plugin marketplace add <repo>`) in a second scrubbed
+#      HOME and assert every plugin it lists has version NEW and source.ref
+#      vNEW. With --source the verdict says the GitHub marketplace was not
+#      checked: the local mirror rewrites source.url and reads the tag's
+#      marketplace.json, never the one users clone.
+#
+# Not covered, on purpose and stated: a running session's in-session
+# auto-update (the background refresh a live Claude Code does), which needs an
+# interactive session and a model call. Only the explicit `claude plugin
+# update` path is proven.
 #
 # Why a path marketplace: `claude plugin marketplace add` refuses file:// URLs,
 # so the marketplace is a local directory whose entries are git-subdir sources
@@ -67,7 +81,7 @@ case "$PREV$NEW" in *[!0-9A-Za-z.+-]*) usage ;; esac
 TAG_PREV="v$PREV"; TAG_NEW="v$NEW"
 
 TAB="$(printf '\t')"
-SCRATCH=""; GATE_HOME=""
+SCRATCH=""; GATE_HOME=""; LIVE_HOME=""
 # shellcheck disable=SC2329  # invoked through the EXIT trap
 cleanup() {
     local name
@@ -76,6 +90,7 @@ cleanup() {
     # Links first, as links: nothing may follow one into the real toolchain caches.
     for name in "${FENCE_MIRRORED_ENTRIES[@]}"; do
         if [ -n "$GATE_HOME" ] && [ -L "$GATE_HOME/$name" ]; then rm -f "$GATE_HOME/$name"; fi
+        if [ -n "$LIVE_HOME" ] && [ -L "$LIVE_HOME/$name" ]; then rm -f "$LIVE_HOME/$name"; fi
     done
     rm -rf "$SCRATCH"
 }
@@ -106,7 +121,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 unset XDG_CONFIG_HOME
 
 run_claude() {
-    env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$CLAUDE")" HOME="$GATE_HOME" TERM=dumb \
+    env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$CLAUDE")" HOME="${CLAUDE_HOME:-$GATE_HOME}" TERM=dumb \
         NX_NO_TELEMETRY=1 DISABLE_AUTOUPDATER=1 "$CLAUDE" "$@"
 }
 CLAUDE_VERSION="$(run_claude --version 2>/dev/null </dev/null)" || unverified "claude --version failed"
@@ -114,7 +129,8 @@ CLAUDE_VERSION="${CLAUDE_VERSION%% *}"
 [ -n "$CLAUDE_VERSION" ] || unverified "claude --version printed nothing"
 
 # ── the release tags, mirrored locally ──────────────────────────────────────
-if [ -z "$SOURCE" ]; then SOURCE="https://github.com/$REPO.git"; fi
+SOURCE_GIVEN=1
+if [ -z "$SOURCE" ]; then SOURCE="https://github.com/$REPO.git"; SOURCE_GIVEN=0; fi
 if [ -d "$SOURCE" ]; then SOURCE="file://$(cd "$SOURCE" && pwd)"; fi
 MIRROR="$SCRATCH/mirror.git"
 git init -q --bare "$MIRROR" || unverified "cannot create the local mirror"
@@ -138,6 +154,21 @@ print(m["name"])
 for p in m["plugins"]:
     print("\t".join([p["name"], p["source"]["path"], str(p["version"])]))
 '
+PY_LIVE='
+import json, os, sys
+home, name = sys.argv[1:3]
+loc = None
+try:
+    loc = json.load(open(os.path.join(home, ".claude", "plugins", "known_marketplaces.json"))).get(name, {}).get("installLocation")
+except (OSError, ValueError):
+    pass
+if not loc:
+    loc = os.path.join(home, ".claude", "plugins", "marketplaces", name)
+f = loc if loc.endswith(".json") else os.path.join(loc, ".claude-plugin", "marketplace.json")
+m = json.load(open(f))
+for p in m["plugins"]:
+    print("\t".join([p["name"], str(p["version"]), str(p["source"].get("ref", ""))]))
+'
 PY_REG='
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -160,6 +191,9 @@ for d in $PLUGIN_DIRS; do
         || unverified "cannot diff $TAG_PREV..$TAG_NEW"
 done
 N_WITNESS="$(grep -c . "$WITNESS")" || N_WITNESS=0
+# A manifest is <plugin dir>/.claude-plugin/plugin.json: it changes on every version bump, so a
+# release whose only witnesses are manifests has proven the version moved, not that content did.
+N_CONTENT="$(awk -F'\t' '$2 !~ /(^|\/)\.claude-plugin\/plugin\.json$/' "$WITNESS" | grep -c .)" || N_CONTENT=0
 [ "$N_WITNESS" -gt 0 ] || failed "$PREV -> $NEW: the witness set is empty (no file changed under the plugin directories: $(printf '%s' "$PLUGIN_DIRS" | tr '\n' ' ')); a proof over no files proves nothing, and this is not a plugin release"
 
 # ── step 1: install the previous release ────────────────────────────────────
@@ -200,6 +234,16 @@ done
 
 REG="$GATE_HOME/.claude/plugins/installed_plugins.json"
 [ -f "$REG" ] || failed "$PREV -> $NEW: install left no installed_plugins.json (claude $CLAUDE_VERSION)"
+# The registry must read PREV for every installed plugin BEFORE the update, or the update below
+# proves nothing (an install that already landed NEW, or landed nothing, would pass it).
+while IFS="$TAB" read -r pname _ppath _pver; do
+    [ -n "$pname" ] || continue
+    got="$("$E2E_PYTHON" -I -c "$PY_REG" "$REG" "$pname@$MARKET_NAME")" || got=""
+    gver="${got%%"$TAB"*}"
+    [ "$gver" = "$PREV" ] || failed "$PREV -> $NEW: after the install step and before any update, installed_plugins.json has $pname@$MARKET_NAME at '${gver:-absent}', want $PREV (claude $CLAUDE_VERSION)"
+done <<EOF
+$(printf '%s\n' "$PREV_INFO" | sed '1d')
+EOF
 
 # ── step 2: the normal update ───────────────────────────────────────────────
 write_market "$TAG_NEW" || unverified "$TAG_NEW marketplace.json unusable"
@@ -227,8 +271,13 @@ while IFS="$(printf '\t')" read -r pname ppath pver; do
     if [ "$gver" != "$NEW" ] || [ "$pver" != "$NEW" ]; then
         problem "installed_plugins.json: $pname@$MARKET_NAME is at '${gver:-absent}', want $NEW (marketplace entry says $pver)"
     fi
-    [ -n "$groot" ] || groot="$GATE_HOME/.claude/plugins/cache/$MARKET_NAME/$pname/$NEW"
-    printf '%s\t%s\n' "$ppath" "$groot" >>"$INSTALL_ROOTS"
+    if [ -z "$groot" ]; then
+        problem "installed_plugins.json: $pname@$MARKET_NAME has no installPath; no path is guessed, so its files cannot be checked"
+    elif [ ! -d "$groot" ]; then
+        problem "installed_plugins.json: $pname@$MARKET_NAME installPath is not a directory ($groot)"
+    else
+        printf '%s\t%s\n' "$ppath" "$groot" >>"$INSTALL_ROOTS"
+    fi
 done <<EOF
 $PLUGINS
 EOF
@@ -256,4 +305,35 @@ if [ -s "$PROBLEMS" ]; then
     head -n 20 "$PROBLEMS" | sed 's/^/  /' >&2 || true
     failed "$PREV -> $NEW: $n mismatch(es) after the normal plugin update, claude $CLAUDE_VERSION (first: $(sed -n '1p' "$PROBLEMS"))"
 fi
-verdict PASSED 0 "$PREV -> $NEW, $N_WITNESS witness file(s), claude $CLAUDE_VERSION"
+
+# ── step 4: the real GitHub marketplace (post-publish runs only) ────────────
+LIVE_NOTE="GitHub marketplace not checked (--source given)"
+if [ "$SOURCE_GIVEN" -eq 0 ]; then
+    # A second scrubbed HOME: the real marketplace carries the same name as the local one,
+    # and one HOME cannot hold both.
+    LIVE_HOME="$SCRATCH/home-live"
+    fence_home "$REAL_HOME" "$LIVE_HOME"
+    export CLAUDE_HOME="$LIVE_HOME"
+    if ! run_claude plugin marketplace add "$REPO" >"$CLAUDE_LOG" 2>&1 </dev/null; then
+        unverified "$PREV -> $NEW: cannot add the real marketplace $REPO ($(tail -n 1 "$CLAUDE_LOG"))"
+    fi
+    unset CLAUDE_HOME
+    LIVE_LIST="$("$E2E_PYTHON" -I -c "$PY_LIVE" "$LIVE_HOME" "$MARKET_NAME" 2>"$SCRATCH/live.err")" \
+        || unverified "$PREV -> $NEW: cannot read the real marketplace's marketplace.json under the scrubbed HOME ($(tail -n 1 "$SCRATCH/live.err"))"
+    N_LIVE="$(printf '%s\n' "$LIVE_LIST" | grep -c .)" || N_LIVE=0
+    [ "$N_LIVE" -gt 0 ] || failed "$PREV -> $NEW: the real marketplace lists no plugin"
+    : >"$PROBLEMS"
+    while IFS="$TAB" read -r lname lver lref; do
+        [ -n "$lname" ] || continue
+        if [ "$lver" != "$NEW" ] || [ "$lref" != "$TAG_NEW" ]; then
+            problem "GitHub marketplace: $lname is at version '$lver' ref '$lref', want $NEW / $TAG_NEW"
+        fi
+    done <<EOF
+$LIVE_LIST
+EOF
+    if [ -s "$PROBLEMS" ]; then
+        failed "$PREV -> $NEW: the real GitHub marketplace $REPO does not list the new release, claude $CLAUDE_VERSION (first: $(sed -n '1p' "$PROBLEMS"))"
+    fi
+    LIVE_NOTE="GitHub marketplace $REPO checked ($N_LIVE plugin(s) at $NEW, ref $TAG_NEW)"
+fi
+verdict PASSED 0 "$PREV -> $NEW, $N_WITNESS witness file(s) ($N_CONTENT non-manifest), claude $CLAUDE_VERSION; $LIVE_NOTE"
