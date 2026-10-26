@@ -1886,7 +1886,9 @@ class TaxonomyRepositoryTest {
         final String tenant = "tax-hub-never-" + System.nanoTime();
         final String srcA = "code__hub_a", srcB = "code__hub_b";
         long topicId = seedHub(tenant, "hub-never", "2026-04-10T13:04:00Z", srcA, srcB);
-        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-30T00:00:00Z");  // well after
+        // srcA discovered BEFORE the assignment, so the timestamp test alone says
+        // fresh; only the never-discovered srcB can make this hub stale.
+        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-09T00:00:00Z");
         // srcB deliberately never recorded.
 
         var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);

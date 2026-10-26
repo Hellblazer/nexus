@@ -2502,14 +2502,11 @@ public final class TaxonomyRepository {
      *       2026-10-26 (nexus-9kp10); it read the reverse until then.</li>
      * </ul>
      *
-     * <p>{@code is_stale} IS COMPUTED HERE rather than client-side, deliberately, even
-     * though ICF and score are computed client-side. The oracle compared ISO-8601
-     * strings lexicographically, which was sound on SQLite's TEXT timestamps. Over HTTP
-     * the values cross as {@code OffsetDateTime.toString()}, which ELIDES ZERO SECONDS
-     * ("2026-04-09T00:00Z", not "...T00:00:00Z") — so the same lexicographic comparison
-     * would silently misorder timestamps that differ only in whether seconds were zero.
-     * Comparing real TIMESTAMPTZ values server-side avoids reintroducing that trap; the
-     * client passes the verdict through.
+     * <p>{@code is_stale} is compared on real TIMESTAMPTZ values here. Clients from
+     * nexus-9kp10 on re-derive it from {@code last_assigned_at},
+     * {@code max_last_discover_at} and {@code never_discovered_count} (parsed, not
+     * compared as strings), because engines before this change send the reverse
+     * sense; this verdict serves older clients, which pass it through.
      *
      * <p>One extra query, not N+1: taxonomy_meta is fetched once for every collection
      * referenced by any hub, then folded per topic in memory.
