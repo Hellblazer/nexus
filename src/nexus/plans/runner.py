@@ -2006,6 +2006,10 @@ def _hydrate_operator_args(
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+    # RDR-232 (nexus-jypmj.1.20): set once the explicit-``inputs`` pass-through below has merged the
+    # reserved stream and recorded the evidence, so the Pattern A site does not merge it again (a
+    # second merge would count the primary items as deduplicated secondary ones).
+    _evidence_handled = False
 
     # nexus-mm5tx follow-up (code-review T2 [24199]): an EXPLICIT plan
     # step whose tool is literally "store_get_many" is a DIFFERENT code
@@ -2200,6 +2204,7 @@ def _hydrate_operator_args(
 
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
+        _evidence_handled = True
         value = args.pop("inputs")
         _passthrough_count = len(value) if isinstance(value, list) else (1 if value else 0)
         if isinstance(value, list):
@@ -2232,6 +2237,22 @@ def _hydrate_operator_args(
             args.setdefault("_zero_evidence_text", _no_evidence_result_text(
                 tool=tool, filtered_count=_passthrough_count,
             ))
+
+    # RDR-232 (nexus-jypmj.1.20): the planner's documented Pattern A passes the evidence in the
+    # operator's own arg (``summarize(content=$stepN.contents)``, ``generate(context=...)``,
+    # ``rank(items=...)``), which resolves to a list of fetched texts and reaches the joins below
+    # with no ids and no ``inputs``. It is the same evidence, so it takes the same merge, cap and
+    # reducer-input record. Only a list of strings counts: a string is a condensed prior output
+    # (``$step5.summary``) and a deferred bundle ref is a dict. A run without a stream gets back
+    # the very list it passed in (``_merge_reserved_explicit_inputs`` returns it unchanged).
+    if target_key and not _evidence_handled:
+        _listed = args.get(target_key)
+        if isinstance(_listed, list) and all(isinstance(v, str) for v in _listed):
+            _texts = [v for v in _listed if v]
+            _merged = _merge_reserved_explicit_inputs(_texts, args, tool, resolved_tool)
+            note_reducer_input(_merged)
+            if _merged is not _texts:
+                args[target_key] = _merged
 
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
         args["content"] = "\n\n".join(str(x) for x in args["content"] if x)

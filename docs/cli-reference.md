@@ -5458,8 +5458,11 @@ and the other seven `null` when they have nothing to report):
   reserved_chars, merged, merged_at_step, over_share_dropped, deduped_secondary,
   secondary_cut, capped, dropped_before_terminal}`. The reserved items are
   merged ahead of the plan's inputs at the first operator that consumes retrieved
-  evidence, whether it receives them by `ids` or as an explicit `inputs` list
-  (`extract` included), so the operator input cap cuts only the plan's own items;
+  evidence, whether it receives them by `ids`, as an explicit `inputs` list
+  (`extract` included) or, as the planner's tool reference teaches, in the
+  operator's own evidence arg as a list of fetched texts
+  (`summarize(content=$stepN.contents)`, `generate(context=...)`,
+  `rank(items=...)`, nexus-jypmj.1.20), so the operator input cap cuts only the plan's own items;
   an explicit-`inputs` operator is capped at that point only when a stream was
   merged. `dropped_before_terminal` (`{step, missing, of}`) counts reserved
   items that a later operator's input no longer held after a `rank` or `filter`
@@ -5500,7 +5503,10 @@ and the other seven `null` when they have nothing to report):
   not an RDR file).
 - `evidence_diagnostics` (nexus-jypmj.1.8): per-stream counts, the reducer input,
   and two deterministic checks, built without a model call from the run's step
-  outputs and what the runner handed the first evidence-consuming operator. The
+  outputs and what the runner handed the first evidence-consuming operator
+  (including an operator whose evidence arg resolved to a list of fetched texts;
+  before nexus-jypmj.1.20 `reducer_input` stayed `null` on that shape, which is the
+  planner's documented Pattern A). The
   same counts go to one structured log event, `nx_answer_evidence_diagnostics`,
   which carries ids and counts only (no question, source label, title or text,
   whatever `trace` is). The event is written for every plan run, whether or not
