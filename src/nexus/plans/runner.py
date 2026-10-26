@@ -56,9 +56,11 @@ import structlog
 
 from nexus import call_deadline
 from nexus.plans.match import Match
+from nexus.plans.owner_narrowing import OWNERS_BINDING
 
 if TYPE_CHECKING:
     from nexus.plans.evidence import CorpusNarrowing
+    from nexus.plans.owner_narrowing import OwnerNarrowing
 
 _log = structlog.get_logger(__name__)
 
@@ -529,8 +531,10 @@ class PlanResult:
     #: :data:`nexus.plans.evidence.NarrowStatus`: ``conflict`` (the step was skipped),
     #: ``narrowed``, ``within_scope``, ``scope_applied``, ``scope_all``,
     #: ``subtree_not_intersected`` or ``unscoped_collection_pin`` (a step pinned through
-    #: ``collection``/``collections`` keeps today's behaviour). Empty when the caller gave no
-    #: scope, so an unscoped run reports nothing.
+    #: ``collection``/``collections`` keeps today's behaviour). An explicit owner (the
+    #: ``_nx_owners`` binding, nexus-jypmj.1.18) adds one more entry per step with ``scope_kind``
+    #: ``owner`` (the owners and ``removed_collections`` ride along; a ``conflict`` skips the step).
+    #: Empty when the caller gave neither scope nor owner, so an unscoped run reports nothing.
     scope_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     #: RDR-232 (nexus-jypmj.1.6): what the reserved primary stream did in this run
     #: (:meth:`ReservedStream.report`); ``None`` when no stream was passed.
@@ -1339,6 +1343,31 @@ def _apply_caller_scope_to_args(
     return out, narrowing
 
 
+async def _apply_owner_narrowing_to_args(
+    tool: str, args: dict[str, Any], *, bindings: dict[str, Any],
+) -> tuple[dict[str, Any], "OwnerNarrowing | None"]:
+    """Narrow a corpus-taking retrieval step to the request's explicit owners (RDR-232,
+    nexus-jypmj.1.18); returns ``(args, narrowing)``.
+
+    Runs after the section 2a scope narrowing and the default corpus, so it sees the corpus the step
+    would actually search. The owners ride in the ``_nx_owners`` binding (set by ``nx_answer`` only for
+    an explicit, resolved owner qualifier); without it, or for a tool outside
+    :data:`_CORPUS_QUERY_TOOLS`, this is a no-op returning ``(args, None)``. See
+    :func:`nexus.plans.owner_narrowing.narrow_args_by_owner` for the rule; a ``conflict`` is skipped
+    by the caller exactly like a section 2a conflict.
+
+    The corpus expansion reads the collection listing, which on a cold cache is a blocking T3 call, so
+    it runs in a worker thread (a copy of the context goes with it); the no-owner path never leaves
+    the loop.
+    """
+    owners = bindings.get(OWNERS_BINDING)
+    if not owners or tool not in _CORPUS_QUERY_TOOLS:
+        return args, None
+    from nexus.plans.owner_narrowing import narrow_args_by_owner  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
+
+    return await asyncio.to_thread(narrow_args_by_owner, args, owners)
+
+
 def _apply_traversal_policy_to_args(
     tool: str, args: dict[str, Any], *, bindings: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1353,7 +1382,9 @@ def _apply_traversal_policy_to_args(
         return args
     from nexus.plans.traversal_policy import derive_policy  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
 
-    return {**args, "policy": derive_policy(args, bindings.get(_CALLER_SCOPE_BINDING))}
+    return {**args, "policy": derive_policy(
+        args, bindings.get(_CALLER_SCOPE_BINDING), bindings.get(OWNERS_BINDING),
+    )}
 
 
 def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
@@ -1382,7 +1413,7 @@ def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
 
 
 def _scope_conflict_output(
-    narrowing: "CorpusNarrowing", *, step_index: int, tool: str,
+    narrowing: "CorpusNarrowing | OwnerNarrowing", *, step_index: int, tool: str,
 ) -> dict[str, Any]:
     """The output of a retrieval step skipped for a scope conflict (RDR-232 S2).
 
@@ -3519,6 +3550,36 @@ async def _plan_run_impl(
             # scope.taxonomy_domain, and a caller's _nx_scope binding all
             # take precedence over this fall-through.
             resolved = _apply_default_corpus_to_args(tool, resolved)
+            # RDR-232 (nexus-jypmj.1.18): an explicit owner narrows the corpus to its own project's
+            # collections (knowledge passes). A step left with no collection is skipped like a scope
+            # conflict: empty structured result plus a ``scope_conflict`` marker, never run unscoped.
+            resolved, _owner_narrowing = await _apply_owner_narrowing_to_args(tool, resolved, bindings=merged)
+            if _owner_narrowing is not None:
+                scope_diagnostics.append(_owner_narrowing.to_diagnostic(step_index=index, tool=tool))
+                if _owner_narrowing.conflict:
+                    _log.warning(
+                        "nx_answer_owner_narrowing_step_skipped",
+                        step_index=index, tool=tool, plan_corpus=_owner_narrowing.plan_corpus,
+                        owners=list(_owner_narrowing.owners), detail=_owner_narrowing.detail,
+                    )
+                    resolved_step_args.append({
+                        "step_index": index,
+                        "tool": tool,
+                        "corpus": _owner_narrowing.plan_corpus or "",
+                        "query": resolved.get("query") or resolved.get("question") or "",
+                        "skipped": True,
+                    })
+                    _skipped = _scope_conflict_output(_owner_narrowing, step_index=index, tool=tool)
+                    _skipped["scope_conflict"]["owners"] = list(_owner_narrowing.owners)
+                    step_outputs.append(_skipped)
+                    _log.info(
+                        "nx_answer_step_complete",
+                        kind="isolated_skipped_owner_narrowing",
+                        step_indices=_seg_indices,
+                        tools=_seg_tools,
+                        elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    )
+                    continue
             # RDR-232 section 3 (nexus-jypmj.1.5): a traverse step carries the evidence policy
             # derived from the caller's scope, applied inside ``traverse`` before manifest expansion.
             resolved = _apply_traversal_policy_to_args(tool, resolved, bindings=merged)

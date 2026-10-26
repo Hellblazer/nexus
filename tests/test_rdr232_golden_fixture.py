@@ -365,7 +365,17 @@ def _assert_oversized_input_keeps_the_reserved_stream(fx, art, primary, resoluti
     from nexus.plans.reserved_stream import ReservedStream, reserved_scope, set_reserved_step, strip_source_note
     from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _hydrate_operator_args
 
-    hits = mcp_core.search(query=art.text, corpus="rdr", limit=g.OVERSIZED_SEARCH_LIMIT, threshold=2.0, structured=True)
+    # nexus-jypmj.1.18: the production owner narrowing (real collection listing and catalog rows). Without it
+    # the other project's same-number RDR is in the search; with the ART owner it is not.
+    from nexus.plans.owner_narrowing import narrow_args_by_owner
+
+    unscoped = mcp_core.search(query=art.text, corpus="rdr", limit=g.OVERSIZED_SEARCH_LIMIT, threshold=2.0, structured=True)
+    foreign_unscoped = sum(1 for c in unscoped["chunk_collections"] if c == fx.nexus_rdr_collection)
+    assert foreign_unscoped > 0, "non-vacuity: without the owner the other project's RDR-084 is in the vector stream"
+    narrowed, narrowing = narrow_args_by_owner({"query": art.text, "corpus": "rdr"}, fx.art_owner)
+    assert narrowing is not None and narrowing.status == "narrowed", narrowing
+    assert narrowing.removed == (fx.nexus_rdr_collection,) and narrowed["corpus"] == fx.art_rdr_collection, narrowing
+    hits = mcp_core.search(query=art.text, corpus=narrowed["corpus"], limit=g.OVERSIZED_SEARCH_LIMIT, threshold=2.0, structured=True)
     got = mcp_core.store_get_many(ids=hits["ids"], collections=hits["collections"], structured=True)
     contents = [c for c in got["contents"] if c]
     assert len(hits["ids"]) > _OPERATOR_MAX_INPUTS, "the fixture holds more RDR chunks than the operator cap"
@@ -391,18 +401,22 @@ def _assert_oversized_input_keeps_the_reserved_stream(fx, art, primary, resoluti
     assert r["by_stream"] == {"t2": len(life.records), "primary": primary.selected_items, "vector": len(secondary)}, r
     assert r["unattributed"] == 0, "every retrieved item is found again by the hash of its text"
     assert (r["out_of_scope"], diag["scope_check"]["state"]) == (0, "satisfied"), diag["scope_check"]
-    # wrong-source contamination: the other project's RDR-084 reaches the reducer through the VECTOR
-    # stream (it is in scope and lexically close); the production counts must equal the oracle's.
+    # wrong-source contamination (nexus-jypmj.1.8 found it, nexus-jypmj.1.18 closes it): the other project's
+    # RDR-084 is in scope and lexically close, so it reached the reducer through the VECTOR stream. With the
+    # explicit ART owner it does not: no foreign-owner item in the reducer input, and the production counts
+    # equal the oracle's.
     oracle_wrong = sum(1 for t in secondary if fx.chunks.get(g.chash_of(strip_source_note(t)), ("",))[0] == g.NEXUS_REF)
-    assert r["by_stream_collection"]["vector"].get(fx.nexus_rdr_collection, 0) == oracle_wrong
-    assert oracle_wrong > 0, "non-vacuity: the wrong project's RDR-084 does reach a 120-hit reducer input"
+    assert oracle_wrong == 0
+    assert r["by_stream_collection"]["vector"].get(fx.nexus_rdr_collection, 0) == oracle_wrong == 0
+    assert set(r["by_stream_collection"]["vector"]) == {fx.art_rdr_collection}, r["by_stream_collection"]
     # the primary budget here is six chunks of a twelve-chunk document: partial, and the lifecycle facet resolved
     assert diag["source_check"]["state"] == "partial" and diag["source_check"]["unresolved"] == []
     assert not any(fx.chunks.get(g.chash_of(strip_source_note(t)), ("", ""))[1] == "code" for t in after)
     print(
         f"RDR232-OVERSIZED hits={len(hits['ids'])} hydrated={len(contents)} reducer_input={r['items']} "
         f"by_stream={r['by_stream']} secondary_cut={report['secondary_cut']} "
-        f"wrong_source_in_reducer={oracle_wrong} unattributed={r['unattributed']} "
+        f"wrong_source_unscoped_hits={foreign_unscoped} wrong_source_in_reducer={oracle_wrong} "
+        f"unattributed={r['unattributed']} "
         f"by_collection={ {c: n for c, n in r['by_collection'].items()} }")
     return diag
 
@@ -478,7 +492,16 @@ def _assert_production_wiring_reaches_the_reducer(
     assert src["lifecycle"]["state"] == "resolved" and src["lifecycle"]["reached_reducer"] == 2, src
     assert d["scope_check"]["state"] == "satisfied" and d["scope_check"]["violations"] == [], d["scope_check"]
     assert d["streams"]["vector"]["out_of_scope"] == 0 and d["streams"]["graph"]["out_of_scope"] == 0
-    assert all(st["corpus"] == "rdr" for st in d["streams"]["vector"]["steps"]), d["streams"]["vector"]["steps"]
+    # nexus-jypmj.1.18: scope `rdr` reaches the step first, then the explicit ART owner narrows `rdr` to the
+    # ART owner's collection; the other project's rdr collection is removed from every vector step.
+    assert all(st["corpus"] == fx.art_rdr_collection for st in d["streams"]["vector"]["steps"]), d["streams"]["vector"]["steps"]
+    on_ = d["scope_check"]["owner_narrowing"]
+    assert on_["owners"] == [fx.art_owner] and on_["skipped_steps"] == [], on_
+    assert on_["steps"] and all(s["removed"] == [fx.nexus_rdr_collection] and s["outcome"] == "narrowed" for s in on_["steps"]), on_
+    assert {s["step_index"] for s in on_["steps"]} == {st["step_index"] for st in d["streams"]["vector"]["steps"]}
+    assert not any(
+        fx.nexus_rdr_collection in r["by_stream_collection"].get(s, {}) for s in ("vector", "graph", "primary")
+    ), "no foreign-owner item reaches the reducer input"
     assert d["streams"]["primary"]["references"] == n_pieces and d["streams"]["t2"]["references"] == 2
     assert d["capped_traversals"] == 0 and d["skipped_steps"] == []
     (trav,) = d["traversals"]
@@ -509,6 +532,18 @@ def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
     assert v["out_of_scope"] == 0 and d["reducer_input"] is None
     assert [x["outcome"] for x in env["scope_diagnostics"]] == ["narrowed"]
     print(f"RDR232-FASTPATH vector_refs={v['references']} by_collection={v['by_collection']} scope_state={d['scope_check']['state']}")
+
+    # nexus-jypmj.1.18: the same call with the explicit ART owner queries the ART collection only.
+    env = _nx_answer_envelope(
+        art, scope, {"content_type": "rdr", "owner": fx.art_owner}, strategy=("research", "corpus-coverage-check"))
+    assert env["continuation"] is None and env["step_count"] == 1
+    d = env["evidence_diagnostics"]
+    v = d["streams"]["vector"]
+    assert v["references"] > 0 and set(v["by_collection"]) == {fx.art_rdr_collection}, v
+    assert [(x["scope_kind"], x["outcome"]) for x in env["scope_diagnostics"]] == [
+        ("corpus_prefix", "narrowed"), ("owner", "narrowed")], env["scope_diagnostics"]
+    assert d["scope_check"]["owner_narrowing"]["steps"][0]["removed"] == [fx.nexus_rdr_collection]
+    print(f"RDR232-FASTPATH-OWNER vector_refs={v['references']} by_collection={v['by_collection']}")
 
 
 def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, production) -> dict:

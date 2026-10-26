@@ -714,6 +714,17 @@ def scope_conflict_clauses(diagnostics: object) -> list[str]:
     clauses: list[str] = []
     for d in diagnostics if isinstance(diagnostics, list) else []:
         if isinstance(d, dict) and d.get("outcome") == "conflict":
+            if d.get("scope_kind") == "owner":
+                # nexus-jypmj.1.18: the step was skipped by the owner narrowing. The cause is the entry's own
+                # ``detail`` (nothing of the owner in the corpus, an empty listing, or a listing that failed):
+                # quote it, never assume one. The owner is named by tumbler (1.1), not collection segment.
+                owners = ", ".join(str(o) for o in d.get("owners") or ()) or str(d.get("caller_scope"))
+                why = str(d.get("detail") or "").strip() or "the narrowing left it nothing to read"
+                clauses.append(
+                    f"step {int(d.get('step_index', 0)) + 1} ({d.get('tool', '?')}) reads corpus "
+                    f"{d.get('plan_corpus')!r} and was skipped by the narrowing to owner {owners}: {why}"
+                )
+                continue
             clauses.append(
                 f"step {int(d.get('step_index', 0)) + 1} ({d.get('tool', '?')}) declares corpus "
                 f"{d.get('plan_corpus')!r}, outside the caller scope {d.get('caller_scope')!r}, "

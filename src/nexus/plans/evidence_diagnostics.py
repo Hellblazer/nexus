@@ -205,7 +205,7 @@ def _scope_counts(scope: ScopeConstraint, by_collection: Mapping[str, int]) -> t
 
 def _traversal_summary(index: int, report: Mapping[str, Any]) -> dict[str, Any]:
     keys = ("policy_applied", "policy_failed", "possibly_truncated", "contained", "nodes_walked", "nodes_retained",
-            "dropped_out_of_scope", "dropped_role", "dropped_cap", "scope_conflict")
+            "dropped_out_of_scope", "dropped_out_of_owner", "owners", "owner_unattributed", "dropped_role", "dropped_cap", "scope_conflict")
     return {"step_index": index, **{k: report.get(k) for k in keys}, "widened": report.get("widened") is not None}
 
 
@@ -253,6 +253,7 @@ def build_evidence_diagnostics(
     named_sources: Any = None,
     reducer_expected: bool = True,
     dropped_scope: str = "",
+    owner_resolution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``evidence_diagnostics`` object for one run (see the module docstring).
 
@@ -264,6 +265,8 @@ def build_evidence_diagnostics(
     path): its streams are the whole evidence, so a missing reducer input is not a gap in the scope check.
     *dropped_scope* is a scope the caller gave that ``nx_answer`` did not apply (a comma-list, nexus-n1908):
     with no scope in force the check says ``not_evaluated`` and names it, never ``not_applicable``.
+    *owner_resolution* is the request's :meth:`OwnerResolution.to_wire` (nexus-jypmj.1.18): it lets
+    ``scope_check.owner_narrowing`` say that owner narrowing was not applied, and why.
     """
     corpus_of_step = {int(a["step_index"]): a.get("corpus", "") for a in resolved_args if "step_index" in a}
     streams: dict[str, _Stream] = {"vector": _Stream({}, []), "graph": _Stream({}, [])}
@@ -336,7 +339,7 @@ def build_evidence_diagnostics(
         "source_check": _source_check(named_sources, primary, lifecycle, attributions, reserved),
         "scope_check": _scope_check(
             scope, streams, attributions, scope_diagnostics, traverse_reports, p_cols,
-            reducer_expected=reducer_expected, dropped_scope=dropped_scope,
+            reducer_expected=reducer_expected, dropped_scope=dropped_scope, owner_resolution=owner_resolution,
         ),
         "skipped_steps": skipped,
         "traversals": traversals,
@@ -489,6 +492,70 @@ def _source_check(
 # ── the scope check ────────────────────────────────────────────────────────────────────────────────────────
 
 
+def _owner_not_applied(owner_resolution: Mapping[str, Any] | None) -> tuple[bool, dict[str, str] | None]:
+    """``(applied, not_applied)`` for the caller's owner qualifier (nexus-jypmj.1.18).
+
+    ``applied``: an explicit ``owner``/``project`` binding resolved, so the secondary streams were narrowed
+    to it. ``not_applied`` is set only when the caller DID name an owner or project and the run went on
+    without narrowing because the qualifier did not resolve (``unresolved``) or named different subtrees
+    (``conflict``): nothing was guessed (RDR-232 section 1) and the run is not narrowed by owner. A request
+    with no qualifier, or only a catalog-subtree scope, asked for no owner narrowing and has neither.
+    """
+    if not isinstance(owner_resolution, Mapping):
+        return False, None
+    status = str(owner_resolution.get("status") or "none")
+    origins = {str(o) for o in (owner_resolution.get("contributions") or {})}
+    if status == "resolved":
+        return bool(origins & {"owner", "project"}), None
+    if status in ("conflict", "unresolved"):  # both arise only from an owner/project binding (a lone scope subtree never conflicts)
+        return False, {
+            "reason": status,
+            "detail": f"owner narrowing was not applied: the owner qualifier {status}. "
+                      f"{owner_resolution.get('detail') or ''}".strip(),
+        }
+    return False, None
+
+
+def _owner_narrowing_wire(
+    scope_diagnostics: Sequence[Mapping[str, Any]],
+    owner_resolution: Mapping[str, Any] | None = None,
+    traverse_reports: Sequence[tuple[int, Mapping[str, Any]]] = (),
+) -> dict[str, Any]:
+    """What the explicit owner did to the retrieval steps (nexus-jypmj.1.18): whether it narrowed at all
+    (``applied``; ``not_applied`` says plainly why it did not when the caller named an owner), the owners
+    applied, per step the collections it removed and the unattributable ones it kept, and the steps it
+    skipped. Read from the ``scope_kind == "owner"`` entries the runner adds to ``scope_diagnostics`` and
+    the traverse reports; always present, empty when no owner narrowed."""
+    owners: list[str] = []
+    steps: list[dict[str, Any]] = []
+    removed_total = 0
+    skipped: list[int] = []
+    unattributed: list[str] = []
+    for d in scope_diagnostics:
+        if d.get("scope_kind") != "owner":
+            continue
+        for o in d.get("owners") or ():
+            if o not in owners:
+                owners.append(str(o))
+        removed = [str(c) for c in d.get("removed_collections") or ()]
+        loose = [str(c) for c in d.get("unattributed") or ()]
+        removed_total += len(removed)
+        steps.append({
+            "step_index": int(d["step_index"]), "tool": d.get("tool"), "outcome": d.get("outcome"),
+            "kept": int(d.get("kept_collections") or 0), "removed": removed, "unattributed": loose,
+        })
+        unattributed.extend(c for c in loose if c not in unattributed)
+        if d.get("outcome") == "conflict":
+            skipped.append(int(d["step_index"]))
+    for _index, report in traverse_reports:
+        unattributed.extend(str(c) for c in report.get("owner_unattributed") or () if str(c) not in unattributed)
+    applied, not_applied = _owner_not_applied(owner_resolution)
+    return {
+        "applied": applied, "not_applied": not_applied, "owners": owners, "removed_total": removed_total,
+        "steps": steps, "skipped_steps": skipped, "unattributed": unattributed,
+    }
+
+
 def _scope_check(
     scope: ScopeConstraint,
     streams: Mapping[str, _Stream],
@@ -499,6 +566,7 @@ def _scope_check(
     *,
     reducer_expected: bool = True,
     dropped_scope: str = "",
+    owner_resolution: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     reasons: list[dict[str, Any]] = []
     conflict_traversals: list[dict[str, Any]] = []
@@ -512,7 +580,7 @@ def _scope_check(
     conflict_steps = [int(d["step_index"]) for d in scope_diagnostics if d.get("outcome") == "conflict"]
     base: dict[str, Any] = {
         "scope": scope.value, "scope_kind": scope.kind, "conflict_steps": conflict_steps,
-        "conflict_traversals": conflict_traversals,
+        "conflict_traversals": conflict_traversals, "owner_narrowing": _owner_narrowing_wire(scope_diagnostics, owner_resolution, traverse_reports),
         "recorded_reasons": reasons, "violations": [], "streams_out_of_scope": {}, "out_of_scope": 0,
         "reducer_out_of_scope": 0, "reducer_unattributed": 0, "unattributed_refs": 0, "examined": 0, "detail": "",
     }

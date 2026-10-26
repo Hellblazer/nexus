@@ -500,15 +500,20 @@ class RetrievalRun:
     traverse_chunk_collections: list[str] = field(default_factory=list)
 
 
-async def run_lookup_retrieval(question: str, *, scope: str = "", bindings: dict[str, Any] | None = None) -> RetrievalRun:
+async def run_lookup_retrieval(
+    question: str, *, scope: str = "", bindings: dict[str, Any] | None = None, owners: str = "",
+) -> RetrievalRun:
     """Run the factual-lookup builtin's retrieval steps through ``plan_run``, with the call-shape
-    ``nx_answer`` gives it, and stop before the first operator step (no model call)."""
+    ``nx_answer`` gives it, and stop before the first operator step (no model call). *owners* is the
+    ``_nx_owners`` binding ``nx_answer`` sets for an explicit owner (nexus-jypmj.1.18)."""
     from nexus.plans.runner import plan_run
 
     match = builtin_match("hybrid-factual-lookup", "lookup")
     run_bindings: dict[str, Any] = {"question": question, "intent": question}
     if scope:
         run_bindings["_nx_scope"] = scope
+    if owners:
+        run_bindings["_nx_owners"] = owners
     run_bindings.update(bindings or {})
     result = await plan_run(
         match, run_bindings, continuation_cut_at_step=LOOKUP_PLAN_FIRST_OPERATOR_STEP,

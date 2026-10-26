@@ -8908,8 +8908,9 @@ def traverse(
     direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
     policy: Annotated[dict | None, Field(
         description=(
-            "Optional traversal evidence policy (RDR-232): {allowed_collections, preserve_seed_documents, "
-            "max_documents, max_chunks, require_link_role}. Absent: the legacy result, unchanged."
+            "Optional traversal evidence policy (RDR-232): {allowed_collections, allowed_owners, "
+            "preserve_seed_documents, max_documents, max_chunks, require_link_role}. Absent: the legacy "
+            "result, unchanged."
         ),
     )] = None,
 ) -> dict:
@@ -9093,7 +9094,15 @@ def _traverse_with_policy(
     from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
 
     try:
-        selection = tp.select_documents(nodes, edges, seeds, policy, direction=direction)
+        kinds: "dict[str, str] | None" = None
+        if policy.allowed_owners:
+            # nexus-jypmj.1.18: the owner filter applies to project-owned collections only, the same rule the
+            # vector stream applies; traversal_policy is stdlib-only, so the kind of each walked collection
+            # is read here by the one seam the vector filter uses.
+            from nexus.plans.owner_narrowing import collection_kind  # noqa: PLC0415 — deferred, like traverse's other imports
+
+            kinds = {c: collection_kind(c) for c in {str(getattr(n, "physical_collection", "") or "") for n in nodes}}
+        selection = tp.select_documents(nodes, edges, seeds, policy, direction=direction, collection_kinds=kinds)
     except Exception as exc:  # noqa: BLE001 — any policy failure omits the graph stream; it never widens
         return _traverse_policy_failed(f"{type(exc).__name__}: {exc}", warnings=warnings)
     report = selection.report
@@ -10043,10 +10052,28 @@ def _nx_answer_caller_bindings(
     run.update(plan_bindings)
     for _name in RESERVED_BINDINGS:
         run.pop(_name, None)
+    # The internal run bindings are nx_answer's own: a caller binding of the same name must not reach the
+    # runner as the scope or the owner narrowing (nexus-jypmj.1.18; _nx_owners is set from the evidence
+    # request after this, _nx_scope just below).
+    from nexus.plans.owner_narrowing import OWNERS_BINDING  # noqa: PLC0415 — deferred; matches this module's convention
+
+    run.pop(OWNERS_BINDING, None)
+    run.pop("_nx_scope", None)
     run["intent"] = question
     if scope:
         run["_nx_scope"] = scope
     return run, frozenset(run)
+
+
+def _nx_answer_owner_binding(request: EvidenceRequest) -> dict[str, str]:
+    """The ``_nx_owners`` run binding for *request*: ``{}`` unless it carries an explicit, resolved owner
+    qualifier (RDR-232, nexus-jypmj.1.18). Only an owner or project binding, or a catalog-subtree scope
+    that serves as the qualifier, narrows the secondary streams; a corpus scope alone, an owner that
+    resolution inferred, and a conflicting or unresolved qualifier do not."""
+    from nexus.plans.owner_narrowing import OWNERS_BINDING, owners_binding_value, request_owners  # noqa: PLC0415 — deferred; matches this module's convention
+
+    value = owners_binding_value(request_owners(request))
+    return {OWNERS_BINDING: value} if value else {}
 
 
 def _nx_answer_seconds_left(ceiling: float, deadline: float | None) -> float:
@@ -11383,6 +11410,8 @@ async def nx_answer(
     _evidence_request = await _nx_answer_evidence_request(
         bindings=bindings, scope=scope, deadline=deadline,
     )
+    # nexus-jypmj.1.18: an explicit owner also narrows the secondary streams (vector corpus, traversal).
+    _caller_run.update(_nx_answer_owner_binding(_evidence_request))
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
     # resolved documents is merged at the runner (nexus-jypmj.1.6).
@@ -11438,6 +11467,7 @@ async def nx_answer(
                 reserved=_reserved_stream, primary=_primary_evidence, lifecycle=_lifecycle,
                 named_sources=_named_sources, reducer_expected=_diag_inputs["reducer_expected"],
                 dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
+                owner_resolution=_evidence_request.owner.to_wire(),
             )
             log_evidence_diagnostics(diag, plan_id=_diag_inputs["plan_id"])
         except Exception as exc:  # noqa: BLE001 — diagnostics never fail an answer
@@ -12523,6 +12553,39 @@ async def nx_answer(
                     "the plan's corpus covers, or use search/query directly."
                 )
             corpus = _fast_narrowing.corpus or _PLAN_STEP_DEFAULT_CORPUS
+            # nexus-jypmj.1.18: the runner's owner narrowing, applied to the fast path's one corpus. A
+            # corpus left with no collection of the owner skips the query, like a scope conflict.
+            import asyncio  # noqa: PLC0415 — stdlib, branch-local
+            from nexus.plans.owner_narrowing import OWNERS_BINDING, narrow_args_by_owner  # noqa: PLC0415 — deferred; matches this module's convention
+
+            _fast_owner_marker: "dict[str, Any] | None" = None
+            if not _fast_conflict:
+                # The corpus expansion can be a cold T3 listing: off the event loop, like this call's other
+                # blocking catalog reads (a copy of the context goes with it).
+                _fast_owner_args, _fast_owner = await asyncio.to_thread(
+                    narrow_args_by_owner, {"corpus": corpus}, _caller_run.get(OWNERS_BINDING),
+                )
+                if _fast_owner is not None:
+                    _scope_diagnostics.append(_fast_owner.to_diagnostic(step_index=0, tool="query"))
+                    if _fast_owner.conflict:
+                        _fast_conflict = True
+                        _log.warning(
+                            "nx_answer_single_query_owner_conflict",
+                            plan_id=best.plan_id, plan_corpus=corpus, owners=list(_fast_owner.owners),
+                        )
+                        _fast_owner_marker = {
+                            "step_index": 0, "tool": "query", "plan_corpus": corpus,
+                            "caller_scope": _fast_owner.scope.value, "scope_kind": "owner",
+                            "owners": list(_fast_owner.owners),
+                        }
+                        no_match = (
+                            f"No matching evidence found for {question!r}. The plan's one retrieval step was "
+                            f"skipped (plan_id={best.plan_id}); "
+                            f"{_nx_answer_scope_conflict_sentence(_scope_diagnostics)} — name an owner whose "
+                            "collections the plan's corpus covers, or use search/query directly."
+                        )
+                    else:
+                        corpus = str(_fast_owner_args["corpus"])
             fast_subtree = _fast_scope.value if _fast_scope.kind == "subtree" else ""
             try:
                 limit = int(step_args.get("limit", 10))
@@ -12625,7 +12688,7 @@ async def nx_answer(
                 _set_evidence_inputs(
                     SimpleNamespace(
                         steps=[
-                            {"ids": [], "tumblers": [], "scope_conflict": {
+                            {"ids": [], "tumblers": [], "scope_conflict": _fast_owner_marker or {
                                 "step_index": 0, "tool": "query", "plan_corpus": _fast_narrowing.plan_corpus,
                                 "caller_scope": scope, "scope_kind": _fast_scope.kind}}
                             if _fast_conflict else {

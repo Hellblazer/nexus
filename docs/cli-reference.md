@@ -5429,6 +5429,22 @@ and the other seven `null` when they have nothing to report):
   conflicted is recorded, but counts no success or failure for the plan: the
   scope was the caller's. A catalog-subtree scope is reported as
   `subtree_not_intersected` and is not intersected with plan corpora.
+  An explicit owner (nexus-jypmj.1.18: the `owner` or `project` binding; a
+  catalog-subtree `scope` is not one) adds one more entry per
+  corpus-taking step, `scope_kind: "owner"`, with `caller_scope` the owner
+  segment (`1-2`), `owners` the owner tumblers, `removed_collections`,
+  `unattributed` and `kept_collections`: the step's corpus is expanded to
+  collections and the `code`, `docs` and `rdr` ones of another owner are removed
+  (`knowledge` and other types pass; a project-owned collection whose owner id
+  is not tumbler-shaped, such as `docs__nexus-571b8edd`, is kept and listed in
+  `unattributed`), so `resolved_corpus` becomes the kept collection names
+  (`outcome: "narrowed"`; `"within_scope"` when nothing was removed). A step left
+  with no collection is skipped (`outcome: "conflict"`) exactly like a scope
+  conflict and never runs unscoped; a step pinned through `collection` or
+  `collections` keeps its pin (`unscoped_collection_pin`). An owner that
+  resolution did not take from the caller, or a qualifier that conflicted or did
+  not resolve, narrows nothing, and `scope_check.owner_narrowing.not_applied`
+  says so.
 - `evidence_request` (nexus-jypmj.1.2): the caller's reserved bindings
   `source`, `owner` and `project`, plus a subtree `scope` as owner
   qualifier: `{source, source_error, owner: {status, tumbler, ...},
@@ -5580,6 +5596,17 @@ and the other seven `null` when they have nothing to report):
     none is outside the scope) or `not_applicable` (no scope or `all`). The
     single-query fast path has no reducer by design, so its streams alone are
     judged. Precedence: violated, conflict, not_evaluated, widened, satisfied.
+  - `scope_check.owner_narrowing` (nexus-jypmj.1.18): `{applied, not_applied,
+    owners, removed_total, steps: [{step_index, tool, outcome, kept, removed,
+    unattributed}], skipped_steps, unattributed}`, the owners applied and, per
+    step, the collections removed and the unattributable ones kept, and the
+    steps skipped. `applied` is true when an explicit owner or project resolved.
+    `not_applied` is `{reason: "unresolved" | "conflict", detail}` when the
+    caller named an owner or project that did not resolve or disagreed with
+    another qualifier: the run went on without owner narrowing (nothing was
+    guessed), and the detail says why. It is `null` otherwise. Empty when no
+    explicit owner narrowed. A step skipped by the owner is in
+    `conflict_steps` and `skipped_steps`.
   - `skipped_steps`: `[{step_index, tool, reason: "scope_conflict", plan_corpus,
     caller_scope}]`. A skipped step dispatched nothing, so it has no `steps`
     record and no telemetry row. `steps` holds the executed steps and
@@ -5587,8 +5614,8 @@ and the other seven `null` when they have nothing to report):
     skipped step's marker output; `skipped_steps` names those.
   - `traversals`: one summary per `traverse` step (`policy_applied`,
     `policy_failed`, `possibly_truncated`, `contained`, `nodes_walked`,
-    `nodes_retained`, `dropped_out_of_scope`, `dropped_role`, `dropped_cap`,
-    `scope_conflict`, `widened`); `capped_traversals`: how many came back at the engine's 500-node
+    `nodes_retained`, `dropped_out_of_scope`, `dropped_out_of_owner`, `owners`,
+    `owner_unattributed`, `dropped_role`, `dropped_cap`, `scope_conflict`, `widened`); `capped_traversals`: how many came back at the engine's 500-node
     cap (the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13).
   - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
     secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
@@ -5606,8 +5633,15 @@ and the other seven `null` when they have nothing to report):
   documents are ranked by link role then distance instead of graph order, the
   300-chunk budget is spent with a reserved share per document instead of the
   graph-order prefix, a step whose link types are one role admits only that
-  role, and the result adds `chunk_collections` and `traversal`. A `traverse`
-  call with no `policy` argument is unchanged.
+  role, and the result adds `chunk_collections` and `traversal`. With an explicit
+  owner the policy also carries `allowed_owners` (owner tumblers such as `1.2`,
+  nexus-jypmj.1.18): a non-seed document of a project-owned collection (code,
+  docs, rdr) whose tumbler is not under one is dropped before the cap
+  (`dropped_out_of_owner`); a document in any other collection, or in a
+  collection whose owner cannot be read (`owner_unattributed`), is kept, as in
+  the vector stream. A seed document is kept, and a plan cannot remove the
+  owners from the policy. A `traverse` call with no
+  `policy` argument is unchanged.
 
 ### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
 

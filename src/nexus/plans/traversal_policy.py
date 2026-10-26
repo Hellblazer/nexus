@@ -7,7 +7,11 @@ chashes in graph order, cut at 300 ids. A scoped ``nx_answer`` then received cod
 filled the cut ahead of the in-scope evidence. The policy runs INSIDE ``traverse``, after the walk
 and before manifest expansion:
 
-1. documents outside ``allowed_collections`` are dropped (:meth:`ScopeConstraint.admits`);
+1. documents outside ``allowed_collections`` are dropped (:meth:`ScopeConstraint.admits`), and, when
+   the caller named an owner (``allowed_owners``, nexus-jypmj.1.18), so are non-seed documents in a
+   project-owned collection (code, docs, rdr) whose tumbler does not lie under one. A document in any
+   other collection (knowledge, paper) passes, as the vector stream passes it, and so does one in a
+   collection whose owner cannot be read (reported as ``owner_unattributed``);
 2. the rest are ranked by link role, then link distance, then tumbler (``traverse`` has no search
    relevance input, so none is invented) and the secondary ones capped at ``max_documents``;
 3. manifests are read for the retained documents only;
@@ -16,7 +20,8 @@ and before manifest expansion:
 5. every returned id carries its document's collection (``chunk_collections``).
 
 Seed documents are kept in their own stream: the rank and the cap never evict one (the scope still
-applies to them, because an explicit scope wins). With ``preserve_seed_documents`` false a seed is an
+applies to them, because an explicit scope wins; the owner filter does not, a seed being the named or
+retrieved document the walk starts from). With ``preserve_seed_documents`` false a seed is an
 ordinary candidate that ranks first (distance zero) and counts against the cap.
 
 The engine caps its own walk at :data:`MAX_GRAPH_NODES` nodes, ordered by ``(min_depth, tumbler)``,
@@ -35,6 +40,7 @@ This module imports only the standard library and :mod:`nexus.plans.evidence`.
 """
 from __future__ import annotations
 
+import re
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -76,8 +82,11 @@ _ROLE_OF_LINK_TYPE: dict[str, str] = {
 _ROLE_RANK: dict[str, int] = {"citation": 0, "implementation": 1, "related": 2}
 
 _WIRE_KEYS = frozenset({
-    "allowed_collections", "preserve_seed_documents", "max_documents", "max_chunks", "require_link_role",
+    "allowed_collections", "allowed_owners", "preserve_seed_documents", "max_documents", "max_chunks",
+    "require_link_role",
 })
+
+_OWNER_TUMBLER_RE = re.compile(r"^\d+\.\d+$")
 
 
 class TraversalPolicyError(ValueError):
@@ -101,6 +110,9 @@ class TraversalPolicy:
     """What a traversal may return as secondary evidence (RDR-232 section 3)."""
 
     allowed_collections: ScopeConstraint
+    #: Owner tumblers (``1.2``) the caller named explicitly (nexus-jypmj.1.18). Non-empty: a non-seed
+    #: document is admitted only when its tumbler lies under one. Empty: no owner filter.
+    allowed_owners: tuple[str, ...] = ()
     preserve_seed_documents: bool = True
     max_documents: int = DEFAULT_MAX_DOCUMENTS
     max_chunks: int = DEFAULT_MAX_CHUNKS
@@ -124,6 +136,14 @@ class TraversalPolicy:
             raise TraversalPolicyError(
                 f"allowed_collections must be a string (one corpus prefix, collection or catalog subtree), got {scope!r}"
             )
+        owners = wire.get("allowed_owners", ())
+        if (
+            not isinstance(owners, (list, tuple))
+            or not all(isinstance(o, str) and _OWNER_TUMBLER_RE.match(o) for o in owners)
+        ):
+            raise TraversalPolicyError(
+                f"allowed_owners must be a list of owner tumblers such as '1.2', got {owners!r}"
+            )
         preserve = wire.get("preserve_seed_documents", True)
         if not isinstance(preserve, bool):
             raise TraversalPolicyError(f"preserve_seed_documents must be a boolean, got {preserve!r}")
@@ -132,6 +152,7 @@ class TraversalPolicy:
             raise TraversalPolicyError(f"require_link_role must be one of {list(LINK_ROLES)}, got {role!r}")
         return cls(
             allowed_collections=ScopeConstraint.parse(scope),
+            allowed_owners=tuple(dict.fromkeys(owners)),
             preserve_seed_documents=preserve,
             max_documents=_positive_int(wire, "max_documents", DEFAULT_MAX_DOCUMENTS),
             max_chunks=min(_positive_int(wire, "max_chunks", DEFAULT_MAX_CHUNKS), DEFAULT_MAX_CHUNKS),
@@ -139,13 +160,23 @@ class TraversalPolicy:
         )
 
     def to_wire(self) -> dict[str, Any]:
-        return {
+        wire: dict[str, Any] = {
             "allowed_collections": self.allowed_collections.value,
             "preserve_seed_documents": self.preserve_seed_documents,
             "max_documents": self.max_documents,
             "max_chunks": self.max_chunks,
             "require_link_role": self.require_link_role,
         }
+        if self.allowed_owners:  # absent means no owner filter, so a policy without one is unchanged on the wire
+            wire["allowed_owners"] = list(self.allowed_owners)
+        return wire
+
+    def admits_owner(self, tumbler: str) -> bool:
+        """Whether *tumbler* lies under an allowed owner (always true with no owner filter). A segment
+        match: ``1.10.2`` is not under ``1.1``."""
+        return not self.allowed_owners or any(
+            tumbler == o or tumbler.startswith(o + ".") for o in self.allowed_owners
+        )
 
     def admits_role(self, role: str) -> bool:
         return self.require_link_role == "factual" or role == self.require_link_role
@@ -190,7 +221,7 @@ def _tightened(derived: dict[str, Any], declared: object) -> dict[str, Any]:
     return out
 
 
-def derive_policy(step_args: Mapping[str, Any], caller_scope: object) -> dict[str, Any]:
+def derive_policy(step_args: Mapping[str, Any], caller_scope: object, owners: object = None) -> dict[str, Any]:
     """The wire policy the runner gives a ``traverse`` step (RDR-232 section 3, "nx_answer always
     supplies the policy derived from request and plan").
 
@@ -201,6 +232,9 @@ def derive_policy(step_args: Mapping[str, Any], caller_scope: object) -> dict[st
     policy still ranks, allocates chunks per document and annotates the output); a scoped run keeps
     :data:`DEFAULT_MAX_DOCUMENTS`. A policy the plan declared is not used as given:
     only the fields that tighten the derived policy are merged (:func:`_tightened`).
+
+    *owners* is the request's explicit owners (the ``_nx_owners`` binding, nexus-jypmj.1.18): they
+    become ``allowed_owners``, and a plan-declared policy can neither remove nor replace them.
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred: reads a YAML registry on first use
 
@@ -219,6 +253,10 @@ def derive_policy(step_args: Mapping[str, Any], caller_scope: object) -> dict[st
     ).to_wire()
     if constraint is None:
         wire["allowed_collections"] = scope  # a scope the policy cannot hold: from_wire refuses it
+    from nexus.plans.owner_narrowing import owner_tumblers  # noqa: PLC0415 — deferred: keeps this module's import light
+
+    if owner_list := owner_tumblers(owners):
+        wire["allowed_owners"] = list(owner_list)
     return _tightened(wire, step_args.get("policy"))
 
 
@@ -284,9 +322,19 @@ def _distance_and_role(
 
 def select_documents(
     nodes: Sequence[Any], edges: Sequence[Any], seeds: Sequence[Any], policy: TraversalPolicy,
-    *, direction: str = "both",
+    *, direction: str = "both", collection_kinds: Mapping[str, str] | None = None,
 ) -> Selection:
-    """Apply *policy* to one engine walk: scope, role, rank, cap. Reads no manifest."""
+    """Apply *policy* to one engine walk: scope, role, rank, cap. Reads no manifest.
+
+    *collection_kinds* maps each walked collection to ``project_owned``, ``other`` or ``unattributed``
+    (:func:`nexus.plans.owner_narrowing.collection_kind`; this module stays stdlib-only, so the caller
+    injects it). The owner filter drops only ``project_owned`` documents; it is required when the policy
+    has ``allowed_owners``, and its absence is an error (the traverse step then fails closed) rather than
+    an owner filter that silently applies to nothing or to everything.
+    """
+    if policy.allowed_owners and collection_kinds is None:
+        raise ValueError("a policy with allowed_owners needs collection_kinds")
+    kinds = collection_kinds or {}
     collection_of = {str(n.tumbler): str(getattr(n, "physical_collection", "") or "") for n in nodes}
     # The counts are by the document's catalog content_type, a row field: never a parse of the
     # collection name (RDR-204, tests/test_collection_name_parse_census.py).
@@ -296,7 +344,8 @@ def select_documents(
 
     scope = policy.allowed_collections
     dropped_by_corpus: dict[str, int] = {}
-    dropped_scope = dropped_role = 0
+    dropped_scope = dropped_role = dropped_owner = 0
+    owner_unattributed: set[str] = set()
     kept_seeds: list[str] = []
     candidates: list[str] = []
     for tumbler, collection in collection_of.items():
@@ -305,9 +354,13 @@ def select_documents(
             dropped_by_corpus[type_of[tumbler]] = dropped_by_corpus.get(type_of[tumbler], 0) + 1
         elif tumbler in seed_ids and policy.preserve_seed_documents:
             kept_seeds.append(tumbler)
+        elif policy.allowed_owners and kinds.get(collection, "unattributed") == "project_owned" and not policy.admits_owner(tumbler):
+            dropped_owner += 1
         elif tumbler not in seed_ids and not policy.admits_role(role.get(tumbler, "related")):
             dropped_role += 1
         else:
+            if policy.allowed_owners and kinds.get(collection, "unattributed") == "unattributed":
+                owner_unattributed.add(collection or "")
             candidates.append(tumbler)
     kept_seeds.sort(key=seed_ids.index)
     candidates.sort(key=lambda t: (
@@ -349,6 +402,9 @@ def select_documents(
         "nodes_walked": len(nodes),
         "nodes_retained": len(kept),
         "dropped_out_of_scope": dropped_scope,
+        "dropped_out_of_owner": dropped_owner,
+        "owners": list(policy.allowed_owners),
+        "owner_unattributed": sorted(owner_unattributed),
         "dropped_role": dropped_role,
         "dropped_cap": dropped_cap,
         "dropped_by_corpus": dropped_by_corpus,
