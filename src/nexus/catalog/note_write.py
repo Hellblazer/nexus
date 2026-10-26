@@ -668,12 +668,12 @@ def put_note(
         status=NO_CATALOG, collection=collection, pieces=pieces, manifest_metadatas=manifest_metadatas,
         chunk_ids=[m.get("chunk_text_hash", "") for m in manifest_metadatas])
 
-    pre_call: dict[str, str] = {}
+    pre_call: dict[str, Any] = {}
     cause: dict[str, str] = {}
     try:
         out.catalog_doc_id, out.minted = sh.catalog_store_hook_tracked(
             title=title, doc_id=first_chash, collection_name=collection, pre_call_doc_id_out=pre_call,
-            error_out=cause)
+            error_out=cause, tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent)
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning and the NO_CATALOG outcome
         cause["error"] = f"{type(exc).__name__}: {exc}"
         _log.warning(
@@ -739,17 +739,23 @@ def put_note(
                 # The row this call minted could not be removed and survives with meta.doc_id naming
                 # the first chash of a chunk that was never written: clear it (a minted row had no
                 # prior identity), or live_note_chashes treats it as a manifest-less note.
-                sh.restore_pre_call_stamp(doc, "", out.doc_id)
+                sh.restore_pre_call_stamp(
+                    doc, "", out.doc_id, pre_call.get("note_meta"), pre_call.get("note_meta_stamped"))
         elif not out.minted:
-            sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
+            sh.restore_pre_call_stamp(
+                doc, pre_call.get("doc_id", ""), out.doc_id, pre_call.get("note_meta"),
+                pre_call.get("note_meta_stamped"))
         _fence_fail(doc, out.reason)
         return out
     except Exception as exc:
         if out.minted:
             if not sh.rollback_minted_catalog_entry(doc, original_error=str(exc)):
-                sh.restore_pre_call_stamp(doc, "", out.doc_id)
+                sh.restore_pre_call_stamp(
+                    doc, "", out.doc_id, pre_call.get("note_meta"), pre_call.get("note_meta_stamped"))
         else:
-            sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
+            sh.restore_pre_call_stamp(
+                doc, pre_call.get("doc_id", ""), out.doc_id, pre_call.get("note_meta"),
+                pre_call.get("note_meta_stamped"))
         _fence_fail(doc, str(exc))
         raise
     out.status, out.write = STORED, write
