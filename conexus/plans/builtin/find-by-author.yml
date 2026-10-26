@@ -13,6 +13,8 @@ optional_bindings:
   - limit
 default_bindings:
   limit: 10
+# RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
+answer_kind: discovery/listing
 tags: builtin-template,rdr-092,rdr-156,catalog,author,combined-query
 plan_json:
   steps:

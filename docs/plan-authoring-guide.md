@@ -58,6 +58,7 @@ default_bindings:                 # fills $vars when the caller omits them
   limit: 10
 required_bindings: [intent, concept]    # `plan_run` aborts if absent
 optional_bindings: [subtree]            # silent pass-through if absent
+answer_kind: lookup                     # the kind of answer the plan serves (see below)
 tags: comma,separated,free-form
 
 # REQUIRED
@@ -143,6 +144,20 @@ plans with byte-identical identities are a conflict — the
 the error. If you really want two plans with the same dimensions,
 differentiate them on `scope` (e.g. one at `scope:global`, one at
 `scope:project`), or use the `strategy` axis.
+
+### `answer_kind` (what the plan can answer)
+
+A template may declare the kind of answer it serves with a top-level
+`answer_kind:` key, one of `lookup`, `synthesis`, `discovery/listing`,
+`comparison`, `audit`, `debug` or `unknown`. Declare it from what the
+plan's description and steps are built to return, never by guessing from
+the verb; a bad value, or `answer_kind: null`, fails template validation.
+The seed loader folds it into `plan_json` as a versioned, curated
+declaration, so it is not a dimension and does not change plan identity.
+Write it at the template level only: an `answer_kind` inside `plan_json`
+is refused, and `plan_save` removes one from a plan you save, because
+only seeded templates declare a kind and a plan saved without one reads
+as `unknown`. Nothing filters plans by kind yet.
 
 ## Phase 2 scope field (routing)
 

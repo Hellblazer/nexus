@@ -31,6 +31,7 @@ from typing import Any
 import structlog
 
 from nexus.db.local_ef import LocalEmbeddingFunction
+from nexus.plans.answer_kind import decode_declaration
 from nexus.plans.match_text import (
     _synthesize_match_text as _plan_library_synthesize_match_text,
 )
@@ -228,6 +229,7 @@ class PlanSessionCache:
         if plan_id is None:
             return False
         doc_id = f"{self._session_id}:{int(plan_id)}"
+        _declared = decode_declaration(row.get("plan_json"))
         meta = {
             "session_id": self._session_id,
             "plan_id": int(plan_id),
@@ -235,6 +237,13 @@ class PlanSessionCache:
             "tags": row.get("tags") or "",
             "verb": row.get("verb") or "",
             "scope": row.get("scope") or "",
+            # RDR-232 Phase 2 (nexus-jypmj.2.1): the declared kind, decoded from plan_json, so a
+            # refresh after a reseed carries it. "unknown" for a row that declares none.
+            "answer_kind": _declared.kind.value,
+            # Origin and route ride beside the kind so the eligibility step can apply the
+            # fail-closed provenance rule (answer_kind module docstring). "" = no declaration / no route.
+            "answer_provenance": _declared.provenance or "",
+            "answer_route": _declared.route or "",
         }
         try:
             self._col.upsert(

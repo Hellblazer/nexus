@@ -499,8 +499,9 @@ def seed_grown_473_clone(library, *, origin_question: str) -> int:
     plans cannot bypass the gate. It does NOT exercise the clause "473 is ineligible" (a builtin-tagged row
     that declares lookup): the builtin is not selected for the incident request in this fixture. Plan 473's
     builtin origin is inferred from RDR-232 line 1606 and T2 nexus_rdr/189-research-11; no live read was
-    made. The test file pins that the clone's ``plan_json`` has no answer-kind key, so the Phase 2 change
-    that adds one to the builtin template (which this clone copies) turns that pin red at a known point.
+    made. Phase 2 (nexus-jypmj.2.1) declares ``lookup`` on the builtin template this clone copies; the clone
+    is stamped with ``grown_plan_json(..., route_kind=None, route_source=None)``, exactly what ``nx_answer``
+    stores for a grown plan today, and the test file pins that it decodes (unknown, grown).
 
     The plan body, binding declarations, default bindings and description are the seeded builtin's own
     (``desired_row_for_template``, the loader's row builder), so the clone runs exactly as 473 ran.
@@ -514,6 +515,7 @@ def seed_grown_473_clone(library, *, origin_question: str) -> int:
     seed loader's reconcile key, and a clone saved under it overwrites the builtin row, so it is refused
     (``ValueError``) when it equals any builtin's description after whitespace normalization.
     """
+    from nexus.plans.answer_kind import grown_plan_json
     from nexus.plans.schema import canonical_dimensions_json
     from nexus.plans.seed_loader import desired_row_for_template
 
@@ -525,8 +527,14 @@ def seed_grown_473_clone(library, *, origin_question: str) -> int:
 
     template = yaml.safe_load((BUILTIN_PLANS / "hybrid-factual-lookup.yml").read_text(encoding="utf-8"))
     row = desired_row_for_template(template)
+    # Phase 2 (nexus-jypmj.2.1) declares `lookup` on the template this clone copies. nx_answer saves a grown
+    # plan whose route was unknown as {unknown, grown} (grown_plan_json replaces the template's declaration),
+    # so the clone is stamped the same way: it stays an unknown-kind grown plan and keeps measuring
+    # "unknown-grown plans cannot bypass the gate". TestPhase2Tripwire pins the stamp.
     return int(library.save_plan(
-        query=origin_question, plan_json=row.plan_json, outcome="success",
+        query=origin_question,
+        plan_json=grown_plan_json(row.plan_json, route_kind=None, route_source=None),
+        outcome="success",
         tags="ad-hoc,grown", project="", ttl=None, scope="personal", scope_tags=GROWN_473_SCOPE_TAGS,
         verb="lookup", name=GROWN_473_STRATEGY,
         dimensions=canonical_dimensions_json(

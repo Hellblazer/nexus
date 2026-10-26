@@ -25,6 +25,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from nexus.plans.answer_kind import PlanAnswerKind, decode_answer_kind
+
 __all__ = ["Match"]
 
 
@@ -68,6 +70,15 @@ class Match:
     # RDR-091 Phase 2a scope-tag column (comma-separated, normalized).
     # Phase 2b matcher consumes this; ``""`` means agnostic.
     scope_tags: str = ""
+
+    @property
+    def answer_kind(self) -> PlanAnswerKind:
+        """The plan's declared answer kind, ``UNKNOWN`` when it declares none (RDR-232 Phase 2).
+
+        Read-only and decoded from ``plan_json`` on demand, so every way of building a ``Match``
+        carries it. Nothing in the matcher filters on it yet (nexus-jypmj.2.3).
+        """
+        return decode_answer_kind(self.plan_json)
 
     @classmethod
     def from_plan_row(

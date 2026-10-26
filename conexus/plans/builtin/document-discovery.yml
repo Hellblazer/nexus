@@ -57,6 +57,8 @@ default_bindings:
   # instead of the narrow single-prefix default this bead exists to fix.
   corpus: knowledge,code,docs,rdr
   limit: 10
+# RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
+answer_kind: discovery/listing
 tags: builtin-template,nexus-h33x8,single-step,fast-path
 plan_json:
   steps:

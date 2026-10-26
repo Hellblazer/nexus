@@ -14,6 +14,8 @@ optional_bindings:
 - limit
 default_bindings:
   limit: 10
+# RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
+answer_kind: audit
 tags: builtin-template,rdr-078,document
 plan_json:
   steps:

@@ -73,6 +73,8 @@ default_bindings:
   depth: 2
   vector_budget_chunks: 6
   graph_budget_chunks: 4
+# RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
+answer_kind: lookup
 tags: builtin-template,rdr-097,nexus-vej3,hybrid-rag,factual-qa
 plan_json:
   steps:

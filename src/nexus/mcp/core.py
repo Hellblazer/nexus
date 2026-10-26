@@ -7472,6 +7472,8 @@ def plan_save(
       evidence request: a plan that lists one in `required_bindings`,
       `optional_bindings` or `default_bindings`, or references it as
       `$name` in a step's args, is refused.
+    - An `answer_kind` key in `plan_json` is removed before the save, and
+      the reply says so: only seeded templates declare an answer kind.
     """
     try:
         if not query or not plan_json:
@@ -7528,6 +7530,18 @@ def plan_save(
                 f"Plan not saved: {embedded.ref} sits where the runner will not substitute it "
                 f"({embedded.reason})."
             )
+        # RDR-232 Phase 2 (nexus-jypmj.2.1): plan_save never writes an answer-kind declaration.
+        # Only the seed loader declares curated and only the nx_answer grow site declares grown,
+        # so an embedded key (valid, malformed or an unrelated one of the same name) is removed
+        # rather than stored or refused. A row saved here declares nothing and decodes unknown.
+        from nexus.plans.answer_kind import strip_declaration  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        plan_json_to_store = plan_json
+        _declaration_removed = False
+        if isinstance(parsed_plan, dict):
+            stripped_plan, _declaration_removed = strip_declaration(parsed_plan)
+            if _declaration_removed:
+                plan_json_to_store = json.dumps(stripped_plan)
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
         # _WRITE_OPS; the daemon serialises the write through its single WAL
         # writer, eliminating the "database is locked" races seen 2026-06-11).
@@ -7535,7 +7549,7 @@ def plan_save(
         row_id = _t2_index_write(
             lambda db: db.plans.save_plan(
                 query=query,
-                plan_json=plan_json,
+                plan_json=plan_json_to_store,
                 outcome=outcome,
                 tags=tags,
                 project=project,
@@ -7548,7 +7562,10 @@ def plan_save(
             tool="plan_save", tier="plan",
             project=project, target_title=query[:80],
         )
-        return f"Saved plan: [{row_id}] {query[:80]}"
+        saved = f"Saved plan: [{row_id}] {query[:80]}"
+        if _declaration_removed:
+            saved += " (answer_kind field removed: only seeded templates declare an answer kind)"
+        return saved
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_save", e)
 
@@ -13651,7 +13668,15 @@ async def nx_answer(
                 )
                 # nexus-j5geq: route through daemon (eliminates second WAL writer).
                 _grow_scope_tags = scope or None
-                _grow_plan_json = best.plan_json
+                # RDR-232 Phase 2 (nexus-jypmj.2.1): record the grown plan's answer kind as unknown with
+                # grown provenance. A kind is recorded only when the request route that produced the plan
+                # was known; nothing passes a route to the inline planner yet (RequestCoverage and the
+                # eligibility filter are nexus-jypmj.2.2 and .2.3), so route_kind/route_source are None.
+                from nexus.plans.answer_kind import grown_plan_json  # noqa: PLC0415 — deferred, rare/branch-local
+
+                _grow_plan_json = grown_plan_json(
+                    best.plan_json, route_kind=None, route_source=None,
+                )
                 _grow_project = project_name
                 def _do_grow(db):
                     gid = db.plans.save_plan(
