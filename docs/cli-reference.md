@@ -5476,15 +5476,26 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
 - `evidence_request` (nexus-jypmj.1.2): the caller's reserved bindings
   `source`, `owner` and `project`, plus a subtree `scope` as owner
   qualifier: `{source, source_error, owner: {status, tumbler, ...},
-  sources}`. `owner.status` is `none`, `resolved`, `conflict` or
-  `unresolved`; a qualifier that failed picks nothing. `None` when no
-  reserved binding was passed.
+  sources, active_project}`. `owner.status` is `none`, `resolved`,
+  `conflict`, `unresolved` or `inferred`; a qualifier that failed picks
+  nothing. `inferred` (nexus-jypmj.2.4, RDR-232 assumption A5) is the third
+  tier of source resolution, after an explicit `owner`/`project` binding and a
+  catalog-subtree `scope`: with an RDR `source` and none of those, the
+  session's project qualifies the source when it is reliable (the host
+  declared it in `CLAUDE_PROJECT_DIR`, the server's working directory is that
+  directory, and the catalog has an owner for it). `scope="rdr"` is a corpus
+  and never selects a project. `active_project` (present once the tier was
+  consulted) is `{applied, reliable, owner, name, reason}`; when it is not
+  applied, `reason` says why and an ambiguous source stays `candidates`. An
+  inferred owner qualifies source resolution only: it never narrows the vector
+  or graph streams, and a document tumbler given as `source` is never held to
+  it. `None` when no reserved binding was passed.
 - `named_sources` (nexus-jypmj.1.4): how each named source resolved,
   `{sources: [{source, status, tumbler, title, file_path, qualified,
   candidates, candidates_truncated, detail}], dropped, catalog_calls}`.
   `status` is `resolved`, `candidates` (several documents fit; nothing is
   picked) or `unresolved`; `qualified` says an owner qualifier narrowed the
-  choice. Where one RDR number has sibling files (`rdr-200-*.md`: the RDR and
+  choice, and `inferred` that the qualifier was the active project. Where one RDR number has sibling files (`rdr-200-*.md`: the RDR and
   its phase notes), a bare `source=RDR-200` resolves to the one file whose
   frontmatter `id` is that number (nexus-xho6c, Sam's ruling of 2026-10-25);
   `detail` names the files passed over, and text mode says so on a

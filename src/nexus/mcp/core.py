@@ -10371,6 +10371,59 @@ async def _nx_answer_evidence_request(
         return build_evidence_request(bindings, scope=scope, name_lookup=_hung)
 
 
+async def _nx_answer_active_project(
+    request: EvidenceRequest,
+    project_names: list[str] | tuple[str, ...],
+    *,
+    scope: str,
+    deadline: float | None = None,
+) -> EvidenceRequest:
+    """The active-project tier of named-source resolution (RDR-232 Phase 2, nexus-jypmj.2.4, A5).
+
+    Resolution order: an explicit ``owner``/``project`` binding, then a catalog-subtree ``scope``, then the
+    session's project (:mod:`nexus.plans.active_project`). *request* comes back unchanged, with no catalog
+    call, unless it names an RDR source and no explicit tier qualified it. Otherwise the tier is consulted and
+    its outcome is on ``request.active_project``: when the session's project is reliable and the question's
+    text does not name another one, the request's owner becomes ``inferred``. An inferred owner qualifies
+    source resolution only; it is applied after the ``_nx_owners`` run binding was built, and
+    ``request_owners`` ignores it, so it never narrows the secondary streams (nexus-jypmj.1.18).
+
+    The detection reads git and the catalog, so it runs in a worker thread bounded by
+    ``PrimaryEvidenceCaps.max_seconds`` and *deadline*. It never raises; a failure is "no reliable active
+    project" with the reason in the envelope.
+    """
+    from nexus.plans.evidence import scope_subtree  # noqa: PLC0415 — deferred; matches this module's convention
+
+    if request.owner.status != "none" or scope_subtree(scope) is not None:
+        return request
+    if not any(s.kind == "rdr" for s in request.sources):
+        return request  # a tumbler names its document outright; there is nothing for a project to qualify
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from dataclasses import replace  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans import active_project as _ap  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.primary_evidence import DEFAULT_CAPS  # noqa: PLC0415 — deferred; matches this module's convention
+
+    def _detect() -> "_ap.ActiveProject":
+        try:
+            cat = _get_catalog()
+        except Exception as exc:  # noqa: BLE001 — a missing catalog is "not reliable", not a failure
+            _log.warning("nx_answer_active_project_catalog_unavailable", error=str(exc))
+            cat = None
+        return _ap.detect_active_project(cat)
+
+    try:
+        active = await asyncio.wait_for(
+            asyncio.to_thread(_detect), timeout=_nx_answer_seconds_left(DEFAULT_CAPS.max_seconds, deadline),
+        )
+    except asyncio.TimeoutError:
+        active = _ap.ActiveProject(False, reason="the lookup of the session's project stopped at the deadline")
+    except Exception as exc:  # noqa: BLE001 — the disclosure stage never raises
+        _log.warning("nx_answer_active_project_failed", error=type(exc).__name__)
+        active = _ap.ActiveProject(False, reason=f"the session's project could not be determined ({type(exc).__name__})")
+    tier = _ap.apply_active_project(request.owner, active, scope=scope, project_names=project_names)
+    return replace(request, owner=tier.owner, active_project=tier.to_wire())
+
+
 async def _nx_answer_named_sources(
     request: EvidenceRequest, *, deadline: float | None = None,
 ) -> NamedSourceResolution | None:
@@ -11686,6 +11739,13 @@ async def nx_answer(
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
     # resolved documents is merged at the runner (nexus-jypmj.1.6).
+    # nexus-jypmj.2.4: the third tier, after the explicit owner/project and the owner scope: the session's
+    # project, only when it is reliable and nothing explicit qualified an RDR source. Applied after the
+    # `_nx_owners` binding above, so an inferred owner never narrows the secondary streams.
+    _evidence_request = await _nx_answer_active_project(
+        _evidence_request, [h.text for h in _request_coverage.source_hints if h.kind == "project"],
+        scope=scope, deadline=deadline,
+    )
     _named_sources = await _nx_answer_named_sources(_evidence_request, deadline=deadline)
     # A source the resolver resolved to exactly one document has nothing left to tell apart, so its
     # "no project qualifier" ambiguity (derived before resolution) is withdrawn.
@@ -11857,6 +11917,14 @@ async def nx_answer(
             "subtree, so this run was NOT scoped (broad search). Pass one scope token to filter.]"
             if _scope_normalized else None
         )
+        # nexus-jypmj.2.4: an ambiguous source with no active project to break the tie says why none applied.
+        _active = _evidence_request.active_project
+        _active_notice = (
+            f"[evidence request: no active project was applied to the ambiguous source: {_active['reason']}]"
+            if _active and not _active.get("applied") and _evidence_request.owner.status == "none"
+            and _named_sources is not None and any(s.status == "candidates" for s in _named_sources.sources)
+            else None
+        )
         _extra_lines = [
             line for line in (
                 _budget_warning_text, _dropped_reduce_text, _scope_normalized_text, _scope_notice,
@@ -11871,6 +11939,7 @@ async def nx_answer(
                         primary_stream=not _single_query_fast_path,
                     ) if _named_sources else ()
                 ),
+                _active_notice,
             )
             if line
         ]

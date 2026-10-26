@@ -201,6 +201,8 @@ class ResolvedSource:
     #: The RDR number the resolved document's own path carries (``docs/rdr/rdr-084-....md``), or
     #: ``None`` when the document is not an RDR file. The lifecycle stream (nexus-jypmj.1.7) keys on it.
     rdr_number: int | None = None
+    #: The qualifier that narrowed the choice was the active project, inferred (nexus-jypmj.2.4), not a binding.
+    inferred: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -210,6 +212,7 @@ class ResolvedSource:
             "title": self.title,
             "file_path": self.file_path,
             "qualified": self.qualified,
+            "inferred": self.inferred,
             "candidates": [asdict(c) for c in self.candidates],
             "candidates_truncated": self.candidates_truncated,
             "detail": self.detail,
@@ -260,11 +263,17 @@ class NamedSourceResolution:
         lines: list[str] = []
         for s in self.sources:
             if s.status == "resolved":
-                if not s.qualified:
-                    tail = (
-                        "" if primary_stream else
-                        "; this single-step plan has no primary evidence stream, so the document is not read as evidence"
+                tail = (
+                    "" if primary_stream else
+                    "; this single-step plan has no primary evidence stream, so the document is not read as evidence"
+                )
+                if s.inferred:
+                    lines.append(
+                        f"[evidence request: named source {s.ref.value} resolved to {s.tumbler} by the active "
+                        f"project, inferred from the session; no owner or project binding confirmed it (pass owner "
+                        f"or project to pin it){tail}]"
                     )
+                elif not s.qualified:
                     lines.append(
                         f"[evidence request: named source {s.ref.value} resolved to {s.tumbler} but was not "
                         f"owner-qualified (pass owner or project to pin it){tail}]"
@@ -311,6 +320,9 @@ class _Qualifier:
     #: ``repo_root``), or ``""`` for an owner with no repo root. It lets ``rdr_canonical`` admit a stale-owner
     #: registration of the project's own file; empty degrades to owner-only matching.
     source_prefix: str = ""
+    #: The owner is the active project, inferred (nexus-jypmj.2.4): it narrows an RDR number among projects, but a
+    #: document tumbler is never held to it, and it yields to the unqualified lookup when the project has no match.
+    inferred: bool = False
 
     @property
     def text(self) -> str:
@@ -386,7 +398,8 @@ def _qualifier(owner: OwnerResolution, calls: _Calls) -> tuple[_Qualifier | None
     qualifier cannot be honoured. A qualifier that cannot be honoured is never loosened."""
     if owner.status == "none":
         return None, ""
-    if owner.status != "resolved" or not owner.tumbler:
+    inferred = owner.status == "inferred"
+    if not (owner.status == "resolved" or inferred) or not owner.tumbler:
         return None, f"{OWNER_FAILURE_PREFIX}{owner.status}: {owner.detail}".rstrip(": ")
     if calls.cat is None:
         return None, "the catalog is unavailable, so the owner qualifier cannot be checked"
@@ -396,14 +409,19 @@ def _qualifier(owner: OwnerResolution, calls: _Calls) -> tuple[_Qualifier | None
         row = calls.owner(str(owner_addr))
     except Exception as exc:  # noqa: BLE001 — the disclosure stage never raises; a failed probe is reported
         _log.warning("named_source_owner_probe_failed", owner=str(owner_addr), error=str(exc))
+        if inferred and not isinstance(exc, LookupDeadline):
+            return None, ""  # an inference that cannot be checked is dropped, not turned into a failure
         return None, calls.failed(f"owner {owner_addr}", exc)
+    if row is None and inferred:
+        return None, ""  # the inferred project is not a registered owner: resolve as if no tier had applied
     if row is None:
         return None, (
             f"owner {owner_addr} is not in the catalog (the qualifier {owner.tumbler} names no "
             "registered owner); nothing was searched"
         )
     return _Qualifier(
-        owner_addr, tumbler if tumbler.depth >= 3 else None, _owner_source_prefix(row),
+        owner_addr, tumbler if tumbler.depth >= 3 and not inferred else None, _owner_source_prefix(row),
+        inferred=inferred,
     ), ""
 
 
@@ -421,16 +439,18 @@ def _unresolved(ref: SourceRef, detail: str, **kw: Any) -> ResolvedSource:
 
 
 def _resolved(ref: SourceRef, entry: CatalogEntry, qualified: bool,
-              candidates: tuple[SourceCandidate, ...] = ()) -> ResolvedSource:
+              candidates: tuple[SourceCandidate, ...] = (), inferred: bool = False) -> ResolvedSource:
     return ResolvedSource(
         ref=ref, status="resolved", tumbler=str(entry.tumbler), title=entry.title,
         file_path=entry.file_path, collection=entry.physical_collection,
         chunk_count=entry.chunk_count, qualified=qualified, candidates=candidates,
-        rdr_number=_key_number(entry),
+        rdr_number=_key_number(entry), inferred=inferred,
     )
 
 
 def _resolve_tumbler(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls) -> ResolvedSource:
+    if qualifier is not None and qualifier.inferred:
+        qualifier = None  # a tumbler names one document outright; the session's project cannot reject it
     try:
         entry = calls.resolve(ref.value)
     except Exception as exc:  # noqa: BLE001 — reported, never raised
@@ -765,28 +785,42 @@ def _resolve_rdr(
         return _unresolved(ref, calls.failed(ref.value, exc))
 
     scoped = [e for e in found if admitted(e)]
+    fallback = ""  # why an inferred qualifier was set aside (the active project holds no such RDR)
+    if not scoped and found and qualifier is not None and qualifier.inferred:
+        # The session's project has no such number. The inference was a tiebreaker for a number that more than
+        # one project holds, not a restriction: resolve as if no tier had applied, and say so.
+        fallback = f"the active project (owner {qualifier.owner}) holds no {ref.value}, so it was not used"
+        qualifier = None
+        scoped = list(found)
+    inferred = qualifier is not None and qualifier.inferred
     foreign = len(found) - len(scoped)
     candidates = tuple(SourceCandidate.of(e) for e in scoped)
-    where = f" under {qualifier.text}" if qualifier is not None else ""
+    where = (
+        f" under {qualifier.text}{' (the active project, inferred)' if inferred else ''}"
+        if qualifier is not None else ""
+    )
     note = f" ({foreign} in other projects ignored)" if foreign else ""
+
+    def noted(detail: str) -> str:
+        return "; ".join(part for part in (fallback, detail) if part)
 
     if truncated:
         return _unresolved(
             ref,
-            f"the candidate lookup for {ref.value} reached its cap of {caps.max_candidates_per_lookup} "
-            "and may be hiding a second candidate; name the document by its tumbler",
+            noted(f"the candidate lookup for {ref.value} reached its cap of {caps.max_candidates_per_lookup} "
+                  "and may be hiding a second candidate; name the document by its tumbler"),
             candidates=candidates, candidates_truncated=True,
         )
     groups = group_rdr_candidates(scoped)
     if not groups:
-        return _unresolved(ref, f"no registered document for {ref.value}{where}{note}")
+        return _unresolved(ref, noted(f"no registered document for {ref.value}{where}{note}"))
     chosen = ""  # the note of a choice among sibling files by their frontmatter id
     if len(groups) > 1:
         if frontmatter_id is None:
             return ResolvedSource(
-                ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None,
-                detail=(f"{len(groups)} documents carry the number {ref.value}{where}; "
-                        "name the document by its tumbler as the source"),
+                ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None, inferred=inferred,
+                detail=noted(f"{len(groups)} documents carry the number {ref.value}{where}; "
+                             "name the document by its tumbler as the source"),
             )
         # Sibling files (rdr-200-*.md, phase notes beside the RDR): the one whose frontmatter id is this
         # number is the RDR (Sam, 2026-10-25). Zero or several carriers is still candidates, with the reason.
@@ -795,8 +829,8 @@ def _resolve_rdr(
         )
         if won is None:
             return ResolvedSource(
-                ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None,
-                detail=f"{len(groups)} documents carry the number {ref.value}{where}: {chosen}",
+                ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None, inferred=inferred,
+                detail=noted(f"{len(groups)} documents carry the number {ref.value}{where}: {chosen}"),
             )
         groups = {won: groups[won]}
     (key, group), = groups.items()
@@ -804,8 +838,8 @@ def _resolve_rdr(
     if qualifier is None and len(owners) > 1:  # a qualifier already chose the project; its stale owners are its own
         return ResolvedSource(
             ref=ref, status="candidates", candidates=candidates, qualified=False,
-            detail=(f"{ref.value} exists in {len(owners)} projects ({', '.join(sorted(str(o) for o in owners))}); "
-                    "pass owner or project to choose"),
+            detail=noted(f"{ref.value} exists in {len(owners)} projects ({', '.join(sorted(str(o) for o in owners))}); "
+                         "pass owner or project to choose"),
         )
     # One basename identity under one owner: the canonical rule decides among the registrations
     # (an rdr registration beats a legacy prose one; two of a kind are not guessed between).
@@ -815,12 +849,13 @@ def _resolve_rdr(
     )
     if winner is None:
         return ResolvedSource(
-            ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None,
-            detail=f"{ref.value} is registered more than once{where}; name the document by its tumbler as the source",
+            ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None, inferred=inferred,
+            detail=noted(f"{ref.value} is registered more than once{where}; name the document by its tumbler as the source"),
         )
     entry = next(e for e in group if e.tumbler == winner)
-    out = _resolved(ref, entry, qualifier is not None, candidates)
-    return replace(out, detail=chosen) if chosen else out
+    out = _resolved(ref, entry, qualifier is not None, candidates, inferred)
+    detail = noted(chosen)
+    return replace(out, detail=detail) if detail else out
 
 
 def resolve_named_sources(

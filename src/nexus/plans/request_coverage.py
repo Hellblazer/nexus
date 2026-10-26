@@ -1043,8 +1043,9 @@ def _source_ambiguities(
             out.append(Ambiguity(
                 "source_unqualified", s.value,
                 f"{s.value} has no project qualifier: no owner or project binding and no catalog-subtree scope "
-                "(scope 'rdr' is a corpus, not a project), and the active-project tier is not wired, so a "
-                f"project that shares this number cannot be told apart.{extra}",
+                "(scope 'rdr' is a corpus, not a project). The active-project tier runs after this derivation "
+                "(evidence_request.active_project says what it did); without it a project that shares this number "
+                f"cannot be told apart.{extra}",
             ))
     by_source: dict[str, set[str]] = {}
     for h in hints:

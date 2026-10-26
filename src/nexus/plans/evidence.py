@@ -362,9 +362,16 @@ class OwnerResolution:
     ``unresolved`` (a named qualifier that names no single owner; nothing
     guessed). ``contributions`` records which inputs (``owner``,
     ``project``, ``scope``) supplied which tumbler.
+
+    ``inferred`` (nexus-jypmj.2.4) is the active-project tier
+    (:mod:`nexus.plans.active_project`): the caller supplied no qualifier and the
+    session's project stands in for one (``contributions`` is
+    ``(("active_project", tumbler),)``). It qualifies source resolution only and
+    never narrows the secondary streams. :func:`resolve_owner_qualifier` never
+    returns it; the tier builds it after the explicit tiers returned ``none``.
     """
 
-    status: Literal["none", "resolved", "conflict", "unresolved"]
+    status: Literal["none", "resolved", "conflict", "unresolved", "inferred"]
     tumbler: str | None = None
     contributions: tuple[tuple[str, str], ...] = ()
     detail: str = ""
@@ -483,17 +490,23 @@ class EvidenceRequest:
     #: (the single-source shape callers already read) and ``None`` when
     #: there are several; read ``sources`` for the full request.
     sources: tuple[SourceRef, ...] = ()
+    #: What the active-project tier did (``ActiveProjectTier.to_wire()``), or ``None`` when it was not
+    #: consulted (nexus-jypmj.2.4). Carried in the envelope; never part of the owner narrowing.
+    active_project: Mapping[str, Any] | None = None
 
     def to_wire(self) -> dict[str, Any] | None:
         """Envelope form, or ``None`` when no reserved binding was passed."""
         if not self.requested:
             return None
-        return {
+        wire: dict[str, Any] = {
             "source": self.source.to_wire() if self.source else None,
             "source_error": self.source_error,
             "owner": self.owner.to_wire(),
             "sources": [s.to_wire() for s in self.sources],
         }
+        if self.active_project is not None:
+            wire["active_project"] = dict(self.active_project)
+        return wire
 
     def disclosures(self) -> list[str]:
         """One-line text-mode notices for what the request could not honour."""
