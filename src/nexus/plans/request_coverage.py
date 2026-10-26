@@ -267,6 +267,9 @@ class RequestCoverage:
         may sit where nothing looked, so the stream is read."""
         if any(t in LIFECYCLE_TOPICS for f in self.facets for t in f.topics):
             return True
+        # A topic sentence ("Summarize RDR-210 status.") is the subject, not a facet, but its topic still counts.
+        if any(t in LIFECYCLE_TOPICS for s in self.subject for t in _topics(_CUE_VERB.sub("", s, count=1))):
+            return True
         return (not self.facets_certain and self.source_origin == "explicit"
                 and any(s.kind == "rdr" for s in self.named_sources))
 
@@ -700,6 +703,8 @@ _DISCOVERY_VERB = re.compile(
     r"touch(?:es)?)\b",
     re.IGNORECASE,
 )
+#: A second question joined to the first ("... RDR-155 and what remains open?") asks for more than one thing.
+_AND_WH = re.compile(r"\band\s+(?:what|how|which|who|whom|whose|when|where|why|whether)\b", re.IGNORECASE)
 _WH_LEAD = re.compile(r"^(?:which|what)\s+((?:\S+\s*){1,3})", re.IGNORECASE)
 
 
@@ -765,8 +770,10 @@ def _strong_signals(text: str, facet_count: int, listed: bool) -> set[str]:
 def _weak_lookup(text: str, facet_count: int, certain: bool) -> bool:
     """A bare question word opening, with nothing stronger: ``lookup`` only for a question that asks ONE thing
     (at most one facet, and a clause structure that was read). A question with more facets than one is a
-    request for several things, not a lookup, so a lookup plan must not be made eligible for it."""
-    if facet_count > 1 or not certain:
+    request for several things, not a lookup, so a lookup plan must not be made eligible for it. A wh-clause
+    joined by ``and <wh-word>`` is a second question that the facet parse keeps inside the one item, so it
+    counts as a second facet here."""
+    if facet_count > 1 or not certain or _AND_WH.search(text):
         return False
     lead = text.strip()
     if re.match(r"^(?:which|what|who|when|where)\b", lead, re.IGNORECASE) and not re.match(
@@ -1194,7 +1201,8 @@ async def structured_extract(
     answers outside the schema. On success only what the first pass lacked is taken: the kind when it was
     ``unknown`` and the facets when the clause structure was uncertain. The model's facets replace the first
     pass's only when together with the constraints and subject they cover every content word of the question;
-    otherwise the ``whole_question`` facet stays beside them and the structure stays uncertain. First-pass
+    otherwise the ``whole_question`` facet stays beside them and the structure stays uncertain. A question
+    past the cap is only sent in part, so it always takes the second path. First-pass
     constraints and the caller's explicit bindings are never replaced. *usage_sink* is where the dispatch
     reports its cost; the report carries the sum. The call is never recursive ``nx_answer`` and never
     retried.
@@ -1250,7 +1258,10 @@ async def structured_extract(
         covering = (
             list(facet_texts) + [c.text for c in coverage.constraints] + list(coverage.subject)
         )
-        if not uncovered_words(question[:_MAX_QUESTION_CHARS], covering):
+        # A question past the cap was only half sent: the model never saw its tail, so its reading can neither
+        # replace the first pass's whole_question facet (which holds the tail) nor make the structure certain.
+        full = _squash(question or "")
+        if len(full) <= _MAX_QUESTION_CHARS and not uncovered_words(full, covering):
             facets, certain = tuple(model_facets), True
         else:
             # The model's reading missed part of the question: keep the whole question beside it.

@@ -582,6 +582,23 @@ def test_a_multi_facet_question_is_never_typed_lookup(question: str) -> None:
 @pytest.mark.parametrize(
     "question",
     [
+        "What is the migration path for RDR-155 and what remains open?",
+        "What is the T2 schema and how is it migrated?",
+        "Who rejected RDR-100 and when was it superseded?",
+        "Who rejected RDR-100 and why?",
+    ],
+)
+def test_a_wh_clause_joined_by_and_is_a_second_question_and_not_lookup(question: str) -> None:
+    """The facet parse keeps ``and <wh-word>`` inside one item (a wh-clause is never split), so the kind typing
+    counts it itself: one certain facet is not enough for ``lookup`` when a second question is joined on."""
+    cov = derive_request_coverage(question)
+    assert cov.facets_certain, "the premise: one item, read as certain"
+    assert (cov.answer_kind, cov.kind_decision) == ("unknown", "unknown")
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
         "What is causing the timeout in the catalog sync?",
         "Which is faster, hybrid search or plain vector search?",
     ],
@@ -837,6 +854,24 @@ def test_a_question_about_something_else_does_not(question: str) -> None:
     assert derive_request_coverage(question).wants_lifecycle_stream is False
 
 
+@pytest.mark.parametrize(
+    ("question", "wanted"),
+    [
+        ("Summarize RDR-210 status. List the open bugs.", True),
+        ("Review RDR-210 gate history. List the open bugs.", True),
+        ("Tell me about RDR-210 lifecycle. List the open bugs.", True),
+        # the cue verb is not a topic, and a subject sentence with no lifecycle word has none
+        ("Review RDR-210. List the open bugs.", False),
+        ("Summarize RDR-210 design. List the open bugs.", False),
+        ("Synthesize RDR-155. List the storage modes.", False),
+    ],
+)
+def test_a_lifecycle_topic_in_the_subject_sentence_reaches_the_stream(question: str, wanted: bool) -> None:
+    cov = derive_request_coverage(question)
+    assert cov.subject, "the premise: the first sentence is read as the subject, not as a facet"
+    assert cov.wants_lifecycle_stream is wanted
+
+
 def test_an_uncertain_clause_structure_with_a_bound_rdr_source_reads_the_stream() -> None:
     q = "Tell me about plan matching, the cache, and the matcher cost. Cite your sources."
     bound = derive_request_coverage(q, evidence_request=_request({"source": "RDR-084", "project": "ART"}))
@@ -963,6 +998,43 @@ def test_model_facets_that_cover_the_question_replace_the_whole_question() -> No
     fake = _Dispatch()
     after = asyncio.run(structured_extract(_uncertain(), _TWO_SENTENCE, dispatch=fake, timeout=5, enabled=True))
     assert [f.origin for f in after.facets] == ["clause"] * 3 and after.facets_certain is True
+
+
+def _over_cap_question_cut_on_a_word(tail: str) -> tuple[str, str]:
+    """``(question, head)``: the head is exactly the cap long (the cut lands on the end of a word), then the tail."""
+    words = ("Describe how the plan matcher cache works. " + _FILLER * 90).split()
+    head = ""
+    for w in words:
+        if len(head) + len(w) + 1 > rc._MAX_QUESTION_CHARS:
+            break
+        head = f"{head} {w}" if head else w
+    head += " " + "p" * (rc._MAX_QUESTION_CHARS - len(head) - 1)
+    assert len(head) == rc._MAX_QUESTION_CHARS
+    return f"{head} {tail}", head
+
+
+_N1_TAIL = "What is the acceptance status of RDR-090 and how did its gate end?"
+
+
+@pytest.mark.parametrize("covers_the_tail", [False, True], ids=["model-read-the-head-only", "model-facets-name-the-tail"])
+def test_model_facets_never_replace_the_whole_question_of_an_over_cap_question(covers_the_tail: bool) -> None:
+    """The model is sent the first cap characters. Its facets that cover those characters (or even name the tail)
+    must not replace the whole_question facet, which holds the tail, nor make the structure certain: a
+    gate/status clause past the cap must still reach the lifecycle stream."""
+    question, head = _over_cap_question_cut_on_a_word(_N1_TAIL)
+    facet_texts = [" ".join(sorted(set(head.split())))[:300]]
+    if covers_the_tail:
+        facet_texts.append(_N1_TAIL)
+    before = derive_request_coverage(question)
+    assert before.facets_certain is False and before.wants_lifecycle_stream is True
+    assert rc.uncovered_words(question[: rc._MAX_QUESTION_CHARS], facet_texts) == [], "the premise: the head is covered"
+    fake = _Dispatch({"answer_kind": "synthesis", "facets": facet_texts, "constraints": []})
+    after = asyncio.run(structured_extract(before, question, dispatch=fake, timeout=5, enabled=True))
+    assert after.extraction.outcome == "ok"
+    assert after.facets_certain is False
+    whole = [f for f in after.facets if f.origin == "whole_question"]
+    assert len(whole) == 1 and _N1_TAIL in whole[0].text, "the tail survives in the whole_question facet"
+    assert after.wants_lifecycle_stream is True
 
 
 def test_the_prompt_text_is_capped_at_the_question_cap() -> None:
