@@ -557,7 +557,9 @@ def test_run_index_logs_skipped_binary_files(tmp_path):
 def test_run_index_logs_empty_chunks(tmp_path):
     from nexus.indexer import _run_index
     repo = tmp_path / "repo"; repo.mkdir()
-    (repo / "empty.py").write_text("   \n\n   \n")
+    # Real content with the chunker mocked to return []: a whitespace-only file
+    # no longer reaches the indexer (nexus-5j8fp skips it before registration).
+    (repo / "empty.py").write_text("x = 1\n")
     db, _ = _mock_db()
     with _patches(db, extra={"nexus.chunker.chunk_file": {"return_value": []}}):
         with patch("nexus.indexer._log") as l1, patch("nexus.code_indexer._log") as l2:

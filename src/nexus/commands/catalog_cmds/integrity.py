@@ -30,7 +30,7 @@ import click
 import structlog
 
 from nexus.catalog.tumbler import Tumbler
-from nexus.classifier import looks_like_binary_content
+from nexus.classifier import is_whitespace_only_text, looks_like_binary_content
 
 _log = structlog.get_logger(__name__)
 
@@ -611,8 +611,8 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
 
     zero_content_by_design -- the source resolves (via the SAME provenance
     rules ``reconcile_stale._resolve_provenance`` uses) to a file that
-    EXISTS but is verifiably unchunkable by construction: zero bytes, or
-    binary content (``_is_zero_content_by_design``). Re-indexing such a
+    EXISTS but is verifiably unchunkable by construction: zero bytes,
+    binary content, or whitespace-only text (``_is_zero_content_by_design``). Re-indexing such a
     doc can never produce a chunk — it must never be prescribed a re-index
     (nexus-rqsh1: 11 of nexus owner 1-1's 12 "gapped" docs were exactly
     this, reappearing in every census forever since re-index is not a
@@ -658,9 +658,11 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
 
 
 def _is_zero_content_by_design(path: Path) -> bool:
-    """True when *path* is a verifiably unchunkable source: zero bytes, or
+    """True when *path* is a verifiably unchunkable source: zero bytes,
     binary content per :func:`nexus.classifier.looks_like_binary_content`
-    (nexus-rqsh1) -- the same sniff the indexer's producer-side fix
+    (nexus-rqsh1), or whitespace-only text per
+    :func:`nexus.classifier.is_whitespace_only_text` (nexus-5j8fp) -- the
+    same sniffs the indexer's producer-side fix
     (7733b48a9) uses to skip registering a catalog document in the first
     place, reused here rather than forked so the two never drift.
 
@@ -676,7 +678,9 @@ def _is_zero_content_by_design(path: Path) -> bool:
         return False
     if size == 0:
         return True
-    return looks_like_binary_content(path)
+    # nexus-5j8fp: whitespace-only text, the second guard the indexer applies
+    # before registration.
+    return looks_like_binary_content(path) or is_whitespace_only_text(path)
 
 
 def _resolves_to_zero_content_by_design(e: object, owner_roots: dict[str, str]) -> bool:
@@ -739,7 +743,7 @@ _RDR145_EXEMPT_NOTE = (
 # nexus-cotmr round-1 exemption error, which hid a population like this
 # from the count entirely).
 _ZERO_CONTENT_BY_DESIGN_NOTE = (
-    "Zero-byte or binary source -- will NEVER chunk, no matter how many "
+    "Zero-byte, binary or whitespace-only source -- will NEVER chunk, no matter how many "
     "times it is re-indexed. The producer no longer registers new catalog "
     "documents for these (commit 7733b48a9); this population is the "
     "pre-fix residue. Remedy is `nx catalog reconcile-stale --execute "
@@ -1186,8 +1190,8 @@ def _emit_verify_report(
             if zero_content["total"]:
                 click.echo(
                     f"  {zero_content['total']} zero-content-by-design — "
-                    "will never chunk (zero-byte or binary source, "
-                    "nexus-rqsh1); producer no longer registers these; "
+                    "will never chunk (zero-byte, binary or whitespace-only "
+                    "source, nexus-rqsh1/nexus-5j8fp); producer no longer registers these; "
                     "remedy is tombstone, not re-index:"
                 )
                 for row in zero_content["by_collection"]:

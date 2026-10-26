@@ -5064,7 +5064,7 @@ def _run_index(
 
     Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
-    from nexus.classifier import ContentClass, classify_file, looks_like_binary_content  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.classifier import WHITESPACE_ONLY_MAX_BYTES, ContentClass, classify_file, is_whitespace_only_text, looks_like_binary_content  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.config import load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -5214,7 +5214,7 @@ def _run_index(
     # don't hit this because ``_git_ls_files``/rglob fallback both build
     # paths as ``repo / rel`` (unresolved) already.
     # nexus-rqsh1: files that would register a catalog document but never
-    # produce a chunk (zero-byte, or binary content misclassified as
+    # produce a chunk (zero-byte, whitespace-only, or binary content misclassified as
     # prose). Tracked separately from skipped_oversize/ContentClass.SKIP
     # for observability — see the per-skip debug logs below. Declared
     # here (round 2, substantive-critic Critical 2026-08-17) so the
@@ -5247,6 +5247,14 @@ def _run_index(
     # reclaim.
     rdr_excluded_present: set[str] = set()
 
+    # nexus-5j8fp: worktree-relative paths this run skipped as whitespace-only
+    # (RDR walk and the main walk). A file still on disk and positively
+    # whitespace-only has no rename ambiguity, so one that still has a stored
+    # document rides the same same-run tombstone as rdr_excluded_present
+    # instead of waiting two full housekeeping runs (which a --since-head
+    # hook never runs). Housekeeping stays the fallback.
+    whitespace_skipped_present: set[str] = set()
+
     rdr_md_paths: list[tuple[float, Path]] = []
     for rdr_rel in dict.fromkeys(rdr_paths):  # de-dupe while preserving order
         rdr_dir = repo / rdr_rel
@@ -5271,8 +5279,10 @@ def _run_index(
                     # candidate_files' arbitrary extensions), so a zero-byte
                     # check alone suffices here — no binary-content sniff
                     # needed.
+                    _md_size: int | None = None
                     try:
-                        if md_file.stat().st_size == 0:
+                        _md_size = md_file.stat().st_size
+                        if _md_size == 0:
                             skipped_unchunkable.append((md_file, "zero_byte"))
                             _log.debug(
                                 "unchunkable_zero_byte_rdr_skipped",
@@ -5281,6 +5291,19 @@ def _run_index(
                             continue
                     except OSError:
                         pass  # defer to per-file path
+                    # nexus-5j8fp: whitespace-only text chunks to nothing too.
+                    if (
+                        _md_size is not None
+                        and _md_size <= WHITESPACE_ONLY_MAX_BYTES
+                        and is_whitespace_only_text(md_file)
+                    ):
+                        skipped_unchunkable.append((md_file, "whitespace_only"))
+                        whitespace_skipped_present.add(str(md_file.relative_to(repo)))
+                        _log.debug(
+                            "unchunkable_whitespace_only_rdr_skipped",
+                            path=str(md_file),
+                        )
+                        continue
                     rdr_md_paths.append((frecency_map.get(md_file, 0.0), md_file))
     rdr_md_paths.sort(key=lambda x: x[0], reverse=True)
     have_rdr_files = bool(rdr_md_paths)
@@ -5377,7 +5400,15 @@ def _run_index(
 
         match classification:
             case ContentClass.CODE:
-                code_files.append((score, path))
+                # nexus-5j8fp: a 1-2 byte whitespace-only source file (serena's
+                # __init__.py) passes the zero-byte guard, chunk_file returns [],
+                # and the document registers but never completes its fence.
+                if file_size <= WHITESPACE_ONLY_MAX_BYTES and is_whitespace_only_text(path):
+                    skipped_unchunkable.append((path, "whitespace_only"))
+                    whitespace_skipped_present.add(str(rel))
+                    _log.debug("unchunkable_whitespace_only_skipped", path=str(path))
+                else:
+                    code_files.append((score, path))
             case ContentClass.PROSE:
                 # nexus-rqsh1: extensions unknown to classify_file's
                 # code/skip/binary-asset tables fall through to PROSE
@@ -5393,6 +5424,13 @@ def _run_index(
                         path=str(path),
                         ext=path.suffix.lower(),
                     )
+                elif file_size <= WHITESPACE_ONLY_MAX_BYTES and is_whitespace_only_text(path):
+                    # nexus-5j8fp: ghidra's 1-2 byte Module.manifest files fall
+                    # through to PROSE and fail every run with "all chunks empty
+                    # after whitespace filtering".
+                    skipped_unchunkable.append((path, "whitespace_only"))
+                    whitespace_skipped_present.add(str(rel))
+                    _log.debug("unchunkable_whitespace_only_skipped", path=str(path))
                 else:
                     prose_files.append((score, path))
             case ContentClass.PDF:
@@ -5409,6 +5447,16 @@ def _run_index(
                     path=str(path),
                     ext=path.suffix.lower(),
                 )
+
+    if whitespace_skipped_present:
+        # nexus-5j8fp: same-run retirement of a still-present whitespace-only
+        # file's existing document, through the nexus-d6qmz tombstone path
+        # (see rdr_excluded_present above). Filtered to paths with a live
+        # stored document so steady state leaves delta_deleted empty.
+        _ws_stored = _stored_paths_among(repo, whitespace_skipped_present)
+        if _ws_stored:
+            _ws_already = set(delta_deleted)
+            delta_deleted.extend(sorted(_ws_stored - _ws_already))
 
     # Sort all lists descending by frecency
     code_files.sort(key=lambda x: x[0], reverse=True)
@@ -5454,7 +5502,7 @@ def _run_index(
             )
 
     # nexus-rqsh1: summary log for the unchunkable-skip population (zero-
-    # byte files, binary content misclassified as prose). Info level, not
+    # byte files, binary content misclassified as prose, whitespace-only text). Info level, not
     # warning — this is the fix draining a known phantom class, not an
     # anomaly the operator needs to act on.
     if skipped_unchunkable:

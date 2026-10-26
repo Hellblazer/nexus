@@ -3751,7 +3751,7 @@ def index_markdown(
     # function) targets a file the operator named explicitly: fail
     # loud, before any catalog write, rather than silently registering
     # nothing while reporting plain success.
-    from nexus.classifier import looks_like_binary_content  # noqa: PLC0415 — circular-dep avoidance (nexus.classifier)
+    from nexus.classifier import is_whitespace_only_text, looks_like_binary_content  # noqa: PLC0415 — circular-dep avoidance (nexus.classifier)
     from nexus.errors import UnchunkableContentError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
     try:
         _md_size = md_path.stat().st_size
@@ -3765,6 +3765,12 @@ def index_markdown(
         raise UnchunkableContentError(
             f"{md_path} looks like binary content, not markdown text, "
             "and cannot be chunked"
+        )
+    # nexus-5j8fp: a whitespace-only file chunks to nothing either, and would
+    # mint a chunk_count=0 document whose fence can never complete.
+    if is_whitespace_only_text(md_path):
+        raise UnchunkableContentError(
+            f"{md_path} contains only whitespace and cannot be chunked"
         )
 
     # RDR-103 Phase 5 leaf fallback (see _index_document for the

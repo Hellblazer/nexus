@@ -3768,7 +3768,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # nexus-y8qtj / nexus-3o4lt: fail-loud identity errors surface the same way.
         raise click.ClickException(str(exc)) from exc
     except UnchunkableContentError as exc:
-        # nexus-rqsh1 round 2: a zero-byte or binary-content file named
+        # nexus-rqsh1 round 2: a zero-byte, whitespace-only or binary-content file named
         # explicitly on this command must fail loud, before any catalog
         # write -- see index_markdown's guard for the full rationale.
         raise click.ClickException(str(exc)) from exc

@@ -22,13 +22,13 @@ Every file is classified into one of four categories:
   that receive line-based chunking
 - **PDF**: `.pdf` files are extracted and chunked separately, then stored in `docs__`.
 - **PROSE**: `.md`, `.markdown`, and any extension not in CODE, PDF, or SKIP.
-- **SKIP** (not indexed): `_SKIP_EXTENSIONS` in `src/nexus/classifier.py` names 23
+- **SKIP** (not indexed): `_SKIP_EXTENSIONS` in `src/nexus/classifier.py` names 24
   known-noise config/data extensions — `.xml`, `.json`, `.yml`, `.yaml`, `.toml`,
   `.properties`, `.ini`, `.cfg`, `.conf`, `.gradle`, `.html`, `.htm`, `.css`, `.svg`,
-  `.cmd`, `.bat`, `.ps1`, `.lock`, `.txt`, `.csv`, `.tsv`, `.dat`, `.log` — plus a
+  `.drawio`, `.cmd`, `.bat`, `.ps1`, `.lock`, `.txt`, `.csv`, `.tsv`, `.dat`, `.log` — plus a
   separate `_BINARY_EXTENSIONS` set of 76 binary-asset extensions (images, audio,
   video, fonts, archives, compiled objects, Office documents, embedded databases,
-  git/data containers) that are also classified SKIP. 99 extensions total route to
+  git/data containers) that are also classified SKIP. 100 extensions total route to
   SKIP.
 
 **Extensionless files** (e.g., `Makefile`, `LICENSE`): if the first two bytes are `#!`
@@ -242,10 +242,24 @@ in the background after each qualifying git operation. Install them with `nx hoo
 ## Unchunkable Sources and Completion Fencing (7.8/7.9)
 
 The indexer never registers a catalog document for a file it will not chunk. `repo`
-discovery silently skips zero-byte and binary-content files (counted in a
+discovery silently skips zero-byte, binary-content and whitespace-only files (a
+non-empty text file of at most 4 KB whose `str.strip()` is empty, such as a lone newline in an
+`__init__.py` or a `Module.manifest`; counted in a
 `skipped_unchunkable` summary line — expected noise in an unbounded walk); the single-file
 forms (`md`, `pdf`, `rdr`) instead fail loud with a clean error naming the file, since the
-operator named that exact file and a silent no-op would mislead.
+operator named that exact file and a silent no-op would mislead. A row an earlier run
+registered for such a file is retired in the same run that skips it: on a full run for
+every such file, and on `--since-head` for a file the commit changed (a `--since-head` run
+only walks the delta). The file is still on disk and positively blank, so there is no
+rename to wait out, and its document is tombstoned through the same path a git deletion
+takes (its chunks follow when `nx catalog purge-trash` reclaims the tombstone, as for any
+deleted document). Housekeeping's two-run miss-count sweep remains the fallback, but it runs
+only on a full run, so in a repo indexed only by the post-commit hook, the row of an
+untouched blank file waits for a full `nx index repo` or for
+`nx catalog reconcile-stale --execute tombstone-zero-content`, which also serves an install
+that does not re-index. `.drawio` joins the skipped extensions: an existing `.drawio`
+document is tombstoned by housekeeping's sweep (two full runs) once the file leaves
+discovery, and its chunks follow at `nx catalog purge-trash`.
 
 Every completed index run is verified by the engine before the document is stamped
 `index_state='complete'`; a refused verification leaves the fence at `'indexing'` and a

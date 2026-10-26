@@ -72,8 +72,8 @@ class UnextractableContentError(NexusError):
       separate, accepted CLI policy (``pdf_quality_gate_failed`` in
       ``commands/index.py``) — reusing that type here would silently
       inherit a non-zero exit this bead explicitly says must NOT happen.
-    - :class:`UnchunkableContentError` — the file is zero-byte or binary
-      BEFORE any extractor even runs (a cheaper, earlier guard).
+    - :class:`UnchunkableContentError` — the file is zero-byte, binary or
+      whitespace-only BEFORE any extractor even runs (a cheaper, earlier guard).
 
     This is the "extractor ran to completion; the content simply is not
     there" case. Two independent, deliberately separate consumers:
@@ -892,7 +892,7 @@ class UploadStalledError(NexusError):
 #: gate must fail THAT record, never abort the rest of the batch.
 #: UnchunkableContentError fires from index_markdown/index_pdf's
 #: pre-registration chunkability guard (nexus-rqsh1/nexus-1sd0f) — a
-#: zero-byte or binary-content file in a batch must fail THAT record
+#: zero-byte, whitespace-only or binary-content file in a batch must fail THAT record
 #: only; single-file commands translate it to ClickException at the
 #: wrapper boundary before any loop sees it.
 #: SourceUriNotFoundError / SourceUriCollectionMismatchError join on exactly

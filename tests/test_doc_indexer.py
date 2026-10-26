@@ -407,6 +407,19 @@ class TestIndexMarkdownUnchunkableGuard:
                 index_markdown(p, corpus="test")
         mock_register.assert_not_called()
 
+    def test_whitespace_only_file_raises_before_registration(self, tmp_path):
+        """nexus-5j8fp: a 1-2 byte whitespace-only file chunks to nothing,
+        so it is refused before any catalog write, like a zero-byte one."""
+        from nexus.doc_indexer import index_markdown
+        from nexus.errors import UnchunkableContentError
+
+        p = tmp_path / "blank.md"
+        p.write_bytes(b"\n")
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
+            with pytest.raises(UnchunkableContentError, match="whitespace"):
+                index_markdown(p, corpus="test")
+        mock_register.assert_not_called()
+
     def test_binary_content_file_raises_before_registration(self, tmp_path):
         from nexus.doc_indexer import index_markdown
         from nexus.errors import UnchunkableContentError

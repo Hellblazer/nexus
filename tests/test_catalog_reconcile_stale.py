@@ -712,6 +712,16 @@ class TestZeroContentByDesign:
         # guessed into zero_content_by_design.
         assert _is_zero_content_by_design(missing) is False
 
+    def test_whitespace_only_source_is_zero_content_by_design(self, tmp_path):
+        """nexus-5j8fp: the indexer no longer registers a whitespace-only file,
+        so a row an earlier run registered for one is the same class as a
+        zero-byte row -- reindex cannot fix it -- and the census says so."""
+        from nexus.commands.catalog_cmds.integrity import _is_zero_content_by_design
+
+        blank = tmp_path / "Module.manifest"
+        blank.write_bytes(b" \n")
+        assert _is_zero_content_by_design(blank) is True
+
     @pytest.mark.t2_tenant
     def test_json_shape_includes_zero_content_by_design(self, tmp_path, monkeypatch):
         cat, t3 = self._cat(tmp_path)
