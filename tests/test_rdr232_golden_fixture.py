@@ -14,10 +14,11 @@ function-scoped fixtures; the tenant ceiling forbids a second one) because the f
      factual-lookup builtin searches ``rdr`` only. Before RDR-232 the plan's own ``corpus: all``
      beat the caller's scope, and the search returned 40 references, all code (T2
      ``nexus/rdr232-golden-baseline``).
-   * ``_assert_graph_stream_not_yet_contained`` (PRE-CHANGE until nexus-jypmj.1.5): ``traverse``
-     still hits its 300-id cap and every reference it returns is code. The traversal policy bead
-     replaces this helper's assertions with the containment assertions; the RDR-084 regression bead
-     (nexus-jypmj.1.8) replaces the whole claim.
+   * ``_assert_graph_stream_contained`` (nexus-jypmj.1.5): the runner gives ``traverse`` a policy
+     from the caller's scope, so the 115 out-of-scope code documents are dropped before manifest
+     expansion and the graph stream holds ``rdr`` chunks only. Before RDR-232 it hit the 300-id
+     cap with every reference code. The RDR-084 regression bead (nexus-jypmj.1.8) replaces the
+     whole claim.
 
    A red in a helper after a later Phase 1 change means exactly that: update the expectation the
    change owns, do not weaken the fixture.
@@ -30,8 +31,8 @@ function-scoped fixtures; the tenant ceiling forbids a second one) because the f
    writes (``$NX_RDR232_BASELINE_OUT``) measures THIS tree; the pre-change baseline is the T2 record
    ``nexus/rdr232-golden-baseline`` at its recorded sha.
 5. ``_assert_measures_follow_containment``: what the containment changes did to the measures,
-   asserted after the report is written. The graph-stream bead (nexus-jypmj.1.5) edits this
-   helper and ``_assert_graph_stream_not_yet_contained``, never the emission.
+   asserted after the report is written. The graph-stream bead (nexus-jypmj.1.5) edited this
+   helper and flipped the graph-stream claim, never the emission.
 
 No model call anywhere: plan selection is the matcher over local ONNX embeddings, and the run is cut
 before the first operator step (``continuation_cut_at_step``).
@@ -107,14 +108,28 @@ def _assert_vector_stream_contained(fx, run) -> dict[str, int]:
     return search_by_corpus
 
 
-def _assert_graph_stream_not_yet_contained(fx, run) -> dict[str, int]:
-    """PRE-CHANGE until nexus-jypmj.1.5 (traversal evidence policy): traverse is unbounded by scope,
-    so it still returns code only and still hits the 300-id cap."""
+def _assert_graph_stream_contained(fx, run) -> dict[str, int]:
+    """nexus-jypmj.1.5: ``traverse`` runs under the caller's scope. Out-of-scope documents are
+    dropped before their manifests are read, so the 300-id cap no longer cuts in-scope evidence,
+    every id carries its collection, and the walk (115 code documents, far under the engine's
+    500-node cap) is reported as contained. Returns the graph stream's reference counts by
+    corpus."""
     traverse_by_corpus = g.count_by_corpus(g.evidence_from_ids(fx, run.traverse_ids))
-    assert traverse_by_corpus.get("code", 0) == len(set(run.traverse_ids)) > 0 and "rdr" not in traverse_by_corpus, (
-        f"pre-change premise (RDR-232 Gap 3): the graph stream is code only: {traverse_by_corpus}")
-    assert run.traverse_ids_truncated and run.traverse_ids_truncated["total"] > 300, (
-        f"traverse never hit its 300-id cap: {run.traverse_ids_truncated}")
+    assert traverse_by_corpus.get("rdr", 0) == len(set(run.traverse_ids)) > 0 and "code" not in traverse_by_corpus, (
+        f"the graph stream holds rdr chunks only once traverse is contained: {traverse_by_corpus}")
+    assert run.traverse_ids_truncated is None, run.traverse_ids_truncated
+    rep = run.traverse_report
+    assert rep["policy_applied"] and not rep["policy_failed"], rep
+    assert rep["dropped_out_of_scope"] == len(fx.code_docs) and rep["dropped_by_corpus"] == {"code": len(fx.code_docs)}, rep
+    assert rep["corpus_counts"].get("rdr", 0) >= 1 and "code" not in rep["corpus_counts"], rep
+    assert rep["possibly_truncated"] is False and rep["contained"] is True and rep["nodes_walked"] < 500, rep
+    assert len(run.traverse_chunk_collections) == len(run.traverse_ids), "one collection per id"
+    for chash, collection in zip(run.traverse_ids, run.traverse_chunk_collections, strict=True):
+        assert collection.startswith("rdr__"), (chash, collection)
+        assert fx.chunks[chash][1] == "rdr"
+    graph_hydrated = g.count_by_corpus(g.evidence_from_contents(fx, run.graph_contents))
+    assert graph_hydrated.get("rdr", 0) > 0 and "code" not in graph_hydrated, (
+        f"the graph stream hydrated for the reducer holds rdr chunks only: {graph_hydrated}")
     return traverse_by_corpus
 
 
@@ -267,12 +282,12 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus) 
 
 
 def _assert_measures_follow_containment(measures: dict) -> None:
-    """What the vector-stream containment (nexus-jypmj.1.3) did to the measures: the vector stream
-    reaches the ART RDR, so coverage of the named source is no longer zero and leakage is no longer
-    total. Leakage stays high on purpose: the graph stream is contained by nexus-jypmj.1.5, which
-    edits this helper along with ``_assert_graph_stream_not_yet_contained``."""
+    """What the stream containment did to the measures: the vector stream (nexus-jypmj.1.3) reaches
+    the ART RDR, so coverage of the named source is no longer zero, and with the graph stream
+    contained too (nexus-jypmj.1.5) no reference leaves the ``rdr`` scope, so leakage is zero.
+    Before either, leakage was total."""
     assert measures["primary_source_coverage"].value == 1.0
-    assert 0.9 < measures["scope_leakage"].value < 1.0, measures["scope_leakage"]
+    assert measures["scope_leakage"].value == 0.0, measures["scope_leakage"]
     assert measures["facet_evidence_coverage"].value > 0.0
 
 
@@ -288,9 +303,7 @@ def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> Non
     search_by_corpus = _assert_vector_stream_contained(fx, run)
     primary = _assert_named_source_and_primary_evidence(fx, reader)
     _assert_primary_stream_reaches_the_reducer(fx, run, primary)
-    traverse_by_corpus = _assert_graph_stream_not_yet_contained(fx, run)
-    raw_references = len(run.search_ids) + len(run.traverse_ids)
-    assert raw_references > 300, f"only {raw_references} chunk references; the graph stream's cap is 300"
+    traverse_by_corpus = _assert_graph_stream_contained(fx, run)
 
     measures = _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus)
     _assert_measures_follow_containment(measures)

@@ -600,6 +600,25 @@ class ScopeConstraint:
         """Whether the scope is a corpus (prefix or collection) rather than a subtree."""
         return self.kind in ("corpus_prefix", "collection")
 
+    def admits(self, collection: str, *, tumbler: str | None = None) -> bool:
+        """Whether a document in *collection* (catalog address *tumbler*) is inside this scope.
+
+        ``none`` and ``all`` admit everything. A corpus prefix admits a collection that is the
+        prefix or sits under it (``rdr`` admits ``rdr__1-1__...``, not ``rdrx__...``); a full
+        collection name admits only itself. A catalog-subtree scope is judged on the tumbler, so
+        without one it admits nothing: the answer is "cannot tell", and the traversal policy
+        (RDR-232 section 3) must not read that as "inside".
+        """
+        if self.kind == "none" or self.value == "all":
+            return True
+        if self.kind == "subtree":
+            return bool(tumbler) and (tumbler == self.value or str(tumbler).startswith(self.value + "."))
+        if not collection:
+            return False
+        if self.kind == "collection":
+            return collection == self.value
+        return _under(collection, self.value)
+
 
 NarrowStatus = Literal[
     "no_scope",                 # the caller gave no scope: the corpus is untouched

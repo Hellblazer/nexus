@@ -8894,6 +8894,12 @@ def traverse(
     )] = "",
     depth: Annotated[int, Field(description="BFS depth, capped at 3.")] = 1,
     direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
+    policy: Annotated[dict | None, Field(
+        description=(
+            "Optional traversal evidence policy (RDR-232): {allowed_collections, preserve_seed_documents, "
+            "max_documents, max_chunks, require_link_role}. Absent: the legacy result, unchanged."
+        ),
+    )] = None,
 ) -> dict:
     """Walk the catalog link graph from seed tumblers, unranked (RDR-078 P3).
 
@@ -8917,8 +8923,29 @@ def traverse(
       chunks); when capped, an `ids_truncated` entry carries the total and
       kept counts. `tumblers` is not capped.
     - `link_types` and `purpose` are mutually exclusive.
+
+    With a `policy` (RDR-232 section 3) the policy runs after the walk and
+    before manifest expansion: documents outside `allowed_collections` are
+    dropped, the rest ranked by link role, then link distance, then tumbler,
+    and the non-seed ones capped at `max_documents`; manifests are read for
+    the retained documents only; `max_chunks` is spent with a reserved share
+    per document. The result adds `chunk_collections` (one collection per id,
+    aligned with `ids`) and `traversal`, a report with the walked, retained
+    and dropped counts, `possibly_truncated` (the engine caps a walk at 500
+    nodes: a response that size is never reported as contained), `widened`
+    and `scope_conflict`. A policy that cannot be applied returns no graph
+    evidence and a `warning`; it never falls back to an unrestricted walk.
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.plans import traversal_policy as _tp  # noqa: PLC0415 — deferred, like this function's other imports
+
+    # RDR-232 section 3: a policy that does not parse is a policy failure, decided before any walk.
+    parsed_policy = None
+    if policy is not None:
+        try:
+            parsed_policy = _tp.TraversalPolicy.from_wire(policy)
+        except _tp.TraversalPolicyError as exc:
+            return _traverse_policy_failed(f"{type(exc).__name__}: {exc}")
 
     # SC-16: mutual exclusion.
     if link_types and purpose:
@@ -8982,6 +9009,11 @@ def traverse(
         result = catalog.graph_many(seed_tumblers, **kw)
 
     nodes = result.get("nodes") or []
+    if parsed_policy is not None:
+        return _traverse_with_policy(
+            catalog, nodes, result.get("edges") or [], seed_tumblers, parsed_policy,
+            direction=direction, warnings=warnings,
+        )
     tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
     collections = sorted({
         n.physical_collection
@@ -9024,6 +9056,74 @@ def traverse(
                  "collections": collections}
     if len(chunk_ids) > MAX_QUERY_RESULTS:
         out["ids_truncated"] = {"total": len(chunk_ids), "kept": MAX_QUERY_RESULTS}
+    if warnings:
+        out["warning"] = "; ".join(warnings)
+    return out
+
+
+def _traverse_policy_failed(reason: str, *, warnings: list[str] | None = None) -> dict:
+    """The graph stream a failed traversal policy leaves: nothing, with a warning (RDR-232 s3).
+
+    The primary and vector streams are the caller's other steps and keep running; this one never
+    falls back to an unrestricted walk. ``contained`` is False so no diagnostic reads it as safe.
+    """
+    _log.warning("traverse_policy_failed", reason=reason)
+    return {
+        "tumblers": [], "ids": [], "collections": [], "chunk_collections": [],
+        "traversal": {"policy_applied": False, "policy_failed": True, "contained": False, "reason": reason},
+        "warning": "; ".join([*(warnings or []), f"traverse: traversal policy failed ({reason}); graph evidence omitted"]),
+    }
+
+
+def _traverse_with_policy(
+    catalog: Any, nodes: list, edges: list, seeds: list, policy: Any,
+    *, direction: str, warnings: list[str],
+) -> dict:
+    """``traverse`` under a :class:`~nexus.plans.traversal_policy.TraversalPolicy` (RDR-232 s3).
+
+    Order is the contract: the policy selects documents from the walk BEFORE any manifest is read,
+    so out-of-scope documents cannot spend the chunk budget, then the budget is split per document.
+    """
+    from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
+
+    try:
+        selection = tp.select_documents(nodes, edges, seeds, policy, direction=direction)
+    except Exception as exc:  # noqa: BLE001 — any policy failure omits the graph stream; it never widens
+        return _traverse_policy_failed(f"{type(exc).__name__}: {exc}", warnings=warnings)
+    report = selection.report
+    if report["possibly_truncated"]:
+        # The count nexus-jypmj.1.12 reads over a window of live traffic: the engine's own
+        # graph_node_limit log carries no caller, this one does (the policy scope).
+        _log.warning(
+            "traverse_graph_node_cap", nodes=report["nodes_walked"], cap=tp.MAX_GRAPH_NODES,
+            caller_scope=policy.allowed_collections.value,
+        )
+        warnings.append(
+            f"traverse: the engine returned {report['nodes_walked']} nodes, its {tp.MAX_GRAPH_NODES}-node cap; "
+            "the walk is possibly truncated and is not reported as contained"
+        )
+
+    manifests: dict[str, list] = {}
+    if selection.kept:
+        try:
+            manifests = {str(k): v for k, v in catalog.get_manifests(list(selection.kept)).items()}
+        except Exception as exc:  # noqa: BLE001 — ids are an enrichment; the retained documents still answer
+            _log.warning("traverse_manifest_lookup_failed", error=str(exc), exc_info=True)
+            warnings.append(f"traverse: chunk ids unavailable, manifest lookup failed: {type(exc).__name__}: {exc}")
+    pairs, total = tp.allocate_chunks(
+        selection.kept,
+        {doc: [getattr(r, "chash", "") or "" for r in rows] for doc, rows in manifests.items()},
+        policy.max_chunks,
+    )
+    out: dict = {
+        "tumblers": list(selection.kept),
+        "ids": [chash for _doc, chash in pairs],
+        "collections": sorted({c for c in selection.collections.values() if c}),
+        "chunk_collections": [selection.collections[doc] for doc, _chash in pairs],
+    }
+    if total > len(pairs):
+        out["ids_truncated"] = {"total": total, "kept": len(pairs)}
+    out["traversal"] = report
     if warnings:
         out["warning"] = "; ".join(warnings)
     return out

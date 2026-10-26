@@ -367,6 +367,9 @@ class RetrievalRun:
     cut_applied: bool
     #: ``PlanResult.scope_diagnostics``: what the caller's scope did to each retrieval step.
     scope_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    #: The traverse step's policy report and per-id collections (nexus-jypmj.1.5).
+    traverse_report: dict[str, Any] = field(default_factory=dict)
+    traverse_chunk_collections: list[str] = field(default_factory=list)
 
 
 async def run_lookup_retrieval(question: str, *, scope: str = "", bindings: dict[str, Any] | None = None) -> RetrievalRun:
@@ -395,6 +398,8 @@ async def run_lookup_retrieval(question: str, *, scope: str = "", bindings: dict
         resolved_search_corpus=corpus,
         cut_applied=result.continuation_cut_applied,
         scope_diagnostics=[dict(d) for d in result.scope_diagnostics],
+        traverse_report=dict(traverse.get("traversal") or {}),
+        traverse_chunk_collections=list(traverse.get("chunk_collections") or []),
     )
 
 

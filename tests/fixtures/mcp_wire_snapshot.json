@@ -1232,6 +1232,18 @@
             ],
             "default": null
           },
+          "policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "purpose": {
             "default": "",
             "type": "string"

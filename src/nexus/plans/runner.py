@@ -1234,6 +1234,23 @@ def _apply_caller_scope_to_args(
     return out, narrowing
 
 
+def _apply_traversal_policy_to_args(
+    tool: str, args: dict[str, Any], *, bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Give a ``traverse`` step its evidence policy (RDR-232 section 3, nexus-jypmj.1.5).
+
+    Every ``traverse`` step the runner dispatches carries a policy derived from the caller's scope
+    (the ``_nx_scope`` binding; none means no containment) and the step's own link types. A policy
+    the plan declared is replaced, never merged: the plan does not loosen the caller's scope.
+    Any other tool is returned unchanged.
+    """
+    if tool != "traverse":
+        return args
+    from nexus.plans.traversal_policy import derive_policy  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
+
+    return {**args, "policy": derive_policy(args, bindings.get(_CALLER_SCOPE_BINDING))}
+
+
 def _scope_conflict_output(
     narrowing: "CorpusNarrowing", *, step_index: int, tool: str,
 ) -> dict[str, Any]:
@@ -3287,6 +3304,9 @@ async def _plan_run_impl(
             # scope.taxonomy_domain, and a caller's _nx_scope binding all
             # take precedence over this fall-through.
             resolved = _apply_default_corpus_to_args(tool, resolved)
+            # RDR-232 section 3 (nexus-jypmj.1.5): a traverse step carries the evidence policy
+            # derived from the caller's scope, applied inside ``traverse`` before manifest expansion.
+            resolved = _apply_traversal_policy_to_args(tool, resolved, bindings=merged)
             # nexus-h3e2: ``mode: broad`` is an authoring affordance for
             # abstract / community-summary plans whose per-corpus default
             # threshold drops 100% of candidates. Runs last so an explicit
