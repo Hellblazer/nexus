@@ -14,8 +14,49 @@ never trigger can never repair it. The documented self-heal advice
 ("re-index repairs the manifest") was structurally wrong for exactly the
 documents that needed it. This core rebuilds the manifest WITHOUT
 re-embedding: the chunk rows are fetched back from T3 (batched ``$in`` over
-whole-file content hashes, 8g0ch), ordered by their spans, and written
-through the same atomic-replace path the indexer uses.
+whole-file content hashes, 8g0ch), ordered by their spans, and ADDED to the
+manifest.
+
+The heal never writes into a document that has manifest rows (nexus-8o06q). A T3
+chunk row is shared by every document holding that text and its ``content_hash`` is
+the LAST writer's, so the fetch cannot see a chunk the document shares with a
+document that wrote it last, and it can see rows of an older chunker run. Neither
+the rows it would add nor the position they belong at can be trusted for a document
+that already has a manifest: a chunk missing from the middle would land after the
+last row and, once the count matched, hide the gap for good.
+
+* A gapped document WITH manifest rows is not touched. The heal stamps its RUNFENCE
+  ``index_state='failed'``, and the next index run that walks its source re-indexes it
+  (every staleness path treats a failed fence as stale: ``doc_indexer._index_run_fresh``,
+  ``StalenessCache.never_fresh`` fed by the catalog pass for the code, prose and PDF
+  indexers, ``_pdfs_needing_index``). The re-index rewrites the manifest at the right
+  positions and skips re-embedding text that is unchanged. These documents are
+  ``ManifestHealResult.reindex``. Nothing is appended and the document's
+  ``chunk_count`` is not changed, so it stays gapped and is listed again on every
+  pass until a re-index completes.
+* A document with NO manifest rows is rebuilt from the fetch, with
+  ``append_manifest_chunks`` (it cannot delete a row a concurrent writer landed;
+  the document is re-read just before, and one whose fence is ``'indexing'`` is
+  skipped). The append folds ``chunk_count`` to the number of rows rebuilt, in its
+  own transaction; the heal never writes ``chunk_count`` itself. If the rebuild holds
+  fewer rows than ``chunk_count`` (repeated text inside one document keeps one
+  manifest row per position but one T3 row, so the heal cannot tell that from a lost
+  chunk) the fence is failed BEFORE the write, so a crash in between leaves the
+  document marked, and the document is also in ``reindex``. After the append its
+  rows equal its folded ``chunk_count``, so it is no longer gapped and a later pass
+  does not list it again; its failed fence is what makes the next index run that
+  walks its source re-index it, and that restores the count. If the rebuild holds
+  more rows than ``chunk_count`` (rows of an older chunker run) nothing is written
+  and the fence is failed; that document still has no rows and is listed again until
+  a re-index.
+
+A marked document stays marked until an index run re-indexes it. One whose source
+the run does not walk stays ``failed``: ``--since-head`` offers only changed files, a
+deleted file offers none, and a document indexed by ``nx index pdf``/``md``/``rdr``
+or written by ``nx store put`` is not in an ``nx index repo`` walk at all (re-run the
+verb that indexed it; for a note, ``nx store put`` again under the same collection
+and title). ``nx t3 gc`` will not move chunks out of a collection that holds a
+non-complete document unless ``--allow-incomplete-index-state`` is passed.
 
 Never-chunked documents (``chunk_count == 0`` and T3 genuinely has no rows —
 e.g. empty ``__init__.py``) are reported as expected, not as gaps: the live
@@ -42,6 +83,20 @@ _log = structlog.get_logger(__name__)
 IN_BATCH = 64
 
 
+@dataclass(frozen=True)
+class ReindexDoc:
+    """A document the heal left for the next index run to rebuild."""
+
+    entry: Any
+    #: Rows its manifest holds after the heal (would hold, in a dry run).
+    manifest_rows: int
+    #: What the document said it held when the pass started. The heal never writes
+    #: it; for a manifest-less document the append that rebuilds it folds the stored
+    #: count to the rows written, so a rebuilt-short document ends at
+    #: ``manifest_rows``, not at this value.
+    chunk_count: int
+
+
 @dataclass
 class ManifestHealResult:
     """Outcome of one heal pass."""
@@ -49,14 +104,27 @@ class ManifestHealResult:
     candidates: int = 0
     gapped: int = 0
     ghost_gapped: int = 0  # gapped subset with chunk_count == 0
+    #: Documents the heal wrote manifest rows into (would write, in a dry run):
+    #: only documents that had none.
     reconciled: int = 0
     write_failed: int = 0
-    dup_collapsed: int = 0
-    dup_old_total: int = 0
-    dup_new_total: int = 0
+    #: Documents the heal marked for re-index (nexus-8o06q): their RUNFENCE
+    #: ``index_state`` is ``'failed'`` (stamped by this pass, or already so; in a
+    #: dry run, would be) and the next index run that walks their source
+    #: re-indexes them. Either
+    #: the document has manifest rows and fewer than its ``chunk_count`` (the heal
+    #: writes nothing into it), or it had none and the rebuild is short of
+    #: ``chunk_count`` (written, so it is also in ``reconciled``) or longer than
+    #: it (not written).
+    reindex: list = field(default_factory=list)
+    #: Gapped documents whose fence is ``'indexing'``: a run may be writing them
+    #: now, so the heal leaves them alone. An indexing fence is stale to the next
+    #: index run on its own.
+    skipped_indexing: list = field(default_factory=list)
     #: Entries that could not be matched to T3 chunks, split by class:
-    #: ``lost`` had chunk_count > 0 (a REAL gap — chunks are gone);
-    #: ``never_chunked`` had chunk_count == 0 (expected — nothing to rebuild).
+    #: ``lost`` had chunk_count > 0 and NO manifest rows (a REAL gap: chunks
+    #: are gone); ``never_chunked`` had chunk_count == 0 (expected: nothing to
+    #: rebuild). A gapped document that has manifest rows is ``reindex``.
     lost: list = field(default_factory=list)
     never_chunked: list = field(default_factory=list)
 
@@ -95,23 +163,25 @@ def heal_manifest_gaps(
     dry_run: bool = False,
     echo: Callable[[str], None] | None = None,
 ) -> ManifestHealResult:
-    """Detect and rebuild manifest gaps for *entries*.
+    """Detect manifest gaps for *entries*; rebuild the manifest-less ones and
+    mark the rest for re-index.
 
     Args:
         entries: Candidate ``CatalogEntry`` rows (any scope — whole catalog
             for the reconcile verb, one owner for the indexer self-heal).
             Filtered here to indexable candidates (``chunk_count > 0`` OR
             the ghost shape: recorded content_hash + physical_collection).
-        cat: Catalog READER (``get_manifests``).
+        cat: Catalog READER (``get_manifests``, ``by_doc_id``).
         t3_factory: Zero-arg factory for the T3 handle. Called LAZILY,
-            only after gap detection finds work (review 4711f521 Medium-1:
-            the eager form constructed a real writer + T3 client on every
-            nothing-to-do invocation). The core closes what it creates.
+            only after gap detection finds a document with no manifest
+            rows (review 4711f521 Medium-1: the eager form constructed a
+            real writer + T3 client on every nothing-to-do invocation).
+            The core closes what it creates.
         writer_factory: Zero-arg factory for the catalog WRITER
-            (``atomic_manifest_replace`` + ``resync_chunk_count_cache``).
-            May be ``None`` only when *dry_run* is True. Same lazy + close
+            (``append_manifest_chunks`` + ``fail_index_run``). May be
+            ``None`` only when *dry_run* is True. Same lazy + close
             contract as *t3_factory*.
-        dry_run: Report without writing.
+        dry_run: Report without writing and without failing a fence.
         echo: Optional line sink for progress output (the observability
             half of nexus-8g0ch: a silent long walk reads as a hang).
             ``None`` degrades to structlog-only.
@@ -139,40 +209,44 @@ def heal_manifest_gaps(
     if not gapped:
         return result
 
+    with_rows = [e for e in gapped if manifests.get(str(e.tumbler))]
+    without_rows = [e for e in gapped if not manifests.get(str(e.tumbler))]
     say(
         f"Scanning: {result.candidates} candidate(s), {result.gapped} gapped "
-        f"({result.ghost_gapped} ghost-class chunk_count==0); rebuilding "
-        f"manifests from T3 chunks…"
+        f"({result.ghost_gapped} ghost-class chunk_count==0); "
+        f"{len(with_rows)} with manifest rows are marked for re-index, "
+        f"{len(without_rows)} without are rebuilt from T3 chunks…"
     )
 
-    from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred: nexus.indexer is heavy and imports back into catalog
-    from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: circular-dep avoidance
-
     # Lazy instantiation (review 4711f521 Medium-1): only a run with real
-    # gaps pays for a T3 client + catalog writer. The core closes both.
-    t3 = t3_factory()
+    # gaps pays for a catalog writer, and only a manifest-less document pays
+    # for a T3 client. The core closes both.
     writer = writer_factory() if (writer_factory and not dry_run) else None
-
-    def _classify_unmatched(entry: Any) -> None:
-        (result.never_chunked if entry.chunk_count == 0
-         else result.lost).append(entry)
-
-    by_coll: dict[str, list] = defaultdict(list)
-    for entry in gapped:
-        content_hash = _content_hash(entry)
-        if not content_hash or not entry.physical_collection:
-            _classify_unmatched(entry)
-            continue
-        by_coll[entry.physical_collection].append((entry, content_hash))
+    t3 = None
+    healer = _Healer(cat, writer, result, manifests, dry_run)
 
     try:
-        _heal_collections(
-            by_coll, t3, writer, result, say,
-            dry_run=dry_run,
-            classify_unmatched=_classify_unmatched,
-            paginated_get=_paginated_get,
-            manifest_chunk_rows=_manifest_chunk_rows,
-        )
+        for entry in with_rows:
+            healer.reindex_if_still_gapped(entry)
+
+        by_coll: dict[str, list] = defaultdict(list)
+        for entry in without_rows:
+            content_hash = _content_hash(entry)
+            if not content_hash or not entry.physical_collection:
+                healer.classify_unmatched(entry)
+                continue
+            by_coll[entry.physical_collection].append((entry, content_hash))
+
+        if by_coll:
+            from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred: nexus.indexer is heavy and imports back into catalog
+            from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: circular-dep avoidance
+
+            t3 = t3_factory()
+            _heal_collections(
+                by_coll, t3, healer, say,
+                paginated_get=_paginated_get,
+                manifest_chunk_rows=_manifest_chunk_rows,
+            )
     finally:
         for handle in (t3, writer):
             close = getattr(handle, "close", None)
@@ -185,23 +259,110 @@ def heal_manifest_gaps(
     return result
 
 
+class _Healer:
+    """The per-document decisions and their writes, over one heal pass."""
+
+    def __init__(
+        self, cat: Any, writer: Any | None, result: ManifestHealResult,
+        manifests: dict, dry_run: bool,
+    ) -> None:
+        self.cat = cat
+        self.writer = writer
+        self.result = result
+        self.manifests = manifests
+        self.dry_run = dry_run
+
+    def classify_unmatched(self, entry: Any) -> None:
+        """No chunk of the document's hash can be found. A document with rows
+        never reaches here (it goes to ``reindex``); one without is lost or
+        was never chunked."""
+        (self.result.never_chunked if entry.chunk_count == 0
+         else self.result.lost).append(entry)
+
+    def fresh(self, entry: Any) -> tuple[str | None, int, int]:
+        """The document's fence state, manifest row count and ``chunk_count``
+        as of now.
+
+        The pass works from a snapshot taken at its start; an index run may
+        have landed rows, moved ``chunk_count`` or flipped the fence since. A
+        dry run writes nothing, so it keeps the snapshot. A failed re-read keeps
+        the snapshot too.
+        """
+        tumbler = str(entry.tumbler)
+        state = getattr(entry, "index_state", None)
+        count = entry.chunk_count
+        rows = len(self.manifests.get(tumbler, []))
+        if self.dry_run:
+            return state, rows, count
+        try:
+            current = self.cat.by_doc_id(tumbler)
+            if current is not None:
+                state = getattr(current, "index_state", None)
+                count = current.chunk_count
+            rows = len(self.cat.get_manifests([tumbler]).get(tumbler, []))
+        except Exception as exc:  # noqa: BLE001 — a failed re-read falls back to the snapshot, never aborts the pass
+            _log.warning("manifest_heal_reread_failed", tumbler=tumbler, error=str(exc))
+        return state, rows, count
+
+    def mark_for_reindex(
+        self, entry: Any, state: str | None, held: int, rows_after: int, why: str,
+    ) -> bool:
+        """Fail the document's fence so the next index run re-indexes it.
+
+        Returns True when the document is marked (or already was, or would be
+        in a dry run). A document whose fence is ``'indexing'`` is skipped.
+        """
+        if state == "indexing":
+            self.result.skipped_indexing.append(entry)
+            return False
+        if not self.dry_run and state != "failed":
+            try:
+                self.writer.fail_index_run(
+                    str(entry.tumbler),
+                    f"manifest_heal: {why}; {held} of {entry.chunk_count} "
+                    "manifest rows; re-index",
+                )
+            except Exception as exc:  # noqa: BLE001 — critique 4711f521 Sig-3: a mid-pass write failure must not lose the progress accounting
+                _log.warning(
+                    "manifest_heal_fence_fail_failed",
+                    tumbler=str(entry.tumbler), error=str(exc),
+                )
+                self.result.write_failed += 1
+                return False
+        self.result.reindex.append(
+            ReindexDoc(entry, rows_after, entry.chunk_count))
+        return True
+
+    def reindex_if_still_gapped(self, entry: Any) -> None:
+        """A gapped document that has manifest rows: write nothing into it."""
+        state, rows, count = self.fresh(entry)
+        # Judge against the document as it is NOW, not the snapshot: a run that
+        # re-indexed it since may have moved its chunk_count (a snapshot count of
+        # 3 against 2 rows would fail the fence a run just completed). A
+        # completed fence means rows == chunk_count, so this also keeps the heal
+        # off a fence a run moved to 'complete'; a fence a run began is
+        # 'indexing' and mark_for_reindex skips it.
+        if rows >= count:
+            return  # no longer gapped: a run completed it since the snapshot
+        self.mark_for_reindex(
+            entry, state, rows, rows, "manifest rows kept, not rebuilt")
+
+
 def _heal_collections(
     by_coll: dict,
     t3: Any,
-    writer: Any | None,
-    result: ManifestHealResult,
+    healer: _Healer,
     say: Callable[[str], None],
     *,
-    dry_run: bool,
-    classify_unmatched: Callable[[Any], None],
     paginated_get: Any,
     manifest_chunk_rows: Any,
 ) -> None:
-    """The per-collection fetch + rebuild walk (split from the entry point
-    so handle cleanup wraps it in one place)."""
-    _classify_unmatched = classify_unmatched
+    """The per-collection fetch + rebuild walk for documents with no manifest
+    rows (split from the entry point so handle cleanup wraps it in one place)."""
     _paginated_get = paginated_get
     _manifest_chunk_rows = manifest_chunk_rows
+    result = healer.result
+    writer = healer.writer
     for coll_i, (coll_name, pairs) in enumerate(sorted(by_coll.items()), 1):
         try:
             col = t3.get_collection(coll_name)
@@ -211,7 +372,7 @@ def _heal_collections(
                 collection=coll_name, docs=len(pairs), error=str(exc),
             )
             for e, _ in pairs:
-                _classify_unmatched(e)
+                healer.classify_unmatched(e)
             say(
                 f"  [{coll_i}/{len(by_coll)}] {coll_name}: "
                 f"UNAVAILABLE — {len(pairs)} doc(s) unmatched"
@@ -247,7 +408,7 @@ def _heal_collections(
                 batch_set = set(batch)
                 dropped = [e for e, ch in pairs if ch in batch_set]
                 for e in dropped:
-                    _classify_unmatched(e)
+                    healer.classify_unmatched(e)
                 fetch_failed_docs += len(dropped)
                 pairs = [(e, ch) for e, ch in pairs if ch not in batch_set]
                 continue
@@ -273,48 +434,61 @@ def _heal_collections(
         for entry, content_hash in pairs:
             ids, metas = rows_by_hash.get(content_hash, ([], []))
             if not ids:
-                _classify_unmatched(entry)
+                healer.classify_unmatched(entry)
                 continue
+            tumbler = str(entry.tumbler)
             ordered = sorted(zip(ids, metas), key=_order_key)
             indexed_metas = []
-            for i, (cid, m) in enumerate(ordered):
+            for k, (cid, m) in enumerate(ordered):
                 m = dict(m or {})
                 if not m.get("chunk_text_hash"):
                     m["chunk_text_hash"] = cid
-                m["chunk_index"] = i
-                indexed_metas.append((i, m))
+                m["chunk_index"] = k
+                indexed_metas.append((k, m))
             chunks = _manifest_chunk_rows(indexed_metas)
             if not any(c["chash"] for c in chunks):
-                _classify_unmatched(entry)
+                healer.classify_unmatched(entry)
                 continue
-            if len(chunks) < entry.chunk_count:
-                # RDR-108: duplicate chunk text collapses to one T3 row by
-                # design, so a rebuilt manifest can legitimately have fewer
-                # rows than the document's stale chunk_count. Not an error —
-                # tracked so the summary reports it instead of hiding it.
-                # A shortfall can equally be a partial rebuild; this core
-                # cannot tell the two apart, and a document whose manifest
-                # hook raised reads chunk_count==0 here. nx index repo's
-                # exit code therefore does not rely on this accounting: it
-                # reads the manifest back after the run
-                # (commands._helpers.resolve_confirmed_write_failure_doc_ids).
-                result.dup_collapsed += 1
-                result.dup_old_total += entry.chunk_count
-                result.dup_new_total += len(chunks)
-            if not dry_run:
+            n = len(chunks)
+            cc = entry.chunk_count
+
+            # The pass decided "no manifest rows" from its start snapshot; a
+            # run may have landed rows or begun since.
+            state, rows, _count = healer.fresh(entry)
+            if rows:
+                healer.reindex_if_still_gapped(entry)
+                continue
+            if state == "indexing":
+                result.skipped_indexing.append(entry)
+                continue
+
+            if cc > 0 and n > cc:
+                # More rows than the document holds: some belong to an older
+                # chunker run of the same file (the fetch includes rows with no
+                # live owner). Writing them would also fill a position the
+                # document does not have; re-indexing decides.
+                healer.mark_for_reindex(
+                    entry, state, 0, 0,
+                    f"T3 holds {n} chunk rows for its hash, more than chunk_count")
+                continue
+            if 0 < cc and n < cc:
+                # Short: a lost chunk, or repeated text the heal cannot tell
+                # from one. Mark BEFORE writing, so a crash between the two
+                # leaves the document marked, not hidden.
+                if not healer.mark_for_reindex(
+                        entry, state, n, n, "rebuilt short of chunk_count"):
+                    continue
+            if not healer.dry_run:
                 try:
-                    writer.atomic_manifest_replace(
-                        str(entry.tumbler), chunks, collection=coll_name)
-                    # atomic_manifest_replace's local-SQLite path re-derives
-                    # chunk_count in-transaction, but the HTTP/service-mode
-                    # path only resyncs when told to — without this the gap
-                    # detector re-flags the same documents forever (GH #1371
-                    # follow-up).
-                    writer.resync_chunk_count_cache(str(entry.tumbler))
+                    # Append, not replace: it cannot delete a row a writer
+                    # landed since the re-read above. It folds chunk_count to
+                    # the row count in its own transaction.
+                    writer.append_manifest_chunks(
+                        tumbler, chunks, collection=coll_name)
                 except Exception as exc:  # noqa: BLE001 — critique 4711f521 Sig-3: a mid-pass write failure must not lose the progress accounting
                     _log.warning(
                         "manifest_heal_write_failed",
-                        tumbler=str(entry.tumbler), error=str(exc),
+                        tumbler=tumbler, error=str(exc),
                     )
                     result.write_failed += 1
                     continue

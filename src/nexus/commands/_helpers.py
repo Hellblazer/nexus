@@ -875,7 +875,11 @@ def raise_identity_drop_exception(
     # registered, or its chunks are reported LOST) still needs it.
     remedies = []
     if write_failed and not identity_dropped:
-        remedies.append("Run 'nx catalog reconcile' to repair the manifests")
+        remedies.append(
+            "Run 'nx catalog reconcile' to rebuild the manifests (a document "
+            "that already has some rows is marked for re-index instead; "
+            "re-index its source)"
+        )
     if identity_dropped:
         # nexus-z0o2p.20: a drop that wrote nothing (no document to own the
         # chunks) has no manifest for reconcile to repair.
@@ -886,8 +890,9 @@ def raise_identity_drop_exception(
             )
         else:
             remedies.append(
-                f"Run 'nx catalog reconcile' to repair the manifests; re-index "
-                f"with --force any {subject} still missing afterwards"
+                f"Run 'nx catalog reconcile' to rebuild the manifests (a {subject} "
+                f"that already has some rows is marked for re-index instead); "
+                f"re-index with --force any {subject} still missing afterwards"
             )
     if refused:
         remedies.append(

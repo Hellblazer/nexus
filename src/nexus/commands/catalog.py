@@ -1057,15 +1057,27 @@ def reconcile_cmd(dry_run: bool) -> None:
     (nexus-0ntxj), so ``nx doctor``'s "failed index runs with hidden
     chunks" row and this command agree.
 
-    This command finds every document with that gap, rebuilds its manifest
-    from the T3 chunks in its ``physical_collection`` (matched by the
-    whole-file ``content_hash`` recorded on both the document and every
-    one of its chunks, ordered by character/line span — RDR-108 Phase 3
-    dropped ``chunk_index``/``doc_id`` from chunk metadata, so the spans
-    are what is left to reconstruct order), and writes the manifest via
-    the same atomic replace path the indexer uses. Documents whose chunks
-    cannot be found in T3 (no content_hash recorded, or no matching
-    chunks) are reported, not silently skipped.
+    This command finds every document with that gap. A document with NO
+    manifest rows is rebuilt from the T3 chunks in its ``physical_collection``
+    (matched by the whole-file ``content_hash`` recorded on both the document
+    and every one of its chunks, ordered by character/line span — RDR-108
+    Phase 3 dropped ``chunk_index``/``doc_id`` from chunk metadata, so the
+    spans are what is left to reconstruct order). A document that already has
+    manifest rows, but fewer than its ``chunk_count``, is not written into:
+    the chunk rows carrying its hash cannot say which positions are missing, so
+    the command marks it for re-index (its index fence is set to ``failed``)
+    and its chunk_count is left as it is. The scope is the whole catalog, so a
+    marked document may not be a repo file: re-index its source (the next
+    ``nx index repo`` for a repo file; ``nx index pdf`` / ``md`` / ``rdr`` for
+    one indexed that way; ``nx store put`` again under the same collection and
+    title for a note), which rewrites the manifest without re-embedding
+    unchanged text. A rebuilt document that comes out short of its
+    ``chunk_count`` is written (its chunk_count becomes the rows written) and
+    marked the same way, and is not listed again by a later pass. Documents
+    whose chunks cannot be found in T3 (no content_hash recorded, or no
+    matching chunks) are reported, not silently skipped. A marked document makes
+    ``nx t3 gc`` refuse its collection unless
+    ``--allow-incomplete-index-state`` is passed.
 
     ``--dry-run`` reports the same counts without writing.
     """
@@ -1087,20 +1099,42 @@ def reconcile_cmd(dry_run: bool) -> None:
         dry_run=dry_run, echo=click.echo,
     )
 
-    corrected_note = (
-        f" ({result.dup_collapsed} with chunk_count corrected "
-        f"{result.dup_old_total} -> {result.dup_new_total} "
-        "for duplicate-text collapse)"
-        if result.dup_collapsed else ""
+    # nexus-8o06q: a document with manifest rows is never written into and its
+    # chunk_count is not changed; a manifest-less document's chunk_count becomes
+    # the rows rebuilt (the append folds it). A gapped document is marked for
+    # re-index (its fence set to failed); the route depends on how it was
+    # indexed, and this verb's scope is the whole catalog.
+    mark = "would be marked" if dry_run else "marked"
+    reindex_note = (
+        f" ({len(result.reindex)} {mark} for re-index; re-index each one's "
+        "source: the next nx index repo for a repo file, nx index pdf / md / "
+        "rdr for one indexed that way)"
+        if result.reindex else ""
     )
     # Critique d470eda1: the unmatched report splits permanent ghost-noise
     # (never-chunked files — nothing to rebuild) from REAL regressions
     # (chunk_count>0 with rows missing = chunks actually lost).
     click.echo(
-        f"{verb} {result.reconciled} document(s){corrected_note}; "
+        f"{verb} {result.reconciled} document(s){reindex_note}; "
         f"{len(result.lost)} with chunks LOST (real gap), "
         f"{len(result.never_chunked)} never-chunked (expected: nothing to rebuild)."
     )
+    if result.reindex:
+        for part in result.reindex[:20]:
+            click.echo(
+                f"    REINDEX {part.entry.tumbler}  {part.manifest_rows} of "
+                f"{part.chunk_count} rows ({mark} for re-index)  "
+                f"{part.entry.file_path or part.entry.title}"
+            )
+        if len(result.reindex) > 20:
+            click.echo(f"    ... and {len(result.reindex) - 20} more to re-index")
+    if result.skipped_indexing:
+        click.echo(
+            f"    {len(result.skipped_indexing)} gapped document(s) skipped: "
+            "an index run is in progress on them (fence 'indexing')"
+        )
+    if result.write_failed:
+        click.echo(f"    {result.write_failed} write failure(s); see the log")
     if result.lost:
         for entry in result.lost[:20]:
             click.echo(f"    LOST {entry.tumbler}  {entry.file_path or entry.title}")

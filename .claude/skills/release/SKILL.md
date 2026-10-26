@@ -271,10 +271,10 @@ uv-lock-version-matches-pyproject test.
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
 - `mcpb/pyproject.toml`: `version` **and** the `conexus>=X.Y.Z` dependency pin (bare `conexus`, no extra, the same distribution the plugin's `nx-mcp` runs from: the engine embeds T3, so the `[local]` extra the bundle once pinned only fetched a second bge copy; `tests/test_plugin_structure.py::test_mcpb_pins_bare_conexus` enforces the bare pin and that it tracks the version.)
 - `mcpb/manifest.json`: `version`
-- `.claude-plugin/marketplace.json`: **`plugins[].version` for every plugin the file lists** (today conexus and sn; a loop, not a fixed pair)
+- `.claude-plugin/marketplace.json`: **`plugins[].version` for every plugin the file lists** (today conexus, sn and conexus-tool-spill; a loop, not a fixed set)
 - `.claude-plugin/marketplace.json`: **`plugins[].source.ref` for every plugin the file lists** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
 - `uv.lock`: `version` — pinned exact versions the release publishes from
-- every plugin's own `<plugin>/.claude-plugin/plugin.json`: `version` (today `conexus/.claude-plugin/plugin.json` **and** `sn/.claude-plugin/plugin.json` — bump each file the marketplace lists; `test_every_plugins_own_plugin_json_version_matches_pyproject` loops over all of them, so a plugin added there is covered with no test edit)
+- every plugin's own `<plugin>/.claude-plugin/plugin.json`: `version` (today `conexus/.claude-plugin/plugin.json`, `sn/.claude-plugin/plugin.json` **and** `tool-spill/.claude-plugin/plugin.json` — the directory is `tool-spill/`, the plugin is `conexus-tool-spill`; bump each file the marketplace lists; `test_every_plugins_own_plugin_json_version_matches_pyproject` loops over all of them, so a plugin added there is covered with no test edit)
 - `conexus/PENDING_RELEASE.md`: **empty the pending list.** Not a version field (nothing here equals `X.Y.Z`) — a drift LEDGER. Advancing `source.ref` is exactly what makes those plugin changes live, so the ledger's entries stop being pending at this step. `tests/test_plugin_release_drift_ledger.py` FAILS on a stale entry, so a forgotten clear blocks the release rather than rotting silently. The list you are deleting is also the honest "what becomes active in this release" note for the CHANGELOG (nexus-mk3tw / the 2026-07-25 inert-guard incident: three guards were merged, closed as "mechanized", and protecting nothing because the pin had not moved).
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
@@ -423,6 +423,7 @@ git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
         .claude-plugin/marketplace.json \
         conexus/.claude-plugin/plugin.json \
         sn/.claude-plugin/plugin.json \
+        tool-spill/.claude-plugin/plugin.json \
         conexus/PENDING_RELEASE.md
 git commit -m "chore(release): conexus X.Y.Z"
 
@@ -452,10 +453,11 @@ grep '^version' pyproject.toml           # must equal X.Y.Z
 grep '"version"' .claude-plugin/marketplace.json    # every plugin entry must equal X.Y.Z
 grep '"version"' conexus/.claude-plugin/plugin.json # must equal X.Y.Z
 grep '"version"' sn/.claude-plugin/plugin.json      # must equal X.Y.Z
+grep '"version"' tool-spill/.claude-plugin/plugin.json  # must equal X.Y.Z
 grep '"ref"' .claude-plugin/marketplace.json        # every plugin entry must equal "vX.Y.Z"
 ```
 
-The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field, looped over EVERY plugin marketplace.json lists — not a fixed count) fail the build if any mismatch. Add one more `grep '"version"' <plugin>/.claude-plugin/plugin.json` line here for each plugin marketplace.json gains; the two shown are today's set (conexus, sn), not a ceiling.
+The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field, looped over EVERY plugin marketplace.json lists — not a fixed count) fail the build if any mismatch. Add one more `grep '"version"' <plugin>/.claude-plugin/plugin.json` line here for each plugin marketplace.json gains; the three shown are today's set (conexus, sn, tool-spill), not a ceiling.
 
 ### 8a. Optional: bump source.sha post-merge (defends against tag force-push)
 

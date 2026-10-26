@@ -157,6 +157,38 @@ def _mini_nexus(
         _write(repo, "conexus/evals/case.md", "eval v2 — the only conexus change\n")
     elif payload == "sn":
         _write(repo, "sn/hooks/probe.py", "v2 ships\n")
+    elif payload.startswith("newplugin"):
+        # A plugin origin/main's marketplace does not list yet (the opt-in
+        # conexus-tool-spill mod) arrives on develop: its directory, its
+        # ledger entries, and a marketplace entry still pinned at the
+        # client tag, which does not contain the directory.
+        entry_version = "0.0.1" if payload == "newplugin-badversion" else VERSION
+        # "newplugin-unmapped": a new entry whose path is outside the
+        # prefix map, so no changed path ever maps to its name.
+        entry_name, entry_path = (
+            ("mystery-mod", "mystery")
+            if payload == "newplugin-unmapped"
+            else ("conexus-tool-spill", "tool-spill")
+        )
+        if payload != "newplugin-nomanifest":
+            _write(repo, f"{entry_path}/.claude-plugin/plugin.json", "{}\n")
+        _write(repo, f"{entry_path}/hooks/register.ts", "v1 ships\n")
+        data = json.loads((repo / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
+        data["plugins"].append(
+            {
+                "name": entry_name,
+                "version": entry_version,
+                "source": {"source": "git-subdir", "path": entry_path, "ref": BASE_TAG},
+            }
+        )
+        _write(repo, ".claude-plugin/marketplace.json", json.dumps(data, indent=2))
+        _write(
+            repo,
+            "conexus/PENDING_RELEASE.md",
+            "# Pending\n"
+            "- `tool-spill/hooks/register.ts`: the mod (nexus-ggggg)\n"
+            "- `tool-spill/.claude-plugin/plugin.json`: its manifest (nexus-ggggg)\n",
+        )
     elif payload == "straddle":
         # One bead's commit couples a plugin path to WHEEL content: the
         # wholesale import cannot ship one half and hold back the other.
@@ -398,6 +430,90 @@ class TestRefMovement:
         )
         refs = {p["name"]: p["source"]["ref"] for p in data["plugins"]}
         assert refs["conexus"] == result["tag"]
+
+
+class TestNewPluginEntersThroughACut:
+    """A plugin absent from origin/main's marketplace may enter through a
+    cut: the 'a cut moves no version field' rule compared every entry with
+    main's copy and would refuse the one entry main does not have."""
+
+    @staticmethod
+    def _entries(repo: pathlib.Path) -> dict[str, dict]:
+        data = json.loads(
+            (repo / ".claude-plugin/marketplace.json").read_text(encoding="utf-8")
+        )
+        return {p["name"]: p for p in data["plugins"]}
+
+    def test_the_new_entry_moves_to_the_cut_tag_and_an_untouched_plugin_stays(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo = _mini_nexus(tmp_path, payload="newplugin")
+        result = _cut(repo)
+        entries = self._entries(repo)
+        assert entries["conexus-tool-spill"]["source"]["ref"] == result["tag"]
+        assert entries["conexus-tool-spill"]["version"] == VERSION
+        # develop's ledger edit lives under conexus/, so conexus moves too;
+        # sn has no change and keeps the client tag.
+        assert entries["conexus"]["source"]["ref"] == result["tag"]
+        assert entries["sn"]["source"]["ref"] == BASE_TAG
+        assert result["moved_plugins"] == ["conexus", "conexus-tool-spill"]
+        assert (repo / "tool-spill/hooks/register.ts").read_text(encoding="utf-8") == "v1 ships\n"
+
+    def test_the_cut_empties_the_new_plugins_ledger_entries(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo = _mini_nexus(tmp_path, payload="newplugin")
+        _cut(repo)
+        ledger = (repo / "conexus/PENDING_RELEASE.md").read_text(encoding="utf-8")
+        assert "tool-spill/" not in ledger
+
+    def test_a_new_entry_with_another_version_is_refused(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo = _mini_nexus(tmp_path, payload="newplugin-badversion")
+        with pytest.raises(CutRefused, match="conexus-tool-spill.*not the client version"):
+            _cut(repo)
+
+    def test_a_new_entry_outside_the_prefix_map_is_refused(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """A new entry whose directory the channel's prefix map does not know
+        never lands in `moved`, so its ref could not be moved to the cut's
+        tag: the cut refuses it rather than pin a tag without its files."""
+        repo = _mini_nexus(tmp_path, payload="newplugin-unmapped")
+        with pytest.raises(
+            CutRefused,
+            match="mystery-mod is not listed on origin/main and no path under its prefix changed",
+        ):
+            _cut(repo)
+
+    def test_a_new_entry_whose_directory_has_no_manifest_is_refused(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        repo = _mini_nexus(tmp_path, payload="newplugin-nomanifest")
+        with pytest.raises(CutRefused, match="plugin.json"):
+            _cut(repo)
+
+    def test_an_existing_entrys_version_still_may_not_move(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        """The new-entry allowance does not loosen the rule for the rest:
+        develop moves sn's version, alongside the new plugin."""
+        repo = _mini_nexus(tmp_path, payload="newplugin")
+        _run(repo, "switch", "-q", "develop")
+        data = json.loads(
+            (repo / ".claude-plugin/marketplace.json").read_text(encoding="utf-8")
+        )
+        for plugin in data["plugins"]:
+            if plugin["name"] == "sn":
+                plugin["version"] = "0.0.1"
+        _write(repo, ".claude-plugin/marketplace.json", json.dumps(data, indent=2))
+        _run(repo, "add", "-A")
+        _run(repo, "commit", "-q", "-m", "move sn's version on develop")
+        _run(repo, "push", "-q", "origin", "develop")
+        _run(repo, "switch", "-q", "main")
+        with pytest.raises(CutRefused, match="version field moved"):
+            _cut(repo)
 
 
 class TestBranchAndAgreement:

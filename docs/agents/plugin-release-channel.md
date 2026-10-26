@@ -4,8 +4,8 @@ Moved from AGENTS.md on 2026-10-14 (nexus-2ziaz); the short rules-only form is [
 
 ### Independent plugin release channel (RDR-197)
 
-A plugin cut ships plugin-surface content (paths under `conexus/` and
-`sn/`, plus `.claude-plugin/marketplace.json`) without a client release:
+A plugin cut ships plugin-surface content (paths under `conexus/`,
+`sn/` and `tool-spill/`, plus `.claude-plugin/marketplace.json`) without a client release:
 it moves the changed plugin's `source.ref` to an anchored tag of the
 shape `plugin-v{X.Y.Z}-{n}`, where `X.Y.Z` is the CURRENT released
 client version and `n` is the cut's sequence number. The number comes
@@ -20,6 +20,20 @@ checklist); the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`,
 never a bare merge (`conexus/PENDING_RELEASE.md` conflicts by
 construction on every cut); invariants R and W live in
 `scripts/plugin_channel.py`'s docstring.
+
+**A new plugin enters the marketplace on develop first.** Its
+`marketplace.json` entry carries the CURRENT client version and the
+client tag as `source.ref`, a tag that does not hold its directory yet;
+the drift ledger is what keeps that honest: every file on the plugin's
+surface differs from the pinned tag, so each is declared in
+`conexus/PENDING_RELEASE.md` until a cut or a client release moves the
+ref. A cut then ships the entry: `cut_plugin_release.py` accepts a
+plugin that origin/main's marketplace does not list, provided its
+version is the client version, its ref moved to the cut's tag and its
+directory holds a manifest. A directory that is not a plugin name needs
+both `ALLOWED_PREFIXES` and `PLUGIN_BY_ALLOWLIST_PREFIX` in
+`scripts/plugin_channel.py` (conexus-tool-spill installs from
+`tool-spill/`).
 
 **Usage discipline** (was this cut warranted?):
 1. Cut when accumulated plugin functionality is worth shipping and no

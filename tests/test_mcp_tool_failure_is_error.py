@@ -252,6 +252,18 @@ def test_traverse_with_an_unknown_purpose_fails() -> None:
     }
 
 
+def test_traverse_with_no_parseable_seed_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-4jwr0: no usable seed is a failure; the catalog is never walked."""
+    from unittest.mock import MagicMock
+
+    cat = MagicMock()
+    monkeypatch.setattr(core, "_get_catalog", lambda: cat)
+    result = _call(core.mcp, "traverse", {"seeds": ["not-a-tumbler"], "link_types": ["cites"]})
+    assert isinstance(result, CallToolResult) and result.isError is True
+    assert "traverse: no seed parses as a tumbler: ['not-a-tumbler']" in result.content[0].text
+    assert not cat.graph.called and not cat.graph_many.called
+
+
 def test_plan_save_refusal_fails() -> None:
     """nexus-4jwr0: a refused save is a failure; the text is unchanged."""
     result = _call(core.mcp, "plan_save", {"query": "q", "plan_json": "{}", "verb": ""})
