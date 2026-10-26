@@ -2496,8 +2496,10 @@ public final class TaxonomyRepository {
      *   <li>{@code never_discovered_count} — contributing collections with a NULL
      *       last_discover_at PLUS those with no taxonomy_meta row at all. Both are
      *       "never discovered" from the command's point of view.</li>
-     *   <li>{@code is_stale} — the hub has assignments newer than the latest discover,
-     *       or any contributing collection was never discovered.</li>
+     *   <li>{@code is_stale} — a contributing collection was discovered after the hub's
+     *       latest assignment (discover ran, projection did not), or any contributing
+     *       collection was never discovered. RDR-077 Phase 5 sense, Sam's ruling
+     *       2026-10-26 (nexus-9kp10); it read the reverse until then.</li>
      * </ul>
      *
      * <p>{@code is_stale} IS COMPUTED HERE rather than client-side, deliberately, even
@@ -2596,7 +2598,7 @@ public final class TaxonomyRepository {
                 boolean isStale = neverCount > 0;
                 if (!isStale && maxDiscover != null
                         && lastAt instanceof OffsetDateTime assignedAt) {
-                    isStale = assignedAt.isAfter(maxDiscover);
+                    isStale = maxDiscover.isAfter(assignedAt);
                 }
                 m.put("max_last_discover_at", utcIso(maxDiscover));
                 m.put("never_discovered_count", neverCount);

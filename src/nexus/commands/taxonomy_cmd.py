@@ -20,7 +20,11 @@ from nexus.commands._helpers import (
 )
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.db.t2.http_taxonomy_store import TopicPersistConflictError
-from nexus.db.t2.taxonomy_compute import MIN_DISCOVER_CHUNKS, MixedEmbeddingDimensionsError
+from nexus.db.t2.taxonomy_compute import (
+    MIN_DISCOVER_CHUNKS,
+    MixedEmbeddingDimensionsError,
+    hub_is_stale,
+)
 
 
 def _T2Database(path, *, client=None):
@@ -3083,9 +3087,10 @@ def _run_backfill(
 @click.option(
     "--warn-stale", is_flag=True,
     help=(
-        "Flag hubs whose latest projection assignment post-dates the newest "
-        "`last_discover_at` across contributing source collections (any hub "
-        "with a never-discovered source is treated as stale)."
+        "Flag hubs whose evidence is older than the last rebuild: a "
+        "contributing source collection's `last_discover_at` post-dates the "
+        "hub's latest projection assignment (any hub with a never-discovered "
+        "source is treated as stale)."
     ),
 )
 @click.option(
@@ -3151,12 +3156,10 @@ def hubs_cmd(
                 click.echo("         " + " | ".join(parts))
             if warn_stale and row.is_stale:
                 bits: list[str] = []
-                if row.max_last_discover_at and row.last_assigned_at and (
-                    row.last_assigned_at > row.max_last_discover_at
-                ):
+                if hub_is_stale(row.last_assigned_at, row.max_last_discover_at, 0):
                     bits.append(
-                        f"last_assigned_at={row.last_assigned_at} > "
-                        f"max_last_discover_at={row.max_last_discover_at}"
+                        f"max_last_discover_at={row.max_last_discover_at} > "
+                        f"last_assigned_at={row.last_assigned_at}"
                     )
                 if row.never_discovered_count:
                     bits.append(

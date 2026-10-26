@@ -1843,41 +1843,39 @@ class TaxonomyRepositoryTest {
     }
 
     @Test @Order(64)
-    void detectHubs_staleWhenAssignmentsNewerThanLatestDiscover() {
-        // nexus-onjvy gap 3: warn_stale was accepted and SILENTLY DROPPED over HTTP.
-        // RDR-077 C-2 semantics: compare against MAX(last_discover_at) across ALL
-        // contributing source collections, not a single row.
+    void detectHubs_staleWhenAnyContributingCollectionDiscoveredAfterTheLatestAssignment() {
+        // RDR-077 Phase 5 sense (Sam, 2026-10-26, nexus-9kp10): discover ran after the
+        // projection, so the hub's evidence predates the rebuild. C-2: the comparison
+        // uses MAX(last_discover_at) over ALL contributing collections, so ONE later
+        // discover is enough; a single-row lookup on srcB would have missed it.
         final String tenant = "tax-hub-stale-" + System.nanoTime();
         final String srcA = "code__hub_a", srcB = "code__hub_b";
         long topicId = seedHub(tenant, "hub-stale", "2026-04-10T13:04:00Z", srcA, srcB);
-        // Both collections discovered BEFORE the hub's latest assignment.
-        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-09T00:00:00Z");
-        repo.recordDiscoverCount(tenant, srcB, 100, "2026-04-09T00:00:00Z");
-
-        var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
-
-        assertThat(hub.get("is_stale")).as("assignments postdate every discover").isEqualTo(true);
-        assertThat(hub.get("max_last_discover_at")).isEqualTo("2026-04-09T00:00:00Z");
-        assertThat(hub.get("never_discovered_count")).isEqualTo(0);
-    }
-
-    @Test @Order(65)
-    void detectHubs_notStaleWhenAnyContributingCollectionDiscoveredLater() {
-        // THE C-2 CORRECTNESS POINT: MAX aggregates over ALL contributing collections.
-        // Updating ONE of the two to postdate the hub's latest assignment clears
-        // staleness — a single-row lookup would have kept it stale.
-        final String tenant = "tax-hub-fresh-" + System.nanoTime();
-        final String srcA = "code__hub_a", srcB = "code__hub_b";
-        long topicId = seedHub(tenant, "hub-fresh", "2026-04-10T13:04:00Z", srcA, srcB);
         repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-11T00:00:00Z");
         repo.recordDiscoverCount(tenant, srcB, 100, "2026-04-09T00:00:00Z");
 
         var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
 
-        assertThat(hub.get("is_stale")).as("the MAX postdates the assignments").isEqualTo(false);
+        assertThat(hub.get("is_stale")).as("srcA's discover postdates the assignments").isEqualTo(true);
         assertThat(hub.get("max_last_discover_at"))
             .as("MAX picks the later of the two, not the first row seen")
             .isEqualTo("2026-04-11T00:00:00Z");
+        assertThat(hub.get("never_discovered_count")).isEqualTo(0);
+    }
+
+    @Test @Order(65)
+    void detectHubs_notStaleWhenEveryDiscoverPredatesTheLatestAssignment() {
+        // Discover then project, the normal order: the hub is fresh.
+        final String tenant = "tax-hub-fresh-" + System.nanoTime();
+        final String srcA = "code__hub_a", srcB = "code__hub_b";
+        long topicId = seedHub(tenant, "hub-fresh", "2026-04-10T13:04:00Z", srcA, srcB);
+        repo.recordDiscoverCount(tenant, srcA, 100, "2026-04-09T00:00:00Z");
+        repo.recordDiscoverCount(tenant, srcB, 100, "2026-04-09T00:00:00Z");
+
+        var hub = hubRow(repo.detectHubsData(tenant, 2), topicId);
+
+        assertThat(hub.get("is_stale")).as("projection ran after every discover").isEqualTo(false);
+        assertThat(hub.get("max_last_discover_at")).isEqualTo("2026-04-09T00:00:00Z");
         assertThat(hub.get("never_discovered_count")).isEqualTo(0);
     }
 
@@ -1895,7 +1893,7 @@ class TaxonomyRepositoryTest {
 
         assertThat(hub.get("never_discovered_count")).isEqualTo(1);
         assertThat(hub.get("is_stale"))
-            .as("a never-discovered contributor is stale even though MAX postdates")
+            .as("a never-discovered contributor is stale whatever the other's timestamp")
             .isEqualTo(true);
     }
 

@@ -86,6 +86,7 @@ from nexus.db.t2.taxonomy_compute import (
     compute_discovered_topics,
     compute_rebuild_plan,
     compute_split,
+    hub_is_stale,
 )
 
 _log = structlog.get_logger(__name__)
@@ -2389,14 +2390,14 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 # engine-service-v0.1.58 added the aggregates to /hubs, so the
                 # flag now does what it says.
                 #
-                # is_stale is computed SERVER-side, unlike icf/score above, and
-                # that asymmetry is deliberate: the retired SQLite oracle
-                # compared ISO-8601 strings lexicographically, which was sound
-                # on TEXT timestamps but is not over HTTP, where a naive
-                # OffsetDateTime.toString() renders in the server's LOCAL
-                # offset and elides zero seconds. Comparing real TIMESTAMPTZ
-                # server-side avoids reintroducing that trap; the client passes
-                # the verdict through rather than re-deriving it from strings.
+                # is_stale is derived HERE from the route's fields, not taken
+                # from the engine's verdict: engines up to v0.1.164 compute it
+                # in the reverse sense (assignments newer than the discover);
+                # RDR-077's sense, ruled by Sam 2026-10-26 (nexus-9kp10), is a
+                # discover newer than the hub's latest projection. The values
+                # are parsed to datetimes before comparing, so the
+                # zero-second elision and offset rendering that made a string
+                # comparison unsafe over HTTP do not apply.
                 # Gated on warn_stale to match the oracle, which only
                 # populated these when asked. The engine computes them
                 # unconditionally (one taxonomy_meta lookup), so without this
@@ -2410,7 +2411,11 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 never_discovered_count=(
                     int(r.get("never_discovered_count", 0)) if warn_stale else 0
                 ),
-                is_stale=bool(r.get("is_stale", False)) if warn_stale else False,
+                is_stale=hub_is_stale(
+                    last_at,
+                    r.get("max_last_discover_at"),
+                    int(r.get("never_discovered_count", 0)),
+                ) if warn_stale else False,
             ))
 
         hubs.sort(key=lambda h: h.score, reverse=True)

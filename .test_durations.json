@@ -4064,7 +4064,7 @@
     "tests/db/test_onjvy_read_routes.py::test_prefer_higher_upsert_keeps_the_higher_similarity": 0.297,
     "tests/db/test_onjvy_read_routes.py::test_taxonomy_status_surfaces_hook_failures_in_service_mode": 0.431,
     "tests/db/test_onjvy_read_routes.py::test_warn_stale_false_reports_nothing": 0.418,
-    "tests/db/test_onjvy_read_routes.py::test_warn_stale_not_stale_when_discover_postdates": 0.357,
+    "tests/db/test_onjvy_read_routes.py::test_warn_stale_not_stale_when_projection_postdates_discover": 0.357,
     "tests/db/test_onjvy_read_routes.py::test_warn_stale_surfaces_staleness_over_http": 0.34,
     "tests/db/test_onnx_model_root.py::test_blank_env_is_absence": 0.003,
     "tests/db/test_onnx_model_root.py::test_blank_home_falls_to_passwd_entry": 0.003,

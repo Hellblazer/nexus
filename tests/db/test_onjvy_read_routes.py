@@ -266,21 +266,23 @@ def test_warn_stale_surfaces_staleness_over_http(db: T2Database) -> None:
     with no warning and no error — a flag the client accepted and the backend
     dropped (nexus-onjvy, same shape as nexus-ybj1b's include_heuristic).
 
-    Assignments are dated in the FUTURE so they postdate the discover, which
-    record_discover_count stamps at now(). That is the only lever the client
-    has over the comparison, and it is enough to prove the wire.
+    RDR-077 sense (Sam, 2026-10-26, nexus-9kp10): stale means a discover ran
+    after the hub's latest projection. Assignments dated in the PAST predate
+    the discover, which record_discover_count stamps at now(). That is the
+    only lever the client has over the comparison, and it is enough to prove
+    the wire.
     """
     topic_id = _unique_topic_id()
     srcs = (f"code__hub_a_{topic_id}", f"code__hub_b_{topic_id}")
-    _seed_hub(db, topic_id, srcs, "2099-01-01T00:00:00Z")
+    _seed_hub(db, topic_id, srcs, "2020-01-01T00:00:00Z")
     for s in srcs:
         db.taxonomy.record_discover_count(s, 100)
 
     hub = _hub(db, topic_id, warn_stale=True)
 
     assert hub.is_stale is True, (
-        "assignments postdate every discover — the hub is stale and the flag "
-        "must say so"
+        "every discover postdates the assignments — the hub is stale and the "
+        "flag must say so"
     )
     assert hub.max_last_discover_at is not None, (
         "max_last_discover_at must cross the wire, not stay hardcoded None"
@@ -291,15 +293,19 @@ def test_warn_stale_surfaces_staleness_over_http(db: T2Database) -> None:
     assert hub.never_discovered_count == 0
 
 
-def test_warn_stale_not_stale_when_discover_postdates(db: T2Database) -> None:
-    """The negative case: old assignments against a fresh discover are NOT stale.
+def test_warn_stale_not_stale_when_projection_postdates_discover(
+    db: T2Database,
+) -> None:
+    """The negative case: projection after the discover is NOT stale.
 
     Without this, the test above would pass against an implementation that
-    hardcoded is_stale=True — the mirror of the bug being fixed.
+    hardcoded is_stale=True — the mirror of the bug being fixed. The engine
+    up to v0.1.164 calls this hub stale; the client derives the verdict from
+    the fields, so this passes on either engine.
     """
     topic_id = _unique_topic_id()
     srcs = (f"code__hub_a_{topic_id}", f"code__hub_b_{topic_id}")
-    _seed_hub(db, topic_id, srcs, "2020-01-01T00:00:00Z")
+    _seed_hub(db, topic_id, srcs, "2099-01-01T00:00:00Z")
     for s in srcs:
         db.taxonomy.record_discover_count(s, 100)
 
@@ -313,7 +319,7 @@ def test_never_discovered_contributor_forces_stale(db: T2Database) -> None:
     """A contributing collection with no taxonomy_meta row counts and forces stale."""
     topic_id = _unique_topic_id()
     srcs = (f"code__hub_a_{topic_id}", f"code__hub_b_{topic_id}")
-    _seed_hub(db, topic_id, srcs, "2020-01-01T00:00:00Z")
+    _seed_hub(db, topic_id, srcs, "2099-01-01T00:00:00Z")
     db.taxonomy.record_discover_count(srcs[0], 100)
     # srcs[1] deliberately never recorded.
 
@@ -322,7 +328,7 @@ def test_never_discovered_contributor_forces_stale(db: T2Database) -> None:
     assert hub.never_discovered_count == 1
     assert hub.is_stale is True, (
         "a never-discovered contributor is stale even though the assignments "
-        "predate the discover that DID happen"
+        "postdate the discover that DID happen"
     )
 
 
