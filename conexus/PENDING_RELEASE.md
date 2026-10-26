@@ -40,12 +40,7 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ---
 
-## Awaiting the next release or plugin cut (pinned: v7.86.2)
+## Awaiting the next release or plugin cut (pinned: v7.86.3)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `tool-spill/hooks/register.ts` (nexus-121ke): new opt-in plugin conexus-tool-spill. In the main conversation only (subagents and, unless `includeHeadless` is on, `claude -p` runs are left alone), a Bash result over `limit` bytes (default 4000) is written to `<temp dir>/claude-tool-spill-<user>/<tool_use_id>.txt` and the model sees the first `head` bytes (1400) and the last `tail` bytes (800) of each stream, cut at line ends, with a note between them naming the file, the middle lines cut and how many of them mention an error or failure. A Read of a whole file over the limit is cut with the next offset and a limit to use; a Read with an offset or limit, an instruction file, an errored or denied call, output Claude Code already persisted, and every other tool pass untouched. Install with `/plugin install conexus-tool-spill@nexus-plugins`; it replaces any machine-local copy of the mod, and nothing changes for anyone who does not install it.
-- `tool-spill/hooks/hooks.json` (nexus-121ke): names the hooks module of conexus-tool-spill.
-- `tool-spill/.claude-plugin/plugin.json` (nexus-121ke): manifest of conexus-tool-spill, with the `limit`, `head`, `tail` and `includeHeadless` userConfig options.
-- `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-121ke): the fallback plugin set, used only when no marketplace.json is reachable, now names conexus-tool-spill too, so an installed copy of it is kept in version lockstep on that path.
-- `conexus/skills/orchestration/reference.md` (nexus-rkats): the Working Rules sequential-thinking bullet names its decision points (agent dispatch, choosing a fix and again after one fails, acting on a verdict/test/measurement, push/merge/bead close/release prep, anything hard to undo) instead of "before every decision". The bead also changes the SessionStart imperative in `src/nexus/session_start_guidance.py` (wheel content), so a plugin-only cut must move this entry under a Deferred section and let it ship with the next client release.
