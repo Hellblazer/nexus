@@ -733,7 +733,6 @@ public class TenantKeyedStateGateTest {
                 "ManifestLabelStage.Split.labels",
                 "ManifestLabelStage.Occurrence.docValues",
                 "ManifestLabelStage.DocFields.keys",
-                "ManifestLabelStage.DocFields.meta",
                 "PgVectorRepository.ExistencePartition.haveVectorIdx",
                 "PgVectorRepository.ExistencePartition.needEmbedIdx",
                 "PgVectorRepository.ManifestLessCensusResult.chashes",

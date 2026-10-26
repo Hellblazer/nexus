@@ -147,21 +147,24 @@ class ManifestLabelStageTest {
             "section_type", "body", "quality_gate_overridden", true, "source_author", w("$ne", "x")));
 
         assertThat(split.active()).isTrue();
-        assertThat(split.rest()).containsOnlyKeys("lang");
+        // tags and quality_gate_overridden have no catalog writer yet: they stay predicates on the chunk row.
+        assertThat(split.rest()).containsOnlyKeys("lang", "tags", "quality_gate_overridden");
         assertThat(split.labels()).extracting(ManifestLabelStage.Predicate::key)
-            .containsExactly("tags", "bib_year", "section_type", "quality_gate_overridden", "source_author");
+            .containsExactly("bib_year", "section_type", "source_author");
     }
 
     @Test
-    void everyDocumentKeyTheBeadNames_isAnswered_andTitleAndContentTypeAreNot() {
+    void exactlyTheKeysWithACatalogAnswerAreAnswered_theMetaKeysTitleAndContentTypeAreNot() {
         for (String key : List.of("source_author", "indexed_at", "bib_year", "bib_authors", "bib_venue",
-                "bib_citation_count", "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi", "tags", "category",
-                "ttl_days", "source_agent", "extraction_method", "quality_gate_overridden", "extraction_source",
-                "frecency_score")) {
+                "bib_citation_count", "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi",
+                "section_title", "section_type", "page_number")) {
             assertThat(ManifestLabelStage.split(w(key, "v")).active()).as(key).isTrue();
         }
-        // nexus-6pfgb.25 owns title= and content_type= (blocked on a ruling): they still go to the search function.
-        for (String key : List.of("title", "content_type", "chunk_text_hash")) {
+        // The catalog meta keys have no writer (epic nexus-6pfgb wave 1), so answering them would only put
+        // those filters under the overfetch cut. nexus-6pfgb.25 owns title= and content_type=.
+        for (String key : List.of("tags", "category", "ttl_days", "source_agent", "extraction_method",
+                "quality_gate_overridden", "extraction_source", "frecency_score",
+                "title", "content_type", "chunk_text_hash")) {
             assertThat(ManifestLabelStage.split(w(key, "v")).active()).as(key).isFalse();
         }
     }
@@ -170,7 +173,7 @@ class ManifestLabelStageTest {
     void aMalformedDocumentKeyOperator_isRefusedLikeALabelOne() {
         assertThatThrownBy(() -> ManifestLabelStage.split(w("bib_year", w("$regex", "x"))))
             .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("unsupported where operator");
-        assertThatThrownBy(() -> ManifestLabelStage.split(w("tags", List.of("a"))))
+        assertThatThrownBy(() -> ManifestLabelStage.split(w("source_author", List.of("a"))))
             .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -202,19 +205,6 @@ class ManifestLabelStageTest {
     }
 
     @Test
-    void aMetaValueKeepsItsJsonType_andAbsentOrJsonNullFallsBack() {
-        assertThat(ManifestLabelStage.metaValue("\"alpha\"")).isEqualTo("alpha");
-        assertThat(ManifestLabelStage.metaValue("\"\"")).isEqualTo("");
-        assertThat(ManifestLabelStage.metaValue("30")).isEqualTo(30L);
-        assertThat(ManifestLabelStage.metaValue("0.9")).isEqualTo(0.9);
-        assertThat(ManifestLabelStage.metaValue("true")).isEqualTo(Boolean.TRUE);
-        assertThat(ManifestLabelStage.metaValue("false")).isEqualTo(Boolean.FALSE);
-        assertThat(ManifestLabelStage.metaValue("[\"a\",\"b\"]")).isEqualTo("[\"a\",\"b\"]");
-        assertThat(ManifestLabelStage.metaValue(null)).isNull();
-        assertThat(ManifestLabelStage.metaValue("null")).isNull();
-    }
-
-    @Test
     void indexedAt_isRenderedAsTheChunkRowsOwnUtcText() {
         assertThat(ManifestLabelStage.indexedAtText(java.time.OffsetDateTime.parse("2026-03-01T00:00:00Z")))
             .isEqualTo("2026-03-01T00:00:00.000000+00:00");
@@ -223,17 +213,83 @@ class ManifestLabelStageTest {
     }
 
     @Test
-    void aBooleanOrNumericDocumentValue_passesTheSameOperatorsAsALabel() {
-        var overridden = ManifestLabelStage.split(w("quality_gate_overridden", true)).labels();
-        assertThat(ManifestLabelStage.passes(overridden, w("quality_gate_overridden", Boolean.TRUE))).isTrue();
-        assertThat(ManifestLabelStage.passes(overridden, w("quality_gate_overridden", Boolean.FALSE))).isFalse();
-        assertThat(ManifestLabelStage.passes(overridden, w("quality_gate_overridden", null))).isFalse();
-
+    void aNumericDocumentValue_passesTheSameOperatorsAsALabel() {
         var recent = ManifestLabelStage.split(w("bib_year", w("$gte", 2020))).labels();
         assertThat(ManifestLabelStage.passes(recent, w("bib_year", 2021))).isTrue();
         assertThat(ManifestLabelStage.passes(recent, w("bib_year", null))).isFalse();
         var notThatYear = ManifestLabelStage.split(w("bib_year", w("$ne", 2021))).labels();
         assertThat(ManifestLabelStage.passes(notThatYear, w("bib_year", null))).isTrue();
+    }
+
+    @Test
+    void anExplicitEmptyStringOperand_isComparedWithAnUnlabelledValueAsTheEmptyString() {
+        for (Object unlabelled : java.util.Arrays.asList(null, "")) {
+            Map<String, Object> value = w("source_author", unlabelled);
+            assertThat(ManifestLabelStage.passes(
+                ManifestLabelStage.split(w("source_author", "")).labels(), value)).as("$eq '' on %s", unlabelled).isTrue();
+            assertThat(ManifestLabelStage.passes(
+                ManifestLabelStage.split(w("source_author", w("$in", List.of("x", "")))).labels(), value))
+                .as("$in [''] on %s", unlabelled).isTrue();
+            assertThat(ManifestLabelStage.passes(
+                ManifestLabelStage.split(w("source_author", w("$ne", ""))).labels(), value))
+                .as("$ne '' on %s", unlabelled).isFalse();
+            assertThat(ManifestLabelStage.passes(
+                ManifestLabelStage.split(w("source_author", w("$nin", List.of("", "x")))).labels(), value))
+                .as("$nin [''] on %s", unlabelled).isFalse();
+            // Any other operand keeps the unlabelled rule: negative operators keep it, the rest drop it.
+            assertThat(ManifestLabelStage.passes(
+                ManifestLabelStage.split(w("source_author", "x")).labels(), value)).isFalse();
+            assertThat(ManifestLabelStage.passes(
+                ManifestLabelStage.split(w("source_author", w("$ne", "x"))).labels(), value)).isTrue();
+            assertThat(ManifestLabelStage.passes(
+                ManifestLabelStage.split(w("source_author", w("$gte", ""))).labels(), value)).isFalse();
+        }
+        // A labelled value is not the empty string.
+        Map<String, Object> alice = w("source_author", "Alice");
+        assertThat(ManifestLabelStage.passes(ManifestLabelStage.split(w("source_author", "")).labels(), alice)).isFalse();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("source_author", w("$ne", ""))).labels(), alice)).isTrue();
+        // The section labels run the same code.
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("section_type", "")).labels(), labels("", "", null))).isTrue();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("section_type", w("$ne", ""))).labels(), labels("", "", null))).isFalse();
+    }
+
+    @Test
+    void aStringKeyComparesAsAnExactString_aNumericKeyKeepsTheNumberTextTolerance() {
+        // bib_semantic_scholar_id and bib_doi are strings: "0042" is not "42", "1e3" is not "1000".
+        Map<String, Object> s2 = w("bib_semantic_scholar_id", "0042");
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_semantic_scholar_id", "0042")).labels(), s2)).isTrue();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_semantic_scholar_id", "42")).labels(), s2)).isFalse();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_semantic_scholar_id", 42)).labels(), s2)).isFalse();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_semantic_scholar_id", w("$ne", "42"))).labels(), s2)).isTrue();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_semantic_scholar_id", w("$in", List.of("42", "7")))).labels(), s2)).isFalse();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_doi", "1000")).labels(), w("bib_doi", "1e3"))).isFalse();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_doi", "1e3")).labels(), w("bib_doi", "1e3"))).isTrue();
+        // A numeric operand never ranges over a string key; a string operand ranges lexically.
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_semantic_scholar_id", w("$gte", 10))).labels(), s2)).isFalse();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_semantic_scholar_id", w("$gte", "0040"))).labels(), s2)).isTrue();
+
+        // bib_year, bib_citation_count and page_number are numbers: a text 2021 is the number 2021.
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_year", 2021)).labels(), w("bib_year", "2021"))).isTrue();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_year", "2021")).labels(), w("bib_year", 2021))).isTrue();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("bib_citation_count", w("$gte", 10))).labels(), w("bib_citation_count", "40")))
+            .isTrue();
+        assertThat(ManifestLabelStage.passes(
+            ManifestLabelStage.split(w("page_number", "5")).labels(), labels("body", "T", 5))).isTrue();
     }
 
     @Test

@@ -6,11 +6,7 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Field;
-import org.jooq.JSONB;
-import org.jooq.impl.DSL;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -51,7 +47,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       chunk can therefore come back twice, once per owner, each with its own label.</li>
  *   <li>Unlabelled: a negative operator ({@code $ne}, {@code $nin}) keeps an unlabelled occurrence (SQL
  *       {@code IS DISTINCT FROM}); every other operator drops it. An empty string counts as unlabelled
- *       exactly as NULL does: a current client writes {@code ""} for a chunk with no heading.</li>
+ *       exactly as NULL does: a current client writes {@code ""} for a chunk with no heading. The one
+ *       exception is an operand that is itself the empty string: an unlabelled value is compared with
+ *       {@code ""} first, so {@code $eq ""} and {@code $in [""]} match it and {@code $ne ""} and {@code $nin
+ *       [""]} drop it, as the chunk-row filter did.</li>
  *   <li>{@code labels_written} (catalog-046): a manifest row says whether its labels are its document's
  *       own answer. A WRITTEN row is authoritative, its empty or NULL label included: the chunk row is
  *       never consulted, because the chunk row belongs to the last writer and a document that indexed a
@@ -80,12 +79,12 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       consulted, because a shared row carries the bib of whichever owner was enriched. An enriched
  *       document's year 0 or empty string is "not recorded" (unlabelled); its citation count 0 is a
  *       count.</li>
- *   <li>{@link #META_KEYS} read the document's {@code metadata} jsonb. A key the document's meta holds (not
- *       absent, not JSON null) is its answer, an empty string included; a key it does not hold is a legacy
- *       document and falls back to the chunk row, the same rule {@code labels_written = false} applies to
- *       the section labels.</li>
  * </ul>
- * Operators, the unlabelled rules ({@code IS DISTINCT FROM}), the per-document lowest-passing-position
+ * The catalog document's {@code metadata} keys ({@code tags}, {@code category}, {@code ttl_days} and the
+ * rest) are NOT answered here: no writer puts them on a catalog document yet (epic nexus-6pfgb, wave 1), so
+ * answering them would only move those filters under the {@link #OVERFETCH} cut for the same answers. They
+ * stay predicates on the chunk row, inside the search.
+ * Operators, the unlabelled rules, the per-document lowest-passing-position
  * expansion and the cut are the section labels'. An expanded row speaks for its document on the document
  * keys the filter names: the owner's value replaces the chunk row's, and an authoritative absence (an
  * unenriched document's bib) removes the key.
@@ -111,13 +110,15 @@ final class ManifestLabelStage {
     static final Set<String> BIB_KEYS = Set.of("bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi");
 
-    /** The keys answered from the document's {@code metadata} jsonb, the chunk row when the document lacks the key. */
-    static final Set<String> META_KEYS = Set.of("tags", "category", "ttl_days", "source_agent", "extraction_method",
-        "quality_gate_overridden", "extraction_source", "frecency_score");
-
     /** Every document-level key this stage answers. */
-    static final Set<String> DOC_KEYS =
-        Set.copyOf(union(union(Set.of(AUTHOR_KEY, INDEXED_AT_KEY), BIB_KEYS), META_KEYS));
+    static final Set<String> DOC_KEYS = Set.copyOf(union(Set.of(AUTHOR_KEY, INDEXED_AT_KEY), BIB_KEYS));
+
+    /**
+     * The answered keys whose values are numbers. Only these compare numerically across a number and its text
+     * ({@code 5} and {@code "5"}); every other key is a string and compares as an exact string, so an id such
+     * as {@code "0042"} is not {@code "42"} and {@code "1e3"} is not {@code "1000"}.
+     */
+    static final Set<String> NUMERIC_KEYS = Set.of("page_number", "bib_year", "bib_citation_count");
 
     /** Every key this stage answers: the per-position labels and the document-level keys. */
     static final Set<String> ANSWERED_KEYS = Set.copyOf(union(LABEL_KEYS, DOC_KEYS));
@@ -261,39 +262,57 @@ final class ManifestLabelStage {
 
     private static boolean test(Predicate p, Object label) {
         if (label == null || (label instanceof String text && text.isEmpty())) {
-            // IS DISTINCT FROM: a negative operator keeps an unlabelled occurrence, any other drops it.
-            return p.operator().equals("$ne") || p.operator().equals("$nin");
+            // An explicit empty-string operand names exactly this value: compare it before the unlabelled rule.
+            return switch (p.operator()) {
+                case "$eq" -> isEmptyString(p.operand());
+                case "$ne" -> !isEmptyString(p.operand());
+                case "$in" -> ((List<?>) p.operand()).stream().anyMatch(ManifestLabelStage::isEmptyString);
+                case "$nin" -> ((List<?>) p.operand()).stream().noneMatch(ManifestLabelStage::isEmptyString);
+                // IS DISTINCT FROM: a negative operator keeps an unlabelled occurrence, any other drops it.
+                default -> false;
+            };
         }
+        boolean numeric = NUMERIC_KEYS.contains(p.key());
         return switch (p.operator()) {
-            case "$eq" -> sameValue(label, p.operand());
-            case "$ne" -> !sameValue(label, p.operand());
-            case "$in" -> ((List<?>) p.operand()).stream().anyMatch(o -> sameValue(label, o));
-            case "$nin" -> ((List<?>) p.operand()).stream().noneMatch(o -> sameValue(label, o));
-            case "$gte" -> compare(label, p.operand()) >= 0 && comparable(label, p.operand());
-            case "$lte" -> compare(label, p.operand()) <= 0 && comparable(label, p.operand());
-            case "$gt" -> compare(label, p.operand()) > 0 && comparable(label, p.operand());
-            case "$lt" -> compare(label, p.operand()) < 0 && comparable(label, p.operand());
+            case "$eq" -> sameValue(label, p.operand(), numeric);
+            case "$ne" -> !sameValue(label, p.operand(), numeric);
+            case "$in" -> ((List<?>) p.operand()).stream().anyMatch(o -> sameValue(label, o, numeric));
+            case "$nin" -> ((List<?>) p.operand()).stream().noneMatch(o -> sameValue(label, o, numeric));
+            case "$gte" -> comparable(label, p.operand(), numeric) && compare(label, p.operand()) >= 0;
+            case "$lte" -> comparable(label, p.operand(), numeric) && compare(label, p.operand()) <= 0;
+            case "$gt" -> comparable(label, p.operand(), numeric) && compare(label, p.operand()) > 0;
+            case "$lt" -> comparable(label, p.operand(), numeric) && compare(label, p.operand()) < 0;
             default -> throw new IllegalStateException("operator validated in split: " + p.operator());
         };
     }
 
+    private static boolean isEmptyString(Object operand) {
+        return operand instanceof String s && s.isEmpty();
+    }
+
     /**
-     * Equality with the search planner's tolerant typing: a stored {@code 5} equals the operand
-     * {@code "5"} and the reverse, so {@code page_number=5} and {@code page_number="5"} both match.
+     * Equality with the search planner's tolerant typing for a numeric key: a stored {@code 5} equals the
+     * operand {@code "5"} and the reverse, so {@code page_number=5} and {@code page_number="5"} both match.
+     * A string key compares as an exact string.
      */
-    private static boolean sameValue(Object label, Object operand) {
-        BigDecimal a = asNumber(label);
-        BigDecimal b = asNumber(operand);
-        if (a != null && b != null) {
-            return a.compareTo(b) == 0;
+    private static boolean sameValue(Object label, Object operand, boolean numericKey) {
+        if (numericKey) {
+            BigDecimal a = asNumber(label);
+            BigDecimal b = asNumber(operand);
+            if (a != null && b != null) {
+                return a.compareTo(b) == 0;
+            }
         }
         return String.valueOf(label).equals(String.valueOf(operand));
     }
 
-    /** A numeric operand compares numerically, a string operand lexically; across the two nothing matches. */
-    private static boolean comparable(Object label, Object operand) {
+    /**
+     * A numeric operand compares numerically, a string operand lexically; across the two nothing matches. A
+     * string key has no number to compare with, so only a string operand applies to it.
+     */
+    private static boolean comparable(Object label, Object operand, boolean numericKey) {
         if (operand instanceof Number) {
-            return asNumber(label) != null;
+            return numericKey && asNumber(label) != null;
         }
         return !(label instanceof Number);
     }
@@ -350,32 +369,21 @@ final class ManifestLabelStage {
         return keys;
     }
 
-    /** The document columns / jsonb extractions one lookup reads for {@code docKeys}, and how to read them back. */
+    /** The document columns one lookup reads for {@code docKeys}, and how to read them back. */
     private record DocFields(Set<String> keys, Field<String> author, Field<OffsetDateTime> indexedAt,
                              Field<Integer> bibYear, Field<String> bibAuthors, Field<String> bibVenue,
                              Field<Integer> bibCitations, Field<String> bibS2, Field<String> bibOpenAlex,
-                             Field<String> bibDoi, Field<OffsetDateTime> bibEnrichedAt,
-                             Map<String, Field<JSONB>> meta) {
+                             Field<String> bibDoi, Field<OffsetDateTime> bibEnrichedAt) {
 
         static DocFields of(Set<String> keys) {
             boolean bib = keys.stream().anyMatch(BIB_KEYS::contains);
-            Map<String, Field<JSONB>> meta = new LinkedHashMap<>();
-            int i = 0;
-            for (String key : keys) {
-                if (META_KEYS.contains(key)) {
-                    // metadata -> 'key': SQL NULL when the document's meta lacks the key, jsonb 'null' for a JSON null.
-                    meta.put(key, DSL.jsonbGetAttribute(CATALOG_DOCUMENTS.METADATA, key).as("meta_" + i));
-                    i++;
-                }
-            }
             return new DocFields(keys,
                 keys.contains(AUTHOR_KEY) ? CATALOG_DOCUMENTS.AUTHOR : null,
                 keys.contains(INDEXED_AT_KEY) ? CATALOG_DOCUMENTS.INDEXED_AT : null,
                 bib ? CATALOG_DOCUMENTS.BIB_YEAR : null, bib ? CATALOG_DOCUMENTS.BIB_AUTHORS : null,
                 bib ? CATALOG_DOCUMENTS.BIB_VENUE : null, bib ? CATALOG_DOCUMENTS.BIB_CITATION_COUNT : null,
                 bib ? CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID : null, bib ? CATALOG_DOCUMENTS.BIB_OPENALEX_ID : null,
-                bib ? CATALOG_DOCUMENTS.BIB_DOI : null, bib ? CATALOG_DOCUMENTS.BIB_ENRICHED_AT : null,
-                meta);
+                bib ? CATALOG_DOCUMENTS.BIB_DOI : null, bib ? CATALOG_DOCUMENTS.BIB_ENRICHED_AT : null);
         }
 
         void addTo(List<Field<?>> select) {
@@ -385,7 +393,6 @@ final class ManifestLabelStage {
                     select.add(f);
                 }
             }
-            select.addAll(meta.values());
         }
 
         Map<String, Object> read(org.jooq.Record r) {
@@ -405,13 +412,6 @@ final class ManifestLabelStage {
             if (bibYear != null) {
                 bibValues(keys, r.get(bibYear), r.get(bibAuthors), r.get(bibVenue), r.get(bibCitations),
                     r.get(bibS2), r.get(bibOpenAlex), r.get(bibDoi), r.get(bibEnrichedAt) != null, out);
-            }
-            for (Map.Entry<String, Field<JSONB>> e : meta.entrySet()) {
-                JSONB raw = r.get(e.getValue());
-                Object value = metaValue(raw == null ? null : raw.data());
-                if (value != null) {
-                    out.put(e.getKey(), value);
-                }
             }
             return out;
         }
@@ -451,41 +451,6 @@ final class ManifestLabelStage {
 
     private static boolean notEmpty(String s) {
         return s != null && !s.isEmpty();
-    }
-
-    private static final ObjectMapper JSON = new ObjectMapper();
-
-    /**
-     * One meta key's value from its jsonb text: null when the key is absent (SQL NULL) or JSON null (the
-     * document does not hold it: legacy, fall back to the row), else the value in its JSON type. A nested
-     * array or object is its JSON text.
-     */
-    static Object metaValue(String json) {
-        if (json == null) {
-            return null;
-        }
-        JsonNode node;
-        try {
-            node = JSON.readTree(json);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            return null;
-        }
-        if (node == null || node.isNull() || node.isMissingNode()) {
-            return null;
-        }
-        if (node.isTextual()) {
-            return node.asText();
-        }
-        if (node.isBoolean()) {
-            return node.asBoolean();
-        }
-        if (node.isIntegralNumber() && node.canConvertToLong()) {
-            return node.asLong();
-        }
-        if (node.isNumber()) {
-            return node.asDouble();
-        }
-        return node.toString();
     }
 
     /**

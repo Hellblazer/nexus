@@ -633,6 +633,8 @@ class PgVectorRepositoryContractTest {
     @Test
     void search_whereGteNumeric_matchesJsonNumbersOnly_neverCastErrors() {
         String col = "code__searchgte__voyage-code-3__v1";
+        // pub_year, not bib_year: the manifest stage answers bib_year from the catalog (nexus-6pfgb.24), so a
+        // probe on it would not reach the SQL path's numeric-cast guard that this test covers.
         embedder1024.register("search query", 1.0f, 0.0f);
         embedder1024.register("year t1", 1.0f, 0.0f);
         embedder1024.register("year t2", 0.8f, 0.6f);
@@ -642,21 +644,21 @@ class PgVectorRepositoryContractTest {
             List.of("5fe59261ef2deb5a71a465d26a552dab0b6ed500a23ec72393d9fc7a7beb21b1", "aee331e61a5aef71a62ac8ae0dc96e5cbec121c9ca8399fabca6ae601aff2feb",
                     "fc926f894506caf7e314ee2d88ae6d5c9aeca62aa307e0d1608757f8cf70e06b", "16994366be46210ec48da3aba917a2b985b51c8c64561ed4d74a7ea0981b4c4e"),
             List.of("year t1", "year t2", "year t3", "year t4"),
-            List.of(Map.of("bib_year", 2021),
-                    Map.of("bib_year", 2020),
-                    Map.of("bib_year", 2019),
+            List.of(Map.of("pub_year", 2021),
+                    Map.of("pub_year", 2020),
+                    Map.of("pub_year", 2019),
                     // JSON-STRING year: must be excluded by a numeric operand
                     // WITHOUT aborting the query on the ::numeric cast.
-                    Map.of("bib_year", "not-a-year")));
+                    Map.of("pub_year", "not-a-year")));
         own(TENANT_A, col, "5fe59261ef2deb5a71a465d26a552dab0b6ed500a23ec72393d9fc7a7beb21b1", "aee331e61a5aef71a62ac8ae0dc96e5cbec121c9ca8399fabca6ae601aff2feb",
             "fc926f894506caf7e314ee2d88ae6d5c9aeca62aa307e0d1608757f8cf70e06b", "16994366be46210ec48da3aba917a2b985b51c8c64561ed4d74a7ea0981b4c4e");
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(col), 10,
-            Map.of("bib_year", Map.of("$gte", 2020)));
+            Map.of("pub_year", Map.of("$gte", 2020)));
 
         assertThat(rows).extracting(r -> r.get("id"))
-            .as("{bib_year:{$gte:2020}} matches the two JSON-number rows >= 2020, "
+            .as("{pub_year:{$gte:2020}} matches the two JSON-number rows >= 2020, "
                 + "excludes 2019 AND the non-numeric row, distance-ordered")
             .containsExactly("5fe59261ef2deb5a71a465d26a552dab0b6ed500a23ec72393d9fc7a7beb21b1", "aee331e61a5aef71a62ac8ae0dc96e5cbec121c9ca8399fabca6ae601aff2feb");
     }
