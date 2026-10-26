@@ -28,7 +28,10 @@ was retired in RDR-155. The name now misleads anyone reading `nx catalog show`
 (2026-10-23): replace the scheme as one change covering the writer, the engine's
 rename rewrite and a backfill of existing rows, riding an engine tag after the
 RDR-007 A2 freeze. Sam's rulings of 2026-10-24 on the draft's open questions are
-in § Decisions; one of them folds nexus-ql5m5 in as Gap 4.
+in § Decisions; one of them folds nexus-ql5m5 in as Gap 4. At the round 1 gate
+(2026-10-26) Sam confirmed the backfill and ruled that `chroma://` goes from storage
+and from new code: every note is backfilled, the engine keeps accepting the old
+spelling on input, and no note is shown back with it (§ Decisions 4 and 5).
 
 In this RDR a **note URI** is `chroma://<c>/<rest>` or `nx-note://<c>/<rest>` whose
 first path segment `<c>` (the collection name) does not start with `rdr__`, `docs__`
@@ -52,64 +55,74 @@ fix delivers a scheme whose name says what it is.
 #### Gap 2: The scheme is spelled independently at every site that knows it
 
 There is no single definition. Every site below spells it on its own (line numbers
-on develop, 2026-10-23):
+as read on develop 2026-10-23 and 2026-10-26; they drift, so an implementer
+re-reads each site before editing it):
 
 | Role | Site |
 | --- | --- |
-| Mints a stored URI | `aspect_readers.uri_for` `:206` (the store hook `:883` and exporter `:652` call it); `aspect_extractor.py` `:1301`, `:1414`, `:1577` (aspect rows' `source_uri`); `commands/enrich.py:1525` (dry-run read) |
-| Mints a transient read URI | `aspect_readers._read_https_uri` `:789` (T3-first read of an https source) |
-| Classifies by prefix | `reconcile_stale._STORE_PUT_URI_PREFIX` `:230`, used `:379`; `recovery_bundle.classify_store_put_origin` `:94` and its residue counter `:185`; `backfill.py` `:84`, `:102`, `:111` (residue census and rewrite) |
-| Parses the URI | `recovery_bundle._resolve_link_endpoint` `:499-501` (collection/title re-derivation) |
+| Mints a stored URI | `aspect_readers.uri_for` (the store hook `:947` and exporter `:652` call it); `http_vector_client.py:5918` (`find_ids_by_title`, through `uri_for`); `aspect_extractor.py` `:1933`, `:2379`, `:2417` (aspect rows' `source_uri`, through `uri_for`, unquoted); `operators/aspect_sql.py:591` (through `uri_for`); |
+| Mints a transient read URI | `aspect_readers._read_https_uri` `:789` (T3-first read of an https source); `commands/enrich.py:1617` (dry-run read, quoted); `aspect_extractor.py` `:1332`, `:1445`, `:1609`, which build `chroma://{collection}/{quote(path, safe='/')}` for `read_source`, quoted, so a different string from the stored form |
+| Classifies by prefix | Three different predicates: `reconcile_stale._STORE_PUT_URI_PREFIX` `:230`, used `:379`, a bare `startswith("chroma://")` with no collection guard (the residue text at `:220-229` is a comment); `recovery_bundle.classify_store_put_origin` `:90-100`, which first excludes file-routed prefixes by `entry.physical_collection`, then tests `chroma://`; its residue counter `:185`; `backfill.py` `:84`, `:102`, `:111` (residue census and rewrite, keyed by `physical_collection`) |
+| Parses the URI | `recovery_bundle._resolve_link_endpoint` `:496-502` (collection/title re-derivation when `by_source_uri` misses) |
 | Dispatches on scheme name | `aspect_readers._READERS` `:1107`, `_STAT_HANDLERS` `:1939`; result labels `"scheme": "chroma"` `:521`, `"served_from": "chroma"` `:797`; `catalog/types._KNOWN_URI_SCHEMES` `:80`; `doc/catalog_links._LINK_SAFE_SCHEMES` `:285` (derived by subtracting from `_KNOWN_URI_SCHEMES`, so a scheme added to the known set becomes link-safe unless it is excluded by name) |
-| Compares URIs exactly | `http_catalog_client.by_source_uri` `:2184`; store hook chash-dedup guard `:930`; exporter import `:745`, `:748`; `recovery_bundle._resolve_link_endpoint` `:498` |
-| User-facing text | `commands/catalog.py:606` (register help), `commands/enrich.py:2094` (help) |
+| Compares URIs exactly | `http_catalog_client.by_source_uri` `:2184`; store hook chash-dedup guard `:996`; exporter import `:745`, `:748`; `recovery_bundle._resolve_link_endpoint` `:498`; `operators/aspect_sql.py` `:622` and `:669-690` (`u in matched_uris`, `u in uri_to_value` against `operator_filter` and `operator_groupby` results) |
+| User-facing text | `commands/catalog.py:606` (register help), `commands/enrich.py:2202` (help) |
 | Comments and docs only | `integrity.py:623` (a docstring; there is no constant there), `doctor_references.py:14`, `aspect_worker.py:585`, `db/t3.py:771`, `catalog/AGENTS.md:9`, `db/AGENTS.md:7` |
-| Engine | rename rewrite `CatalogRepository.java:9713-9734` (collision pre-check) and `:9915-9929` (three UPDATEs); `deriveSourceUri` javadoc `:933`; the three moves in Gap 4, which do not spell it and should. Two applied changelogs mention it in comments (`hygiene-001-not-null.xml:93`, `aspects-004-doc-id-backfill.xml:30`); applied changesets are never edited. |
+| Engine | rename rewrite `CatalogRepository.java:9778-9801` (collision pre-check, literals `:9782-9783`) and `:9970-9994` (three UPDATEs); `deriveSourceUri` javadoc `:933`; the other moves in Gap 4, which do not spell it and should. Two applied changelogs mention it in comments (`hygiene-001-not-null.xml:93`, `aspects-004-doc-id-backfill.xml:30`); applied changesets are never edited. |
 
 `engine_version.py:577` is release history and stays as written. A change that
 misses one site leaves notes that a classifier, reader or rename treats as
 something else. The fix delivers one definition per side, and a lint that no other
 spelling survives.
 
-#### Gap 3: Changing the spelling duplicates notes for clients that do not have the change
+#### Gap 3: Changing the spelling duplicates notes unless the engine canonicalizes
 
 A re-put finds its Document by `source_uri`. Once stored rows say `nx-note://`, any
-client that still sends `chroma://` misses them, and the engine mints a second
-Document. Engine-side canonicalization of incoming URIs is necessary but not
-sufficient: an un-upgraded client also compares URIs locally. Its `by_source_uri`
-drops any row whose `source_uri` is not byte-equal to the one it asked for
-(`http_catalog_client.py:2184`), so an `nx-note://` row returned for a `chroma://`
-query is discarded, and the store hook goes on to register. Its classifiers
-(`reconcile_stale.py:379`, `recovery_bundle.py:94`) stop recognising notes, so an
-old client's recovery-bundle export silently leaves them out. It has no reader or
-stat handler for `nx-note` (`aspect_readers.py:1107`, `:1939`), so
-`nx doctor --check-references` reports every sampled note as unreadable. Old
-recovery bundles and exports carry `chroma://` indefinitely. The reverse also
-holds: a new client that sends `nx-note://` to an engine without canonicalization
-mints a duplicate beside every un-backfilled `chroma://` row, and that duplicate
-then makes the backfill collide. The fix must keep one Document per note for old
-clients, new clients and old artifacts, against old and new engines.
+caller that still sends `chroma://` (an un-upgraded client, an old recovery bundle or
+export being imported) misses them, and the engine mints a second Document. The
+reverse also holds: a new client that sends `nx-note://` to an engine that has not
+backfilled mints a duplicate beside every `chroma://` row, and that duplicate then
+makes the backfill collide. The fix must keep one Document per note for every
+caller and every artifact. It does not have to keep un-upgraded clients' displays
+and classifiers unchanged: Sam ruled (2026-10-26) that old clients upgrade.
 
-#### Gap 4: Moving a collection by any path other than rename leaves note URIs naming the old collection
+#### Gap 4: Moving a note between collections by any path other than rename leaves its URI naming the old collection
 
 The collection rename rewrites `chroma://<old>/` to `chroma://<new>/` in all three
-tables (nexus-sis0m.3). Three other engine paths move rows between collections and
-leave `source_uri` as it was (nexus-ql5m5; the highlight rename was found while
-folding that bead in):
+tables (nexus-sis0m.3), and refuses up front, with nothing moved, when a rewritten
+URI is already held by a live document (`SourceUriCollision`,
+`CatalogRepository.java:9778-9801`). Other engine paths move note rows between
+collections and leave `source_uri` as it was (nexus-ql5m5; the highlight rename and
+the re-embed move were found while folding that bead in):
 
 | Path | Route | Moves | Site |
 | --- | --- | --- | --- |
-| Re-home | `POST /v1/catalog/collections/rehome` | `catalog_documents.physical_collection`, `document_aspects.collection`, `document_highlights.collection` | `CatalogRepository.rehomeCollection` `:10083`, `moveScopedTable` `:10272` |
+| Re-home | `POST /v1/catalog/collections/rehome` | every table in `COLLECTION_SCOPED_TABLES`, `catalog_documents.physical_collection` and both aspect tables among them | `CatalogRepository.rehomeCollection` `:10148`, `moveScopedTable` |
+| Collection update | `POST /v1/catalog/update`, `/update_many` with `physical_collection` | `catalog_documents.physical_collection` of one document | `buildUpdateDocumentQuery` (`UPDATABLE_DOC_COLUMNS` `:1895-1897`); callers `doc_indexer.py:1125`, `catalog/path_ambiguity.py:387`, `nx catalog migrate-fallback` (`migration.py:257`) |
+| Re-embed move (RDR-210 P6) | manifest write with a `move` | `catalog_documents.physical_collection`, `document_aspects`, `aspect_extraction_queue`, `document_highlights` collection, per document | `CatalogRepository.completeMove` `:6391`, called from `writeManifestMany` `:6112` |
 | Aspect rename | `POST /v1/aspects/rename_collection` | `document_aspects.collection` | `AspectRepository.renameAspectCollection` `:429` |
 | Highlight rename | `POST /v1/aspects/highlights/rename_collection` | `document_highlights.collection` | `AspectRepository.renameHighlightsCollection` `:1358` |
 
-A note moved this way keeps an identity naming its old collection. A re-put under
-the new collection misses it and mints a duplicate, and its aspects and highlights
-stop joining it by URI. The two aspect renames are also legs of the client's
-`rename_collection_cascade`, where the catalog rename has already moved and
-rewritten the rows, so there they find nothing to move; they leave stale URIs when
-called on their own. The fix delivers one rule: every path that moves a note row
-between collections rewrites its URI in the same statement.
+A note moved by re-home, re-embed or a collection update keeps an identity naming its old collection. A
+re-put under the new collection misses it and mints a duplicate, and its aspects and
+highlights stop joining it by URI. The re-embed move does this to `store_put` notes
+by design: RDR-210 P6 moves every document of a re-embedded collection to its
+sibling. The fix delivers one rule for paths that move the catalog row: the move
+rewrites the note's URI in the same statement, and refuses when the rewritten URI is
+held by a live document.
+
+The aspect rename and the highlight rename are different. They move only the
+denormalized `collection` column of satellite rows; the note's catalog row stays
+where it is, and an aspect row's `source_uri` equals its document's
+(`mcp/core.py:4513-4525`). Rewriting the URI there would split the satellite from its
+document. In the client's `rename_collection_cascade` they run after the catalog
+rename has moved and rewritten everything, and find nothing to move; there is no
+in-tree caller of either on its own (`db/t2/__init__.py:412-416`). They are left
+unchanged. Of the other writers of `physical_collection` (`nexus_rdr/231-research-16`),
+upsert and import take the caller's whole row, `source_uri` included, so the caller's
+URI (canonicalized, step 2) is the one stored; `updateDocumentCollection` and
+`updateDocumentCollections` (`:3433`, `:3445`) have no in-tree caller and are out of
+scope.
 
 ## Relationship to Prior RDRs
 
@@ -138,7 +151,7 @@ revision closes.
 
 Client: `src/nexus/aspect_readers.py`, `catalog/store_hook.py`,
 `catalog/http_catalog_client.py`, `catalog/recovery_bundle.py`, `exporter.py`, the
-catalog commands in Gap 2, `db/client_identity.py`, `engine_version.py`. Engine:
+catalog commands in Gap 2, `engine_version.py`. Engine:
 `CatalogRepository`, `AspectRepository`, `CatalogHandler`, `AspectHandler`,
 Liquibase changelogs. The live-URI partial unique index
 `ux_catalog_documents_live_source_uri` (`catalog-016`: unique `(tenant_id,
@@ -175,22 +188,22 @@ for tenant-spanning row DML.
 
 ### Key Discoveries
 
-- **Verified**: three tables hold a note URI: `catalog_documents.source_uri`, `document_aspects.source_uri` and `document_highlights.source_uri`. The rename rewrites all three (`CatalogRepository.java:9915-9929`); `CatalogRenameIdentityCascadeTest` enumerates holders by sweeping every `nexus.*` text and json column for the URI (`columnsHolding`, `:356-386`), not from a hand-kept list.
-- **Verified**: the engine's register paths report `created=false` when the idempotency lookup matches (`RegisterOutcome`, `CatalogRepository.java:1074`, `:1126`), and the store hook threads it (`store_hook.py:1080`). The rollback in `rollback_minted_catalog_entry` (`store_hook.py:1119`) therefore deletes a live note only if the engine's lookup misses, that is, only if register is not canonicalized.
-- **Verified**: an old client's `by_source_uri` discards any row not byte-equal to its query (`http_catalog_client.py:2184`); its chash-dedup guard does the same (`store_hook.py:930`).
+- **Verified**: three tables hold a note URI: `catalog_documents.source_uri`, `document_aspects.source_uri` and `document_highlights.source_uri`. The rename rewrites all three (`CatalogRepository.java:9970-9994`); `CatalogRenameIdentityCascadeTest` enumerates holders by sweeping every `nexus.*` text and json column for the URI (`columnsHolding`, `:356-386`), not from a hand-kept list.
+- **Verified**: the engine's register paths report `created=false` when the idempotency lookup matches (`RegisterOutcome`, `CatalogRepository.java:1074`, `:1126`), and the store hook threads it (`store_hook.py:1146`). The rollback in `rollback_minted_catalog_entry` (`store_hook.py:1185`) therefore deletes a live note only if the engine's lookup misses, that is, only if register is not canonicalized.
+- **Verified**: an old client's `by_source_uri` discards any row not byte-equal to its query (`http_catalog_client.py:2184`); its chash-dedup guard does the same (`store_hook.py:996`).
 - **Verified**: `_normalize_source_uri` (`catalog/types.py:93`) has no production caller; `_KNOWN_URI_SCHEMES` matters at runtime only through `_LINK_SAFE_SCHEMES`.
 - **Verified**: under FORCE ROW LEVEL SECURITY, Liquibase's role (`nexus_admin`, NOBYPASSRLS, no tenant GUC at migration time) reads and writes zero rows of a tenant table unless the changeset toggles NO FORCE first (`aspects-004-doc-id-backfill.xml` header; `fk-004-chunks-collection-registry.xml:175`). A Liquibase `sqlCheck` precondition on row counts would therefore always see zero.
-- **Verified**: the three client classifiers use three predicates (`nexus_rdr/231-research-13`): `reconcile_stale.py:379` is a bare `startswith("chroma://")`; `recovery_bundle.py:90-100` and `backfill.py` exclude file-routed collections by `entry.physical_collection`. Only the last two treat `chroma://` under a file-routed collection as residue; the `reconcile_stale.py:220-229` text saying so is a comment, not code.
+- **Verified**: the three client classifiers use three predicates (`nexus_rdr/231-research-13`): `reconcile_stale.py:379` is a bare `startswith("chroma://")`; `recovery_bundle.py:90-100` excludes file-routed collections by `entry.physical_collection`, and `backfill.py` selects exactly those rows as its candidates. Only the last two treat `chroma://` under a file-routed collection as residue; the `reconcile_stale.py:220-229` text saying so is a comment, not code.
 - **Verified**: `completeMove` (`CatalogRepository.java:6391`, the RDR-210 P6 re-embed move) sets `physical_collection` and the satellites' `collection` and never `source_uri`; it refuses a tombstoned document per document (`TombstonedDocumentException`), which the re-embed runner recognizes (`nexus_rdr/231-research-11`).
 - **Verified**: the rename refuses before anything moves when a rewritten URI is held by a live document (`SourceUriCollision`, `:9778-9801`); re-home moves table by table and reports per-table refusals, and chunks, keyed by chash, cannot be held back per document (`nexus_rdr/231-research-12`).
-- **Inferred, not run** (`nexus_rdr/231-research-14`): with engine canonicalization and no legacy rendering, an old client's re-put does not duplicate (its byte compare drops the `nx-note://` row, register then returns `created=false`), but its classifiers, its recovery-bundle export, `nx doctor --check-references` and `aspect_sql`'s compare stop recognising notes.
+- **Inferred, not run** (`nexus_rdr/231-research-14`): with engine canonicalization and no legacy rendering, an old client's re-put does not duplicate (its byte compare drops the `nx-note://` row, register then returns `created=false`), but the re-put's metadata (tags, category, ttl, the `meta.doc_id` stamp) is not applied, and its classifiers, its recovery-bundle export, `nx doctor --check-references`, `aspect_sql`'s compare and `find_ids_by_title` stop recognising notes.
 
 ### Critical Assumptions
 
-- [ ] The three tables in Key Discoveries are the only places a note URI is stored. — **Status**: Verified in source (rename cascade and its information_schema sweep); not yet checked against production data — **Method**: run the `columnsHolding` sweep for `chroma://` against a restored copy of the cloud database before the gate, and assert in the backfill test that the sweep finds no note URI after the changeset
+- [ ] The three tables in Key Discoveries are the only places a note URI is stored. — **Status**: Verified in source (rename cascade and its information_schema sweep); not yet checked against production data — **Method**: run the `columnsHolding` sweep for `chroma://` against a restored copy of the cloud database before the engine tag, and assert in the backfill test that the sweep finds no note URI after the changeset
 - [ ] No tenant holds a live legacy note row and a live `nx-note://` row for the same note, so the backfill cannot collide on catalog-016. — **Status**: Unverified on production; true by construction for any database no new client has written to — **Method**: the census query in Technical Design step 5, run read-only per tenant against the cloud database before the engine tag, and the same count as the changeset's in-transaction guard
-- [ ] Every engine route through which a caller's URI enters a write or a lookup is in the route table of Technical Design step 2. — **Status**: Verified by source search (2026-10-23) — **Method**: `NoteUriRouteGateTest` drives each listed route with `chroma://` and asserts `nx-note://` is stored or matched, and a static sweep fails on any reference to the `source_uri` column, by the jOOQ symbol or by the string key `"source_uri"`, in `CatalogRepository`, `AspectRepository` or the `vectors` package, inside a method the table neither lists nor exempts
-- [ ] The cloud engine does not serve from an old and a new instance at once after the backfill. — **Status**: Unverified; a conexus-side fact (`nexus_rdr/231-research-15`) — **Method**: ask conexus for the deploy topology before the tag; if rolling, drain old instances first or re-run the census after the rollout
+- [ ] Every engine route through which a caller's URI enters a write or a lookup is in the route table of Technical Design step 2. — **Status**: Verified by source search (2026-10-23; the string-key and `vectors` domain re-swept by the 2026-10-26 fix checks) — **Method**: `NoteUriRouteGateTest` drives each listed route with `chroma://` and asserts `nx-note://` is stored or matched, and a static sweep fails on any reference to the `source_uri` column, by the jOOQ symbol or by the string key `"source_uri"`, in `CatalogRepository`, `AspectRepository` or the `vectors` package, inside a method the table neither lists nor exempts
+- [ ] The cloud engine does not serve from an old and a new instance at once after the backfill. — **Status**: Unverified; a conexus-side fact (`nexus_rdr/231-research-15`) — **Method**: ask conexus for the deploy topology before the tag; deploy with old instances drained, because the changeset runs once and nothing rewrites a lone `chroma://` row an old instance writes after it; run the census for live `chroma://` note rows after the rollout
 
 ## Proposed Solution
 
@@ -214,8 +227,12 @@ an old artifact into the new spelling at the one place it reads one.
    Engine: a `NoteUri` helper with `canonical(uri)` and `moveTo(field, oldColl,
    newColl)`, and its own copy of the three prefixes. One fixture corpus of URIs
    (notes in both spellings, residue under each file-routed prefix, `chroma://c`
-   with no slash, an empty segment) is run through `is_note_uri`, `NoteUri`, and the
-   step 5 SQL predicate, which must agree on every row.
+   with no slash, an empty segment) is run three ways, each answering "is this a
+   note, in either spelling": `is_note_uri(canonical_note_uri(u))` in Python,
+   `NoteUri.isNote(u)` in Java, and, in SQL, the step 5 predicate or the same
+   predicate on the `nx-note://` form. The three answers must agree on every row,
+   and the corpus's residue rows are built from `FILE_ROUTED_PREFIXES` so a new
+   prefix joins the corpus.
 
 2. **Engine input canonicalization, forever.** Each route applies
    `NoteUri.canonical` to the caller's URI before it reads or writes:
@@ -227,8 +244,8 @@ an old artifact into the new spelling at the one place it reads one.
    | `POST /v1/catalog/doc/register_many` | `registerDocumentManyWithOutcome` via `deriveSourceUri` (batch idempotency fetch, insert, race patch) |
    | `POST /v1/catalog/update`, `/update_many` | `buildUpdateDocumentQuery` when `source_uri` is in the field map |
    | `POST /v1/catalog/import/document` | `importDocumentsBatch`, `doImportDocument` (before their identity guards) |
-   | `GET /v1/catalog/list?source_uri=` | handler before `documentsBySourceUri` |
-   | `GET /v1/catalog/resolve?source_uri=` | handler before `documentsBySourceUri` |
+   | `GET /v1/catalog/list?source_uri=` | `documentsBySourceUri` |
+   | `GET /v1/catalog/resolve?source_uri=` | `documentsBySourceUri` |
    | `POST /v1/aspects/upsert`, `/import` | `upsertAspect`, `importAspectsBatch`, `doImportAspect` |
    | `POST /v1/aspects/highlights/upsert`, `/highlights/import` | `upsertHighlight`, `importHighlightsBatch`, `doImportHighlight` |
    | `GET /v1/aspects/highlights/get_by_source_uri` | `getHighlightBySourceUri` |
@@ -237,16 +254,21 @@ an old artifact into the new spelling at the one place it reads one.
    Exempt, with the reason recorded in the gate test: `POST /v1/catalog/merge`
    (`mergeDocuments` moves a stored URI; no caller URI enters), the moves in step 4,
    and the `vectors` routes, which only return the catalog's stored `source_uri`
-   (`PgVectorRepository.sourceUrisByChash`, `ManifestLabelStage`) and take none.
+   (`PgVectorRepository.sourceUrisByChash`, `enrichSearchRows` `:8162`, `:8224`,
+   `ManifestLabelStage`) and take none. `/list` and `/resolve` canonicalize inside
+   `documentsBySourceUri`, not in the handler, so a later caller of that method
+   gets it too.
 
 3. **Engine output: the stored spelling, to everyone.** No response rewriting and no
    capability header. After the backfill every note URI a response carries, the
    `include_source_uri` field of the `vectors` routes included, is `nx-note://`. An
    un-upgraded client therefore still converges on one Document per note (its
    re-put's byte compare misses, register's canonicalized idempotency lookup returns
-   `created=false`, and the rollback never targets a live note), but its
-   classifiers, its recovery-bundle export, `nx doctor --check-references` and
-   `aspect_sql` stop recognising notes until it upgrades (`nexus_rdr/231-research-14`).
+   `created=false`, and the rollback never targets a live note), but the re-put's
+   metadata is not applied, and its classifiers, its recovery-bundle export,
+   `nx doctor --check-references`, `aspect_sql` and `find_ids_by_title` stop
+   recognising notes until it upgrades (`nexus_rdr/231-research-14`, inferred from
+   source, not run).
    This is the cost Sam accepted (Decisions 5).
 
 4. **Every move of a note's catalog row rewrites its URI, and refuses a taken one.**
@@ -268,10 +290,19 @@ an old artifact into the new spelling at the one place it reads one.
      (`nexus_rdr/231-research-12`), so the refusal is whole. Only live rows are
      checked, because catalog-016 constrains only live rows; tombstones move with
      their URIs rewritten.
+   - **Collection update** (`buildUpdateDocumentQuery`): when the field map moves
+     `physical_collection` and carries no `source_uri`, the UPDATE sets
+     `source_uri = moveTo(...)` from the row's current collection to the new one,
+     after the same check for that document (409 `SourceUriCollision`). When the
+     caller sends `source_uri` too, the caller's URI, canonicalized, is stored.
    - **Re-embed move** (`completeMove`): before its UPDATE, the same check for the
-     one document; a taken URI throws `SourceUriCollision` for that document, which
-     rolls back its manifest write. The re-embed runner reports it per document, as
-     it reports a tombstoned one.
+     one document; a taken URI throws `SourceUriCollision`, which rolls back that
+     document's manifest write while the batch's other documents proceed
+     (`writeManifestMany`'s per-document catch). Two edits make it a per-document
+     skip rather than a failed job: `failureDetail`'s allowlist passes
+     `SourceUriCollision`'s message through (today it reports "internal error"),
+     and `ReembedRunner` gains a skip reason for it beside the tombstone prefix
+     (today any other reason is fatal, `ReembedRunner.java:398-406`).
    - **Aspect rename and highlight rename**: unchanged (Gap 4).
 
 5. **Backfill (DATA EFFECT), one changeset.** Tenant-spanning, in one transaction,
@@ -324,27 +355,36 @@ an old artifact into the new spelling at the one place it reads one.
 
 6. **Client.** Every stored and transient mint calls `note_uri`; nothing else
    spells a scheme. Readers and stat handlers register under `nx-note`; the
-   `chroma` reader, stat handler and `_KNOWN_URI_SCHEMES` entry go, and
-   `_LINK_SAFE_SCHEMES` excludes `nx-note` by name. Classifiers: `reconcile_stale`
+   `chroma` reader, stat handler and `_KNOWN_URI_SCHEMES` entry go,
+   `_KNOWN_URI_SCHEMES` gains `nx-note` (with the lock-test update
+   `catalog/CLAUDE.md` § Adding a new source-URI scheme requires), and
+   `_LINK_SAFE_SCHEMES` excludes `nx-note` by name. `nx doctor --check-references`
+   reports a residue row (step 5 leaves it) as an unknown scheme, which it is. Classifiers: `reconcile_stale`
    and `recovery_bundle` call `is_note_uri`. For `reconcile_stale` that is a
    behaviour change: a `chroma://` row under a file-routed collection, today
-   classed store-put-origin by its bare prefix, is classed residue, matching
-   `recovery_bundle`. `backfill.py` keeps matching `chroma://` residue under
-   file-routed collections by `physical_collection`; it is the one client site that
-   still names the legacy scheme, because rewriting that residue to `file://` is its
-   job. The exact-compare sites (`by_source_uri`, the store hook's guard, the
+   counted as store-put-origin by its bare prefix, is no longer counted (the
+   function returns `None` for it, as `recovery_bundle` already does). `backfill.py` and `recovery_bundle`'s residue counter (`:183-186`) keep
+   matching `chroma://` residue under file-routed collections by
+   `physical_collection`; they are the two client sites that still name the legacy
+   scheme, because finding and rewriting that residue is their job.
+   `recovery_bundle._resolve_link_endpoint` (`:496-502`), whose fallback re-derives
+   a mode-changed identity, parses `nx-note://` after `canonical_note_uri`. The exact-compare sites (`by_source_uri`, the store hook's guard, the
    exporter and recovery-bundle imports, `aspect_sql`) compare `nx-note://` with
    `nx-note://` and need no change beyond the mint; the two imports pass every
    incoming URI through `canonical_note_uri` first, because old bundles and exports
-   carry `chroma://` indefinitely. The client mints `nx-note://` unconditionally:
-   the release moves `REQUIRED_ENGINE_VERSION` to the tag, local engines converge to
-   it, and the cloud engine deploys before the client tag (Activation Step 1). A
-   hand-mixed install (new client, older engine) would mint duplicates beside
-   un-backfilled rows; the engine-identity pin is the guard, as for every paired
-   release.
+   carry `chroma://` indefinitely. The client mints only `nx-note://`, and refuses
+   a note write when the serving engine reports a version below
+   `NOTE_URI_MIN_ENGINE_VERSION` (`engine_version.py`, set to the tag; the same
+   at-start probe as `CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION`). A local engine lags
+   the pinned version until `nx daemon restart-stale` runs (§ Technical
+   Environment); without the refusal a new client would register `nx-note://`
+   twins beside un-backfilled `chroma://` rows, and the backfill guard would then
+   halt that engine's boot. The refusal names the remedy (`nx daemon
+   restart-stale`). A probe that resolves no version does not refuse; it logs
+   (inferred, not read: whether any engine build reports no version).
 
 7. **Input-accept forever.** The engine never refuses `chroma://` on input; it
-   canonicalizes it. Nothing returns it.
+   canonicalizes it. No response carries it for a note.
 
 ```text
 // Illustrative: engine helper
@@ -418,16 +458,17 @@ part of the route gate.
 
 ### Consequences
 
-- Positive: the note identity names what it is; one definition per side; no note URI moves without its row; nothing shows `chroma://` after the deploy.
+- Positive: the note identity names what it is; one definition per side; no note URI moves without its row; no note carries `chroma://` after the deploy (residue under file-routed collections keeps it until `nx catalog backfill-source-uri` rewrites it to `file://`).
 - Negative: a DATA EFFECT changeset on every tenant's catalog; un-upgraded clients stop recognising notes (classifiers, recovery-bundle export, doctor references, aspect SQL) until they upgrade; a re-home or re-embed move of a note whose new URI is taken is refused instead of half-done.
 
 ### Risks and Mitigations
 
 - **Risk**: the backfill collides on catalog-016. **Mitigation**: the in-transaction guard aborts before any row moves; the pre-tag census finds pairs first.
 - **Risk**: an input route is missed, so an old client or an old artifact mints a duplicate. **Mitigation**: `NoteUriRouteGateTest`, behavioural and static.
-- **Risk**: an old cloud client's recovery-bundle export silently omits notes until it upgrades. **Mitigation**: the client release notes say so; the paired release moves the managed floor (inferred, not read: whether the floor refuses old clients; § Technical Environment says they keep talking to the engine).
-- **Risk**: a rolling cloud deploy serves an old engine instance after the backfill, and an old client's re-put through it mints a `chroma://` twin. **Mitigation**: the deploy-topology assumption (§ Critical Assumptions) is checked before the tag.
-- **Risk**: a classifier misses the new spelling and treats notes as residue. **Mitigation**: one `is_note_uri`, the fixture corpus shared with the engine and the SQL predicate, and a lint that no `chroma://` or `nx-note://` literal, and no `"chroma"` scheme key, appears outside the definitions and `backfill.py`.
+- **Risk**: an old cloud client's recovery-bundle export silently omits notes, and its re-puts do not update metadata, until it upgrades. **Mitigation**: the client release notes say so; nothing refuses an old client (Alternative 4 rejected that).
+- **Risk**: a new client writes to a local engine that has not restarted onto the tag. **Mitigation**: the `NOTE_URI_MIN_ENGINE_VERSION` write refusal (step 6).
+- **Risk**: a rolling cloud deploy serves an old engine instance after the backfill, and an old client's re-put through it writes a lone `chroma://` note row that nothing rewrites. **Mitigation**: the deploy-topology assumption (§ Critical Assumptions): drained deploy, then the post-rollout census.
+- **Risk**: a classifier misses the new spelling and treats notes as residue. **Mitigation**: one `is_note_uri`, the fixture corpus shared with the engine and the SQL predicate, and a lint that no `chroma://` or `nx-note://` literal, and no `"chroma"` scheme key, appears outside the definitions, `backfill.py` and `recovery_bundle`'s residue counter.
 
 ### Failure Modes
 
@@ -437,8 +478,9 @@ A missed client classifier shows as notes reported as migration residue by
 `nx catalog reconcile-stale`. A collision halts the engine's migration at boot,
 with the count in the error. A move path that misses the rewrite shows as a note
 whose URI names a collection it no longer lives in, and as a duplicate on its next
-re-put. A refused re-home or re-embed move shows as a 409 naming the document that
-holds the URI.
+re-put. A refused re-home or collection update shows as a 409 naming the document
+that holds the URI; a refused re-embed move shows as that document's skip in the
+job's report, with the holder named.
 
 ## Implementation Plan
 
@@ -449,8 +491,9 @@ holds the URI.
 
 ### Minimum Viable Validation
 
-On a substrate engine with the change: register a note with `chroma://` (as an old
-client does), run the backfill, then re-put the same note with `chroma://` and with
+On a substrate engine: seed a `chroma://` note row by SQL in the schema the
+previous changeset leaves (the API canonicalizes, so it cannot write one), run the
+backfill, then re-put the same note with `chroma://` and with
 `nx-note://`. Assert one live Document whose stored `source_uri` is `nx-note://...`,
 that both re-puts returned it, that every read returns `nx-note://`, and that the
 matching aspect row was rewritten too. Then rename the collection and assert both
@@ -471,17 +514,23 @@ change spelling for every caller.
 
 ### Phase 2: Operational Activation
 
-#### Activation Step 1: Census and deploy topology, deploy the engine tag (backfill runs), then release the client
+#### Activation Step 1: Census, deploy topology and residue; stage the engine deploy with conexus; push the client tag
 
-Before the tag, run the step 5 census read-only per tenant against the cloud
-database (pairs and row counts); any pair is merged first. Ask conexus whether the
-cloud engine deploy is rolling (§ Critical Assumptions). The engine deploys before
-the client tag, and the client release follows as close behind as the release
-process allows, because old cloud clients lose their view of notes from the deploy
-until they upgrade. The client release branch carries the data-effect relay
-attestation for the engine range
+Before the tag, run the census read-only per tenant against the cloud database, with
+the step 5 note predicate as `<note>`: live pairs (the guard's query), live
+`chroma://` note rows, and row counts of the three tables for the lock estimate. Any
+pair is merged first. Ask conexus whether the cloud engine deploy is rolling (§
+Critical Assumptions). The wire entry is not additive, so the release follows
+nexus-1emxn choreography (b): the engine tag is cut, the redeploy is staged with
+conexus and confirmed, and it fires at the client-tag push, so the engine and the
+client that needs it arrive together. Until a user installs the new client, an old
+client loses its view of notes (step 3). The client release branch carries the
+data-effect relay attestation for the engine range
 (`scripts/list_data_effects.py --record-relay-attestation`), committed on the
 release branch so `check_engine_release_floor.py` finds it in the tagged tree.
+After the deploy, run the census again for live `chroma://` note rows (expected
+zero), and run `nx catalog backfill-source-uri` to rewrite file-routed residue to
+`file://`; rows it cannot re-derive stay as residue and are counted.
 
 ### Day 2 Operations
 
@@ -502,12 +551,15 @@ None.
 - **Scenario**: re-home a collection holding a note, then re-put the note under the target — **Verify**: one live Document whose URI names the target; its aspect and highlight rows carry the same URI.
 - **Scenario**: re-home where the target already holds a live document at a note's rewritten URI — **Verify**: 409 `SourceUriCollision` naming that document; nothing moved in any table, chunks and manifest rows included.
 - **Scenario**: re-embed move of a note — **Verify**: the note's URI names the sibling collection, its aspects and highlights match it, and a re-put under the sibling finds it.
-- **Scenario**: re-embed move where the sibling already holds a live document at the rewritten URI — **Verify**: that document's move is refused and reported by the runner; the job's other documents move.
+- **Scenario**: re-embed move where the sibling already holds a live document at the rewritten URI — **Verify**: that document is skipped with the holder named in the job report; the job's other documents move; the job does not end failed.
+- **Scenario**: `/v1/catalog/update` moving a note's `physical_collection` without `source_uri`, then with a taken target URI — **Verify**: URI rewritten to the new collection; then 409 `SourceUriCollision`, nothing changed.
+- **Scenario**: a note write from a new client to an engine reporting a version below `NOTE_URI_MIN_ENGINE_VERSION` — **Verify**: refused, naming `nx daemon restart-stale`; nothing registered.
+- **Scenario**: `recovery_bundle._resolve_link_endpoint` on an old bundle's `chroma://` link after a mode change — **Verify**: re-derives the target through the `nx-note://` form.
 - **Scenario**: aspect rename and highlight rename — **Verify**: `source_uri` unchanged (the catalog row did not move).
 - **Scenario**: backfill with a planted live twin — **Verify**: the migration aborts, no row changed, FORCE still set on all three tables.
 - **Scenario**: backfill effect in `SchemaUpgradeRehearsalIntegrationTest` — **Verify**: seeded note rows in all three tables rewritten, residue untouched, `columnsHolding("chroma://")` finds only the residue.
-- **Scenario**: fixture corpus through `is_note_uri`, `NoteUri.canonical` and the SQL predicate — **Verify**: all three agree on every row.
-- **Scenario**: `reconcile_stale` on a `chroma://code__...` residue row — **Verify**: classed residue, not store-put-origin (the stated behaviour change).
+- **Scenario**: fixture corpus through `is_note_uri(canonical_note_uri(u))`, `NoteUri.isNote` and the SQL predicate (either spelling) — **Verify**: all three agree on every row.
+- **Scenario**: `reconcile_stale` on a `chroma://code__...` residue row — **Verify**: not counted as store-put-origin (the stated behaviour change).
 - **Scenario**: `note_uri` with and without `quote_rest` — **Verify**: today's stored and transient strings, scheme apart.
 - **Scenario**: import of an old recovery bundle and an old export carrying `chroma://` — **Verify**: converges onto the backfilled Document.
 - **Scenario**: `_LINK_SAFE_SCHEMES` — **Verify**: excludes `nx-note`.
@@ -568,7 +620,7 @@ history, and `backfill.py`'s residue rewrite, which keeps matching `chroma://`.
 ### Cross-Cutting Concerns
 
 - **Versioning**: the engine tag carries the changeset and the routes; the client release pins it through `REQUIRED_ENGINE_VERSION`.
-- **Deployment model**: engine first, client release right behind; the wire entry is not additive.
+- **Deployment model**: nexus-1emxn choreography (b): the deploy is staged with conexus and fires at the client-tag push; the wire entry is not additive.
 - **Incremental adoption**: old clients keep one Document per note but stop recognising notes until they upgrade (step 3).
 - Others: N/A.
 
@@ -593,7 +645,7 @@ Sam, 2026-10-24, on the draft's three open questions:
 Sam, 2026-10-26, at the round 1 gate (`nexus_rdr/231-research-10`):
 
 4. **The backfill stands.** A comment on nexus-t7fbb and nexus-ql5m5 dated 2026-10-26 recorded a 2026-10-25 "no backfill" decision; Sam withdrew it as a mistake, and both beads now say so.
-5. **`chroma://` goes from storage and new code.** Everything is backfilled, new clients never mint or show it, and the engine keeps canonicalizing it on input so old clients and old artifacts do not duplicate. No legacy rendering and no capability header: old clients upgrade, through the paired release and `REQUIRED_ENGINE_VERSION`. This replaces the 2026-10-24 revision's legacy rendering (Alternative 5).
+5. **`chroma://` goes from storage and new code.** Every note is backfilled, new clients never mint or show it, and the engine keeps canonicalizing it on input so old clients and old artifacts do not duplicate. No legacy rendering and no capability header: old clients upgrade, through the paired release and `REQUIRED_ENGINE_VERSION`. This replaces the 2026-10-24 revision's legacy rendering (Alternative 5).
 
 ## References
 
@@ -611,4 +663,6 @@ Sam, 2026-10-26, at the round 1 gate (`nexus_rdr/231-research-10`):
 
 - 2026-10-26: Gate round 1 — BLOCKED (3 Critical, 5 Significant, 3 ship-blocker(s)); commit `62d294522`; critique `nexus_rdr/231-gate-critique-2026-10-26-r1`.
 
-- 2026-10-26: Round 1 fixes and Sam's rulings (Decisions 4 and 5): backfill confirmed; legacy rendering and the capability header dropped, old clients upgrade; re-home refuses a taken URI whole, the re-embed move rewrites and refuses per document, the aspect and highlight renames stay unchanged; Gap 2 split stored and transient mints and added `aspect_sql`; the three classifier predicates stated and unified; the route gate widened; deploy-topology assumption added.
+- 2026-10-26: Round 1 fixes and Sam's rulings (Decisions 4 and 5): backfill confirmed; legacy rendering and the capability header dropped, old clients upgrade; re-home refuses a taken URI whole, the re-embed move rewrites and refuses per document, the aspect and highlight renames stay unchanged; Gap 2 split stored and transient mints and added `aspect_sql` (that hunk was left out of a85e22c93 and landed with the fix-check fixes); the three classifier predicates stated and unified; the route gate widened; deploy-topology assumption added.
+
+- 2026-10-26: Fix-check fixes (`nexus_rdr/231-fix-check-a85e22c93`): activation by nexus-1emxn choreography (b); `NOTE_URI_MIN_ENGINE_VERSION` refuses a note write to a lagging engine; the collection update rewrites a moved note's URI; the re-embed collision becomes a per-document skip; `recovery_bundle` link parse and residue counter stated; residue rewritten by `backfill-source-uri` after the deploy; the corpus agreement defined; the route-gate exempt list completed; citations refreshed.
