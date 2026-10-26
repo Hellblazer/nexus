@@ -17,7 +17,10 @@
 
     THE FIX. The GRANT loop skips any grantee whose pg_roles row has rolbypassrls. That covers nexus_diag and any
     BYPASSRLS role added later, with no role name in the function. PUBLIC (grantee 0) has no pg_roles row and is
-    still copied. The revoke loop, the policy copy and the signature are vectors-030-1's, unchanged. No repair DML:
+    still copied. The semantic is the attribute: a grant ANY BYPASSRLS role holds on a parent (a DBA's backup or
+    reporting role too) is no longer mirrored to new partitions, and partition_sync_access now removes it from
+    existing ones. This assumes nexus_svc is NOBYPASSRLS, as provisioning makes it; a BYPASSRLS nexus_svc would
+    get no DML on new leaves. The revoke loop, the policy copy and the signature are vectors-030-1's, unchanged. No repair DML:
     a leaf that already carries the grant is stripped by grants-nexus-diag-2 on the deploy boot, and no leaf made
     after that is given it again.
 

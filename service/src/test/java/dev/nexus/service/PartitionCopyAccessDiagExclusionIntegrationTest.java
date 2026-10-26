@@ -10,6 +10,7 @@ import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.assertj.core.api.SoftAssertions;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -32,8 +33,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>The fixture is {@link GrantsNexusDiagViewAccessIntegrationTest}'s: two walks as a non-superuser owner, with a
  * superuser-created BYPASSRLS {@code nexus_diag}. Everything the test creates, it creates AFTER the second walk, so
- * nothing but the function under test stands between the parent's grant and the new relations. Non-vacuity: the
- * parent grant is asserted present first, and every list of relations checked is asserted non-empty.
+ * nothing but the function under test stands between the parent's grant and the new relations. Three paths reach
+ * the function: a tenant's leaves (the service_tokens trigger), a new model partition (create_model_partition) and
+ * partition_sync_access; each is checked, softly, so a pre-fix run shows every path red. Non-vacuity: the parent
+ * grant is asserted present first, and every list of relations checked is asserted non-empty. Only nexus.chunks
+ * carries the diag grant; the taxonomy_centroids parent has none, so its checks are a guard, not evidence. A
+ * PUBLIC grant on the chunks parent pins that a grantee with no pg_roles row is still copied.
  *
  * <p>No SQL text: the ACLs are read through JDBC metadata, the partition names come from the generated
  * {@code partition_name} routine, and the tenant and model are created through the generated tables and routines
@@ -51,9 +56,11 @@ class PartitionCopyAccessDiagExclusionIntegrationTest {
     private static final String MODEL = "h4w9o-model-1024";
     private static final List<String> PARENTS = List.of("chunks", "taxonomy_centroids");
     private static final List<String> DML = List.of("DELETE", "INSERT", "SELECT", "UPDATE");
+    private static final String PUBLIC = "PUBLIC";
+    private static final String PUBLIC_PRIVILEGE = "REFERENCES";
 
     @Test
-    void newTenantLeavesAndNewModelPartitionsCarryNoNexusDiagPrivilege() throws Exception {
+    void newTenantLeavesNewModelPartitionsAndSyncedLeavesCarryNoNexusDiagPrivilege() throws Exception {
         try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
              Connection su = pg.createConnection("")) {
             provisionAndMigrate(pg, su);
@@ -63,12 +70,22 @@ class PartitionCopyAccessDiagExclusionIntegrationTest {
                 DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
 
                 // Precondition: the parent holds the diag grant, so a copy that did not skip it would carry it.
+                // Only nexus.chunks has one (grants-nexus-diag-3); the taxonomy_centroids parent has none, so its
+                // assertions below guard against a future parent grant and are not evidence for this fix.
                 assertThat(privileges(admin, DIAG_ROLE, "chunks"))
                     .as("nexus_diag must hold SELECT on the nexus.chunks parent after the walk "
                         + "(grants-nexus-diag-3); without it this test proves nothing")
                     .contains("SELECT");
                 assertThat(privileges(admin, SVC_ROLE, "chunks"))
                     .as("nexus_svc's DML on the nexus.chunks parent").containsAll(DML);
+                // Control for PUBLIC, which has no pg_roles row: a grant to it must still be copied.
+                ctx.grant(DSL.privilege(PUBLIC_PRIVILEGE)).on(DSL.table(DSL.name("nexus", "chunks"))).toPublic()
+                    .execute();
+                assertThat(privileges(admin, PUBLIC, "chunks"))
+                    .as("PUBLIC's " + PUBLIC_PRIVILEGE + " on the nexus.chunks parent").contains(PUBLIC_PRIVILEGE);
+
+                // Soft: a pre-fix run reports every path's failure, not only the first.
+                SoftAssertions soft = new SoftAssertions();
 
                 // 1. A tenant created after boot: the service_tokens trigger creates its leaves.
                 PgContainerHelper.seedServiceToken(ctx, "tok-h4w9o", TENANT, "h4w9o");
@@ -77,13 +94,7 @@ class PartitionCopyAccessDiagExclusionIntegrationTest {
                     assertThat(leaves).as("the new tenant's leaves under " + parent
                         + " (non-vacuity: the trigger made some)").isNotEmpty();
                     for (String leaf : leaves) {
-                        assertThat(privileges(admin, DIAG_ROLE, leaf))
-                            .as("nexus_diag on the new tenant's leaf " + leaf).isEmpty();
-                        // Control: the skip is not a wholesale ACL drop. nexus_svc keeps the parent's DML.
-                        assertThat(privileges(admin, SVC_ROLE, leaf))
-                            .as("nexus_svc on the new tenant's leaf " + leaf + " matches its parent " + parent)
-                            .isEqualTo(privileges(admin, SVC_ROLE, parent))
-                            .containsAll(DML);
+                        checkCopied(soft, admin, "tenant leaf", parent, leaf);
                     }
                 }
 
@@ -95,30 +106,63 @@ class PartitionCopyAccessDiagExclusionIntegrationTest {
                     .execute();
                 for (String parent : PARENTS) {
                     String modelPartition = PartitionScratch.createModelPartition(ctx, parent, MODEL, true);
-                    List<String> tree = List.of(
-                        PartitionScratch.partitionName(ctx, parent, MODEL, null),
-                        PartitionScratch.partitionName(ctx, parent, MODEL, "default"),
-                        PartitionScratch.partitionName(ctx, parent, MODEL, TENANT));
+                    List<String> tree = modelTree(ctx, parent);
                     assertThat(modelPartition).as("create_model_partition's answer").endsWith(tree.get(0));
                     assertThat(relationNames(admin, parent))
                         .as("the new model partition and its leaves exist "
                             + "(non-vacuity: itself, default's leaf and " + TENANT + "'s leaf)")
                         .containsAll(tree);
                     for (String rel : tree) {
-                        assertThat(privileges(admin, DIAG_ROLE, rel))
-                            .as("nexus_diag on " + rel + " under the new model partition of " + parent).isEmpty();
-                        assertThat(privileges(admin, SVC_ROLE, rel))
-                            .as("nexus_svc on " + rel + " matches " + parent)
-                            .isEqualTo(privileges(admin, SVC_ROLE, parent))
-                            .containsAll(DML);
+                        checkCopied(soft, admin, "model partition tree", parent, rel);
                     }
                 }
 
-                // 3. The parent keeps its diag grant: the view still reads through it.
-                assertThat(privileges(admin, DIAG_ROLE, "chunks"))
+                // 3. partition_sync_access (SchemaMigrator.repairPartitionAccessDrift's call) revokes and
+                // re-copies the parent's ACL on every partition: it must not put nexus_diag back.
+                for (String parent : PARENTS) {
+                    int synced = PartitionScratch.syncAccess(ctx, parent, true);
+                    assertThat(synced).as("partition_sync_access on " + parent
+                        + " (non-vacuity: it touched partitions)").isPositive();
+                    List<String> rels = new ArrayList<>(tenantLeaves(admin, ctx, parent, TENANT));
+                    rels.addAll(modelTree(ctx, parent));
+                    for (String rel : rels) {
+                        checkCopied(soft, admin, "after partition_sync_access", parent, rel);
+                    }
+                }
+
+                // 4. The parent keeps its diag grant: the view still reads through it.
+                soft.assertThat(privileges(admin, DIAG_ROLE, "chunks"))
                     .as("the nexus.chunks parent keeps nexus_diag's SELECT").contains("SELECT");
+                soft.assertAll();
             }
         }
+    }
+
+    /**
+     * The skip is exact: nexus_diag (BYPASSRLS) gets nothing on {@code rel}, while nexus_svc gets exactly its parent
+     * privileges and PUBLIC (no pg_roles row) keeps the grant the test put on the nexus.chunks parent.
+     */
+    private static void checkCopied(SoftAssertions soft, Connection admin, String path, String parent, String rel)
+            throws Exception {
+        soft.assertThat(privileges(admin, DIAG_ROLE, rel))
+            .as(path + ": nexus_diag on " + rel + " under " + parent).isEmpty();
+        soft.assertThat(privileges(admin, SVC_ROLE, rel))
+            .as(path + ": nexus_svc on " + rel + " matches its parent " + parent)
+            .isEqualTo(privileges(admin, SVC_ROLE, parent))
+            .containsAll(DML);
+        if (parent.equals("chunks")) {
+            soft.assertThat(privileges(admin, PUBLIC, rel))
+                .as(path + ": PUBLIC on " + rel + " keeps the parent's " + PUBLIC_PRIVILEGE)
+                .contains(PUBLIC_PRIVILEGE);
+        }
+    }
+
+    /** The model partition of {@link #MODEL} under the parent, then its default leaf and the tenant's leaf. */
+    private static List<String> modelTree(DSLContext ctx, String parent) {
+        return List.of(
+            PartitionScratch.partitionName(ctx, parent, MODEL, null),
+            PartitionScratch.partitionName(ctx, parent, MODEL, "default"),
+            PartitionScratch.partitionName(ctx, parent, MODEL, TENANT));
     }
 
     /** Privileges the role holds on nexus.&lt;table&gt; by an explicit ACL entry (JDBC metadata), sorted. */
