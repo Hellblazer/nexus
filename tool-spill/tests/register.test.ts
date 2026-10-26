@@ -181,6 +181,29 @@ test('output Claude Code already persisted is left alone (marker text, rawOutput
   expect(writes).toHaveLength(0)
 })
 
+test('output that only mentions the marker is still cut (nexus-x967v)', async ($, on) => {
+  // Reading the plugin's own README or source puts the marker text mid-output; only Claude Code's own wrapper,
+  // which starts the output, means "already persisted".
+  const writes = spy(on)
+  const stdout = exact(2_500) + '\nthe <persisted-output> marker, quoted in prose\n' + exact(2_500)
+  on('tool.call', () => BIG_BASH(stdout))
+
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'cat README.md' })
+
+  expect(writes).toHaveLength(1)
+  expect(writes[0].text).toBe(stdout)
+  expect(r.result.stdout).toContain('[tool-spill:')
+})
+
+test('the marker after leading whitespace still counts as persisted', async ($, on) => {
+  const writes = spy(on)
+  const result = { stdout: '\n  <persisted-output>\n' + exact(5_000) + '\n</persisted-output>', stderr: '' }
+  on('tool.call', () => ({ result }))
+
+  expect(((await $.tool.call({ tool: 'Bash', command: 'big' })) as any).result).toEqual(result)
+  expect(writes).toHaveLength(0)
+})
+
 test('an image result is left alone', async ($, on) => {
   const writes = spy(on)
   const result = { stdout: 'A'.repeat(20_000), stderr: '', isImage: true }

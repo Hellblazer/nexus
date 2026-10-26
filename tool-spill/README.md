@@ -44,7 +44,7 @@ Passed through whole:
 - an errored result or a denied call;
 - a `Read` with an `offset` or a `limit`: the model sliced it itself, so following the note, or reading a slice of a spill file, costs nothing extra and is never cut again;
 - a `Read` of an instruction file (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `REGISTER.md`, or anything under a `skills/`, `agents/`, `commands/` or `rules/` directory, so a large source file under, say, `src/nexus/commands/` also passes whole; either path separator, any case);
-- `Bash` output Claude Code has already moved to a file of its own (past about 30 KB: `persistedOutputPath`, `rawOutputPath` or its `<persisted-output>` marker), and image output;
+- `Bash` output Claude Code has already moved to a file of its own (past about 30 KB: `persistedOutputPath`, `rawOutputPath`, or output that starts with its `<persisted-output>` marker; output that only quotes the marker further in is still cut), and image output;
 - every call a subagent makes;
 - every call in a headless run, unless `includeHeadless` is on.
 

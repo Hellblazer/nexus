@@ -137,9 +137,10 @@ export const register: Register = (on, options) => {
         const out: string = res.result.stdout
         const err: string = res.result.stderr ?? ''
         const size = bytes(out) + bytes(err)
-        // Claude Code already moves output past its own cap (about 30 KB) to a file; leave those to it.
+        // Claude Code already moves output past its own cap (about 30 KB) to a file; leave those to it. Its marker
+        // wraps the whole output, so it counts only at the start: output that merely quotes it is cut (nexus-x967v).
         if (size <= LIMIT || res.result.isImage || res.result.rawOutputPath || res.result.persistedOutputPath ||
-            out.includes('<persisted-output>')) return res
+            out.trimStart().startsWith('<persisted-output>')) return res
         if (!INCLUDE_HEADLESS && await isHeadless($)) return res
 
         const path = `${await dirOf($)}/${e.tool_use_id.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`

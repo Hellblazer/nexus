@@ -46,3 +46,4 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `tool-spill/.claude-plugin/plugin.json` (nexus-121ke): each userConfig option's title says what it changes and what a blank field means (Claude Code shows only titles and never prefills a declared default), and the plugin description says no setup is needed.
 - `tool-spill/README.md` (nexus-121ke): the install section explains the blank option fields, the four defaults, why one would change each, and the note a cut result carries.
+- `tool-spill/hooks/register.ts` (nexus-x967v): the `<persisted-output>` marker counts only at the start of a Bash result, so output that merely quotes it (the plugin's own README or source) is cut instead of passing whole.
