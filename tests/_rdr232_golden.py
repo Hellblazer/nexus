@@ -590,12 +590,14 @@ class PlanSelection:
 
 def observe_plan_selection(
     library, question: str, *, scope: str = "", bindings: dict[str, Any] | None = None, eligibility=None,
-    min_confidence: float | None = None,
+    min_confidence: float | None = None, derive_category_verb: bool = True,
 ) -> PlanSelection:
     """What the matcher offers and picks for *question*, called as ``nx_answer`` calls it
     (same bindings, availability set, floor, ``n`` and category verb). A plan miss selects ``None``.
     *eligibility* is the answer-kind filter (nexus-jypmj.2.3); none, as before, is the unmodified matcher.
-    *min_confidence* replaces the production floor (a test that wants every candidate the matcher examined)."""
+    *min_confidence* replaces the production floor (a test that wants every candidate the matcher examined).
+    *derive_category_verb* False passes no category verb, which closes the below-floor category route (the matcher
+    then falls through from cosine to FTS when no cosine hit clears *min_confidence*)."""
     from nexus.mcp.core import _PLAN_MATCH_MIN_CONFIDENCE, _nx_answer_caller_bindings, _nx_answer_match_is_hit
     from nexus.mcp_infra import get_t1_plan_cache
     from nexus.plans.matcher import plan_match
@@ -606,7 +608,7 @@ def observe_plan_selection(
     matches = plan_match(
         question, library=library, cache=cache, dimensions=None, scope_preference=scope,
         context=None, min_confidence=_PLAN_MATCH_MIN_CONFIDENCE if min_confidence is None else min_confidence, n=5,
-        available_bindings=available, category_verb=infer_verb(question), eligibility=eligibility,
+        available_bindings=available, category_verb=infer_verb(question) if derive_category_verb else None, eligibility=eligibility,
     )
     keys = [plan_label_key(m.dimensions, m.tags) for m in matches]
     hit = bool(matches) and _nx_answer_match_is_hit(matches[0].confidence, threshold=_PLAN_MATCH_MIN_CONFIDENCE)

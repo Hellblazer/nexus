@@ -677,6 +677,28 @@ class _LegacyBuiltins:
         return [self._strip(r) for r in self._lib.search_plans(*args, **kwargs)]
 
 
+#: A question whose words are all in the seeded plans' own text and that no verb pattern reads (so the
+#: category route is closed); with the cosine ceiling open the matcher can only answer it from FTS5.
+FTS_PROBE_QUESTION = "hybrid factual lookup"
+
+
+def _drive_fts_branch(library, el) -> dict:
+    """One request driven through the matcher's FTS5 fallback, with the shadow filter, on the real substrate."""
+    from nexus.plans.request_coverage import derive_request_coverage
+
+    cov = derive_request_coverage(FTS_PROBE_QUESTION)
+    shadow = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=False)
+    sel = g.observe_plan_selection(
+        library, FTS_PROBE_QUESTION, eligibility=shadow, min_confidence=1.5, derive_category_verb=False)
+    fts = shadow.to_wire()["branches"]["fts"]
+    others = {b: c["examined"] for b, c in shadow.to_wire()["branches"].items() if b != "fts"}
+    assert not any(others.values()), f"the probe was meant to reach FTS only: {others}"
+    return {
+        "question": FTS_PROBE_QUESTION, "examined": fts["examined"], "excluded": fts["excluded"],
+        "reasons": fts["reasons"], "offered": sel.candidates,
+    }
+
+
 def _measure_eligibility(library, queries, with_clone_selections) -> dict:
     """nexus-jypmj.2.3: the answer-kind eligibility filter over the golden set, gate off (shadow) and on.
 
@@ -727,6 +749,19 @@ def _measure_eligibility(library, queries, with_clone_selections) -> dict:
         })
     off = compute_measures(queries, shadow_obs)
     on = compute_measures(queries, enforced_obs)
+    # Per-branch examined counts over the 24 requests (gate off, shadow): the exclusion counts alone cannot tell
+    # a branch that judged nothing from a branch that judged candidates and excluded none.
+    examined_by_branch = {b: sum(r["branches_off"][b]["examined"] for r in rows) for b in el.BRANCHES}
+    fts_natural = examined_by_branch["fts"]
+    # The golden requests all reach the cosine branch or the category route, so the FTS fallback is judged on
+    # no natural request (fts examined 0 and excluded 0 there is a branch that never ran, not a branch that
+    # found everything eligible). One request is driven to it on this substrate: a question with no cosine hit
+    # above the floor (an open ceiling above any cosine) and no category verb, whose words are in the seeded
+    # plans' text, so the matcher falls through to the FTS5 fallback and the filter judges what it finds there.
+    fts_probe = _drive_fts_branch(library, el)
+    assert fts_probe["examined"] > 0, (
+        "no request reached the FTS branch of the matcher on the real substrate, so its eligibility judgement "
+        f"is not exercised by this fixture: {fts_probe}")
     # The same enforcing run over the library as it stands BEFORE `nx plan reseed`: builtins seeded before
     # nexus-jypmj.2.1 carry no declaration, so with the gate on each reads as an untrusted unknown plan.
     legacy_view = _LegacyBuiltins(library)
@@ -795,12 +830,16 @@ def _measure_eligibility(library, queries, with_clone_selections) -> dict:
         f"wrong_shape off={off['wrong_shape_admission_rate'].value} on={on['wrong_shape_admission_rate'].value} "
         f"eligible_plan_recall off={off['eligible_plan_recall'].value} on={on['eligible_plan_recall'].value} "
         f"would_exclude_any={sum(1 for r in rows if r['excluded_total'])} "
+        f"examined_by_branch={examined_by_branch} fts_examined_natural={fts_natural} "
+        f"fts_probe(question={fts_probe['question']!r})=examined={fts_probe['examined']} "
+        f"excluded={fts_probe['excluded']} reasons={fts_probe['reasons']} offered={fts_probe['offered']} "
         f"miss_off={sum(1 for r in rows if r['selected_off'] is None)} "
         f"miss_on={sum(1 for r in rows if r['selected_on'] is None)}")
     for r in rows:
         print(
             f"RDR232-ELIGIBILITY[{r['qid']}] golden={r['golden_kind']} derived={r['derived_kind']}/{r['decision']} "
             f"off={r['selected_off']} on={r['selected_on']} would_exclude={r['would_exclude']} "
+            f"examined_by_branch={ {b: c['examined'] for b, c in r['branches_off'].items()} } "
             f"excluded_by_branch={ {b: c['excluded'] for b, c in r['branches_off'].items()} }")
     return {"rows": rows, "off": off, "on": on}
 

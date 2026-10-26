@@ -154,6 +154,12 @@ def test_golden_kind_regression_floor() -> None:
     print(f"RDR232-COVERAGE-KIND in-sample golden={len(_golden())} exact={exact} unknown_instead={unknowns} wrong={wrong}")
     assert wrong == 0
     assert exact >= 16
+    # In-sample tripwire, stricter than the floor above: the patterns were fitted to these 24 requests, so the
+    # observed 23 exact is where they stand today, and a drop to the floor of 16 would otherwise pass unseen.
+    # This is not a quality claim; a change to these numbers is a deliberate update, made here with the reason.
+    assert unknowns == ["G05"] and wrong == 0, (
+        f"in-sample kind agreement moved: unknown_instead={unknowns} (was ['G05']) wrong={wrong} (was 0); "
+        "if the change is intended, update this assertion and say why in the commit")
 
 
 # ── 3. extraction failure: unknown plus one whole_question facet, nothing dropped ─────────────────────────
@@ -176,7 +182,10 @@ def test_the_uncertain_first_pass_keeps_the_whole_question_and_the_constraints()
 
 @pytest.mark.parametrize("failure", ["timeout", "error", "invalid"])
 def test_a_failed_structured_extraction_leaves_unknown_and_whole_question(failure: str) -> None:
+    awaited: list[str] = []
+
     async def dispatch(prompt, schema, *, timeout, usage_sink):  # noqa: ARG001
+        awaited.append(failure)
         if failure == "timeout":
             await asyncio.sleep(5)
         if failure == "error":
@@ -187,6 +196,9 @@ def test_a_failed_structured_extraction_leaves_unknown_and_whole_question(failur
     after = asyncio.run(structured_extract(
         before, _TWO_SENTENCE, dispatch=dispatch, timeout=0.05, enabled=True, cleanup_grace=0.05))
     assert after.extraction.outcome == failure and after.extraction.calls == 1
+    # the report's calls=1 is a literal in report(); the stub's own count is the evidence of one attempt (RDR-232:
+    # never retried, on a failure path too)
+    assert len(awaited) == 1, f"{failure}: the dispatch was awaited {len(awaited)} times, expected exactly one"
     assert (after.answer_kind, after.kind_decision) == ("unknown", "unknown")
     assert after.facets == before.facets and after.constraints == before.constraints, "no clause was dropped"
     assert after.facets[0].origin == "whole_question"
