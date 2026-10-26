@@ -20,16 +20,20 @@ from nexus.commands.rdr import rdr
 _FM = "---\ntitle: {t}\nstatus: draft\ntype: Feature\npriority: P2\n---\n\n# {t}\n"
 
 
-def _git(cwd: Path, *args: str) -> None:
-    subprocess.run(
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
         ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
         cwd=cwd, check=True, capture_output=True, text=True, encoding="utf-8",
-    )
+    ).stdout.strip()
 
 
 def _rdr(path: Path, name: str) -> None:
     path.mkdir(parents=True, exist_ok=True)
     (path / name).write_text(_FM.format(t=name), encoding="utf-8")
+
+
+def _t2(monkeypatch: pytest.MonkeyPatch, titles: list[str] | None) -> None:
+    monkeypatch.setattr(rdr_mod, "_preamble_t2_rdr_titles", lambda repo_name: titles)
 
 
 @pytest.fixture
@@ -51,13 +55,22 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     wt = tmp_path / "wt-other"
     _git(root, "worktree", "add", "-q", "-b", "feature/draft", str(wt))
     _rdr(wt / "docs/rdr", "rdr-007-uncommitted-draft.md")
-    # A file in a subdirectory is not an RDR number of this directory.
-    _rdr(root / "docs/rdr/joint", "JDR-050-joint.md")
+    # Files that are not RDR numbers of this directory: one in a subdirectory
+    # whose name would otherwise parse, and a dated note.
+    _rdr(root / "docs/rdr/100-archive", "old.md")
+    _rdr(root / "docs/rdr/joint", "rdr-060-joint.md")
+    _rdr(root / "docs/rdr", "2026-10-26-handoff.md")
     _git(root, "add", "docs")
     _git(root, "commit", "-q", "-m", "joint")
     monkeypatch.chdir(root)
-    monkeypatch.setattr(rdr_mod, "_preamble_get_rdrs_from_t2", lambda repo_name, rdr_dir: [])
+    _t2(monkeypatch, [])
     return root
+
+
+def _create() -> str:
+    result = CliRunner().invoke(rdr, ["preamble", "rdr-create"])
+    assert result.exit_code == 0, result.output
+    return result.output
 
 
 def _next_id(output: str) -> str:
@@ -66,22 +79,60 @@ def _next_id(output: str) -> str:
 
 
 def test_next_id_skips_branch_and_worktree_holders(repo: Path) -> None:
-    result = CliRunner().invoke(rdr, ["preamble", "rdr-create"])
-    assert result.exit_code == 0, result.output
-    assert _next_id(result.output) == "RDR-008"
-    assert "RDR-005" in result.output and "feature/held" in result.output
-    assert "RDR-007" in result.output and "wt-other" in result.output
+    out = _create()
+    assert _next_id(out) == "RDR-008"
+    assert "RDR-005: branch feature/held" in out
+    assert "RDR-007" in out and "wt-other" in out
+    assert "RDR-100" not in out and "RDR-060" not in out and "2026" not in _next_id(out)
+    assert "incomplete" not in out
 
 
-def test_next_id_skips_a_t2_record(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        rdr_mod, "_preamble_get_rdrs_from_t2",
-        lambda repo_name, rdr_dir: [{"id": "011", "file_path": "docs/rdr/rdr-011-x.md"}],
-    )
-    result = CliRunner().invoke(rdr, ["preamble", "rdr-create"])
-    assert result.exit_code == 0, result.output
-    assert _next_id(result.output) == "RDR-012"
-    assert "RDR-011" in result.output and "T2" in result.output
+def test_next_id_skips_a_remote_only_branch(repo: Path) -> None:
+    sha = _git(repo, "rev-parse", "feature/held")
+    _git(repo, "update-ref", "refs/remotes/origin/feature/remote-only", sha)
+    _git(repo, "branch", "-q", "-D", "feature/held")
+    out = _create()
+    assert _next_id(out) == "RDR-008"
+    assert "RDR-005: branch origin/feature/remote-only" in out
+
+
+def test_next_id_skips_t2_records_and_research_rows(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _t2(monkeypatch, ["011", "014-research-1", "014-research-2", "notes"])
+    out = _create()
+    assert _next_id(out) == "RDR-015"
+    assert "RDR-011: T2 proj_rdr/011" in out
+    assert "RDR-014: T2 proj_rdr/014-research-1" in out
+
+
+def test_an_unreadable_holder_source_is_said(
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _t2(monkeypatch, None)
+    out = _create()
+    assert _next_id(out) == "RDR-008"
+    assert "Holder scan incomplete" in out
+
+
+def test_git_failure_is_said(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rdr_mod, "_git_lines", lambda repo_root, *args: None)
+    out = _create()
+    assert _next_id(out) == "RDR-002"
+    assert "Holder scan incomplete" in out
+
+
+def test_bootstrap_skips_held_numbers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "fresh"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "develop")
+    monkeypatch.chdir(root)
+    _t2(monkeypatch, ["001", "002-research-1"])
+    out = _create()
+    assert "bootstrap required" in out
+    assert _next_id(out) == "RDR-003"
 
 
 def test_no_holders_elsewhere_keeps_the_local_answer(
@@ -94,8 +145,7 @@ def test_no_holders_elsewhere_keeps_the_local_answer(
     _git(root, "add", "docs")
     _git(root, "commit", "-q", "-m", "only")
     monkeypatch.chdir(root)
-    monkeypatch.setattr(rdr_mod, "_preamble_get_rdrs_from_t2", lambda repo_name, rdr_dir: [])
-    result = CliRunner().invoke(rdr, ["preamble", "rdr-create"])
-    assert result.exit_code == 0, result.output
-    assert _next_id(result.output) == "RDR-004"
-    assert "held elsewhere" not in result.output
+    _t2(monkeypatch, [])
+    out = _create()
+    assert _next_id(out) == "RDR-004"
+    assert "held elsewhere" not in out and "incomplete" not in out
