@@ -59,6 +59,9 @@ ART_REQUEST_QID = "G06-synthesis-art-rdr084"
 #: exceed it for the cap to bite (the incident's mix needed more than 300 reachable code ids).
 MIN_CODE_CHUNKS = 301
 
+#: The builtin lookup plan's first operator (``rank``, 0-based): where the reserved stream merges.
+LOOKUP_RANK_STEP = 4
+
 
 def _assert_fixture_loads(fx):
     """Asserts the fixture is in the hermetic tenant and returns the catalog reader."""
@@ -115,7 +118,7 @@ def _assert_graph_stream_not_yet_contained(fx, run) -> dict[str, int]:
     return traverse_by_corpus
 
 
-def _assert_named_source_and_primary_evidence(fx, reader) -> None:
+def _assert_named_source_and_primary_evidence(fx, reader):
     """nexus-jypmj.1.4: the named-source resolver and primary evidence, real catalog + T3."""
     from dataclasses import replace as _replace
 
@@ -151,6 +154,46 @@ def _assert_named_source_and_primary_evidence(fx, reader) -> None:
         f"RDR232-PRIMARY rows={cov.manifest_rows} hydrated={cov.rows_hydrated} selected={cov.selected_rows} "
         f"labels_from_manifest={cov.labels_from_manifest} labels_from_content={cov.labels_from_content} "
         f"label_sources={sorted(sources_of_labels)} catalog_calls={art_resolution.catalog_calls}")
+    return primary
+
+
+def _assert_primary_stream_reaches_the_reducer(fx, run, primary) -> None:
+    """nexus-jypmj.1.6: the reserved primary stream is merged ahead of the plan's own inputs at the
+    first operator (the builtin's ``rank``, explicit ``inputs`` of both hydrated streams). Every
+    primary chunk reaches the reducer's input, first; the positional cap keeps them and cuts
+    secondary items only. Run through the runner's real hydration with the run's real contents."""
+    import json
+
+    from nexus.plans.reserved_stream import ReservedStream, reserved_scope, set_reserved_step
+    from nexus.plans.runner import _OPERATOR_MAX_INPUTS, _hydrate_operator_args
+
+    secondary = run.vector_contents + run.graph_contents
+    _, plain = _hydrate_operator_args("rank", {"criterion": "c", "inputs": list(secondary)})
+    before = json.loads(plain["items"])
+    assert before == [c for c in secondary if c], "no stream: the explicit inputs are untouched"
+
+    stream = ReservedStream.from_evidence(primary)
+    assert stream is not None and len(stream.items) == primary.selected_items
+    with reserved_scope(stream):
+        set_reserved_step(LOOKUP_RANK_STEP)
+        _, merged = _hydrate_operator_args("rank", {"criterion": "c", "inputs": list(secondary)})
+    after = json.loads(merged["items"])
+    reserved = [i.text for i in stream.items]
+    assert after[:len(reserved)] == reserved, "the primary chunks lead the reducer's input, in order"
+    assert len(after) <= _OPERATOR_MAX_INPUTS
+    def art_chunks(contents):
+        return [i for i in g.evidence_from_contents(fx, contents) if i.source == g.ART_REF and i.corpus == "rdr"]
+
+    in_before = art_chunks(before)
+    in_after = art_chunks([i.raw for i in stream.items] + after[len(reserved):])
+    assert len(in_after) >= len(reserved) and len(in_after) >= len(in_before), (
+        "the primary chunks are in the reducer's input and the merge removed no ART chunk")
+    report = stream.report()
+    print(
+        f"RDR232-MERGE secondary_before={len(before)} reducer_input_after={len(after)} "
+        f"reserved={report['reserved_items']} deduped_secondary={report['deduped_secondary']} "
+        f"secondary_cut={report['secondary_cut']} capped={report['capped']} "
+        f"art_rdr_chunks_in_reducer_input_before={len(in_before)} after={len(in_after)}")
 
 
 def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus) -> dict:
@@ -243,7 +286,8 @@ def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> Non
     scope, bindings = g.request_call_shape(art)
     run = asyncio.run(g.run_lookup_retrieval(art.text, scope=scope, bindings=bindings))
     search_by_corpus = _assert_vector_stream_contained(fx, run)
-    _assert_named_source_and_primary_evidence(fx, reader)
+    primary = _assert_named_source_and_primary_evidence(fx, reader)
+    _assert_primary_stream_reaches_the_reducer(fx, run, primary)
     traverse_by_corpus = _assert_graph_stream_not_yet_contained(fx, run)
     raw_references = len(run.search_ids) + len(run.traverse_ids)
     assert raw_references > 300, f"only {raw_references} chunk references; the graph stream's cap is 300"

@@ -86,6 +86,7 @@ from nexus.plans.runner import (
     _hydrate_operator_args,
     _resolve_args,
 )
+from nexus.plans.reserved_stream import set_reserved_step
 
 if TYPE_CHECKING:
     from nexus.plans.continuation import ContinuationCut
@@ -186,6 +187,8 @@ def _compose_shape_a(
         source_collections = (
             resolved.get("collections") if "ids" in resolved else None
         )
+        # RDR-232 (nexus-jypmj.1.6): the same reserved-stream merge plan_run's bundle path applies.
+        set_reserved_step(bi)
         _, prepared = _hydrate_operator_args(tool, resolved)
         prepared.pop("_truncation_metadata", None)
         bundle_steps.append(OperatorBundleStep(
@@ -309,6 +312,7 @@ def _compose_shape_b(
     # retrieval prefix step was already narrowed (or skipped) by ``plan_run`` before the cut.
     resolved, _narrowing = _apply_caller_scope_to_args(tool, resolved, bindings=bindings)
     resolved = _apply_mode_to_args(tool, resolved)
+    set_reserved_step(bi)  # RDR-232 (nexus-jypmj.1.6): see _compose_shape_a
     resolved_tool, prepared = _hydrate_operator_args(tool, resolved)
     prepared.pop("_truncation_metadata", None)
     verb = _bare(resolved_tool)

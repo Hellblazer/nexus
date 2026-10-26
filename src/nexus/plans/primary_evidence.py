@@ -28,8 +28,8 @@ the last writer's, so :func:`t3_chunk_fetcher` hands the selector text and nothi
 Every limit is a field of :class:`PrimaryEvidenceCaps`, the one calibration object
 (:data:`DEFAULT_CAPS`). The reserved share (``max_selected_items``) stays below the
 operator input cap (``runner._OPERATOR_MAX_INPUTS``, 100) so plan evidence keeps room.
-Merging this evidence ahead of the plan's inputs is nexus-jypmj.1.6; this module only
-produces it.
+Merging this evidence ahead of the plan's inputs is :mod:`nexus.plans.reserved_stream`
+(nexus-jypmj.1.6); this module only produces it.
 """
 
 from __future__ import annotations
@@ -91,6 +91,10 @@ class PrimaryEvidenceCaps:
     max_candidates_per_lookup: int = 100
     #: Manifest rows hydrated across ALL sources; a larger manifest is sampled, not cut.
     max_manifest_rows: int = 300
+    #: Manifest rows KEPT after the catalog read, across all sources, before sorting and
+    #: sampling (nexus-jypmj.1.6). ``get_manifests`` has no row limit, so this bounds what the
+    #: rest of the pipeline holds, not the reply; a longer manifest is spread-sampled.
+    max_manifest_rows_read: int = 3000
     #: Characters fetched from T3 across all sources (stops at the first batch past it).
     max_fetched_chars: int = 600_000
     #: Unique chunks reserved for the primary stream (< ``runner._OPERATOR_MAX_INPUTS``).
@@ -731,6 +735,11 @@ def select_primary_evidence(
     for d in docs:
         rows = sorted((r for r in manifests.get(d.tumbler or "", []) if r.chash), key=lambda r: r.position)
         all_rows.append(rows)
+    true_counts = [len(r) for r in all_rows]
+    for k, read_allow in enumerate(_water_fill(caps.max_manifest_rows_read, true_counts)):
+        if true_counts[k] > read_allow:
+            all_rows[k] = [all_rows[k][i] for i in _spread(range(true_counts[k]), read_allow)]
+            caps_hit.append("max_manifest_rows_read")
     allowance = _water_fill(caps.max_manifest_rows, [len(r) for r in all_rows])
     sampled: list[list[ManifestRow]] = []
     for rows, allow in zip(all_rows, allowance, strict=True):
@@ -781,6 +790,7 @@ def select_primary_evidence(
     coverage_base: list[dict[str, Any]] = []
     for k, d in enumerate(docs):
         rows = all_rows[k]
+        n_rows = true_counts[k]
         hydrated = [
             r for r in sampled[k]
             if (r.collection or d.collection or "", r.chash) in texts
@@ -809,10 +819,10 @@ def select_primary_evidence(
         no_manifest = not rows
         coverage_base.append({
             "status": "manifest_error" if manifest_failed else ("no_manifest" if no_manifest else "ok"),
-            "manifest_rows": len(rows),
-            "manifest_rows_expected": d.chunk_count if rows and d.chunk_count != len(rows) else 0,
+            "manifest_rows": n_rows,
+            "manifest_rows_expected": d.chunk_count if rows and d.chunk_count != n_rows else 0,
             "rows_hydrated": len(built),
-            "rows_sampled": len(sampled[k]) < len(rows),
+            "rows_sampled": len(sampled[k]) < n_rows,
             "missing_content": missing,
             "labelled_rows": sum(1 for b in built if b.label),
             "labels_from_manifest": n_manifest,

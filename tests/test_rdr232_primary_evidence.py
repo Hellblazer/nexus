@@ -719,7 +719,7 @@ def test_a_golden_required_source_label_maps_to_a_source_ref_and_a_project() -> 
 # ── nx_answer: the resolution reaches the caller ──────────────────────────────────────────
 
 
-async def _answer(cat: FakeCatalog, *, bindings: dict, structured: bool) -> Any:
+async def _answer(cat: FakeCatalog, *, bindings: dict, structured: bool, t3: FakeT3 | None = None) -> Any:
     """``nx_answer`` over a one-step ad-hoc plan, the catalog replaced by *cat*. The same
     patches ``test_rdr232_reserved_bindings._text_answer`` uses, plus the catalog."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -745,6 +745,8 @@ async def _answer(cat: FakeCatalog, *, bindings: dict, structured: bool) -> Any:
          patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
          patch("nexus.mcp.core.scratch", return_value="ok"), \
          patch("nexus.mcp.core._get_catalog", return_value=cat), \
+         patch("nexus.mcp.core._get_t3", return_value=MagicMock()), \
+         patch("nexus.plans.primary_evidence.t3_chunk_fetcher", return_value=(t3 or FakeT3()).fetch), \
          patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
         t2_ctx.return_value.__enter__.return_value = db_stub
         return await nx_answer(question="q", bindings=bindings, structured=structured)
@@ -763,10 +765,14 @@ async def test_nx_answer_says_so_when_a_named_source_is_ambiguous_and_when_it_re
     (src,) = env["named_sources"]["sources"]
     assert (src["status"], src["tumbler"]) == ("candidates", None)
 
-    env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True)
+    env = await _answer(cat, bindings={"source": "RDR-084", "owner": ART_OWNER}, structured=True, t3=t3)
     (src,) = env["named_sources"]["sources"]
     assert (src["status"], src["tumbler"], src["qualified"]) == ("resolved", ART_DOC, True)
-    assert env["final_text"] == "the answer is 42", "a clean resolution adds no notice to the answer"
+    # The ad-hoc plan is one search step: no operator consumed the primary evidence it read, and
+    # the notice says so (nexus-jypmj.1.6). Nothing else is added for a clean resolution.
+    assert env["final_text"].endswith("the answer is 42")
+    assert env["final_text"].count("[evidence request:") == 1 and "was not merged into a reduction" in env["final_text"]
+    assert env["primary_evidence"]["selected_items"] == 1 and env["reserved_stream"]["merged"] is False
 
     env = await _answer(cat, bindings={"source": "RDR-084", "owner": "9.9"}, structured=True)
     (src,) = env["named_sources"]["sources"]

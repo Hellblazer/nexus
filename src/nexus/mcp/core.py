@@ -127,7 +127,8 @@ from nexus.mcp import subscriptions as _subscriptions
 from nexus.mcp import channel as _channel
 
 if TYPE_CHECKING:
-    from nexus.plans.primary_evidence import NamedSourceResolution
+    from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
+    from nexus.plans.reserved_stream import ReservedStream
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
 #: string to the agent rather than raising; before returning an error they must
@@ -9943,6 +9944,35 @@ def _nx_answer_named_sources(request: EvidenceRequest) -> NamedSourceResolution 
     return resolve_named_sources(request.sources, request.owner, cat=cat)
 
 
+async def _nx_answer_primary_stream(
+    resolution: NamedSourceResolution | None,
+) -> "tuple[PrimaryEvidence | None, ReservedStream | None]":
+    """Read the resolved named sources and build the reserved stream (RDR-232, nexus-jypmj.1.6).
+
+    Uses the resolution ``nx_answer`` already holds (``select_primary_evidence``, not
+    ``gather_primary_evidence``, so no source is resolved twice). ``(None, None)`` when no source
+    resolved, so a run without one is byte-identical to before. The read is blocking catalog and
+    T3 I/O, so it runs in a worker thread; it never raises, and a failure is disclosed as an
+    unread source, not a failed answer.
+    """
+    if resolution is None or not resolution.resolved():
+        return None, None
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.primary_evidence import select_primary_evidence, t3_chunk_fetcher  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.reserved_stream import ReservedStream  # noqa: PLC0415 — deferred; matches this module's convention
+
+    try:
+        cat = _get_catalog()
+        fetch = t3_chunk_fetcher(_get_t3())
+        evidence = await asyncio.to_thread(
+            select_primary_evidence, resolution, cat=cat, fetch_chunks=fetch,
+        )
+    except Exception as exc:  # noqa: BLE001 — an unreadable source is disclosed, never a failed answer
+        _log.warning("nx_answer_primary_evidence_failed", error=str(exc))
+        return None, None
+    return evidence, ReservedStream.from_evidence(evidence)
+
+
 def _autoalias_bindings(
     *,
     required: list[str],
@@ -11050,6 +11080,10 @@ async def nx_answer(
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.
     _single_query_fast_path = False
+    # nexus-jypmj.1.6: the named sources' primary evidence and the stream the runner merges. Set
+    # just before plan_run, never on the single_query fast path (it has no operator step).
+    _primary_evidence: "PrimaryEvidence | None" = None
+    _reserved_stream: "ReservedStream | None" = None
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -11137,6 +11171,8 @@ async def nx_answer(
             line for line in (
                 _budget_warning_text, _dropped_reduce_text, _scope_notice,
                 *_evidence_request.disclosures(),
+                *(_primary_evidence.disclosures() if _primary_evidence else ()),
+                *(_reserved_stream.disclosures() if _reserved_stream else ()),
                 *(
                     _named_sources.disclosures(
                         owner_failure_disclosed=_evidence_request.owner.status in ("conflict", "unresolved"),
@@ -11256,6 +11292,13 @@ async def nx_answer(
             # detail, ...}], dropped, catalog_calls}. None when no source
             # was named.
             "named_sources": _named_sources.to_wire() if _named_sources else None,
+            # RDR-232 Phase 1 (nexus-jypmj.1.6): the primary evidence read from the resolved
+            # sources (per-document coverage, selected items by position, caps hit) and what the
+            # runner did with it (merged step, secondary items cut or deduplicated, reserved
+            # items an intermediate operator dropped). None when no source resolved or the run
+            # had no reduction to feed (the single_query fast path).
+            "primary_evidence": _primary_evidence.to_wire() if _primary_evidence else None,
+            "reserved_stream": _reserved_stream.report() if _reserved_stream else None,
             # RDR-232 Phase 1 (nexus-jypmj.1.2): the caller's evidence
             # request read from the reserved bindings (source, owner,
             # project) and a subtree scope: {source, source_error, owner:
@@ -12290,6 +12333,11 @@ async def nx_answer(
     # degrade to "Error during plan execution" — exactly the "changed
     # default behavior" this parameter must not cause.
     _plan_run_kwargs: dict[str, Any] = {}
+    # RDR-232 (nexus-jypmj.1.6): the reserved primary stream, passed only when a named source
+    # resolved and yielded evidence (the same "only pass when set" rule as the kwargs below).
+    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources)
+    if _reserved_stream is not None:
+        _plan_run_kwargs["reserved_stream"] = _reserved_stream
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline
     # RDR-196 .p3c (nexus-nyry9.21) D5: same "only pass when set"
@@ -12528,12 +12576,17 @@ async def nx_answer(
             from nexus.plans.runner import merge_bindings  # noqa: PLC0415 — rare/branch-local path
 
             _continuation_merged = merge_bindings(best.default_bindings, run_bindings)
-            _continuation_envelope = assemble_continuation_envelope(
-                cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
-                step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
-                prefix_may_redispatch=_prefix_may_redispatch,
-                prefix_redispatch_step_count=_prefix_redispatch_step_count,
-            )
+            # nexus-jypmj.1.6: the continuation re-runs the runner's hydration, so it merges the
+            # same reserved stream and the caller-side reduction sees the same evidence.
+            from nexus.plans.reserved_stream import reserved_scope  # noqa: PLC0415 — rare/branch-local path
+
+            with reserved_scope(_reserved_stream):
+                _continuation_envelope = assemble_continuation_envelope(
+                    cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
+                    step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
+                    prefix_may_redispatch=_prefix_may_redispatch,
+                    prefix_redispatch_step_count=_prefix_redispatch_step_count,
+                )
         except Exception as exc:  # noqa: BLE001 — a broken reconstruction must never strand a call whose prefix already stopped short of the suffix — falls back exactly like an assembly-returns-None case
             _log.warning(
                 "nx_answer_continuation_envelope_assembly_failed",

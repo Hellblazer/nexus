@@ -5396,7 +5396,7 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has three RDR-232 keys, all always present:
+The envelope has five RDR-232 keys, all always present:
 
 - `scope_diagnostics` (nexus-jypmj.1.3): a list with one entry per
   corpus-taking retrieval step the caller's `scope` reached,
@@ -5427,6 +5427,24 @@ The envelope has three RDR-232 keys, all always present:
   not-owner-qualified source, and states a failed owner qualifier once. On
   the single-step fast path the notice says the plan has no primary evidence
   stream, so a resolved document is not read as evidence there.
+- `primary_evidence` (nexus-jypmj.1.6): what was read from the resolved
+  sources, `{selected_items, selected_chars, manifest_rows_hydrated,
+  fetched_chars, fetch_errors, partial, caps_hit, caps, documents, items}`;
+  `items` carry positions, labels and chashes, not bodies. `None` when no
+  source resolved, the read failed, or the plan took the single-step fast path.
+- `reserved_stream` (nexus-jypmj.1.6): what the runner did with it, `{reserved_items,
+  reserved_chars, merged, merged_at_step, over_share_dropped, deduped_secondary,
+  secondary_cut, capped, dropped_before_terminal}`. The reserved items are
+  merged ahead of the plan's inputs at the first operator that consumes retrieved
+  evidence, so the operator input cap cuts only the plan's own items; an
+  explicit-`inputs` operator is capped at that point only when a stream was
+  merged. `dropped_before_terminal` (`{step, missing, of}`) counts reserved
+  items a later operator's input no longer held, for example after an
+  unbundled `rank`. Text mode adds a `[evidence request: ...]` line when a
+  read stream was never merged or items were dropped. `None` when no stream
+  was built. A document with more than `max_manifest_rows_read` (3000)
+  manifest rows is spread-sampled after the catalog reply; the reply itself
+  is not yet limited by the service.
 
 ### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
 

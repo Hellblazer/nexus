@@ -49,7 +49,7 @@ import os as _os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import structlog
@@ -531,6 +531,9 @@ class PlanResult:
     #: ``collection``/``collections`` keeps today's behaviour). Empty when the caller gave no
     #: scope, so an unscoped run reports nothing.
     scope_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    #: RDR-232 (nexus-jypmj.1.6): what the reserved primary stream did in this run
+    #: (:meth:`ReservedStream.report`); ``None`` when no stream was passed.
+    reserved_report: dict[str, Any] | None = None
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -660,6 +663,12 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 #: on either side can't silently drop the sentinel (substantive-critic C2).
 from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY  # noqa: E402
 import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
+from nexus.plans.reserved_stream import (  # noqa: E402
+    ReservedStream,
+    active_reserved_stream,
+    reserved_scope,
+    set_reserved_step,
+)
 
 
 def _is_operator_error(exc: BaseException) -> bool:
@@ -2014,10 +2023,23 @@ def _hydrate_operator_args(
                 with_source_note(c, str(notes[i])) if i < len(notes) else c
                 for i, c in enumerate(contents)
             ]
+        # RDR-232 (nexus-jypmj.1.6): the reserved primary stream enters ahead of the plan's own
+        # items, so the positional cap below cuts only secondary ones. A vector hit that is a
+        # reserved chunk (same chash) is dropped; the primary copy keeps its attribution header.
+        _rs = active_reserved_stream()
+        _rs_merge = _rs is not None and _rs.should_merge()
+        if _rs_merge:
+            _rs_dups = [k for k, (cid, c) in enumerate(zip(id_list_raw, contents)) if c and _rs.is_primary_chash(str(cid))]
+            for k in _rs_dups:
+                contents[k] = ""
         non_empty = [c for c in contents if c]
+        if _rs_merge:
+            non_empty = _rs.merge(non_empty, pre_deduped=len(_rs_dups))
         original_count = len(non_empty)
         truncation_metadata: dict[str, Any] | None = None
         if original_count > _OPERATOR_MAX_INPUTS:
+            if _rs_merge:
+                _rs.note_cap(original_count, _OPERATOR_MAX_INPUTS)
             _log.warning(
                 "auto_hydration_overflow",
                 tool=tool, resolved_tool=resolved_tool,
@@ -2108,6 +2130,24 @@ def _hydrate_operator_args(
                     tool=tool, resolved_tool=resolved_tool,
                     original_count=original_count, kept_count=len(value),
                 )
+            # RDR-232 (nexus-jypmj.1.6): merge the reserved stream ahead of the plan's inputs and
+            # cap the merged list the same way the ids branch does. The cap runs ONLY here, when a
+            # stream was merged (S4): a run without one keeps today's uncapped inputs.
+            _rs = active_reserved_stream()
+            if _rs is not None and _rs.should_merge():
+                value = _rs.merge(value)
+                if len(value) > _OPERATOR_MAX_INPUTS:
+                    _rs.note_cap(len(value), _OPERATOR_MAX_INPUTS)
+                    _log.warning(
+                        "explicit_inputs_overflow_with_reserved_stream",
+                        tool=tool, resolved_tool=resolved_tool,
+                        input_count=len(value), max_inputs=_OPERATOR_MAX_INPUTS,
+                    )
+                    args["_truncation_metadata"] = {
+                        "truncated": True, "original_count": len(value),
+                        "kept_count": _OPERATOR_MAX_INPUTS,
+                    }
+                    value = value[:_OPERATOR_MAX_INPUTS]
             if target_key == "items":
                 value = json.dumps(value)
         args[target_key] = value
@@ -2139,6 +2179,16 @@ def _hydrate_operator_args(
     # f-string in claude_dispatch).
     if resolved_tool == "operator_aggregate" and isinstance(args.get("groups"), list):
         args["groups"] = json.dumps(args["groups"])
+
+    # RDR-232 (nexus-jypmj.1.6, critique observation 13): an operator after the merge step is not
+    # given the stream again; count the reserved items its input no longer holds, so a drop by an
+    # intermediate operator (an unbundled rank) is reported, not silent.
+    _rs = active_reserved_stream()
+    if (
+        _rs is not None and _rs.merged and _rs.merged_step != _rs.current_step
+        and resolved_tool in _OPERATOR_RESOLVED_TOOLS
+    ):
+        _rs.observe(args)
 
     return resolved_tool, args
 
@@ -2449,7 +2499,7 @@ setattr(_default_dispatcher, _SUPPORTS_BUNDLING_ATTR, True)
 # ── Public API ──────────────────────────────────────────────────────────────
 
 
-async def plan_run(
+async def _plan_run_impl(
     match: Match,
     bindings: dict[str, Any] | None = None,
     *,
@@ -2857,6 +2907,9 @@ async def plan_run(
                 tools=_seg_tools,
                 total_steps=len(steps),
             )
+            # RDR-232 (nexus-jypmj.1.6): the reserved stream merges at one plan step; tell it
+            # which one this segment hydrates (the bundle loops below refine it per step).
+            set_reserved_step(_seg_indices[0])
 
             if isinstance(seg, OperatorBundleSlice):
                 # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
@@ -2884,6 +2937,7 @@ async def plan_run(
                     )
                     # Operators skip _check_embedding_domain / scope / caller-
                     # scope injection — those are retrieval-tool concerns.
+                    set_reserved_step(bi)
                     _, b_prepared = _hydrate_operator_args(btool, b_resolved)
                     # RDR-093 S-1: strip the runner-internal truncation
                     # marker so it never leaks into the bundled prompt.
@@ -2932,6 +2986,7 @@ async def plan_run(
                         bundle_plan_indices=list(seg.plan_indices),
                     )
                     for bi in seg.plan_indices:
+                        set_reserved_step(bi)
                         bstep = steps[bi]
                         btool = _extract_tool(bstep)
                         b_raw_args = bstep.get("args", {}) or {}
@@ -3459,3 +3514,35 @@ async def plan_run(
         dropped_reduce_steps=_dropped_reduce_steps,
         scope_diagnostics=scope_diagnostics,
     )
+
+
+async def plan_run(
+    match: Match,
+    bindings: dict[str, Any] | None = None,
+    *,
+    dispatcher: ToolDispatcher | None = None,
+    bundle_operators: bool = True,
+    deadline: float | None = None,
+    budget_usd_remaining: float | None = None,
+    continuation_cut_at_step: int | None = None,
+    reserved_stream: ReservedStream | None = None,
+) -> PlanResult:
+    """Execute *match*'s steps; see :func:`_plan_run_impl` for every parameter but one.
+
+    ``reserved_stream`` (RDR-232 Phase 1, nexus-jypmj.1.6): the named source's primary evidence,
+    built by ``nx_answer`` from the resolved sources. Operator hydration merges it ahead of the
+    plan's own inputs at the first operator that consumes retrieved evidence (see
+    :mod:`nexus.plans.reserved_stream`). ``None`` (the default) runs exactly as before and
+    leaves :attr:`PlanResult.reserved_report` ``None``.
+    """
+    if reserved_stream is not None:
+        reserved_stream.reset_run()
+    with reserved_scope(reserved_stream):
+        result = await _plan_run_impl(
+            match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
+            deadline=deadline, budget_usd_remaining=budget_usd_remaining,
+            continuation_cut_at_step=continuation_cut_at_step,
+        )
+    if reserved_stream is not None:
+        result = _dc_replace(result, reserved_report=reserved_stream.report())
+    return result
