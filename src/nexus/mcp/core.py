@@ -10371,6 +10371,41 @@ async def _nx_answer_evidence_request(
         return build_evidence_request(bindings, scope=scope, name_lookup=_hung)
 
 
+def _nx_answer_source_stage_deadline(deadline: float | None) -> float:
+    """The one absolute ``time.monotonic()`` deadline the active-project stage and the named-source stage share
+    (nexus-jypmj.2.4): ``PrimaryEvidenceCaps.max_seconds`` from now, or the answer's own *deadline* if that is
+    sooner. Each stage bounds itself by what is left of it, so together they stay within one budget instead of
+    each taking a full ceiling."""
+    from nexus.plans.primary_evidence import DEFAULT_CAPS  # noqa: PLC0415 — deferred; matches this module's convention
+
+    ceiling = time.monotonic() + DEFAULT_CAPS.max_seconds
+    return ceiling if deadline is None else min(ceiling, deadline)
+
+
+def _nx_answer_settle_inference(request: EvidenceRequest, named: "NamedSourceResolution | None") -> EvidenceRequest:
+    """Make the envelope say what the resolver did with an inferred owner.
+
+    The active-project tier infers an owner BEFORE resolution. The resolver may set it aside: the project holds
+    no such number, its owner could not be probed, or the question's title pointed at another project's
+    document. If no source ended up resolved or ambiguous under it, the envelope must not go on saying the
+    owner was ``inferred`` and the tier ``applied`` (nexus-jypmj.2.4). Pure; the request comes back unchanged
+    unless an inference was made and no source kept it.
+    """
+    if request.owner.status != "inferred" or named is None or any(s.inferred for s in named.sources):
+        return request
+    from dataclasses import replace  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.evidence import OwnerResolution  # noqa: PLC0415 — deferred; matches this module's convention
+
+    tier = dict(request.active_project or {})
+    tier["applied"] = False
+    tier["reason"] = (
+        "the session's project was inferred and then set aside during resolution: it holds no such document, "
+        "its owner could not be checked, or the question's title pointed at another project's document "
+        "(each source's detail says which)"
+    )
+    return replace(request, owner=OwnerResolution("none"), active_project=tier)
+
+
 def _nx_answer_question_sources(request: EvidenceRequest, coverage: "RequestCoverage") -> EvidenceRequest:
     """Feed the RDR ids the question names into named-source resolution (RDR-232 Phase 2, nexus-jypmj.2.4).
 
@@ -10387,7 +10422,7 @@ def _nx_answer_question_sources(request: EvidenceRequest, coverage: "RequestCove
     """
     if coverage.source_origin != "question":
         return request
-    return request.with_question_sources(coverage.named_sources)
+    return request.with_question_sources(coverage.named_sources, coverage.source_ranges)
 
 
 async def _nx_answer_active_project(
@@ -10407,14 +10442,21 @@ async def _nx_answer_active_project(
     source resolution only; it is applied after the ``_nx_owners`` run binding was built, and
     ``request_owners`` ignores it, so it never narrows the secondary streams (nexus-jypmj.1.18).
 
+    *project_names* are the words the question puts where a project name could stand. Only a registered owner
+    name counts as one (case-insensitively), so ``in detail`` is no project and ``the conexus RDR-084`` is.
+
     The detection reads git and the catalog, so it runs in a worker thread bounded by
-    ``PrimaryEvidenceCaps.max_seconds`` and *deadline*. It never raises; a failure is "no reliable active
+    ``PrimaryEvidenceCaps.max_seconds`` and *deadline*; the caller passes the stage deadline it shares with the
+    named-source resolution, so the two together stay within one budget. The catalog is not touched until the
+    host's project variable and directories agree. It never raises; a failure is "no reliable active
     project" with the reason in the envelope.
     """
-    from nexus.plans.evidence import scope_subtree  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.evidence import ScopeConstraint, scope_subtree  # noqa: PLC0415 — deferred; matches this module's convention
 
     if request.owner.status != "none" or scope_subtree(scope) is not None:
         return request
+    if ScopeConstraint.parse(scope).kind == "collection":
+        return request  # a collection name carries its own owner: the scope tier, not a session guess
     if not any(s.kind == "rdr" for s in request.sources):
         return request  # a tumbler names its document outright; there is nothing for a project to qualify
     import asyncio  # noqa: PLC0415 — stdlib, branch-local
@@ -10422,16 +10464,20 @@ async def _nx_answer_active_project(
     from nexus.plans import active_project as _ap  # noqa: PLC0415 — deferred; matches this module's convention
     from nexus.plans.primary_evidence import DEFAULT_CAPS  # noqa: PLC0415 — deferred; matches this module's convention
 
-    def _detect() -> "_ap.ActiveProject":
-        try:
-            cat = _get_catalog()
-        except Exception as exc:  # noqa: BLE001 — a missing catalog is "not reliable", not a failure
-            _log.warning("nx_answer_active_project_catalog_unavailable", error=str(exc))
-            cat = None
-        return _ap.detect_active_project(cat)
+    def _detect() -> "tuple[_ap.ActiveProject, frozenset[str]]":
+        # The catalog is fetched inside detect_active_project, after the environment and directories agree.
+        active = _ap.detect_active_project(None, get_catalog=_get_catalog)
+        registered: frozenset[str] = frozenset()
+        if active.reliable and project_names:
+            try:
+                registered = _ap.registered_owner_names(_get_catalog())
+            except Exception as exc:  # noqa: BLE001 — no registry means no name can be vouched for
+                _log.warning("nx_answer_active_project_registry_unavailable", error=type(exc).__name__)
+        return active, registered
 
+    registered: frozenset[str] = frozenset()
     try:
-        active = await asyncio.wait_for(
+        active, registered = await asyncio.wait_for(
             asyncio.to_thread(_detect), timeout=_nx_answer_seconds_left(DEFAULT_CAPS.max_seconds, deadline),
         )
     except asyncio.TimeoutError:
@@ -10439,12 +10485,42 @@ async def _nx_answer_active_project(
     except Exception as exc:  # noqa: BLE001 — the disclosure stage never raises
         _log.warning("nx_answer_active_project_failed", error=type(exc).__name__)
         active = _ap.ActiveProject(False, reason=f"the session's project could not be determined ({type(exc).__name__})")
-    tier = _ap.apply_active_project(request.owner, active, scope=scope, project_names=project_names)
+    tier = _ap.apply_active_project(
+        request.owner, active, scope=scope, project_names=project_names, registered=registered,
+    )
     return replace(request, owner=tier.owner, active_project=tier.to_wire())
 
 
 async def _nx_answer_named_sources(
     request: EvidenceRequest, *, deadline: float | None = None,
+    title_hints: dict[str, list[str]] | None = None,
+) -> NamedSourceResolution | None:
+    """:func:`_nx_answer_named_sources_stage`, made total: the stage never raises into ``nx_answer``. A failure
+    anywhere in it (an import, the catalog handle, the worker thread) leaves every named source ``unresolved``
+    with the exception's TYPE as the reason (never its text), and the answer goes on."""
+    if not request.sources:
+        return None
+    try:
+        return await _nx_answer_named_sources_stage(request, deadline=deadline, title_hints=title_hints)
+    except Exception as exc:  # noqa: BLE001 — the disclosure stage never fails an answer
+        _log.warning("nx_answer_named_sources_failed", error=type(exc).__name__)
+        from dataclasses import replace as _replace  # noqa: PLC0415 — stdlib, branch-local
+        from nexus.plans.primary_evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+            DEFAULT_CAPS,
+            NamedSourceResolution,
+            question_source_caps,
+        )
+
+        caps = question_source_caps(DEFAULT_CAPS) if request.source_origin == "question" else DEFAULT_CAPS
+        return _replace(
+            NamedSourceResolution.failed(request.sources, type(exc).__name__, caps=caps),
+            origin=request.source_origin, ranges=request.source_ranges,
+        )
+
+
+async def _nx_answer_named_sources_stage(
+    request: EvidenceRequest, *, deadline: float | None = None,
+    title_hints: dict[str, list[str]] | None = None,
 ) -> NamedSourceResolution | None:
     """Resolve the request's named sources (RDR-232 Phase 1, nexus-jypmj.1.4).
 
@@ -10461,6 +10537,9 @@ async def _nx_answer_named_sources(
     the resolution starts no call past it, and one that has not returned by then is abandoned (a thread
     cannot be cancelled; it ends after its current call) and every source is ``unresolved`` with the
     deadline as the reason (nexus-jypmj.1.9 code review F2).
+
+    *title_hints* (source value to the titles the question gives it) act only as a veto on an inferred
+    qualifier (nexus-jypmj.2.4). The ranges the question named by their ends ride on the result for disclosure.
     """
     if not request.sources:
         return None
@@ -10492,7 +10571,8 @@ async def _nx_answer_named_sources(
         ))
         return _replace(resolve_named_sources(
             request.sources, request.owner, cat=cat, caps=caps, deadline=deadline, frontmatter_id=ids,
-        ), origin=origin)
+            title_hints=title_hints,
+        ), origin=origin, ranges=request.source_ranges)
 
     try:
         return await asyncio.wait_for(
@@ -10500,7 +10580,9 @@ async def _nx_answer_named_sources(
         )
     except asyncio.TimeoutError:
         _log.warning("nx_answer_named_sources_deadline", sources=len(request.sources))
-        return _replace(NamedSourceResolution.deadline_hit(request.sources, caps=caps), origin=origin)
+        return _replace(
+            NamedSourceResolution.deadline_hit(request.sources, caps=caps), origin=origin, ranges=request.source_ranges,
+        )
 
 
 async def _nx_answer_lifecycle_stream(
@@ -11533,7 +11615,14 @@ async def nx_answer(
             "owner name such as ART) are reserved: they name the document the "
             "question is about and which project's it is, are never plan "
             "bindings, and are reported back in the envelope's "
-            "evidence_request."
+            "evidence_request. With no owner, project or subtree scope, an "
+            "RDR number that several projects hold is qualified by the "
+            "session's own project when the server knows it reliably "
+            "(Claude Code sets CLAUDE_PROJECT_DIR); the result is marked "
+            "inferred, and a title or a registered project name in the "
+            "question that contradicts it blocks the inference. Claude "
+            "Desktop and Cowork start the server without that variable, so "
+            "nothing is inferred there: pass owner or project to choose."
         ),
     )] = None,
     continuation: Annotated[bool | None, Field(
@@ -11772,16 +11861,34 @@ async def nx_answer(
     # nexus-jypmj.2.4: the third tier, after the explicit owner/project and the owner scope: the session's
     # project, only when it is reliable and nothing explicit qualified an RDR source. Applied after the
     # `_nx_owners` binding above, so an inferred owner never narrows the secondary streams.
+    # The two stages share ONE budget (PrimaryEvidenceCaps.max_seconds, or the answer's own deadline if sooner).
+    from nexus.plans.request_coverage import project_name_candidates  # noqa: PLC0415 — deferred; matches this module's convention
+
+    _source_deadline = _nx_answer_source_stage_deadline(deadline)
     _evidence_request = await _nx_answer_active_project(
-        _evidence_request, [h.text for h in _request_coverage.source_hints if h.kind == "project"],
-        scope=scope, deadline=deadline,
+        _evidence_request, project_name_candidates(question or ""), scope=scope, deadline=_source_deadline,
     )
-    _named_sources = await _nx_answer_named_sources(_evidence_request, deadline=deadline)
+    _title_hints: dict[str, list[str]] = {}
+    for _hint in _request_coverage.source_hints:
+        if _hint.kind == "title":
+            _title_hints.setdefault(_hint.source, []).append(_hint.text)
+    _named_sources = await _nx_answer_named_sources(
+        _evidence_request, deadline=_source_deadline, title_hints=_title_hints or None,
+    )
+    _evidence_request = _nx_answer_settle_inference(_evidence_request, _named_sources)
     # A source the resolver resolved to exactly one document has nothing left to tell apart, so its
-    # "no project qualifier" ambiguity (derived before resolution) is withdrawn.
+    # "no project qualifier" ambiguity (derived before resolution) is withdrawn. One the active project
+    # chose among documents that other projects also hold keeps a distinct `source_inferred` line instead.
     if _named_sources is not None:
         _request_coverage = _request_coverage.without_unqualified_for(
-            s.ref.value for s in _named_sources.resolved()
+            (s.ref.value for s in _named_sources.resolved()),
+            inferred_over={
+                s.ref.value: (
+                    f"{s.ref.value} was resolved to {s.tumbler} by the session's project, inferred; "
+                    f"{s.foreign} document(s) in other projects carry the same number"
+                )
+                for s in _named_sources.resolved() if s.inferred and s.foreign
+            },
         )
     # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
     # plan_match, which asks it of every branch's candidates; enforcing only when the module constant is on

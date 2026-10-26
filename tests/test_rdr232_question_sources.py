@@ -21,22 +21,26 @@ The rules, and the test that holds each:
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from nexus.mcp import core
 from nexus.plans.active_project import detect_active_project
 from nexus.plans.evidence import OwnerResolution, SourceRef, build_evidence_request
 from nexus.plans.owner_narrowing import request_owners
 from nexus.plans.primary_evidence import QUESTION_SOURCE_CAP, NamedSourceResolution
-from nexus.plans.request_coverage import ACTIVE_PROJECT_TIER
+from nexus.plans.request_coverage import ACTIVE_PROJECT_TIER, derive_request_coverage
 from tests.test_rdr232_active_project import SessionCatalog, _session
 from tests.test_rdr232_caller_scope import MULTI_STEP_PLAN, _drive_nx_answer, _match, _plan_run_result
 from tests.test_rdr232_primary_evidence import ART_DOC, ART_OWNER, NEXUS_DOC, NEXUS_OWNER, _doc
-from tests.test_rdr232_request_coverage import G06
+from tests.test_rdr232_request_coverage import G06, GOLDEN
 
 #: The incident's bindings: the plan-visible ``content_type`` only. No ``source``, no ``owner``, no ``project``.
 INCIDENT_BINDINGS = {"content_type": "rdr"}
@@ -46,29 +50,47 @@ PLAIN_QUESTION = "Explain the architecture of RDR-084."
 
 def _run(
     tmp_path: Path, *, question: str = G06, scope: str = "rdr", bindings: dict[str, Any] | None = INCIDENT_BINDINGS,
-    project: str | None = ART_OWNER, declare: bool = True, extra_docs: tuple[tuple[str, str], ...] = (),
+    project: str | None = ART_OWNER, declare: bool = True, extra_docs: tuple[tuple[str, ...], ...] = (),
+    configure: Callable[[SessionCatalog], None] | None = None, monkeypatch: pytest.MonkeyPatch | None = None,
+    budget_seconds: float | None = None,
 ) -> tuple[dict, AsyncMock, AsyncMock, SessionCatalog]:
     """``nx_answer`` on the fake catalog, the model-free plan runner replaced by a recorder. *project* is the
     owner the session's directory is registered under (``None``: never indexed); *declare* False leaves
-    ``CLAUDE_PROJECT_DIR`` unset (a host that did not name the session's project). Returns
+    ``CLAUDE_PROJECT_DIR`` unset (a host that did not name the session's project). *extra_docs* are
+    ``(tumbler, path[, collection])`` (the Nexus collection by default); *configure* edits the catalog before the
+    call. With *monkeypatch* the tier's detection is NOT replaced: the process's own environment and working
+    directory are set to the session's (or the variable removed), and the default path runs. Returns
     ``(envelope, plan_run, lifecycle_stream, catalog)``."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     cat, t3, environ, cwd = _session(tmp_path, project)
-    for tumbler, path in extra_docs:
-        _doc(cat, t3, tumbler, path, [f"# {path}\nbody"], collection="rdr__1-1__bge-base-en-v15-768__v1")
+    for tumbler, path, *rest in extra_docs:
+        _doc(cat, t3, tumbler, path, [f"# {path}\nbody"], collection=rest[0] if rest else "rdr__1-1__bge-base-en-v15-768__v1")
+    if configure is not None:
+        configure(cat)
     steps = [{"ids": ["c1"], "tumblers": ["1.2.1"]}, {"text": "The decision is X [1] after review of the evidence."}]
     run = AsyncMock(return_value=_plan_run_result(list(steps), []))
     life = AsyncMock(return_value=None)
     seen = environ if declare else {}
-    with patch("nexus.plans.active_project.detect_active_project",
-               side_effect=lambda c, **_kw: detect_active_project(c, environ=seen, getcwd=lambda: cwd)), \
-         patch("nexus.mcp.core._nx_answer_lifecycle_stream", life), \
-         patch("nexus.plans.runner.plan_run", run), \
-         patch("nexus.plans.primary_evidence.t3_chunk_fetcher", return_value=t3.fetch), \
-         patch("nexus.mcp.core._get_t3", return_value=MagicMock()):
+    with ExitStack() as stack:
+        if monkeypatch is None:
+            stack.enter_context(patch(
+                "nexus.plans.active_project.detect_active_project",
+                side_effect=lambda c=None, **kw: detect_active_project(
+                    c, get_catalog=kw.get("get_catalog"), environ=seen, getcwd=lambda: cwd),
+            ))
+        else:
+            monkeypatch.chdir(cwd)
+            if declare:
+                monkeypatch.setenv("CLAUDE_PROJECT_DIR", cwd)
+            else:
+                monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        stack.enter_context(patch("nexus.mcp.core._nx_answer_lifecycle_stream", life))
+        stack.enter_context(patch("nexus.plans.runner.plan_run", run))
+        stack.enter_context(patch("nexus.plans.primary_evidence.t3_chunk_fetcher", return_value=t3.fetch))
+        stack.enter_context(patch("nexus.mcp.core._get_t3", return_value=MagicMock()))
         env, _ = _drive_nx_answer(
             _match(MULTI_STEP_PLAN, default_bindings={"intent": "q"}), scope=scope, structured=True,
-            question=question, bindings=bindings, catalog=cat,
+            question=question, bindings=bindings, catalog=cat, budget_seconds=budget_seconds,
         )
     return env, run, life, cat
 
@@ -131,7 +153,14 @@ def test_the_same_call_with_no_reliable_active_project_is_the_candidates_ambigui
 
 
 def test_the_unmodified_call_matches_the_golden_incident_question_verbatim() -> None:
-    assert "RDR-084" in G06 and "ART" not in G06.split(".")[0], "the filed question names no project"
+    """The recorded incident question (bench/queries/golden_v1.yaml, run 722), read from the file here, is the
+    exact string these tests send, and it names no project."""
+    recorded = yaml.safe_load(GOLDEN.read_text(encoding="utf-8"))["queries"]
+    (g06,) = [q["text"] for q in recorded if q["qid"] == "G06-synthesis-art-rdr084"]
+    assert G06 == g06, "the question under test is not the recorded one"
+    assert inspect.signature(_run).parameters["question"].default == g06, "_run's default call is not the filed one"
+    assert g06.startswith("Synthesize RDR-084, LIST PARSE Canonical Consolidation.")
+    assert [h.kind for h in derive_request_coverage(g06, scope="rdr").source_hints] == ["title"], "no project is named"
 
 
 # ── precedence: an explicit binding wins and replaces the text ───────────────────────────────────────────

@@ -5484,7 +5484,18 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   session's project qualifies the source when it is reliable (the host
   declared it in `CLAUDE_PROJECT_DIR`, the server's working directory is that
   directory, and the catalog has an owner for it). `scope="rdr"` is a corpus
-  and never selects a project. `active_project` (present once the tier was
+  and never selects a project; a conformant collection-name `scope` and a
+  catalog-subtree `scope` are scope tiers and the project is not consulted.
+  Claude Desktop and Cowork start the server without `CLAUDE_PROJECT_DIR`, so
+  there the project is never inferred and a number that more than one project
+  holds stays `candidates`: pass `owner` or `project` (an owner name such as ART, or its tumbler) to choose. A reliable
+  session of another repo still resolves its own project's RDR (`inferred`) when
+  the question does not contradict it. The question contradicts it by a title
+  that the session's document does not fit while another project's does (a veto
+  only: the title never picks a document), or by a registered project name
+  (matched case-insensitively against the owner names) that is not the
+  session's; both give the `candidates` ambiguity, and `active_project.reason`
+  says the inference was set aside. `active_project` (present once the tier was
   consulted) is `{applied, reliable, owner, name, reason}`; when it is not
   applied, `reason` says why and an ambiguous source stays `candidates`. An
   inferred owner qualifies source resolution only: it never narrows the vector
@@ -5493,7 +5504,10 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   same resolution, through the same three tiers (nexus-jypmj.2.4): the request
   then carries `source_origin: "question"` and `sources` holds the ids read from
   the text, at most 3 resolved per request (the rest are in
-  `named_sources.dropped`). A `source` binding wins and replaces them. A source
+  `named_sources.dropped`). A range (`RDR-078 through RDR-095`) keeps its two
+  ends as sources and is listed in `named_sources.ranges` and in a text notice
+  ("range RDR-078 to RDR-095 not expanded: RDR-079 to RDR-094 not resolved"):
+  the numbers between are not resolved. A `source` binding wins and replaces them. A source
   read from the question is never an owner: only an `owner` or `project` binding
   narrows the secondary streams. `None` when no reserved binding was passed and
   the question names no RDR.
@@ -5640,7 +5654,8 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   the full question. `ambiguities` discloses what the request left open: an
   RDR named without an owner, project or catalog-subtree scope
   (`source_unqualified`, withdrawn once the resolver resolved it to one
-  document), a conflicting or unresolved qualifier, a project named only in
+  document; replaced by `source_inferred` when the active project chose among
+  documents that other projects also carry), a conflicting or unresolved qualifier, a project named only in
   the text. `extraction` is `{outcome, calls, timeout_s, latency_ms,
   cost_usd}` for the optional structured call (`NX_ANSWER_STRUCTURED_EXTRACT`;
   `outcome` `disabled`, `not_needed`, `skipped_deadline`, `ok`, `unchanged`,

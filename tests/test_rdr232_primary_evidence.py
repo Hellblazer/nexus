@@ -110,6 +110,13 @@ class FakeCatalog:
             row["repo_root"] = self.repo_roots[prefix]
         return row
 
+    def list_owners(self, *, include_deactivated: bool = False) -> list[dict]:
+        self.calls.append(("list_owners", {}))
+        names = {ART_OWNER: "ART", NEXUS_OWNER: "nexus"}
+        return [
+            {"tumbler_prefix": p, "name": names.get(p, p), "owner_type": "repo"} for p in sorted(self.owners)
+        ]
+
     def resolve(self, tumbler: Any, *, follow_alias: bool = True) -> CatalogEntry | None:
         self.calls.append(("resolve", {"tumbler": str(tumbler)}))
         return next((e for e in self.entries if str(e.tumbler) == str(tumbler)), None)

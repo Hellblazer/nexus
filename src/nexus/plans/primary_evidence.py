@@ -56,7 +56,7 @@ from nexus.catalog.rdr_canonical import (
 )
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, ManifestRow
-from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRef, SourceRefError
+from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRange, SourceRef, SourceRefError
 
 _log = structlog.get_logger(__name__)
 
@@ -70,6 +70,7 @@ __all__ = [
     "PrimaryEvidence",
     "PrimaryEvidenceCaps",
     "QUESTION_SOURCE_CAP",
+    "TITLE_MATCH_SHARE",
     "RDR_FRONTMATTER_EXTRACTOR",
     "FrontmatterId",
     "FrontmatterIdLookup",
@@ -81,6 +82,7 @@ __all__ = [
     "question_source_caps",
     "recorded_frontmatter_id",
     "resolve_named_sources",
+    "title_hint_match",
     "select_primary_evidence",
     "t3_chunk_fetcher",
 ]
@@ -136,7 +138,10 @@ DEFAULT_CAPS = PrimaryEvidenceCaps()
 #: (nexus-jypmj.2.4). A binding is a deliberate request and keeps ``max_named_sources``; a question that
 #: mentions many RDR ids (a range, a survey) is not, and each id costs an owner probe, up to two capped
 #: finds and a share of the primary stream. The ids past the cap are named in ``NamedSourceResolution.dropped``
-#: and in a text notice, never silently dropped. The golden request that names the most (G09) names two.
+#: and in a text notice, never silently dropped.
+#:
+#: A CALIBRATION PARAMETER, not a derived value: the developer chose 3 (the resolver's own cap is 6, and
+#: RDR-232 is silent). Nothing measured it; the held-out set of nexus-jypmj.2.8 is where to calibrate it.
 QUESTION_SOURCE_CAP = 3
 
 
@@ -217,6 +222,12 @@ class ResolvedSource:
     rdr_number: int | None = None
     #: The qualifier that narrowed the choice was the active project, inferred (nexus-jypmj.2.4), not a binding.
     inferred: bool = False
+    #: How many registered documents carrying this number sit in OTHER projects than the qualifier's (the ones
+    #: the qualifier left out). An inferred choice with ``foreign`` above 0 is the case the inference mattered in.
+    foreign: int = 0
+    #: The part of ``detail`` that only says an inferred qualifier was set aside because the active project holds
+    #: no such number (the result is the unqualified one). A source read from the question does not print it.
+    fallback: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -227,6 +238,7 @@ class ResolvedSource:
             "file_path": self.file_path,
             "qualified": self.qualified,
             "inferred": self.inferred,
+            "foreign": self.foreign,
             "candidates": [asdict(c) for c in self.candidates],
             "candidates_truncated": self.candidates_truncated,
             "detail": self.detail,
@@ -244,9 +256,25 @@ class NamedSourceResolution:
     #: ``explicit`` (a ``source`` binding) or ``question`` (RDR ids read from the question's text,
     #: nexus-jypmj.2.4). Shown per source on the wire and in the notices; it does not change resolution.
     origin: Literal["explicit", "question"] = "explicit"
+    #: The spans of RDR numbers the question named by their ends (``RDR-078 through RDR-095``). Only the ends
+    #: are sources; the numbers between are never expanded, and the disclosure says so (nexus-jypmj.2.4).
+    ranges: tuple[SourceRange, ...] = ()
 
     def resolved(self) -> tuple[ResolvedSource, ...]:
         return tuple(s for s in self.sources if s.status == "resolved")
+
+    @classmethod
+    def failed(
+        cls, sources: Sequence[SourceRef], reason: str, *, caps: PrimaryEvidenceCaps = DEFAULT_CAPS,
+    ) -> NamedSourceResolution:
+        """Every source unresolved because the stage itself failed (never raises past the caller): nothing is
+        known about any of them. *reason* is free of paths and secrets (an exception's type, not its text)."""
+        refs = list(sources)
+        kept, dropped = refs[: caps.max_named_sources], refs[caps.max_named_sources:]
+        return cls(
+            sources=tuple(_unresolved(r, f"the lookup of {r.value} failed: {reason}") for r in kept),
+            dropped=tuple(r.value for r in dropped), catalog_calls=0, caps=caps,
+        )
 
     @classmethod
     def deadline_hit(
@@ -267,6 +295,7 @@ class NamedSourceResolution:
             "dropped": list(self.dropped),
             "catalog_calls": self.catalog_calls,
             "origin": self.origin,
+            "ranges": [r.to_wire() for r in self.ranges],
         }
 
     def disclosures(self, *, owner_failure_disclosed: bool = False, primary_stream: bool = True) -> list[str]:
@@ -279,26 +308,35 @@ class NamedSourceResolution:
         document is read as evidence.
         """
         lines: list[str] = []
+        from_question = self.origin == "question"
         for s in self.sources:
-            name = f"{s.ref.value} (read from the question)" if self.origin == "question" else s.ref.value
+            name = f"{s.ref.value} (read from the question)" if from_question else s.ref.value
             if s.status == "resolved":
                 tail = (
                     "" if primary_stream else
                     "; this single-step plan has no primary evidence stream, so the document is not read as evidence"
                 )
+                # A source read from the question says nothing about a plain resolution (one project holds the
+                # number; the envelope has it): the line is for a doubt, i.e. an inference that chose among
+                # projects holding the number. A source the caller bound keeps its line (nexus-jypmj.2.4).
                 if s.inferred:
-                    lines.append(
-                        f"[evidence request: named source {name} resolved to {s.tumbler} by the active "
-                        f"project, inferred from the session; no owner or project binding confirmed it (pass owner "
-                        f"or project to pin it){tail}]"
-                    )
-                elif not s.qualified:
+                    if not from_question or s.foreign:
+                        others = f"; {s.foreign} document(s) in other projects carry the number" if s.foreign else ""
+                        lines.append(
+                            f"[evidence request: named source {name} resolved to {s.tumbler} by the active "
+                            f"project, inferred from the session{others}; no owner or project binding confirmed it "
+                            f"(pass owner or project to pin it){tail}]"
+                        )
+                elif not s.qualified and not from_question:
                     lines.append(
                         f"[evidence request: named source {name} resolved to {s.tumbler} but was not "
                         f"owner-qualified (pass owner or project to pin it){tail}]"
                     )
-                if s.detail:  # a choice among sibling files, and the files passed over (nexus-xho6c)
-                    lines.append(f"[evidence request: named source {name} resolved to {s.tumbler}: {s.detail}]")
+                shown = s.detail
+                if from_question and s.fallback and shown.startswith(s.fallback):
+                    shown = shown[len(s.fallback):].lstrip("; ")  # the set-aside inference changed nothing for the reader
+                if shown:  # a choice among sibling files, and the files passed over (nexus-xho6c)
+                    lines.append(f"[evidence request: named source {name} resolved to {s.tumbler}: {shown}]")
             elif s.status == "candidates":
                 names = ", ".join(c.tumbler for c in s.candidates)
                 lines.append(
@@ -315,6 +353,9 @@ class NamedSourceResolution:
                 f"[evidence request: {len(self.dropped)} named source(s){from_q} beyond the cap of "
                 f"{self.caps.max_named_sources} were {fate}: {', '.join(self.dropped)}]"
             )
+        for rng in self.ranges:
+            if text := rng.disclosure():
+                lines.append(f"[evidence request: {text}]")
         return lines
 
 
@@ -459,12 +500,12 @@ def _unresolved(ref: SourceRef, detail: str, **kw: Any) -> ResolvedSource:
 
 
 def _resolved(ref: SourceRef, entry: CatalogEntry, qualified: bool,
-              candidates: tuple[SourceCandidate, ...] = (), inferred: bool = False) -> ResolvedSource:
+              candidates: tuple[SourceCandidate, ...] = (), inferred: bool = False, foreign: int = 0) -> ResolvedSource:
     return ResolvedSource(
         ref=ref, status="resolved", tumbler=str(entry.tumbler), title=entry.title,
         file_path=entry.file_path, collection=entry.physical_collection,
         chunk_count=entry.chunk_count, qualified=qualified, candidates=candidates,
-        rdr_number=_key_number(entry), inferred=inferred,
+        rdr_number=_key_number(entry), inferred=inferred, foreign=foreign,
     )
 
 
@@ -774,9 +815,37 @@ def _carrier_group(
     )
 
 
+_TITLE_WORD = re.compile(r"[a-z0-9]+")
+#: Words that carry no title: a hint's own filler, never evidence that a title matches.
+_TITLE_STOP = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "into", "its", "are", "was", "rdr",
+})
+#: The share of a title hint's words that a document's title or file name must hold for the hint to match it.
+TITLE_MATCH_SHARE = 0.6
+
+
+def _title_words(text: str) -> frozenset[str]:
+    return frozenset(w for w in _TITLE_WORD.findall(text.lower()) if len(w) >= 3 and w not in _TITLE_STOP)
+
+
+def title_hint_match(entry: CatalogEntry, hints: Sequence[str]) -> float:
+    """The best share (0 to 1) of any one title *hint*'s words found in the document's title or file name.
+
+    Used to VETO an inference, never to choose a document: a score says "the question's words fit this
+    document", and the caller acts on it only to refuse a guess (nexus-jypmj.2.4, RDR-232 section 1).
+    """
+    have = _title_words(f"{entry.title} {PurePosixPath(entry.file_path).stem}")
+    best = 0.0
+    for hint in hints:
+        want = _title_words(hint)
+        if want:
+            best = max(best, len(want & have) / len(want))
+    return best
+
+
 def _resolve_rdr(
     ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, caps: PrimaryEvidenceCaps,
-    frontmatter_id: FrontmatterIdLookup | None = None,
+    frontmatter_id: FrontmatterIdLookup | None = None, title_hints: Sequence[str] = (),
 ) -> ResolvedSource:
     number = ref.number or 0
     query = f"RDR-{number:03d}"
@@ -812,6 +881,23 @@ def _resolve_rdr(
         fallback = f"the active project (owner {qualifier.owner}) holds no {ref.value}, so it was not used"
         qualifier = None
         scoped = list(found)
+    if qualifier is not None and qualifier.inferred and title_hints and scoped and len(found) > len(scoped):
+        # The question carries a title for this number. If the session's project's document does not fit it and
+        # another project's does, the session's project is the wrong guess: the title VETOES the inference (it
+        # never picks a document). Candidates of every project, and nothing is read as evidence.
+        mine = max(title_hint_match(e, title_hints) for e in scoped)
+        mine_keys = {str(e.tumbler) for e in scoped}
+        others = [e for e in found if str(e.tumbler) not in mine_keys and title_hint_match(e, title_hints) >= TITLE_MATCH_SHARE]
+        if mine < TITLE_MATCH_SHARE and others:
+            return ResolvedSource(
+                ref=ref, status="candidates", candidates=tuple(SourceCandidate.of(e) for e in found), qualified=False,
+                detail=(
+                    f"the session's project (owner {qualifier.owner}) holds a {ref.value} but the question's title "
+                    f"{title_hints[0]!r} does not fit it and does fit {', '.join(str(e.tumbler) for e in others)}; "
+                    "the project was not inferred. Pass owner or project to choose, or name the document by its "
+                    "tumbler as the source"
+                ),
+            )
     inferred = qualifier is not None and qualifier.inferred
     foreign = len(found) - len(scoped)
     candidates = tuple(SourceCandidate.of(e) for e in scoped)
@@ -873,9 +959,9 @@ def _resolve_rdr(
             detail=noted(f"{ref.value} is registered more than once{where}; name the document by its tumbler as the source"),
         )
     entry = next(e for e in group if e.tumbler == winner)
-    out = _resolved(ref, entry, qualifier is not None, candidates, inferred)
+    out = _resolved(ref, entry, qualifier is not None, candidates, inferred, foreign)
     detail = noted(chosen)
-    return replace(out, detail=detail) if detail else out
+    return replace(out, detail=detail, fallback=fallback) if detail else out
 
 
 def resolve_named_sources(
@@ -887,8 +973,13 @@ def resolve_named_sources(
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     frontmatter_id: FrontmatterIdLookup | None = None,
+    title_hints: Mapping[str, Sequence[str]] | None = None,
 ) -> NamedSourceResolution:
     """Resolve each named source inside the owner qualifier. Never raises.
+
+    *title_hints* maps a source value (``RDR-084``) to the titles the question's text gives it. They act only on
+    an INFERRED qualifier, as a veto (:func:`title_hint_match`); they never choose a document and never move an
+    explicit qualifier.
 
     *frontmatter_id* (:func:`recorded_frontmatter_id`): where one RDR number has sibling files, the file
     whose frontmatter carries the id resolves; without it, siblings are candidates as before.
@@ -915,7 +1006,7 @@ def resolve_named_sources(
         elif ref.kind == "tumbler":
             out.append(_resolve_tumbler(ref, qualifier, calls))
         else:
-            out.append(_resolve_rdr(ref, qualifier, calls, caps, frontmatter_id))
+            out.append(_resolve_rdr(ref, qualifier, calls, caps, frontmatter_id, (title_hints or {}).get(ref.value, ())))
     return NamedSourceResolution(
         sources=tuple(out), dropped=tuple(r.value for r in dropped), catalog_calls=calls.n, caps=caps,
     )

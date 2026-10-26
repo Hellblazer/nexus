@@ -71,7 +71,7 @@ from typing import Any, Literal
 import structlog
 
 from nexus.plans.answer_kind import GOLDEN_LABEL_TO_KIND, PlanAnswerKind
-from nexus.plans.evidence import EvidenceRequest, OwnerResolution, ScopeConstraint, SourceRef
+from nexus.plans.evidence import EvidenceRequest, OwnerResolution, ScopeConstraint, SourceRange, SourceRef
 
 _log = structlog.get_logger(__name__)
 
@@ -85,10 +85,12 @@ __all__ = [
     "REQUEST_KINDS",
     "RequestCoverage",
     "SourceHint",
+    "SourceRange",
     "derive_request_coverage",
     "extraction_enabled",
     "log_fields",
     "normalize_kind",
+    "project_name_candidates",
     "structured_extract",
 ]
 
@@ -195,7 +197,7 @@ class Ambiguity:
     """A thing the request leaves open that the run must say, not settle."""
 
     code: Literal[
-        "source_unqualified", "owner_conflict", "owner_unresolved", "project_hint_conflict",
+        "source_unqualified", "source_inferred", "owner_conflict", "owner_unresolved", "project_hint_conflict",
         "project_hint_unapplied", "kind_ambiguous",
     ]
     subject: str
@@ -249,6 +251,9 @@ class RequestCoverage:
     #: ``explicit`` (a ``source`` binding), ``question`` (read from the text) or ``none``.
     source_origin: Literal["explicit", "question", "none"] = "none"
     source_hints: tuple[SourceHint, ...] = ()
+    #: Ranges of RDR numbers the question names by their ends (nexus-jypmj.2.4). Only the ends are sources;
+    #: set for a question-origin source only (a ``source`` binding wins over the text).
+    source_ranges: tuple[SourceRange, ...] = ()
     #: The topic sentence(s) the question opens with (``Synthesize RDR-084, <title>``), kept so that no clause
     #: of the question is dropped even where it is neither a facet nor a constraint.
     subject: tuple[str, ...] = ()
@@ -275,12 +280,26 @@ class RequestCoverage:
         return (not self.facets_certain and self.source_origin == "explicit"
                 and any(s.kind == "rdr" for s in self.named_sources))
 
-    def without_unqualified_for(self, resolved: Iterable[str]) -> RequestCoverage:
+    def without_unqualified_for(
+        self, resolved: Iterable[str], inferred_over: Mapping[str, str] | None = None,
+    ) -> RequestCoverage:
         """This coverage without the ``source_unqualified`` ambiguity of any source in *resolved* (the values
-        the named-source resolver resolved to exactly one document: nothing is left to tell apart)."""
+        the named-source resolver resolved to exactly one document: nothing is left to tell apart).
+
+        *inferred_over* maps a resolved source to the detail of an inference that did not remove the doubt:
+        the active project chose among documents that other projects also hold (nexus-jypmj.2.4). That
+        source keeps a distinct ``source_inferred`` ambiguity instead of losing its ledger line.
+        """
         done = set(resolved)
-        kept = tuple(a for a in self.ambiguities if not (a.code == "source_unqualified" and a.subject in done))
-        return self if kept == self.ambiguities else replace(self, ambiguities=kept)
+        inferred_over = inferred_over or {}
+        kept: list[Ambiguity] = []
+        for a in self.ambiguities:
+            if a.code == "source_unqualified" and a.subject in done:
+                if a.subject in inferred_over:
+                    kept.append(Ambiguity("source_inferred", a.subject, inferred_over[a.subject]))
+                continue
+            kept.append(a)
+        return self if tuple(kept) == self.ambiguities else replace(self, ambiguities=tuple(kept))
 
     def to_wire(self, *, redact: bool = False) -> dict[str, Any]:
         """The envelope form. *redact* drops every text and source hint (counts and closed names remain)."""
@@ -294,6 +313,7 @@ class RequestCoverage:
             "source_origin": self.source_origin,
             "source_hints": [] if redact else [h.to_wire() for h in self.source_hints],
             "source_hint_count": len(self.source_hints),
+            "source_ranges": [r.to_wire() for r in self.source_ranges],
             "subject": [] if redact else list(self.subject),
             "explicit_scope": {"kind": self.explicit_scope.kind, "value": "" if redact else self.explicit_scope.value},
             "current_code_requested": self.current_code_requested,
@@ -846,6 +866,47 @@ def _rdr_sources(text: str) -> tuple[SourceRef, ...]:
     return tuple(found)
 
 
+#: ``RDR-078 through RDR-095``, ``RDR-078 to RDR-095``, ``RDR-078 - RDR-095`` (any dash), ``RDR-078 until RDR-095``.
+_RDR_RANGE = re.compile(
+    r"\bRDR[-_ ]?(\d{1,4})\s*(?:through(?:\s+to)?|thru|until|till|to|-|\u2013|\u2014)\s*RDR[-_ ]?(\d{1,4})\b",
+    re.IGNORECASE,
+)
+
+
+def _source_ranges(text: str) -> tuple[SourceRange, ...]:
+    """The ranges of RDR numbers the text names by their ends. A range is never expanded; the caller keeps the
+    ends as sources and discloses the rest (RDR-232: no requested clause is silently dropped)."""
+    out: list[SourceRange] = []
+    for m in _RDR_RANGE.finditer(text):
+        rng = SourceRange(int(m.group(1)), int(m.group(2)))
+        if rng not in out:
+            out.append(rng)
+    return tuple(out)
+
+
+#: A word right before an RDR id (``the conexus RDR-084``, ``Nexus RDR-084``): a CANDIDATE project name. Most
+#: are verbs and articles ("Summarize RDR-084"), so a candidate counts only if it names a registered owner.
+_NAME_BEFORE = re.compile(rf"\b({_NAME})\s+RDR[-_ ]?\d{{1,4}}\b")
+
+
+def project_name_candidates(text: str) -> list[str]:
+    """Every word the question puts next to an RDR id where a project name could stand, in order, without
+    repeats: before the id, after ``in``/``of``/``from``/``for`` (``RDR-084 in detail``), or as a possessive.
+
+    These are CANDIDATES. They carry no meaning until the caller checks them against the registered owner
+    names (``nx_answer`` does, case-insensitively): ``in detail`` and ``Summarize`` are not projects, and a
+    lower-case ``nexus`` is. Pure: no catalog, no stoplist beyond the articles and prepositions.
+    """
+    names: list[str] = []
+    for pattern, group in ((_NAME_BEFORE, 1), (_PROJECT_AFTER, 2), (_PROJECT_POSSESSIVE, 1)):
+        for m in pattern.finditer(text):
+            name = m.group(group)
+            if name.lower() in _PROJECT_STOP or name.lower().startswith("rdr") or name in names:
+                continue
+            names.append(name)
+    return names
+
+
 def _project_hints(text: str) -> list[SourceHint]:
     hints: list[SourceHint] = []
 
@@ -1015,6 +1076,7 @@ def _derive(
         kind_decision=decision,  # type: ignore[arg-type]
         source_origin=origin,  # type: ignore[arg-type]
         source_hints=tuple(hints),
+        source_ranges=_source_ranges(full) if origin == "question" else (),
         subject=tuple(parsed.topics),
         ambiguities=tuple(ambiguities),
         facets_certain=facets_certain,

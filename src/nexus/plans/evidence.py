@@ -59,6 +59,7 @@ __all__ = [
     "OwnerResolution",
     "ReservedBindingError",
     "ScopeConstraint",
+    "SourceRange",
     "SourceRef",
     "SourceRefError",
     "build_evidence_request",
@@ -354,6 +355,42 @@ def _comparable(a: tuple[int, ...], b: tuple[int, ...]) -> bool:
 
 
 @dataclass(frozen=True)
+class SourceRange:
+    """A span of RDR numbers the question names with its two ends (``RDR-078 through RDR-095``). Only the
+    endpoints are sources; the numbers between them are not expanded, and :meth:`between` says which."""
+
+    start: int
+    end: int
+
+    @property
+    def start_value(self) -> str:
+        return f"RDR-{self.start:03d}"
+
+    @property
+    def end_value(self) -> str:
+        return f"RDR-{self.end:03d}"
+
+    def between(self) -> str:
+        """The numbers strictly between the ends (``RDR-079 to RDR-094``), or ``""`` when there are none."""
+        low, high = sorted((self.start, self.end))
+        if high - low < 2:
+            return ""
+        if high - low == 2:
+            return f"RDR-{low + 1:03d}"
+        return f"RDR-{low + 1:03d} to RDR-{high - 1:03d}"
+
+    def disclosure(self) -> str:
+        """The one line that says the range was seen and not expanded, or ``""`` when nothing lies between."""
+        between = self.between()
+        if not between:
+            return ""
+        return f"range {self.start_value} to {self.end_value} not expanded: {between} not resolved"
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"start": self.start_value, "end": self.end_value, "not_resolved": self.between()}
+
+
+@dataclass(frozen=True)
 class OwnerResolution:
     """The owner qualifier a request resolved to.
 
@@ -497,14 +534,20 @@ class EvidenceRequest:
     #: question's text names, fed in by :meth:`with_question_sources`; nexus-jypmj.2.4). A ``question``
     #: source is not a binding: ``requested`` stays False, and it is never an owner qualifier.
     source_origin: Literal["explicit", "question"] = "explicit"
+    #: Ranges of RDR numbers the question names by their ends (``RDR-078 through RDR-095``); only the ends are
+    #: in ``sources``. Carried to the named-source resolution, which discloses what was not expanded.
+    source_ranges: tuple[SourceRange, ...] = ()
 
-    def with_question_sources(self, sources: Sequence[SourceRef]) -> EvidenceRequest:
+    def with_question_sources(
+        self, sources: Sequence[SourceRef], ranges: Sequence[SourceRange] = (),
+    ) -> EvidenceRequest:
         """This request with the RDR ids the question names as its sources (nexus-jypmj.2.4).
 
         An explicit ``source`` binding wins and replaces them: a request that carries one, or that carries a
         ``source`` the caller passed but that did not parse (``source_error``), is returned unchanged. Only RDR
         ids are taken (a tumbler in the text is not a source reference). The sources take the same tiers as a
         binding. They add no owner: ``owner`` is untouched, so only an ``owner``/``project`` binding narrows.
+        *ranges* are the spans the text named by their ends: the ends are in *sources*, the rest is disclosed.
         """
         if self.sources or self.source_error:
             return self
@@ -513,6 +556,7 @@ class EvidenceRequest:
             return self
         return replace(
             self, sources=refs, source=refs[0] if len(refs) == 1 else None, source_origin="question",
+            source_ranges=tuple(ranges),
         )
 
     def to_wire(self) -> dict[str, Any] | None:

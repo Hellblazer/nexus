@@ -68,6 +68,23 @@ class SessionCatalog(FakeCatalog):
         super().__init__(*args, **kw)
         self.repo_hashes = dict(repo_hashes or {})
         self.fail_owner_lookup = False
+        #: ``get_owner_by_prefix`` raises from this call on (1-based): 2 lets the detection's probe through and
+        #: fails the resolver's own, which comes after it.
+        self.fail_owner_probe_from: int | None = None
+        self._probes = 0
+        #: Registered owners with no documents, ``{tumbler: name}``: what ``list_owners`` adds to the two projects.
+        self.extra_owners: dict[str, str] = {}
+
+    def get_owner_by_prefix(self, prefix: str) -> dict | None:
+        self._probes += 1
+        if self.fail_owner_probe_from is not None and self._probes >= self.fail_owner_probe_from:
+            self.calls.append(("get_owner_by_prefix", {"prefix": prefix}))
+            raise RuntimeError("engine unreachable")
+        return super().get_owner_by_prefix(prefix)
+
+    def list_owners(self, *, include_deactivated: bool = False) -> list[dict]:
+        rows = super().list_owners(include_deactivated=include_deactivated)
+        return rows + [{"tumbler_prefix": t, "name": n, "owner_type": "repo"} for t, n in self.extra_owners.items()]
 
     def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
         self.calls.append(("owner_for_repo", {"repo_hash": repo_hash}))
@@ -326,7 +343,9 @@ def test_nx_answer_runs_an_inferred_request_without_the_owners_binding(tmp_path:
     active = _detect(cat, environ, cwd)
     steps = [{"ids": ["c1"], "tumblers": ["1.2.1"]}, {"text": "The decision is X [1] after review of the evidence."}]
     run = AsyncMock(return_value=_plan_run_result(list(steps), []))
-    named = AsyncMock(return_value=_resolution_for_rdr084())
+    resolution = _resolution_for_rdr084()
+    resolution = replace(resolution, sources=tuple(replace(src, inferred=True) for src in resolution.sources))
+    named = AsyncMock(return_value=resolution)
     with patch("nexus.plans.active_project.detect_active_project", return_value=active), \
          patch("nexus.mcp.core._nx_answer_named_sources", named), \
          patch("nexus.plans.runner.plan_run", run):
@@ -433,7 +452,8 @@ async def test_the_stage_applies_the_tier_in_a_worker_thread_and_never_raises(tm
     cat, _t3, environ, cwd = _session(tmp_path)
     with patch.object(core, "_get_catalog", return_value=cat), \
          patch("nexus.plans.active_project.detect_active_project",
-               side_effect=lambda c, **_kw: detect_active_project(c, environ=environ, getcwd=lambda: cwd)):
+               side_effect=lambda c=None, **kw: detect_active_project(
+                   c, get_catalog=kw.get("get_catalog"), environ=environ, getcwd=lambda: cwd)):
         got = await core._nx_answer_active_project(_request(scope="rdr"), (), scope="rdr", deadline=None)
     assert got.owner.status == "inferred" and got.owner.tumbler == ART_OWNER and got.active_project["applied"] is True
 
