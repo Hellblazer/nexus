@@ -156,7 +156,7 @@ def test_fresh_box_service_mode_registers(fake_client):
     assert reg["title"] == "fresh-box-note"
     assert reg["content_type"] == "knowledge"
     assert reg["physical_collection"] == _COLLECTION
-    assert reg["meta"] == {"doc_id": _DOC_ID}
+    assert {k: v for k, v in reg["meta"].items() if k != "put_at"} == {"doc_id": _DOC_ID}  # put_at: nexus-6pfgb.15
     # nexus-sdp0u: the synthesized identity — same chroma:// convention as
     # aspect_readers.uri_for — must reach the wire so the engine's
     # upsert-on-source_uri identity can match a later re-put.
@@ -232,7 +232,7 @@ def test_fresh_box_service_mode_reconciles_reput_by_source_uri(fake_client, monk
     assert client.registered == [], "reconcile must not mint a new document"
     (upd,) = client.updated
     assert upd["tumbler"] == "1.1.9"
-    assert upd["meta"] == {"doc_id": "b" * 64}
+    assert {k: v for k, v in upd["meta"].items() if k != "put_at"} == {"doc_id": "b" * 64}  # put_at: nexus-6pfgb.15
 
 
 def test_fresh_box_service_unreachable_is_loud_not_silent(fake_client, monkeypatch):

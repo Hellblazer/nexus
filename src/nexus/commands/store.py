@@ -786,9 +786,38 @@ def _delete_by_title(
 
 @store.command("expire")
 def expire_cmd() -> None:
-    """Remove T3 knowledge__ entries whose TTL has expired."""
-    count = _t3().expire()
+    """Remove T3 knowledge__ entries whose TTL has expired.
+
+    Each note is judged by its own TTL and its own put time, kept in its catalog entry (nexus-6pfgb.15),
+    not by the chunk row it shares with any note of identical text. A lapsed note is retired; its chunk
+    is deleted only when no other live note holds it.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — command-local; keeps CLI startup flat
+
+    db = _t3()
+    if not isinstance(db, HttpVectorClient):  # the in-memory facade (tests) has no catalog to judge notes by
+        count = db.expire()
+        click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
+        return
+    report = db.expire_report()
+    count = report.chunks_deleted
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
+    if report.notes_tombstoned:
+        n = report.notes_tombstoned
+        click.echo(f"{n} {'note' if n == 1 else 'notes'} retired; {count} {'chunk' if count == 1 else 'chunks'} deleted.")
+    if report.row_ttl_unattributed:
+        click.echo(
+            f"{report.row_ttl_unattributed} chunk(s) carry a lapsed TTL on the chunk row but are held by "
+            "several notes, or by one note whose own TTL the catalog does not record and whose write the "
+            "row is not, so none was judged by it.",
+            err=True,
+        )
+    if report.failures:
+        for tumbler, why in report.failures:
+            click.echo(f"  note {tumbler} was NOT retired: {why}", err=True)
+        raise click.ClickException(
+            f"{len(report.failures)} lapsed note(s) were not retired and stay live; run it again once fixed."
+        )
 
 
 def _echo_left_out(result: dict) -> None:

@@ -19,6 +19,7 @@ import hashlib
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -752,18 +753,21 @@ def _find_ghost_by_title(reader, owner, title: str):
 
 #: The note keys that have no catalog column, kept in the document's ``meta`` (nexus-6pfgb.5). The
 #: chunk row carries them too, but a chunk shared by two notes carries only the last writer's.
-NOTE_META_KEYS: tuple[str, ...] = ("tags", "category", "ttl_days", "source_agent")
+#: ``put_at`` (nexus-6pfgb.15) is the time of the note's last put: the clock its own ``ttl_days``
+#: counts from (:mod:`nexus.catalog.note_ttl`), and the marker that the catalog, not the shared
+#: chunk row, holds this note's TTL.
+NOTE_META_KEYS: tuple[str, ...] = ("tags", "category", "ttl_days", "source_agent", "put_at")
 
 #: What a note key reads as when it is unset: the retraction sentinel written over a key the entry held
 #: (catalog ``update`` has no meta delete-keys, so a written key cannot be removed). In catalog meta a
 #: ``ttl_days`` of 0 is that sentinel, not an accepted input (``put_note`` and ``write_note`` reject 0;
 #: the chunk row spells permanent as ``None``/absent): readers treat 0 and absent as permanent.
-_NOTE_META_UNSET: dict[str, Any] = {"tags": "", "category": "", "ttl_days": 0, "source_agent": ""}
+_NOTE_META_UNSET: dict[str, Any] = {"tags": "", "category": "", "ttl_days": 0, "source_agent": "", "put_at": ""}
 
 
 def note_catalog_meta(
     *, tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
-    prior: dict[str, Any] | None = None,
+    put_at: str = "", prior: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The note keys one put writes to its catalog entry's ``meta``, and what undoes them.
 
@@ -774,10 +778,15 @@ def note_catalog_meta(
     row, and a ``ttl_days`` of 7 that outlived a permanent re-put would expire the note. *revert* maps
     each written key to the value *prior* held (or the unset value), for
     :func:`restore_pre_call_stamp` when the write does not land.
+
+    *put_at* (nexus-6pfgb.15) is the time of this put, an ISO-8601 stamp. Every put sends it, so the
+    TTL clock of a re-put note restarts as the chunk row's does, and a failed put restores the old
+    stamp with the rest.
     """
     given: dict[str, Any] = {
         "tags": tags or "", "category": category or "",
         "ttl_days": ttl_days if ttl_days and ttl_days > 0 else 0, "source_agent": source_agent or "",
+        "put_at": put_at or "",
     }
     prior = prior or {}
     write: dict[str, Any] = {}
@@ -812,6 +821,7 @@ def catalog_store_hook_tracked(
     pre_call_doc_id_out: dict[str, Any] | None = None,
     error_out: dict[str, str] | None = None,
     tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
+    put_at: str | None = None,
 ) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
 
@@ -903,6 +913,9 @@ def catalog_store_hook_tracked(
             ``pre_call_doc_id_out["note_meta"]`` carries what
             :func:`restore_pre_call_stamp` needs to put them back and
             ``["note_meta_stamped"]`` what this call wrote (its compare-and-set).
+        put_at: the time of this put, written with them as ``meta.put_at``, the clock the
+            note's own ``ttl_days`` counts from (nexus-6pfgb.15, :mod:`nexus.catalog.note_ttl`).
+            ``None`` (the default) stamps the current time; tests pass a fixed one.
         error_out: Optional out-parameter, like *pre_call_doc_id_out* (no
             return-shape change). The ``("", False)`` return does not say
             WHY; when it is returned, ``error_out["error"]`` names the
@@ -945,12 +958,13 @@ def catalog_store_hook_tracked(
         # Computed BEFORE the chash dedup below (moved up at nexus-bb6n2
         # round 2) so a dedup HIT can stamp it too.
         source_uri = uri_for(collection_name, title) if title else None
+        put_at_stamp = put_at if put_at is not None else datetime.now(UTC).isoformat()
 
         def stamp_for(entry) -> dict[str, Any]:
             """The ``meta`` to merge into *entry* (``None`` for a brand-new row): the identity stamp
             and the note keys. Records the note keys' undo in ``pre_call_doc_id_out``."""
             write, revert = note_catalog_meta(
-                tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent,
+                tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent, put_at=put_at_stamp,
                 prior=(getattr(entry, "meta", None) or {}) if entry is not None else None)
             if pre_call_doc_id_out is not None and revert:
                 pre_call_doc_id_out["note_meta"] = revert
@@ -1552,52 +1566,161 @@ def reap_catalog_documents_by_title(
     if reader is None:
         return None
     writer = None
-    documents: list[tuple[str, str]] = []
-    reaped_chashes: dict[str, None] = {}
-    failures: list[tuple[str, str]] = []
-    held: dict[str, None] = {}
     try:
         entries = title_reap_candidates(reader, collection, title, list(chashes), present)
         if not entries:
             return TitleReap((), (), ())
         writer = make_catalog_writer()
-        for entry in entries:
-            tumbler = str(entry.tumbler)
-            rows = reader.get_manifest(tumbler)
-            original = [manifest_row_wire(r) for r in rows]
-            row_collection = entry.physical_collection or collection
-            try:
-                if original:
-                    writer.write_manifest(tumbler, [], collection=row_collection)
-            except Exception as exc:  # noqa: BLE001 — nothing changed; reported, the caller fails loud
-                _log.warning("catalog_title_reap_retract_failed", tumbler=tumbler, exc_info=True)
-                failures.append((tumbler, f"manifest not retracted ({type(exc).__name__}: {exc})"))
-                held.update(dict.fromkeys(r["chash"] for r in original))
-                continue
-            try:
-                writer.delete_document(entry.tumbler)
-            except Exception as exc:  # noqa: BLE001 — restore below; reported, the caller fails loud
-                _log.warning("catalog_title_reap_tombstone_failed", tumbler=tumbler, exc_info=True)
-                detail = f"not tombstoned ({type(exc).__name__}: {exc})"
-                if original:
-                    try:
-                        writer.write_manifest(tumbler, original, collection=row_collection)
-                    except Exception as restore_exc:  # noqa: BLE001 — named so the operator can repair it
-                        _log.error("catalog_title_reap_restore_failed", tumbler=tumbler, exc_info=True)
-                        detail += (
-                            f"; its manifest could NOT be restored ({type(restore_exc).__name__}) "
-                            f"and is empty: re-run the delete, or repair with nx catalog reconcile"
-                        )
-                failures.append((tumbler, detail))
-                held.update(dict.fromkeys(r["chash"] for r in original))
-                continue
-            documents.append((tumbler, title))
-            reaped_chashes.update(dict.fromkeys(r["chash"] for r in original))
-        return TitleReap(tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held))
+        return _reap_documents(reader, writer, entries, collection, title=title)
     finally:
         if writer is not None:
             writer.close()
         reader.close()
+
+
+def _reap_documents(
+    reader, writer, entries, collection: str, *, title: str = "",
+    still_due: Callable[[Any], bool] | None = None,
+) -> TitleReap:
+    """Tombstone each of *entries*, retracting its own manifest first; the one note delete path
+    behind ``nx store delete --title`` and the TTL sweep (nexus-6pfgb.15).
+
+    All or nothing per document, as :func:`reap_catalog_documents_by_title` documents. A document
+    that cannot be reaped is left live and intact, named in ``failures``, and its chunks in ``held``.
+
+    *still_due*, when given, is asked of each document's entry freshly read just before its
+    retraction; a document that is gone, or for which it says no, is skipped untouched (not counted,
+    its chunks not returned). The TTL sweep passes it so a note re-put since the listing (made
+    permanent, or its clock restarted) is not retired from the stale entry. There is no
+    compare-and-set on the catalog, so this narrows the window to one read and does not close it.
+    """
+    documents: list[tuple[str, str]] = []
+    reaped_chashes: dict[str, None] = {}
+    failures: list[tuple[str, str]] = []
+    held: dict[str, None] = {}
+    for entry in entries:
+        tumbler = str(entry.tumbler)
+        if still_due is not None:
+            fresh = reader.resolve_many([tumbler]).get(tumbler)
+            if fresh is None or not still_due(fresh):
+                continue
+        rows = reader.get_manifest(tumbler)
+        original = [manifest_row_wire(r) for r in rows]
+        row_collection = entry.physical_collection or collection
+        try:
+            if original:
+                writer.write_manifest(tumbler, [], collection=row_collection)
+        except Exception as exc:  # noqa: BLE001 — nothing changed; reported, the caller fails loud
+            _log.warning("catalog_title_reap_retract_failed", tumbler=tumbler, exc_info=True)
+            failures.append((tumbler, f"manifest not retracted ({type(exc).__name__}: {exc})"))
+            held.update(dict.fromkeys(r["chash"] for r in original))
+            continue
+        try:
+            writer.delete_document(entry.tumbler)
+        except Exception as exc:  # noqa: BLE001 — restore below; reported, the caller fails loud
+            _log.warning("catalog_title_reap_tombstone_failed", tumbler=tumbler, exc_info=True)
+            detail = f"not tombstoned ({type(exc).__name__}: {exc})"
+            if original:
+                try:
+                    writer.write_manifest(tumbler, original, collection=row_collection)
+                except Exception as restore_exc:  # noqa: BLE001 — named so the operator can repair it
+                    _log.error("catalog_title_reap_restore_failed", tumbler=tumbler, exc_info=True)
+                    detail += (
+                        f"; its manifest could NOT be restored ({type(restore_exc).__name__}) "
+                        f"and is empty: re-run the delete, or repair with nx catalog reconcile"
+                    )
+            failures.append((tumbler, detail))
+            held.update(dict.fromkeys(r["chash"] for r in original))
+            continue
+        documents.append((tumbler, getattr(entry, "title", "") or title))
+        reaped_chashes.update(dict.fromkeys(r["chash"] for r in original))
+    return TitleReap(tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held))
+
+
+def lapsed_note_documents(reader, collection: str, *, now: datetime) -> list:
+    """The live store_put-origin notes in *collection* whose own TTL has run out at *now*
+    (nexus-6pfgb.15).
+
+    Each is judged by its own catalog entry (:mod:`nexus.catalog.note_ttl`): ``meta.ttl_days``
+    counted from ``meta.put_at``. A chunk row's ``ttl_days`` and ``indexed_at`` are the last writer's
+    and are never read here. A note with ``ttl_days`` absent or ``0`` is permanent. Reads one catalog
+    listing of the collection, so the cost follows the collection's document count.
+    """
+    from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
+
+    return [
+        e for e in (reader.list_by_collection(collection) or [])
+        if e.content_type == "knowledge" and not e.file_path
+        and (e.physical_collection or collection) == collection
+        and note_ttl.lapsed(e.meta, e.indexed_at, now=now)
+    ]
+
+
+def reap_lapsed_note_documents(collection: str, *, now: datetime) -> TitleReap | None:
+    """Tombstone every note in *collection* whose own TTL has lapsed, each through the note delete
+    path of ``nx store delete --title`` (manifest retracted, then the document tombstoned; all or
+    nothing per note), and return what that did (nexus-6pfgb.15).
+
+    The caller then asks T3 to delete the returned ``chashes``; the engine's delete anti-join keeps
+    any chunk another live document still holds, so a co-owner keeps serving it. ``None`` when the
+    catalog is unavailable.
+    """
+    from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return None
+    writer = None
+    try:
+        entries = lapsed_note_documents(reader, collection, now=now)
+        if not entries:
+            return TitleReap((), (), ())
+        writer = make_catalog_writer()
+        return _reap_documents(
+            reader, writer, entries, collection,
+            still_due=lambda e: note_ttl.lapsed(e.meta, e.indexed_at, now=now),
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+        reader.close()
+
+
+def live_note_owners(reader, collection: str, chashes: list[str]) -> dict[str, list]:
+    """``chash -> [CatalogEntry, ...]`` of the LIVE documents in *collection* (or ghosts, which have
+    none) whose manifests name each chash; a chash nobody holds maps to ``[]`` (nexus-6pfgb.15).
+
+    Unlike :func:`live_holders_of_chashes` this keeps the entries, so a caller can read each owner's
+    ``meta``, and it raises on a catalog failure: the expiry sweep must not treat "could not look"
+    as "no owner". A chash the wire rejects as not hex (a legacy id) owns nothing.
+    """
+    out: dict[str, list] = {c: [] for c in chashes}
+    if not chashes:
+        return out
+    page = 300
+    owners: dict[str, list] = {}
+    for i in range(0, len(chashes), page):
+        batch = chashes[i:i + page]
+        try:
+            owners.update(reader.docs_for_chashes(batch) or {})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 400:
+                raise
+            for chash in batch:  # one bad id 400s the whole batch: isolate it
+                try:
+                    owners.update(reader.docs_for_chashes([chash]) or {})
+                except httpx.HTTPStatusError as one:
+                    if one.response.status_code != 400:
+                        raise
+    tumblers = sorted({str(t) for ts in owners.values() for t in ts})
+    entries = reader.resolve_many(tumblers) if tumblers else {}
+    for chash, ts in owners.items():
+        out[chash] = [
+            entries[str(t)] for t in ts
+            if str(t) in entries and (entries[str(t)].physical_collection or "") in ("", collection)
+        ]
+    return out
 
 
 def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, list[tuple[str, str]]]:
