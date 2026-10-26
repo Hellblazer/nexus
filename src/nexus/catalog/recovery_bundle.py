@@ -130,8 +130,9 @@ class ExportSummary:
     #: ttl_days value that is not provably its own (the row's ``catalog_doc_id`` and ``title`` are not
     #: both this note's): the record carries none.
     note_keys_unrecovered: int = 0
-    #: The titles of those notes, in export order, so the command can name them.
-    note_keys_unrecovered_titles: list[str] = field(default_factory=list)
+    #: ``(collection, title)`` of each of those notes, in export order, so the command can name them
+    #: (a title is unique within a collection only).
+    note_keys_unrecovered_notes: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -295,7 +296,7 @@ def export_knowledge_doc(
             keys = {"tags": "", "category": "", "ttl_days": None}
             if summary is not None and (row_keys["tags"] or row_keys["category"] or row_keys["ttl_days"]):
                 summary.note_keys_unrecovered += 1
-                summary.note_keys_unrecovered_titles.append(entry.title or "")
+                summary.note_keys_unrecovered_notes.append((entry.physical_collection, entry.title or ""))
                 _log.info(
                     "recovery_export_note_keys_unrecovered",
                     tumbler=str(entry.tumbler),

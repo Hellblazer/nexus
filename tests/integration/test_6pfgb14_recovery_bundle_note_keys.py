@@ -164,3 +164,31 @@ def test_a_keyless_note_that_wrote_its_own_row_exports_the_rows_values(t2_servic
     assert (docs["keyed-B"]["tags"], docs["keyed-B"]["category"], docs["keyed-B"]["ttl_days"]) == (
         "beta", "finding", 7)
     assert summary.note_keys_unrecovered == 0
+
+
+def test_a_rejected_keyless_note_re_put_with_its_values_exports_them(t2_service_env, tmp_path):
+    """The remedy ``nx catalog export`` prints: a keyless note the export could not recover, re-put
+    under its title with its values by a current client, exports those values on the next export.
+    The re-put lands on the same catalog entry, which then holds note keys and answers for the note."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    collection = t3_collection_name("6pfgb14-remedy", t3=client)
+    body = "6pfgb14 body whose keyless owner is re-put after a departed co-owner"
+    a = _put_without_put_at(content=body, collection=collection, title="unset-A")
+    b = put_note(content=body, collection=collection, title="keyed-B", tags="beta", category="finding",
+                 ttl_days=7, source_agent="agent-b")
+    moved = put_note(content=body + " (moved)", collection=collection, title="keyed-B", tags="beta",
+                     category="finding", ttl_days=7, source_agent="agent-b")
+    assert a.status == STORED and b.status == STORED and moved.status == STORED
+    summary, _docs = _exported(client, tmp_path, collection)
+    assert summary.note_keys_unrecovered_notes == [(collection, "unset-A")]
+
+    again = put_note(content=body, collection=collection, title="unset-A", tags="alpha", category="design",
+                     ttl_days=30, source_agent="agent-a")
+    assert again.status == STORED and again.catalog_doc_id == a.catalog_doc_id, again
+
+    second = tmp_path / "second"
+    second.mkdir()
+    summary, docs = _exported(client, second, collection)
+    assert (docs["unset-A"]["tags"], docs["unset-A"]["category"], docs["unset-A"]["ttl_days"]) == (
+        "alpha", "design", 30)
+    assert summary.note_keys_unrecovered == 0

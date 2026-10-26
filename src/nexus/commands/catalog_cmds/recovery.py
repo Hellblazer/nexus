@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
+
 import click
 
 
@@ -55,16 +57,19 @@ def export_cmd(output: Path) -> None:
     if summary.note_keys_unrecovered:
         click.echo(
             f"  note keys not recovered: {summary.note_keys_unrecovered} note(s) whose own tags, "
-            "category and ttl_days are not in the catalog (stored before 7.87.0, or brought in by "
-            "an .nxexp import) and whose chunk row cannot be shown to be their own write; they "
-            "export with those empty (ttl_days permanent). To keep a note's values, re-put it "
-            "with its tags, category and TTL using a current client, then export again:"
+            "category and ttl_days are not in the catalog (stored by nx 7.87.0 or earlier, or "
+            "brought in by an .nxexp import) and whose chunk row cannot be shown to be their own "
+            "write; they export with those empty (ttl_days permanent). To keep a note's values, "
+            "re-put it with its tags, category and TTL using a current client, then export again; "
+            "take the values from your own records, since the chunk row may hold another note's:"
         )
-        titles = summary.note_keys_unrecovered_titles
-        for title in titles[:_UNRECOVERED_TITLES_SHOWN]:
-            click.echo(f"    {title or '(untitled)'}")
-        if len(titles) > _UNRECOVERED_TITLES_SHOWN:
-            click.echo(f"    ... and {len(titles) - _UNRECOVERED_TITLES_SHOWN} more")
+        notes = summary.note_keys_unrecovered_notes
+        for collection, title in notes[:_UNRECOVERED_TITLES_SHOWN]:
+            # json.dumps quotes the title and escapes control characters: an .nxexp import's title
+            # is untrusted text and must not reach the terminal raw.
+            click.echo(f"    {collection}: {json.dumps(title) if title else '(untitled)'}")
+        if len(notes) > _UNRECOVERED_TITLES_SHOWN:
+            click.echo(f"    ... and {len(notes) - _UNRECOVERED_TITLES_SHOWN} more")
     if summary.unresolvable_link_endpoints:
         click.echo(
             f"  WARNING: {summary.unresolvable_link_endpoints} link endpoint(s) "

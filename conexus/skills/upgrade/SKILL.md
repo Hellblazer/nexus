@@ -142,8 +142,8 @@ and carries less than the old direct path. Not carried: T2 plans, taxonomy
 those tables: the `nx store export` file carries each chunk's `ttl_days` and
 `indexed_at` as stored, and the `nx catalog export` recovery bundle gives each
 `store_put` note its own `ttl_days` and restarts its clock at the import, so a note
-already expired but not reaped comes back with a full TTL; a note stored before
-7.87.0 or brought in by an `.nxexp` import keeps its `ttl_days`, tags and category
+already expired but not reaped comes back with a full TTL; a note stored by
+7.87.0 or earlier or brought in by an `.nxexp` import keeps its `ttl_days`, tags and category
 only when its chunk row is provably its own write, else it comes back permanent
 with them empty and the export names it), the telemetry stores,
 DEVONthink highlights, curated catalog metadata (author, year, corpus, `meta`, collection

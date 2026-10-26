@@ -860,7 +860,7 @@ def test_a_legacy_note_alone_on_an_unstamped_row_takes_none_of_its_values(fake_c
     assert (a["tags"], a["category"], a["ttl_days"]) == ("", "", None)
     assert "note-b" not in docs, "B has no manifest left: a ghost, not an owner"
     assert summary.note_keys_unrecovered == 1
-    assert summary.note_keys_unrecovered_titles == ["note-a"]
+    assert summary.note_keys_unrecovered_notes == [(KNOW, "note-a")]
 
 
 def test_a_note_with_no_keys_of_its_own_never_takes_a_departed_co_owners_keys(fake_catalog, tmp_path):
