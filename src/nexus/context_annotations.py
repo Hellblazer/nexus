@@ -1,19 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Per-result context annotations for the search and query renders.
 
-A retrieved chunk carries when it was indexed, when its source was
-published, and when it expires; the catalog row carries the document's
-index state. None of that reached the reader or the model: a result was a
-distance, a title and a snippet. This module turns what is already stored
-into one short line per result, and one instruction line per response,
-so a reader can weigh age and status without a second lookup.
+A retrieved chunk's owning documents know when they were indexed, when the
+source was published, and when it expires; the catalog row carries the
+document's index state. None of that reached the reader or the model: a result
+was a distance, a title and a snippet. This module turns those facts into one
+short line per result, and one instruction line per response, so a reader can
+weigh age and status without a second lookup.
 
 Pure functions, fixed-clock friendly: every age is computed against the
 ``now`` the caller passes. No I/O.
+
+Document-level facts (title, indexed date, year, expiry) come from the
+catalog document(s) that own a chunk, never from the T3 chunk row: one row
+exists per chash, so a chunk two documents share carries the last writer's
+values (nexus-6pfgb, census row 1). :func:`entry_facts` reads them off one
+catalog entry; :func:`agreed_facts` keeps a field only when every owner gives
+the same value, so a field the owners disagree on, or one that no owner
+resolves, is left out rather than filled from the row.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -34,12 +43,14 @@ READER_INSTRUCTION: str = (
 #: as :data:`READER_INSTRUCTION`, phrased for the model that reads the
 #: hydrated chunks rather than the person reading a render.
 SOURCE_INSTRUCTION: str = (
-    "Some inputs open with a [source: ...] line naming the document, its "
-    "collection and its dates. That line is provenance, not evidence: never "
-    "quote it as support. Indexed dates are when nexus last indexed the "
+    "Some inputs open with a [source: ...] line. It names the collection "
+    "and, when the documents holding the text are known, their titles, "
+    "plus the dates those documents agree on; a date the documents disagree "
+    "on is left out. That line is provenance, not evidence: never quote it "
+    "as support. Indexed dates are when nexus last indexed the "
     "source, not when it was written; a published year is the document's "
     "own date. When sources disagree, prefer the more recently published "
-    "one, and cite the source and its date."
+    "one, and cite the source and its date when the line gives one."
 )
 
 #: The marker :func:`with_source_note` writes; :func:`source_clause` keys
@@ -79,10 +90,12 @@ def annotate(
 ) -> list[str]:
     """Return the annotation tokens for one result, in display order.
 
-    ``metadata`` is the chunk's stored metadata (``indexed_at``,
-    ``ttl_days``, ``bib_year``). ``index_state`` and ``year`` come from
-    the catalog row when the caller has one (the ``query`` tool's
-    catalog-routed path); a chunk-only caller leaves them ``None``.
+    ``metadata`` holds the facts to render (``indexed_at``, ``ttl_days``,
+    ``bib_year``): the owning documents' agreed facts
+    (:func:`agreed_facts`), never the shared chunk row's, which is the last
+    writer's. ``index_state`` and ``year`` come from the catalog row when the
+    caller has one (the ``query`` tool's catalog-routed path); a caller
+    without one leaves them ``None``.
 
     Tokens, each present only when its fact is stored:
 
@@ -133,24 +146,147 @@ def annotation_line(
     return " · ".join(tokens)
 
 
+#: Metadata key a search hit carries its owners' agreed facts under
+#: (:func:`agreed_facts` over the live documents holding its chunk). Set by
+#: ``search_engine._attach_display_paths``; a working key like ``_owner_doc_ids``,
+#: not a result field, so ``format_json`` leaves it out.
+OWNER_FACTS_KEY: str = "_owner_facts"
+
+#: The most owners of one chunk resolved for its title and facts. A chunk many
+#: documents share (boilerplate) would otherwise make every read resolve all of
+#: them; past the cap the owners cannot be shown to agree, so a reader states
+#: no facts for that chunk.
+OWNER_RESOLVE_CAP: int = 10
+
+#: Facts compared by value across owners. ``indexed_at`` compares as an
+#: instant, so two spellings of one stamp agree.
+_FACT_KEYS: tuple[str, ...] = ("title", "file_path", "indexed_at", "bib_year", "ttl_days")
+
+
+def entry_facts(entry: Any) -> dict[str, Any]:
+    """The provenance facts one catalog entry states, each present only when stored.
+
+    ``title``, ``file_path``, ``indexed_at`` (the document's own index time),
+    ``bib_year`` (the enriched year, else the catalog ``year``) and ``ttl_days``
+    (the entry's ``meta["ttl_days"]``, which exists once the notes catalog-meta
+    writer has stamped it; an entry without one has no expiry to show). Reads
+    attributes with defaults, so a hand-built stub entry works.
+    """
+    facts: dict[str, Any] = {}
+    for key in ("title", "file_path", "indexed_at"):
+        value = str(getattr(entry, key, "") or "").strip()
+        if value:
+            facts[key] = value
+    try:
+        year = int(getattr(entry, "bib_year", 0) or getattr(entry, "year", 0) or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year > 0:
+        facts["bib_year"] = year
+    meta = getattr(entry, "meta", None)
+    if isinstance(meta, Mapping) and meta.get("ttl_days") is not None:
+        try:
+            facts["ttl_days"] = int(meta["ttl_days"])
+        except (TypeError, ValueError):
+            pass
+    return facts
+
+
+def _comparable(key: str, value: Any) -> Any:
+    if key == "indexed_at":
+        return _parse_iso(value) or value
+    return value
+
+
+def agreed_facts(per_owner: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The facts every owner states with the same value; a field any owner lacks
+    or states differently is left out. No owners states nothing."""
+    if not per_owner:
+        return {}
+    agreed: dict[str, Any] = {}
+    for key in _FACT_KEYS:
+        if not all(key in facts for facts in per_owner):
+            continue
+        values = {_comparable(key, facts[key]) for facts in per_owner}
+        if len(values) == 1:
+            agreed[key] = per_owner[0][key]
+    # An expiry counts from the indexed stamp: without an agreed stamp there is
+    # nothing to count from.
+    if "indexed_at" not in agreed:
+        agreed.pop("ttl_days", None)
+    return agreed
+
+
+def owner_titles(titles: Sequence[str], *, limit: int = 3) -> str:
+    """The title shown for the documents holding a chunk (nexus-sis0m.5).
+
+    A chunk row carries its last writer's title, which names the wrong
+    document when two share identical text, and a deleted one once that
+    writer is removed. The catalog's live owners are named instead: the one
+    title, or several joined, past *limit* with a count.
+    """
+    distinct = sorted(dict.fromkeys(t for t in titles if t))
+    if len(distinct) <= limit:
+        return " · ".join(distinct)
+    return " · ".join(distinct[:limit]) + f" (+{len(distinct) - limit} more)"
+
+
+def _owner_title_list(per_owner: Sequence[Mapping[str, Any]], *, limit: int = 3) -> str:
+    """The owners' titles for a source note, quoted and joined with ", " so a title that holds
+    " · " (the note's own separator) cannot read as two parts. Up to *limit* titles, then
+    "+N more"; an owner with no title is counted ("N untitled"), never dropped silently."""
+    distinct = sorted({str(f["title"]) for f in per_owner if f.get("title")})
+    untitled = sum(1 for f in per_owner if not f.get("title"))
+    if not distinct:
+        return ""
+    text = ", ".join(json.dumps(t, ensure_ascii=False) for t in distinct[:limit])
+    extra = [f"+{len(distinct) - limit} more"] if len(distinct) > limit else []
+    if untitled:
+        extra.append(f"{untitled} untitled")
+    return f"{text} ({', '.join(extra)})" if extra else text
+
+
+def note_facts(per_owner: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """:func:`agreed_facts` for a source note, which also names the owners.
+
+    A title is a set of names, not a conflict: where the owners' titles differ
+    the note lists them (quoted, comma-joined, past three a count, owners
+    without a title counted), so the line still says what to cite and cannot
+    be read as one document. Dates, year and expiry stay omitted where the
+    owners disagree.
+    """
+    facts = agreed_facts(per_owner)
+    if "title" not in facts:
+        names = _owner_title_list(per_owner)
+        if names:
+            facts["title"] = names
+    return facts
+
+
+def hit_annotation_line(metadata: Mapping[str, Any], *, now: datetime | None = None) -> str:
+    """The age/expiry line of one search hit, from its owners' agreed facts
+    (:data:`OWNER_FACTS_KEY`). The chunk row's own ``indexed_at``, ``bib_year`` and
+    ``ttl_days`` are the last writer's and are never read; a hit with no resolved
+    owners, or owners that disagree, prints nothing for the fields in question."""
+    return annotation_line(metadata.get(OWNER_FACTS_KEY) or {}, now=now)
+
+
 def source_note(
-    metadata: Mapping[str, Any],
+    facts: Mapping[str, Any],
     *,
     collection: str = "",
     now: datetime | None = None,
 ) -> str:
     """One line naming a hydrated chunk's document, collection and dates.
 
-    ``<title or display path or source path> · <collection> · <annotate()
-    tokens>``, with every absent part dropped. Empty when nothing is
-    known, so a caller can test truthiness before prefixing.
+    ``<title or file path> · <collection> · <annotate() tokens>``, with every
+    absent part dropped. *facts* are the chunk's owners' agreed facts
+    (:func:`agreed_facts`), never the chunk row. Empty when nothing is known, so
+    a caller can test truthiness before prefixing.
     """
-    label = (
-        str(metadata.get("title") or "").strip()
-        or str(metadata.get("_display_path") or metadata.get("source_path") or "").strip()
-    )
+    label = str(facts.get("title") or facts.get("file_path") or "").strip()
     parts = [x for x in (label, collection.strip()) if x]
-    parts.extend(annotate(metadata, now=now or datetime.now(UTC)))
+    parts.extend(annotate(facts, now=now or datetime.now(UTC)))
     return " · ".join(parts)
 
 

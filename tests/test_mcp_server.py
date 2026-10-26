@@ -2966,7 +2966,34 @@ def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
     t3.put(collection=coll, content="a note about annotated retrieval context", title="ctxnote")
     out = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0)
     assert out.startswith(READER_INSTRUCTION), out[:120]
-    assert "indexed 20" in out and "d ago)" in out, out
+    # nexus-6pfgb.11: the age line is the OWNING document's, read from the catalog; the chunk
+    # row's own indexed_at is the last writer's and is not read. This note has no catalog
+    # document (t3.put registers none), so its hit prints no age line ...
+    assert "indexed 20" not in out and "d ago)" not in out, out
+    # ... and the same hit with a catalog owner prints that owner's.
+    from types import SimpleNamespace
+
+    from nexus.catalog.tumbler import Tumbler
+    from nexus.catalog.types import CatalogEntry
+
+    chash = _search_render(
+        query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True,
+    )["chunk_text_hash"][0]
+    owner = CatalogEntry(
+        tumbler=Tumbler.parse("1.1.1"), title="ctxnote", author="", year=0, content_type="knowledge",
+        file_path="", corpus="", physical_collection=coll, chunk_count=1, head_hash="",
+        indexed_at="2026-09-01T00:00:00+00:00",
+    )
+    catalog = SimpleNamespace(
+        chash_positions=lambda chashes: [
+            {"chash": chash, "doc_id": "1.1.1", "position": 0, "chunk_count": 1, "collection": coll},
+        ],
+        resolve_many=lambda doc_ids: {"1.1.1": owner},
+    )
+    with patch("nexus.mcp.core._get_catalog", return_value=catalog):
+        # A new query string: the first query's result list is cached with its (owner-less) metadata.
+        owned = _search_render(query="a note about annotated retrieval context", corpus=coll, limit=5, offset=0)
+    assert "indexed 2026-09-01" in owned and "d ago)" in owned, owned
     # structured output is untouched by the annotation
     structured = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True)
     assert set(structured) == {

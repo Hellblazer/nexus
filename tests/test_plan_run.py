@@ -2577,7 +2577,11 @@ class TestNonEvidentiaryStamp:
         # dropped before its chash was even collected.
         call_kwargs = mock_hydrate.call_args.kwargs
         assert call_kwargs["ids"] == ["b" * 64]
-        assert json.loads(args["items"]) == ["def real_function(): pass"]
+        # The resolved entry states no title or dates (nexus-6pfgb.11: the note speaks only
+        # for what the document's own catalog entry says), so the note names the collection.
+        assert json.loads(args["items"]) == [
+            "[source: code__x__model-code__v1]\ndef real_function(): pass",
+        ]
 
     def test_tumbler_resolve_many_failure_degrades_to_leave_every_candidate_in(
         self,

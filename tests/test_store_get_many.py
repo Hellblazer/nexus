@@ -869,7 +869,9 @@ class TestStoreGetManySourceNotes:
     aligned 1:1 with ``contents``, from the same fetch that resolves
     content -- one line per chunk naming its document, collection and
     dates; "" for a missing id. The plan runner prefixes it onto the
-    content an operator prompt sees."""
+    content an operator prompt sees. nexus-6pfgb.11: the document and its
+    dates are the OWNING documents' (tests/test_6pfgb11_provenance_from_catalog.py
+    pins that); the chunk row's title and dates, the last writer's, are not read."""
 
     @pytest.mark.t2_tenant
     def test_source_notes_aligned_and_empty_for_missing(self):
@@ -888,8 +890,10 @@ class TestStoreGetManySourceNotes:
         assert out["contents"] == ["body one", ""]
         assert len(out["source_notes"]) == 2
         note = out["source_notes"][0]
-        assert note.startswith("Doc One · knowledge")
-        assert "indexed 2026-09-01" in note and "published 2024" in note
+        # "doc-1" is not a chunk hash, so no catalog document owns it: the note names
+        # the collection it was found in and nothing from the row.
+        assert note.startswith("knowledge")
+        assert "Doc One" not in note and "2026-09-01" not in note and "2024" not in note
         assert out["source_notes"][1] == ""
 
 

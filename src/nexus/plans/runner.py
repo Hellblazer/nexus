@@ -1899,9 +1899,12 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     if not flat_ids:
         return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
 
-    hydrated = mcp_core.store_get_many(
-        ids=flat_ids, collections=flat_collections, structured=True,
-    )
+    # The notes below come from each document's own catalog entry, so the chunk-level
+    # ``source_notes`` (an owner ``resolve_many`` over the same documents) is not asked for.
+    with mcp_core.without_source_notes():
+        hydrated = mcp_core.store_get_many(
+            ids=flat_ids, collections=flat_collections, structured=True,
+        )
     chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
     # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision 3):
     # ``section_types`` rides the SAME store_get_many call above -- no
@@ -1916,17 +1919,13 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     chunk_section_types = (
         hydrated.get("section_types", []) if isinstance(hydrated, dict) else []
     )
-    # nexus-onn7s: ``source_notes`` rides the same call; a document's note
-    # is its first kept chunk's note, prefixed once on the reassembled
-    # text. Absent or short list degrades to no note, never to a drop.
-    chunk_source_notes = (
-        hydrated.get("source_notes", []) if isinstance(hydrated, dict) else []
-    )
-    if not isinstance(chunk_source_notes, list):
-        chunk_source_notes = []
-
     per_doc: dict[str, list[str]] = {doc_id: [] for doc_id in tumbler_ids}
-    doc_note: dict[str, str] = {}
+    # nexus-onn7s: a document's note is prefixed once on its reassembled text.
+    # nexus-6pfgb.11: it is built from THIS document's own catalog entry, never
+    # from the chunk's ``source_notes`` line: that line speaks for a bare chunk
+    # id, and a chunk two documents share would name the same document (or no
+    # field at all) for both. The collection is the first kept chunk's.
+    doc_collection: dict[str, str] = {}
     for i, (doc_id, content) in enumerate(zip(owner, chunk_contents)):
         if not content:
             continue
@@ -1936,13 +1935,26 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
         if section_type == "imports":
             continue
         per_doc[doc_id].append(content)
-        if doc_id not in doc_note and i < len(chunk_source_notes) and chunk_source_notes[i]:
-            doc_note[doc_id] = str(chunk_source_notes[i])
+        doc_collection.setdefault(doc_id, flat_collections[i])
 
-    from nexus.context_annotations import with_source_note  # noqa: PLC0415 — deferred; runner imports stay lazy
+    from nexus.context_annotations import (  # noqa: PLC0415 — deferred; runner imports stay lazy
+        agreed_facts,
+        entry_facts,
+        source_note,
+        with_source_note,
+    )
+
+    def _doc_note(doc_id: str) -> str:
+        # A document the catalog did not resolve (the lookup failed, or it is
+        # gone) gets no note: nothing here may speak for it, and the chunk
+        # rows' values are the last writer's.
+        entry = catalog_entries.get(doc_id) if isinstance(catalog_entries, dict) else None
+        if entry is None:
+            return ""
+        return source_note(agreed_facts([entry_facts(entry)]), collection=doc_collection.get(doc_id, ""))
 
     contents = [
-        with_source_note("\n\n".join(per_doc[doc_id]), doc_note.get(doc_id, ""))
+        with_source_note("\n\n".join(per_doc[doc_id]), _doc_note(doc_id) if per_doc[doc_id] else "")
         for doc_id in tumbler_ids
     ]
     missing = [doc_id for doc_id in tumbler_ids if not per_doc[doc_id]]

@@ -10,12 +10,14 @@ operators toward no longer exists.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
@@ -2755,12 +2757,14 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     cols = hits.get("chunk_collections") or hits.get("collections") or [collection]
 
     try:
-        hydrated = store_get_many(
-            ids,
-            cols,
-            max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
-            structured=True,
-        )
+        # The prefetch reads ``contents`` only; skip the owner lookup behind ``source_notes``.
+        with without_source_notes():
+            hydrated = store_get_many(
+                ids,
+                cols,
+                max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
+                structured=True,
+            )
     except Exception as exc:  # noqa: BLE001 — best-effort path; must not crash caller
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug("tidy_prefetch_hydrate_failed", exc_info=True)
@@ -3385,7 +3389,7 @@ def _search_render(
         # each result carries what is already stored about its age and
         # expiry (context_annotations); the contradiction flag stays on the
         # title line where it has always been.
-        from nexus.context_annotations import READER_INSTRUCTION, annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+        from nexus.context_annotations import READER_INSTRUCTION, hit_annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
         # Contradiction flag (RDR-057 Phase 3a; search latency, nexus-92q1p follow-up,
         # Sam 2026-10-08). Computed HERE, on `page`: the rows in final display order after
@@ -3430,7 +3434,9 @@ def _search_render(
             # never assume upstream never regresses).
             snippet = (r.content or "")[:200].replace("\n", " ")
             flag = " [CONTRADICTS ANOTHER RESULT]" if r.metadata.get("_contradiction_flag") else ""
-            note = annotation_line(r.metadata)
+            # nexus-6pfgb.11: the age and expiry are the owning documents' own,
+            # resolved with the display title; the chunk row's are the last writer's.
+            note = hit_annotation_line(r.metadata)
             note_line = f"\n  {note}" if note else ""
             lines.append(f"[{dist}] {label}{flag}{note_line}\n  {snippet}")
 
@@ -5963,6 +5969,129 @@ def _read_scope(t3, collection: str) -> list[str]:
 
 _CHASH_ID = re.compile(r"[0-9a-f]{64}")
 
+#: Whether ``store_get_many(structured=True)`` computes ``source_notes``. On by default (the wire
+#: contract); an in-process caller that never reads the notes turns it off with
+#: :func:`without_source_notes`, so a call it makes does not pay the owner ``resolve_many``. A
+#: context variable and not a tool parameter: the MCP schema must not move (nexus-6pfgb.11).
+_SOURCE_NOTES_ON: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nexus_store_get_many_source_notes", default=True,
+)
+
+
+@contextlib.contextmanager
+def without_source_notes() -> Iterator[None]:
+    """Within the block, ``store_get_many(structured=True)`` returns ``source_notes`` all ``""``
+    and makes no owner ``resolve_many``. For in-process callers that build their own provenance
+    (the plan runner's tumbler hydration) or never read it (the ``nx_tidy`` prefetch)."""
+    token = _SOURCE_NOTES_ON.set(False)
+    try:
+        yield
+    finally:
+        _SOURCE_NOTES_ON.reset(token)
+
+#: Sentinel: "fetch the owner rows yourself" (``None`` is a fetch that failed).
+_FETCH_OWNER_ROWS: Any = object()
+
+
+def _owner_rows_by_chash(chunk_ids: list[str], found: list[bool]) -> dict[str, list[dict]] | None:
+    """The catalog's live manifest rows holding each found, chash-shaped chunk id, by chash
+    (one ``chash_positions`` round trip for the whole batch).
+
+    ``{}`` when no id is chash-shaped (nothing to ask). ``None`` when the catalog cannot answer
+    (no handle, an engine that predates the route, a failed call): the callers then keep what
+    they had before owners were consulted. Shared by :func:`resolve_owner_section_types` and
+    :func:`resolve_owner_source_notes` so one hydration asks once.
+    """
+    wanted = [cid for cid, ok in zip(chunk_ids, found) if ok and _CHASH_ID.fullmatch(cid or "")]
+    if not wanted:
+        return {}
+    try:
+        lookup = getattr(_get_catalog(), "chash_positions", None)
+        rows = lookup(list(dict.fromkeys(wanted))) if lookup else None
+    except Exception:  # noqa: BLE001 — best-effort owner lookup; each caller documents its fallback
+        _log.debug("store_get_many_owner_rows_failed", exc_info=True)
+        return None
+    if not isinstance(rows, list):
+        return None
+    by_chash: dict[str, list[dict]] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("chash"):
+            by_chash.setdefault(row["chash"], []).append(row)
+    return by_chash
+
+
+def resolve_owner_source_notes(
+    chunk_ids: list[str],
+    found: list[bool],
+    collections: list[str],
+    *,
+    owner_rows: Any = _FETCH_OWNER_ROWS,
+) -> list[str]:
+    """The ``[source: ...]`` note of each hydrated chunk, from the catalog documents that own it
+    (nexus-6pfgb.11, census row 1).
+
+    A T3 chunk row is one per chash, so the title, indexed date, year and expiry on it are the
+    last writer's, which names the wrong document for the other owners of a shared chunk (and the
+    note is read by operator prompts). ``store_get_many`` is handed chunk ids and no document, so
+    the rule is, per chunk, over its live owners in the collection it was found in:
+
+    * every owner states the same value for a field: that value;
+    * owners disagree on a field, or one lacks it: the field is left out, except the title, where
+      the note lists the owners' titles, quoted, and counts untitled owners
+      (:func:`~nexus.context_annotations.note_facts`);
+    * no owner resolves (a chunk with no manifest row, a non-chash id, a catalog that cannot
+      answer), more owners than :data:`~nexus.context_annotations.OWNER_RESOLVE_CAP`, or an owner
+      the manifest names that ``resolve_many`` did not return (so "every owner agrees" cannot be
+      checked): the note names the collection only. The chunk row's values are never a fallback.
+
+    A missing id gets ``""``. Two catalog round trips cover the whole batch (``chash_positions``,
+    shared with the section-type read, then ``resolve_many``), never one per chunk.
+    """
+    from nexus.context_annotations import (  # noqa: PLC0415 — deferred; keeps core's import surface flat
+        OWNER_RESOLVE_CAP,
+        entry_facts,
+        note_facts,
+        source_note,
+    )
+
+    notes = [source_note({}, collection=collections[i]) if ok else "" for i, ok in enumerate(found)]
+    wanted = [i for i, cid in enumerate(chunk_ids) if found[i] and _CHASH_ID.fullmatch(cid or "")]
+    if not wanted:
+        return notes
+    if owner_rows is _FETCH_OWNER_ROWS:
+        owner_rows = _owner_rows_by_chash(chunk_ids, found)
+    if not owner_rows:
+        return notes
+    owners_of: dict[int, list[str]] = {}
+    for i in wanted:
+        docs = list(dict.fromkeys(
+            row["doc_id"] for row in owner_rows.get(chunk_ids[i], ())
+            if row.get("doc_id") and (not row.get("collection") or row["collection"] == collections[i])
+        ))
+        if docs and len(docs) <= OWNER_RESOLVE_CAP:
+            owners_of[i] = docs
+    if not owners_of:
+        return notes
+    try:
+        entries = _get_catalog().resolve_many(sorted({d for docs in owners_of.values() for d in docs}))
+    except Exception:  # noqa: BLE001 — best-effort provenance; the collection-only note is the documented fallback
+        _log.debug("store_get_many_owner_entries_failed", exc_info=True)
+        return notes
+    if not isinstance(entries, dict):
+        return notes
+    for i, docs in owners_of.items():
+        if any(entries.get(d) is None for d in docs):
+            # The manifest lists only live rows, so an owner with no entry is an anomaly (a
+            # skipped page, a race), not a tombstone: an owner that could disagree went unheard.
+            continue
+        live = [
+            entries[d] for d in docs
+            if (getattr(entries[d], "physical_collection", "") or "") in ("", collections[i])
+        ]
+        facts = note_facts([entry_facts(e) for e in live])
+        notes[i] = source_note(facts, collection=collections[i])
+    return notes
+
 
 def _row_key(r) -> tuple:
     """The identity of one search row: its chunk id, collection and the owning document it
@@ -5975,6 +6104,8 @@ def resolve_owner_section_types(
     found: list[bool],
     collections: list[str],
     stored: list[str],
+    *,
+    owner_rows: Any = _FETCH_OWNER_ROWS,
 ) -> list[str]:
     """The ``section_type`` of each hydrated chunk, read from the catalog manifest of the
     documents that own it (nexus-tko2w, RDR-108).
@@ -6002,18 +6133,11 @@ def resolve_owner_section_types(
     wanted = [i for i, cid in enumerate(chunk_ids) if found[i] and _CHASH_ID.fullmatch(cid or "")]
     if not wanted:
         return stored
-    try:
-        lookup = getattr(_get_catalog(), "chash_positions", None)
-        rows = lookup(list(dict.fromkeys(chunk_ids[i] for i in wanted))) if lookup else None
-    except Exception:  # noqa: BLE001 — best-effort label lookup; the stored value is the documented fallback
-        _log.debug("store_get_many_owner_section_types_failed", exc_info=True)
+    if owner_rows is _FETCH_OWNER_ROWS:
+        owner_rows = _owner_rows_by_chash(chunk_ids, found)
+    if owner_rows is None:
         return stored
-    if not isinstance(rows, list):
-        return stored
-    by_chash: dict[str, list[dict]] = {}
-    for row in rows:
-        if isinstance(row, dict) and row.get("chash"):
-            by_chash.setdefault(row["chash"], []).append(row)
+    by_chash = owner_rows
     out = list(stored)
     for i in wanted:
         owners = [
@@ -6218,7 +6342,10 @@ def store_get_many(
     human-readable "Hydrated N/M docs" listing with each document's content
     under an `[id]` line and a trailing `Missing: ...` line, or, when
     `structured=True`, `{contents, missing, section_types, source_notes}`
-    (`source_notes` names the collection each entry was found in), or
+    (`source_notes` is one provenance line per entry: the collection it was
+    found in, plus the catalog documents' titles and the indexed date, year and
+    expiry they agree on; a date the owners disagree on, or that no owner
+    states, is left out), or
     `{contents, missing, error}` as an error result if the batch fetch
     itself failed.
 
@@ -6427,19 +6554,11 @@ def store_get_many(
         # unconditionally (not gated on `structured`) so callers cannot
         # observe stale data by mixing modes.
         section_types: list[str] = []
-        # nexus-onn7s: ``source_notes`` rides the same fetch, same
-        # alignment, same "" for a missing id -- one line per chunk naming
-        # its document, collection and dates, which the plan runner
-        # prefixes onto the hydrated content an operator prompt sees.
-        from nexus.context_annotations import source_note  # noqa: PLC0415 — deferred; keeps core's import surface flat
-
-        source_notes: list[str] = []
-        for doc_id, entry, entry_collection in zip(id_list, entries, entry_collections):
+        for doc_id, entry in zip(id_list, entries):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
                 section_types.append("")
-                source_notes.append("")
                 continue
 
             body = str(entry.get("content") or "")
@@ -6454,14 +6573,26 @@ def store_get_many(
                 )
             contents.append(body)
             section_types.append(str(entry.get("section_type") or ""))
-            source_notes.append(source_note(entry, collection=entry_collection))
 
         if structured:
             # nexus-tko2w: the stored value above is the chunk row's, the last writer's; the
             # label is read from the owning documents' manifest rows (only the structured
             # result carries it, so only that mode pays the lookup).
+            found_flags = [entry is not None for entry in entries]
+            owner_rows = _owner_rows_by_chash(id_list, found_flags)
             section_types = resolve_owner_section_types(
-                id_list, [entry is not None for entry in entries], entry_collections, section_types,
+                id_list, found_flags, entry_collections, section_types, owner_rows=owner_rows,
+            )
+            # nexus-onn7s: ``source_notes`` rides the same fetch, same alignment, same "" for
+            # a missing id -- one line per chunk naming its document, collection and dates,
+            # which the plan runner prefixes onto the hydrated content an operator prompt sees.
+            # nexus-6pfgb.11: the document and its dates are the OWNING documents' (the same
+            # rows as the section types), not the chunk row's, which is the last writer's.
+            source_notes = (
+                resolve_owner_source_notes(
+                    id_list, found_flags, entry_collections, owner_rows=owner_rows,
+                )
+                if _SOURCE_NOTES_ON.get() else [""] * len(id_list)
             )
             return {
                 "contents": contents, "missing": missing,
