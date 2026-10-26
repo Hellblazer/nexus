@@ -803,8 +803,22 @@ class TestMintTokenResolutionSeam:
         self._reset_manager()
         try:
             clock = _FakeMonotonicClock()
+
+            class _MidRng:
+                """Pins the per-manager refresh point (nexus-dncjg) to the
+                nominal 20%; the test sits at 15% remaining."""
+
+                def uniform(self, lo: float, hi: float) -> float:
+                    return (lo + hi) / 2
+
+            # wall_clock follows the fake clock: the refresh reads the lease
+            # the first mint published (nexus-dncjg), and the real wall clock
+            # beside a fake monotonic one would make that lease look 255s
+            # newer than the cached token, so the refresh would adopt it and
+            # never re-mint.
             manager = data_token_module.DataTokenManager(
-                clock=clock, mint_credential=lambda: _MINT_CREDENTIAL,
+                clock=clock, wall_clock=clock, mint_credential=lambda: _MINT_CREDENTIAL,
+                rng=_MidRng(),
             )
             monkeypatch.setattr(data_token_module, "_default_manager", manager)
 

@@ -938,12 +938,17 @@ mint also (best-effort) persists the short-TTL DATA TOKEN — never the mint
 credential — to `~/.config/nexus/data_token_lease.<key>`, where `<key>` is
 a filesystem-safe digest of `(base_url host:port, tenant)`. Mode `0600`,
 atomic temp-file + `os.replace` publish. On a genuine in-process cache MISS
-(never on a refresh-due-but-still-cached entry), `DataTokenManager.
-bearer_for` reads the lease file BEFORE minting, accepting it only when its
-format version, tenant, and base-url digest all match AND its remaining
-TTL exceeds the same 20% refresh threshold the in-process cache enforces;
-any other state (absent, corrupt, foreign, stale) is a clean miss and the
-manager mints as before. A lease-write failure is logged as a warning and
+and also on a refresh-due-but-still-cached entry,
+`DataTokenManager.bearer_for` reads the lease file BEFORE minting, accepting
+it only when its format version, tenant, and base-url digest all match AND
+it is not yet refresh-due for the reading manager (each manager draws its
+own refresh point once, 15% to 25% of the TTL remaining, so borrowers of one
+lease do not come due together); a refresh-due entry adopts only a sibling's
+remint (a different token that expires later) and otherwise mints under the
+host's mint lock, so one process per host mints. A refresh that fails while
+the cached token is still valid keeps that token (one mint attempt, no retry
+sleep) and waits a jittered 15 to 45 seconds; any other state (absent,
+corrupt, foreign, stale) is a clean miss and the manager mints as before. A lease-write failure is logged as a warning and
 NEVER fails the mint — the lease is an optimization, the mint is the
 source of truth. `invalidate()` (the 401 self-heal path) removes the lease
 file alongside the in-process entry, best-effort. A mint also removes up
