@@ -8904,41 +8904,32 @@ def traverse(
 ) -> dict:
     """Walk the catalog link graph from seed tumblers (RDR-078 P3).
 
-    Without a `policy` documents and chunk ids come back in graph order; with
-    one they are ranked and the chunk budget is shared (below).
-
     Use `search_graph_hop` instead when the reachable set should also be
-    vector-ranked in one call. Accepts either `link_types` or `purpose`,
-    never both.
+    vector-ranked in one call. Takes `link_types` or `purpose`, never both.
 
-    Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`:
-    the reachable document tumblers, the chunk ids (chashes) of those
-    documents' manifests, and their collections (sorted). `$stepN.ids` with
-    `$stepN.collections` hydrates through `store_get_many`. When `purpose`
-    does not resolve to a known name the call fails with
-    `{"tumblers": [...], "ids": [...], "collections": [...], "warning": "..."}`
-    as an error result, and so does a call where no seed parses as a
-    tumbler. A `warning` entry on a successful result names seeds that
-    did not parse, or says the chunk ids are missing because the manifest
-    lookup failed.
+    Returns `{"tumblers": [...], "ids": [...], "collections": [...],
+    "warning": "..."}`: the reachable document tumblers, their manifests'
+    chunk ids (chashes) and their collections; `warning` only when set.
+    `$stepN.ids` with `$stepN.collections` hydrates
+    through `store_get_many`. An unknown `purpose`, or no seed that parses
+    as a tumbler, is an error result carrying a `warning`; on success a
+    `warning` names unparsed seeds or a failed manifest lookup.
 
     Constraints:
-    - `ids` is capped at 300 (a two-hop walk from one note reached 1,196
-      chunks); when capped, an `ids_truncated` entry carries the total and
-      kept counts. `tumblers` is not capped.
-    - `link_types` and `purpose` are mutually exclusive.
+    - `ids` is capped at 300; when capped, `ids_truncated` carries the
+      total and kept counts. `tumblers` is not capped.
 
-    With a `policy` (RDR-232 section 3) the policy runs after the walk and
-    before manifest expansion: documents outside `allowed_collections` are
-    dropped, the rest ranked by link role, then link distance, then tumbler,
-    and the non-seed ones capped at `max_documents`; manifests are read for
-    the retained documents only; `max_chunks` is spent with a reserved share
-    per document. The result adds `chunk_collections` (one collection per id,
-    aligned with `ids`) and `traversal`, a report with the walked, retained
-    and dropped counts, `possibly_truncated` (the engine caps a walk at 500
-    nodes: a response that size is never reported as contained), `widened`
-    and `scope_conflict`. A policy that cannot be applied returns no graph
-    evidence and a `warning`; it never falls back to an unrestricted walk.
+    Without a `policy` the result is in graph order. With a `policy`
+    (RDR-232 section 3) it runs after the walk, before manifest expansion:
+    documents outside `allowed_collections` are dropped, the rest ranked by
+    link role, distance, then tumbler, and non-seeds capped at
+    `max_documents`; only retained manifests are read and `max_chunks` is
+    shared per document. The result adds `chunk_collections` (one per id)
+    and `traversal`: walked, retained and dropped counts,
+    `possibly_truncated` (the engine caps a walk at 500 nodes, so a
+    response that size is never contained), `widened` and `scope_conflict`.
+    A policy that cannot be applied returns no graph evidence and a
+    `warning`, never an unrestricted walk.
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans import traversal_policy as _tp  # noqa: PLC0415 — deferred, like this function's other imports
