@@ -658,8 +658,8 @@ mode): the one that pins `engine-service-v0.1.165`, or later. A branch off an
 older tag has neither, and the gate rightly refuses `scripts/` in the diff.
 There is no exemption.
 
-**2. Branch off the tag, never off `develop`.** In its own worktree (see "Where
-to run the battery"):
+**2. Branch off the tag, never off `develop`.** In a sibling worktree of the primary
+checkout (see "Where to run the battery"):
 
 ```bash
 git fetch origin --tags
@@ -673,8 +673,8 @@ git cherry-pick -x <sha> [<sha> ...]     # -x records the develop sha in each me
 
 The nx code under test is the tag's own, so there is no main/develop skew and
 Step 7's pre-merge of `main` has nothing to do. A conflict in `CHANGELOG.md` or
-`conexus/PENDING_RELEASE.md` is resolved by dropping develop's side; the bump
-commit writes both. A commit that also touches `src/` or `service/` cannot be
+`conexus/PENDING_RELEASE.md` is resolved by keeping the release branch's side (`git checkout --ours <file>`
+during the pick); the bump commit writes both. A commit that also touches `src/` or `service/` cannot be
 cherry-picked whole: that entry waits for a normal release. A change that names
 an nx verb the tag lacks fails the existing verb-rot test in the preflight; it
 is not eligible either.
@@ -688,7 +688,8 @@ the entries that shipped. The engine pin does not move, and a diff that touches
 unless `uv sync` changed a dependency (in which case this is not a fast-lane
 release). Steps 4a and 4b do not apply. The new `CHANGELOG.md` section must name
 its engine pairing as its first `engine-service-v` mention, for example `Pairs
-with engine-service-vA.B.C (REQUIRED_ENGINE_VERSION unchanged from X.Y.Z)`,
+with engine-service-vA.B.C (REQUIRED_ENGINE_VERSION unchanged from X.Y.Z)`
+(A.B.C is the engine tag the base tag's own CHANGELOG section names),
 or the preflight's pin-tests fail (`tests/test_engine_version.py`, nexus-9gggv).
 Commit it all as one `chore(release): conexus X.Y.N` commit.
 
