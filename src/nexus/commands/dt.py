@@ -1454,14 +1454,26 @@ def index_cmd(
 
     # RDR-139 Layer C: gap-fill bibliographic metadata over the collections
     # this run touched, unchanged records included (nexus-g276c). Runs once
-    # per distinct collection (title-group oriented),
-    # after all records land so a multi-record paper enriches as one group.
+    # per distinct collection, after all records land: nexus-6pfgb.21 selects
+    # by the catalog document (its manifest, its own catalog row), so the
+    # records of this run are in the catalog by now. The catalog cannot always
+    # answer (not initialised, unreachable): the enrich verb then stops with no
+    # change and raises, and the indexing above is already done, so the failure
+    # is a warning here, the summary below is still printed, and the remaining
+    # collections are still tried.
     if enrich and touched_collections:
         from nexus.commands.enrich import run_bib_enrichment  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
 
         for coll in sorted(touched_collections):
             click.echo(f"\nEnriching bibliographic metadata: {coll}")
-            run_bib_enrichment(coll, source="dt")
+            try:
+                run_bib_enrichment(coll, source="dt")
+            except click.ClickException as exc:
+                click.echo(
+                    f"Warning: bibliographic enrichment of {coll} did not run "
+                    f"(indexing is unaffected): {exc.format_message()}",
+                    err=True,
+                )
 
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
     if unchanged:

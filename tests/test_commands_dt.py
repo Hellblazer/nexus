@@ -2627,6 +2627,34 @@ class TestEnrichWiring:
         assert calls == [("knowledge__fixture-subject__voyage-context-3__v1", {"source": "dt"})]  # nexus-t952k
         assert "Enriching bibliographic metadata" in result.output
 
+    def test_a_catalog_failure_in_enrichment_keeps_the_index_summary(
+        self, runner, fake_selectors, fake_dispatcher, monkeypatch,
+    ):
+        """nexus-6pfgb.21: ``run_bib_enrichment`` stops with a ClickException when the catalog
+        cannot answer. The records are already indexed, so ``dt index`` warns, prints its
+        summary and exits 0."""
+        import click
+
+        from nexus.cli import main
+
+        tried: list[str] = []
+
+        def _enrich(coll, **kw):
+            tried.append(coll)
+            raise click.ClickException("the catalog is not initialised; nothing was changed.")
+
+        monkeypatch.setattr("nexus.commands.enrich.run_bib_enrichment", _enrich)
+        fake_selectors["selection"].return_value = [("U1", "/a.pdf"), ("U2", "/b.pdf")]
+        result = runner.invoke(main, [
+            "dt", "index", "--selection",
+            "--collection", "knowledge__fixture-subject", "--enrich",
+        ])
+        assert result.exit_code == 0, result.output
+        assert tried, "enrichment was not attempted"
+        assert "did not run" in result.output
+        assert "the catalog is not initialised" in result.output
+        assert "Indexed " in result.output
+
     def test_no_enrich_flag_skips_enrichment(
         self, runner, fake_selectors, fake_dispatcher, monkeypatch,
     ):

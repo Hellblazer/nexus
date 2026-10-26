@@ -1516,6 +1516,30 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
     return count
 
 
+def _live_holders_of_chunk(cat: "CatalogReader", collection: str, chunk_id: str) -> list:
+    """The catalog entries of the live documents whose manifest names *chunk_id*
+    in *collection* (nexus-6pfgb.21). Collection-scoped through
+    ``live_owners_in_collection`` (the engine's chash-positions route where its
+    rows carry a collection, the referencing manifests otherwise), so it holds
+    on engine 0.1.164. Raises on a catalog read failure rather than answering
+    "nobody holds it".
+
+    One element per live OWNER, so ``len`` is the owner count: an owner the
+    catalog did not resolve is ``None`` in its slot rather than dropped, because
+    a chunk two live documents hold is shared whether or not both resolve."""
+    import re  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+    from nexus.catalog.orphan_backfill import live_owners_in_collection  # noqa: PLC0415 — deferred import; avoids a module cycle and CLI startup cost
+
+    if not re.fullmatch(r"[0-9a-f]{64}", chunk_id or ""):
+        return []  # not a chash: no manifest can name it, and the engine 400s a malformed one
+    tumblers = live_owners_in_collection(cat, [chunk_id], collection).get(chunk_id, [])
+    if not tumblers:
+        return []
+    entries = cat.resolve_many(list(tumblers))
+    return [entries.get(t) for t in tumblers]
+
+
 def _backfill_papers(
     cat: "CatalogReader", t3: object, dry_run: bool, repo_collections: set[str] | None = None,
     *, writer: object = None,
@@ -1553,14 +1577,13 @@ def _backfill_papers(
         year = 0
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred import; rare/branch-local path
 
+        first_id = ""
+        meta: dict | None = None
         try:
             col = t3.get_or_create_collection(col_name)
             result = col.get(limit=1, include=["metadatas"], include_non_live=True)
             if result.get("ids") and result.get("metadatas"):
-                meta = result["metadatas"][0]
-                title = meta.get("title", "") or title
-                author = meta.get("bib_authors", "") or meta.get("author", "")
-                year = int(meta.get("bib_year", 0) or 0)
+                first_id, meta = result["ids"][0], result["metadatas"][0]
         except VectorServiceError as exc:
             # nexus-ou4tb walk: registering a paper with DEFAULT metadata
             # (collection name as title, no author, year 0) on a degraded
@@ -1599,13 +1622,55 @@ def _backfill_papers(
                     _note_skipped_deleted(col_name, 1)
                     continue
 
+        # A dry run prints the title it would register, so it reads it; a real run reads
+        # it only for a collection it is going to register (a registered one costs no
+        # holder lookup, and its shared first chunk is not warned about on every re-run).
+        curator = None
+        existing: list = []
+        if not dry_run:
+            curator = _get_or_create_curator(cat, "papers", writer=w)
+            existing = [e for e in cat.by_owner(curator) if e.physical_collection == col_name]
+        if (dry_run or not existing) and meta is not None:
+            try:
+                # nexus-6pfgb.21 (x54wv census row 14): the chunk row's title and
+                # bib_* are the LAST writer's, shared by every document holding
+                # the text. A chunk no live document holds (the recovery case this
+                # verb exists for) has nobody else's value to contradict, so its
+                # row is read as before. A chunk one live document holds is that
+                # document's: read its catalog row. A chunk several hold names no
+                # one, so the collection is skipped, not registered under a
+                # stranger's title.
+                held_by = _live_holders_of_chunk(cat, col_name, first_id)
+            except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
+                click.echo(f"  warning: {col_name} skipped — metadata unreadable ({exc}); re-run after fixing")
+                _log.warning("backfill_papers_metadata_error", col=col_name, exc_info=True)
+                continue
+            if len(held_by) > 1:
+                click.echo(
+                    f"  warning: {col_name} skipped — its first chunk is held by "
+                    f"{len(held_by)} documents, so its row names none of them; "
+                    "register the paper by hand"
+                )
+                _log.warning(
+                    "backfill_papers_skipped_shared_first_chunk",
+                    col=col_name, holders=len(held_by),
+                )
+                continue
+            if held_by and held_by[0] is not None:
+                holder = held_by[0]
+                title = holder.title or title
+                author = holder.bib_authors or holder.author or ""
+                year = int(holder.bib_year or holder.year or 0)
+            else:
+                title = meta.get("title", "") or title
+                author = meta.get("bib_authors", "") or meta.get("author", "")
+                year = int(meta.get("bib_year", 0) or 0)
+
         if dry_run:
             click.echo(f"  [dry-run] Would register paper: {title} → {col_name}")
             count += 1
             continue
 
-        curator = _get_or_create_curator(cat, "papers", writer=w)
-        existing = [e for e in cat.by_owner(curator) if e.physical_collection == col_name]
         if not existing:
             w.register(
                 owner=curator, title=title, content_type="paper",

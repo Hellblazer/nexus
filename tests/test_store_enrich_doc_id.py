@@ -24,6 +24,7 @@ from unittest.mock import patch
 import pytest
 
 from tests._catalog_fixture_ops import documents_by_title
+from tests._enrich_holders import held
 from tests._note_write_double import route_note_writes_to
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
@@ -278,7 +279,9 @@ def test_enrich_preserves_doc_id_round_trip(
             "_resolved_via": "title",
         }
 
+    # nexus-6pfgb.21: the chunk is the catalog document's by its manifest, not by its title.
     with patch("nexus.db.make_t3", return_value=local_t3), \
+         held({"chunk-1": "Round-Trip Test Title"}), \
          patch("nexus.commands.enrich._resolve_bib_for_title", side_effect=fake_resolve), \
          patch("nexus.commands.enrich._catalog_enrich_hook"):
         runner = CliRunner()

@@ -152,7 +152,6 @@ class TestLayerCFallback:
         primary = {"year": 2024, "venue": "VLDB", "authors": "A", "doi": "10.1/A"}
         assert _merge_bib_gapfill(primary, {}) == primary
 
-    @pytest.mark.t2_tenant
     def test_enrich_source_dt_makes_no_dt_call_when_unavailable(self):
         # CLI path: available()=False → dt_resolve_doi is never invoked, the
         # primary miss is skipped, exit 0 (exact pre-RDR-139 behaviour).
@@ -160,9 +159,11 @@ class TestLayerCFallback:
 
         from click.testing import CliRunner
         from nexus.commands.enrich import enrich
+        from tests._enrich_holders import held
 
         meta = {"title": "P", "source_path": "/p.pdf"}
-        with patch("nexus.mcp_client.devonthink.available", return_value=False), \
+        with held({"c1": "P"}), \
+             patch("nexus.mcp_client.devonthink.available", return_value=False), \
              patch("nexus.mcp_client.devonthink.dt_resolve_doi") as mock_resolve, \
              patch("nexus.bib_enricher_openalex.enrich", return_value={}), \
              patch("nexus.bib_enricher_openalex.enrich_by_doi", return_value={}), \
@@ -186,7 +187,7 @@ class TestLayerCFallback:
             )
             assert res.exit_code == 0, res.output
             mock_resolve.assert_not_called()
-            assert "1 titles had no" in res.output
+            assert "1 documents had no" in res.output
 
 
 class TestLayerDFallback:

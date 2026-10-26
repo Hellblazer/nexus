@@ -410,54 +410,102 @@ def test_export_ships_key_registered_from_the_catalog_document() -> None:
     assert owners_for(entry(H_A, H_A, state="indexing"))["index_content_hash"] == ""
 
 
-# ── (d) the enrich lookup title ────────────────────────────────────────────────
+# ── (d) enrich selects chunks by the catalog Document that holds them ─────────
+#
+# nexus-6pfgb.21 replaced the title-group lookup this section pinned (nexus-g276c,
+# nexus-3ajpd): the unit is now the Document, whose catalog title IS the lookup title and whose
+# manifest names its chunks. The helper below is the one place enrich asks "who holds these?".
+
+H1, H2, H3 = "a" * 64, "b" * 64, "c" * 64
 
 
-def test_enrich_title_for_a_group_with_a_shared_chunk_is_the_owning_documents() -> None:
-    """Census row 10. A title group holds A's own chunk and a chunk shared with B. The chunk rows
-    carry different documents' file hashes (the shared one B's), so the old hash-keyed lookup saw
-    two catalog titles and fell back to the chunk title. The documents holding ALL the group's
-    chunks are the intersection: A."""
-    from nexus.commands.enrich import _catalog_title_for_chunks
-
-    owners = {
-        "own": {"1.1.1": "A: the full title"},
-        "shared": {"1.1.1": "A: the full title", "1.1.2": "B: another paper"},
-    }
-    assert _catalog_title_for_chunks(["own", "shared"], owners) == "A: the full title"
-
-
-def test_enrich_title_is_not_the_last_writers_for_a_group_of_only_shared_chunks() -> None:
-    """The group is only chunks A and B share: the old lookup keyed on the chunk row's hash and
-    named whichever document wrote last. Two owners with different titles name nobody."""
-    from nexus.commands.enrich import _catalog_title_for_chunks
-
-    owners = {"shared": {"1.1.1": "A: the full title", "1.1.2": "B: another paper"}}
-    assert _catalog_title_for_chunks(["shared"], owners) == ""
+def _holders_reader(rows, entries, *, manifests=None):
+    """A reader whose chash-positions route answers *rows* (``None`` when *manifests* is given:
+    an engine without the route), and whose manifests answer the fallback."""
+    return SimpleNamespace(
+        chash_positions=lambda chashes: (
+            None if manifests is not None
+            else [r for r in rows if r["chash"] in set(chashes)]
+        ),
+        docs_and_manifests_for_chashes=lambda chashes: ({}, manifests or {}),
+        resolve_many=MagicMock(side_effect=lambda ts: {t: entries[t] for t in ts if t in entries}),
+        close=lambda: None,
+    )
 
 
-def test_enrich_title_is_empty_for_a_group_mixing_two_documents_chunks() -> None:
-    from nexus.commands.enrich import _catalog_title_for_chunks
-
-    owners = {"x": {"1.1.1": "A"}, "y": {"1.1.2": "B"}}
-    assert _catalog_title_for_chunks(["x", "y"], owners) == ""
-    assert _catalog_title_for_chunks(["unowned"], owners) == ""
+def _row(chash, doc, collection=COLLECTION):
+    return {"chash": chash, "doc_id": doc, "position": 0, "chunk_count": 1, "collection": collection}
 
 
-def test_enrich_owner_titles_come_from_the_manifest_not_the_chunk_row(monkeypatch) -> None:
-    from nexus.commands.enrich import _catalog_owner_titles
+def test_enrich_holders_come_from_the_manifest_in_this_collection(monkeypatch) -> None:
+    from nexus.commands.enrich import _catalog_documents_for_chunks
 
-    reader = MagicMock()
-    reader.docs_for_chashes.return_value = {"own": ["1.1.1"], "shared": ["1.1.1", "1.1.2", "9.9.9"]}
-    reader.resolve_many.return_value = {
-        "1.1.1": SimpleNamespace(title="A: the full title", physical_collection=COLLECTION),
-        "1.1.2": SimpleNamespace(title="B: another paper", physical_collection=COLLECTION),
-        "9.9.9": SimpleNamespace(title="Elsewhere", physical_collection="docs__other__m__v1"),
-    }
+    reader = _holders_reader(
+        [
+            _row(H1, "1.1.1"), _row(H2, "1.1.1"), _row(H2, "1.1.2"),
+            _row(H2, "9.9.9", "docs__other__m__v1"),   # same text, another collection
+        ],
+        {
+            "1.1.1": SimpleNamespace(title="A: the full title"),
+            "1.1.2": SimpleNamespace(title="B: another paper"),
+        },
+    )
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader, raising=False)
-    out = _catalog_owner_titles(COLLECTION, ["own", "shared"])
-    assert out == {
-        "own": {"1.1.1": "A: the full title"},
-        "shared": {"1.1.1": "A: the full title", "1.1.2": "B: another paper"},
-    }
-    reader.docs_for_chashes.assert_called_once_with(["own", "shared"])
+
+    owners, entries = _catalog_documents_for_chunks(COLLECTION, [H1, H2, H3])
+
+    assert owners == {H1: ["1.1.1"], H2: ["1.1.1", "1.1.2"]}   # H3 is held by nobody
+    assert sorted(entries) == ["1.1.1", "1.1.2"]
+    assert entries["1.1.1"].title == "A: the full title"
+    reader.resolve_many.assert_called_once_with(["1.1.1", "1.1.2"])
+
+
+def test_enrich_holders_on_an_engine_whose_rows_carry_no_collection(monkeypatch) -> None:
+    """Engine 0.1.164: chash-positions rows carry no collection, so the referencing manifests
+    (which do) decide whether a document holds the chunk in THIS collection."""
+    from nexus.commands.enrich import _catalog_documents_for_chunks
+
+    here = SimpleNamespace(chash=H1, collection=COLLECTION)
+    elsewhere = SimpleNamespace(chash=H1, collection="docs__other__m__v1")
+    reader = _holders_reader(
+        [], {"1.1.1": SimpleNamespace(title="A")},
+        manifests={"1.1.1": [here], "9.9.9": [elsewhere]},
+    )
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader, raising=False)
+
+    owners, _entries = _catalog_documents_for_chunks(COLLECTION, [H1])
+
+    assert owners == {H1: ["1.1.1"]}
+
+
+def test_enrich_holders_never_ask_the_engine_about_an_id_that_is_not_a_chash(monkeypatch) -> None:
+    from nexus.commands.enrich import _catalog_documents_for_chunks
+
+    asked: list[list[str]] = []
+    reader = _holders_reader([], {})
+    reader.chash_positions = lambda chashes: asked.append(list(chashes)) or []
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader, raising=False)
+
+    assert _catalog_documents_for_chunks(COLLECTION, ["chunk-1", "", H1]) == ({}, {})
+    assert asked == [[H1]]
+
+
+def test_enrich_holders_refuse_rather_than_guess_when_the_catalog_cannot_answer(monkeypatch) -> None:
+    """The title-group fallback is the defect: no catalog, no enrichment, and nothing written."""
+    import click
+
+    from nexus.commands.enrich import _catalog_documents_for_chunks
+
+    reader = _holders_reader([], {})
+
+    def _boom(_chashes):
+        raise RuntimeError("engine down")
+
+    reader.chash_positions = _boom
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: reader, raising=False)
+    with pytest.raises(click.ClickException, match="engine down.*nothing was changed"):
+        _catalog_documents_for_chunks(COLLECTION, [H1])
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: None, raising=False)
+    with pytest.raises(click.ClickException, match="not initialised"):
+        _catalog_documents_for_chunks(COLLECTION, [H1])

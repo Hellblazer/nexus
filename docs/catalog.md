@@ -140,11 +140,11 @@ You don't have to register documents manually. Every indexing pathway does it au
 | `nx index pdf paper.pdf` | PDF with title, author, page count |
 | `nx index rdr .` | RDR documents with frontmatter titles |
 | `nx index md file.md` | Markdown documents |
-| `nx enrich bib <collection>` | Adds Semantic Scholar metadata + enables citation link generation |
+| `nx enrich bib <collection>` | Adds Semantic Scholar or OpenAlex metadata (bib columns and the paper's reference list) to each document's catalog row, then auto-generates `cites` links between enriched papers |
 | `nx enrich aspects <collection>` | Extracts structured per-paper aspects (RDR-089) into T2 ``document_aspects`` |
 | MCP `store_put` | Knowledge entries stored by agents |
 
-After `nx enrich bib`, run `nx catalog generate-links` to create citation links from the newly fetched references.
+`nx enrich bib` creates the citation links itself when it enriched at least one document (it prints the count). A reference matches a paper only within one id space: a Semantic Scholar id against a paper enriched by Semantic Scholar, an OpenAlex id against one enriched by OpenAlex. `nx catalog generate-links` re-runs the scan, for example after enriching a second collection with the other backend's ids.
 
 ### Taxonomy and topic links
 

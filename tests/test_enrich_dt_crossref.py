@@ -22,7 +22,7 @@ from nexus.commands.enrich import (
     enrich,
 )
 from nexus.db.http_vector_client import HttpVectorClient
-import pytest
+from tests._enrich_holders import held
 
 
 # --- _dt_crossref_bib: map the live CrossRef flat dict -> nexus bib dict ----
@@ -142,7 +142,6 @@ def _two_chunk_collection(mock_retry: MagicMock) -> MagicMock:
     return mock_retry
 
 
-@pytest.mark.t2_tenant
 @patch("nexus.mcp_client.devonthink.available", return_value=True)
 @patch("nexus.mcp_client.devonthink.dt_resolve_doi")
 @patch("nexus.bib_enricher_openalex.enrich")
@@ -177,11 +176,13 @@ def test_source_dt_gapfills_when_primary_misses(
     mock_t3.return_value = mock_db
 
     runner = CliRunner()
-    result = runner.invoke(
-        enrich, ["bib", "knowledge__t", "--delay", "0", "--source", "dt"]
-    )
+    with held({"c1": "Paper A", "c2": "Paper A"}), \
+            patch("nexus.commands.enrich._catalog_enrich_hook", return_value=True):
+        result = runner.invoke(
+            enrich, ["bib", "knowledge__t", "--delay", "0", "--source", "dt"]
+        )
     assert result.exit_code == 0, result.output
-    assert "enriched 2 chunks across 1 titles" in result.output
+    assert "enriched 2 chunks across 1 documents" in result.output
     mock_dt_resolve.assert_called_once()
     # the update payload carried DT's year
     update_call = [c for c in mock_retry.call_args_list
@@ -190,7 +191,6 @@ def test_source_dt_gapfills_when_primary_misses(
     assert update_call[-1].kwargs["metadatas"][0]["bib_year"] == 2013
 
 
-@pytest.mark.t2_tenant
 @patch("nexus.mcp_client.devonthink.available", return_value=False)
 @patch("nexus.bib_enricher_openalex.enrich")
 @patch("nexus.bib_enricher_openalex.enrich_by_doi")
@@ -221,11 +221,11 @@ def test_source_dt_unavailable_degrades_to_primary_only(
     mock_db.get_or_create_collection.return_value = MagicMock()
     mock_t3.return_value = mock_db
 
-    with patch("nexus.mcp_client.devonthink.dt_resolve_doi") as mock_dt:
+    with patch("nexus.mcp_client.devonthink.dt_resolve_doi") as mock_dt, held({"c1": "Paper A"}):
         runner = CliRunner()
         result = runner.invoke(
             enrich, ["bib", "knowledge__t", "--delay", "0", "--source", "dt"]
         )
         assert result.exit_code == 0, result.output
-        assert "1 titles had no" in result.output
+        assert "1 documents had no" in result.output
         mock_dt.assert_not_called()
