@@ -31,6 +31,10 @@ The seven measures, with their pre-change reading:
 
 CLI: ``uv run python scripts/bench/answer_shape_metrics.py <golden.yaml> <observations.json>``
 prints the seven measures as JSON.
+
+Quoting a baseline: state :data:`BASELINE_CAVEATS` with it (``eligible_plan_recall`` is a blacklist
+reading, the evidence-side measures score one request, and the grown-clone plan-side figure is
+forced by construction).
 """
 from __future__ import annotations
 
@@ -57,6 +61,29 @@ MEASURE_NAMES: tuple[str, ...] = (
     "scope_leakage",
     "repair_yield_and_cost",
     "terminal_completeness",
+)
+
+
+#: What must be stated wherever a baseline taken from these measures is quoted (nexus-jypmj.1.14; the
+#: nexus-jypmj.1.1 critique, Significant 2; the third from the 1.14 critique, blocker 1). Three
+#: readings a bare number invites and cannot support.
+BASELINE_CAVEATS: tuple[str, ...] = (
+    "eligible_plan_recall counts a request as served when some candidate plan is not labeled "
+    "unacceptable. Only unacceptable plans are labeled (no acceptable list exists), so it is a "
+    "blacklist reading: it cannot say a candidate is the right shape, only that it is not a known "
+    "wrong one.",
+    "primary_source_coverage, facet_evidence_coverage and scope_leakage score one request (n=1: G06, "
+    "the ART RDR-084 synthesis, the only request with a fixture-backed evidence set), so each is a "
+    "single-request reading and not a rate over the golden set.",
+    "The plan-side figure taken with the grown clone of plan 473 (wrong_shape_admission_rate 0.1667 "
+    "against the builtins-only floor 0.125) is forced by construction: the clone's originating "
+    "question is the G06 request text, so the matcher's verbatim-repeat rule selects it for G06 at "
+    "confidence 1.0. It covers that one request (+1 admission), it is not a measured rate, and it says "
+    "nothing about how plan 473 matched live. The clone stands for one Phase 2 exit clause only, "
+    "'unknown-grown plans cannot bypass the gate'; the clause '473 is ineligible' (a builtin-tagged "
+    "row declaring lookup) is not measured by it. Plan 473's builtin origin is inferred from RDR-232 "
+    "line 1606 and T2 nexus_rdr/189-research-11, not read live. The top-level plan-side measures in "
+    "the report are the builtins-only floor.",
 )
 
 

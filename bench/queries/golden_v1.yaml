@@ -18,7 +18,15 @@
 #                       from. Evidence outside them is scope leakage unless a permitted reason is
 #                       recorded.
 #   unacceptable_plans  "<verb>:<strategy>" keys of builtin plans that are the wrong shape for the
-#                       request, read from each plan's description, not from a declared kind.
+#                       request, read from each plan's description, not from a declared kind. A
+#                       grown plan has no template strategy to name it, so the fixture's grown clone
+#                       of plan 473 (nexus-jypmj.1.14) is named "grown:hybrid-factual-lookup-473"; it
+#                       is listed wherever "lookup:hybrid-factual-lookup" is, since it has 473's body.
+#                       The clone stands for ONE Phase 2 exit clause, "unknown-grown plans cannot
+#                       bypass the gate" (it is stored ad-hoc,grown and carries no answer-kind
+#                       declaration). It does NOT measure the clause "473 is ineligible" (a
+#                       builtin-tagged row that declares lookup). Plan 473's builtin origin is inferred
+#                       from RDR-232 line 1606 and T2 nexus_rdr/189-research-11; no live read was made.
 #
 # Real requests: the first three lookups and the post-store-hook and retrieval-layer requests are
 # the RDR-090 spike queries (ground_truth kept so the spike's NDCG axis still reads); the ART
@@ -26,7 +34,13 @@
 # text from nx_answer_runs run 722, 2026-10-23T22:25:33Z). The rest are requests of the shapes the RDR names, written against this
 # repository's own RDRs and code.
 #
-# Changing a label or adding a request after a baseline is recorded bumps golden_set_version.
+# A relabel that can change a measure of an already-recorded observation set bumps
+# golden_set_version; a key no recorded observation can contain does not. (Adding a request changes
+# the set's size, so it bumps too.) nexus-jypmj.1.14 added the one grown key above without a bump:
+# every recorded observation set is builtins-only, none can contain a "grown:" key, so every recorded
+# measure reads as it did and the report carries the version it loads from bench.schema.
+# tests/test_rdr232_grown_clone.py pins that the key appears exactly where
+# "lookup:hybrid-factual-lookup" does and that no builtin plan is tagged grown.
 golden_set_version: 1
 queries:
   # ── lookup ───────────────────────────────────────────────────────────────
@@ -128,6 +142,7 @@ queries:
     allowed_corpora: ["rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:find-by-author"
       - "research:citation-traversal"
@@ -142,6 +157,7 @@ queries:
     allowed_corpora: ["rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:find-by-author"
       - "research:citation-traversal"
@@ -156,6 +172,7 @@ queries:
     allowed_corpora: ["docs", "rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:find-by-author"
       - "research:citation-traversal"
@@ -173,6 +190,7 @@ queries:
     allowed_corpora: ["rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:find-by-author"
       - "research:document-discovery"
@@ -194,6 +212,7 @@ queries:
     allowed_corpora: ["rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "analyze:default"
       - "query:abstract-themes"
       - "debug:default"
@@ -208,6 +227,7 @@ queries:
     allowed_corpora: ["rdr", "docs"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "analyze:default"
       - "query:abstract-themes"
       - "debug:default"
@@ -222,6 +242,7 @@ queries:
     allowed_corpora: ["knowledge"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "analyze:default"
       - "debug:default"
       - "review:default"
@@ -238,6 +259,7 @@ queries:
     allowed_corpora: ["rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:document-discovery"
       - "research:find-by-author"
@@ -256,6 +278,7 @@ queries:
     allowed_corpora: ["docs", "rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:document-discovery"
       - "research:find-by-author"
@@ -269,6 +292,7 @@ queries:
     allowed_corpora: ["rdr", "code"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:document-discovery"
       - "research:find-by-author"
@@ -283,6 +307,7 @@ queries:
     allowed_corpora: ["rdr", "code"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "query:abstract-themes"
       - "research:find-by-author"
@@ -296,6 +321,7 @@ queries:
     allowed_corpora: ["docs", "code"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "query:abstract-themes"
       - "research:find-by-author"
@@ -309,6 +335,7 @@ queries:
     allowed_corpora: ["code", "rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "query:abstract-themes"
       - "research:find-by-author"
@@ -323,6 +350,7 @@ queries:
     allowed_corpora: ["code", "rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "query:abstract-themes"
       - "research:find-by-author"
       - "research:corpus-coverage-check"
@@ -337,6 +365,7 @@ queries:
     allowed_corpora: ["code", "rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "query:abstract-themes"
       - "research:find-by-author"
       - "research:corpus-coverage-check"
@@ -351,6 +380,7 @@ queries:
     allowed_corpora: ["docs", "code"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "query:abstract-themes"
       - "research:find-by-author"
       - "research:corpus-coverage-check"
@@ -366,6 +396,7 @@ queries:
     allowed_corpora: ["knowledge", "code", "docs", "rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:find-by-author"
       - "research:citation-traversal"
@@ -379,6 +410,7 @@ queries:
     allowed_corpora: ["knowledge", "code", "docs", "rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:find-by-author"
       - "research:citation-traversal"
 
@@ -391,6 +423,7 @@ queries:
     allowed_corpora: ["knowledge", "code", "docs", "rdr"]
     unacceptable_plans:
       - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
       - "research:corpus-coverage-check"
       - "research:find-by-author"
       - "research:citation-traversal"

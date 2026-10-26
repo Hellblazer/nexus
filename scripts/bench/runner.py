@@ -44,8 +44,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from bench.metrics import multi_hop_precision
-from bench.schema import Query, load_queries
+import yaml
+
+from bench.metrics import dedupe_by_doc, grade_for_path, multi_hop_precision, ndcg_at_k
+from bench.schema import GOLDEN_REQUIRED_FIELDS, Query, load_golden_set, load_queries
 
 PathHandler = Callable[[Query], dict[str, Any]]
 DEFAULT_PATHS = ("A", "B", "C")
@@ -54,6 +56,54 @@ K = 3
 
 def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
+
+
+#: Request keys only a golden set carries (the RDR-232 labels). A file with one of them and no version
+#: stamp is a golden set that lost its stamp, not an RDR-090 file.
+_GOLDEN_ONLY_KEYS = frozenset(GOLDEN_REQUIRED_FIELDS)
+
+
+def load_query_file(path: Path) -> list[Query]:
+    """Load a bench query file: strictly as an RDR-232 golden set when it declares a
+    ``golden_set_version`` (so a missing label or an unsupported version is refused here, not scored),
+    leniently otherwise (the RDR-090 files such as ``spike_5q.yaml``).
+
+    A file that carries golden-only request fields (``answer_kind``, ``unacceptable_plans``, ...) but no
+    ``golden_set_version`` is refused: stripping the stamp must not switch off the strict loader.
+    """
+    with open(path, encoding="utf-8") as f:
+        head = yaml.safe_load(f) or {}
+    if isinstance(head, dict) and "golden_set_version" in head:
+        return load_golden_set(path)
+    raw = head.get("queries") if isinstance(head, dict) else None
+    if isinstance(raw, list):
+        found = sorted({k for q in raw if isinstance(q, dict) for k in q.keys() & _GOLDEN_ONLY_KEYS})
+        if found:
+            raise ValueError(
+                f"{path}: carries golden-set fields {found} but no golden_set_version; "
+                "a golden set declares its version"
+            )
+    return load_queries(path)
+
+
+def _score_ndcg(row: dict[str, Any], q: Query) -> None:
+    """Score NDCG@K from the row's retrieved chunks against the request's ``ground_truth``.
+
+    Only a request with ground truth is scored: its ideal ranking is non-empty, so a 0.0 means the
+    retrieval missed. A request without it has an empty ideal ranking, ``ndcg_at_k`` returns 0.0 by
+    convention, and that zero must not be averaged in as a failure, so its row is marked unscored
+    and keeps whatever the handler reported. An errored row is not scored either. The runner scores
+    from ``chunks`` itself rather than trusting a handler's own ``ndcg_at_3``, so every path is graded
+    by the same arithmetic.
+    """
+    row["ndcg_scored"] = False
+    if not q.ground_truth or row.get("error") is not None:
+        return
+    deduped = dedupe_by_doc(row.get("chunks", []))[:K]
+    grades = [grade_for_path(c.get("source_path", ""), q.ground_truth) for c in deduped]
+    row["grades"] = grades
+    row["ndcg_at_3"] = ndcg_at_k(grades, q.ground_truth, k=K)
+    row["ndcg_scored"] = True
 
 
 def run_bench(
@@ -94,6 +144,7 @@ def run_bench(
             # Compute multi-hop precision when GT carries required keys.
             paths = [c.get("source_path", "") for c in row.get("chunks", [])]
             row["multi_hop_precision"] = multi_hop_precision(paths, q.ground_truth)
+            _score_ndcg(row, q)
             rows.append(row)
 
     sweep_elapsed_s = time.monotonic() - sweep_t0
@@ -101,6 +152,7 @@ def run_bench(
     # ── Aggregations ────────────────────────────────────────────────
     by_path: dict[str, list[dict[str, Any]]] = {label: [] for label in handlers}
     by_category: dict[str, dict[str, list[float]]] = {}
+    by_category_scored: dict[str, dict[str, list[float]]] = {}
     qid_to_cat = {q.qid: q.category for q in queries}
 
     for r in rows:
@@ -109,6 +161,9 @@ def run_bench(
         by_category.setdefault(cat, {label: [] for label in handlers})
         if r.get("error") is None:
             by_category[cat].setdefault(r["path"], []).append(r["ndcg_at_3"])
+            by_category_scored.setdefault(cat, {label: [] for label in handlers})
+            if r.get("ndcg_scored"):
+                by_category_scored[cat].setdefault(r["path"], []).append(r["ndcg_at_3"])
 
     by_path_summary = {}
     for label, rs in by_path.items():
@@ -117,8 +172,13 @@ def run_bench(
         elapsed = [r["elapsed_s"] for r in rs]
         mhp = [r["multi_hop_precision"] for r in clean
                if r.get("multi_hop_precision") is not None]
+        scored = [r["ndcg_at_3"] for r in clean if r.get("ndcg_scored")]
         by_path_summary[label] = {
             "mean_ndcg_at_3": _mean(ndcg),
+            # NDCG over the requests that carry ground_truth only (the RDR-232 golden set: 5 of 24);
+            # the all-request mean above counts the others as 0.0.
+            "mean_ndcg_at_3_scored": _mean(scored) if scored else None,
+            "ndcg_scored_n": len(scored),
             "mean_elapsed_s": _mean(elapsed),
             "mean_multi_hop_precision": _mean(mhp) if mhp else None,
             "errors": sum(1 for r in rs if r.get("error")),
@@ -128,6 +188,11 @@ def run_bench(
     by_category_summary = {
         cat: {label: _mean(vals) for label, vals in cat_data.items()}
         for cat, cat_data in by_category.items()
+    }
+    # The same cut over the requests that carry ground_truth only; None where a category has none.
+    by_category_scored_summary = {
+        cat: {label: (_mean(vals) if vals else None) for label, vals in cat_data.items()}
+        for cat, cat_data in by_category_scored.items()
     }
 
     return {
@@ -139,6 +204,7 @@ def run_bench(
         "rows": rows,
         "by_path": by_path_summary,
         "by_category": by_category_summary,
+        "by_category_scored": by_category_scored_summary,
     }
 
 
@@ -193,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="Comma-separated subset of A,B,C to run.")
     args = parser.parse_args(argv)
 
-    queries = load_queries(args.queries_yaml)
+    queries = load_query_file(args.queries_yaml)
 
     selected = {p.strip() for p in args.paths.split(",") if p.strip()}
     if not selected.issubset(set(DEFAULT_PATHS)):
@@ -220,6 +286,9 @@ def main(argv: list[str] | None = None) -> int:
             f"t={summary['mean_elapsed_s']:.2f}s  "
             f"errors={summary['errors']}/{summary['n']}"
         )
+        if summary["mean_ndcg_at_3_scored"] is not None:
+            line += (f"  scored NDCG@3={summary['mean_ndcg_at_3_scored']:.3f} "
+                     f"(n={summary['ndcg_scored_n']})")
         if summary["mean_multi_hop_precision"] is not None:
             line += f"  mhp={summary['mean_multi_hop_precision']:.3f}"
         print(line)

@@ -190,8 +190,12 @@ class TestCommittedGoldenSet:
     def test_unacceptable_plans_name_real_builtin_plans(self) -> None:
         from bench.schema import load_golden_set
 
+        from tests._rdr232_golden import GROWN_LABEL_KEYS
+
         keys = _builtin_plan_keys()
         assert len(keys) >= 10, f"builtin plan census came back with {len(keys)} plans"
+        # the fixture's grown clone of plan 473 (nexus-jypmj.1.14) is the one non-builtin key a label may use
+        keys |= GROWN_LABEL_KEYS
         for q in load_golden_set(GOLDEN):
             unknown = sorted(set(q.unacceptable_plans) - keys)
             assert not unknown, f"{q.qid}: unacceptable_plans names no builtin plan: {unknown}"

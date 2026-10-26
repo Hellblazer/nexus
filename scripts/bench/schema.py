@@ -53,7 +53,9 @@ class Query:
     #: ``required_sources`` are source refs the answer must draw on (``RDR-084@ART``);
     #: ``required_facets`` are stable facet ids the request asks for; ``allowed_corpora`` are the
     #: collection-family prefixes evidence may come from; ``unacceptable_plans`` are
-    #: ``<verb>:<strategy>`` keys of builtin plans that would be the wrong shape for this request.
+    #: plan keys that would be the wrong shape for this request: ``<verb>:<strategy>`` for a
+    #: builtin plan, ``grown:<strategy>`` for a grown plan (nexus-jypmj.1.14 names the fixture's
+    #: clone of plan 473 that way; no builtin can produce a ``grown:`` key).
     answer_kind: str = ""
     required_sources: list[str] = field(default_factory=list)
     required_facets: list[str] = field(default_factory=list)

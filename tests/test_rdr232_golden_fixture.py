@@ -37,7 +37,12 @@ function-scoped fixtures; the tenant ceiling forbids a second one) because the f
    non-vacuity only (the measures scored the run, the later-phase ones are reported as such),
    never a value a Phase 1 change owns, so it keeps emitting whatever the tree does. The report it
    writes (``$NX_RDR232_BASELINE_OUT``) measures THIS tree; the pre-change baseline is the T2 record
-   ``nexus/rdr232-golden-baseline`` at its recorded sha.
+   ``nexus/rdr232-golden-baseline`` at its recorded sha. The plan-side measures are taken twice
+   (nexus-jypmj.1.14): over the builtins-only library, which is a FLOOR (the incident request selects
+   ``research:default`` there and scores as the right shape), and again after
+   ``_measure_with_grown_473_clone`` adds a grown clone of plan 473, which is what the incident
+   selected. The report carries ``BASELINE_CAVEATS`` and so must any quotation of it:
+   ``eligible_plan_recall`` is a blacklist reading, and the evidence-side measures score n=1.
 5. ``_assert_measures_follow_containment``: what the containment changes did to the measures,
    asserted after the report is written. The graph-stream bead (nexus-jypmj.1.5) edited this
    helper and flipped the graph-stream claim, never the emission.
@@ -53,13 +58,14 @@ import os
 from pathlib import Path
 
 from bench.answer_shape_metrics import (
+    BASELINE_CAVEATS,
     MEASURE_NAMES,
     NotMeasurable,
     RunObservation,
     compute_measures,
     measures_to_json,
 )
-from bench.schema import load_golden_set
+from bench.schema import GOLDEN_SET_VERSION, load_golden_set
 from tests import _rdr232_golden as g
 
 ART_REQUEST_QID = "G06-synthesis-art-rdr084"
@@ -546,6 +552,79 @@ def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
     print(f"RDR232-FASTPATH-OWNER vector_refs={v['references']} by_collection={v['by_collection']}")
 
 
+def _assert_library_holds_builtins_and_clone(library) -> None:
+    """Seeding the clone must not have overwritten a builtin row (``plans.query`` is the seed loader's
+    reconcile key): the library still holds every builtin-tagged row, plus exactly one grown clone."""
+    rows = library.list_plans(limit=500, include_disabled=True)
+    tag_sets = [{t.strip() for t in str(r.get("tags") or "").split(",")} for r in rows]
+    builtin = sum(1 for t in tag_sets if "builtin-template" in t)
+    grown = [r for r, t in zip(rows, tag_sets) if "grown" in t]
+    expected = len(list(g.BUILTIN_PLANS.glob("*.yml")))
+    assert expected >= 10, f"builtin template census came back with {expected}"
+    assert builtin == expected, f"the library holds {builtin} builtin-tagged rows, the templates are {expected}"
+    assert len(grown) == 1 and grown[0].get("name") == g.GROWN_473_STRATEGY, grown
+
+
+def _measure_with_grown_473_clone(library, queries, art, floor_observations, floor_selections) -> dict:
+    """nexus-jypmj.1.14: the plan-side measures again with a grown clone of plan 473 in the library.
+
+    The builtins-only library selects ``research:default`` for the incident request (the matcher over
+    the local embeddings), so that baseline is a FLOOR: it scored the request as the right shape. The
+    incident selected plan 473. The clone is a grown plan with 473's body whose originating question is
+    the incident request, so the matcher's verbatim-repeat rule selects it for G06 (confidence 1.0) and
+    only for G06: this reproduces the selection, it does not measure how 473 matched live. The label
+    ``grown:hybrid-factual-lookup-473`` names it in ``unacceptable_plans``.
+
+    The +1 admission is forced by construction (one request, exact-text repeat), not a measured rate.
+    The clone stands for one Phase 2 exit clause, "unknown-grown plans cannot bypass the gate"; the
+    clause "473 is ineligible" (a builtin-tagged row declaring lookup) is NOT measured here, and 473's
+    builtin origin is inferred (RDR-232 line 1606, T2 nexus_rdr/189-research-11), not read live.
+
+    Asserted relations, not values: the clone changes the selection of the incident request and of no
+    other, every other request keeps both its selection and its candidate set (so recall cannot have
+    moved through them), it is that request's wrong-shape admission, and nothing else moves. The numbers are emitted,
+    and the Phase 2 gate (nexus-jypmj.2) is what turns this pin.
+    """
+    from nexus.mcp_infra import reset_plan_cache_for_tests
+
+    g.seed_grown_473_clone(library, origin_question=art.text)
+    _assert_library_holds_builtins_and_clone(library)
+    reset_plan_cache_for_tests()  # the matcher's cosine cache holds the library as of its last refresh
+    observations: list[RunObservation] = []
+    selections: dict[str, dict] = {}
+    for q in queries:
+        sc, bd = g.request_call_shape(q)
+        sel = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd)
+        selections[q.qid] = {"selected": sel.selected, "candidates": sel.candidates, "confidences": sel.confidences}
+        observations.append(RunObservation(qid=q.qid, selected_plan=sel.selected, candidate_plans=sel.candidates))
+    with_clone = compute_measures(queries, observations)
+    floor = compute_measures(queries, floor_observations)
+
+    assert floor_selections[ART_REQUEST_QID]["selected"] != g.GROWN_473_KEY
+    assert selections[ART_REQUEST_QID]["selected"] == g.GROWN_473_KEY, selections[ART_REQUEST_QID]
+    changed, candidates_moved = g.selection_drift(floor_selections, selections)
+    assert changed == [ART_REQUEST_QID], f"the clone must change the incident request's selection only: {changed}"
+    # recall parity: every other request keeps its candidate set, not only its selection
+    assert set(candidates_moved) <= {ART_REQUEST_QID}, (
+        f"the clone changed the candidate set of requests other than the incident one: {candidates_moved}")
+    f, c = floor["wrong_shape_admission_rate"], with_clone["wrong_shape_admission_rate"]
+    assert (c.n, c.detail["selected_unacceptable"]) == (f.n, f.detail["selected_unacceptable"] + 1), (f, c)
+    assert with_clone["eligible_plan_recall"].n == floor["eligible_plan_recall"].n == len(queries)
+    # recall parity, value side: the incident request keeps research:default as an unlabeled candidate,
+    # so the clone adds an admission without moving recall (a relation; the Phase 2 gate turns it)
+    assert with_clone["eligible_plan_recall"].value == floor["eligible_plan_recall"].value, (
+        floor["eligible_plan_recall"], with_clone["eligible_plan_recall"])
+    print(
+        f"RDR232-GROWN473 label={g.GROWN_473_KEY} g06_floor_selected={floor_selections[ART_REQUEST_QID]['selected']} "
+        f"g06_with_clone_selected={selections[ART_REQUEST_QID]['selected']} "
+        f"g06_confidences={selections[ART_REQUEST_QID]['confidences']} "
+        f"wrong_shape floor={f.value} ({f.detail['selected_unacceptable']}/{f.n}) "
+        f"with_clone={c.value} ({c.detail['selected_unacceptable']}/{c.n}) "
+        f"eligible_plan_recall floor={floor['eligible_plan_recall'].value} "
+        f"with_clone={with_clone['eligible_plan_recall'].value}")
+    return {"selections": selections, "measures": with_clone, "floor": floor}
+
+
 def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, production) -> dict:
     """Emit the report and return the measures. Asserts non-vacuity only.
 
@@ -566,19 +645,28 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
         f"reducer_input={len(reducer_input)} reducer_by_corpus={reducer_by_corpus} "
         f"search_corpus={run.resolved_search_corpus!r}")
 
+    from nexus.mcp_infra import reset_plan_cache_for_tests
+
     library = g.seed_builtin_plans()
-    observations: list[RunObservation] = []
-    selections: dict[str, dict] = {}
-    for q in queries:
-        sc, bd = g.request_call_shape(q)
-        sel = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd)
-        selections[q.qid] = {"selected": sel.selected, "candidates": sel.candidates}
-        observations.append(RunObservation(
-            qid=q.qid, selected_plan=sel.selected, candidate_plans=sel.candidates,
-            evidence=refs if q.qid == ART_REQUEST_QID else None,
-        ))
-    measures = compute_measures(queries, observations)
-    assert tuple(measures) == MEASURE_NAMES
+    # The plan cache is process-global and refills from the library only every 90 s: start from none,
+    # so the floor does not depend on what an earlier test left in it, and leave none behind.
+    reset_plan_cache_for_tests()
+    try:
+        observations: list[RunObservation] = []
+        selections: dict[str, dict] = {}
+        for q in queries:
+            sc, bd = g.request_call_shape(q)
+            sel = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd)
+            selections[q.qid] = {"selected": sel.selected, "candidates": sel.candidates}
+            observations.append(RunObservation(
+                qid=q.qid, selected_plan=sel.selected, candidate_plans=sel.candidates,
+                evidence=refs if q.qid == ART_REQUEST_QID else None,
+            ))
+        measures = compute_measures(queries, observations)
+        assert tuple(measures) == MEASURE_NAMES
+        grown = _measure_with_grown_473_clone(library, queries, art, observations, selections)
+    finally:
+        reset_plan_cache_for_tests()
 
     # The ART request, scored on the reducer-input view as well (what the model is handed): once on the
     # secondary streams alone (the hydrated contents of the cut run), once on the production request,
@@ -599,12 +687,18 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
     for later in ("repair_yield_and_cost", "terminal_completeness"):
         assert isinstance(measures[later].value, NotMeasurable) and measures[later].value.phase == 3
 
+    plan_side = g.plan_side_report(measures, grown["measures"])
+    wrong_shape = plan_side["with_grown_473_clone"]["measures"]["wrong_shape_admission_rate"]
+    assert wrong_shape["n"] == len(queries) and plan_side["with_grown_473_clone"]["caveat"]
+    assert BASELINE_CAVEATS and plan_side["builtins_only"]["reading"]
     out = os.environ.get("NX_RDR232_BASELINE_OUT")
     if out:
+        # Built only when a report is wanted: head_sha and tree_is_dirty run the VCS binary with
+        # check=True, and a run with no usable repository must not fail the test.
         report = {
             "tree_sha": g.head_sha(),
             "tree_dirty": g.tree_is_dirty(),
-            "golden_set_version": 1,
+            "golden_set_version": GOLDEN_SET_VERSION,
             "golden_requests": len(queries),
             "fixture": {
                 "art_owner": fx.art_owner, "nexus_owner": fx.nexus_owner,
@@ -622,8 +716,15 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
                 "search_corpus_resolved": run.resolved_search_corpus,
                 "scope_diagnostics": run.scope_diagnostics,
             },
+            # The builtins-only selections and measures are the FLOOR: the library holds the 12 builtins,
+            # so the incident request selects research:default and scores as the right shape. The
+            # grown-clone entries add plan 473's stand-in (nexus-jypmj.1.14), selected for G06 by
+            # verbatim repeat: forced by construction, see its caveat.
             "plan_selection": selections,
-            "measures": json.loads(measures_to_json(measures)),
+            "plan_selection_with_grown_473_clone": grown["selections"],
+            "grown_473_label_key": g.GROWN_473_KEY,
+            "plan_side_measures": plan_side,
+            "measures": g.measures_report(measures),
             "measures_level": "reference (ids returned by the vector and graph streams)",
             "art_reducer_input_measures": json.loads(measures_to_json(reducer_measures)),
             "production_reducer_measures": json.loads(measures_to_json(production_measures)),
@@ -632,6 +733,8 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
                 "unattributed": prod_reducer["unattributed"],
             },
             "production_evidence_diagnostics": production["envelope"]["evidence_diagnostics"],
+            # State these wherever a number from this report is quoted.
+            "caveats": list(BASELINE_CAVEATS),
         }
         Path(out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return measures, reducer_measures, production_measures

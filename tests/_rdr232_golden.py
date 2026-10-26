@@ -385,10 +385,155 @@ def build_rdr084_fixture() -> Fixture:
 # ── observers ───────────────────────────────────────────────────────────────
 
 
+#: nexus-jypmj.1.14. Plan 473 of the 2026-10-23 incident is the tenant's seeded copy of the builtin
+#: ``lookup:hybrid-factual-lookup`` (RDR-232 line 1606: "plan 473's template"). The fixture library holds
+#: only the 12 builtins, and the local matcher over them selects ``research:default`` for the incident
+#: request, so the baseline scored it as the right shape. The clone below is a GROWN-shaped copy of 473
+#: (saved the way ``nx_answer``'s plan-grow path saves a plan: tags ``ad-hoc,grown``, scope ``personal``,
+#: a scope anchor) so the matcher has a lookup-shaped plan to select for the incident request, and the
+#: label key names it. (The RDR calls 473 builtin; "grown" describes how this copy is stored, which is
+#: what the Phase 2 gate has to handle: RDR-232 line 1408, an unknown-kind grown plan with lookup-shaped
+#: history and a synthesis request.)
+GROWN_473_STRATEGY = "hybrid-factual-lookup-473"
+#: ``unacceptable_plans`` entry that names the clone. A ``<verb>:<strategy>`` key cannot: a grown plan's
+#: strategy is a slug of its originating question, not a template name, so the key carries a ``grown:``
+#: prefix that no builtin verb can collide with, and the golden loader test knows it as the one
+#: grown key the labels may use.
+GROWN_473_KEY = f"grown:{GROWN_473_STRATEGY}"
+#: The scope anchor the grow path gives a plan grown from a ``scope="rdr"`` call.
+GROWN_473_SCOPE_TAGS = "rdr"
+GROWN_LABEL_KEYS: frozenset[str] = frozenset({GROWN_473_KEY})
+
+
 def builtin_plan_key(dimensions: dict[str, Any]) -> str:
     """``<verb>:<strategy>``: the plan identity golden_v1.yaml's unacceptable_plans uses (several
     builtins are all named ``default``, so the name alone does not identify one)."""
     return f"{dimensions.get('verb', '')}:{dimensions.get('strategy', '')}"
+
+
+def plan_label_key(dimensions: dict[str, Any], tags: str = "") -> str:
+    """The key a golden label uses for a library plan: ``<verb>:<strategy>`` for a template-seeded
+    plan, ``grown:<strategy>`` for a grown one (tags carry the comma token ``grown``, as the matcher
+    reads them)."""
+    if "grown" in [t.strip() for t in (tags or "").split(",")]:
+        return f"grown:{dimensions.get('strategy', '')}"
+    return builtin_plan_key(dimensions)
+
+
+#: The plan-side measures the grown clone can move (the other five are evidence-side or later-phase).
+PLAN_SIDE_MEASURES: tuple[str, ...] = ("eligible_plan_recall", "wrong_shape_admission_rate")
+FLOOR_READING = (
+    "builtins-only floor: the library holds the builtin templates only, so the incident request (G06) "
+    "selects research:default and scores as the right shape. Not the incident's selection; see "
+    "plan_side_measures.with_grown_473_clone."
+)
+
+
+def grown_clone_caveat() -> str:
+    """The construction caveat (``BASELINE_CAVEATS``) that travels with the grown-clone figures."""
+    from bench.answer_shape_metrics import BASELINE_CAVEATS
+
+    (caveat,) = [c for c in BASELINE_CAVEATS if "grown clone of plan 473" in c]
+    return caveat
+
+
+def plan_side_report(floor: dict, with_clone: dict) -> dict:
+    """The report's ``plan_side_measures``: both readings, each carrying what it is. The grown-clone
+    block carries its construction caveat so a figure copied out of the report keeps it."""
+    from bench.answer_shape_metrics import measures_to_json
+
+    def block(measures: dict) -> dict:
+        return {n: json.loads(measures_to_json({n: measures[n]}))[n] for n in PLAN_SIDE_MEASURES}
+
+    return {
+        "builtins_only": {"reading": FLOOR_READING, "measures": block(floor)},
+        "with_grown_473_clone": {"caveat": grown_clone_caveat(), "measures": block(with_clone)},
+    }
+
+
+def measures_report(measures: dict) -> dict:
+    """The report's top-level ``measures``: the seven measures, with the two plan-side entries labeled
+    as the builtins-only floor (they are taken over a library that cannot select the incident's plan)."""
+    from bench.answer_shape_metrics import measures_to_json
+
+    out = json.loads(measures_to_json(measures))
+    for name in PLAN_SIDE_MEASURES:
+        out[name]["plan_library"] = FLOOR_READING
+    return out
+
+
+def selection_drift(
+    floor: dict[str, dict], with_clone: dict[str, dict],
+) -> tuple[list[str], list[str]]:
+    """Which requests the clone moved: (qids whose SELECTED plan differs, qids whose candidate SET
+    differs), each sorted. Inputs are ``{qid: {"selected": ..., "candidates": [...]}}``. A request in
+    only one of the two maps counts as moved in both."""
+    selected: list[str] = []
+    candidates: list[str] = []
+    for qid in sorted(set(floor) | set(with_clone)):
+        a, b = floor.get(qid), with_clone.get(qid)
+        if a is None or b is None or a["selected"] != b["selected"]:
+            selected.append(qid)
+        if a is None or b is None or set(a["candidates"]) != set(b["candidates"]):
+            candidates.append(qid)
+    return selected, candidates
+
+
+def builtin_descriptions() -> set[str]:
+    """Every builtin template's match description, whitespace-normalized: the values ``plans.query``
+    holds for the seeded builtin rows, which the seed loader reconciles on."""
+    from nexus.plans.seed_loader import desired_row_for_template
+
+    out: set[str] = set()
+    for path in sorted(BUILTIN_PLANS.glob("*.yml")):
+        row = desired_row_for_template(yaml.safe_load(path.read_text(encoding="utf-8")))
+        out.add(" ".join(str(row.query).split()))
+    return out
+
+
+def seed_grown_473_clone(library, *, origin_question: str) -> int:
+    """Save the grown clone of plan 473 into *library*; returns its row id.
+
+    What this clone measures, and what it does not. It is stored ``ad-hoc,grown`` and carries no
+    answer-kind declaration, so it exercises ONE Phase 2 exit clause (RDR-232 lines ~487-498): unknown-grown
+    plans cannot bypass the gate. It does NOT exercise the clause "473 is ineligible" (a builtin-tagged row
+    that declares lookup): the builtin is not selected for the incident request in this fixture. Plan 473's
+    builtin origin is inferred from RDR-232 line 1606 and T2 nexus_rdr/189-research-11; no live read was
+    made. The test file pins that the clone's ``plan_json`` has no answer-kind key, so the Phase 2 change
+    that adds one to the builtin template (which this clone copies) turns that pin red at a known point.
+
+    The plan body, binding declarations, default bindings and description are the seeded builtin's own
+    (``desired_row_for_template``, the loader's row builder), so the clone runs exactly as 473 ran.
+    What makes it grown is how ``nx_answer`` saves one: tags ``ad-hoc,grown``, scope ``personal``, the
+    strategy slug in place of the template's, and the originating call's scope as its anchor. Its match
+    text is the builtin's description (473's own wording, no exemplars added). Its ``query`` is
+    *origin_question*, as the grow path stores the question that grew the plan; pass the incident request
+    and ``plan_match`` selects the clone for a verbatim repeat of it (confidence 1.0) and for no other
+    request. That is how the fixture reproduces the incident's selection: it says nothing about how 473
+    matched live. *origin_question* must differ from the builtin's description: ``plans.query`` is the
+    seed loader's reconcile key, and a clone saved under it overwrites the builtin row, so it is refused
+    (``ValueError``) when it equals any builtin's description after whitespace normalization.
+    """
+    from nexus.plans.schema import canonical_dimensions_json
+    from nexus.plans.seed_loader import desired_row_for_template
+
+    if " ".join(origin_question.split()) in builtin_descriptions():
+        raise ValueError(
+            "origin_question equals a builtin plan's description: plans.query is the seed loader's "
+            "reconcile key, so the clone would overwrite that builtin row"
+        )
+
+    template = yaml.safe_load((BUILTIN_PLANS / "hybrid-factual-lookup.yml").read_text(encoding="utf-8"))
+    row = desired_row_for_template(template)
+    return int(library.save_plan(
+        query=origin_question, plan_json=row.plan_json, outcome="success",
+        tags="ad-hoc,grown", project="", ttl=None, scope="personal", scope_tags=GROWN_473_SCOPE_TAGS,
+        verb="lookup", name=GROWN_473_STRATEGY,
+        dimensions=canonical_dimensions_json(
+            {"verb": "lookup", "scope": "personal", "strategy": GROWN_473_STRATEGY}),
+        default_bindings=row.default_bindings,
+        match_description=" ".join(str(row.query).split()),
+    ))
 
 
 def builtin_match(strategy: str, verb: str):
@@ -450,7 +595,7 @@ def observe_plan_selection(
         context=None, min_confidence=_PLAN_MATCH_MIN_CONFIDENCE, n=5,
         available_bindings=available, category_verb=infer_verb(question),
     )
-    keys = [builtin_plan_key(m.dimensions) for m in matches]
+    keys = [plan_label_key(m.dimensions, m.tags) for m in matches]
     hit = bool(matches) and _nx_answer_match_is_hit(matches[0].confidence, threshold=_PLAN_MATCH_MIN_CONFIDENCE)
     return PlanSelection(keys[0] if hit else None, keys, [m.confidence for m in matches])
 
