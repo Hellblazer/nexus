@@ -1412,6 +1412,76 @@ def preamble_rdr_list(args: tuple[str, ...]) -> None:
 # preamble rdr-create
 # ---------------------------------------------------------------------------
 
+_RDR_NUMBER_RE: Final = re.compile(r"^(?:rdr-)?(\d+)[-_.]", re.IGNORECASE)
+
+
+def _rdr_number(name: str) -> int | None:
+    """The RDR number a file name in the RDR directory carries, or None."""
+    m = _RDR_NUMBER_RE.match(name)
+    return int(m.group(1)) if m else None
+
+
+def _git_lines(repo_root: str, *args: str) -> list[str]:
+    """stdout lines of a read-only git command; [] when git fails."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", repo_root, *args],
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return out.stdout.splitlines() if out.returncode == 0 else []
+
+
+def _preamble_rdr_numbers_held_elsewhere(
+    repo_root: str, rdr_dir: str, repo_name: str,
+) -> dict[int, list[str]]:
+    """RDR numbers held outside this tree, each with who holds it (nexus-3piej).
+
+    Holders: any commit reachable from any ref (an unmerged branch, local or
+    remote), a file in another worktree's RDR directory (an uncommitted
+    draft), and a ``{repo}_rdr`` T2 record. Only direct children of the RDR
+    directory count, as in this tree's own listing.
+    """
+    held: dict[int, list[str]] = {}
+
+    def add(num: int, holder: str) -> None:
+        holders = held.setdefault(num, [])
+        if holder not in holders:
+            holders.append(holder)
+
+    prefix = rdr_dir.rstrip("/") + "/"
+    ref = ""
+    for line in _git_lines(
+        repo_root, "log", "--all", "--source", "--name-only", "--format=\x01%S", "--", rdr_dir,
+    ):
+        if line.startswith("\x01"):
+            ref = line[1:].removeprefix("refs/heads/").removeprefix("refs/remotes/")
+            continue
+        if not line.startswith(prefix) or "/" in line[len(prefix):]:
+            continue
+        num = _rdr_number(line[len(prefix):])
+        if num is not None:
+            add(num, f"branch {ref}")
+
+    here = Path(repo_root).resolve()
+    for line in _git_lines(repo_root, "worktree", "list", "--porcelain"):
+        if not line.startswith("worktree "):
+            continue
+        wt = Path(line.removeprefix("worktree "))
+        if wt.resolve() == here:
+            continue
+        for f in (wt / rdr_dir).glob("*.md"):
+            num = _rdr_number(f.name)
+            if num is not None:
+                add(num, f"worktree {wt}")
+
+    for r in _preamble_get_rdrs_from_t2(repo_name, rdr_dir):
+        if str(r.get("id", "")).isdigit():
+            add(int(r["id"]), f"T2 {repo_name}_rdr/{r['id']}")
+    return held
+
+
 @preamble.command("rdr-create")
 @click.argument("args", nargs=-1)
 def preamble_rdr_create(args: tuple[str, ...]) -> None:
@@ -1458,15 +1528,25 @@ def preamble_rdr_create(args: tuple[str, ...]) -> None:
             nums = re.findall(r"\d+", r["file"])
             if nums:
                 max_num = max(max_num, int(nums[0]))
-        next_num = max_num + 1
+        # nexus-3piej: a number held by a branch, another worktree or a T2
+        # record is taken too, or the new RDR's record write upserts over it.
+        held = _preamble_rdr_numbers_held_elsewhere(repo_root, rdr_dir, repo_name)
+        local = {int(n[0]) for r in rdrs if (n := re.findall(r"\d+", r["file"]))}
+        skipped = {n: h for n, h in held.items() if n > max_num and n not in local}
+        next_num = max([max_num, *skipped]) + 1
 
-        if rdr_prefix_style:
-            next_id = f"RDR-{next_num:03d}"
-        else:
-            next_id = f"{next_num:03d}"
+        def fmt(num: int) -> str:
+            return f"RDR-{num:03d}" if rdr_prefix_style else f"{num:03d}"
+
+        next_id = fmt(next_num)
 
         print(f"**Next ID:** `{next_id}`")
         print(f"**ID style detected:** `{id_style}`")
+        if skipped:
+            print()
+            print("**Numbers held elsewhere (skipped):**")
+            for num in sorted(skipped):
+                print(f"- {fmt(num)}: {'; '.join(skipped[num])}")
         print()
         print(f"### Existing RDRs ({len(rdrs)} found)")
         print()

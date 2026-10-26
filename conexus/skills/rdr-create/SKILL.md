@@ -95,6 +95,8 @@ Replace `[NUMBER]` with the assigned ID and `[TITLE]` with the user's title.
 
 ### Step 4: Write T2 record
 
+`memory_put` upserts by (project, title), so first read `mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="{NNN}")`. If a record exists and its `file_path` is not this RDR's file, STOP: the number belongs to another RDR (nexus-3piej). Delete the file from Step 3, take the next free number from the preamble, and start again at Step 3. Only when no record exists, write it:
+
 mcp__plugin_conexus_nexus__memory_put(content="id: NNN\nprefix: PREFIX\ntitle: User's Title\nstatus: draft\ntype: Feature\npriority: Medium\ncreated: YYYY-MM-DD\ngated: \nclosed: \nclose_reason: \nsuperseded_by: \nsupersedes: \nepic_bead: \narchived: false\nfile_path: $RDR_DIR/NNN-kebab-title.md", project="{repo}_rdr", title="{NNN}", tags="rdr,{type}"  # omit ttl (memory_put's ttl is int|None; permanent by omission)
 
 ### Step 5: Regenerate README index

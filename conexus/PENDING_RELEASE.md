@@ -52,3 +52,4 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/routing/registry.yaml` (nexus-i93tz): drops the `subagent_git_integrity_check` rule.
 - `conexus/hooks/scripts/routing/README.md` (nexus-i93tz): the cumulative-cap table counts 2 rules again and names the removal; a paragraph says the git-write guard is frozen except for real incidents and lists the routes it does not cover.
 - `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (nexus-i93tz): docstring only, no logic change; the KNOWN LIMITS text gains the frozen-guard paragraph and the accepted not-covered routes.
+- `conexus/skills/rdr-create/SKILL.md` (nexus-3piej): Step 4 reads `{repo}_rdr/NNN` before the record write and stops when it belongs to another RDR's file, because `memory_put` upserts by title and silently replaced RDR-233's record on 2026-10-26.
