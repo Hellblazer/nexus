@@ -145,12 +145,14 @@ filters through the engine's search routes (its engine leg) and also
 applies them as raw SQL `metadata->>key = value` on `nexus.chunks` to
 count what the engine should have found (its recall leg); a findings
 query reads
-title and indexed_at from the row; a rehearsal census assumes indexed_at
-survives in place (T2
-`nexus/chunk-row-normalization-external-readers-2026-10-26`, 2026-10-26).
-Every engine redeploy runs the parity gate, so those gates must read the
-catalog before clients stop writing the keys, or the next redeploy, related
-or not, undercounts.
+title and indexed_at from the row (T2
+`nexus/chunk-row-normalization-external-readers-2026-10-26`, 2026-10-26;
+RF-12, RF-13). One conexus tool also writes: the gate's copy tool
+`etl_t3.py` inserts chunk rows with their source metadata verbatim, so it
+would be refused in Phase 4 unless it strips the retired keys. Every
+engine redeploy runs the parity gate, so those gates must read the catalog
+before clients stop writing the keys, or the next redeploy, related or
+not, undercounts.
 
 ## Relationship to Prior RDRs
 
@@ -223,7 +225,7 @@ closed children; the conexus answer on external readers. Engine-stamped
 keys and position keys were censused for this RDR on 2026-10-26 against
 develop f14fe0148 (RF-4, RF-5); owner-resolution cost was traced and timed
 (RF-10). Each finding below is also a T2 record,
-`nexus_rdr/236-research-1` to `-10`, with its sources. The draft was
+`nexus_rdr/236-research-1` to `-13`, with its sources. The draft was
 critiqued once before Sam's gate decision (T2
 `nexus/critique-rdr236-draft-2026-10-26`); this revision answers it.
 
@@ -291,10 +293,10 @@ critiqued once before Sam's gate decision (T2
   so `_normalize_partial` drops it before every write outside the taxonomy
   and quarantine collections; no reader exists; it is dead as written
   (inference from source, not run).
-- **RF-6 (Documented, conexus 2026-10-26).** External readers listed in
-  Gap 5. The raw-SQL recall leg breaks outright when category and tags leave
-  the row; the engine leg depends on route (a) answering them from the
-  catalog. Filed there as conexus-wd1q.
+- **RF-6 (Documented, conexus 2026-10-26; confirmed by RF-12 and RF-13).**
+  External readers listed in Gap 5. The raw-SQL recall leg breaks outright
+  when category and tags leave the row; the engine leg depends on route
+  (a) answering them from the catalog. Filed there as conexus-wd1q.
 - **RF-7 (Decided, Sam 2026-10-26).** `title=` means the document's catalog
   title everywhere, the filename for code and prose; the per-position label
   stays display text (nexus-6pfgb.2, option A). `content_type=` maps by
@@ -325,6 +327,43 @@ critiqued once before Sam's gate decision (T2
   `store_hook.note_manifest_metadata`), orphan backfill and manifest
   backfill send no label keys and leave their rows legacy, the last two
   deliberately, because the row's labels are the last writer's.
+- **RF-12 (Verified, source search of conexus HEAD 1ede4c1, 2026-10-26).**
+  No executable caller of `upsert-chunks`, `update-metadata` or the
+  combined manifest writes exists in conexus. Direct SQL on
+  `nexus.chunks`: `deploy/gate/etl_t3.py` (a live gate and migration copy
+  tool) inserts rows with the source's metadata verbatim, so document keys
+  pass through; the gc purge fixture writes quarantine keys or nothing;
+  the rehearsal scripts update the collection column only; the legacy ETL
+  has no metadata column; the reseed script rides the nexus client. No
+  `jsonb_set` or metadata concatenation outside tests. Readers of document
+  keys: `livec_findings.sql` (title, indexed_at) and the recall leg of the
+  parity gate.
+- **RF-13 (Verified, source search in both repositories, 2026-10-26).** The
+  twelve filtered parity queries each carry one equality filter on an
+  indexer constant: category=paper (four, the DEVONthink papers
+  collection), category=code (two), tags=js (one), category=prose (four),
+  tags=pdf (one). None uses a user note value. Ten rewrite to catalog
+  content_type or the collection scope; the two tag filters need a file
+  extension predicate or `source_format`. The engine leg forwards the
+  clause unchanged (`run_gate.py` ~2029, `warmup.py` ~70) and the oracle
+  is recaptured; the recall leg (`_where_clause_parts` ~3848, pool count
+  ~4101) becomes a join through `catalog_document_chunks` on tenant,
+  collection and chash, counting chunks, since chashes recur across
+  collections. `livec_findings.sql` line 100 can read the catalog title or
+  file_path directly, which also fixes the page-suffix PDF titles its
+  regexp misses today; its lines 104-105 (chunk indexed_at against the
+  document's, for superseded residue) have no direct rewrite and need the
+  manifest join and a decision on which side supplies the older value.
+  Unconfirmed: the exact-recall code after `run_gate.py` ~4112 and the
+  catalog content_type values held for the papers and rdr collections.
+- **RF-11 (Verified, source search 2026-10-26).** Every indexer writes
+  tags and category as constants (code: extension and "code"; prose:
+  extension and "prose"; markdown: "markdown" and "prose"; `nx index pdf`
+  and the streaming pipeline: "pdf" and "paper"; the repo PDF path: "pdf"
+  and "prose"), a census of all five writers, so the backfill derives them
+  for indexed documents without reading a chunk row. For notes, the live
+  census on nexus-6pfgb.35 recovers all 427 keyless notes with row values
+  under option B and finds no TTL at stake.
 - **RF-10 (Verified, source search and spike 2026-10-26; T2
   `nexus/rdr236-a3-owner-resolution-batching-2026-10-26`).** Owner
   resolution is one SQL statement per chash list on the engine
@@ -345,42 +384,60 @@ critiqued once before Sam's gate decision (T2
   **Status**: Verified — **Method**: Source Search (3ajpd, x54wv, RF-4).
 - [x] A2: catalog meta merge is `jsonb_concat`; an explicit empty value
   overwrites — **Status**: Verified — **Method**: Source Search (nexus-ke45f).
-- [ ] A3: every live reader can resolve chash to owners at page cost, not
-  per hit — **Status**: Verified for `search` and `store_get_many`; not yet
-  true for `query` (repeats the lookup), the plan runner's chash path (five
-  calls) and `query`'s catalog-parameter branch (per row); Phase 2 makes it
-  true by consuming rows already fetched (RF-10), and the box is ticked
-  when those land — **Method**: Source Search plus a timed spike.
+- [x] A3: owner resolution can be done at page cost, not per hit, on every
+  live reader — **Status**: Verified: the engine answers a whole chash list
+  in one statement (cap 1000), `search` and `store_get_many` already pay
+  one batched pair per page, and the three sites that do not (`query`'s
+  duplicate lookup, the plan runner's chash path, `query`'s per-row
+  catalog-parameter branch) have the batched rows available in the same
+  request, so making them page-cost is a Phase 2 edit, not an open
+  question (RF-10) — **Method**: Source Search plus a timed spike.
 - [x] A4: `catalog_document_chunks` carries a column for every position
   field and the writers fill them on every path — **Status**: Verified
   (RF-5, RF-9): the columns exist and every indexer path sends the labels;
   notes, orphan backfill and manifest backfill send none and leave their
   rows legacy, which is what nexus-jz86a fixes for notes in Phase 1 —
   **Method**: Source Search.
-- [ ] A5: no writer outside the nexus client sends document keys to chunk
-  rows — **Status**: Unverified — **Method**: the engine's would-refuse log
-  from Phase 4 Step 2a, read over a stated window, empty or every entry
-  dispositioned (RDR-223's method; a search of the conexus repository is
-  only a first look).
-- [ ] A6: the parity gate's twelve filtered queries and the findings SQL can
+- [x] A5: no writer outside the nexus client sends document keys to chunk
+  rows on purpose — **Status**: Verified for the path census of the
+  conexus repository (RF-12): no caller of a chunk write route exists
+  there, and the only direct writer that carries document keys is the
+  gate's copy tool `deploy/gate/etl_t3.py`, which inserts source rows'
+  metadata verbatim and must strip non-chunk keys in Phase 5; everything
+  else writes quarantine keys, collection only, or no metadata. The
+  engine's would-refuse log from Phase 4 Step 2a, read over a stated
+  window and empty or dispositioned, remains the final check for writers
+  no repository shows (RDR-223's method) — **Method**: Source Search, then
+  the log.
+- [x] A6: the parity gate's twelve filtered queries and the findings SQL can
   be rewritten against the catalog without changing what they measure —
-  **Status**: Unverified — **Method**: Spike in conexus (conexus-wd1q)
-  before Phase 4 Step 1.
-- [ ] A7: the backfill can give every existing document its own values.
-  Notes: by option B (RF-8): TTL from a stamp-and-title row whatever the
-  owner count; tags and category from that row or from a piece row the
-  note solely owns; residue is a note with neither (0 of 427 on the live
-  tenant for tags and category; TTL residue is the 8 unstamped notes, none
-  of which had a TTL).
-  Indexed documents: tags, category and source_format are constants per
-  content type and extension, so they need no row at all; extraction_* and
-  frecency_score are copied from a row with exactly one live owner, and
-  frecency is recomputable from git. Residue: an all-shared PDF's
-  extraction provenance, which only a forced re-extraction restores (an
-  unchanged document is skipped by the freshness check) — **Status**:
-  Assumed; measured by the backfill's dry run (counts filled, derived,
-  skipped, residue per kind) and its live run, both before Phase 4 Step 1,
-  which needs the keyless-note count at zero.
+  **Status**: Verified for the queries (RF-13): all twelve filter on
+  indexer constants, ten rewrite to catalog content_type or the
+  collection scope, two (tags=js, tags=pdf) need a file extension
+  predicate or the `source_format` meta key Phase 1 adds; the engine leg
+  forwards the where clause unchanged and needs nothing; the recall leg
+  becomes a manifest join. Not fully true for the findings SQL: its
+  superseded-residue predicate compares a chunk row's indexed_at with the
+  document's, and a shared row has no single indexed_at, so that predicate
+  needs a manifest join and a design decision in conexus-wd1q — **Method**:
+  Source Search in both repositories; the rewritten gate's first run is
+  the spike.
+- [x] A7: the backfill can give every existing document its own values.
+  **Status**: Verified for notes and for the derived keys; Assumed for the
+  extraction and frecency residue. Notes: by option B (RF-8), the live
+  census of 2026-10-26 recovers all 427 keyless notes with row values for
+  tags and category (419 by stamp and title, 8 as sole live owners) and
+  loses no TTL (RF-11). Indexed documents: tags, category and
+  source_format are constants per indexer (RF-11, a census of all five
+  writers), so they are derived, never copied. What stays assumed:
+  extraction_method, quality_gate_overridden, extraction_source and
+  frecency_score are copied only from a chunk with exactly one live
+  owner; an all-shared PDF's extraction provenance needs a forced
+  re-extraction (an unchanged document is skipped by the freshness check),
+  and frecency is recomputable from git — **Method**: Source Search and
+  the .35 live census; the residue count comes from the backfill's dry run
+  and live run, both before Phase 4 Step 1, which needs the keyless-note
+  count at zero.
 
 ## Proposed Solution
 
@@ -884,9 +941,16 @@ recall SQL applies the same presence fallback as the engine (row value
 while the meta key is absent). Parity gate: the engine leg keeps its where strings (route
 (a) answers them from the catalog after Phase 3); the recall leg's raw SQL
 joins `catalog_document_chunks` and `catalog_documents` for category and
-tags. `livec_findings.sql` and `owner_1_1_census.py` read title and
-indexed_at from the catalog. Rehearsal census predicates on quarantine keys
-are unchanged (ROW keys). A6's spike runs here.
+tags, counting chunks through the manifest since chashes recur across
+collections; the two tag filters use a file extension predicate or
+`source_format`. `livec_findings.sql` reads the catalog title or file_path
+in place of the regexp-stripped row title; its superseded-residue
+predicate on indexed_at is redesigned over the manifest join (which side
+supplies the older value is conexus-wd1q's decision). `etl_t3.py` strips
+non-chunk keys from the rows it copies. `owner_1_1_census.py` reads
+neither key in code and needs nothing. Rehearsal census predicates on
+quarantine keys are unchanged (ROW keys). The rewritten gate's first run
+against a Phase 3 engine is A6's spike.
 
 ### Day 2 Operations
 
@@ -961,8 +1025,10 @@ To be written at gate.
 
 ### Assumption Verification
 
-A1 to A4 verified; A5 by the would-refuse log at Phase 4 Step 2b; A6 by
-conexus-wd1q's spike; A7 by the backfill dry run.
+A1 to A6 verified as stated, A5 with the would-refuse log at Phase 4 Step
+2b as its final check and A6 with the findings predicate left to
+conexus-wd1q's design; A7 verified for notes and derived keys, its residue
+measured by the backfill runs.
 
 #### API Verification
 
@@ -1014,6 +1080,10 @@ to bead ids at lock.
 ## Revision History
 
 - 2026-10-26: created from Sam's direction and the x54wv census.
+- 2026-10-26: research verification pass: A3 restated as the verified
+  fact with Phase 2 edits named; A5, A6 and A7 verified from source and
+  the live note census (RF-11 to RF-13); the conexus copy tool `etl_t3.py`
+  and the findings SQL's indexed_at predicate added to Gap 5 and Phase 5.
 - 2026-10-26: confirmation critique (T2
   `nexus/confirm-critique-rdr236-draft-2026-10-26`) found three leftovers,
   fixed here: the `write_many` combined route is in the refusal; the
