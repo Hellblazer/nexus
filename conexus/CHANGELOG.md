@@ -1,5 +1,11 @@
 # Changelog
 
+## [7.87.1] - 2026-10-26
+
+Plugin version aligned with conexus 7.87.1, a plugin-only release off 7.87.0. These plugin changes become live at this pin.
+
+- **conexus-tool-spill no longer re-cuts a Bash read of its own spill file** (nexus-i9a1p). Following the note with `sed -n`, `head` or `grep` on the saved file produced an output over the limit that was cut and saved again, so a long output could take several nested spills to read. A Bash command that names the spill directory (`claude-tool-spill-<user>`, in any spelling: the full path, `$TMPDIR/...`, a `cd` into it, either separator) now passes whole up to 4 times `limit` (16 KB by default); a larger read is cut and saved like any other, so nothing is lost when an unrelated command happens to name the directory. The note now says to read a slice with the Read tool, which the mod never cuts. `tool-spill/hooks/register.ts`, `tool-spill/README.md`.
+
 ## [7.87.0] - 2026-10-26
 
 Plugin version aligned with conexus 7.87.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
