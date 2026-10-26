@@ -5489,10 +5489,20 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   applied, `reason` says why and an ambiguous source stays `candidates`. An
   inferred owner qualifies source resolution only: it never narrows the vector
   or graph streams, and a document tumbler given as `source` is never held to
-  it. `None` when no reserved binding was passed.
+  it. An RDR id that only the question names (no `source` binding) is fed to the
+  same resolution, through the same three tiers (nexus-jypmj.2.4): the request
+  then carries `source_origin: "question"` and `sources` holds the ids read from
+  the text, at most 3 resolved per request (the rest are in
+  `named_sources.dropped`). A `source` binding wins and replaces them. A source
+  read from the question is never an owner: only an `owner` or `project` binding
+  narrows the secondary streams. `None` when no reserved binding was passed and
+  the question names no RDR.
 - `named_sources` (nexus-jypmj.1.4): how each named source resolved,
-  `{sources: [{source, status, tumbler, title, file_path, qualified,
-  candidates, candidates_truncated, detail}], dropped, catalog_calls}`.
+  `{sources: [{source, status, tumbler, title, file_path, qualified, inferred,
+  origin, candidates, candidates_truncated, detail}], dropped, catalog_calls,
+  origin}`. `origin` is `explicit` (a `source` binding) or `question` (RDR ids
+  read from the question's text, nexus-jypmj.2.4; at most 3 are resolved, the
+  rest are in `dropped` and named in a text notice).
   `status` is `resolved`, `candidates` (several documents fit; nothing is
   picked) or `unresolved`; `qualified` says an owner qualifier narrowed the
   choice, and `inferred` that the qualifier was the active project. Where one RDR number has sibling files (`rdr-200-*.md`: the RDR and

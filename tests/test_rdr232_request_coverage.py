@@ -266,7 +266,7 @@ def test_an_unqualified_rdr_in_a_multi_facet_request_discloses_the_ambiguity() -
     codes = [(a.code, a.subject) for a in cov.ambiguities]
     assert codes == [("source_unqualified", "RDR-084")]
     assert "no project qualifier" in cov.ambiguities[0].detail and "'rdr' is a corpus" in cov.ambiguities[0].detail
-    assert cov.to_wire()["active_project_tier"] == "not_wired"
+    assert cov.to_wire()["active_project_tier"] == "wired"
 
 
 def test_an_explicit_project_binding_is_not_ambiguous() -> None:
@@ -1106,9 +1106,12 @@ def test_normalize_kind_is_the_golden_label_map() -> None:
     assert rc.normalize_kind("nonsense") is None and rc.normalize_kind(7) is None
 
 
-def test_the_active_project_seam_says_what_2_4_should_extend() -> None:
-    doc = derive_request_coverage.__doc__ or ""
-    assert "OwnerResolution" in doc and "inferred" in doc and "name, not a tumbler" in doc
+def test_the_active_project_seam_is_disclosure_only_and_points_at_the_wired_tier() -> None:
+    """2.4 wired the tier (``nexus.plans.active_project``, an ``inferred`` ``OwnerResolution``); the seam
+    here stays a recorded name and the docstring says so."""
+    doc = " ".join((derive_request_coverage.__doc__ or "").split())
+    assert "disclosure seam" in doc and "never used here" in doc
+    assert "nexus.plans.active_project" in doc and "inferred" in doc and "OwnerResolution" in doc
 
 
 # ── F8. smaller items ─────────────────────────────────────────────────────────────────────────────────────

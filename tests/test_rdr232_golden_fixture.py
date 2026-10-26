@@ -539,6 +539,27 @@ def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
     assert [x["outcome"] for x in env["scope_diagnostics"]] == ["narrowed"]
     print(f"RDR232-FASTPATH vector_refs={v['references']} by_collection={v['by_collection']} scope_state={d['scope_check']['state']}")
 
+    # nexus-jypmj.2.4: the call as filed names RDR-084 in its text and binds no source. Its text source now
+    # reaches the real resolver: with no reliable session project (this process is not an ART session) both
+    # documents are candidates and nothing is picked ...
+    (named,) = env["named_sources"]["sources"]
+    assert named["origin"] == "question" and named["status"] == "candidates" and named["tumbler"] is None, named
+    assert {c["tumbler"] for c in named["candidates"]} == {fx.art_rdr, fx.nexus_rdr}
+    assert env["evidence_request"]["owner"]["status"] == "none" and env["primary_evidence"] is None
+    # ... and with the session's project ART (the seam of the tier replaced, the catalog real) it resolves
+    # to ART's document, inferred, still without narrowing any stream by owner.
+    from unittest.mock import patch
+
+    from nexus.plans.active_project import ActiveProject
+
+    with patch("nexus.plans.active_project.detect_active_project",
+               return_value=ActiveProject(True, owner=fx.art_owner, name=g.ART_PROJECT)):
+        env_art = _nx_answer_envelope(art, scope, {"content_type": "rdr"}, strategy=("research", "corpus-coverage-check"))
+    (named_art,) = env_art["named_sources"]["sources"]
+    assert (named_art["status"], named_art["tumbler"], named_art["inferred"]) == ("resolved", fx.art_rdr, True), named_art
+    assert env_art["scope_diagnostics"] == env["scope_diagnostics"], "an inferred project narrows no stream"
+    print(f"RDR232-FASTPATH-TEXT-SOURCE no_project={named['status']} art_session={named_art['status']}:{named_art['tumbler']}")
+
     # nexus-jypmj.1.18: the same call with the explicit ART owner queries the ART collection only.
     env = _nx_answer_envelope(
         art, scope, {"content_type": "rdr", "owner": fx.art_owner}, strategy=("research", "corpus-coverage-check"))

@@ -69,6 +69,7 @@ __all__ = [
     "NamedSourceResolution",
     "PrimaryEvidence",
     "PrimaryEvidenceCaps",
+    "QUESTION_SOURCE_CAP",
     "RDR_FRONTMATTER_EXTRACTOR",
     "FrontmatterId",
     "FrontmatterIdLookup",
@@ -77,6 +78,7 @@ __all__ = [
     "SourceCandidate",
     "derive_content_labels",
     "gather_primary_evidence",
+    "question_source_caps",
     "recorded_frontmatter_id",
     "resolve_named_sources",
     "select_primary_evidence",
@@ -129,6 +131,18 @@ class PrimaryEvidenceCaps:
 
 
 DEFAULT_CAPS = PrimaryEvidenceCaps()
+
+#: Named sources resolved when they were READ FROM THE QUESTION rather than passed as a ``source`` binding
+#: (nexus-jypmj.2.4). A binding is a deliberate request and keeps ``max_named_sources``; a question that
+#: mentions many RDR ids (a range, a survey) is not, and each id costs an owner probe, up to two capped
+#: finds and a share of the primary stream. The ids past the cap are named in ``NamedSourceResolution.dropped``
+#: and in a text notice, never silently dropped. The golden request that names the most (G09) names two.
+QUESTION_SOURCE_CAP = 3
+
+
+def question_source_caps(caps: PrimaryEvidenceCaps = DEFAULT_CAPS) -> PrimaryEvidenceCaps:
+    """*caps* with ``max_named_sources`` held to :data:`QUESTION_SOURCE_CAP` (or lower, if *caps* is)."""
+    return replace(caps, max_named_sources=min(caps.max_named_sources, QUESTION_SOURCE_CAP))
 
 
 # ── Narrow ports (the real catalog and T3 satisfy them) ──────────────────────
@@ -227,6 +241,9 @@ class NamedSourceResolution:
     dropped: tuple[str, ...] = ()
     catalog_calls: int = 0
     caps: PrimaryEvidenceCaps = DEFAULT_CAPS
+    #: ``explicit`` (a ``source`` binding) or ``question`` (RDR ids read from the question's text,
+    #: nexus-jypmj.2.4). Shown per source on the wire and in the notices; it does not change resolution.
+    origin: Literal["explicit", "question"] = "explicit"
 
     def resolved(self) -> tuple[ResolvedSource, ...]:
         return tuple(s for s in self.sources if s.status == "resolved")
@@ -246,9 +263,10 @@ class NamedSourceResolution:
 
     def to_wire(self) -> dict[str, Any]:
         return {
-            "sources": [s.to_wire() for s in self.sources],
+            "sources": [{**s.to_wire(), "origin": self.origin} for s in self.sources],
             "dropped": list(self.dropped),
             "catalog_calls": self.catalog_calls,
+            "origin": self.origin,
         }
 
     def disclosures(self, *, owner_failure_disclosed: bool = False, primary_stream: bool = True) -> list[str]:
@@ -262,6 +280,7 @@ class NamedSourceResolution:
         """
         lines: list[str] = []
         for s in self.sources:
+            name = f"{s.ref.value} (read from the question)" if self.origin == "question" else s.ref.value
             if s.status == "resolved":
                 tail = (
                     "" if primary_stream else
@@ -269,31 +288,32 @@ class NamedSourceResolution:
                 )
                 if s.inferred:
                     lines.append(
-                        f"[evidence request: named source {s.ref.value} resolved to {s.tumbler} by the active "
+                        f"[evidence request: named source {name} resolved to {s.tumbler} by the active "
                         f"project, inferred from the session; no owner or project binding confirmed it (pass owner "
                         f"or project to pin it){tail}]"
                     )
                 elif not s.qualified:
                     lines.append(
-                        f"[evidence request: named source {s.ref.value} resolved to {s.tumbler} but was not "
+                        f"[evidence request: named source {name} resolved to {s.tumbler} but was not "
                         f"owner-qualified (pass owner or project to pin it){tail}]"
                     )
                 if s.detail:  # a choice among sibling files, and the files passed over (nexus-xho6c)
-                    lines.append(f"[evidence request: named source {s.ref.value} resolved to {s.tumbler}: {s.detail}]")
+                    lines.append(f"[evidence request: named source {name} resolved to {s.tumbler}: {s.detail}]")
             elif s.status == "candidates":
                 names = ", ".join(c.tumbler for c in s.candidates)
                 lines.append(
-                    f"[evidence request: named source {s.ref.value} is ambiguous: "
+                    f"[evidence request: named source {name} is ambiguous: "
                     f"{len(s.candidates)} candidates ({names}); {s.detail}]"
                 )
             elif s.status == "unresolved":
                 if owner_failure_disclosed and s.detail.startswith(OWNER_FAILURE_PREFIX):
                     continue
-                lines.append(f"[evidence request: named source {s.ref.value} unresolved: {s.detail}]")
+                lines.append(f"[evidence request: named source {name} unresolved: {s.detail}]")
         if self.dropped:
+            from_q, fate = (" read from the question", "dropped, not resolved") if self.origin == "question" else ("", "dropped")
             lines.append(
-                f"[evidence request: {len(self.dropped)} named source(s) beyond the cap of "
-                f"{self.caps.max_named_sources} were dropped: {', '.join(self.dropped)}]"
+                f"[evidence request: {len(self.dropped)} named source(s){from_q} beyond the cap of "
+                f"{self.caps.max_named_sources} were {fate}: {', '.join(self.dropped)}]"
             )
         return lines
 

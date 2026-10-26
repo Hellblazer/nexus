@@ -43,8 +43,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import structlog
@@ -493,10 +493,31 @@ class EvidenceRequest:
     #: What the active-project tier did (``ActiveProjectTier.to_wire()``), or ``None`` when it was not
     #: consulted (nexus-jypmj.2.4). Carried in the envelope; never part of the owner narrowing.
     active_project: Mapping[str, Any] | None = None
+    #: Where ``sources`` came from: ``explicit`` (the ``source`` binding) or ``question`` (RDR ids the
+    #: question's text names, fed in by :meth:`with_question_sources`; nexus-jypmj.2.4). A ``question``
+    #: source is not a binding: ``requested`` stays False, and it is never an owner qualifier.
+    source_origin: Literal["explicit", "question"] = "explicit"
+
+    def with_question_sources(self, sources: Sequence[SourceRef]) -> EvidenceRequest:
+        """This request with the RDR ids the question names as its sources (nexus-jypmj.2.4).
+
+        An explicit ``source`` binding wins and replaces them: a request that carries one, or that carries a
+        ``source`` the caller passed but that did not parse (``source_error``), is returned unchanged. Only RDR
+        ids are taken (a tumbler in the text is not a source reference). The sources take the same tiers as a
+        binding. They add no owner: ``owner`` is untouched, so only an ``owner``/``project`` binding narrows.
+        """
+        if self.sources or self.source_error:
+            return self
+        refs = tuple(s for s in sources if s.kind == "rdr")
+        if not refs:
+            return self
+        return replace(
+            self, sources=refs, source=refs[0] if len(refs) == 1 else None, source_origin="question",
+        )
 
     def to_wire(self) -> dict[str, Any] | None:
-        """Envelope form, or ``None`` when no reserved binding was passed."""
-        if not self.requested:
+        """Envelope form, or ``None`` when no reserved binding was passed and the question named no source."""
+        if not self.requested and self.source_origin != "question":
             return None
         wire: dict[str, Any] = {
             "source": self.source.to_wire() if self.source else None,
@@ -504,6 +525,8 @@ class EvidenceRequest:
             "owner": self.owner.to_wire(),
             "sources": [s.to_wire() for s in self.sources],
         }
+        if self.source_origin != "explicit":
+            wire["source_origin"] = self.source_origin
         if self.active_project is not None:
             wire["active_project"] = dict(self.active_project)
         return wire

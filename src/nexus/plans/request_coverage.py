@@ -108,9 +108,11 @@ FacetOrigin = Literal["clause", "whole_question"]
 #: The T2 lifecycle stream is read only for a request with a facet on one of these topics.
 LIFECYCLE_TOPICS: tuple[str, ...] = ("gate", "lifecycle", "status")
 
-#: Where the active-project tier of source resolution (nexus-jypmj.2.4) plugs in. This module records that
-#: the tier is not wired; it never calls it.
-ACTIVE_PROJECT_TIER = "not_wired"
+#: The active-project tier of source resolution (nexus-jypmj.2.4) is wired: ``nx_answer`` feeds the RDR ids
+#: this module reads from the question into named-source resolution and applies the tier there, after this
+#: derivation (``nexus.plans.active_project``; the outcome is ``evidence_request.active_project`` in the
+#: envelope). This module records that and never calls the tier.
+ACTIVE_PROJECT_TIER = "wired"
 
 #: Longest question the first pass reads for structure, and the most facets and constraints it returns. A
 #: longer question is cut for the structural read only: the result is then uncertain (``facets_certain`` is
@@ -900,12 +902,10 @@ def derive_request_coverage(
     :func:`~nexus.plans.evidence.build_evidence_request`; they outrank anything read from *question*.
     *explicit_kind* is a caller hint (``dimensions["answer_kind"]``); an invalid value is ignored.
 
-    *active_project* is a seam for the active-project tier of source resolution (nexus-jypmj.2.4). It is
-    recorded and never used here, and it returns a project name, not a tumbler or an owner. Because it runs
-    after the evidence request is built it cannot qualify a source. nexus-jypmj.2.4 should extend
-    ``OwnerResolution`` (``nexus.plans.evidence``) with an ``inferred`` status instead, so the owner the
-    active project names enters the same resolution as an explicit ``owner`` or ``project`` binding, and
-    is reported as inferred.
+    *active_project* is a disclosure seam, recorded and never used here: it returns a project name, not a
+    tumbler or an owner, and runs too early to qualify a source. The tier itself is
+    ``nexus.plans.active_project``, applied by ``nx_answer`` after this derivation as an ``inferred``
+    ``OwnerResolution`` (nexus-jypmj.2.4), to the sources a binding or, failing that, the question names.
 
     Never raises: a failure degrades to one ``whole_question`` facet that is uncertain, keeps the caller's
     bound sources, and so fails open on the lifecycle stream.

@@ -5689,6 +5689,7 @@ class TestAnswerShapeGate:
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
              patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp.core._get_catalog", return_value=None), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
             env = await nx_answer(question="why does RDR-160 route bge-768", structured=True)
@@ -5723,6 +5724,7 @@ class TestAnswerShapeGate:
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
              patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp.core._get_catalog", return_value=None), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
             text = await nx_answer(question="why does RDR-160 route bge-768")
@@ -5787,6 +5789,7 @@ class TestAnswerShapeGate:
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
              patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp.core._get_catalog", return_value=None), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
             env = await nx_answer(question="compare RDR-185 with RDR-197", structured=True)

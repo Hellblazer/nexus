@@ -10371,6 +10371,25 @@ async def _nx_answer_evidence_request(
         return build_evidence_request(bindings, scope=scope, name_lookup=_hung)
 
 
+def _nx_answer_question_sources(request: EvidenceRequest, coverage: "RequestCoverage") -> EvidenceRequest:
+    """Feed the RDR ids the question names into named-source resolution (RDR-232 Phase 2, nexus-jypmj.2.4).
+
+    Until this stage only a ``source`` binding reached :func:`_nx_answer_named_sources`; an RDR id that
+    appeared only in the question was recorded by the request coverage (``source_origin`` ``question``) and
+    never resolved, so the incident call as filed (``scope="rdr"``, ``content_type``, no ``source``) stayed
+    unresolved whatever the active-project tier did. Those sources now take the same tiers as a binding: the
+    explicit ``owner``/``project``, the owner scope, then the session's project.
+
+    A ``source`` binding wins and replaces them (:meth:`EvidenceRequest.with_question_sources`). They are not
+    an owner: ``request.owner`` is untouched here, so the ``_nx_owners`` run binding, built from the
+    explicit bindings before this stage, is unchanged. At most ``QUESTION_SOURCE_CAP`` are resolved; the
+    rest are named in the resolution's ``dropped`` list. Pure: no catalog call, never raises.
+    """
+    if coverage.source_origin != "question":
+        return request
+    return request.with_question_sources(coverage.named_sources)
+
+
 async def _nx_answer_active_project(
     request: EvidenceRequest,
     project_names: list[str] | tuple[str, ...],
@@ -10446,12 +10465,18 @@ async def _nx_answer_named_sources(
     if not request.sources:
         return None
     import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from dataclasses import replace as _replace  # noqa: PLC0415 — stdlib, branch-local
     from nexus.plans.primary_evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
         DEFAULT_CAPS,
         NamedSourceResolution,
+        question_source_caps,
         recorded_frontmatter_id,
         resolve_named_sources,
     )
+
+    # nexus-jypmj.2.4: RDR ids read from the question are held to QUESTION_SOURCE_CAP; a binding keeps the resolver's cap.
+    origin = request.source_origin
+    caps = question_source_caps(DEFAULT_CAPS) if origin == "question" else DEFAULT_CAPS
 
     def _resolve() -> NamedSourceResolution:
         try:
@@ -10465,15 +10490,17 @@ async def _nx_answer_named_sources(
             lambda db: db.document_aspects.get_by_doc_id(doc_id, timeout=timeout, retry_read_timeout=False),
             op="rdr_frontmatter_id",
         ))
-        return resolve_named_sources(request.sources, request.owner, cat=cat, deadline=deadline, frontmatter_id=ids)
+        return _replace(resolve_named_sources(
+            request.sources, request.owner, cat=cat, caps=caps, deadline=deadline, frontmatter_id=ids,
+        ), origin=origin)
 
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_resolve), timeout=_nx_answer_seconds_left(DEFAULT_CAPS.max_seconds, deadline),
+            asyncio.to_thread(_resolve), timeout=_nx_answer_seconds_left(caps.max_seconds, deadline),
         )
     except asyncio.TimeoutError:
         _log.warning("nx_answer_named_sources_deadline", sources=len(request.sources))
-        return NamedSourceResolution.deadline_hit(request.sources)
+        return _replace(NamedSourceResolution.deadline_hit(request.sources, caps=caps), origin=origin)
 
 
 async def _nx_answer_lifecycle_stream(
@@ -11739,6 +11766,9 @@ async def nx_answer(
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
     # resolved documents is merged at the runner (nexus-jypmj.1.6).
+    # nexus-jypmj.2.4: an RDR id that only the question names takes the same path as a `source` binding (a
+    # binding wins). It adds no owner, and the `_nx_owners` binding above was built without it.
+    _evidence_request = _nx_answer_question_sources(_evidence_request, _request_coverage)
     # nexus-jypmj.2.4: the third tier, after the explicit owner/project and the owner scope: the session's
     # project, only when it is reliable and nothing explicit qualified an RDR source. Applied after the
     # `_nx_owners` binding above, so an inferred owner never narrows the secondary streams.
