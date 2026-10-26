@@ -581,7 +581,9 @@ class ScopeConstraint:
 
         if is_conformant_collection_name(text):
             return cls("collection", text)
-        if name_lookup is not None and text not in _CORPUS_WORDS and "__" not in text:
+        # A corpus-shaped token fails the strict owner lookup (OwnerNameError) and stays a
+        # prefix, so no name-shape pre-check is needed (RDR-204 parse census).
+        if name_lookup is not None and text not in _CORPUS_WORDS:
             try:
                 tumbler = str(name_lookup(text))
             except OwnerNameError:
