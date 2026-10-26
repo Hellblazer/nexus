@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -24,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "check_plugin_only_eligibility.py"
 
 PASS_LINE = "PLUGIN-ONLY ELIGIBILITY PASSED"
+FAIL_LINE = "PLUGIN-ONLY ELIGIBILITY FAILED"
 UNVERIFIED_LINE = "PLUGIN-ONLY ELIGIBILITY UNVERIFIED"
 
 _GIT_ENV = {
@@ -104,6 +106,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "conexus-foo"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
 name = "zeta"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -132,6 +139,18 @@ BASE_FILES = {
     "service/pom.xml": "<p/>\n",
     "tests/test_a.py": "def test_a(): pass\n",
     "docs/a.md": "doc\n",
+    # nested look-alikes of the free prefixes, and root files no rule frees
+    "src/docs/x.py": "x = 1\n",
+    "src/tests/x.py": "x = 1\n",
+    "README.md": "readme\n",
+    "AGENTS.md": "agents\n",
+    # the machinery that gates the lane (nexus-rbmja.5)
+    "tests/e2e/release-battery.sh": "#!/bin/bash\n",
+    "tests/e2e/plugin-lockstep-tests.sh": "#!/bin/bash\n",
+    "tests/e2e/plugin-delivery-proof.sh": "#!/bin/bash\n",
+    "tests/e2e/hook-cli-skew/run.sh": "#!/bin/bash\n",
+    "tests/test_plugin_lockstep.py": "def test_l(): pass\n",
+    "tests/hooks/test_lockstep_survives_cli_skew.py": "def test_s(): pass\n",
 }
 
 
@@ -148,11 +167,33 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
-def _commit(repo: Path, changes: dict[str, str | None]) -> None:
+class Link(NamedTuple):
+    """A symlink to commit in place of (or beside) a regular file."""
+
+    target: str
+
+
+def _pyproject_bumped(to: str = "7.86.4") -> str:
+    return PYPROJECT.replace('name = "conexus"\nversion = "7.86.3"', f'name = "conexus"\nversion = "{to}"')
+
+
+def _commit(
+    repo: Path, changes: dict[str, str | Link | None], *, bump: bool = True
+) -> None:
+    """Commit *changes* on top of the tag. A release always moves the version, so
+    pyproject.toml's patch bump rides along unless the case supplies its own
+    (or passes ``bump=False`` to test the lane without one)."""
+    if bump and "pyproject.toml" not in changes:
+        changes = {**changes, "pyproject.toml": _pyproject_bumped()}
     for rel, text in changes.items():
-        if text is None:
+        if isinstance(text, Link):
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).unlink(missing_ok=True)
+            os.symlink(text.target, repo / rel)
+        elif text is None:
             (repo / rel).unlink()
         else:
+            (repo / rel).unlink(missing_ok=True)  # replaces a symlink too
             _write(repo, rel, text)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "change")
@@ -196,6 +237,7 @@ def test_plugin_only_diff_passes(repo: Path) -> None:
     r = _check(repo)
     assert r.returncode == 0, r.stdout + r.stderr
     assert r.stdout.rstrip().splitlines()[-1] == PASS_LINE
+    assert "examined v7.86.3..HEAD: 8 changed paths" in r.stdout
 
 
 def test_full_version_bump_passes(repo: Path) -> None:
@@ -453,6 +495,7 @@ def test_unresolvable_base_exits_2(repo: Path) -> None:
     _commit(repo, {"conexus/skills/a.md": "ok\n"})
     r = _check(repo, base="v9.9.9")
     assert r.returncode == 2, r.stdout + r.stderr
+    assert "blind to tags" in r.stdout
     assert r.stdout.rstrip().splitlines()[-1] == UNVERIFIED_LINE
     assert PASS_LINE not in r.stdout
 
@@ -480,21 +523,249 @@ def test_head_option_selects_range(repo: Path) -> None:
     assert _run(repo, "--base", "v7.86.3").returncode == 1
 
 
-# ---- real history (skipped where the objects are absent; counted) -----------
+# ---- nexus-rbmja.5: the version bump ---------------------------------------
 
 
-def _real_has(rev: str) -> bool:
-    return (
-        subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        ).returncode
-        == 0
+def test_plugin_diff_without_a_version_bump_fails(repo: Path) -> None:
+    """A plugin diff that does not move the version is the nexus-konsk non-delivery.
+
+    Mutation (drop version_bump_problem): the diff is ELIGIBLE and the battery
+    prints PASSED(PLUGIN-ONLY) for a cut Claude Code will never pick up.
+    """
+    _commit(repo, {"conexus/skills/a.md": "skill v2\n"}, bump=False)
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "INELIGIBLE: version bump:" in r.stdout and "7.86.3 -> 7.86.3" in r.stdout
+    assert PASS_LINE not in r.stdout
+
+
+@pytest.mark.parametrize("to", ["7.87.0", "8.0.0", "7.86.5", "7.86.2", "7.86.10"])
+def test_only_a_patch_plus_one_bump_is_eligible(repo: Path, to: str) -> None:
+    """Mutation (accept any version change, or any increase): a minor bump, a
+    skipped patch, a downgrade and a jump all read ELIGIBLE."""
+    _commit(repo, {"conexus/skills/a.md": "skill v2\n", "pyproject.toml": _pyproject_bumped(to)})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "not a patch bump" in r.stdout and "7.86.4 exactly" in r.stdout
+
+
+@pytest.mark.parametrize("to", ["7.86.4rc1", "7.86.4.1", "7.86.x", "7.86"])
+def test_a_non_numeric_version_is_ineligible(repo: Path, to: str) -> None:
+    """The surface normaliser accepts any version-looking value; the bump check
+    must still refuse one that is not X.Y.Z. Mutation (skip the semver parse):
+    the surface check alone passes it."""
+    _commit(repo, {"conexus/skills/a.md": "skill v2\n", "pyproject.toml": _pyproject_bumped(to)})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "is not X.Y.Z on both sides" in r.stdout
+
+
+def test_a_deleted_pyproject_cannot_pass_the_bump_check(repo: Path) -> None:
+    """Mutation (let a missing pyproject.toml read as no problem)."""
+    _commit(repo, {"pyproject.toml": None}, bump=False)
+    r = _check(repo)
+    assert r.returncode == 1
+    assert "must exist on both sides" in r.stdout
+
+
+# ---- nexus-rbmja.5: ancestry and --base shape --------------------------------
+
+
+def test_head_that_does_not_descend_from_base_is_ineligible(repo: Path) -> None:
+    """A head on unrelated history diffs as a pile of changes against the tag.
+
+    Mutation (drop the is-ancestor check): the unrelated head with only plugin
+    changes and a bump reads ELIGIBLE.
+    """
+    _git(repo, "checkout", "-q", "--orphan", "unrelated")
+    _commit(repo, {"conexus/skills/a.md": "skill v2\n"})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "does not descend from v7.86.3" in r.stdout
+    assert PASS_LINE not in r.stdout
+
+
+@pytest.mark.parametrize("base", ["main", "HEAD", "7.86.3", "v7.86", "v7.86.3-rc1", "v7.86.3^", "plugin-v7.86.3-1"])
+def test_base_must_be_a_client_tag(repo: Path, base: str) -> None:
+    """Mutation (drop the vX.Y.Z regex): any commit-ish is accepted as the base,
+    including one that resolves."""
+    _git(repo, "tag", "plugin-v7.86.3-1")
+    _commit(repo, {"conexus/skills/a.md": "ok\n"})
+    r = _check(repo, base=base)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "must be the last client tag" in r.stdout
+    assert r.stdout.rstrip().splitlines()[-1] == UNVERIFIED_LINE
+
+
+# ---- nexus-rbmja.5: the gating machinery is not free -------------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/e2e/release-battery.sh",
+        "tests/e2e/plugin-lockstep-tests.sh",
+        "tests/e2e/plugin-delivery-proof.sh",
+        "tests/e2e/hook-cli-skew/run.sh",
+        "tests/e2e/hook-cli-skew/new_file.py",
+        "tests/test_plugin_lockstep.py",
+        "tests/hooks/test_lockstep_survives_cli_skew.py",
+    ],
+)
+def test_the_gating_harness_is_not_free_under_tests(repo: Path, path: str) -> None:
+    """Mutation (drop the harness rule): tests/ is free and an eligible diff may
+    edit the eligibility call that gates it."""
+    _commit(repo, {"conexus/skills/a.md": "ok\n", path: "# edited\n"})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"INELIGIBLE: {path} [" in r.stdout
+    assert "release machinery that gates this lane" in r.stdout
+
+
+# ---- nexus-rbmja.5: type changes and symlinks --------------------------------
+
+
+def test_a_symlink_replacing_a_channel_file_is_ineligible(repo: Path) -> None:
+    """Status T. Mutation (judge by path only): conexus/skills/a.md is a channel
+    path, so a symlink swapped in for it reads ELIGIBLE."""
+    _commit(repo, {"conexus/skills/a.md": Link("../../src/nexus/a.py")})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "conexus/skills/a.md [T]" in r.stdout and "symlink" in r.stdout
+
+
+def test_a_new_symlink_is_ineligible(repo: Path) -> None:
+    """Status A with mode 120000 (no type change). Mutation (check status T only)."""
+    _commit(repo, {"docs/link.md": Link("../src/nexus/a.py")})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "docs/link.md [A]" in r.stdout and "mode 000000 -> 120000" in r.stdout
+
+
+# ---- nexus-rbmja.5: mutation killers ------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["src/docs/x.py", "src/tests/x.py"])
+def test_a_free_prefix_nested_under_src_is_not_free(repo: Path, path: str) -> None:
+    """Mutation (match tests/ and docs/ anywhere in the path: ``p in path``)."""
+    _commit(repo, {path: "changed\n"})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"INELIGIBLE: {path} [M]" in r.stdout
+
+
+@pytest.mark.parametrize("path", ["README.md", "AGENTS.md"])
+def test_a_root_markdown_file_is_not_a_changelog(repo: Path, path: str) -> None:
+    """Mutation (free any root .md instead of the two named files)."""
+    _commit(repo, {path: "changed\n"})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"INELIGIBLE: {path} [M]" in r.stdout
+
+
+@pytest.mark.parametrize("text", ["{not json", "[1, 2]", '{"version": 7}', ""])
+def test_a_manifest_that_does_not_parse_is_ineligible(repo: Path, text: str) -> None:
+    """Mutation (treat a manifest that fails to parse as unchanged-but-version)."""
+    _commit(repo, {"mcpb/manifest.json": text})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "mcpb/manifest.json [M] unparsable" in r.stdout
+
+
+@pytest.mark.parametrize("pin", ["evil>=7.86.4", "conexus-foo>=7.86.4", "conexus==7.86.4"])
+def test_the_mcpb_pin_cannot_be_rewritten_to_another_package(repo: Path, pin: str) -> None:
+    """Mutation (normalise any quoted ``<name>>=<version>`` dependency)."""
+    text = _bump(MCPB_PYPROJECT).replace("conexus>=7.86.4", pin)
+    assert pin in text
+    _commit(repo, {"mcpb/pyproject.toml": text})
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "mcpb/pyproject.toml [M] changes more than the version" in r.stdout
+
+
+@pytest.mark.parametrize("path", sorted(["pyproject.toml", "mcpb/pyproject.toml", "mcpb/manifest.json", "uv.lock"]))
+def test_deleting_a_version_surface_is_ineligible(repo: Path, path: str) -> None:
+    """Mutation (content-check only when both sides exist, pass a delete)."""
+    _commit(repo, {path: None}, bump=False)
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"INELIGIBLE: {path} [D] status D: must exist on both sides" in r.stdout
+
+
+def test_a_package_named_like_conexus_is_not_the_conexus_stanza(repo: Path) -> None:
+    """Mutation (match the stanza name by prefix: ``startswith("conexus")``)."""
+    _commit(
+        repo,
+        {
+            "uv.lock": UV_LOCK.replace(
+                'name = "conexus-foo"\nversion = "1.0.0"',
+                'name = "conexus-foo"\nversion = "1.0.1"',
+            )
+        },
     )
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "uv.lock [M] changes more than the version" in r.stdout
 
 
-_REAL_BUMP_FILES = [
+def test_the_summary_counts_what_was_examined(repo: Path) -> None:
+    """Non-vacuity: the ``examined`` line names the range, the path count and the
+    category split. Mutation (drop the line, or count after filtering)."""
+    _commit(
+        repo,
+        {
+            "conexus/skills/a.md": "v2\n",
+            "docs/a.md": "v2\n",
+            "CHANGELOG.md": "# Changelog\nmore\n",
+        },
+    )
+    r = _check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (
+        "examined v7.86.3..HEAD: 4 changed paths "
+        "(1 changelog, 1 channel, 1 tests-docs, 1 version-surface)"
+    ) in r.stdout
+
+
+def test_every_offender_is_reported_with_its_reason(repo: Path) -> None:
+    """Two offenders in one diff are both named, each with its reason, and the
+    failure line counts them. Mutation (stop at the first offender)."""
+    _commit(
+        repo,
+        {
+            "src/nexus/a.py": "changed\n",
+            "scripts/s.py": "changed\n",
+            "conexus/skills/a.md": "ok\n",
+        },
+    )
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    reason = "outside the plugin channel, tests/, docs/ and the version surfaces"
+    assert f"INELIGIBLE: src/nexus/a.py [M] {reason}" in r.stdout
+    assert f"INELIGIBLE: scripts/s.py [M] {reason}" in r.stdout
+    assert f"{FAIL_LINE}: 2 problem(s) in 4 paths" in r.stdout
+    assert "INELIGIBLE: conexus/skills/a.md" not in r.stdout
+
+
+def test_a_blind_tag_checkout_is_unverified_not_a_pass(repo: Path) -> None:
+    """The base tag does not resolve: the sentinel names the cause. Mutation
+    (drop assert_tag_visibility from _resolve): the failure still exits 2 but
+    from a later git error, and this message is gone."""
+    _commit(repo, {"conexus/skills/a.md": "ok\n"})
+    _git(repo, "tag", "-d", "v7.86.3")
+    r = _check(repo)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "blind to tags" in r.stdout and "--base v7.86.3" in r.stdout
+    assert r.stdout.rstrip().splitlines()[-1] == UNVERIFIED_LINE
+
+
+# ---- file shapes from the working tree, built in a tmp repo ------------------
+# These replace two tests that read v7.86.3 and a develop commit out of git
+# history and skipped silently in the depth-1 PR CI clone (nexus-rbmja.5, High).
+# They copy the files' CONTENT from the working tree, so no tag or history is
+# needed, and none can skip.
+
+_SHAPE_FILES = [
     ".claude-plugin/marketplace.json",
     "conexus/.claude-plugin/plugin.json",
     "sn/.claude-plugin/plugin.json",
@@ -508,66 +779,104 @@ _REAL_BUMP_FILES = [
 ]
 
 
-@pytest.mark.skipif(not _real_has("v7.86.3"), reason="tag v7.86.3 not in this clone")
-def test_real_fake_7_86_4_is_eligible(tmp_path: Path) -> None:
-    """The measured case: v7.86.3's own files, bumped as the fake 7.86.4 was.
+def _current_version() -> str:
+    m = re.search(
+        r'(?ms)^\[project\].*?^version = "([0-9]+\.[0-9]+\.[0-9]+)"',
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+    )
+    assert m, "pyproject.toml has no [project] version"
+    return m.group(1)
 
-    Builds a tmp repo whose base commit holds the REAL v7.86.3 blobs of the
-    ten files and bumps them the way a release does (sed on the version
-    strings; uv.lock only the conexus stanza). Mutation: tighten any
-    version-surface check until a real file shape fails it.
-    """
-    r = tmp_path / "real"
+
+def _next_patch(version: str) -> str:
+    major, minor, patch = version.split(".")
+    return f"{major}.{minor}.{int(patch) + 1}"
+
+
+def _bump_pyproject(text: str, version: str) -> str:
+    return re.sub(
+        rf'(?m)^version = "{re.escape(version)}"$',
+        f'version = "{_next_patch(version)}"',
+        text,
+        count=1,
+    )
+
+
+def _shape_repo(tmp_path: Path, files: list[str]) -> tuple[Path, str, dict[str, str]]:
+    """A tmp repo whose base commit holds the working tree's copy of *files*,
+    tagged with the version in the working tree's pyproject.toml."""
+    version = _current_version()
+    r = tmp_path / "shape"
     r.mkdir()
     _git(r, "init", "-q", "-b", "main")
     base: dict[str, str] = {}
-    for rel in _REAL_BUMP_FILES:
-        blob = subprocess.run(
-            ["git", "show", f"v7.86.3:{rel}"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
+    for rel in files:
+        blob = (REPO_ROOT / rel).read_text(encoding="utf-8")
         base[rel] = blob
         _write(r, rel, blob)
     _git(r, "add", "-A")
     _git(r, "commit", "-q", "-m", "base")
-    _git(r, "tag", "v7.86.3")
+    _git(r, "tag", f"v{version}")
+    return r, version, base
 
-    changes: dict[str, str | None] = {}
+
+def test_working_tree_release_files_bumped_as_a_release_does_are_eligible(tmp_path: Path) -> None:
+    """The measured case: the real files, bumped the way the fake 7.86.4 was
+    (sed on the version strings; uv.lock only the conexus stanza).
+
+    Mutation: tighten any version-surface check until a real file shape fails it.
+    """
+    r, version, base = _shape_repo(tmp_path, _SHAPE_FILES)
+    new_version = _next_patch(version)
+    changes: dict[str, str | Link | None] = {}
     for rel, blob in base.items():
         if rel == "uv.lock":
             new = re.sub(
-                r'(\[\[package\]\]\nname = "conexus"\nversion = )"7\.86\.3"',
-                r'\1"7.86.4"',
+                rf'(\[\[package\]\]\nname = "conexus"\nversion = )"{re.escape(version)}"',
+                rf'\1"{new_version}"',
                 blob,
                 count=1,
             )
         elif rel == "pyproject.toml":
-            new = re.sub(
-                r'(?m)^version = "7\.86\.3"$', 'version = "7.86.4"', blob, count=1
-            )
+            new = _bump_pyproject(blob, version)
         elif rel in ("CHANGELOG.md", "conexus/CHANGELOG.md"):
-            new = "## 7.86.4\n\nPairs with engine-service-v0.1.164.\n\n" + blob
+            new = f"## {new_version}\n\nPairs with an engine.\n\n" + blob
         else:
-            new = blob.replace("7.86.3", "7.86.4")
+            new = blob.replace(version, new_version)
         assert new != blob, f"bump produced no change in {rel}"
         changes[rel] = new
     _commit(r, changes)
 
-    out = _check(r)
+    out = _check(r, base=f"v{version}")
     assert out.returncode == 0, out.stdout + out.stderr
     assert out.stdout.rstrip().splitlines()[-1] == PASS_LINE
-    assert f"{len(_REAL_BUMP_FILES)} changed paths" in out.stdout
+    assert f"{len(_SHAPE_FILES)} changed paths" in out.stdout
 
 
-@pytest.mark.skipif(not _real_has("d004f9d46"), reason="d004f9d46 not in this clone")
-def test_real_self_gc_commit_is_ineligible() -> None:
-    """develop's d004f9d46 touches src/nexus/hooks/self_gc.py.
+def test_working_tree_hook_source_edit_is_ineligible_beside_a_plugin_change(tmp_path: Path) -> None:
+    """develop's self-gc commit touched src/nexus/hooks/self_gc.py: the real file,
+    edited, with a plugin change and a second src/ file in the same diff.
 
-    Mutation: accept src/ paths.
+    Mutation: accept src/ paths, or stop at the first offender.
     """
-    r = _run(REPO_ROOT, "--base", "d004f9d46^", "--head", "d004f9d46")
-    assert r.returncode == 1, r.stdout + r.stderr
-    assert "src/nexus/hooks/self_gc.py" in r.stdout
+    files = [
+        "src/nexus/hooks/self_gc.py",
+        "src/nexus/engine_version.py",
+        "pyproject.toml",
+        "conexus/hooks/hooks.json",
+    ]
+    r, version, base = _shape_repo(tmp_path, files)
+    _commit(
+        r,
+        {
+            "src/nexus/hooks/self_gc.py": base["src/nexus/hooks/self_gc.py"] + "# edited\n",
+            "src/nexus/engine_version.py": base["src/nexus/engine_version.py"] + "# edited\n",
+            "conexus/hooks/hooks.json": base["conexus/hooks/hooks.json"] + "\n",
+            "pyproject.toml": _bump_pyproject(base["pyproject.toml"], version),
+        },
+    )
+    out = _check(r, base=f"v{version}")
+    assert out.returncode == 1, out.stdout + out.stderr
+    assert "INELIGIBLE: src/nexus/hooks/self_gc.py [M]" in out.stdout
+    assert "INELIGIBLE: src/nexus/engine_version.py [M]" in out.stdout
+    assert f"{FAIL_LINE}: 2 problem(s) in 4 paths" in out.stdout

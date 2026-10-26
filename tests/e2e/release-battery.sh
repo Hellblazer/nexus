@@ -27,9 +27,12 @@
 # --plugin-only vX.Y.Z (nexus-rbmja.3; vX.Y.Z = the last client tag, the branch
 # base): the plugin-only fast lane. scripts/check_plugin_only_eligibility.py
 # --base vX.Y.Z runs first; anything but ELIGIBLE refuses the battery (exit 2)
-# before a leg starts. lsg, pkgup, mvv, dual and resolve are shown in the table as
-# SKIPPED(plugin-only: inputs identical to vX.Y.Z), never omitted, and two legs
-# defined only in this mode run in the group:
+# before a leg starts. The tree must have no changes at all (git status --porcelain empty,
+# untracked files included): the eligibility gate reads the committed HEAD, so uncommitted edits
+# would run under a verdict about different bytes. --skip-preflight does not compose with it
+# (exit 2): the preflight is the only full-tree gate this mode keeps. lsg, pkgup, mvv, dual and
+# resolve are shown in the table as SKIPPED(plugin-only: wheel and engine identical to vX.Y.Z but
+# for the version), never omitted, and two legs defined only in this mode run in the group:
 #   skew      tests/e2e/hook-cli-skew/run.sh             the plugin against every CLI in the field
 #   lockstep  tests/e2e/plugin-lockstep-tests.sh         the plugin/CLI lockstep tests
 # The closing line then names the mode, and a plugin-only run never prints a bare
@@ -68,6 +71,8 @@ while [ $# -gt 0 ]; do
 done
 [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "--max-parallel must be a positive integer" >&2; exit 2; }
 if [ "$PLUGIN_ONLY" = 1 ]; then
+  [ "$SKIP_PREFLIGHT" = 0 ] \
+    || { echo "--skip-preflight does not compose with --plugin-only: the preflight is the only full-tree gate this mode keeps" >&2; exit 2; }
   [[ "$PLUGIN_ONLY_BASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || { echo "--plugin-only wants the last client tag as vX.Y.Z (got '$PLUGIN_ONLY_BASE')" >&2; exit 2; }
 fi
@@ -136,6 +141,14 @@ e2e_python_resolve || exit 2
 # means exit 0 AND its own PASSED verdict line; a gate that exits 0 and says nothing proves nothing
 # (the nexus-f2g8u class), so that refuses too, as does UNVERIFIED (could-not-check is never a pass).
 if [ "$PLUGIN_ONLY" = 1 ]; then
+  # The gate reads committed HEAD and the legs run the working tree: a changed or untracked path would
+  # be judged on bytes it does not run. Refuse before the gate, so nothing starts on a mismatch.
+  TREE_STATE="$(git status --porcelain 2>&1)" || { echo "BATTERY REFUSED: plugin-only mode: git status failed: $TREE_STATE" >&2; exit 2; }
+  if [ -n "$TREE_STATE" ]; then
+    printf '%s\n' "$TREE_STATE" | sed -n '1,20p' >&2
+    echo "BATTERY REFUSED: plugin-only mode: the working tree has changes or untracked paths (listed above); eligibility is judged on committed HEAD" >&2
+    exit 2
+  fi
   ELIG_OUT="$("$E2E_PYTHON" scripts/check_plugin_only_eligibility.py --base "$PLUGIN_ONLY_BASE" 2>&1)"; ELIG_RC=$?
   ELIG_LAST="$(printf '%s\n' "$ELIG_OUT" | grep -v '^[[:space:]]*$' | tail -1 || true)"
   if [ "$ELIG_RC" -ne 0 ] || [ "$ELIG_LAST" != "PLUGIN-ONLY ELIGIBILITY PASSED" ]; then
@@ -216,12 +229,15 @@ define_leg dual       group  "DUAL-EMBEDDER GATE (PASSED|FAILED)"       tests/e2
 define_leg resolve    group  "CONSTRAINTS RESOLVE GATE (PASSED|FAILED)" tests/e2e/constraints-resolve-gate.sh
 
 # nexus-rbmja.3: the plugin-only fast lane. The five legs above stay in the table and are marked
-# SKIPPED, never omitted (their inputs are the last client tag's, byte for byte, which the
-# eligibility gate above just proved); the two legs below exist only in this mode.
+# SKIPPED, never omitted. What the eligibility gate above proved is that the diff from the last client
+# tag touches nothing the wheel or the engine are built from but the version strings, so the wheel and
+# engine are those of the tag; tests/ and the plugin trees DO differ, and the skipped legs are not pure
+# functions of the tree (PyPI, constraint resolution), so the status claims no more than that. The two
+# legs below exist only in this mode.
 PLUGIN_SKIPPED=0
 if [ "$PLUGIN_ONLY" = 1 ]; then
   for leg in lsg pkgup mvv dual resolve; do
-    LEG_STATUS[$leg]="SKIPPED(plugin-only: inputs identical to $PLUGIN_ONLY_BASE)"; PLUGIN_SKIPPED=$((PLUGIN_SKIPPED+1))
+    LEG_STATUS[$leg]="SKIPPED(plugin-only: wheel and engine identical to $PLUGIN_ONLY_BASE but for the version)"; PLUGIN_SKIPPED=$((PLUGIN_SKIPPED+1))
   done
   define_leg skew       group  "HOOK-CLI SKEW GATE (PASSED|FAILED)"       tests/e2e/hook-cli-skew/run.sh
   define_leg lockstep   group  "PLUGIN LOCKSTEP TESTS (PASSED|FAILED)"    tests/e2e/plugin-lockstep-tests.sh

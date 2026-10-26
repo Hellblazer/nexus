@@ -27,9 +27,9 @@ def _run(tmp_path: Path, summary: str, rc: int, **env: str) -> subprocess.Comple
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     fake = bindir / "uv"
-    fake.write_text(f"#!/bin/bash\necho \"$@\" > '{tmp_path}/uv.args'\n"
+    fake.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$@\" > '{tmp_path}/uv.args'\n"
                     f"echo 'NX_TEST_T2_SUBSTRATE='\"$NX_TEST_T2_SUBSTRATE\" > '{tmp_path}/uv.env'\n"
-                    f"printf '%s\\n' {summary!r}\nexit {rc}\n")
+                    f"printf '%b\\n' {summary!r}\nexit {rc}\n")  # %b: a case may pass several lines
     fake.chmod(0o755)
     return subprocess.run(
         ["bash", str(repo / "tests" / "e2e" / "plugin-lockstep-tests.sh")],
@@ -51,6 +51,24 @@ def test_a_clean_run_prints_the_verdict_with_its_counts(tmp_path: Path) -> None:
     assert (tmp_path / "uv.env").read_text().strip() == "NX_TEST_T2_SUBSTRATE=none"
     args = (tmp_path / "uv.args").read_text()
     assert "tests/test_plugin_lockstep.py" in args and "tests/hooks/test_lockstep_survives_cli_skew.py" in args
+    # pytest's own output reaches the battery log, ahead of the verdict line
+    assert r.stdout.splitlines()[0] == "41 passed, 2 warnings in 4.90s", r.stdout
+
+
+def test_the_marker_expression_is_emptied_so_the_default_addopts_cannot_deselect(tmp_path: Path) -> None:
+    """``-m ""`` overrides the project's default marker deselection (nexus-rbmja.5). Mutation (drop it):
+    a default-deselected lockstep test is silently not run and the count still reads PASSED."""
+    _run(tmp_path, "41 passed in 1s", 0)
+    lines = (tmp_path / "uv.args").read_text().splitlines()
+    assert lines[lines.index("-m") + 1] == "", lines
+
+
+def test_the_counts_come_from_the_last_summary_line_not_the_first(tmp_path: Path) -> None:
+    """pytest can print an earlier line that looks like a summary (a nested run, a -rA section); the
+    final one is the verdict. Mutation (``tail -1`` -> ``head -1``): this reads 5 passed, 1 skipped
+    and fails the leg over its skip budget."""
+    r = _run(tmp_path, "5 passed, 1 skipped in 1.0s\n41 passed in 4.9s", 0)
+    assert r.returncode == 0 and _last(r) == "PLUGIN LOCKSTEP TESTS PASSED (41 passed, 0 skipped)", (r.stdout, r.stderr)
 
 
 def test_zero_passed_is_a_failure_not_a_pass(tmp_path: Path) -> None:

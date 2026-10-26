@@ -41,6 +41,9 @@ _PASS_LINE.update({
 _PLUGIN_GROUP = ("skew", "lockstep")
 _TAG = "v7.86.3"
 _ELIGIBLE = "PLUGIN-ONLY ELIGIBILITY PASSED"
+#: What a skipped leg claims, and no more (nexus-rbmja.5): the diff from the tag moves nothing the
+#: wheel or engine are built from but the version strings; tests/ and the plugin trees do differ.
+_SKIP_STATUS = f"SKIPPED(plugin-only: wheel and engine identical to {_TAG} but for the version)"
 
 
 class _Battery:
@@ -241,7 +244,7 @@ def test_plugin_only_skips_the_heavy_legs_by_design_and_runs_skew_and_lockstep(b
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert battery.ran_legs() == {"elig", "preflight", *_PLUGIN_GROUP}, "only preflight, skew, lockstep run"
     for leg in _SKIPPED_LEGS:
-        assert _row(r.stdout, leg).startswith(f"SKIPPED(plugin-only: inputs identical to {_TAG})"), r.stdout
+        assert _row(r.stdout, leg).startswith(_SKIP_STATUS), r.stdout
     for leg in ("preflight", *_PLUGIN_GROUP):
         assert _row(r.stdout, leg).startswith("PASSED"), r.stdout
     closing = r.stdout.rstrip().splitlines()[-1]
@@ -277,7 +280,7 @@ def test_plan_lists_the_plugin_only_statuses(battery: _Battery) -> None:
     assert list(plan) == ["preflight", *_GROUP, *_PLUGIN_GROUP], plan
     assert plan["preflight"] == "PENDING"
     for leg in _SKIPPED_LEGS:
-        assert plan[leg] == f"SKIPPED(plugin-only: inputs identical to {_TAG})", plan
+        assert plan[leg] == _SKIP_STATUS, plan
     for leg in _PLUGIN_GROUP:
         assert plan[leg] == "PENDING", plan
     assert battery.ran_legs() == {"elig"}, "--plan runs the gate and no leg"
@@ -308,3 +311,102 @@ def test_only_composes_with_plugin_only_and_the_verdict_names_both(battery: _Bat
     assert closing.startswith("RELEASE BATTERY PASSED (PARTIAL:") and "PLUGIN-ONLY" in closing, closing
     r = _plugin(battery, "--only", "mvv")
     assert "mvv" not in battery.ran_legs() and _row(r.stdout, "mvv").startswith("SKIPPED(plugin-only"), r.stdout
+
+
+# ── nexus-rbmja.5: the phase-1 review findings ────────────────────────────────────────────────────────
+
+
+def test_the_skipped_legs_claim_only_what_the_gate_proved(battery: _Battery) -> None:
+    """Mutation (restore "inputs identical to"): tests/, the plugin trees and the version strings differ
+    from the tag, so that wording is false; the table must say wheel and engine, but for the version."""
+    r = _plugin(battery)
+    assert "inputs identical" not in r.stdout, r.stdout
+    for leg in _SKIPPED_LEGS:
+        assert _row(r.stdout, leg).startswith(_SKIP_STATUS), r.stdout
+
+
+def test_plugin_only_refuses_a_nonzero_gate_exit_even_with_a_passed_last_line(battery: _Battery) -> None:
+    """The gate is ELIGIBLE only on exit 0 AND its verdict line. Mutation (judge by the last line
+    alone): a gate that printed PASSED and exited 1 runs the battery."""
+    battery.set_leg("elig", f"{_ELIGIBLE}\n", 1)
+    r = _plugin(battery)
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert f"BATTERY REFUSED: plugin-only mode: {_ELIGIBLE}" in r.stderr
+    assert battery.ran_legs() == {"elig"}
+
+
+def test_the_equals_spelling_of_plugin_only_is_the_same_mode(battery: _Battery) -> None:
+    """Mutation (drop the ``--plugin-only=*`` arm): the spelling is an unknown argument, exit 2."""
+    r = battery.run(f"--plugin-only={_TAG}")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert (battery.out / "elig.args").read_text() == f"--base {_TAG}"
+    assert battery.ran_legs() == {"elig", "preflight", *_PLUGIN_GROUP}
+    assert r.stdout.rstrip().splitlines()[-1].startswith(f"RELEASE BATTERY PASSED (PLUGIN-ONLY vs {_TAG}")
+    assert battery.run("--plugin-only=7.86.3").returncode == 2
+
+
+def test_the_banner_names_the_mode_and_the_base_and_only_in_that_mode(battery: _Battery) -> None:
+    """Mutation (drop the banner suffix): a log opens without saying it is a plugin-only run."""
+    r = _plugin(battery)
+    banner = next(ln for ln in r.stdout.splitlines() if ln.startswith("RELEASE BATTERY: work="))
+    assert banner.endswith(f"mode=plugin-only base={_TAG}"), banner
+    banner = next(ln for ln in battery.run().stdout.splitlines() if ln.startswith("RELEASE BATTERY: work="))
+    assert "mode=" not in banner, banner
+
+
+def test_the_gate_output_is_echoed_into_the_log_on_a_pass(battery: _Battery) -> None:
+    """The examined-count line is the evidence of what was checked; it must reach the log. Mutation
+    (drop the ``printf`` of the gate's output after a pass)."""
+    battery.set_leg("elig", f"examined {_TAG}..HEAD: 3 changed paths (3 channel)\n{_ELIGIBLE}\n", 0)
+    r = _plugin(battery)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert f"examined {_TAG}..HEAD: 3 changed paths (3 channel)" in r.stdout
+
+
+def test_the_gate_output_reaches_stderr_on_a_refusal(battery: _Battery) -> None:
+    """Mutation (drop the echo before the refusal): the operator sees a verdict and no offenders."""
+    battery.set_leg("elig", "INELIGIBLE: src/nexus/x.py [M] outside the plugin channel\nPLUGIN-ONLY ELIGIBILITY FAILED: 1 problem(s)\n", 1)
+    r = _plugin(battery)
+    assert r.returncode == 2
+    assert "INELIGIBLE: src/nexus/x.py [M] outside the plugin channel" in r.stderr
+
+
+def _dirty(battery: _Battery, how: str) -> None:
+    if how == "modified":
+        (battery.root / "scripts" / "check_plugin_only_eligibility.py").write_text("# edited\n")
+    else:
+        (battery.root / "untracked.txt").write_text("x\n")
+
+
+@pytest.mark.parametrize("how", ["modified", "untracked"])
+def test_plugin_only_refuses_a_dirty_tree_before_the_gate_or_any_leg(battery: _Battery, how: str) -> None:
+    """Eligibility reads committed HEAD and the legs run the working tree. Mutation (drop the
+    porcelain check): the gate passes on HEAD and the legs run uncommitted bytes."""
+    _dirty(battery, how)
+    r = _plugin(battery)
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert "BATTERY REFUSED: plugin-only mode: the working tree has changes or untracked paths" in r.stderr
+    assert ("check_plugin_only_eligibility.py" if how == "modified" else "untracked.txt") in r.stderr
+    assert battery.ran_legs() == set(), "neither the gate nor any leg may start on a dirty tree"
+
+
+def test_a_dirty_tree_does_not_stop_the_full_battery(battery: _Battery) -> None:
+    """The refusal is a plugin-only rule: the full battery has its own dirty-tree banner and a
+    developer's sweep must still run. Mutation (move the check out of the plugin-only branch)."""
+    _dirty(battery, "untracked")
+    r = battery.run()
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert battery.ran_legs() == {"preflight", *_GROUP}
+
+
+def test_skip_preflight_does_not_compose_with_plugin_only(battery: _Battery) -> None:
+    """The preflight is the only full-tree gate the mode keeps; without it the closing line would
+    read like a full-preflight run. Mutation (drop the refusal)."""
+    r = _plugin(battery, "--skip-preflight")
+    assert r.returncode == 2, (r.stdout, r.stderr)
+    assert "--skip-preflight does not compose with --plugin-only" in r.stderr
+    assert battery.ran_legs() == set()
+    r = battery.run("--skip-preflight", "--plugin-only", _TAG)  # either order
+    assert r.returncode == 2 and battery.ran_legs() == set(), (r.stdout, r.stderr)
+    r = battery.run("--skip-preflight", "--only", "mvv")  # the full battery still allows it
+    assert r.returncode == 0, (r.stdout, r.stderr)

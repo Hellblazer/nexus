@@ -10,13 +10,18 @@ is built from.
 
     uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z [--head HEAD]
 
-Diffs ``base..head`` (name-status, renames off, so a move out of ``src/``
-shows the ``src/`` deletion). ELIGIBLE (exit 0, last line
-``PLUGIN-ONLY ELIGIBILITY PASSED``) only if every changed path is one of:
+``--base`` must be a client tag ``vX.Y.Z`` and ``--head`` must descend from it.
+Diffs ``base..head`` (raw, renames off, so a move out of ``src/`` shows the
+``src/`` deletion). ELIGIBLE (exit 0, last line ``PLUGIN-ONLY ELIGIBILITY
+PASSED``) only if the head's ``pyproject.toml`` version is the base's with the
+patch number plus one (a plugin diff that does not move the version is never
+delivered, nexus-konsk) and every changed path is one of:
 
   a. a channel path per :func:`plugin_channel.is_channel_path` (imported,
      never copied);
-  b. under ``tests/`` or ``docs/``;
+  b. under ``tests/`` or ``docs/``, except the release machinery that gates
+     this lane (:data:`HARNESS_EXACT`, :data:`HARNESS_PREFIXES`): the battery,
+     the lockstep wrapper and tests, the skew harness, the delivery proof;
   c. ``CHANGELOG.md`` or ``conexus/PENDING_RELEASE.md``;
   d. a version surface whose CONTENT change is the version and nothing
      else: ``pyproject.toml`` (the ``[project]`` version line),
@@ -26,12 +31,13 @@ shows the ``src/`` deletion). ELIGIBLE (exit 0, last line
 
 Everything else is INELIGIBLE (exit 1, each offender with its reason):
 ``src/`` (the engine pin lives there), ``service/``, any other line of the
-four surfaces, ``scripts/``, ``.github/``, the rest of ``mcpb/``.
+four surfaces, ``scripts/``, ``.github/``, the rest of ``mcpb/``, the release
+machinery under ``tests/``, and any type change or symlink (mode 120000).
 
 Could-not-check is never a pass: an unresolvable ``--base`` or ``--head``
-(a blind checkout, a non-repo) exits 2 with ``PLUGIN-ONLY ELIGIBILITY
-UNVERIFIED``. An EMPTY diff exits 1: there is nothing to release, and a
-vacuous pass would let an empty cut through.
+(a blind checkout, a non-repo, a ``--base`` that is not ``vX.Y.Z``) exits 2
+with ``PLUGIN-ONLY ELIGIBILITY UNVERIFIED``. An EMPTY diff exits 1: there is
+nothing to release, and a vacuous pass would let an empty cut through.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from plugin_channel import (
     GitCommandError,
@@ -62,6 +69,23 @@ UNVERIFIED_LINE = "PLUGIN-ONLY ELIGIBILITY UNVERIFIED"
 FREE_PREFIXES: tuple[str, ...] = ("tests/", "docs/")
 #: Exact paths released alongside a plugin-only cut.
 FREE_EXACT: tuple[str, ...] = ("CHANGELOG.md", "conexus/PENDING_RELEASE.md")
+#: The machinery that gates this lane. It lives under ``tests/`` but is not free:
+#: an eligible diff that edited the eligibility call or the lockstep leg would
+#: change its own gate.
+HARNESS_EXACT: tuple[str, ...] = (
+    "tests/e2e/release-battery.sh",
+    "tests/e2e/plugin-lockstep-tests.sh",
+    "tests/e2e/plugin-delivery-proof.sh",
+    "tests/test_plugin_lockstep.py",
+    "tests/hooks/test_lockstep_survives_cli_skew.py",
+)
+HARNESS_PREFIXES: tuple[str, ...] = ("tests/e2e/hook-cli-skew/",)
+#: Git modes that are not a regular file: symlink, submodule.
+SPECIAL_MODES: frozenset[str] = frozenset({"120000", "160000"})
+
+_CLIENT_TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
+_SEMVER = re.compile(r"^([0-9]+)\.([0-9]+)\.([0-9]+)$")
+_PROJECT_VERSION = re.compile(r'^version\s*=\s*"([^"]*)"\s*$')
 
 _VERSION_VALUE = r'"[0-9][^"]*"'
 _VERSION_LINE = re.compile(rf"^version\s*=\s*{_VERSION_VALUE}\s*$")
@@ -74,6 +98,13 @@ _SENTINEL = "<VERSION>"
 
 class Unverifiable(RuntimeError):
     """The check could not be performed; never a pass."""
+
+
+class Change(NamedTuple):
+    status: str
+    path: str
+    old_mode: str
+    new_mode: str
 
 
 # ---- git ---------------------------------------------------------------------
@@ -99,9 +130,22 @@ def _resolve(ref: str, cwd: Path, label: str) -> None:
         raise Unverifiable(f"--{label} {ref} does not resolve to a commit")
 
 
-def changed_paths(base: str, head: str, cwd: Path) -> list[tuple[str, str]]:
-    """(status, path) for every path differing between *base* and *head*."""
-    out = _git(["diff", "--name-status", "--no-renames", "-z", base, head], cwd)
+def is_ancestor(base: str, head: str, cwd: Path) -> bool:
+    """Whether *head* descends from *base*; could-not-check raises."""
+    out = _git(["merge-base", "--is-ancestor", base, head], cwd)
+    if out.returncode == 0:
+        return True
+    if out.returncode == 1:
+        return False
+    raise Unverifiable(
+        f"git merge-base --is-ancestor {base} {head} failed (rc {out.returncode}): "
+        f"{out.stderr.decode(errors='replace').strip()}"
+    )
+
+
+def changed_paths(base: str, head: str, cwd: Path) -> list[Change]:
+    """Every path differing between *base* and *head*, with git's own modes."""
+    out = _git(["diff", "--raw", "--no-renames", "-z", base, head], cwd)
     if out.returncode != 0:
         raise Unverifiable(
             f"git diff {base} {head} failed (rc {out.returncode}): "
@@ -111,8 +155,14 @@ def changed_paths(base: str, head: str, cwd: Path) -> list[tuple[str, str]]:
     if fields and fields[-1] == "":
         fields.pop()
     if len(fields) % 2:
-        raise Unverifiable("unparsable git diff --name-status output")
-    return [(fields[i], fields[i + 1]) for i in range(0, len(fields), 2)]
+        raise Unverifiable("unparsable git diff --raw output")
+    changes: list[Change] = []
+    for i in range(0, len(fields), 2):
+        meta = fields[i].lstrip(":").split()
+        if len(meta) != 5:
+            raise Unverifiable(f"unparsable git diff --raw entry: {fields[i]!r}")
+        changes.append(Change(meta[4], fields[i + 1], meta[0], meta[1]))
+    return changes
 
 
 def _blob(rev: str, path: str, cwd: Path) -> str | None:
@@ -203,13 +253,57 @@ _SURFACE_ALLOWS = {
 }
 
 
+# ---- the version bump --------------------------------------------------------
+
+
+def project_version_of(text: str) -> str | None:
+    """The ``[project]`` table's ``version`` value, or None when absent."""
+    table = ""
+    for line in text.split("\n"):
+        header = _TABLE_HEADER.match(line)
+        if header:
+            table = header.group(1)
+        elif table == "project" and (m := _PROJECT_VERSION.match(line)):
+            return m.group(1)
+    return None
+
+
+def version_bump_problem(base: str, head: str, cwd: Path) -> str | None:
+    """None when head's ``[project]`` version is base's with patch + 1."""
+    before = _blob(base, "pyproject.toml", cwd)
+    after = _blob(head, "pyproject.toml", cwd)
+    if before is None or after is None:
+        return "pyproject.toml must exist on both sides to check the version bump"
+    old, new = project_version_of(before), project_version_of(after)
+    old_m, new_m = _SEMVER.match(old or ""), _SEMVER.match(new or "")
+    if old_m is None or new_m is None:
+        return (
+            f"pyproject.toml version is not X.Y.Z on both sides "
+            f"(base {old!r}, head {new!r})"
+        )
+    major, minor, patch = (int(g) for g in old_m.groups())
+    if tuple(int(g) for g in new_m.groups()) != (major, minor, patch + 1):
+        return (
+            f"version {old} -> {new} is not a patch bump; this lane ships "
+            f"{major}.{minor}.{patch + 1} exactly (a diff that does not move "
+            f"the version is never delivered)"
+        )
+    return None
+
+
 # ---- classification ----------------------------------------------------------
 
 
 def classify(
-    status: str, path: str, base: str, head: str, cwd: Path
+    change: Change, base: str, head: str, cwd: Path
 ) -> tuple[str, str | None]:
     """(category, reason). reason is None when the path is eligible."""
+    status, path = change.status, change.path
+    if status.startswith("T") or SPECIAL_MODES & {change.old_mode, change.new_mode}:
+        return "special", (
+            f"type change or symlink/submodule (mode {change.old_mode} -> "
+            f"{change.new_mode}); a link can point anywhere"
+        )
     if path in VERSION_SURFACES:
         before = _blob(base, path, cwd)
         after = _blob(head, path, cwd)
@@ -225,6 +319,11 @@ def classify(
         return "version-surface", (
             f"changes more than the version ({_SURFACE_ALLOWS[path]})"
         )
+    if path in HARNESS_EXACT or any(path_has_prefix(path, p) for p in HARNESS_PREFIXES):
+        return "harness", (
+            "release machinery that gates this lane; it ships through a "
+            "normal release"
+        )
     if is_channel_path(path):
         return "channel", None
     if any(path_has_prefix(path, p) for p in FREE_PREFIXES):
@@ -235,8 +334,15 @@ def classify(
 
 
 def evaluate(base: str, head: str, cwd: Path) -> int:
+    if not _CLIENT_TAG.match(base):
+        raise Unverifiable(f"--base {base!r} must be the last client tag, vX.Y.Z")
     _resolve(base, cwd, "base")
     _resolve(head, cwd, "head")
+    if not is_ancestor(base, head, cwd):
+        sys.stdout.write(
+            f"INELIGIBLE: {head} does not descend from {base}\n{FAIL_LINE}\n"
+        )
+        return 1
     changes = changed_paths(base, head, cwd)
     if not changes:
         sys.stdout.write(
@@ -245,18 +351,22 @@ def evaluate(base: str, head: str, cwd: Path) -> int:
         return 1
     categories: Counter[str] = Counter()
     offenders: list[str] = []
-    for status, path in changes:
-        category, reason = classify(status, path, base, head, cwd)
+    for change in changes:
+        category, reason = classify(change, base, head, cwd)
         categories[category] += 1
         if reason is not None:
-            offenders.append(f"INELIGIBLE: {path} [{status}] {reason}")
+            offenders.append(f"INELIGIBLE: {change.path} [{change.status}] {reason}")
+    if (bump := version_bump_problem(base, head, cwd)) is not None:
+        offenders.append(f"INELIGIBLE: version bump: {bump}")
     summary = ", ".join(f"{n} {name}" for name, n in sorted(categories.items()))
     sys.stdout.write(
         f"examined {base}..{head}: {len(changes)} changed paths ({summary})\n"
     )
     if offenders:
         sys.stdout.write("\n".join(offenders) + "\n")
-        sys.stdout.write(f"{FAIL_LINE}: {len(offenders)} of {len(changes)} paths\n")
+        sys.stdout.write(
+            f"{FAIL_LINE}: {len(offenders)} problem(s) in {len(changes)} paths\n"
+        )
         return 1
     sys.stdout.write(f"{PASS_LINE}\n")
     return 0

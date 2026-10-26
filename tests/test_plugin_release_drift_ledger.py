@@ -1034,6 +1034,15 @@ class TestTheCIWiringItself:
             f"could merge undeclared on a green PR."
         )
 
+    def test_the_path_filter_covers_the_ledger_module_the_test_imports(self) -> None:
+        """nexus-rbmja.5: the ledger parser moved to ``scripts/plugin_ledger.py``
+        (rbmja.2); an edit there changes what this check computes, so it must
+        trigger the workflow as the cut script's own path does."""
+        wf = self._workflow()
+        on = wf[True] if True in wf else wf["on"]
+        for event in ("push", "pull_request"):
+            assert "scripts/plugin_ledger.py" in on[event]["paths"], event
+
     def _fetch_step(self) -> dict:
         steps = self._workflow()["jobs"]["ledger"]["steps"]
         matches = [

@@ -12,8 +12,12 @@
 # Non-vacuity (the nexus-moht0 doctrine): a run that passed nothing is a failure, and so is one that
 # skipped more than the stated budget, because a skip-passing lockstep test proves nothing about the
 # lockstep. The budget is NX_LOCKSTEP_SKIP_BUDGET (default 0: today's run skips none).
-# NX_TEST_T2_SUBSTRATE=none: the files need no engine. Exit 0 only on PASSED; 1 on a red; 2 when the
-# test runner could not be started.
+# NX_TEST_T2_SUBSTRATE=none: the files need no engine. Exit 0 only on PASSED. Exit 1 on a red, a
+# vacuous run, a skip over budget, or a runner that failed to start (a missing uv is pytest exit 127,
+# reported as a FAILED line). Exit 2 only for a malformed NX_LOCKSTEP_SKIP_BUDGET or when the repo
+# root or the log file cannot be had. The tests run through `uv run pytest`, as the preflight's pytest
+# checks do: the battery's resolved $E2E_PYTHON is a bare interpreter without the project's
+# environment, so it cannot import pytest here.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
