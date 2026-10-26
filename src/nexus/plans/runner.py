@@ -100,6 +100,7 @@ __all__ = [
     "PlanRunUnresolvedVarError",
     "StepRecord",
     "ToolDispatcher",
+    "find_embedded_step_ref",
     "merge_bindings",
     "plan_run",
     "resolve_step_bindings",
@@ -842,6 +843,26 @@ def _rollup_step_usage(entries: list) -> Any:
     )
 
 
+class _StepId(str):
+    """A string that came out of a ``$stepN.ids`` / ``.tumblers`` reference inside a list arg
+    (nexus-jypmj.4). It compares and serialises as the plain string; the type is the provenance, so
+    evidence hydration can tell a chunk id from fetched text that merely looks like one."""
+
+    __slots__ = ()
+
+
+#: Step output fields that hold identifiers, never evidence text.
+_ID_FIELDS: frozenset[str] = frozenset({"ids", "tumblers"})
+
+
+def _is_id_field_ref(item: Any) -> bool:
+    """True when *item* is a whole-value ``$stepN.ids`` / ``$stepN.tumblers`` reference."""
+    if not isinstance(item, str):
+        return False
+    m = _STEPREF_RE.match(item)
+    return m is not None and m.group(2) in _ID_FIELDS
+
+
 def _resolve_value(
     value: Any,
     *,
@@ -874,6 +895,8 @@ def _resolve_value(
                 deferred_step_indices=deferred_step_indices,
             )
             if isinstance(r, list):
+                if _is_id_field_ref(item):
+                    r = [_StepId(x) if isinstance(x, str) else x for x in r]
                 resolved.extend(r)
             else:
                 resolved.append(r)
@@ -994,6 +1017,35 @@ def _reject_unsubstitutable_step_refs(raw_args: dict[str, Any], step_index: int 
                     "not substituted; an arg is exactly one $stepN.<field> reference or a list of them"
                 ),
             )
+
+
+def find_embedded_step_ref(plan: "str | dict[str, Any] | None") -> PlanRunStepRefError | None:
+    """The first unsubstitutable ``$stepN.field`` in a whole plan, as the error ``plan_run`` would
+    raise for it, else ``None`` (nexus-jypmj.4).
+
+    The pre-run form of :func:`_reject_unsubstitutable_step_refs`, which it calls on each step's raw
+    args: ``plan_save``, the plan matcher, ``nx plan hygiene`` and the inline planner's output all
+    ask it rather than carry a second copy of the rule. *plan* is the ``plan_json`` text or its
+    decoded mapping. Anything that is not a plan with a ``steps`` list of mappings returns ``None``:
+    shape problems belong to the schema validator, not to this scan.
+    """
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (TypeError, ValueError):
+            return None
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return None
+    for index, step in enumerate(steps):
+        args = step.get("args") if isinstance(step, dict) else None
+        if not isinstance(args, dict):
+            continue
+        try:
+            _reject_unsubstitutable_step_refs(args, index)
+        except PlanRunStepRefError as exc:
+            return exc
+    return None
 
 
 def _resolve_args(
@@ -1654,6 +1706,31 @@ def _is_tumbler_shaped(value: str) -> bool:
     return bool(_TUMBLER_ID_RE.match(value))
 
 
+def _drop_step_ids_from_evidence(
+    values: list[Any], *, tool: str, resolved_tool: str, branch: str,
+) -> list[Any]:
+    """Drop the chunk ids from an evidence list that also holds fetched text (nexus-jypmj.4).
+
+    ``[$step3.contents, $step5.ids]`` flattens to fetched texts and ids. An id is an identifier,
+    not evidence: only the ``ids=`` arg hydrates one, and that needs the paired ``collections`` a
+    flat list no longer has (the default collection would hydrate a code or rdr chash to ""). So a
+    list that mixes texts with ids loses the ids, as the pass-through loses empty strings, and says
+    so. Provenance decides, not shape: only a string :func:`_resolve_value` marked as coming from an
+    ``.ids`` / ``.tumblers`` reference is an id, so fetched text that reads like one ("1.2.3") is
+    kept. A list of ids alone is the plan author's explicit choice and is returned as it is.
+    """
+    ids = [v for v in values if isinstance(v, _StepId)]
+    if not ids or not any(v and not isinstance(v, _StepId) for v in values):
+        return values
+    kept = [v for v in values if not isinstance(v, _StepId)]
+    _log.warning(
+        "evidence_step_ids_dropped",
+        tool=tool, resolved_tool=resolved_tool, branch=branch,
+        dropped=len(ids), kept=len(kept), sample=[str(v)[:24] for v in ids[:3]],
+    )
+    return kept
+
+
 #: nexus-mm5tx follow-up (code-review T2 [24199]): fixed, machine-
 #: recognisable prefix for the short-circuit result text emitted when
 #: an operator's hydrated evidence filters to zero items (either the
@@ -2242,6 +2319,10 @@ def _hydrate_operator_args(
     # ``_INPUTS_TARGET``; when the plan passed it a list it is still the first evidence-consuming
     # operator in the ``review-default`` shape (extract, then compare), and merges the stream here.
     if resolved_tool == "operator_extract" and isinstance(args.get("inputs"), list):
+        args["inputs"] = _drop_step_ids_from_evidence(
+            args["inputs"], tool=tool, resolved_tool=resolved_tool, branch="extract_inputs",
+        )
+    if resolved_tool == "operator_extract" and isinstance(args.get("inputs"), list):
         _rs = active_reserved_stream()
         if _rs is not None and _rs.should_merge():
             args["inputs"] = _merge_reserved_explicit_inputs(
@@ -2272,6 +2353,9 @@ def _hydrate_operator_args(
                     tool=tool, resolved_tool=resolved_tool,
                     original_count=original_count, kept_count=len(value),
                 )
+            value = _drop_step_ids_from_evidence(
+                value, tool=tool, resolved_tool=resolved_tool, branch="inputs_alias",
+            )
             value = _merge_reserved_explicit_inputs(value, args, tool, resolved_tool)
             note_reducer_input(value)  # nexus-jypmj.1.8: the explicit-inputs reducer input, after merge and cap
             if target_key == "items":
@@ -2297,6 +2381,12 @@ def _hydrate_operator_args(
         _listed = args.get(target_key)
         if isinstance(_listed, list) and all(isinstance(v, str) for v in _listed):
             _texts = [v for v in _listed if v]
+            _kept = _drop_step_ids_from_evidence(
+                _texts, tool=tool, resolved_tool=resolved_tool, branch="pattern_a",
+            )
+            if _kept is not _texts:
+                _texts = _kept
+                args[target_key] = _texts
             _merged = _merge_reserved_explicit_inputs(_texts, args, tool, resolved_tool)
             note_reducer_input(_merged)
             if _merged is not _texts:

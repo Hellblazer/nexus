@@ -300,3 +300,161 @@ def test_continuation_shape_a_merges_pattern_a() -> None:
     assert "PRIMARY TEXT 0" in bundle_steps[0].args["content"]
     assert stream.report()["merged_at_step"] == 0
     assert rec.items is not None and any("PRIMARY TEXT 0" in i for i in rec.items)
+
+
+# ── nexus-jypmj.4: continuation Shape B, and chunk ids mixed into a list of fetched texts ─────────────────
+
+
+def test_continuation_shape_b_merges_pattern_a() -> None:
+    """Shape B composes the one cut step after a prefix that already ran: its evidence arg is a
+    list of fetched texts from the prefix's output, and it is the first operator, so it merges."""
+    from nexus.plans.continuation import ContinuationCut, CutShape
+    from nexus.plans.continuation_envelope import _compose_shape_b
+
+    steps = [
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids"}},
+        {"tool": "summarize", "args": {"content": ["$step1.contents"]}},
+    ]
+    stream, rec = _stream(), ReducerInputRecorder()
+    cut = ContinuationCut(shape=CutShape.SHAPE_B, cut_at_step=1, plan_indices=(1,), operators=("summarize",))
+    with reducer_input_scope(rec), reserved_scope(stream):
+        _, _, verb, prepared = _compose_shape_b(cut, steps, {}, [{"contents": ["secondary 0", "secondary 1"]}])
+    assert verb == "summarize"
+    assert prepared["content"].split("\n\n") == [*_primary_text(stream), "secondary 0", "secondary 1"]
+    assert stream.report()["merged_at_step"] == 1
+    assert rec.items is not None and "secondary 1" in rec.items and any("PRIMARY TEXT 0" in i for i in rec.items)
+
+
+CHASH = f"{0xC0DE:064x}"
+CHASH2 = f"{0xBEEF:064x}"
+TUMBLER = "1.2.34"
+
+#: step 1 fetched texts (two of which read like identifiers), step 2 the ids a search returned.
+_FETCHED = ["fetched text", "1.2.3", "10.0.0.1", CHASH]
+_STEP_OUTPUTS = [{"contents": _FETCHED}, {"ids": [CHASH2, TUMBLER], "tumblers": ["1.9.9"]}]
+
+
+def _resolve(args: dict) -> dict:
+    """The runner's own arg resolution, so the id provenance is the real thing, not a test double."""
+    from nexus.plans.runner import _resolve_args
+
+    return _resolve_args(args, bindings={}, step_outputs=_STEP_OUTPUTS)
+
+
+def _dropped_events(logs: list[dict]) -> list[dict]:
+    return [e for e in logs if e.get("event") == "evidence_step_ids_dropped"]
+
+
+#: (tool, args builder, how to read the evidence list back, branch the id drop reports)
+BRANCHES = {
+    "pattern_a": ("summarize", lambda ref: {"content": ["$step1.contents", ref]}, "join", "pattern_a"),
+    "inputs_alias": ("summarize", lambda ref: {"inputs": ["$step1.contents", ref]}, "join", "inputs_alias"),
+    "extract_inputs": ("extract", lambda ref: {"inputs": ["$step1.contents", ref], "fields": "a"}, "list", "extract_inputs"),
+}
+
+
+def _evidence(kind: str, args: dict) -> list[str]:
+    value = args["inputs"] if kind == "list" else args["content"]
+    return value if kind == "list" else value.split("\n\n")
+
+
+@pytest.mark.parametrize("ref", ["$step2.ids", "$step2.tumblers"])
+@pytest.mark.parametrize("branch", sorted(BRANCHES))
+def test_ids_from_a_step_ref_never_reach_the_reducer_beside_fetched_text(branch: str, ref: str) -> None:
+    """``[$step1.contents, $step2.ids]`` flattens to texts and ids. Only ``ids=`` hydrates an id, and
+    it needs the paired collections a flat list has lost, so the ids are dropped, with a warning,
+    on every branch that sends evidence to a reducer, and the fetched texts all stay (including the
+    ones that read like an id)."""
+    from structlog.testing import capture_logs
+
+    tool, build, kind, label = BRANCHES[branch]
+    with capture_logs() as logs:
+        _, args = _hydrate_operator_args(tool, _resolve(build(ref)))
+    assert _evidence(kind, args) == _FETCHED
+    dropped = _dropped_events(logs)
+    assert len(dropped) == 1 and dropped[0]["branch"] == label
+    assert dropped[0]["kept"] == len(_FETCHED)
+    assert dropped[0]["dropped"] == (2 if ref.endswith("ids") else 1)
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_the_id_drop_precedes_the_stream_merge_and_the_reducer_record(shape: str) -> None:
+    from structlog.testing import capture_logs
+
+    tool, key, texts, kind = SHAPES[shape]
+    stream, rec = _stream(), ReducerInputRecorder()
+    args_in = _resolve({key: ["$step1.contents", "$step2.ids"]})
+    with capture_logs() as logs, reducer_input_scope(rec), reserved_scope(stream):
+        rec.set_step(4)
+        set_reserved_step(4)
+        _, args = _hydrate_operator_args(tool, args_in)
+    sent = _decode(kind, args[key])
+    assert sent == [*_primary_text(stream), *_FETCHED], "no id string is part of the reducer's input"
+    assert list(rec.items or ()) == sent
+    assert len(_dropped_events(logs)) == 1
+
+
+def test_a_text_that_reads_like_an_id_is_kept_when_it_is_fetched_text() -> None:
+    """Provenance, not shape: a version string, a dotted address, a bare hash and a hash with a
+    trailing newline are all fetched text here, mixed with a real id, and all survive."""
+    outputs = [{"contents": ["1.2.3", "10.0.0.1", "0.1.0", CHASH, f"{CHASH}\n"]}, {"ids": [CHASH2]}]
+    from nexus.plans.runner import _resolve_args
+
+    args = _resolve_args(
+        {"content": ["$step1.contents", "$step2.ids"]}, bindings={}, step_outputs=outputs,
+    )
+    _, hydrated = _hydrate_operator_args("summarize", args)
+    assert hydrated["content"].split("\n\n") == outputs[0]["contents"]
+
+
+def test_a_text_that_reads_like_an_id_is_never_dropped_when_no_ref_marked_it() -> None:
+    """Non-vacuity of the rule above: with no ids ref in the list, hash- and tumbler-shaped strings
+    pass through untouched, however much they look like identifiers."""
+    _, args = _hydrate_operator_args("summarize", {"content": ["fetched text", CHASH, "1.2.34", "more text"]})
+    assert args["content"].split("\n\n") == ["fetched text", CHASH, "1.2.34", "more text"]
+
+
+def test_ids_are_dropped_without_a_stream_too() -> None:
+    _, args = _hydrate_operator_args("summarize", _resolve({"content": ["$step1.contents", "$step2.ids"]}))
+    assert args["content"].split("\n\n") == _FETCHED
+
+
+@pytest.mark.parametrize("branch", sorted(BRANCHES))
+def test_a_list_of_only_ids_is_left_alone(branch: str) -> None:
+    """A list with no fetched text in it is the plan author's explicit choice, not a mix."""
+    from structlog.testing import capture_logs
+
+    tool, build, kind, _ = BRANCHES[branch]
+    args_in = build("$step2.ids")
+    key = "content" if "content" in args_in else "inputs"
+    args_in[key] = ["$step2.ids"]
+    with capture_logs() as logs:
+        _, args = _hydrate_operator_args(tool, _resolve(args_in))
+    assert _evidence(kind, args) == [CHASH2, TUMBLER]
+    assert _dropped_events(logs) == []
+
+
+def test_the_drop_warning_reports_a_count_and_a_truncated_sample() -> None:
+    from structlog.testing import capture_logs
+
+    many = [f"{i:064x}" for i in range(12)]
+    outputs = [{"contents": ["text"]}, {"ids": many}]
+    from nexus.plans.runner import _resolve_args
+
+    args = _resolve_args({"content": ["$step1.contents", "$step2.ids"]}, bindings={}, step_outputs=outputs)
+    with capture_logs() as logs:
+        _hydrate_operator_args("summarize", args)
+    (event,) = _dropped_events(logs)
+    assert event["dropped"] == 12 and event["kept"] == 1
+    assert len(event["sample"]) == 3 and all(len(x) <= 24 for x in event["sample"])
+
+
+def test_the_id_marker_does_not_mutate_or_alias_the_step_output() -> None:
+    """The marked ids are copies: the prior step's output list is the same plain strings afterwards."""
+    from nexus.plans.runner import _StepId
+
+    resolved = _resolve({"content": ["$step1.contents", "$step2.ids"]})
+    assert any(isinstance(v, _StepId) for v in resolved["content"])
+    assert not any(isinstance(v, _StepId) for v in _STEP_OUTPUTS[1]["ids"])
+    assert not any(isinstance(v, _StepId) for v in _STEP_OUTPUTS[0]["contents"])
+    assert json.dumps(resolved["content"]) == json.dumps([*_FETCHED, CHASH2, TUMBLER])

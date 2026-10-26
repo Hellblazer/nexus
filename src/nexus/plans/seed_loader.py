@@ -492,6 +492,17 @@ def load_seed_directory(
             # bare KeyError on template["dimensions"].
             template_loader.add(template, source=source)
             canonical = canonical_dimensions_json(template["dimensions"])
+            # nexus-jypmj.4: a step arg with a step reference inside other text or an object is
+            # never substituted, so the runner refuses the plan before its first dispatch. Refuse it
+            # here, by name, rather than seed a row that can only fail at run time.
+            from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred: the runner is heavy and the seed loader otherwise is not
+
+            embedded = find_embedded_step_ref(template.get("plan_json"))
+            if embedded is not None:
+                raise PlanTemplateSchemaError(
+                    f"plan {template.get('name') or path.name!r}: embedded step reference "
+                    f"{embedded.ref} ({embedded.reason}); not seeded"
+                )
         except PlanTemplateDuplicateError as exc:
             result.errors.append((source, str(exc)))
             continue

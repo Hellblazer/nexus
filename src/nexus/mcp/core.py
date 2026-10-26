@@ -7327,8 +7327,9 @@ def plan_save(
     matched to a verb-shaped intent by `nx_answer`'s plan-match gate.
 
     Returns "Saved plan: [<id>] <query>", or a refusal naming why (missing
-    verb, invalid JSON, a plan with no executable steps, or a plan that
-    declares a reserved binding name).
+    verb, invalid JSON, a plan with no executable steps, a plan that
+    declares a reserved binding name, or a `$stepN.<field>` reference
+    inside other text or an object).
 
     Constraints:
     - `verb` is required; a verb-less plan is refused outright.
@@ -7383,6 +7384,16 @@ def plan_save(
                 "retrieval plans (a non-empty steps list, each step with a "
                 "tool); implementation / phased plans belong in beads + T2 "
                 "memory (memory_put)."
+            )
+        # nexus-jypmj.4: a $stepN.field inside other text or an object is never substituted,
+        # so the plan would fail at run time (nexus-jypmj.1.19). Refuse it at the door.
+        from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        embedded = find_embedded_step_ref(parsed_plan)
+        if embedded is not None:
+            return _fail(
+                f"Plan not saved: {embedded.ref} sits where the runner will not substitute it "
+                f"({embedded.reason})."
             )
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
         # _WRITE_OPS; the daemon serialises the write through its single WAL
@@ -9899,8 +9910,11 @@ def _nx_answer_record_run(
 
     ``cost_usd`` (RDR-196 .p1d, nexus-nyry9.10 — replaces 9 former
     hardcoded-zero-cost literals, one per call site): the SUM of every step's
-    ``cost_usd`` that is not ``None``, or ``None`` when no step reports a
-    known cost — an empty *step_records* trivially falls into the latter
+    ``cost_usd`` that is not ``None``, PLUS *planner_cost_usd* when a plan-miss
+    run paid for the inline planner (nexus-jypmj.1.20; the planner dispatch is
+    no step's, so the run cost may exceed the step sum), or ``None`` when no
+    step and no planner reports a known cost — an empty *step_records* with no
+    planner cost trivially falls into the latter
     (sum of nothing is "unknown", never a fabricated zero). This is
     deliberately a BLANKET rule, not case-by-case: a call site with
     genuinely zero steps (e.g. the single-step fast path, which bypasses
@@ -10792,94 +10806,127 @@ async def _nx_answer_plan_miss(
         from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS  # noqa: PLC0415 — rare/branch-local path; default-path pin (nexus-ek8tr)
 
         _planner_model = STRONG_DEFAULT_ALIAS
-    payload = None
-    last_output_error: _OpOutputError | None = None
-    for attempt in range(2):
-        attempt_timeout = 300.0 if attempt == 0 else 150.0
-        try:
-            payload = await claude_dispatch(
-                prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
-                model=_planner_model, operator="planner",
-            )
-            break
-        except _OpOutputError as exc:
-            last_output_error = exc
-            import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-            _slog.get_logger().warning(
-                "nx_answer_planner_output_error",
-                attempt=attempt + 1,
-                error=str(exc)[:300],
-            )
-    if payload is None:
-        # Both attempts hit OperatorOutputError. Re-raise the second one
-        # (most recent diagnostic) so the caller's error string carries
-        # the most-actionable snippet.
-        assert last_output_error is not None
-        raise last_output_error
-    steps = payload.get("steps", []) if isinstance(payload, dict) else []
-    if not steps:
-        raise ValueError("planner returned empty plan")
 
-    _ALLOWED_TOOLS = {
-        "search", "query", "traverse", "store_get_many",
-        "extract", "rank", "compare", "summarize", "generate",
-    }
-    # The LLM planner emits either the bare operator name ("extract") or
-    # the resolved MCP tool name ("operator_extract" / full prefix form).
-    # Normalize all three to the bare form the dispatcher's _OPERATOR_TOOL_MAP
-    # expects as a key.
-    _TOOL_ALIASES = {
-        "grep": "search", "read": "search", "bash": "search",
-        "find": "search", "glob": "search",
-        "web_search": "search", "web_fetch": "search",
-        # operator_* → bare op name (the runner dispatcher remaps back)
-        "operator_extract": "extract",
-        "operator_rank": "rank",
-        "operator_compare": "compare",
-        "operator_summarize": "summarize",
-        "operator_generate": "generate",
-    }
-    # Catalog tools the LLM might reach for — map to the closest allowed
-    # tool (traverse covers link walks; search covers catalog_search use
-    # cases).  Prevents silent `planner_step_dropped` when the planner
-    # hasn't fully internalised the "no catalog_* in plans" rule.
-    _CATALOG_TOOL_REDIRECTS = {
-        "link_query": "traverse",
-        "links": "traverse",
-        "catalog_search": "search",
-        "catalog_show": "query",
-        "catalog_list": "query",
-        "catalog_resolve": "traverse",
-        "catalog_stats": None,  # nothing plan-step-worthy to redirect to
-    }
-    _TOOL_ALIASES.update({
-        k: v for k, v in _CATALOG_TOOL_REDIRECTS.items() if v is not None
-    })
-    import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-    _plog = _slog.get_logger()
-    normalized = []
-    dropped: list[str] = []
-    for step in steps:
-        raw_tool = step.get("tool", "")
-        bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
-        bare = _TOOL_ALIASES.get(bare.lower(), bare)
-        if bare not in _ALLOWED_TOOLS:
-            _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
-            dropped.append(raw_tool or bare or "?")
-            continue
-        step["tool"] = bare
-        normalized.append(step)
+    async def _plan_from(planner_prompt: str) -> str:
+        """One planner round trip, normalized to the dispatchable tools, as ``plan_json`` text."""
+        payload = None
+        last_output_error: _OpOutputError | None = None
+        for attempt in range(2):
+            attempt_timeout = 300.0 if attempt == 0 else 150.0
+            try:
+                payload = await claude_dispatch(
+                    planner_prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
+                    model=_planner_model, operator="planner",
+                )
+                break
+            except _OpOutputError as exc:
+                last_output_error = exc
+                import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+                _slog.get_logger().warning(
+                    "nx_answer_planner_output_error",
+                    attempt=attempt + 1,
+                    error=str(exc)[:300],
+                )
+        if payload is None:
+            # Both attempts hit OperatorOutputError. Re-raise the second one
+            # (most recent diagnostic) so the caller's error string carries
+            # the most-actionable snippet.
+            assert last_output_error is not None
+            raise last_output_error
+        steps = payload.get("steps", []) if isinstance(payload, dict) else []
+        if not steps:
+            raise ValueError("planner returned empty plan")
 
-    if not normalized:
-        # Search review I-5: surface the dropped tools in the error so the
-        # caller's "planner failed" message can explain why (e.g. the LLM
-        # picked Bash / grep / WebFetch which aren't dispatchable).
-        detail = ", ".join(sorted(set(dropped))) if dropped else "(no tools at all)"
-        raise ValueError(
-            f"planner returned only non-dispatchable tools: {detail}"
+        _ALLOWED_TOOLS = {
+            "search", "query", "traverse", "store_get_many",
+            "extract", "rank", "compare", "summarize", "generate",
+        }
+        # The LLM planner emits either the bare operator name ("extract") or
+        # the resolved MCP tool name ("operator_extract" / full prefix form).
+        # Normalize all three to the bare form the dispatcher's _OPERATOR_TOOL_MAP
+        # expects as a key.
+        _TOOL_ALIASES = {
+            "grep": "search", "read": "search", "bash": "search",
+            "find": "search", "glob": "search",
+            "web_search": "search", "web_fetch": "search",
+            # operator_* → bare op name (the runner dispatcher remaps back)
+            "operator_extract": "extract",
+            "operator_rank": "rank",
+            "operator_compare": "compare",
+            "operator_summarize": "summarize",
+            "operator_generate": "generate",
+        }
+        # Catalog tools the LLM might reach for — map to the closest allowed
+        # tool (traverse covers link walks; search covers catalog_search use
+        # cases).  Prevents silent `planner_step_dropped` when the planner
+        # hasn't fully internalised the "no catalog_* in plans" rule.
+        _CATALOG_TOOL_REDIRECTS = {
+            "link_query": "traverse",
+            "links": "traverse",
+            "catalog_search": "search",
+            "catalog_show": "query",
+            "catalog_list": "query",
+            "catalog_resolve": "traverse",
+            "catalog_stats": None,  # nothing plan-step-worthy to redirect to
+        }
+        _TOOL_ALIASES.update({
+            k: v for k, v in _CATALOG_TOOL_REDIRECTS.items() if v is not None
+        })
+        import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        _plog = _slog.get_logger()
+        normalized = []
+        dropped: list[str] = []
+        for step in steps:
+            raw_tool = step.get("tool", "")
+            bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
+            bare = _TOOL_ALIASES.get(bare.lower(), bare)
+            if bare not in _ALLOWED_TOOLS:
+                _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
+                dropped.append(raw_tool or bare or "?")
+                continue
+            step["tool"] = bare
+            normalized.append(step)
+
+        if not normalized:
+            # Search review I-5: surface the dropped tools in the error so the
+            # caller's "planner failed" message can explain why (e.g. the LLM
+            # picked Bash / grep / WebFetch which aren't dispatchable).
+            detail = ", ".join(sorted(set(dropped))) if dropped else "(no tools at all)"
+            raise ValueError(
+                f"planner returned only non-dispatchable tools: {detail}"
+            )
+        return json.dumps({"steps": normalized})
+
+    plan_json = await _plan_from(prompt)
+    # nexus-jypmj.4: a $stepN.field inside other text or an object is never substituted, so plan_run
+    # would refuse this plan after the planner was paid for. Say what is wrong and ask once more. The
+    # retry is the same prompt with the error text appended (concatenation: the text carries a token
+    # from the planner's own output, so it is never a format string). A second bad plan goes on to
+    # plan_run, which refuses it as it did before; the retry's cost lands in the ambient usage sink.
+    from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
+
+    embedded = find_embedded_step_ref(plan_json)
+    if embedded is not None:
+        import structlog as _slog3  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        _slog3.get_logger().warning(
+            "nx_answer_planner_step_ref_retry", ref=embedded.ref, reason=embedded.reason[:200],
         )
-
-    plan_json = json.dumps({"steps": normalized})
+        try:
+            plan_json = await _plan_from(
+                prompt
+                + "\n\nYour previous plan was refused before it ran: "
+                + str(embedded)[:200]
+                + "\nReturn the plan again with every argument exactly one $stepN.<field> reference, "
+                + "a list of them, or a literal with no reference in it."
+            )
+        except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan stands and plan_run refuses it by name
+            # A retry that times out, returns unusable output or an empty plan must not replace the
+            # real refusal with its own error: keep the first plan, whose embedded ref plan_run
+            # reports exactly as it did before the retry existed.
+            _slog3.get_logger().warning(
+                "nx_answer_planner_step_ref_retry_failed",
+                error_type=type(exc).__name__, error=str(exc)[:200],
+            )
     return Match(
         plan_id=0,
         name="ad-hoc",
@@ -11528,9 +11575,10 @@ async def nx_answer(
         # whether it reads the envelope or `nx answer-runs --json`).
         # ``[]`` when no plan_run steps executed (single-step fast path,
         # or any error/miss path before plan_run ever ran).
-        # ``cost_usd`` mirrors _nx_answer_record_run's own blanket rule:
-        # the sum of every step's non-None cost, or None when no step
-        # reports a known cost — never a fabricated 0.0.
+        # ``cost_usd`` comes from _run_cost_usd, the function
+        # _nx_answer_record_run uses too: every step's non-None cost plus
+        # the inline planner's own dispatch cost on a plan-miss run, or
+        # None when neither is known — never a fabricated 0.0.
         _steps = step_records or []
         cost_usd = _run_cost_usd(_steps, _planner_cost_usd(_planner_usage_sink))
         return {
@@ -12323,6 +12371,7 @@ async def nx_answer(
         try:
             from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred; matches this module's convention
             from nexus.plans.runner import (  # noqa: PLC0415 — deferred; matches this module's convention
+                PlanRunStepRefError,
                 PlanRunUnresolvedVarError,
                 resolve_step_bindings,
             )
@@ -12398,7 +12447,7 @@ async def nx_answer(
                     default_bindings=best.default_bindings or {},
                     caller_bindings=step_bindings,
                 )
-            except PlanRunUnresolvedVarError as exc:
+            except (PlanRunUnresolvedVarError, PlanRunStepRefError) as exc:
                 # nexus-pucte: this fast path bypasses plan_run (and its
                 # pre-dispatch _validate_var_refs check) entirely by
                 # design; resolve_step_bindings now runs the same check
@@ -12406,12 +12455,22 @@ async def nx_answer(
                 # handling immediately above — refuse loudly rather than
                 # let a $var with no default and no caller value reach
                 # query() as a literal token string.
+                # nexus-jypmj.4: it also raises PlanRunStepRefError for a
+                # $stepN.field in the step's args (inside other text, or a
+                # reference to a step that never ran); same refusal.
                 elapsed_ms = int((time.monotonic() - start) * 1000)
-                _log.warning(
-                    "nx_answer_single_query_unresolved_var",
-                    plan_id=best.plan_id, plan_name=best.name,
-                    var_name=exc.var_name, confidence=best.confidence,
-                )
+                if isinstance(exc, PlanRunStepRefError):
+                    _log.warning(
+                        "nx_answer_single_query_step_ref",
+                        plan_id=best.plan_id, plan_name=best.name,
+                        ref=exc.ref, confidence=best.confidence,
+                    )
+                else:
+                    _log.warning(
+                        "nx_answer_single_query_unresolved_var",
+                        plan_id=best.plan_id, plan_name=best.name,
+                        var_name=exc.var_name, confidence=best.confidence,
+                    )
                 try:
                     with _t2_ctx() as db:
                         _nx_answer_record_complete(

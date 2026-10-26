@@ -310,6 +310,40 @@ def _log_reserved_drops(drops: list[tuple[int, tuple[str, ...]]]) -> None:
     )
 
 
+def _embedded_step_ref(m: Match) -> tuple[str, str] | None:
+    """``(ref, reason)`` when *m*'s plan holds a ``$stepN.field`` the runner will not substitute.
+
+    The runner raises on such a plan before its first dispatch (nexus-jypmj.1.19), so a saved or
+    imported row holding one only wastes a match and bumps its failure count (nexus-jypmj.4). The
+    scan is the runner's own, imported at call time so this module stays light.
+    """
+    from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred: the runner is heavy and this is the rare path
+
+    err = find_embedded_step_ref(m.plan_json)
+    return None if err is None else (err.ref, err.reason)
+
+
+def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
+    """Report plans excluded for an unsubstitutable ``$stepN.field`` in a step arg.
+
+    INFO and drained exactly like :func:`_log_reserved_drops`; the row is neither rewritten nor
+    deleted, and ``nx plan hygiene`` reports it.
+    """
+    if not drops:
+        return
+    snapshot = list(drops)
+    drops.clear()
+    _log.info(
+        "plan_match_embedded_step_ref_excluded",
+        dropped=len(snapshot),
+        detail=[{"plan_id": pid, "ref": ref, "reason": why} for pid, ref, why in snapshot],
+        remedy=(
+            "the plan can only fail at run time; nx plan hygiene --apply retires it, or "
+            "edit it so each arg is one $stepN.<field> reference or a list of them"
+        ),
+    )
+
+
 def _log_t1_drops(
     *,
     hits: list,
@@ -670,6 +704,9 @@ def plan_match(
     # (plan_id, names) for every candidate excluded for declaring a
     # reserved binding name (nexus-jypmj.1.2); drained like binding_drops.
     reserved_drops: list[tuple[int, tuple[str, ...]]] = []
+    # (plan_id, ref, reason) for every candidate excluded for a $stepN.field the runner will not
+    # substitute (nexus-jypmj.4); drained like reserved_drops.
+    embedded_ref_drops: list[tuple[int, str, str]] = []
     if cache is not None and cache.is_available:
         hits = cache.query(intent, _over)
         # Gather all admissible candidates with (adjusted_score, specificity).
@@ -781,6 +818,10 @@ def plan_match(
             if reserved:
                 reserved_drops.append((m.plan_id, reserved))
                 continue
+            embedded = _embedded_step_ref(m)
+            if embedded is not None:
+                embedded_ref_drops.append((m.plan_id, *embedded))
+                continue
             if filter_dims and not _superset(m.dimensions, filter_dims):
                 continue
             # nexus-mz5tv: a scoped caller must not match an unanchored
@@ -850,6 +891,7 @@ def plan_match(
         )
         _log_binding_drops(binding_drops)
         _log_reserved_drops(reserved_drops)
+        _log_embedded_ref_drops(embedded_ref_drops)
         _log_literal_drops(literal_drops)
 
         if scored:
@@ -914,6 +956,10 @@ def plan_match(
         if reserved:
             reserved_drops.append((m.plan_id, reserved))
             continue
+        embedded = _embedded_step_ref(m)
+        if embedded is not None:
+            embedded_ref_drops.append((m.plan_id, *embedded))
+            continue
         if filter_dims and not _superset(m.dimensions, filter_dims):
             continue
         # nexus-mz5tv: same unanchored-grown drop on the FTS5 path — an
@@ -939,6 +985,7 @@ def plan_match(
 
     _log_binding_drops(binding_drops)
     _log_reserved_drops(reserved_drops)
+    _log_embedded_ref_drops(embedded_ref_drops)
     _log_literal_drops(fts_literal_drops)
     for m in matches:
         library.increment_match_metrics(m.plan_id, confidence=None)

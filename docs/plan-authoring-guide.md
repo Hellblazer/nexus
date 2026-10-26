@@ -326,7 +326,9 @@ longer string (`"Code: $step3.contents"`), or anywhere inside an object
 (`{"a": "$step3.contents"}`), raises `PlanRunStepRefError` naming the step
 and the arg, before the first step dispatches. Only the plan's own args are
 checked: a `$intent` whose text contains `$step1.ids` is the caller's text and
-passes through.
+passes through. The same check refuses `plan_save` of such a plan, makes the
+plan matcher skip a saved one (logged), and is reported by `nx plan hygiene`
+(nexus-jypmj.4).
 
 Unknown `$stepN.<field>` references raise `PlanRunStepRefError` with
 the list of fields actually present in the prior step's output.

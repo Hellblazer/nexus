@@ -3823,7 +3823,7 @@ nx plan disable PLAN_ID          # Soft-disable a plan without deleting it
 nx plan enable PLAN_ID           # Re-enable a previously disabled plan
 nx plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
 nx plan reseed [--force] [--insert-only]  # Re-run the builtin seed loader
-nx plan hygiene [--apply]        # Flag/disable bead-dumps, null-verb, always-failing plans
+nx plan hygiene [--apply]        # Flag/disable bead-dumps, embedded step refs, null-verb, always-failing plans
 ```
 
 Service mode is the only mode: all verbs (`list` / `show` / `delete` /
@@ -3841,12 +3841,15 @@ nx plan hygiene            # report-only scan
 nx plan hygiene --apply    # disable the flagged plans (reversible)
 ```
 
-Scans the plan library for three pollution classes and, with `--apply`,
+Scans the plan library for four pollution classes and, with `--apply`,
 DISABLES them (never deletes; reverse with `nx plan enable ID`):
 
 - plans whose `plan_json` is not an executable retrieval DAG (unparseable
   JSON, no/empty `steps`, steps without a `tool`) — the bead-dump class that
   can match a question and then crash the plan runner;
+- plans with a `$stepN.<field>` reference inside other text or an object in a
+  step arg, which the runner never substitutes and refuses before dispatch
+  (the plan matcher already skips them and logs the exclusion);
 - null-verb rows (legacy pollution predating the save-time verb requirement;
   unmatchable by verb-filtered `nx_answer`);
 - always-failing plans (zero recorded successes, 3+ failures) — the matcher

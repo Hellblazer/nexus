@@ -267,22 +267,26 @@ def _import_plan(library, *, query: str, plan: dict, name: str,
     )
 
 
-def _info_logging() -> None:
+@pytest.fixture
+def info_logging():
+    """INFO-level structlog for the test, and the previous configuration back afterwards."""
+    saved = structlog.get_config()
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
     )
+    yield
+    structlog.configure(**saved)
 
 
 @pytest.mark.t2_tenant
 def test_a_saved_plan_declaring_a_reserved_name_is_excluded_logged_and_kept(
-    library,
+    library, info_logging
 ) -> None:
     """Every (path, name, where) case runs against one library, one tenant.
     Each case deletes its two rows afterwards, so the matcher sees exactly
     one bad and one good row per case."""
     from nexus.plans.matcher import plan_match
 
-    _info_logging()
     for path in ("t1", "fts"):
         for name, where in (
             ("source", "required_bindings"),

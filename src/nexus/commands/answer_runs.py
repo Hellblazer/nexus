@@ -113,6 +113,11 @@ def _costs_agree(
     ``cost_usd`` also carries the planner dispatch's own cost, which is no step's, so a run cost
     at or above the step sum agrees, and a known run cost agrees with no known step cost. A run
     cost below its steps is still a drop.
+
+    The allowance is one-sided on purpose (nexus-jypmj.4): the planner's own cost is not stored, so
+    ``run_cost - step_sum`` cannot be told from an over-count and no upper bound on it is sound.
+    Catching an over-count needs ``planner_cost_usd`` persisted on the run, a stored-run schema
+    change that was ruled out for this bead.
     """
     if run_cost is None and step_sum is None:
         return True

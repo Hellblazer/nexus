@@ -79,10 +79,13 @@ def _open_plan_library():
 def _hygiene_scan(library) -> list[dict]:
     """Scan the plan library for hygiene violations (nexus-vtp8h).
 
-    Three classes, each with a named reason:
+    Four classes, each with a named reason:
       * non-executable plan_json (unparseable, or fails the
         ``validate_plan_steps(require_steps=True)`` executable-DAG check —
         the bead-dump class the drift audit found 77/116 of);
+      * a ``$stepN.field`` inside other text or an object in a step arg,
+        which the runner never substitutes and refuses at run time
+        (nexus-jypmj.4; the plan matcher already excludes these);
       * null-verb rows (pre-fiovt legacy pollution — save-time refusal
         exists now, but migrated rows predate it);
       * always-failing rows (zero successes, >= 3 failures — the matcher
@@ -93,6 +96,7 @@ def _hygiene_scan(library) -> list[dict]:
     import json as _json  # noqa: PLC0415 — command-local import
 
     from nexus.plans.matcher import _is_always_failing  # noqa: PLC0415 — command-local import
+    from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — command-local import
     from nexus.plans.schema import PlanTemplateSchemaError, validate_plan_steps  # noqa: PLC0415 — command-local import
 
     findings: list[dict] = []
@@ -116,6 +120,13 @@ def _hygiene_scan(library) -> list[dict]:
             reason = f"not an executable DAG: {exc}"
         except PlanTemplateSchemaError as exc:
             reason = f"not an executable DAG: {exc}"
+        if reason is None:
+            embedded = find_embedded_step_ref(parsed)
+            if embedded is not None:
+                reason = (
+                    f"embedded step reference {embedded.ref} "
+                    f"({embedded.reason}); the runner refuses it before dispatch"
+                )
         if reason is None and not (row.get("verb") or "").strip():
             reason = "null-verb (pre-fiovt pollution; unmatchable by verb-filtered nx_answer)"
         if reason is None and _is_always_failing(row):
@@ -152,8 +163,8 @@ def _hygiene_apply(library, findings: list[dict]) -> int:
 @click.option("--apply", "apply_", is_flag=True,
               help="Disable the flagged plans (default: report only).")
 def hygiene_cmd(apply_: bool) -> None:
-    """Scan the plan library for bead-dumps, null-verb rows, and
-    always-failing plans; --apply DISABLES them (reversible via
+    """Scan the plan library for bead-dumps, embedded step references,
+    null-verb rows, and always-failing plans; --apply DISABLES them (reversible via
     `nx plan enable` — never deletes).
 
     Routes through HttpPlanLibrary, so it cleans the live engine-served
@@ -165,7 +176,7 @@ def hygiene_cmd(apply_: bool) -> None:
         return
     findings = _hygiene_scan(library)
     if not findings:
-        click.echo("Plan library clean: no bead-dumps, null-verb, or always-failing plans.")
+        click.echo("Plan library clean: no bead-dumps, embedded step references, null-verb, or always-failing plans.")
         return
     click.echo(f"{len(findings)} plan(s) flagged:")
     for f in findings:
