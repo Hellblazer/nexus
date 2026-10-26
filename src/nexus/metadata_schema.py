@@ -520,7 +520,10 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
                 "by a caller outside those two methods)"
             ),
         )
-    if not ttl or ttl <= 0:
+    # A row's ttl_days is whatever a writer stored. Anything that is not a plain positive number
+    # (a string, a list, a bool, NaN) or is past timedelta's range (10**10, inf, 1e300) is not a
+    # TTL that has lapsed: the expiry sweep must not abort on one bad row (nexus-6pfgb.15).
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not ttl or ttl <= 0:
         return False
     indexed_at = metadata.get("indexed_at", "")
     if not indexed_at:
@@ -529,6 +532,6 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
     try:
         idx_dt = datetime.fromisoformat(indexed_at)
         now_dt = datetime.fromisoformat(now_iso)
-    except (TypeError, ValueError):
+        return (now_dt - idx_dt) >= timedelta(days=ttl)
+    except (TypeError, ValueError, OverflowError):  # an unparseable or mixed naive/aware stamp, a ttl past timedelta
         return False
-    return (now_dt - idx_dt) >= timedelta(days=ttl)

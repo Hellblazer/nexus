@@ -180,6 +180,8 @@ class _World:
 
     def __init__(self, monkeypatch, catalog, rows):
         self.deleted: list[list[str]] = []
+        self.row_reads: list[list[str]] = []
+        self.row_read_error: Exception | None = None
         self.get_wheres: list[dict] = []
         self.reaped_chashes: list[str] = []
         monkeypatch.setattr(HttpVectorClient, "list_collections", lambda self: [
@@ -202,6 +204,12 @@ class _World:
                 if body["offset"] > 0:
                     return {"ids": [], "metadatas": []}
                 return {"ids": list(rows), "metadatas": list(rows.values())}
+            if path == "/v1/vectors/store-get":
+                self.row_reads.append(list(body["ids"]))
+                if self.row_read_error is not None:
+                    raise self.row_read_error
+                hit = [c for c in body["ids"] if c in rows]
+                return {"ids": hit, "metadatas": [rows[c] for c in hit]}
             if path == "/v1/vectors/store-delete":
                 self.deleted.append(list(body["ids"]))
                 return {"deleted": len(body["ids"])}
@@ -487,3 +495,183 @@ def test_the_sweep_still_asks_the_wire_only_for_positive_row_ttls(monkeypatch):
     w.sweep()
 
     assert w.get_wheres == [{"ttl_days": {"$gt": 0}}]
+
+
+# ── nexus-6pfgb.30: the catalog's TTL keys can be stale ────────────────────────
+#
+# A re-put by a client older than nexus-6pfgb.5, or by any writer that bypasses the catalog hook,
+# rewrites the chunk row and leaves the catalog entry's ttl_days/put_at as they were.
+
+
+def _older_client_row(*, written_by="1.1.1", ttl=None, indexed_at=None, title=None):
+    """The chunk row an older client's re-put leaves: stamped and titled as the note, its own TTL (None is
+    permanent) and a fresh indexed_at, with no catalog write behind it."""
+    row = {"catalog_doc_id": written_by, "title": title or f"note-{written_by}", "indexed_at": indexed_at or _ago(0.5)}
+    if ttl is not None:
+        row["ttl_days"] = ttl
+    return row
+
+
+def test_a_note_re_put_permanent_by_a_writer_that_bypasses_the_catalog_hook_is_not_retired(monkeypatch):
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=None)})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and cat.manifests["1.1.1"] == ["c1"] and w.deleted == []
+    assert report.catalog_ttl_stale == (("1.1.1", "note-1.1.1"),)
+    assert (report.notes_tombstoned, report.chunks_deleted, report.failures) == (0, 0, ())
+    assert w.row_reads == [["c1"]], "the note's own rows were read, by its manifest chashes, in one batch"
+
+
+def test_a_note_re_put_by_an_older_client_with_the_same_ttl_is_caught_by_the_later_indexed_at(monkeypatch):
+    """The row's TTL agrees (1 day); only its indexed_at says the put was newer than the catalog's put_at."""
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=1, indexed_at=_ago(0.5))})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and report.catalog_ttl_stale == (("1.1.1", "note-1.1.1"),)
+
+
+def test_a_genuinely_lapsed_note_with_no_later_put_is_still_retired(monkeypatch):
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    # what this client's put leaves: the row agrees with the catalog, indexed_at seconds from put_at
+    row = _older_client_row(ttl=1, indexed_at=(NOW - timedelta(days=2) + timedelta(seconds=3)).isoformat())
+    w = _World(monkeypatch, cat, {"c1": row})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == ["1.1.1"] and w.deleted == [["c1"]]
+    assert (report.notes_tombstoned, report.catalog_ttl_stale, report.failures) == (1, (), ())
+
+
+def test_a_row_another_note_wrote_last_says_nothing_about_this_note(monkeypatch):
+    """A permanent co-owner B wrote the shared row last; A's catalog TTL is the only word on A."""
+    cat = _FakeCatalog([
+        _entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)}),
+        _entry("1.1.2", meta={"ttl_days": 0, "put_at": _ago(0.5)}),
+    ], {"1.1.1": ["c1"], "1.1.2": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(written_by="1.1.2", ttl=None)})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == ["1.1.1"] and report.catalog_ttl_stale == ()
+
+
+def test_a_row_an_import_wrote_over_the_note_counts_by_its_title_though_its_stamp_is_foreign(monkeypatch):
+    """An .nxexp import keeps the source box's catalog_doc_id on the row it writes and leaves the
+    destination note's catalog keys alone."""
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(written_by="9.9.9", title="note-1.1.1", ttl=None)})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and report.catalog_ttl_stale == (("1.1.1", "note-1.1.1"),)
+
+
+def test_unreadable_rows_fail_closed(monkeypatch):
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=1)})
+    w.row_read_error = RuntimeError("engine down")
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and cat.manifests["1.1.1"] == ["c1"] and w.deleted == []
+    assert [t for t, _ in report.failures] == ["1.1.1"] and "could not be read" in report.failures[0][1]
+    assert report.notes_tombstoned == 0 and report.catalog_ttl_stale == ()
+    with pytest.raises(ExpireIncompleteError):
+        HttpVectorClient().expire()
+
+
+def test_one_stale_note_does_not_hold_back_the_lapsed_note_beside_it(monkeypatch):
+    cat = _FakeCatalog([
+        _entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)}),
+        _entry("1.1.2", meta={"ttl_days": 1, "put_at": _ago(2)}),
+    ], {"1.1.1": ["c1"], "1.1.2": ["c2"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=None)})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == ["1.1.2"] and w.deleted == [["c2"]]
+    assert (report.notes_tombstoned, [t for t, _ in report.catalog_ttl_stale]) == (1, ["1.1.1"])
+
+
+def test_a_permanent_or_unlapsed_note_costs_no_row_read(monkeypatch):
+    cat = _FakeCatalog([
+        _entry("1.1.1", meta={"ttl_days": 0, "put_at": _ago(400)}),
+        _entry("1.1.2", meta={"ttl_days": 7, "put_at": _ago(1)}),
+    ], {"1.1.1": ["c1"], "1.1.2": ["c2"]})
+    w = _World(monkeypatch, cat, {})
+
+    w.sweep()
+
+    assert w.row_reads == []
+
+
+def test_the_rows_of_a_large_note_are_read_in_pages(monkeypatch):
+    chashes = [f"c{i:04d}" for i in range(650)]
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": chashes})
+    w = _World(monkeypatch, cat, {})
+
+    w.sweep()
+
+    assert [len(b) for b in w.row_reads] == [300, 300, 50]
+
+
+@pytest.mark.parametrize(("row", "stale"), [
+    ({"catalog_doc_id": "1.1.1", "title": "N"}, True),                                 # permanent row, catalog 1d
+    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 3}, True),                  # another TTL
+    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 1}, False),                 # agrees, no clock
+    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": 1, "indexed_at": "junk"}, False),
+    ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": float("inf")}, True),       # garbage reads permanent
+    ({"catalog_doc_id": "1.1.9", "title": "other"}, False),                            # not this note's row
+    ({"title": "N"}, True),                                                            # title alone names the note
+])
+def test_catalog_ttl_stale_rule(row, stale):
+    meta = {"ttl_days": 1, "put_at": _ago(2)}
+    assert note_ttl.catalog_ttl_stale(
+        meta, _ago(0), [row], owner_tumbler="1.1.1", owner_title="N") is stale
+
+
+def test_catalog_ttl_stale_allows_clock_skew_between_the_row_and_the_catalog_stamp():
+    meta = {"ttl_days": 1, "put_at": _ago(2)}
+    near = {"title": "N", "ttl_days": 1, "indexed_at": (NOW - timedelta(days=2) + timedelta(minutes=4)).isoformat()}
+    far = {"title": "N", "ttl_days": 1, "indexed_at": (NOW - timedelta(days=2) + timedelta(minutes=6)).isoformat()}
+    assert not note_ttl.catalog_ttl_stale(meta, _ago(0), [near], owner_tumbler="1.1.1", owner_title="N")
+    assert note_ttl.catalog_ttl_stale(meta, _ago(0), [far], owner_tumbler="1.1.1", owner_title="N")
+
+
+# ── the row scan survives a garbage ttl_days on a chunk row ────────────────────
+
+
+@pytest.mark.parametrize("garbage", [10**10, float("inf"), 1e300, float("nan"), "n/a", [3], {"d": 1}, True])
+def test_is_expired_reads_a_garbage_row_ttl_as_not_lapsed(garbage):
+    assert is_expired({"ttl_days": garbage, "indexed_at": _ago(400)}, now_iso=NOW.isoformat()) is False
+
+
+def test_is_expired_reads_a_mixed_naive_and_aware_stamp_as_not_lapsed():
+    assert is_expired({"ttl_days": 1, "indexed_at": "2020-01-01T00:00:00"}, now_iso=NOW.isoformat()) is False
+
+
+def test_is_expired_still_judges_a_real_lapse():
+    assert is_expired({"ttl_days": 1, "indexed_at": _ago(2)}, now_iso=NOW.isoformat()) is True
+    assert is_expired({"ttl_days": 1.5, "indexed_at": _ago(2)}, now_iso=NOW.isoformat()) is True
+    assert is_expired({"ttl_days": 3, "indexed_at": _ago(2)}, now_iso=NOW.isoformat()) is False
+
+
+def test_a_garbage_row_ttl_does_not_abort_the_sweep_before_the_catalog_pass(monkeypatch):
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
+    rows = {
+        "g1": {"ttl_days": 10**10, "indexed_at": _ago(400)},
+        "g2": {"ttl_days": float("inf"), "indexed_at": _ago(400)},
+        "g3": {"ttl_days": 1e300, "indexed_at": _ago(400)},
+        "g4": {"ttl_days": "n/a", "indexed_at": _ago(400)},
+        "g5": {"ttl_days": [3], "indexed_at": _ago(400)},
+    }
+    w = _World(monkeypatch, cat, rows)
+
+    report = w.sweep()
+
+    assert cat.tombstoned == ["1.1.1"] and (report.notes_tombstoned, report.failures) == (1, ())
+    assert report.row_ttl_unattributed == 0

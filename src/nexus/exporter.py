@@ -1181,6 +1181,11 @@ class _OwnerImport:
         if not rows_by_doc:
             return
 
+        # The import writes chunk rows (metadata whole, ttl_days and indexed_at included) and the
+        # document's manifest, and writes NO note keys (ttl_days, put_at) to the catalog entry: an
+        # imported note makes no TTL claim the catalog could keep true, and a note it lands on keeps
+        # the keys it had. The TTL sweep reads a note's own chunk rows before retiring it for that reason
+        # (nexus-6pfgb.30, note_ttl.catalog_ttl_stale).
         already = self._existing_ids([r.rec_id for recs in recs_by_doc.values() for r in recs])
         chunks: dict[str, dict] = {}
         for recs in recs_by_doc.values():

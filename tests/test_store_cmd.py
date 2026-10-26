@@ -586,6 +586,19 @@ def test_store_expire_exits_non_zero_when_a_lapsed_note_could_not_be_retired(run
     assert "1.1.7" in result.output and "NOT retired" in result.output
 
 
+def test_store_expire_names_a_note_left_live_by_a_stale_catalog_ttl_and_the_remedy(runner, mock_store):
+    """nexus-6pfgb.30: a lapsed note whose own chunk row records a later put is not retired; the operator
+    is told which note and how to settle it, and the run still exits 0 (nothing failed, nothing was lost)."""
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(
+        chunks_deleted=0, notes_tombstoned=0, catalog_ttl_stale=(("1.1.9", "meeting-notes"),))
+    result = runner.invoke(main, ["store", "expire"])
+    assert result.exit_code == 0
+    assert "1.1.9" in result.output and "meeting-notes" in result.output and "NOT retired" in result.output
+    assert "Re-put it" in result.output and "nx store delete --title" in result.output
+
+
 # ── nx collection ────────────────────────────────────────────────────────────
 
 @pytest.mark.t2_tenant

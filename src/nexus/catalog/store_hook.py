@@ -1465,13 +1465,17 @@ class TitleReap:
     *chashes* the chunks their manifests named, which the caller then asks
     T3 to delete; *failures* ``(tumbler, error)`` for any document left
     live; *held* the chunks of those failed documents, which the caller
-    must leave alone (no other path may reap a document this one refused).
+    must leave alone (no other path may reap a document this one refused);
+    *stale* ``(tumbler, title)`` of each lapsed note the TTL sweep left alone
+    because a chunk row of its own records a later put than its catalog TTL
+    keys do (nexus-6pfgb.30). Their chunks are in *held* too.
     """
 
     documents: tuple[tuple[str, str], ...]
     chashes: tuple[str, ...]
     failures: tuple[tuple[str, str], ...]
     held: tuple[str, ...] = ()
+    stale: tuple[tuple[str, str], ...] = ()
 
 
 def _is_title_reap_candidate(entry, title: str, collection: str) -> bool:
@@ -1581,6 +1585,7 @@ def reap_catalog_documents_by_title(
 def _reap_documents(
     reader, writer, entries, collection: str, *, title: str = "",
     still_due: Callable[[Any], bool] | None = None,
+    guard: Callable[[Any, list[str]], tuple[str, str] | None] | None = None,
 ) -> TitleReap:
     """Tombstone each of *entries*, retracting its own manifest first; the one note delete path
     behind ``nx store delete --title`` and the TTL sweep (nexus-6pfgb.15).
@@ -1593,19 +1598,38 @@ def _reap_documents(
     its chunks not returned). The TTL sweep passes it so a note re-put since the listing (made
     permanent, or its clock restarted) is not retired from the stale entry. There is no
     compare-and-set on the catalog, so this narrows the window to one read and does not close it.
+
+    *guard*, when given, is asked ``guard(fresh_entry, chashes)`` after *still_due* and before the
+    retraction, with the chashes of the document's manifest. It returns ``None`` to go ahead, or
+    ``(kind, detail)`` to leave the document untouched: ``"stale"`` (the TTL sweep found a chunk row
+    that records a later put than the catalog's TTL keys, nexus-6pfgb.30) is reported in ``stale``;
+    any other kind (``"unreadable"``: the rows could not be read, so the answer is unknown) is a
+    failure. Either way the document stays live and its chunks are held.
     """
     documents: list[tuple[str, str]] = []
     reaped_chashes: dict[str, None] = {}
     failures: list[tuple[str, str]] = []
     held: dict[str, None] = {}
+    stale: list[tuple[str, str]] = []
     for entry in entries:
         tumbler = str(entry.tumbler)
+        fresh = entry
         if still_due is not None:
             fresh = reader.resolve_many([tumbler]).get(tumbler)
             if fresh is None or not still_due(fresh):
                 continue
         rows = reader.get_manifest(tumbler)
         original = [manifest_row_wire(r) for r in rows]
+        if guard is not None:
+            verdict = guard(fresh, [r["chash"] for r in original])
+            if verdict is not None:
+                kind, detail = verdict
+                held.update(dict.fromkeys(r["chash"] for r in original))
+                if kind == "stale":
+                    stale.append((tumbler, getattr(entry, "title", "") or title))
+                else:
+                    failures.append((tumbler, detail))
+                continue
         row_collection = entry.physical_collection or collection
         try:
             if original:
@@ -1634,7 +1658,7 @@ def _reap_documents(
             continue
         documents.append((tumbler, getattr(entry, "title", "") or title))
         reaped_chashes.update(dict.fromkeys(r["chash"] for r in original))
-    return TitleReap(tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held))
+    return TitleReap(tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held), tuple(stale))
 
 
 def lapsed_note_documents(reader, collection: str, *, now: datetime) -> list:
@@ -1656,7 +1680,10 @@ def lapsed_note_documents(reader, collection: str, *, now: datetime) -> list:
     ]
 
 
-def reap_lapsed_note_documents(collection: str, *, now: datetime) -> TitleReap | None:
+def reap_lapsed_note_documents(
+    collection: str, *, now: datetime,
+    row_reader: Callable[[list[str]], dict[str, dict]] | None = None,
+) -> TitleReap | None:
     """Tombstone every note in *collection* whose own TTL has lapsed, each through the note delete
     path of ``nx store delete --title`` (manifest retracted, then the document tombstoned; all or
     nothing per note), and return what that did (nexus-6pfgb.15).
@@ -1664,6 +1691,13 @@ def reap_lapsed_note_documents(collection: str, *, now: datetime) -> TitleReap |
     The caller then asks T3 to delete the returned ``chashes``; the engine's delete anti-join keeps
     any chunk another live document still holds, so a co-owner keeps serving it. ``None`` when the
     catalog is unavailable.
+
+    *row_reader*, when given, maps chashes to their chunk rows' metadata (a chash with no row is absent).
+    Before a lapsed note is retired its own rows are read through it, and the note is left alone,
+    its chunks held, when one records a put the catalog's TTL keys do not
+    (:func:`~nexus.catalog.note_ttl.catalog_ttl_stale`, nexus-6pfgb.30: a re-put by an older client, or a
+    writer that bypasses the catalog hook, leaves the catalog entry stale). If the rows cannot be read
+    the note is not retired and is reported as a failure: no read, no deletion.
     """
     from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -1680,11 +1714,33 @@ def reap_lapsed_note_documents(collection: str, *, now: datetime) -> TitleReap |
         return _reap_documents(
             reader, writer, entries, collection,
             still_due=lambda e: note_ttl.lapsed(e.meta, e.indexed_at, now=now),
+            guard=None if row_reader is None else _row_guard(row_reader),
         )
     finally:
         if writer is not None:
             writer.close()
         reader.close()
+
+
+def _row_guard(row_reader: Callable[[list[str]], dict[str, dict]]):
+    """The :func:`_reap_documents` guard of the TTL sweep: read the note's own chunk rows and refuse to
+    retire it when they show a put its catalog TTL keys do not (nexus-6pfgb.30)."""
+    from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
+
+    def guard(entry, chashes: list[str]) -> tuple[str, str] | None:
+        try:
+            rows = row_reader(chashes) if chashes else {}
+        except Exception as exc:  # noqa: BLE001 — fail closed: unknown is not "no later put"
+            _log.warning("catalog_ttl_guard_rows_unreadable", tumbler=str(entry.tumbler), exc_info=True)
+            return ("unreadable", f"its chunk rows could not be read ({type(exc).__name__}: {exc}), so a later put cannot be ruled out")
+        if note_ttl.catalog_ttl_stale(
+            entry.meta, entry.indexed_at, list(rows.values()),
+            owner_tumbler=entry.tumbler, owner_title=getattr(entry, "title", "") or "",
+        ):
+            return ("stale", "")
+        return None
+
+    return guard
 
 
 def live_note_owners(reader, collection: str, chashes: list[str]) -> dict[str, list]:

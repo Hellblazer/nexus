@@ -23,6 +23,11 @@ Three spellings to keep apart:
   lives only on the chunk row (:func:`has_own_keys`), and only a row the note itself wrote may be read
   as its TTL (:func:`row_written_by`).
 
+- The entry's keys can be stale. Only the put path of a client that has nexus-6pfgb.5 writes them, so a
+  re-put by an older client, or by a writer that bypasses it (the ``.nxexp`` import), leaves a note that
+  looks lapsed after its owner made it permanent. :func:`catalog_ttl_stale` reads the note's own chunk
+  rows for that (nexus-6pfgb.30); the sweep does not retire a note it flags.
+
 Pure functions, no I/O; the caller passes ``now``.
 """
 from __future__ import annotations
@@ -104,8 +109,8 @@ def row_written_by(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bo
     title names one note in a collection. Either side empty is no match.
 
     A row with no ``catalog_doc_id`` (written before the stamp, or by a path that omits it) is nobody's:
-    ``False``, never a fall-back to "the only owner left". The expiry sweep and the recovery-bundle
-    export both ask this before reading a row's TTL as a note's.
+    ``False``, never a fall-back to "the only owner left". The expiry sweep asks this before reading a
+    row's TTL as a note's; the recovery-bundle export will adopt it (nexus-6pfgb.14).
     """
     if not isinstance(row_meta, dict) or not owner_title:
         return False
@@ -114,3 +119,54 @@ def row_written_by(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bo
         return False
     title = row_meta.get("title")
     return isinstance(title, str) and title == owner_title
+
+
+#: How far a chunk row's ``indexed_at`` may sit after the catalog's ``put_at`` and still be the same
+#: put. The row is stamped in the T3 write and ``put_at`` in the catalog hook of one put, seconds apart;
+#: five minutes is generous for that and far below the one-day minimum TTL.
+PUT_SKEW = timedelta(minutes=5)
+
+
+def row_names_note(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bool:
+    """Whether a chunk row is evidence about the put of the note *owner_tumbler* titled *owner_title*.
+
+    The wider cousin of :func:`row_written_by`, for a check that can only REFUSE to retire a note, never
+    retire one: a row whose ``title`` is the note's counts even when its ``catalog_doc_id`` is not the
+    note's tumbler, because an ``.nxexp`` import keeps the SOURCE box's stamp on rows it writes over this
+    note's. A note title names one note in a collection, so a same-titled row is that note's row.
+    """
+    if row_written_by(owner_tumbler, row_meta, owner_title=owner_title):
+        return True
+    return isinstance(row_meta, dict) and bool(owner_title) and row_meta.get("title") == owner_title
+
+
+def catalog_ttl_stale(
+    meta: Any, indexed_at: str, rows: Any, *, owner_tumbler: Any, owner_title: str,
+    skew: timedelta = PUT_SKEW,
+) -> bool:
+    """Whether a chunk row of this note records a put the catalog entry's own TTL keys do not (nexus-6pfgb.30).
+
+    The note's catalog ``ttl_days`` and ``put_at`` are written only by the put path of a client that has
+    nexus-6pfgb.5; a re-put by an older client, or by any writer that bypasses the catalog hook (the
+    ``.nxexp`` import), rewrites the chunk row and leaves them as they were, so a note its owner just made
+    permanent still looks lapsed. Both signs are read from the note's OWN rows (:func:`row_names_note`; a
+    row another note wrote last says nothing about this one):
+
+    - the row's TTL is not the catalog's (a permanent row under a catalog ``ttl_days`` > 0, or another
+      number of days), or
+    - the row's ``indexed_at`` is more than *skew* after the catalog's clock (:func:`clock_start`).
+
+    A row with no readable ``indexed_at`` only has the first sign to give. *rows* is the iterable of the
+    chunk rows' metadata dicts.
+    """
+    days = note_ttl_days(meta)
+    start = _parse_iso(clock_start(meta, indexed_at))
+    for row in rows or ():
+        if not row_names_note(owner_tumbler, row, owner_title=owner_title):
+            continue
+        if note_ttl_days(row) != days:
+            return True
+        stamped = _parse_iso(row.get("indexed_at"))
+        if stamped is not None and start is not None and stamped - start > skew:
+            return True
+    return False

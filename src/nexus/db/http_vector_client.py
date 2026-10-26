@@ -2532,13 +2532,17 @@ class ExpireReport:
     live and whole, and its chunks are not deleted. *row_ttl_unattributed* counts chunks whose
     row TTL lapsed but that several notes hold, or that one note holds whose TTL the catalog does
     not record and whose own write the row is not, so the row (the last writer's) cannot say which
-    note expires: they are left alone.
+    note expires: they are left alone. *catalog_ttl_stale* are ``(tumbler, title)`` of lapsed notes
+    left live because a chunk row of the note's own records a later put than its catalog TTL keys do
+    (a re-put by a client older than nexus-6pfgb.5, or by a writer that bypasses the catalog hook,
+    nexus-6pfgb.30); a re-put with this client, or ``nx store delete --title``, settles each.
     """
 
     chunks_deleted: int
     notes_tombstoned: int
     failures: tuple[tuple[str, str], ...] = ()
     row_ttl_unattributed: int = 0
+    catalog_ttl_stale: tuple[tuple[str, str], ...] = ()
 
 
 class ExpireIncompleteError(RuntimeError):
@@ -6171,6 +6175,17 @@ class HttpVectorClient:
         by the row (the catalog pass above decides it), and a row that lapsed over several notes
         without keys is counted too.
 
+        THE CATALOG'S KEYS CAN BE STALE (nexus-6pfgb.30). ``meta.ttl_days``/``put_at`` are written only by
+        the put path of a client that has nexus-6pfgb.5. A re-put by an older client, or by any writer
+        that bypasses the catalog hook (the ``.nxexp`` import), rewrites the chunk row and leaves the keys
+        as they were, so a note its owner made permanent could look lapsed. Before a lapsed note is
+        retired its own chunk rows are read (:meth:`_note_rows`; those the note wrote, or that carry its
+        title); one whose TTL is not the catalog's, or whose ``indexed_at`` is later than the catalog's
+        clock by more than five minutes, records a put the catalog missed, and the note is NOT retired:
+        it is reported in ``catalog_ttl_stale``. Rows that cannot be read fail closed: the note stays and
+        is reported in ``failures``. A row another note wrote last says nothing about this note, so a
+        permanent re-put by an older client that a co-owner of the same text then overwrote is not seen.
+
         The rest of this docstring is the row scan's history.
 
         nexus-h8rf6.5: was missing entirely — ``nx store expire`` crashed
@@ -6301,6 +6316,7 @@ class HttpVectorClient:
         notes = 0
         unattributed = 0
         failures: list[tuple[str, str]] = []
+        ttl_stale: list[tuple[str, str]] = []
         # Opened on first use, so a sweep with no knowledge collection never touches the catalog.
         reader_box: list[Any] = []
 
@@ -6375,11 +6391,15 @@ class HttpVectorClient:
                         # else: every owner has its own TTL on record; the catalog pass below decides
 
                 # The notes whose own TTL has lapsed, each retired through the note delete path.
-                reaped = reap_lapsed_note_documents(name, now=now) if reader is not None else None
+                reaped = (
+                    reap_lapsed_note_documents(name, now=now, row_reader=lambda ids, _n=name: self._note_rows(_n, ids))
+                    if reader is not None else None
+                )
                 held: set[str] = set()
                 if reaped is not None:
                     notes += len(reaped.documents)
                     failures.extend(reaped.failures)
+                    ttl_stale.extend(reaped.stale)
                     held = set(reaped.held)
                     targets.update(dict.fromkeys(c for c in reaped.chashes if c not in held))
 
@@ -6390,12 +6410,33 @@ class HttpVectorClient:
         finally:
             if reader_box and reader_box[0] is not None:
                 reader_box[0].close()
-        if notes or unattributed or failures:
+        if notes or unattributed or failures or ttl_stale:
             _log.info(
                 "store_expire_swept", notes_tombstoned=notes, chunks_deleted=total,
-                row_ttl_unattributed=unattributed, failures=len(failures),
+                row_ttl_unattributed=unattributed, failures=len(failures), catalog_ttl_stale=len(ttl_stale),
             )
-        return ExpireReport(total, notes, tuple(failures), unattributed)
+        return ExpireReport(total, notes, tuple(failures), unattributed, tuple(ttl_stale))
+
+    def _note_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        """``chash -> chunk-row metadata`` for the chunks of *collection* named by *chashes* that it holds
+        (a chash with no live row is absent; the note being judged is live, so its chunks are). Pages at 300 ids per request. Raises on any
+        service failure: the caller (the TTL sweep's guard, nexus-6pfgb.30) treats "could not read" as
+        "do not retire", never as "no row"."""
+        out: dict[str, dict] = {}
+        page = 300
+        for start in range(0, len(chashes), page):
+            batch = chashes[start:start + page]
+            result = _post(
+                "/v1/vectors/store-get",
+                {"collection": collection, "ids": batch, "limit": len(batch)},
+                tenant=self._tenant,
+            )
+            ids = result.get("ids") or []
+            metas = result.get("metadatas") or []
+            for doc_id, meta in zip(ids, metas):
+                if isinstance(meta, dict):
+                    out[doc_id] = meta
+        return out
 
     def collection_info(self, name: str) -> dict:
         """Return ``{"count": N, "metadata": {}}`` for *name*.

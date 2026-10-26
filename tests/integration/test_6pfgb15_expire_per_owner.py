@@ -65,8 +65,19 @@ class _World:
         """Move the note's own clock back: its ``put_at`` in the catalog entry."""
         entry = self._entry(title)
         assert entry is not None, f"{title!r} was never registered"
+        aged = _days_ago(days)
         writer = make_catalog_writer()
-        writer.update(entry.tumbler, meta={"put_at": _days_ago(days)})
+        writer.update(entry.tumbler, meta={"put_at": aged})
+        # The note's own chunk rows were stamped by the same put: age them with it, or the sweep's
+        # guard (nexus-6pfgb.30) rightly reads a row newer than the catalog's clock as a later put.
+        reader = make_catalog_reader()
+        assert reader is not None
+        for manifest_row in reader.get_manifest(str(entry.tumbler)):
+            row = self.client.get_by_id(self.collection, manifest_row.chash)
+            if row is not None and row.get("title") == title:
+                seed_chunks_direct(
+                    self.collection, ids=[manifest_row.chash], documents=[row["content"]],
+                    metadatas=[{"indexed_at": aged}], embed=True)
 
     def age_row(self, body: str, *, ttl_days: int | None, days: int) -> None:
         """Set the shared chunk row's own ``ttl_days`` and ``indexed_at``: what the old sweep read."""
@@ -286,3 +297,56 @@ def test_a_stale_stamp_that_equals_a_legacy_notes_tumbler_does_not_make_the_row_
     w.client.expire()
 
     assert len(documents_by_title("stale-legacy")) == 1 and w.chunk_served(body)
+
+
+def test_a_note_re_put_permanent_by_a_writer_that_bypasses_the_catalog_hook_is_not_retired(t2_service_env):
+    """nexus-6pfgb.30. An older client's re-put rewrites the chunk row (permanent, a fresh indexed_at)
+    and leaves the catalog's ttl_days and put_at as they were, so the catalog says lapsed. The sweep must
+    read the note's own row and leave the note alone, then retire it once the row agrees with the catalog."""
+    w = _World(t2_service_env, "6pfgb30-stale")
+    body = "6pfgb30 text re-put permanent by an older client"
+    w.put("stale-ttl", body, ttl="1d")
+    w.age_note("stale-ttl", 2)
+    w.age_row(body, ttl_days=None, days=0)  # the older client's write: no TTL, indexed now, stamp and title kept
+    entry = w._entry("stale-ttl")
+    assert entry is not None and entry.meta.get("ttl_days") == 1, "control: the catalog still says 1 day, lapsed"
+    rows = w.client._note_rows(w.collection, [_chash(body)])
+    assert note_ttl.row_written_by(entry.tumbler, rows[_chash(body)], owner_title="stale-ttl"), (
+        "control: the engine's store-get returns the stamp and title the guard attributes the row by")
+    assert not rows[_chash(body)].get("ttl_days")
+
+    report = w.client.expire_report()
+
+    assert w.live("stale-ttl") and w.chunk_served(body), "a note its owner made permanent is not retired"
+    assert [t for _, t in report.catalog_ttl_stale] == ["stale-ttl"]
+    assert (report.notes_tombstoned, report.chunks_deleted, report.failures) == (0, 0, ())
+
+    # remedy: a re-put with this client rewrites both the row and the catalog keys; it is permanent now
+    w.put("stale-ttl", body)
+    w.age_note("stale-ttl", 400)
+    assert w.client.expire_report().notes_tombstoned == 0 and w.live("stale-ttl")
+
+
+def test_a_genuinely_lapsed_note_is_retired_with_its_own_rows_read(t2_service_env):
+    w = _World(t2_service_env, "6pfgb30-lapsed")
+    body = "6pfgb30 text of a note that simply lapsed"
+    w.put("really-lapsed", body, ttl="1d")
+    w.age_note("really-lapsed", 2)
+
+    report = w.client.expire_report()
+
+    assert not w.live("really-lapsed") and not w.chunk_present(body)
+    assert (report.notes_tombstoned, report.catalog_ttl_stale, report.failures) == (1, (), ())
+
+
+def test_a_lapsed_note_whose_rows_cannot_be_read_is_not_retired(t2_service_env):
+    w = _World(t2_service_env, "6pfgb30-unread")
+    body = "6pfgb30 text of a lapsed note whose rows cannot be read"
+    w.put("unread", body, ttl="1d")
+    w.age_note("unread", 2)
+
+    with patch.object(HttpVectorClient, "_note_rows", side_effect=RuntimeError("engine unreachable")):
+        report = w.client.expire_report()
+
+    assert w.live("unread") and w.chunk_served(body)
+    assert [t for t, _ in report.failures] and report.notes_tombstoned == 0

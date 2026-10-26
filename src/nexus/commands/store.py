@@ -812,6 +812,15 @@ def expire_cmd() -> None:
             "row is not, so none was judged by it.",
             err=True,
         )
+    if report.catalog_ttl_stale:
+        for tumbler, title in report.catalog_ttl_stale:
+            click.echo(
+                f"  note {tumbler} ({title!r}) has lapsed in the catalog but was NOT retired: a chunk row of it "
+                "records a later put than its catalog TTL (put by a client older than the one that records "
+                "TTLs, or imported). Re-put it with this client (with or without --ttl) to settle it, or "
+                "delete it with nx store delete --title.",
+                err=True,
+            )
     if report.failures:
         for tumbler, why in report.failures:
             click.echo(f"  note {tumbler} was NOT retired: {why}", err=True)
