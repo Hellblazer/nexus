@@ -663,9 +663,13 @@ def _measure_eligibility(library, queries, with_clone_selections) -> dict:
     never selects a plan the filter refused, and the incident request no longer selects the grown clone.
     The numbers are emitted; nexus-jypmj.2.8 sets thresholds from them before the gate is enabled.
 
-    Limits: the request kinds are the derivation's own (the golden label is printed beside it, and the
-    derivation was written with this set in view), the library is the 12 builtins plus one grown clone, and
-    only the incident request reaches the clone. A builtin seeded before nexus-jypmj.2.1 and not reseeded
+    Limits: IN-SAMPLE. The request kinds are the derivation's own first pass, and that derivation was
+    written with this set in view. Wrong-shape 0 is therefore a FLOOR, not a rate: the kinds the gate acts on
+    and the kinds the labels say are both read off the same compatibility matrix, so agreement is near-certain
+    by construction, and the recall figures carry the same bias (the out-of-sample misses seen in the 2.2
+    review were all ``lookup``, the kind the gate admits most broadly). Read the printed figures as "does not
+    regress on these 24", never as an error rate; a held-out set is nexus-jypmj.2.8's. The library is the 12
+    builtins plus one grown clone, and only the incident request reaches the clone. A builtin seeded before nexus-jypmj.2.1 and not reseeded
     declares nothing and would read as an untrusted unknown plan; the library here was seeded by this
     build, so its builtins carry their declarations.
     """
@@ -687,13 +691,14 @@ def _measure_eligibility(library, queries, with_clone_selections) -> dict:
             q.qid, "a shadow filter moved the selection", sel_off, base)
         refused = set(gate.excluded_plan_ids)
         assert not (refused & set(sel_on.plan_ids)), (q.qid, "the enforcing run offered a refused plan", refused)
+        refused_labels = {key for pid, key in zip(sel_off.plan_ids, sel_off.candidates) if pid in refused}
         shadow_obs.append(RunObservation(qid=q.qid, selected_plan=sel_off.selected, candidate_plans=sel_off.candidates))
         enforced_obs.append(RunObservation(qid=q.qid, selected_plan=sel_on.selected, candidate_plans=sel_on.candidates))
         rows.append({
             "qid": q.qid.split("-")[0], "golden_kind": q.answer_kind, "derived_kind": cov.answer_kind,
             "decision": cov.kind_decision, "selected_off": sel_off.selected, "selected_on": sel_on.selected,
             "would_exclude": shadow.excluded_plan_ids, "branches_off": shadow.to_wire()["branches"],
-            "excluded_total": shadow.excluded_total,
+            "excluded_total": shadow.excluded_total, "refused_labels": refused_labels,
         })
     off = compute_measures(queries, shadow_obs)
     on = compute_measures(queries, enforced_obs)
@@ -722,10 +727,21 @@ def _measure_eligibility(library, queries, with_clone_selections) -> dict:
     assert g06["selected_on"] != g.GROWN_473_KEY, g06
     assert g06["excluded_total"] >= 1 and g06["derived_kind"] == "synthesis", g06
     changed = [r["qid"] for r in rows if r["selected_off"] != r["selected_on"]]
-    # selection moves only through the filter, so every changed request had its selected plan refused
-    assert all(r["selected_off"] is not None for r in rows if r["qid"] in changed), changed
+    # selection moves only through the filter: every changed request had a plan selected with the gate off, and
+    # that plan's label is among the labels the enforcing run refused for that request
+    for r in rows:
+        if r["qid"] in changed:
+            assert r["selected_off"] is not None, r
+            assert r["selected_off"] in r["refused_labels"], (r["qid"], "the old plan was not refused", r)
+    # in-sample tripwires (see Limits): the gate may not make the wrong-shape rate worse or lose recall here
+    assert on["wrong_shape_admission_rate"].value <= off["wrong_shape_admission_rate"].value, (on, off)
+    assert on["eligible_plan_recall"].value >= off["eligible_plan_recall"].value, (on, off)
     print(
-        f"RDR232-ELIGIBILITY requests={len(rows)} selection_changed={changed} "
+        "RDR232-ELIGIBILITY-LIMIT in-sample: request kinds are the first pass fitted to these 24 requests; "
+        "wrong_shape 0 is a floor, recall is biased the same way; the figures below are not rates"
+    )
+    print(
+        f"RDR232-ELIGIBILITY in_sample(wrong_shape_0_is_a_floor,not_rates) requests={len(rows)} selection_changed={changed} "
         f"wrong_shape off={off['wrong_shape_admission_rate'].value} on={on['wrong_shape_admission_rate'].value} "
         f"eligible_plan_recall off={off['eligible_plan_recall'].value} on={on['eligible_plan_recall'].value} "
         f"would_exclude_any={sum(1 for r in rows if r['excluded_total'])} "

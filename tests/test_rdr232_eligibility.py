@@ -133,9 +133,14 @@ def _pj(kind: K | None = None, provenance: str = "curated", route: str | None = 
         pytest.param("builtin-template,grown", _pj(L), U, "grown", None, id="the-grown-tag-wins-over-a-curated-pair"),
         pytest.param("ad-hoc,grown", _pj(), U, "grown", None, id="grown-tag-no-declaration"),
         pytest.param("ad-hoc,grown", _pj(U, "grown"), U, "grown", None, id="grown-unknown"),
-        pytest.param("ad-hoc,grown", _pj(S, "grown", "heuristic"), S, "grown", None, id="grown-with-a-recorded-route"),
+        pytest.param("ad-hoc,grown", _pj(S, "grown", "explicit"), S, "grown", None,
+                     id="grown-with-an-explicit-route-keeps-its-kind"),
+        pytest.param("ad-hoc,grown", _pj(S, "grown", "heuristic"), U, "grown", "unreviewed_route",
+                     id="grown-with-a-heuristic-route-reads-as-unknown"),
+        pytest.param("ad-hoc,grown", _pj(S, "grown", "model-assisted"), U, "grown", "unreviewed_route",
+                     id="grown-with-a-model-assisted-route-reads-as-unknown"),
         pytest.param("", _pj(S, "grown", "explicit"), S, "grown", None, id="the-declaration-alone-says-grown"),
-        pytest.param("builtin-template", _pj(S, "grown", "heuristic"), S, "grown", None,
+        pytest.param("builtin-template", _pj(S, "grown", "heuristic"), U, "grown", "unreviewed_route",
                      id="builtin-tag-but-a-grown-declaration-is-grown"),
         pytest.param("", _pj(), U, "unattested", None, id="a-plan-save-row-declares-nothing"),
         pytest.param(None, None, U, "unattested", None, id="no-tags-no-json"),
@@ -148,6 +153,46 @@ def _pj(kind: K | None = None, provenance: str = "curated", route: str | None = 
 def test_provenance_is_decided_from_the_row_and_fails_closed(tags, plan_json, kind, provenance, flag) -> None:
     standing = el.classify_plan(tags, plan_json)
     assert (standing.kind, standing.provenance, standing.flag) == (kind, provenance, flag)
+
+
+@pytest.mark.parametrize(
+    ("route", "honoured"),
+    [("explicit", True), ("heuristic", False), ("model-assisted", False), (None, False)],
+    ids=["explicit", "heuristic", "model-assisted", "none"],
+)
+def test_a_grown_plans_recorded_kind_counts_only_on_an_explicit_route(route, honoured) -> None:
+    """RDR-232: recorded kind provenance relaxes the unknown-kind restriction "after review". Until a reviewed
+    decision says otherwise only the route the caller named counts; the others are unknown-kind grown plans,
+    with a reason of their own. ``None`` is a stored row that records no route (not producible by the grow
+    site, and not a valid declaration either: it decodes as no declaration)."""
+    plan_json = _pj(S, "grown", route) if route is not None else json.dumps(
+        {"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "synthesis", "provenance": "grown"}},
+    )
+    standing = el.classify_plan("ad-hoc,grown", plan_json)
+    assert standing.provenance == "grown"
+    if honoured:
+        assert (standing.kind, standing.flag, standing.route) == (S, None, "explicit")
+        assert el.eligibility(S, standing.kind, standing.provenance).eligible
+    else:
+        assert standing.kind is U
+        assert standing.flag == ("unreviewed_route" if route is not None else None)
+        assert not el.eligibility(S, standing.kind, standing.provenance).eligible
+    # either way the stored route is reported, so the envelope can say why
+    assert standing.route == route
+
+
+@pytest.mark.parametrize("route", ["explicit", "heuristic", "model-assisted"])
+def test_a_discounted_route_is_refused_with_its_own_reason_and_still_serves_lookup_and_listing(route) -> None:
+    row = _row(910, "grown-synth", kind=S, tags="ad-hoc,grown", provenance="grown", route=route)
+    out, filt = _match([row], [(910, 0.05)], S)
+    if route == "explicit":
+        assert _ids(out) == [910]
+        return
+    assert out == []
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
+    for request in (L, D):
+        out, _ = _match([row], [(910, 0.05)], request)
+        assert _ids(out) == [910], request
 
 
 @pytest.mark.parametrize("tags", [42, ["builtin-template"], MagicMock()], ids=["int", "list", "mock"])
@@ -216,8 +261,11 @@ SYNTH_12 = _row(12, "research-default", kind=S, tags="builtin-template,rdr-097",
 DISC_13 = _row(13, "document-discovery", kind=D, tags="builtin-template", verb="discovery")
 #: A grown plan whose route was unknown: lookup-shaped history, declared unknown.
 GROWN_UNKNOWN = _row(901, "grown-lookup", kind=U, tags="ad-hoc,grown", provenance="grown", verb="lookup")
-GROWN_LOOKUP = _row(902, "grown-lookup-recorded", kind=L, tags="ad-hoc,grown", provenance="grown", route="heuristic",
+GROWN_LOOKUP = _row(902, "grown-lookup-recorded", kind=L, tags="ad-hoc,grown", provenance="grown", route="explicit",
                     verb="lookup")
+#: The same plan stamped by the heuristic route: the request's guess, discounted until reviewed.
+GROWN_LOOKUP_HEURISTIC = _row(903, "grown-lookup-heuristic", kind=L, tags="ad-hoc,grown", provenance="grown",
+                              route="heuristic", verb="lookup")
 LEGACY_BUILTIN = _row(14, "legacy-default", kind=None, tags="builtin-template", verb="research")
 
 
@@ -229,11 +277,12 @@ def _ids(matches) -> list[int]:
     return [m.plan_id for m in matches]
 
 
-def _match(rows, hits, request: K, *, enforce=True, fts=(), cache=True, category_verb=None, n=5):
+def _match(rows, hits, request: K, *, enforce=True, fts=(), cache=True, category_verb=None, n=5, **kw):
     lib = _Library(rows, fts)
     filt = _filter(request, enforce=enforce)
     out = real_plan_match(
         "q", library=lib, cache=_Cache(hits) if cache else None, eligibility=filt, category_verb=category_verb, n=n,
+        **kw,
     )
     return out, filt
 
@@ -290,7 +339,7 @@ def test_scenario_4_it_is_refused_for_every_broad_kind(request_kind: K) -> None:
     assert out == []
 
 
-def test_a_grown_plan_that_recorded_its_route_kind_is_judged_by_the_matrix() -> None:
+def test_a_grown_plan_that_recorded_an_explicit_route_kind_is_judged_by_the_matrix() -> None:
     out, _ = _match([GROWN_LOOKUP], [(902, 0.05)], L)
     assert _ids(out) == [902]
     out, filt = _match([GROWN_LOOKUP], [(902, 0.05)], S)
@@ -301,9 +350,13 @@ def test_a_grown_plan_that_recorded_its_route_kind_is_judged_by_the_matrix() -> 
 
 
 def test_scenario_5_an_unknown_request_never_selects_a_grown_plan() -> None:
-    out, filt = _match([GROWN_UNKNOWN, GROWN_LOOKUP], [(901, 0.05), (902, 0.06)], U)
+    out, filt = _match(
+        [GROWN_UNKNOWN, GROWN_LOOKUP, GROWN_LOOKUP_HEURISTIC], [(901, 0.05), (902, 0.06), (903, 0.07)], U,
+    )
     assert out == []
-    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unknown_request_untrusted_plan": 2}
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {
+        "unknown_request_untrusted_plan": 2, "unreviewed_route": 1,
+    }
 
 
 def test_scenario_5_an_unknown_request_keeps_the_curated_synthesis_and_drops_the_curated_lookup() -> None:
@@ -391,12 +444,14 @@ def test_scenario_8_with_the_gate_off_the_returned_matches_are_those_of_no_filte
         lib = _Library(rows, fts)
         cache = _Cache(hits) if use_cache else None
         out = real_plan_match("q", library=lib, cache=cache, eligibility=filt, **kwargs)
-        return out, lib.metrics, (cache.asked if cache else [])
+        return out, lib.metrics, (cache.asked if cache else []), lib.fts_limits
 
     base = run(None)
     shadow_filter = _filter(request_kind, enforce=False)
     shadow = run(shadow_filter)
-    assert shadow == base, "matches, the metrics bumped, and the over-fetch asked of the cache are all identical"
+    assert shadow == base, (
+        "matches, the metrics bumped, and the over-fetch asked of the cache and of FTS are all identical"
+    )
 
 
 def test_scenario_8_the_shadow_filter_still_reports_what_the_gate_would_exclude() -> None:
@@ -434,6 +489,121 @@ def test_no_filter_at_all_is_the_existing_call() -> None:
     lib = _Library([LOOKUP_473, SYNTH_12])
     out = real_plan_match("q", library=lib, cache=_Cache([(473, 0.1), (12, 0.4)]))
     assert _ids(out) == [473, 12]
+
+
+# order: eligibility is asked last ------------------------------------------------------------------------------
+
+
+def _requiring(row: dict, *names: str) -> dict:
+    plan = json.loads(row["plan_json"])
+    plan["required_bindings"] = list(names)
+    return {**row, "plan_json": json.dumps(plan)}
+
+
+def test_eligibility_runs_after_the_binding_gate_so_an_unrunnable_wrong_shape_plan_is_counted_once(
+    monkeypatch,
+) -> None:
+    """A lookup plan that needs a ``content_type`` nobody supplied is unrunnable AND the wrong shape for a
+    synthesis request. It is the binding gate's drop: it never reaches the filter, so it is not ``examined``
+    and not ``excluded`` there. Asked FIRST instead, the filter would count it and the binding log would not."""
+    from nexus.plans import matcher
+
+    dropped: list[tuple[int, str]] = []
+
+    def spy(drops):
+        dropped.extend(drops)
+        drops.clear()
+
+    monkeypatch.setattr(matcher, "_log_binding_drops", spy)
+    unrunnable = dict(_requiring(LOOKUP_473, "content_type"), id=480, name="needs-a-type")
+    out, filt = _match(
+        [unrunnable, LOOKUP_473, SYNTH_12], [(480, 0.05), (473, 0.1), (12, 0.4)], S,
+        available_bindings=frozenset({"intent"}),
+    )
+    assert _ids(out) == [12]
+    assert filt.to_wire()["branches"]["cosine"] == {"examined": 2, "excluded": 1, "reasons": {"kind_mismatch": 1}}
+    assert filt.excluded_plan_ids == [473], "480 was dropped for its binding, not for its shape"
+    assert dropped == [(480, "content_type")]
+
+
+def test_eligibility_runs_after_the_binding_gate_on_the_fts_branch_too() -> None:
+    """Same order on the FTS fallback: the unrunnable plan (480) is the binding gate's, only 473 is judged."""
+    unrunnable = dict(_requiring(LOOKUP_473, "content_type"), id=480, name="needs-a-type")
+    _, filt = _match(
+        [unrunnable, LOOKUP_473], [], S, fts=[480, 473], cache=False, available_bindings=frozenset({"intent"}),
+    )
+    assert filt.to_wire()["branches"]["fts"] == {"examined": 1, "excluded": 1, "reasons": {"kind_mismatch": 1}}
+    assert filt.excluded_plan_ids == [473]
+
+
+# a judging fault ------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("enforce", [False, True], ids=["shadow", "enforcing"])
+def test_a_judging_fault_never_fails_plan_match(monkeypatch, enforce) -> None:
+    """Shadow mode runs the judge on the production path with the gate off. An exception in it must not
+    become a ``plan_match`` failure: the candidate is counted under ``judge_error`` and, with the gate off, kept."""
+
+    def boom(*_a, **_k):
+        raise RuntimeError("judge down")
+
+    monkeypatch.setattr(el, "_judge", boom)
+    out, filt = _match([LOOKUP_473, SYNTH_12], [(473, 0.1), (12, 0.4)], S, enforce=enforce)
+    branch = filt.to_wire()["branches"]["cosine"]
+    assert branch == {"examined": 2, "excluded": 2, "reasons": {"judge_error": 2}}
+    assert _ids(out) == ([] if enforce else [473, 12]), "kept when not enforcing, dropped (fail closed) when enforcing"
+    assert "judge_error" in el.REASONS
+
+
+def test_a_judging_fault_does_not_fail_the_returned_summary_either(monkeypatch) -> None:
+    def boom(*_a, **_k):
+        raise RuntimeError("judge down")
+
+    monkeypatch.setattr(el, "_judge", boom)
+    filt = _filter(S, enforce=False)
+    m = SimpleNamespace(plan_id=473)
+    filt.record_returned([m], selected=m)
+    assert filt.to_wire()["selected"]["reason"] == "judge_error"
+    assert el.eligible_matches(S, [m]) == []
+
+
+# odd stored rows ------------------------------------------------------------------------------------------------
+
+_DEEP: dict = {}
+_cursor = _DEEP
+for _ in range(400):
+    _cursor["k"] = {}
+    _cursor = _cursor["k"]
+
+
+@pytest.mark.parametrize(
+    "plan_json",
+    [
+        None, "", "null", "[]", "42", '"text"', "{not json", json.dumps(_DEEP), [], 7, 1.5, object(),
+        {"answer_kind": None}, {"answer_kind": []}, {"answer_kind": 7}, {"answer_kind": "lookup"},
+        {"answer_kind": {"version": 1, "kind": ["lookup"], "provenance": "curated"}},
+        {"answer_kind": {"version": 1, "kind": {"k": 1}, "provenance": "grown", "route": "explicit"}},
+        {"answer_kind": {"version": 1, "kind": "lookup", "provenance": ["curated"]}},
+        {"answer_kind": {"version": 1, "kind": "lookup", "provenance": "grown", "route": ["explicit"]}},
+        {"answer_kind": {"version": [1], "kind": "lookup", "provenance": "curated"}},
+        {"answer_kind": {"version": 1, "kind": "lookup", "provenance": "curated", "extra": {"a": [1]}}},
+        {"steps": "x", "answer_kind": {}},
+    ],
+    ids=lambda v: type(v).__name__ if not isinstance(v, (str, dict)) else str(v)[:40],
+)
+@pytest.mark.parametrize("tags", [None, "", "builtin-template", "grown", "builtin-template,grown", 5, ["grown"]])
+def test_classify_plan_never_raises_and_never_trusts_an_odd_row(plan_json, tags) -> None:
+    standing = el.classify_plan(tags, plan_json)
+    assert isinstance(standing.kind, K) and standing.provenance in ("curated", "grown", "unattested")
+    if standing.provenance == "curated":
+        assert isinstance(tags, str) and "builtin-template" in tags
+    for request in K:
+        el.eligibility(request, standing.kind, standing.provenance)
+
+
+@pytest.mark.parametrize("raw", [None, [], 3, {"a": 1}, ["lookup"], float("nan"), b"lookup", object()])
+def test_coerce_kind_of_an_unhashable_or_odd_value_is_unknown(raw) -> None:
+    assert el.coerce_kind(raw) is U
 
 
 # the filter ---------------------------------------------------------------------------------------------------
@@ -480,7 +650,8 @@ def test_returned_summary_counts_what_the_gate_would_leave() -> None:
     wire = filt.to_wire()
     assert wire["returned"] == {"total": 2, "eligible": 1}
     assert wire["selected"] == {
-        "plan_id": 473, "eligible": False, "kind": "lookup", "provenance": "curated", "reason": "kind_mismatch",
+        "plan_id": 473, "eligible": False, "kind": "lookup", "provenance": "curated", "route": None,
+        "reason": "kind_mismatch",
     }
     filt.record_returned([m12], selected=m12)
     assert filt.to_wire()["selected"]["eligible"] is True
@@ -507,7 +678,7 @@ def test_eligible_matches_drops_the_wrong_shape_plans() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scenario_6_the_wrong_shape_plan_is_absent_from_the_planners_prompt(enabled) -> None:
+async def test_scenario_6_the_wrong_shape_plan_is_absent_from_the_planners_prompt() -> None:
     import nexus.mcp.core as core
     from nexus.plans.request_coverage import RequestCoverage
 
@@ -524,13 +695,15 @@ async def test_scenario_6_the_wrong_shape_plan_is_absent_from_the_planners_promp
     coverage = RequestCoverage(answer_kind="synthesis", kind_decision="heuristic")
     with patch("nexus.operators.dispatch.claude_dispatch", fake_dispatch), \
          patch("nexus.mcp_infra.get_collection_names", lambda: []):
-        await core._nx_answer_plan_miss("q", few_shot_matches=near_misses, coverage=coverage)
+        await core._nx_answer_plan_miss(
+            "q", few_shot_matches=near_misses, coverage=coverage, enforce_eligibility=True,
+        )
     assert "SYNTHESIS-SHAPED-EXAMPLE" in captured["prompt"]
     assert "LOOKUP-SHAPED-EXAMPLE" not in captured["prompt"]
 
 
 @pytest.mark.asyncio
-async def test_an_unknown_request_gives_the_planner_no_narrow_or_grown_example(enabled) -> None:
+async def test_an_unknown_request_gives_the_planner_no_narrow_or_grown_example() -> None:
     import nexus.mcp.core as core
     from nexus.plans.request_coverage import RequestCoverage
 
@@ -546,7 +719,9 @@ async def test_an_unknown_request_gives_the_planner_no_narrow_or_grown_example(e
     ]
     with patch("nexus.operators.dispatch.claude_dispatch", fake_dispatch), \
          patch("nexus.mcp_infra.get_collection_names", lambda: []):
-        await core._nx_answer_plan_miss("q", few_shot_matches=near_misses, coverage=RequestCoverage())
+        await core._nx_answer_plan_miss(
+            "q", few_shot_matches=near_misses, coverage=RequestCoverage(), enforce_eligibility=True,
+        )
     assert "LOOKUP-SHAPED-EXAMPLE" not in captured["prompt"] and "GROWN-EXAMPLE" not in captured["prompt"]
 
 
@@ -571,6 +746,33 @@ async def test_with_the_gate_off_the_planner_prompt_is_unchanged() -> None:
     assert prompts[0] == prompts[1] and "LOOKUP-SHAPED-EXAMPLE" in prompts[0]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("constant", "enforce", "filtered"), [(True, False, False), (False, True, True)])
+async def test_the_planner_follows_the_callers_enforce_and_never_rereads_the_constant(
+    monkeypatch, constant, enforce, filtered,
+) -> None:
+    """nexus-jypmj.2.3 S6: the gate is read once, into the request's filter. The planner takes that decision as
+    an argument, so the matcher and the few-shots cannot disagree within one call."""
+    import nexus.mcp.core as core
+    from nexus.plans.request_coverage import RequestCoverage
+
+    monkeypatch.setattr(el, "ANSWER_KIND_ELIGIBILITY_ENABLED", constant)
+    prompts: list[str] = []
+
+    async def fake_dispatch(prompt, schema, timeout=300.0, model=None, **kw):  # noqa: ARG001
+        prompts.append(prompt)
+        return {"steps": [{"tool": "search", "args": {"query": "x"}}]}
+
+    near_misses = [_as_match(dict(LOOKUP_473, query="LOOKUP-SHAPED-EXAMPLE"))]
+    with patch("nexus.operators.dispatch.claude_dispatch", fake_dispatch), \
+         patch("nexus.mcp_infra.get_collection_names", lambda: []):
+        await core._nx_answer_plan_miss(
+            "q", few_shot_matches=near_misses, coverage=RequestCoverage(answer_kind="synthesis"),
+            enforce_eligibility=enforce,
+        )
+    assert ("LOOKUP-SHAPED-EXAMPLE" not in prompts[0]) is filtered
+
+
 # nx_answer: the wiring ----------------------------------------------------------------------------------------
 
 
@@ -586,7 +788,7 @@ def _ad_hoc(steps=None) -> Match:
     )
 
 
-def _drive(question, rows, hits, *, plan_miss=None, fts=(), db=None, matcher_floor=None, **kw):
+def _drive(question, rows, hits, *, plan_miss=None, fts=(), db=None, matcher_floor=None, miss_error=None, **kw):
     """Run ``nx_answer`` with the REAL matcher over a fake library; the planner and the runner are stubs."""
     from tests.test_rdr232_caller_scope import _MULTI_PLAN, _drive_nx_answer, _plan_run_result
 
@@ -601,7 +803,7 @@ def _drive(question, rows, hits, *, plan_miss=None, fts=(), db=None, matcher_flo
             kwargs["min_confidence"] = matcher_floor  # the matcher admits what nx_answer's own gate then refuses
         return real_plan_match(q, library=lib, cache=cache, **kwargs)
 
-    miss = AsyncMock(return_value=plan_miss or _ad_hoc())
+    miss = AsyncMock(side_effect=miss_error) if miss_error else AsyncMock(return_value=plan_miss or _ad_hoc())
     steps = [{"ids": ["c1"], "tumblers": ["1.1.1"], "chunk_collections": ["rdr__1-1__x__v1"]},
              {"text": "The decision is X [1]. It was accepted on 2026-10-01 after review of the evidence."}]
     kw.setdefault("scope", "")
@@ -634,7 +836,7 @@ def test_with_the_gate_on_plan_473_is_refused_and_the_next_eligible_plan_runs(en
     assert wire["enforced"] is True
     assert env["plan_id"] == 12
     assert wire["selected"] == {
-        "plan_id": 12, "eligible": True, "kind": "synthesis", "provenance": "curated", "reason": None,
+        "plan_id": 12, "eligible": True, "kind": "synthesis", "provenance": "curated", "route": None, "reason": None,
     }
     assert wire["excluded_plan_ids"] == [473] and not miss.called
 
@@ -677,10 +879,14 @@ def test_no_candidates_and_a_low_confidence_match_have_their_own_fallback_reason
     assert miss.called and env["plan_eligibility"]["fallback_reason"] == "below_confidence_floor"
 
 
-def test_the_planner_is_handed_the_coverage() -> None:
+def test_the_planner_is_handed_the_coverage_and_the_filters_enforce(monkeypatch) -> None:
     env, miss, _ = _drive(G06, [], [])
     cov = miss.call_args.kwargs["coverage"]
     assert cov.answer_kind == "synthesis" and cov.kind_decision == "heuristic"
+    assert miss.call_args.kwargs["enforce_eligibility"] is False
+    monkeypatch.setattr(el, "ANSWER_KIND_ELIGIBILITY_ENABLED", True)
+    _, miss, _ = _drive(G06, [], [])
+    assert miss.call_args.kwargs["enforce_eligibility"] is True
 
 
 def test_the_matcher_is_handed_a_filter_built_from_the_coverage_and_the_constant() -> None:
@@ -703,6 +909,16 @@ def test_a_matcher_error_still_carries_the_eligibility_key() -> None:
 
     env, _ = _drive_nx_answer(_MULTI_PLAN, scope="", structured=True, plan_match=boom, question=G06)
     assert env["plan_eligibility"]["fallback_reason"] is None and env["plan_eligibility"]["branches"]["fts"]["examined"] == 0
+
+
+def test_the_planner_failure_envelope_says_why_the_planner_was_asked(enabled) -> None:
+    """The fallback reason is set before the inline planner runs, so the error envelope carries it too."""
+    env, miss, _ = _drive(G06, [LOOKUP_473], [(473, 0.05)], fts=[473], miss_error=RuntimeError("planner down"))
+    assert miss.called
+    assert env["plan_eligibility"]["fallback_reason"] == "all_candidates_ineligible"
+    assert env["plan_eligibility"]["enforced"] is True and env["plan_eligibility"]["excluded_total"] == 2
+    assert env["plan_eligibility"]["selected"] is None, "no plan was selected: the planner failed"
+    assert "planner" in json.dumps(env).lower()
 
 
 # the grow site records the route kind only when the route was known ----------------------------------------

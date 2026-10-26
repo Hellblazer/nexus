@@ -779,8 +779,10 @@ def plan_match(
             # Bypasses the CONFIDENCE floors (via confidence=1.0) and
             # NOTHING else. Not the always-failing skip, not the dimension
             # filter, not the unmet-binding gate, not the unanchored-grown
-            # drop, not a scope conflict. Those answer "can this plan run
-            # here at all", which a repeated question does not speak to.
+            # drop, not a scope conflict, not answer-kind eligibility
+            # (nexus-jypmj.2.3: asked last, below). Those answer "can this
+            # plan run here at all" or "may this plan serve this kind of
+            # request", which a repeated question does not speak to.
             is_verbatim = _is_verbatim_repeat(row, normalized_intent)
             if is_verbatim:
                 confidence = 1.0

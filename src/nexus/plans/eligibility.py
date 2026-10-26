@@ -32,7 +32,12 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
 * ``curated``: the ``builtin-template`` tag AND a declaration that says ``curated``;
 * ``grown``: the ``grown`` tag OR a declaration that says ``grown``, whichever is the less trusted
   reading. A ``curated`` declaration on a row without the builtin tag is not trusted: it reads as grown
-  with kind ``unknown`` (``untrusted_curated_claim``);
+  with kind ``unknown`` (``untrusted_curated_claim``). A grown plan's recorded kind counts only when its
+  route is ``explicit`` (the caller named the kind). A ``heuristic`` or ``model-assisted`` stamp is the
+  request's guessed kind, not a property of the plan's steps, and the RDR relaxes the unknown-kind
+  restriction for recorded provenance only "after review": until a reviewed decision says otherwise such
+  a plan reads as grown with kind ``unknown`` (``unreviewed_route``). The route is still recorded at the
+  grow site; only eligibility discounts it;
 * ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``,
   and it is treated like any other untrusted unknown plan. A builtin seeded before nexus-jypmj.2.1 is
   this until ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is
@@ -46,9 +51,15 @@ The whole filter sits behind :data:`ANSWER_KIND_ELIGIBILITY_ENABLED`, which ship
 gate WOULD exclude, but :meth:`EligibilityFilter.admit` keeps every candidate and the matcher's output,
 metrics and over-fetch are identical to a call that passed no filter.
 
-The matcher calls :meth:`EligibilityFilter.admit` last on each branch, after every other drop, so a
-branch's ``excluded`` count is "candidates that would have been returned (or pooled) but for
-eligibility", not "candidates something else would have dropped anyway".
+The matcher calls :meth:`EligibilityFilter.admit` last on each branch, after every other drop (unmet
+binding, scope conflict, always-failing, FTS literal drop), so a branch's ``excluded`` count is
+"candidates that would have been returned (or pooled) but for eligibility", not "candidates something
+else would have dropped anyway". A candidate that is both unrunnable and the wrong shape is counted
+under the binding drop and never reaches ``examined``.
+
+:meth:`EligibilityFilter.admit` never raises. If judging a row fails, the candidate counts under the
+``judge_error`` reason; with the filter not enforcing it is kept (the shadow filter must never fail
+``plan_match``), and when enforcing it is dropped (fail closed).
 """
 from __future__ import annotations
 
@@ -56,7 +67,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from nexus.plans.answer_kind import PlanAnswerKind, decode_declaration
+
+_log = structlog.get_logger(__name__)
 
 __all__ = [
     "ANSWER_KIND_ELIGIBILITY_ENABLED",
@@ -64,6 +79,7 @@ __all__ = [
     "BUILTIN_TAG",
     "GROWN_TAG",
     "REASONS",
+    "TRUSTED_ROUTES",
     "EligibilityFilter",
     "PlanStanding",
     "Verdict",
@@ -95,7 +111,13 @@ REASONS: frozenset[str] = frozenset({
     "untrusted_unknown_plan",
     "undeclared_builtin",
     "untrusted_curated_claim",
+    "unreviewed_route",
+    "judge_error",
 })
+
+#: The grown-plan route whose recorded kind eligibility honours (the caller named it). The other routes
+#: (``heuristic``, ``model-assisted``) are discounted until a reviewed decision adds them here.
+TRUSTED_ROUTES: frozenset[str] = frozenset({"explicit"})
 
 #: At most this many refused plan ids are listed in the envelope.
 _MAX_LISTED_IDS = 20
@@ -132,11 +154,17 @@ def coerce_kind(raw: object) -> PlanAnswerKind:
 
 @dataclass(frozen=True)
 class PlanStanding:
-    """What the stored row says a plan is: its kind, how far to trust it, and a defect if it has one."""
+    """What the stored row says a plan is: its kind, how far to trust it, and a defect if it has one.
+
+    ``route`` is the recorded route of a grown plan's declared kind (``explicit``, ``heuristic``,
+    ``model-assisted``), whether or not it was honoured; ``None`` when the row records none. ``kind`` is the
+    EFFECTIVE kind: ``unknown`` when the declared one was discounted.
+    """
 
     kind: PlanAnswerKind
     provenance: str  # "curated" | "grown" | "unattested"
     flag: str | None = None
+    route: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,8 +189,14 @@ def classify_plan(tags: str | None, plan_json: Any) -> PlanStanding:
     if GROWN_TAG in tokens or declared.provenance == "grown":
         # A grown declaration that validated carries its route, so its kind is a recorded one. A grown
         # TAG with a curated or absent declaration has no route: its kind is unknown.
-        kind = declared.kind if declared.provenance == "grown" else _U
-        return PlanStanding(kind, "grown")
+        if declared.provenance != "grown":
+            return PlanStanding(_U, "grown")
+        if declared.kind is _U:
+            return PlanStanding(_U, "grown")
+        if declared.route in TRUSTED_ROUTES:
+            return PlanStanding(declared.kind, "grown", route=declared.route)
+        # the request's guessed kind is not the plan's shape: read it as unknown until reviewed
+        return PlanStanding(_U, "grown", "unreviewed_route", route=declared.route)
     if declared.provenance == "curated":
         if BUILTIN_TAG in tokens:
             return PlanStanding(declared.kind, "curated")
@@ -199,11 +233,24 @@ def _judge(request_kind: PlanAnswerKind, tags: str | None, plan_json: Any) -> tu
     return standing, verdict
 
 
+def _safe_judge(request_kind: PlanAnswerKind, tags: Any, plan_json: Any) -> tuple[PlanStanding, Verdict]:
+    """:func:`_judge` that never raises: a fault is the ``judge_error`` verdict on an unattested standing.
+
+    Callers on the production path (the matcher, ``nx_answer``) use this one, so a judging fault with the
+    gate off cannot fail ``plan_match``; the fault is logged and counted under ``judge_error``.
+    """
+    try:
+        return _judge(request_kind, tags, plan_json)
+    except Exception:  # noqa: BLE001 — a judging fault must never fail the caller; logged and counted
+        _log.warning("eligibility_judge_failed", exc_info=True)
+        return PlanStanding(_U, "unattested", "judge_error"), Verdict(False, "judge_error")
+
+
 def eligible_matches(request_kind: PlanAnswerKind, matches: Iterable[Any] | None) -> list[Any]:
     """*matches* without the plans a request of *request_kind* may not use (quiet: no counting)."""
     kept = []
     for m in matches or ():
-        _, verdict = _judge(request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None))
+        _, verdict = _safe_judge(request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None))
         if verdict.eligible:
             kept.append(m)
     return kept
@@ -231,10 +278,13 @@ class EligibilityFilter:
 
     def admit(self, row: Mapping[str, Any], branch: str) -> bool:
         """Judge the candidate *row* found by *branch*; False means the matcher must drop it."""
-        standing, verdict = _judge(self.request_kind, row.get("tags"), row.get("plan_json"))
         counts = self._branches[branch]
         counts["examined"] += 1
-        plan_id = row.get("id")
+        plan_id = row.get("id") if isinstance(row, Mapping) else None
+        standing, verdict = _safe_judge(
+            self.request_kind, row.get("tags") if isinstance(row, Mapping) else None,
+            row.get("plan_json") if isinstance(row, Mapping) else None,
+        )
         if isinstance(plan_id, int):
             self._judged[plan_id] = (standing, verdict)
         if verdict.eligible:
@@ -261,7 +311,7 @@ class EligibilityFilter:
             plan_id = getattr(m, "plan_id", 0)
             if plan_id in self._judged:
                 return self._judged[plan_id]
-            return _judge(self.request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None))
+            return _safe_judge(self.request_kind, getattr(m, "tags", None), getattr(m, "plan_json", None))
 
         self._returned = {
             "total": len(matches), "eligible": sum(1 for m in matches if judged(m)[1].eligible),
@@ -273,7 +323,7 @@ class EligibilityFilter:
         standing, verdict = judged(selected)
         self._selected = {
             "plan_id": plan_id, "eligible": verdict.eligible, "kind": standing.kind.value,
-            "provenance": standing.provenance, "reason": verdict.reason,
+            "provenance": standing.provenance, "route": standing.route, "reason": verdict.reason,
         }
 
     def set_fallback(self, reason: str | None) -> None:

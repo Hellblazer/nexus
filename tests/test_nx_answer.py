@@ -143,7 +143,7 @@ class TestMinConfidenceOverride:
             # miss path must kick in.
             return [_make_match(plan_id=1, confidence=0.45)]
 
-        async def fake_miss(question, scope="", max_steps=6):
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
             return _make_match(plan_id=0, confidence=None)
 
         plan_run_result = MagicMock()
@@ -179,7 +179,7 @@ class TestMinConfidenceOverride:
             captured.update(kwargs)
             return []
 
-        async def fake_miss(question, scope="", max_steps=6):
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
             return _make_match(plan_id=0, confidence=None)
 
         plan_run_result = MagicMock()
@@ -250,7 +250,7 @@ class TestMinConfidenceOverride:
             captured.update(kwargs)
             return []
 
-        async def fake_miss(question, scope="", max_steps=6):
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
             return _make_match(plan_id=0, confidence=None)
 
         plan_run_result = MagicMock()
@@ -1084,7 +1084,7 @@ class TestPlanRunTelemetry:
         def fake_match(question, **kwargs):
             return []
 
-        async def fake_miss(question, scope="", max_steps=6):
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
             return _make_match(plan_id=0, confidence=None)
 
         plan_run_result = MagicMock()

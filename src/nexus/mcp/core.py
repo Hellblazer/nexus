@@ -10974,14 +10974,16 @@ async def _nx_answer_plan_miss(
     max_steps: int = 6,
     few_shot_matches: "list | None" = None,
     coverage: "RequestCoverage | None" = None,
+    enforce_eligibility: bool = False,
 ) -> Any:
     """Decompose *question* into a plan via claude_dispatch, execute it,
     and return a synthetic Match for plan_run.
 
-    *coverage* (RDR-232 Phase 2, nexus-jypmj.2.3) is the request's derived coverage. With the eligibility
-    gate on, the near-miss plans offered as few-shot examples are only those the request's answer kind may
-    use: a rejected shape must not teach the planner its structure. With the gate off, or no coverage, the
-    examples are those passed in.
+    *coverage* (RDR-232 Phase 2, nexus-jypmj.2.3) is the request's derived coverage and
+    *enforce_eligibility* is the caller's eligibility filter's ``enforce`` (the caller read the gate once
+    for the whole request; this function does not re-read it). With both, the near-miss plans offered as
+    few-shot examples are only those the request's answer kind may use: a rejected shape must not teach
+    the planner its structure. Without either, the examples are those passed in.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
     from nexus.plans.match import Match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -11010,9 +11012,9 @@ async def _nx_answer_plan_miss(
     # examples. On a miss these near-miss matches are still the most similar
     # historical plans; demonstrating their structure measurably lifts plan
     # quality over the prior zero-shot prompt.
-    from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so the gate constant is honored (nexus-jypmj.2.3)
+    from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — deferred, rare/branch-local (nexus-jypmj.2.3)
 
-    if coverage is not None and _eligibility.ANSWER_KIND_ELIGIBILITY_ENABLED:
+    if coverage is not None and enforce_eligibility:
         few_shot_matches = _eligibility.eligible_matches(
             _eligibility.coerce_kind(coverage.answer_kind), few_shot_matches,
         )
@@ -12397,6 +12399,7 @@ async def nx_answer(
                 best = await _nx_answer_plan_miss(
                     question, scope=scope, max_steps=max_steps,
                     few_shot_matches=matches, coverage=_request_coverage,
+                    enforce_eligibility=_plan_eligibility.enforce,
                 )
         except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)

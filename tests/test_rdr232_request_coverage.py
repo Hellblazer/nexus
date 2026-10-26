@@ -77,13 +77,43 @@ def test_the_incident_question_is_a_synthesis_with_its_facets_and_three_constrai
 # ── 2. ambiguity is unknown, and verb_infer is not consulted ───────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("qid", ["G20", "G22", "G23", "G24"])
+@pytest.mark.parametrize("qid", ["G22", "G23", "G24"])
 def test_ambiguous_phrasing_is_unknown_and_never_asks_verb_infer(qid: str) -> None:
     text = _golden()[qid]["text"]
     boom = AssertionError("RequestCoverage must not consult verb_infer")
     with patch("nexus.plans.verb_infer.infer_verb", side_effect=boom):
         cov = derive_request_coverage(text)
     assert cov.answer_kind == "unknown" and cov.kind_decision == "unknown"
+
+
+def test_a_why_question_about_what_named_code_decided_is_debug() -> None:
+    """nexus-jypmj.2.3 (G20): canonical debug phrasing with no failure word in it. The subject is a snake_case
+    identifier and the verb a selection or return verb."""
+    text = _golden()["G20"]["text"]
+    cov = derive_request_coverage(text)
+    assert (cov.answer_kind, cov.kind_decision) == ("debug", "heuristic")
+    for q in (
+        "Why does plan_match return no plans for this question?",
+        "why does `plan_match()` skip grown plans",
+        "Why did nx_answer choose the research plan?",
+    ):
+        assert derive_request_coverage(q).answer_kind == "debug", q
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Why does the RDR choose tumblers?",  # no code subject: a design-rationale question
+        "Why did the team pick nx_answer?",  # the subject is people, not code
+        "Why does nx_answer exist?",  # not a selection or return verb
+        "Why do snake_case names matter?",
+        "Which paper explains why nx_answer picks lookup plans?",  # does not open with why
+        "Why does nx_answer pick the lookup plan, and which RDR introduced it?",  # a second question joined on
+        "Why does nx_answer pick the lookup plan, and how does it differ from plan_match?",  # two kinds
+    ],
+)
+def test_the_code_behaviour_why_pattern_stays_conservative(question: str) -> None:
+    assert derive_request_coverage(question).answer_kind != "debug", question
 
 
 def test_the_module_does_not_import_verb_infer() -> None:

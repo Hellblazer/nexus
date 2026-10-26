@@ -820,7 +820,7 @@ class TestCapabilityProbeAtRunStart:
             ],
         })
 
-        async def fake_miss(question, scope="", max_steps=6, few_shot_matches=None):
+        async def fake_miss(question, scope="", max_steps=6, few_shot_matches=None, coverage=None, enforce_eligibility=False):
             return Match(
                 plan_id=0, name="ad-hoc", description="", confidence=None,
                 dimensions={}, tags="", plan_json=ad_hoc_plan,
@@ -868,7 +868,7 @@ class TestCapabilityProbeAtRunStart:
             lambda **kw: recorded.append(kw)
         )
 
-        async def failing_miss(question, scope="", max_steps=6, few_shot_matches=None):
+        async def failing_miss(question, scope="", max_steps=6, few_shot_matches=None, coverage=None, enforce_eligibility=False):
             raise RuntimeError("planner blew up")
 
         with patch("nexus.plans.matcher.plan_match", return_value=[]), \

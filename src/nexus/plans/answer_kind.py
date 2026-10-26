@@ -40,6 +40,11 @@ nexus-jypmj.2.3) applies, failing closed:
   tag is not trusted (treat it as grown);
 * a row is **grown** if its tags say ``grown`` OR its declaration says
   ``grown``, whichever is the less trusted reading;
+* a **grown** row's recorded kind counts only with an ``explicit`` route: a
+  ``heuristic`` or ``model-assisted`` stamp is the request's guess, and the RDR
+  relaxes the restriction for recorded provenance only "after review", so
+  eligibility reads such a row as ``unknown`` (``unreviewed_route``) until a
+  reviewed decision widens ``eligibility.TRUSTED_ROUTES``;
 * a row with no declaration is **unattested** (provenance ``None``): it is
   neither curated nor grown, and is eligible only where an ``unknown`` plan is;
 * ``provenance: grown`` on an ``unknown`` kind records ORIGIN only. It is not

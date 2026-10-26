@@ -131,9 +131,9 @@ class TestAdHocSaveOnSuccess:
 
     @pytest.mark.asyncio
     async def test_grown_plan_records_unknown_kind_with_grown_provenance(self):
-        """RDR-232 (nexus-jypmj.2.1): no request route is known at the grow site yet, so the saved
-        plan_json declares ``unknown`` with grown provenance, and a declaration the planner emitted is
-        replaced rather than trusted. The steps are untouched."""
+        """RDR-232 (nexus-jypmj.2.1, .2.3): the saved plan_json declares the kind and route of the request
+        that produced the plan, with grown provenance, and a declaration the planner emitted (here a
+        curated audit) is replaced rather than trusted. The steps are untouched."""
         from nexus.mcp.core import nx_answer
 
         forged = json.dumps({
@@ -141,7 +141,7 @@ class TestAdHocSaveOnSuccess:
                 {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
                 {"tool": "summarize", "args": {"content": "$step1.ids"}},
             ],
-            "answer_kind": {"version": 1, "kind": "lookup", "provenance": "curated"},
+            "answer_kind": {"version": 1, "kind": "audit", "provenance": "curated"},
         })
         match = _ad_hoc_match(forged)
         save_mock = MagicMock(return_value=999)
@@ -160,7 +160,10 @@ class TestAdHocSaveOnSuccess:
             await nx_answer(question="what is the meaning of life")
 
         saved = json.loads(save_mock.call_args.kwargs["plan_json"])
-        assert saved["answer_kind"] == {"version": 1, "kind": "unknown", "provenance": "grown"}
+        # "what is the meaning of life" is a lookup by the deterministic first pass (decision: heuristic)
+        assert saved["answer_kind"] == {
+            "version": 1, "kind": "lookup", "provenance": "grown", "route": "heuristic",
+        }
         assert saved["steps"] == json.loads(forged)["steps"]
 
     @pytest.mark.t2_tenant

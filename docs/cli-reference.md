@@ -5416,7 +5416,7 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
 `scope_normalized`, `evidence_request`, `named_sources`, `primary_evidence`,
 `reserved_stream`, `lifecycle_stream`, `evidence_diagnostics`, `request_coverage` and
 `plan_eligibility`; `scope_diagnostics` is `[]` when it has nothing to report,
-`request_coverage` and `plan_eligibility` are always objects, and the other six are
+`request_coverage` and `plan_eligibility` are always objects, and the other seven are
 `null` when they have nothing to report):
 
 - `scope_normalized` (nexus-jypmj.1.8, nexus-n1908): `{given, applied, reason}`
@@ -5636,20 +5636,28 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   fallback), each `{examined, excluded, reasons}`; a reason is `kind_mismatch`,
   `unknown_request_untrusted_plan`, `unknown_request_narrow_plan`,
   `untrusted_unknown_plan`, `undeclared_builtin` (a builtin seeded before
-  nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration) or
-  `untrusted_curated_claim`. The filter judges after every other drop, so a count is
-  "would have been returned, but for eligibility". The gate ships off
+  nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration),
+  `untrusted_curated_claim`, `unreviewed_route` (a grown plan whose recorded kind came
+  from a `heuristic` or `model-assisted` route, which is discounted until a reviewed
+  decision says otherwise; only an `explicit` route is honoured) or `judge_error`
+  (judging the candidate failed; kept when not enforcing, dropped when enforcing).
+  The filter judges after every other drop (unmet binding, scope conflict,
+  always-failing, FTS literal drop), so a count is "would have been returned, but for
+  eligibility". The gate ships off
   (`nexus.plans.eligibility.ANSWER_KIND_ELIGIBILITY_ENABLED`): `enforced` is then
   `false`, nothing is excluded, and the object reports what the gate would exclude.
   With the gate on, ineligible plans are removed from every branch and from the inline
   planner's few-shot examples, and a call left with no candidate plans inline with
   `fallback_reason` `all_candidates_ineligible`. `returned` is `{total, eligible}` for
   the plans the matcher returned; `selected` is `{plan_id, eligible, kind, provenance,
-  reason}` for the plan that ran (`null` for an inline plan). `fallback_reason` is
+  route, reason}` for the plan that ran (`null` for an inline plan). `fallback_reason` is
   `null` when a library plan ran, else `force_dynamic`, `no_plan_candidates`,
   `all_candidates_ineligible` or `below_confidence_floor`. A plan grown by the inline
-  planner records the request's kind in its `plan_json` only when `kind_decision` is
-  `explicit`, `heuristic` or `model-assisted`.
+  planner records the request's kind and route in its `plan_json` only when
+  `kind_decision` is `explicit`, `heuristic` or `model-assisted`; eligibility honours
+  the recorded kind only for `explicit`. Any agreement or wrong-shape figure measured
+  on the 24 golden requests is in-sample: the request kinds are the first pass fitted
+  to that set, so a wrong-shape count of 0 is a floor and the figures are not rates.
 - `evidence_diagnostics` (nexus-jypmj.1.8): per-stream counts, the reducer input,
   and two deterministic checks, built without a model call from the run's step
   outputs and what the runner handed the first evidence-consuming operator

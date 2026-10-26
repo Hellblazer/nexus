@@ -698,6 +698,17 @@ _FAILURE_WORDS = re.compile(
     r"not working|doesn't|does not|cannot|can't|unexpected)\b",
     re.IGNORECASE,
 )
+#: "Why does nx_answer pick the lookup plan ...": a why-question about what a NAMED piece of code decided. The
+#: subject must be a snake_case identifier and the verb a selection or return verb, so a design-rationale
+#: question ("Why does the RDR choose tumblers?") and a bare "Why does X exist" stay unknown.
+_BEHAVIOUR_VERB = (
+    r"(?:pick|picks|picked|choose|chooses|chose|select|selects|selected|route|routes|routed|prefer|prefers|"
+    r"skip|skips|skipped|drop|drops|dropped|ignore|ignores|ignored|reject|rejects|rejected|return|returns|returned)"
+)
+_CODE_SUBJECT = r"[`'\"]?[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+(?:\(\))?[`'\"]?"
+_WHY_CODE_BEHAVIOUR = re.compile(
+    rf"^why\s+(?:does|did|do)\s+(?:the\s+)?{_CODE_SUBJECT}\s+{_BEHAVIOUR_VERB}\b", re.IGNORECASE,
+)
 _DISCOVERY_VERB = re.compile(
     r"\b(?:discuss(?:es)?|mention(?:s)?|cover(?:s)?|describe(?:s)?|reference(?:s)?|cite(?:s)?|about|contain(?:s)?|"
     r"touch(?:es)?)\b",
@@ -752,6 +763,8 @@ def _strong_signals(text: str, facet_count: int, listed: bool) -> set[str]:
         found.add("debug")
     if re.match(r"^what (?:causes|is causing|are causing|caused|'s causing)\b", lead, re.IGNORECASE) \
             and _FAILURE_WORDS.search(lead):
+        found.add("debug")
+    if _WHY_CODE_BEHAVIOUR.match(lead) and not _AND_WH.search(lead):
         found.add("debug")
     if re.match(r"^(?:which|what) (?:is|are|was|were) (?:\w+er|more \w+|less \w+|better|worse)\b[^?]*\bor\b", lead,
                 re.IGNORECASE):
