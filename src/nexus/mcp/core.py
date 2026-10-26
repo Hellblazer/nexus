@@ -131,6 +131,7 @@ from nexus.mcp import channel as _channel
 if TYPE_CHECKING:
     from nexus.plans.lifecycle_stream import LifecycleStream
     from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
+    from nexus.plans.request_coverage import RequestCoverage
     from nexus.plans.reserved_stream import ReservedStream
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
@@ -10234,6 +10235,75 @@ def _nx_answer_seconds_left(ceiling: float, deadline: float | None) -> float:
     return max(left, 0.0)
 
 
+def _nx_answer_split_kind_hint(
+    dimensions: dict[str, Any] | None,
+) -> "tuple[dict[str, Any] | None, str | None]":
+    """``(dimensions, hint)``: the caller's answer-kind hint taken out of *dimensions* (RDR-232 Phase 2,
+    nexus-jypmj.2.2). ``dimensions`` is a hard superset filter over plans, and no plan carries an
+    ``answer_kind`` dimension, so the hint must not reach ``plan_match``; it is read by the request
+    coverage and nothing else. *dimensions* is returned untouched (same object) when it holds no hint."""
+    if not dimensions or "answer_kind" not in dimensions:
+        return dimensions, None
+    rest = {k: v for k, v in dimensions.items() if k != "answer_kind"}
+    hint = dimensions["answer_kind"]
+    return (rest or None), (hint if isinstance(hint, str) else None)
+
+
+async def _nx_answer_request_coverage(
+    *,
+    question: str,
+    scope: str,
+    evidence_request: EvidenceRequest,
+    explicit_kind: str | None,
+    deadline: float | None,
+    trace: bool,
+) -> "RequestCoverage":
+    """Build the request's :class:`~nexus.plans.request_coverage.RequestCoverage` before ``plan_match``.
+
+    RDR-232 Phase 2 (nexus-jypmj.2.2), **shadow mode**: the result is reported (envelope, evidence
+    diagnostics, one log event) and decides only whether the T2 lifecycle stream is read; it does not gate
+    plan selection (nexus-jypmj.2.3). The deterministic first pass runs in-process and is timed on its own.
+    The optional structured extraction (``NX_ANSWER_STRUCTURED_EXTRACT``, off by default) makes at most one
+    direct dispatch under its own timeout, inside *deadline*, with its latency and cost in the coverage's
+    ``extraction`` report. Never raises: a failure leaves the first-pass result.
+    """
+    from dataclasses import replace  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.request_coverage import (  # noqa: PLC0415 — deferred; matches this module's convention
+        ExtractionReport,
+        derive_request_coverage,
+        extraction_enabled,
+        extraction_timeout,
+        log_fields,
+        structured_extract,
+    )
+
+    started = time.monotonic()
+    coverage = derive_request_coverage(
+        question, scope=scope, evidence_request=evidence_request, explicit_kind=explicit_kind,
+    )
+    coverage = replace(coverage, derive_ms=int((time.monotonic() - started) * 1000))
+    if extraction_enabled(_os.environ):
+        timeout = min(extraction_timeout(_os.environ), _nx_answer_seconds_left(float("inf"), deadline))
+        sink: list = []
+
+        async def _dispatch(prompt: str, schema: dict, *, timeout: float, usage_sink: list) -> dict:
+            from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — deferred; operator dispatch is a call-time import here
+
+            return await claude_dispatch(
+                prompt, schema, timeout=timeout, usage_sink=usage_sink, model=_pin_default_model(None),
+                operator="request_coverage_extract", deadline=deadline,
+            )
+
+        coverage = await structured_extract(
+            coverage, question, dispatch=_dispatch, timeout=timeout, enabled=True, usage_sink=sink,
+        )
+    else:
+        coverage = replace(coverage, extraction=ExtractionReport("disabled"))
+    # A logger fetched per call (as nx_answer does), so a test's log capture sees the event.
+    structlog.get_logger().info("nx_answer_request_coverage", **log_fields(coverage, trace=trace))
+    return coverage
+
+
 async def _nx_answer_evidence_request(
     *,
     bindings: dict[str, Any] | None,
@@ -11328,7 +11398,9 @@ async def nx_answer(
     dimensions: Annotated[dict[str, Any] | None, Field(
         description=(
             "Dimensional filter for the plan-match gate, e.g. "
-            "{\"verb\": \"research\"}. Unset considers every active plan."
+            "{\"verb\": \"research\"}. Unset considers every active plan. "
+            "The key answer_kind (lookup, synthesis, discovery, comparison, audit, "
+            "debug) is a hint about the answer you want, not a filter."
         ),
     )] = None,
     structured: Annotated[bool, Field(
@@ -11579,6 +11651,15 @@ async def nx_answer(
     )
     # nexus-jypmj.1.18: an explicit owner also narrows the secondary streams (vector corpus, traversal).
     _caller_run.update(_nx_answer_owner_binding(_evidence_request))
+    # RDR-232 Phase 2 (nexus-jypmj.2.2), shadow mode: what the request asks for, derived BEFORE plan_match
+    # in a stage of its own. A caller's answer-kind hint rides in `dimensions` and is taken out here, since
+    # `dimensions` is a hard filter over plans and none carries that key. Reported in the envelope and the
+    # evidence diagnostics; the only plan-visible use is the lifecycle-stream read below.
+    dimensions, _kind_hint = _nx_answer_split_kind_hint(dimensions)
+    _request_coverage = await _nx_answer_request_coverage(
+        question=question, scope=scope, evidence_request=_evidence_request, explicit_kind=_kind_hint,
+        deadline=deadline, trace=trace,
+    )
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
     # resolved documents is merged at the runner (nexus-jypmj.1.6).
@@ -11635,6 +11716,7 @@ async def nx_answer(
                 named_sources=_named_sources, reducer_expected=_diag_inputs["reducer_expected"],
                 dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
                 owner_resolution=_evidence_request.owner.to_wire(),
+                request_coverage=_request_coverage.diagnostics_summary(),
             )
             log_evidence_diagnostics(diag, plan_id=_diag_inputs["plan_id"])
         except Exception as exc:  # noqa: BLE001 — diagnostics never fail an answer
@@ -11886,6 +11968,12 @@ async def nx_answer(
             # {status, tumbler, contributions, detail}}. Always present,
             # None when no reserved binding was passed.
             "evidence_request": _evidence_request.to_wire(),
+            # RDR-232 Phase 2 (nexus-jypmj.2.2), shadow mode: what the request asks for, derived before
+            # plan_match: {answer_kind, kind_decision, facets, constraints, named_sources, source_origin,
+            # source_hints, explicit_scope, current_code_requested, ambiguities, wants_lifecycle_stream,
+            # extraction: {outcome, calls, timeout_s, latency_ms, cost_usd}, derive_ms}. Reported only; it
+            # does not choose a plan. Always present.
+            "request_coverage": _request_coverage.to_wire(),
             # RDR-232 section 2a (nexus-jypmj.1.3): one entry per corpus-taking
             # retrieval step the caller's scope reached: {step_index, tool,
             # plan_corpus, caller_scope, scope_kind, outcome, resolved_corpus}.
@@ -13005,7 +13093,12 @@ async def nx_answer(
     # RDR-232 (nexus-jypmj.1.6): the reserved primary stream, passed only when a named source
     # resolved and yielded evidence (the same "only pass when set" rule as the kwargs below).
     # nexus-jypmj.1.7: the resolved RDR's T2 lifecycle records ride the same stream, ahead of the chunks.
-    _lifecycle = await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
+    # RDR-232 Phase 2 (nexus-jypmj.2.2, step 8): the T2 stream is read only for a request that has a gate,
+    # lifecycle or status facet. Before Phase 2 every resolved RDR source read it.
+    _lifecycle = (
+        await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
+        if _request_coverage.wants_lifecycle_stream else None
+    )
     _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle, deadline=deadline)
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream

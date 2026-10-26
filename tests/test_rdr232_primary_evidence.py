@@ -746,9 +746,11 @@ async def _answer(
     cat: FakeCatalog, *, bindings: dict, structured: bool, t3: FakeT3 | None = None,
     t2_records: dict[tuple[str, str], str] | None = None, plan_run_calls: list | None = None,
     aspects: dict[str, Any] | None = None, aspect_calls: list[tuple[str, dict]] | None = None,
+    question: str = "State the gate history of this RDR.",
 ) -> Any:
     """``nx_answer`` over a one-step ad-hoc plan, the catalog replaced by *cat*. The same
-    patches ``test_rdr232_reserved_bindings._text_answer`` uses, plus the catalog."""
+    patches ``test_rdr232_reserved_bindings._text_answer`` uses, plus the catalog. The default *question*
+    has a gate facet: from Phase 2 (nexus-jypmj.2.2) the T2 lifecycle stream is read only for such a request."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from nexus.mcp.core import nx_answer
@@ -788,7 +790,7 @@ async def _answer(
          patch("nexus.plans.primary_evidence.t3_chunk_fetcher", return_value=(t3 or FakeT3()).fetch), \
          patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
         t2_ctx.return_value.__enter__.return_value = db_stub
-        return await nx_answer(question="q", bindings=bindings, structured=structured)
+        return await nx_answer(question=question, bindings=bindings, structured=structured)
 
 
 @pytest.mark.asyncio

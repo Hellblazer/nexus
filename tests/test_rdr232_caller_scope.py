@@ -400,11 +400,13 @@ def _single_query_match(corpus: str | None, *, default_corpus: bool = True) -> M
 
 
 def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan_run_result=None,
-                     db=None, bindings=None):
+                     db=None, bindings=None, question: str = "which documents discuss widgets",
+                     dimensions=None, trace: bool = True, plan_match=None):
     """Call ``nx_answer`` with the matcher, the plan runner, T2 and the catalog patched away.
 
     *db* is the T2 stub (a ``MagicMock``) the run records into, for a test that reads the outcome
-    counters; a fresh one otherwise."""
+    counters; a fresh one otherwise. *question*, *dimensions* and *trace* go to ``nx_answer``; *plan_match*
+    replaces the matcher stub (a test that reads the matcher's arguments)."""
     import nexus.mcp.core as core
 
     query_calls: list[dict] = []
@@ -419,7 +421,8 @@ def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan
     db_stub = db if db is not None else MagicMock(plans=MagicMock())
     db_stub.conn = MagicMock()
     patches = [
-        patch("nexus.plans.matcher.plan_match", return_value=[match]),
+        (patch("nexus.plans.matcher.plan_match", plan_match) if plan_match is not None
+         else patch("nexus.plans.matcher.plan_match", return_value=[match])),
         patch("nexus.mcp.core._get_catalog", return_value=None),
         patch("nexus.mcp.core._t2_ctx"),
         patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)),
@@ -434,8 +437,8 @@ def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan
     with ExitStack() as stack:
         mocks = [stack.enter_context(p) for p in patches]
         mocks[2].return_value.__enter__.return_value = db_stub
-        out = asyncio.run(core.nx_answer(question="which documents discuss widgets", scope=scope,
-                                         structured=structured, bindings=bindings))
+        out = asyncio.run(core.nx_answer(question=question, scope=scope, structured=structured,
+                                         bindings=bindings, dimensions=dimensions, trace=trace))
     return out, query_calls
 
 

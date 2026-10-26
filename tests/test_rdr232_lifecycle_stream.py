@@ -679,6 +679,10 @@ def test_without_lifecycle_the_primary_stream_call_is_unchanged() -> None:
     assert asyncio.run(mcp_core._nx_answer_primary_stream(_resolution(_src(status="unresolved")))) == (None, None)
 
 
+#: A question with a gate facet: from Phase 2 (nexus-jypmj.2.2) the T2 stream is read only for such a request.
+_GATE_QUESTION = "State the gate history of RDR-084."
+
+
 def _drive_envelope(resolution, life):
     from unittest.mock import AsyncMock
 
@@ -690,8 +694,10 @@ def _drive_envelope(resolution, life):
          patch("nexus.mcp.core._nx_answer_lifecycle_stream", AsyncMock(return_value=life)), \
          patch("nexus.mcp.core._nx_answer_primary_stream", AsyncMock(return_value=(None, None))), \
          patch("nexus.plans.runner.plan_run", run):
-        env, _ = _drive_nx_answer(_MULTI_PLAN, scope="", structured=True, bindings={"source": "RDR-084"})
-        text, _ = _drive_nx_answer(_MULTI_PLAN, scope="", structured=False, bindings={"source": "RDR-084"})
+        env, _ = _drive_nx_answer(
+            _MULTI_PLAN, scope="", structured=True, bindings={"source": "RDR-084"}, question=_GATE_QUESTION)
+        text, _ = _drive_nx_answer(
+            _MULTI_PLAN, scope="", structured=False, bindings={"source": "RDR-084"}, question=_GATE_QUESTION)
     return env, text
 
 

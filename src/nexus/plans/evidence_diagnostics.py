@@ -254,6 +254,7 @@ def build_evidence_diagnostics(
     reducer_expected: bool = True,
     dropped_scope: str = "",
     owner_resolution: Mapping[str, Any] | None = None,
+    request_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``evidence_diagnostics`` object for one run (see the module docstring).
 
@@ -267,6 +268,8 @@ def build_evidence_diagnostics(
     with no scope in force the check says ``not_evaluated`` and names it, never ``not_applicable``.
     *owner_resolution* is the request's :meth:`OwnerResolution.to_wire` (nexus-jypmj.1.18): it lets
     ``scope_check.owner_narrowing`` say that owner narrowing was not applied, and why.
+    *request_coverage* is :meth:`~nexus.plans.request_coverage.RequestCoverage.diagnostics_summary` (nexus-jypmj.2.2):
+    counts and closed names only, carried as ``request_coverage`` and ``None`` when the caller did not build one.
     """
     corpus_of_step = {int(a["step_index"]): a.get("corpus", "") for a in resolved_args if "step_index" in a}
     streams: dict[str, _Stream] = {"vector": _Stream({}, []), "graph": _Stream({}, [])}
@@ -345,6 +348,7 @@ def build_evidence_diagnostics(
         "traversals": traversals,
         "capped_traversals": capped_traversal_count(steps),
         "reserved": _reserved_wire(reserved),
+        "request_coverage": dict(request_coverage) if request_coverage is not None else None,
     }
 
 
@@ -661,6 +665,7 @@ def log_evidence_diagnostics(diag: Mapping[str, Any], *, plan_id: int) -> None:
     source = diag["source_check"]
     scope = diag["scope_check"]
     reserved = diag.get("reserved") or {}
+    coverage = diag.get("request_coverage") or {}
     _log.info(
         "nx_answer_evidence_diagnostics",
         plan_id=plan_id,
@@ -683,4 +688,9 @@ def log_evidence_diagnostics(diag: Mapping[str, Any], *, plan_id: int) -> None:
         reserved_over_share_dropped=reserved.get("over_share_dropped"),
         reserved_dropped_before_terminal=(reserved.get("dropped_before_terminal") or {}).get("missing"),
         reserved_secondary_cut=reserved.get("secondary_cut"),
+        coverage_kind=coverage.get("answer_kind"),
+        coverage_facets=coverage.get("facets"),
+        coverage_constraints=coverage.get("constraints"),
+        coverage_ambiguities=len(coverage.get("ambiguities") or ()),
+        coverage_wants_lifecycle=coverage.get("wants_lifecycle_stream"),
     )
