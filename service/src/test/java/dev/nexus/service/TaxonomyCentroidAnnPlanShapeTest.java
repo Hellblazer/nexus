@@ -25,6 +25,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Random;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
@@ -83,6 +84,15 @@ class TaxonomyCentroidAnnPlanShapeTest {
     private static final String COL_384  = "knowledge__planshape__minilm-l6-v2-384__v1";
     /** Registered under the 768-dimension model; two stray centroid rows of OTHER models sit beside its own. */
     private static final String COL_MIXED = "docs__planshapemixed__bge-base-en-v15-768__v1";
+    /** nexus-2k8wi: per dim, a collection a re-embed cutover retired (superseded_by set) and a live foreign one. */
+    private static final String SUP_1024 = "knowledge__planshapesup__voyage-context-3__v1";
+    private static final String SUP_768  = "docs__planshapesup__bge-base-en-v15-768__v1";
+    private static final String SUP_384  = "knowledge__planshapesup__minilm-l6-v2-384__v1";
+    private static final String LIVE_1024 = "knowledge__planshapelive__voyage-context-3__v1";
+    private static final String LIVE_768  = "docs__planshapelive__bge-base-en-v15-768__v1";
+    private static final String LIVE_384  = "knowledge__planshapelive__minilm-l6-v2-384__v1";
+    private static final long SUP_TOPIC = 900_001L;
+    private static final long LIVE_TOPIC = 900_002L;
 
     // Modest but non-trivial per-dim cardinality: large enough that the planner's default
     // cost model naturally prefers the HNSW index over Seq Scan + Sort, small enough to
@@ -205,6 +215,15 @@ class TaxonomyCentroidAnnPlanShapeTest {
             for (String coll : List.of(COL_1024, COL_768, COL_384, COL_MIXED)) {
                 PgContainerHelper.insertCollection(ctx, TENANT, coll);
             }
+            for (int dim : new int[] {1024, 768, 384}) {
+                PgContainerHelper.insertCollection(ctx, TENANT, supFor(dim), modelFor(dim));
+                PgContainerHelper.insertCollection(ctx, TENANT, liveFor(dim), modelFor(dim));
+                ctx.update(CATALOG_COLLECTIONS)
+                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "successor-of-" + supFor(dim))
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
+                    .and(CATALOG_COLLECTIONS.NAME.eq(supFor(dim)))
+                    .execute();
+            }
             // Deterministic filler positions (CLAUDE.md: seeded randomness) -- a
             // client-side seeded Random replaces the retired setseed(0.42)/random()
             // SQL-side generation (nexus-cbo4a: the raw generate_series/LATERAL/
@@ -232,6 +251,15 @@ class TaxonomyCentroidAnnPlanShapeTest {
                         TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
                         TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
                     .values(TENANT, coll, (long) (CENTROIDS_PER_DIM + dim), modelFor(dim), queryVec(dim), "nearest", 1)
+                    .execute();
+                // nexus-2k8wi: the retired collection's centroid sits EXACTLY on the query (the nearest foreign one);
+                // the live foreign collection's is a little off it.
+                ctx.insertInto(TAXONOMY_CENTROIDS,
+                        TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
+                        TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.EMBEDDING_MODEL, embCol,
+                        TAXONOMY_CENTROIDS.LABEL, TAXONOMY_CENTROIDS.DOC_COUNT)
+                    .values(TENANT, supFor(dim), SUP_TOPIC, modelFor(dim), queryVec(dim), "superseded", 1)
+                    .values(TENANT, liveFor(dim), LIVE_TOPIC, modelFor(dim), offAxisVec(dim), "live-foreign", 1)
                     .execute();
                 PgContainerHelper.analyzeTable(su, TAXONOMY_CENTROIDS);
             }
@@ -285,6 +313,22 @@ class TaxonomyCentroidAnnPlanShapeTest {
     /** The plan lines that seq-scan {@code leaf} (EXPLAIN may or may not schema-qualify the name). */
     private static List<String> seqScannedLines(String plan, String leaf) {
         return plan.lines().filter(l -> l.contains("Seq Scan") && l.contains(leaf)).toList();
+    }
+
+    private static String supFor(int dim) {
+        return dim == 1024 ? SUP_1024 : dim == 768 ? SUP_768 : SUP_384;
+    }
+
+    private static String liveFor(int dim) {
+        return dim == 1024 ? LIVE_1024 : dim == 768 ? LIVE_768 : LIVE_384;
+    }
+
+    /** Near the query vector but not on it: (1.0, 0.1, 0, ...). */
+    private static Vector offAxisVec(int dim) {
+        float[] v = new float[dim];
+        v[0] = 1.0f;
+        v[1] = 0.1f;
+        return Vector.of(v);
     }
 
     /** A length-{@code dim} typed pgvector value: first component 1.0, rest zero --
@@ -379,49 +423,63 @@ class TaxonomyCentroidAnnPlanShapeTest {
             .doesNotContain("Function Scan");
     }
 
-    // nexus-2k8wi: the cross-collection branch carries the superseded-collection filter, an uncorrelated
-    // ARRAY(SELECT ... FROM catalog_collections) beside "collection <> p_collection". What this pins is what the
-    // changeset can promise: the function still inlines (no Function Scan), and the filter is evaluated ONCE as an
-    // InitPlan rather than once per candidate row as a correlated SubPlan.
-    //
-    // It does NOT pin the HNSW index scan, because that is not true of this branch. Unlike
-    // assign_from_chashes_<dim> and cross_preview_<dim>, which set enable_seqscan and enable_sort off, the ANN
-    // function has no planner pin, and the "<> ALL (non-constant array)" test makes the planner assume an array of
-    // ten elements, each excluding about 1/n_collections of the rows: for a tenant with few collections it
-    // estimates a handful of rows and chooses a Seq Scan with a top-N Sort, exact where HNSW is approximate. Measured
-    // on this 3,000-centroid fixture (2026-10-25): without the filter an HNSW Index Scan (rows=3000), with it a Seq
-    // Scan (rows=3); a correlated NOT EXISTS beside the same predicate kept the Index Scan. No live caller
-    // reaches this branch (HttpTaxonomyStore.assign_single and compute_assignments with cross_collection are
-    // unused; the live cross pass is assign_from_chashes), so the access path is left as the planner picks it.
+    // nexus-2k8wi: the cross-collection branch excludes the centroids of superseded collections, and it must do so
+    // WITHOUT losing the HNSW index scan. The ANN function has no planner pin (unlike assign_from_chashes_<dim> and
+    // cross_preview_<dim>, which set enable_seqscan and enable_sort off), and the ARRAY spelling
+    // "collection <> ALL (ARRAY(SELECT ...))" makes the planner assume a ten-element array, so on this
+    // 3,000-centroid fixture it estimates a handful of rows and chooses a Seq Scan with a top-N Sort (measured
+    // 2026-10-25: Seq Scan, rows=3). The NOT EXISTS spelling keeps the Index Scan. The fixture holds a retired
+    // collection per dim (superseded_by set), so the filter excludes something, and the behavioural test below
+    // proves it does. The cross query's SOURCE is the small live collection (LIVE_<dim>), so that the bulk of the
+    // centroids (COL_<dim>, 3,000 rows) are the candidates: with the big collection as the source the foreign set is
+    // a handful of rows and a Seq Scan is the right plan whatever the filter's spelling.
 
-    private void assertCrossBranchShape(int dim, Table<?> fn) {
+    private void assertCrossBranchShape(int dim, String model, Table<?> fn) {
         String plan = explain(fn);
         assertThat(plan)
             .as("a Function Scan node means the cross branch of taxonomy_ann_query_%d is no longer inlinable. Plan was:%n%s",
                 dim, plan)
             .doesNotContain("Function Scan");
         assertThat(plan)
-            .as("the superseded filter is in the plan as an InitPlan over catalog_collections, evaluated once. Plan was:%n%s",
-                plan)
-            .contains("InitPlan").contains("catalog_collections");
+            .as("the cross branch must still bind to the HNSW index embedding_%d_idx. Plan was:%n%s", dim, plan)
+            .contains("embedding_" + dim + "_idx");
+        assertThat(seqScannedLines(plan, populatedLeaf(model)))
+            .as("the superseded-collection filter must not turn the cross branch into a Seq Scan of the populated leaf"
+                + " (the ARRAY spelling does). Plan was:%n%s", plan)
+            .isEmpty();
         assertThat(plan)
-            .as("the filter must not become a per-row SubPlan. Plan was:%n%s", plan)
-            .doesNotContain("SubPlan");
+            .as("the filter is part of the plan, over catalog_collections. Plan was:%n%s", plan)
+            .contains("catalog_collections");
     }
 
     @Test
-    void annQuery_crossBranch_shape_filterIsAnInitPlan_1024() {
-        assertCrossBranchShape(1024, TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), COL_1024, true, 10, MODEL_1024, TENANT));
+    void annQuery_crossBranch_shape_keepsHnswIndexScan_1024() {
+        assertCrossBranchShape(1024, MODEL_1024, TAXONOMY_ANN_QUERY_1024.call(queryVec(1024), LIVE_1024, true, 10, MODEL_1024, TENANT));
     }
 
     @Test
-    void annQuery_crossBranch_shape_filterIsAnInitPlan_768() {
-        assertCrossBranchShape(768, TAXONOMY_ANN_QUERY_768.call(queryVec(768), COL_768, true, 10, MODEL_768, TENANT));
+    void annQuery_crossBranch_shape_keepsHnswIndexScan_768() {
+        assertCrossBranchShape(768, MODEL_768, TAXONOMY_ANN_QUERY_768.call(queryVec(768), LIVE_768, true, 10, MODEL_768, TENANT));
     }
 
     @Test
-    void annQuery_crossBranch_shape_filterIsAnInitPlan_384() {
-        assertCrossBranchShape(384, TAXONOMY_ANN_QUERY_384.call(queryVec(384), COL_384, true, 10, MODEL_384, TENANT));
+    void annQuery_crossBranch_shape_keepsHnswIndexScan_384() {
+        assertCrossBranchShape(384, MODEL_384, TAXONOMY_ANN_QUERY_384.call(queryVec(384), LIVE_384, true, 10, MODEL_384, TENANT));
+    }
+
+    @Test
+    void annQuery_crossBranch_excludesSupersededCollection_atEveryDim() {
+        int checked = 0;
+        for (int dim : new int[] {1024, 768, 384}) {
+            // The source is the small live collection, so the big COL_<dim> and the retired SUP_<dim> are the candidates.
+            List<AnnHit> hits = repo.annQuery(TENANT, unit(dim, 1.0f), liveFor(dim), true, 10);
+            assertThat(hits).as("dim %d: the live collection's exact-match centroid is a candidate", dim)
+                .extracting(AnnHit::topicId).contains((long) (CENTROIDS_PER_DIM + dim));
+            assertThat(hits).as("dim %d: the retired collection's centroid sits exactly on the query and still is not offered", dim)
+                .extracting(AnnHit::topicId).doesNotContain(SUP_TOPIC);
+            checked++;
+        }
+        assertThat(checked).as("non-vacuity: three dims").isEqualTo(3);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -466,7 +524,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
                 .fetchCount(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID.eq(TENANT));
             assertThat((long) count)
                 .as("the plan-shape claim is only meaningful at cardinality")
-                .isEqualTo(3L * (CENTROIDS_PER_DIM + 1) + 2);
+                .isEqualTo(3L * (CENTROIDS_PER_DIM + 1) + 2 + 3L * 2);
         }
     }
 

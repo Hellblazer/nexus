@@ -147,8 +147,11 @@ class CrossPreviewDriftTest {
      * nexus-2k8wi: ALL nine cross-pass functions exclude the centroids of superseded collections. The shared-CTE
      * checks above cover assign_from_chashes and cross_preview at every dim, and the runtime tests cover the
      * 1024 trio; this one closes the gap that left taxonomy_ann_query_384 and _768 with no test at all (deleting
-     * the filter from either body passed every other assertion). Common substring, because the ann functions
-     * spell the predicate inside a CASE and the other two on {@code ct.collection}.
+     * the filter from either body passed every other assertion). Two spellings, one per family (vectors-038 header,
+     * THE FORM): assign_from_chashes and cross_preview keep the ARRAY form their pinned HNSW plan rides on, and
+     * taxonomy_ann_query uses NOT EXISTS because the ARRAY form sends its unpinned cross branch to a Seq Scan. Each
+     * family is also checked against the OTHER family's spelling, so a body switched to the wrong form fails here
+     * (the plan test fails it too, for the ann family).
      */
     @Test
     void allNineCrossPassFunctions_excludeSupersededCollections() throws Exception {
@@ -156,10 +159,24 @@ class CrossPreviewDriftTest {
         for (int dim : new int[] {384, 768, 1024}) {
             for (String fn : new String[] {"assign_from_chashes_", "cross_preview_", "taxonomy_ann_query_"}) {
                 String src = normalizeWhitespace(prosrc(fn + dim));
-                assertThat(src)
-                    .as("%s%d must leave out the centroids of a collection whose registry row names a successor", fn, dim)
-                    .contains("<> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc")
-                    .contains("COALESCE(cc.superseded_by, '') <> ''");
+                boolean ann = fn.startsWith("taxonomy_ann_query");
+                if (ann) {
+                    assertThat(src)
+                        .as("%s%d must leave out the centroids of a collection whose registry row names a successor,"
+                            + " as a NOT EXISTS over catalog_collections (the ARRAY form loses the HNSW index scan)",
+                            fn, dim)
+                        .contains("AND NOT EXISTS ( SELECT 1 FROM nexus.catalog_collections cc")
+                        .contains("AND cc.name = nexus.taxonomy_centroids.collection")
+                        .contains("COALESCE(cc.superseded_by, '') <> '')")
+                        .doesNotContain("<> ALL (ARRAY(");
+                } else {
+                    assertThat(src)
+                        .as("%s%d must leave out the centroids of a collection whose registry row names a successor,"
+                            + " as the ARRAY form its pinned HNSW plan rides on", fn, dim)
+                        .contains("<> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc")
+                        .contains("COALESCE(cc.superseded_by, '') <> ''")
+                        .doesNotContain("NOT EXISTS ( SELECT 1 FROM nexus.catalog_collections cc");
+                }
                 checked++;
             }
         }

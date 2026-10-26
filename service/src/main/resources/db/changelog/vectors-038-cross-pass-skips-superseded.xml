@@ -19,21 +19,34 @@
     keys on. A rename tombstone matches the predicate too and is harmless, because it holds no centroids to
     exclude.
 
-    THE FORM. "ct.collection <> ALL (ARRAY(SELECT cc.name FROM nexus.catalog_collections cc WHERE ...))" is an
-    uncorrelated array expression: the planner evaluates it once, as an InitPlan, and applies it as a plain
-    filter beside "ct.collection <> p_collection". In assign_from_chashes_<dim> and cross_preview_<dim> that
-    filter rides on the pinned HNSW index scan (those two set enable_seqscan and enable_sort off). The ANN
-    function carries no such pin, and for a tenant with few collections the planner's row estimate for
-    "collection <> ALL (non-constant array)" collapses (it assumes ten array elements), so its cross branch
-    can choose a Seq Scan with a top-N Sort instead of the index (measured on a 3,000-centroid fixture:
-    TaxonomyCentroidAnnPlanShapeTest); that route has no live caller. A NOT EXISTS or a
-    join against catalog_collections would be pulled up into an anti-join, which can displace the pinned
-    "Index Scan using the HNSW index, no Sort" plan taxonomy-020 holds (enable_seqscan and enable_sort are off
-    there, so a plan that cannot be built as a presorted index scan has nowhere to go). The statement stays one
-    CTE with no new variable and no new statement, so the four set_config pins stay where they are, and the
-    "batch" and "nearest" span that CrossPreviewDriftTest requires to be identical in assign_from_chashes_<dim>
-    and cross_preview_<dim> is edited the same way in both; the test's hand-kept copy of the span gains the same
-    lines.
+    THE FORM. Two spellings of the one predicate, chosen by what the planner is allowed to do with each function.
+
+    assign_from_chashes_<dim> and cross_preview_<dim> use "ct.collection <> ALL (ARRAY(SELECT cc.name FROM
+    nexus.catalog_collections cc WHERE ...))", an uncorrelated array expression the planner evaluates once, as an
+    InitPlan, and applies as a plain filter beside "ct.collection <> p_collection". Both functions set
+    enable_seqscan and enable_sort off, so that filter rides on the pinned "Index Scan using the HNSW index, no
+    Sort" plan taxonomy-020 holds. A NOT EXISTS or a join there would be pulled up into an anti-join, which can
+    displace that plan (a plan that cannot be built as a presorted index scan has nowhere to go with the pins on).
+    The statement stays one CTE with no new variable and no new statement, so the four set_config pins stay where
+    they are, and the "batch" and "nearest" span that CrossPreviewDriftTest requires to be identical in
+    assign_from_chashes_<dim> and cross_preview_<dim> is edited the same way in both; the test's hand-kept copy of
+    the span gains the same lines.
+
+    The cross branch of taxonomy_ann_query_<dim> uses a top-level conjunct instead: "AND NOT EXISTS (SELECT 1
+    FROM nexus.catalog_collections cc WHERE p_cross_collection AND cc.tenant_id, cc.embedding_model and
+    cc.name = <the centroid's collection> match AND non-empty superseded_by)". That function carries no planner
+    pin, and the ARRAY form loses the HNSW index there: the planner's row estimate for "collection <> ALL
+    (non-constant array)" collapses (it assumes ten array elements), so its cross branch chose a Seq Scan with a
+    top-N Sort (measured on a 3,000-centroid fixture, TaxonomyCentroidAnnPlanShapeTest, 2026-10-25: rows=52 for
+    the ARRAY form, a Nested Loop Anti Join under the Index Scan for NOT EXISTS). Two details of the spelling
+    matter. The sublink must be a top-level AND conjunct of the function's WHERE, because the planner pulls
+    sublinks up into anti-joins before it folds constants: wrapped in the CASE that selects the branch (or in an
+    OR with "NOT p_cross_collection") it stays a hashed SubPlan and the Seq Scan returns. That is why the cross
+    toggle is a qual INSIDE the subquery ("WHERE p_cross_collection AND ..."): with p_cross_collection false the
+    subquery can match nothing and the same-collection branch reads a tombstone's own centroids as before.
+    The test asserts the HNSW index scan, with no Seq Scan of the populated leaf, at all three dims, with a
+    retired collection in the fixture and the small live collection as the source so the bulk of the centroids
+    are the candidates.
 
     WHAT IS NOT CHANGED. The same-collection branch of taxonomy_ann_query_<dim> and the own pass of
     assign_from_chashes_<dim> read one collection by name, and still read a tombstone's own centroids when asked
@@ -67,7 +80,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-038-1" author="nexus-2k8wi">
-        <comment>The cross pass skips superseded collections: assign_from_chashes_384/768/1024 (the cross branch), cross_preview_384/768/1024 and the cross-collection branch of taxonomy_ann_query_384/768/1024 exclude the centroids of any collection whose catalog_collections row has a non-empty superseded_by. A supersede tombstone keeps its centroids (a rename tombstone's are re-homed), so a live collection's chunks could attach to a retired collection's topics and grow their doc_count. The filter is an uncorrelated ARRAY(SELECT ...) beside the existing "collection &lt;&gt; source" test, which the planner runs as an InitPlan and applies as a filter on the pinned HNSW index scan. Signatures, grants, the function-level plan_cache_mode and the one-signature post-condition are vectors-031-1's. No data effect: function definitions and grants only.</comment>
+        <comment>The cross pass skips superseded collections: assign_from_chashes_384/768/1024 (the cross branch), cross_preview_384/768/1024 and the cross-collection branch of taxonomy_ann_query_384/768/1024 exclude the centroids of any collection whose catalog_collections row has a non-empty superseded_by. A supersede tombstone keeps its centroids (a rename tombstone's are re-homed), so a live collection's chunks could attach to a retired collection's topics and grow their doc_count. The filter in assign_from_chashes and cross_preview is an uncorrelated ARRAY(SELECT ...) beside the existing "collection &lt;&gt; source" test, which the planner runs as an InitPlan and applies as a filter on the pinned HNSW index scan; in the unpinned taxonomy_ann_query it is a top-level NOT EXISTS over catalog_collections, which the planner turns into an anti-join under the HNSW index scan. Signatures, grants, the function-level plan_cache_mode and the one-signature post-condition are vectors-031-1's. No data effect: function definitions and grants only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.assign_from_chashes_384(p_collection text, p_chashes text[], p_cross_collection boolean,
                                               p_embedding_model text, p_tenant text)
@@ -300,12 +313,14 @@ AS $$
        AND tenant_id = p_tenant
        AND embedding_384 IS NOT NULL
        AND (CASE WHEN p_cross_collection THEN collection <> p_collection
-                                   AND collection <> ALL (ARRAY(
-                                       SELECT cc.name FROM nexus.catalog_collections cc
-                                        WHERE cc.tenant_id = p_tenant
-                                          AND cc.embedding_model = p_embedding_model
-                                          AND COALESCE(cc.superseded_by, '') <> ''))
                  ELSE collection = p_collection END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.name = nexus.taxonomy_centroids.collection
+              AND COALESCE(cc.superseded_by, '') <> '')
      ORDER BY embedding_384 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
      LIMIT p_n
 $$;
@@ -526,12 +541,14 @@ AS $$
        AND tenant_id = p_tenant
        AND embedding_768 IS NOT NULL
        AND (CASE WHEN p_cross_collection THEN collection <> p_collection
-                                   AND collection <> ALL (ARRAY(
-                                       SELECT cc.name FROM nexus.catalog_collections cc
-                                        WHERE cc.tenant_id = p_tenant
-                                          AND cc.embedding_model = p_embedding_model
-                                          AND COALESCE(cc.superseded_by, '') <> ''))
                  ELSE collection = p_collection END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.name = nexus.taxonomy_centroids.collection
+              AND COALESCE(cc.superseded_by, '') <> '')
      ORDER BY embedding_768 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
      LIMIT p_n
 $$;
@@ -752,12 +769,14 @@ AS $$
        AND tenant_id = p_tenant
        AND embedding_1024 IS NOT NULL
        AND (CASE WHEN p_cross_collection THEN collection <> p_collection
-                                   AND collection <> ALL (ARRAY(
-                                       SELECT cc.name FROM nexus.catalog_collections cc
-                                        WHERE cc.tenant_id = p_tenant
-                                          AND cc.embedding_model = p_embedding_model
-                                          AND COALESCE(cc.superseded_by, '') <> ''))
                  ELSE collection = p_collection END)
+       AND NOT EXISTS (
+           SELECT 1 FROM nexus.catalog_collections cc
+            WHERE p_cross_collection
+              AND cc.tenant_id = p_tenant
+              AND cc.embedding_model = p_embedding_model
+              AND cc.name = nexus.taxonomy_centroids.collection
+              AND COALESCE(cc.superseded_by, '') <> '')
      ORDER BY embedding_1024 OPERATOR(nexus.<=>) p_embedding, topic_id ASC
      LIMIT p_n
 $$;
