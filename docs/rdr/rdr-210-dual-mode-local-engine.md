@@ -848,8 +848,8 @@ use, carrying the document's aspects and highlights with it.
       (210-research-17). The request already carries thresholds per collection
       (`search_engine.py:1637-1646`).
       A collection whose name carries no model token gets no threshold on a
-      dual engine and keeps the prefix threshold otherwise; interim, until
-      nexus-noayy reads the family from the catalog row.
+      dual engine and keeps the prefix threshold otherwise. The family comes from the
+      catalog row (nexus-noayy, nexus-ml9vu).
 
 ### Re-embed to the profile default
 
@@ -1647,8 +1647,8 @@ engine can return two families to one search. **Tests**:
   is filtered by its threshold and a bge collection is not; on `onnx-local`
   neither is, as today.
 - Thresholds: a collection whose name carries no model token gets no threshold
-  on a dual engine and keeps the prefix threshold otherwise; interim, until
-  nexus-noayy reads the family from the catalog row.
+  on a dual engine and keeps the prefix threshold otherwise. The family comes from the
+  catalog row (nexus-noayy, nexus-ml9vu).
 
 ### Phase 2: Engine
 
@@ -1696,7 +1696,8 @@ embedder present.
 #### Step 5: Dual journey test
 
 Rewrite `Rdr204Gh1461ProfileRestartJourneyTest` to use one production dual router
-for both collections, removing the separate bge router and the fake. **Test**: the
+for both collections, removing the separate bge router. The local member is still a test double
+(nexus-9nndg); replacing it with the production local router is that bead. **Test**: the
 rewritten test itself.
 
 #### Step 6: Egress guard
@@ -1802,13 +1803,14 @@ against a floor of 1.0000, inversions as in Technical Design 12 (T2
 No keyed local script exists to extend. Add `tests/e2e/dual-embedder-gate.sh`: it
 provisions a local engine with the bge model and a real Voyage key from the
 operator's credential chain, runs the MVV's first half, restarts, and runs it
-again. An absent key is a FAIL, not a skip. It needs a dual engine under the
+again. The first boot is Voyage-first (nexus-8x0tg), so the dual path provisions
+the bge family and no prior keyless boot does. An absent key is a FAIL, not a skip. It needs a dual engine under the
 supervisor, so it lands with Phase 3. **Test**: the script's own guard test,
 asserting a missing key fails it.
 
 #### Step 2: Release battery leg
 
-Register it as a fourth leg in `tests/e2e/release-battery.sh` beside `:165-167`.
+Register it as a fifth leg in `tests/e2e/release-battery.sh` (the dual leg, `release-battery.sh:173`).
 It runs in the release battery and by hand only, never nightly (Sam, Q3).
 
 ### Phase 6: Re-embed
@@ -1922,10 +1924,10 @@ one HDBSCAN calls all noise, gets neither from discover, and `--wait` still exit
 
 #### Step 5: Doctor rows and paired release
 
-Extend the off-profile row; add the job row. Ships in its own engine tag with the
-client half paired, after Phase 4 and its Step 3 measurement; the client half
-raises `REQUIRED_ENGINE_VERSION` to that tag, so the tag is deployed to the cloud
-engine first (Technical Design 4), although its routes refuse there. **Test**: doctor tests for the not-applicable, running and
+Extend the off-profile row; add the job row. Shipped inside
+engine-service-v0.1.164 with the cutover; the client needed nothing past that
+tag. `REQUIRED_ENGINE_VERSION` moves to v0.1.165 with the client release that
+follows the next engine cut (nexus-j67ix). **Test**: doctor tests for the not-applicable, running and
 failed cases, and the Phase 6 MVV scenarios in the dual gate script.
 
 ### Day 2 Operations
@@ -2166,9 +2168,8 @@ round 1).
   Phase 4 needs Phase 1 Step 5's merge rules and reaches users in or after the
   Phase 3 release, since a sibling-spanning read against a single-family engine
   errors on the unserved sibling (Phase 4 Step 1). Phase 5 needs a dual engine
-  under the supervisor and lands with Phase 3. Phase 6 is an engine tag paired
-  with its client half, after Phase 4 and its Step 3 measurement, with the same
-  cloud-first ordering for its pin (Phase 6 Step 5). A dual engine without
+  under the supervisor and lands with Phase 3. Phase 6 shipped in
+  engine-service-v0.1.164 (Phase 6 Step 5). A dual engine without
   Phase 4 still serves both families; only single-name reads stay on one
   sibling.
 - **Secret/credential lifecycle**: the key keeps its one source (the credential
