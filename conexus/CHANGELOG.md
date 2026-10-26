@@ -4,6 +4,7 @@
 
 Plugin version aligned with conexus 7.87.1, a plugin-only release off 7.87.0. These plugin changes become live at this pin.
 
+- **conexus-tool-spill keeps its spill directory private on a shared box** (nexus-a9e7j). The spill files hold full command output, and on a Linux box several users share they sat in a world-readable `/tmp` directory. Each spill now first makes the directory owner-only (mode 700) through `/bin/sh`, since the mod's file write takes no mode. A symbolic link, a file, or a directory another user owns in its place turns spilling off for the session with one toast, and output then passes whole. On Windows a drive or UNC temp path runs no process and spills as before. `tool-spill/hooks/register.ts`, `tool-spill/README.md`.
 - **conexus-tool-spill no longer re-cuts a Bash read of its own spill file** (nexus-i9a1p). Following the note with `sed -n`, `head` or `grep` on the saved file produced an output over the limit that was cut and saved again, so a long output could take several nested spills to read. A Bash command that names the spill directory (`claude-tool-spill-<user>`, in any spelling: the full path, `$TMPDIR/...`, a `cd` into it, either separator) now passes whole up to 4 times `limit` (16 KB by default); a larger read is cut and saved like any other, so nothing is lost when an unrelated command happens to name the directory. The note now says to read a slice with the Read tool, which the mod never cuts. `tool-spill/hooks/register.ts`, `tool-spill/README.md`.
 
 ## [7.87.0] - 2026-10-26
