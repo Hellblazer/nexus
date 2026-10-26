@@ -8,7 +8,8 @@ Design of record: T2 ``nexus/design-xn3fr-recovery-bundle.md`` (Sam-approved
 2026-08-31). The two things a reinstall cannot regenerate are the catalog
 LINK GRAPH (cross-collection, tumbler-addressed — and tumblers are NOT
 stable across reindex) and store_put-origin knowledge content (whose ONLY
-copy is its single T3 chunk — nexus-b6enc). This module carries both in one
+copy is its T3 chunks — nexus-b6enc; one per piece of a note ``put_note``
+split, RDR-223). This module carries both in one
 human-inspectable JSONL bundle:
 
 - line 1: JSON header (``format_version``, counts, source fingerprint);
@@ -68,17 +69,6 @@ MAX_SUPPORTED_RECOVERY_FORMAT_VERSION: int = 1
 _LINK_PAGE: int = 200
 
 
-class SingleChunkInvariantError(RuntimeError):
-    """A store_put-origin document's manifest carried more than one row.
-
-    ``store_put`` (MCP and CLI) is single-chunk BY CONSTRUCTION
-    (``single_chunk_manifest_metadata``; ``T3Database.put``'s docstring).
-    If this fires, that invariant broke somewhere and the export's
-    no-join content reconstruction is no longer sound — escalate, never
-    silently join.
-    """
-
-
 def classify_store_put_origin(entry: CatalogEntry) -> str | None:
     """Return the store-put-origin leg (``"chroma_uri"`` /
     ``"knowledge_no_path"``) for *entry*, or ``None`` when it is not
@@ -123,7 +113,11 @@ class ExportSummary:
     links_exported: int = 0
     ghosts_skipped: int = 0
     file_routed_excluded: int = 0
-    single_chunk_violations: int = 0
+    #: Notes written as several pieces (RDR-223) of which some, not all, are gone from T3: the
+    #: record is left out rather than carrying a truncated text, and ``notes_incomplete_notes``
+    #: names each as ``(collection, title)``. A note with every piece gone is a ghost.
+    notes_incomplete: int = 0
+    notes_incomplete_notes: list[tuple[str, str]] = field(default_factory=list)
     unresolvable_link_endpoints: int = 0
     #: Notes whose catalog entry holds none of its own note keys (written before nexus-6pfgb.5, or
     #: stored with none of them before nexus-6pfgb.15) while the chunk row carries a tags, category or
@@ -183,7 +177,9 @@ def select_store_put_documents(
     Returns ``(entry, leg, manifest_rows)`` triples for exportable docs.
     ``manifests`` is the BATCH ``get_manifests`` result — a doc_id absent
     from it is identical to present-with-zero-rows (a true ghost for the
-    ``knowledge_no_path`` leg), never "not yet checked".
+    ``knowledge_no_path`` leg), never "not yet checked". A note may have
+    several rows: ``put_note`` writes a long note as pieces (RDR-223), and
+    :func:`export_knowledge_doc` joins them (nexus-6pfgb.36).
     """
     out: list[tuple[CatalogEntry, str, list]] = []
     for entry in entries:
@@ -207,14 +203,6 @@ def select_store_put_documents(
                 leg=leg,
             )
             continue
-        if len(rows) > 1:
-            summary.single_chunk_violations += 1
-            raise SingleChunkInvariantError(
-                f"store_put-origin doc {entry.tumbler} ({entry.title!r}) has "
-                f"{len(rows)} manifest rows — store_put is single-chunk by "
-                "construction; the no-join export contract is unsound for "
-                "this document. Escalate (nexus-xn3fr single-chunk tripwire)."
-            )
         out.append((entry, leg, rows))
     return out
 
@@ -272,17 +260,35 @@ def export_knowledge_doc(
     so being the only owner left says nothing about who wrote it (nexus-6pfgb.34). Otherwise the
     record carries none and *summary* counts the note, when the row held a value that was dropped.
     ``ttl_days`` is a positive integer or ``None``.
+
+    The content is every piece of the note joined in manifest position order (nexus-6pfgb.36):
+    ``put_note`` writes a long note as several pieces (RDR-223) and ``"".join(pieces) == content``
+    by construction (:func:`nexus.catalog.store_hook.note_pieces`). The key rule above reads the
+    first piece's row. A note with some pieces gone from T3 returns ``None`` and *summary* counts it
+    as incomplete, so no truncated text reaches the bundle; a note with every piece gone returns
+    ``None`` for the caller to count as a ghost.
     """
-    chash = manifest_rows[0].chash
-    row = t3.get_by_id(entry.physical_collection, chash)
-    if row is None or not row.get("content"):
+    ordered = sorted(manifest_rows, key=lambda r: r.position)
+    pieces: list[dict | None] = []
+    for mrow in ordered:
+        piece = t3.get_by_id(entry.physical_collection, mrow.chash)
+        pieces.append(piece if piece is not None and piece.get("content") else None)
+    missing = [mrow.chash for mrow, piece in zip(ordered, pieces) if piece is None]
+    if missing:
         _log.warning(
             "recovery_export_chunk_missing",
             tumbler=str(entry.tumbler),
             title=entry.title,
-            chash=chash,
+            chashes=missing,
+            pieces=len(ordered),
         )
+        if len(missing) < len(ordered) and summary is not None:
+            summary.notes_incomplete += 1
+            summary.notes_incomplete_notes.append((entry.physical_collection, entry.title or ""))
         return None
+    row = pieces[0]
+    assert row is not None  # every piece is present past the check above
+    content = "".join(str(p["content"]) for p in pieces if p is not None)
     keys = _own_note_keys(entry)
     if keys is None:
         row_keys = {
@@ -310,7 +316,7 @@ def export_knowledge_doc(
         "tags": keys["tags"],
         "category": keys["category"],
         "ttl_days": keys["ttl_days"],
-        "content": row["content"],
+        "content": content,
     }
 
 
@@ -420,9 +426,11 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     docs: list[dict] = []
     selected = select_store_put_documents(entries, manifests, summary)
     for entry, _leg, rows in selected:
+        incomplete_before = summary.notes_incomplete
         rec = export_knowledge_doc(t3, entry, rows, summary=summary)
         if rec is None:
-            summary.ghosts_skipped += 1
+            if summary.notes_incomplete == incomplete_before:
+                summary.ghosts_skipped += 1
             continue
         docs.append(rec)
 
@@ -437,6 +445,7 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
         links=summary.links_exported,
         ghosts_skipped=summary.ghosts_skipped,
         note_keys_unrecovered=summary.note_keys_unrecovered,
+        notes_incomplete=summary.notes_incomplete,
     )
     return summary
 

@@ -31,7 +31,6 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.recovery_bundle import (
     ExportSummary,
     ImportSummary,
-    SingleChunkInvariantError,
     classify_store_put_origin,
     export_bundle,
     import_bundle,
@@ -292,13 +291,60 @@ def test_enumerate_store_put_origin_documents_excludes_non_knowledge_and_true_gh
     assert by_title["legacy-note"]["collection"] == KNOW
 
 
-def test_single_chunk_tripwire_raises_loudly(fake_catalog, tmp_path):
+CH_P1 = "d" * 64
+CH_P2 = "e" * 64
+
+
+def _split_note_t3() -> _FakeT3:
+    """title-a (1.9.1) written as three pieces (RDR-223). Only the first piece's row is the note's
+    own write; the later pieces carry another writer's stamp and keys, which must not reach the
+    record."""
+    t3 = _FakeT3()
+    t3.rows[CH_A] = {"id": CH_A, "content": "first piece, ", "tags": "own-tags", "category": "own-cat",
+                     "ttl_days": 9, "catalog_doc_id": "1.9.1", "title": "title-a"}
+    for chash, text in ((CH_P1, "second piece, "), (CH_P2, "third piece")):
+        t3.rows[chash] = {"id": chash, "content": text, "tags": "other", "category": "other",
+                          "ttl_days": 3, "catalog_doc_id": "1.7.7", "title": "someone-else"}
+    return t3
+
+
+def test_a_note_written_as_several_pieces_exports_its_whole_text_in_position_order(fake_catalog, tmp_path):
+    """nexus-6pfgb.36: a note put_note split into pieces exports as one record holding every piece,
+    joined in manifest position order whatever order the manifest arrives in, with the keyless note's
+    keys taken from the first piece's row only."""
     url, state = fake_catalog
     state.manifests["1.9.1"] = [
-        {"chash": CH_A, "position": 0}, {"chash": CH_B, "position": 1},
+        {"chash": CH_P2, "position": 2}, {"chash": CH_A, "position": 0}, {"chash": CH_P1, "position": 1},
     ]
-    with _client(url) as reader, pytest.raises(SingleChunkInvariantError):
-        export_bundle(reader, _FakeT3(), tmp_path / "b.jsonl")
+    with _client(url) as reader:
+        summary = export_bundle(reader, _split_note_t3(), tmp_path / "b.jsonl")
+    _header, records = read_bundle(tmp_path / "b.jsonl")
+    doc = {r["title"]: r for r in records if r["record"] == "knowledge_doc"}["title-a"]
+    assert doc["content"] == "first piece, second piece, third piece"
+    assert (doc["tags"], doc["category"], doc["ttl_days"]) == ("own-tags", "own-cat", 9)
+    assert summary.docs_exported == 3
+    assert summary.notes_incomplete == 0
+
+
+def test_a_note_missing_a_piece_is_counted_and_never_exported_truncated(fake_catalog, tmp_path):
+    """nexus-6pfgb.36: a note one of whose pieces is gone from T3 exports no record (a truncated note
+    imported back would overwrite the whole one wherever it still exists) and is counted and named,
+    apart from the ghosts, whose every piece is gone."""
+    url, state = fake_catalog
+    state.manifests["1.9.1"] = [
+        {"chash": CH_A, "position": 0}, {"chash": CH_P1, "position": 1}, {"chash": CH_P2, "position": 2},
+    ]
+    t3 = _split_note_t3()
+    del t3.rows[CH_P1]
+    with _client(url) as reader:
+        summary = export_bundle(reader, t3, tmp_path / "b.jsonl")
+    _header, records = read_bundle(tmp_path / "b.jsonl")
+    titles = {r["title"] for r in records if r["record"] == "knowledge_doc"}
+    assert "title-a" not in titles
+    assert titles == {"title-b", "legacy-note"}
+    assert summary.notes_incomplete == 1
+    assert summary.notes_incomplete_notes == [(KNOW, "title-a")]
+    assert summary.ghosts_skipped == 1  # ghost-note only
 
 
 def test_export_links_drives_pagination_to_exhaustion(fake_catalog, tmp_path, monkeypatch):

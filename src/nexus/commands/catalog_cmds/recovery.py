@@ -54,6 +54,16 @@ def export_cmd(output: Path) -> None:
         click.echo(
             f"  ghosts skipped (rows with no live content): {summary.ghosts_skipped}"
         )
+    if summary.notes_incomplete:
+        click.echo(
+            f"  WARNING: {summary.notes_incomplete} note(s) written as several pieces have a piece "
+            "missing from the store and were left out of the bundle rather than exported truncated:"
+        )
+        incomplete = summary.notes_incomplete_notes
+        for collection, title in incomplete[:_UNRECOVERED_TITLES_SHOWN]:
+            click.echo(f"    {collection}: {json.dumps(title) if title else '(untitled)'}")
+        if len(incomplete) > _UNRECOVERED_TITLES_SHOWN:
+            click.echo(f"    ... and {len(incomplete) - _UNRECOVERED_TITLES_SHOWN} more")
     if summary.note_keys_unrecovered:
         click.echo(
             f"  note keys not recovered: {summary.note_keys_unrecovered} note(s) whose own tags, "

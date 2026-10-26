@@ -414,7 +414,7 @@ nx catalog import recovery.jsonl    # after the reinstall + re-index
 Carries the two things a reinstall cannot regenerate: the **link graph**
 (cross-collection, and tumblers are NOT stable across reindex) and
 **store_put-origin knowledge content** (whose only copy is its indexed
-chunk). One human-inspectable JSONL file: a header line, then
+chunks). One human-inspectable JSONL file: a header line, then
 `knowledge_doc` records, then `link` records.
 
 Locked format decisions (design of record: T2
@@ -439,6 +439,13 @@ Locked format decisions (design of record: T2
 - **Idempotent.** Re-importing the same bundle merges (the engine's
   duplicate-link `co_discovered_by` contract; store_put reconciles) —
   zero net growth on a second pass.
+- **A note written as several pieces exports whole.** The note writer
+  stores a long note as pieces under one catalog document (RDR-223); the
+  export joins every piece in manifest position order into one record, and
+  import hands the whole text to the note writer, which splits it again.
+  A note with some pieces gone from T3 is left out of the bundle, never
+  exported truncated, and the export names it (`written as several pieces
+  have a piece missing`); a note with every piece gone counts as a ghost.
 - **Spans degrade gracefully.** A `chash:`-anchored link span whose
   chunk no longer exists on the target is stripped and counted in the
   import report; the link itself still imports.

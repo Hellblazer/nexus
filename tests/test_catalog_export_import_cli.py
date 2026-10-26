@@ -182,3 +182,22 @@ def test_catalog_export_caps_the_unrecovered_titles_it_prints(tmp_path, monkeypa
     result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
     assert '"legacy-19"\n' in result.output and "legacy-20" not in result.output
     assert "... and 3 more" in result.output
+
+
+def test_catalog_export_names_the_split_notes_left_out_for_a_missing_piece(tmp_path, monkeypatch):
+    """nexus-6pfgb.36: a note with a piece gone from the store is left out, and the command names it."""
+    notes = [("knowledge__x", f"split-{i}") for i in range(21)] + [("knowledge__y", "bad\x1b[2Jtitle")]
+
+    def _fake_export(reader, t3, path):
+        path.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": 1}) + "\n")
+        return ExportSummary(docs_exported=3, notes_incomplete=22, notes_incomplete_notes=notes)
+
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
+    monkeypatch.setattr("nexus.catalog.recovery_bundle.export_bundle", _fake_export)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+
+    result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
+    assert result.exit_code == 0, result.output
+    assert "WARNING: 22 note(s) written as several pieces have a piece missing" in result.output
+    assert '    knowledge__x: "split-19"\n' in result.output and "split-20" not in result.output
+    assert "... and 2 more" in result.output
