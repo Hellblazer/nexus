@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.87.0] - 2026-10-26
+
+Plugin version aligned with conexus 7.87.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- **conexus-tool-spill option titles and install notes say what each setting changes and what a blank field means** (nexus-121ke). `tool-spill/.claude-plugin/plugin.json`, `tool-spill/README.md`.
+- **conexus-tool-spill counts the `<persisted-output>` marker only at the start of a Bash result** (nexus-x967v). Output that merely quotes the marker is cut like any other large output. `tool-spill/hooks/register.ts`.
+- **The subagent git-integrity check is removed** (nexus-i93tz). `hooks/scripts/routing/subagent_git_integrity_check.py` is deleted, its three `hooks.json` registrations and its `registry.yaml` rule are gone; the git-write guard stays, frozen, and its docstring and the routing README list the routes it does not cover.
+- **`rdr-create` confirms the RDR number is free in T2 before using it** (nexus-3piej). `skills/rdr-create/SKILL.md` Step 2.
+- **The `nexus` skill says a catalog subtree in `nx_answer(scope=...)` filters and is never a corpus** (nexus-jypmj.1.16). `skills/nexus/SKILL.md`, `skills/nexus/reference.md`.
+
 ## [7.86.3] - 2026-10-25
 
 Plugin version aligned with conexus 7.86.3. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

@@ -43,25 +43,12 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-
-## Awaiting the next release (pinned: v7.86.3)
+## Awaiting the next release (pinned: v7.87.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `tool-spill/.claude-plugin/plugin.json` (nexus-121ke): each userConfig option's title says what it changes and what a blank field means (Claude Code shows only titles and never prefills a declared default), and the plugin description says no setup is needed.
-- `tool-spill/README.md` (nexus-121ke): the install section explains the blank option fields, the four defaults, why one would change each, and the note a cut result carries.
-- `tool-spill/hooks/register.ts` (nexus-x967v): the `<persisted-output>` marker counts only at the start of a Bash result, so output that merely quotes it (the plugin's own README or source) is cut instead of passing whole.
-- `conexus/hooks/scripts/routing/subagent_git_integrity_check.py` (nexus-i93tz): deleted. The subagent shared-git-state integrity check (shipped report-only in 7.83.x) is dropped by Sam's decision of 2026-10-25: three and a half days of real subagent work produced no change report and its restore phase is never built. The subagent git-write guard (`subagent_git_write_requires_orchestrator.py`) keeps its logic and stays the only line. Rows the hook already wrote to the routing log stay readable (`integrity_info`, `integrity_unverified` and `integrity_change` outcomes count under `extra` in `nx hook routing-stats`, and the rule shows as unregistered); the `git-integrity/` session state it left under the nexus config directory is reaped by the client's `nx-hook self-gc` (session directories untouched for two days), not by the plugin, and nothing reads it.
-- `conexus/hooks/hooks.json` (nexus-i93tz): drops the three registrations of `subagent_git_integrity_check.py` (PreToolUse, PostToolUse and PostToolUseFailure on Bash); the PostToolUse and PostToolUseFailure events leave the manifest, and the per-call Bash hook count goes from 4 back to 2.
-- `conexus/hooks/scripts/routing/registry.yaml` (nexus-i93tz): drops the `subagent_git_integrity_check` rule.
-- `conexus/hooks/scripts/routing/README.md` (nexus-i93tz): the cumulative-cap table counts 2 rules again and names the removal; a paragraph says the git-write guard is frozen except for real incidents and lists the routes it does not cover.
-- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (nexus-i93tz): docstring only, no logic change; the KNOWN LIMITS text gains the frozen-guard paragraph and the accepted not-covered routes.
-- `conexus/skills/rdr-create/SKILL.md` (nexus-3piej): Step 2 confirms `{repo}_rdr/NNN` is free in T2 (only a not-found answer; a record or an ambiguous-prefix answer means held) before the file is created, because `memory_put` upserts by title and silently replaced RDR-233's record on 2026-10-26; the step also says what the preamble's new held-elsewhere list and incomplete-scan notice mean.
 
 ## Deferred to the next client release
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/skills/nexus/SKILL.md` (nexus-jypmj.1.16): the `nx_answer` `scope="1.2"` example says a catalog subtree filters `query` and `search_metadata_scoped` steps and that a `search` step runs unscoped and is named in the answer.
-- `conexus/skills/nexus/reference.md` (nexus-jypmj.1.16): the `scope` parameter row says a subtree is a filter and never a corpus, which tools it reaches, that a document-level address filters nothing, and the `[scope not applied: ...]` line and `subtree_not_applied` outcome that disclose it.
 - `conexus/skills/upgrade/SKILL.md` (nexus-6pfgb.14): the list of what an upgrade does not carry no longer says a note's TTL is lost; it names `nx store export` (each chunk's `ttl_days` and `indexed_at` as stored) and the `nx catalog export` recovery bundle (each `store_put` note's own `ttl_days`, clock restarted at import). Deferred: the bead also changes `src/nexus/catalog/recovery_bundle.py`.
