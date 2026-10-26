@@ -455,8 +455,8 @@ Locked format decisions (design of record: T2
   `catalog_doc_id` cannot tell a departed co-owner's values from the note's
   own, so for such a legacy row that sole-owner fallback can export another
   note's `tags`, `category` or `ttl_days` (a permanent note can come back
-  expiring); it is expected to adopt the expiry sweep's stricter rule when
-  nexus-6pfgb.15 lands. Otherwise it
+  expiring); the expiry sweep's stricter rule (`note_ttl.row_written_by`)
+  is not yet applied to the export. Otherwise it
   exports with them empty and the export summary counts it when the row
   held a value (`note keys not recovered`). Import restarts a note's TTL
   clock: the expiry is `ttl_days` from the import, not from the original
