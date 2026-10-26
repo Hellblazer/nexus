@@ -8,7 +8,8 @@ import type { Engine, Register } from 'claude-code'
 //   Bash: the full text goes to a file; the model gets the head and the tail of each stream (cut at line ends), a
 //         note between them naming the file, how many middle lines were cut and how many of those mention an error
 //         or a failure. A failure on the last line, or an error buried in the middle, is therefore never silent.
-//         A command that names the spill directory (reading a spill file back) passes whole.
+//         A command that names the spill directory (reading a spill file back) passes whole up to 4 times the
+//         limit, so a slice of a spill is not spilled again; past that it is cut like any other.
 //   Read: a whole-file read only. A read the model sliced itself (offset or limit) passes whole, so following the
 //         note costs nothing extra, and instruction files (skills, agents, rules, AGENTS.md, CLAUDE.md) pass whole.
 //
@@ -20,6 +21,8 @@ import type { Engine, Register } from 'claude-code'
 const DEFAULT_LIMIT = 4_000
 const DEFAULT_HEAD = 1_400
 const DEFAULT_TAIL = 800
+// A Bash read of a spill file passes whole up to this many times the limit.
+const SPILL_READ_FACTOR = 4
 // Either separator, so a Windows path matches too.
 const INSTRUCTIONS = /(^|[\\/])(SKILL|AGENTS|CLAUDE|CLAUDE\.local|REGISTER)\.md$|[\\/](skills|agents|commands|rules)[\\/]/i
 const ERRORISH = /error|fail|traceback|panic|exception|fatal|denied|not found|no such|cannot|refused|timed out|unable/i
@@ -114,12 +117,14 @@ function dirOf($: Engine): Promise<string> {
   return spillDir
 }
 
-// Whether `command` names `dir` itself: followed by a separator, a quote, a space or the end, so a sibling directory
-// that merely shares the prefix (`claude-tool-spill-samuel` beside `claude-tool-spill-sam`) does not count.
-function namesDir(command: string, dir: string): boolean {
-  for (let i = command.indexOf(dir); i >= 0; i = command.indexOf(dir, i + 1)) {
-    const after = command[i + dir.length]
-    if (after === undefined || /[\\/\s'"]/.test(after)) return true
+// Whether `command` names the spill directory: its basename (`claude-tool-spill-<user>`), so `$TMPDIR/...`, a `cd`
+// into it and either separator count, followed by the end or a character a sanitised user name cannot hold, so a
+// sibling that merely shares the prefix (`claude-tool-spill-samuel` beside `claude-tool-spill-sam`) does not.
+function namesSpillDir(command: string, dir: string): boolean {
+  const name = dir.slice(Math.max(dir.lastIndexOf('/'), dir.lastIndexOf('\\')) + 1)
+  for (let i = command.indexOf(name); i >= 0; i = command.indexOf(name, i + 1)) {
+    const after = command[i + name.length]
+    if (after === undefined || !/[A-Za-z0-9_.-]/.test(after)) return true
   }
   return false
 }
@@ -155,10 +160,12 @@ export const register: Register = (on, options) => {
         if (!INCLUDE_HEADLESS && await isHeadless($)) return res
 
         const dir = await dirOf($)
-        // A command that reads a spill file back (sed, head, grep on it) is following a note: cutting it again would
-        // spill a spill (nexus-i9a1p). Claude Code's own cap still bounds it.
+        // A command that reads a spill file back (sed, head, grep on it) is following a note, so it may bring in up to
+        // SPILL_READ_FACTOR times the limit, the size of the slice the Read note suggests, before it too is cut and
+        // saved; under that, cutting it would only spill a spill (nexus-i9a1p).
         const input: any = e
-        if (typeof input.command === 'string' && namesDir(input.command, dir)) return res
+        if (typeof input.command === 'string' && namesSpillDir(input.command, dir) &&
+            size <= LIMIT * SPILL_READ_FACTOR) return res
         const path = `${dir}/${e.tool_use_id.replace(/[^A-Za-z0-9_.-]/g, '_')}.txt`
         const where = `Full output: ${path}. Read a slice of it with the Read tool (offset and limit; a sliced Read ` +
           'is never cut) or hand it to a subagent; do not re-run the command.'
