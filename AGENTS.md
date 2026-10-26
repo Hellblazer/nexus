@@ -83,7 +83,7 @@ Full text with history: [hot-rules](docs/agents/hot-rules.md).
 
 These load only when you read a file their `paths:` matches; each is the short-rules form of a former section of this file, and the full text is in [`docs/agents/`](docs/agents/README.md):
 
-- [`releases-and-engine.md`](.claude/rules/releases-and-engine.md): release cadence, plugin channel, engine-service release, cutting a release and its blocking Step 0. The `release` and `engine-release` skills stay the authority.
+- [`releases-and-engine.md`](.claude/rules/releases-and-engine.md): release cadence, plugin-only fast lane, engine-service release, cutting a release and its blocking Step 0. The `release` and `engine-release` skills stay the authority.
 - [`ci-and-runners.md`](.claude/rules/ci-and-runners.md): CI Cost Discipline, self-hosted runners and fork PRs.
 - [`external-service-limits.md`](.claude/rules/external-service-limits.md): `QUOTAS` limits and Voyage limits.
 - [`adding-a-cli-command.md`](.claude/rules/adding-a-cli-command.md).

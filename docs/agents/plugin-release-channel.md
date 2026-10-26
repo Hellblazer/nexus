@@ -1,63 +1,14 @@
-# Independent plugin release channel
+# Plugin-only releases
 
-Moved from AGENTS.md on 2026-10-14 (nexus-2ziaz); the short rules-only form is [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md), which links here. A `§ <heading>` reference below names a section of AGENTS.md or of a sibling file; [README.md](README.md) maps each heading to its file.
+The independent plugin channel of RDR-197 (anchored `plugin-vX.Y.Z-n` tags, a cut script, a verify-only tag workflow) was retired on 2026-10-26 (nexus-rbmja.8). It could not carry forward wheel references (nexus-konsk, nexus-semdv). RDR-197 stays as the record.
 
-### Independent plugin release channel (RDR-197)
+Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `.claude-plugin/marketplace.json`) now ships ahead of `src/` work as a patch release on the normal client tag form: the plugin-only fast lane. The `release` skill's "Plugin-only fast lane" section is the only description of the steps. The pieces it uses:
 
-A plugin cut ships plugin-surface content (paths under `conexus/`,
-`sn/` and `tool-spill/`, plus `.claude-plugin/marketplace.json`) without a client release:
-it moves the changed plugin's `source.ref` to an anchored tag of the
-shape `plugin-v{X.Y.Z}-{n}`, where `X.Y.Z` is the CURRENT released
-client version and `n` is the cut's sequence number. The number comes
-from git's own tag list at cut time (one more than the highest existing
-`plugin-v{X.Y.Z}-*` tag); there is NO stored counter file, so there is
-nothing to reset and nothing to read from the wrong place. The channel
-publishes nothing to PyPI: the `plugin-v*` tag fires a verify-only
-workflow (`.github/workflows/plugin-release.yml`), and the wheel-surface
-proof asserts the cut's range touches no wheel content. The cut itself
-is `scripts/cut_plugin_release.py` (a script with tests, never a
-checklist); the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`,
-never a bare merge (`conexus/PENDING_RELEASE.md` conflicts by
-construction on every cut); invariants R and W live in
-`scripts/plugin_channel.py`'s docstring.
+- `scripts/check_plugin_only_eligibility.py` refuses a diff that leaves the plugin surface, reusing the allowlist in `scripts/plugin_channel.py`.
+- `tests/e2e/release-battery.sh --plugin-only` runs the legs a plugin-only diff can change and reports the rest as skipped.
+- `tests/e2e/plugin-delivery-proof.sh` proves, after publish, that an install of the previous release receives the new plugin files through Claude Code's normal plugin update.
+- `conexus/PENDING_RELEASE.md` is the cherry-pick list, and `tests/test_plugin_release_drift_ledger.py` keeps it honest.
 
-**A new plugin enters the marketplace on develop first.** Its
-`marketplace.json` entry carries the CURRENT client version and the
-client tag as `source.ref`, a tag that does not hold its directory yet;
-the drift ledger is what keeps that honest: every file on the plugin's
-surface differs from the pinned tag, so each is declared in
-`conexus/PENDING_RELEASE.md` until a cut or a client release moves the
-ref. A cut then ships the entry: `cut_plugin_release.py` accepts a
-plugin that origin/main's marketplace does not list, provided its
-version is the client version, its ref moved to the cut's tag and its
-directory holds a manifest. A directory that is not a plugin name needs
-both `ALLOWED_PREFIXES` and `PLUGIN_BY_ALLOWLIST_PREFIX` in
-`scripts/plugin_channel.py` (conexus-tool-spill installs from
-`tool-spill/`).
+**A new plugin enters the marketplace on develop first.** Its `marketplace.json` entry carries the current client version and the client tag as `source.ref`, a tag that does not hold its directory yet; the drift ledger keeps that honest, because every file on the plugin's surface differs from the pinned tag and so is declared in `conexus/PENDING_RELEASE.md` until a release moves the ref. A directory that is not a plugin name needs both `ALLOWED_PREFIXES` and `PLUGIN_BY_ALLOWLIST_PREFIX` in `scripts/plugin_channel.py` (conexus-tool-spill installs from `tool-spill/`).
 
-**Usage discipline** (was this cut warranted?):
-1. Cut when accumulated plugin functionality is worth shipping and no
-   client release is imminent. A client release ships the same content
-   for free.
-2. An open release PR always wins. Never cut while one is in flight.
-3. Batch related plugin work into one cut, exactly as the release
-   cadence rules above batch client releases.
-4. **Rehearse before the real cut, every time:**
-   `tests/e2e/plugin-cut-rehearsal/run.sh` (container by default, `--host`
-   for a fast loop) walks the whole flow against a FAKE origin — the real
-   cut script with its battery, the cut PR's CI on a synthetic merge ref
-   with a `pull_request` payload, merge + anchored tag, the tag workflow's
-   steps, back-merge — and commits the source's uncommitted changes onto
-   its clone's develop, so machinery fixes are rehearsed before they land.
-   Must end `PLUGIN-CUT REHEARSAL PASSED`. The first real cut (2026-08-30,
-   nexus-a2wmi.12) refused three times on machinery that only runs at cut
-   time, each round costing a PR to main; every one was reachable here.
-
-**Sunset trigger:** if two years pass with zero cuts, delete the
-workflow, the parity test's anchored-form branch, and the cut script.
-RDR-197 (`docs/rdr/rdr-197-plugin-only-release-channel.md`) is the
-record that keeps the design recoverable.
-
-`docs/` is NOT in the channel allowlist, deliberately: docs-only commits
-outnumber plugin-surface commits about 12 to 1, and admitting them would
-make nearly every cut a docs cut.
+`docs/` is NOT in the allowlist, deliberately: docs-only commits outnumber plugin-surface commits about 12 to 1, and admitting them would make nearly every plugin-only release a docs release.

@@ -2,9 +2,8 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The PENDING_RELEASE drift-ledger parsers and the RDR-228 Phase 2 guard.
 
-Moved out of ``scripts/cut_plugin_release.py`` (nexus-rbmja.2) so the
-drift-ledger test, which stays, does not depend on the anchored-tag cut
-script, which is retired. Nothing here imports the cut script.
+Moved out of the anchored-tag cut script (nexus-rbmja.2), since retired
+(nexus-rbmja.8), so the drift-ledger test does not depend on it.
 
 Under the plugin-only fast lane the ledger is the cherry-pick list, and an
 entry under "Deferred to the next client release" still means "do not
@@ -102,11 +101,8 @@ def _deferred_entries(ledger_text: str) -> list[str]:
     :func:`atomic_split_check` -- that is the whole point of deferring
     it -- and :func:`deferred_paths` reads the same set to hold its
     channel path(s) back from the cut's import. Reuses
-    ``_ledger_blocks`` so section membership and entry boundaries agree
-    with :func:`path_entries` by construction: both walk the identical
-    grouping, so an entry recognised here is byte-identical to the one
-    ``path_entries`` produces, and set membership between the two is a
-    safe string comparison.
+    ``_ledger_blocks`` so section membership and entry boundaries come
+    from the one grouping.
     """
     deferred: list[str] = []
     in_section = False

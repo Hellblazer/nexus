@@ -280,7 +280,7 @@ editions. This is what keeps the dual-license offer viable.
 
 ## Release Process
 
-The `release` skill (`.claude/skills/release/SKILL.md`, also `/conexus:release`) is the executable checklist and the authority for a client release; `.claude/rules/releases-and-engine.md` has the short rules and the engine-service cut has its own skill (`engine-release`). This page keeps what those do not: the plugin channel cut, the schema/data-migration rationale, break-glass, the file quick reference and the one-time setup. A step-by-step copy used to live here and drifted from the skill, so it was removed; do not rebuild one.
+The `release` skill (`.claude/skills/release/SKILL.md`, also `/conexus:release`) is the executable checklist and the authority for a client release; `.claude/rules/releases-and-engine.md` has the short rules and the engine-service cut has its own skill (`engine-release`). This page keeps what those do not: the pointer to the plugin-only fast lane, the schema/data-migration rationale, break-glass, the file quick reference and the one-time setup. A step-by-step copy used to live here and drifted from the skill, so it was removed; do not rebuild one.
 
 Three rules hold for every release:
 
@@ -290,71 +290,9 @@ Three rules hold for every release:
 
 What the skill walks, in order: the engine-freshness gate (`scripts/check_engine_release_floor.py`, Step 0, blocking) and the preflight (0c); the release battery (`tests/e2e/release-battery.sh` and its legs, Step 1); the docs audit against changes since the last tag (2); the version bump across every manifest, the changelogs, the wire ledger, the privacy-policy date and `uv.lock` (3 to 5); the release branch and PR (7); the pre-push verification (8); tag and push (9), which fires `release.yml`; verification that the workflow, GitHub and PyPI all show the release (10, 11); the mandatory back-merge of `main` into `develop` (11b); the published-bytes journeys (11c); and the local reinstall (12). The checks that gate a tag read GitHub's check-run record and do not re-run the suite on a tree CI already tested.
 
-### Plugin channel cut (RDR-197)
+### Plugin-only releases
 
-A plugin cut ships accumulated `conexus/` and `sn/` plugin content
-without a client release. It moves the changed plugin's `source.ref` in
-`.claude-plugin/marketplace.json` to an anchored tag
-`plugin-v{X.Y.Z}-{n}` (the current released client version plus a
-sequence number derived from git's tag list at cut time; no counter
-file exists). It publishes nothing to PyPI and moves no version field.
-Usage discipline and the sunset trigger live in
-`docs/agents/plugin-release-channel.md` (AGENTS.md carries the short
-rules); check them before cutting.
-
-Command sequence (the script does the work; the human pushes):
-
-```bash
-# Step 0 — MANDATORY before every cut (`docs/agents/plugin-release-channel.md` § Usage discipline):
-tests/e2e/plugin-cut-rehearsal/run.sh --promote-machinery   # container default; --host = fast loop
-# must end: PLUGIN-CUT REHEARSAL PASSED. A rehearsal that passed on a
-# full clone has not rehearsed CI — the runs cover the depth-1 tag leg
-# and the tagless shard leg too.
-uv run python scripts/cut_plugin_release.py vX.Y.Z   # the CURRENT released client tag
-# The script: verifies origin/main carries the channel machinery,
-# derives n from the tag list, runs the atomic-split check, branches
-# plugin-release/X.Y.Z-n off origin/main, imports the allowlist from
-# develop as a diff-and-apply, moves only the changed plugins' refs,
-# empties the covered PENDING_RELEASE.md entries, runs the local
-# battery, and prints the commands below. It pushes and tags NOTHING.
-git push -u origin plugin-release/X.Y.Z-n
-gh pr create --base main --head plugin-release/X.Y.Z-n --title "plugin release: plugin-vX.Y.Z-n"
-gh pr merge <N> --merge
-git tag -a plugin-vX.Y.Z-n -m "plugin-vX.Y.Z-n" <merge-commit>
-git push origin plugin-vX.Y.Z-n     # fires the verify-only plugin-release.yml
-scripts/plugin_cut_back_merge.sh . && scripts/git-push-develop.sh HEAD
-```
-
-The back-merge is NEVER a bare `git merge origin/main`: the cut commit
-empties the `conexus/PENDING_RELEASE.md` entries it ships while develop
-still carries them, so that file conflicts by construction on every cut.
-`scripts/plugin_cut_back_merge.sh` resolves exactly that one conflict
-(main wins), aborts on any other conflict, and runs develop's drift
-contract as the net.
-
-Minimal battery, two layers that deliberately differ:
-
-- **The cut script runs locally**, against the cut branch's mixed state:
-  the FULL `-m lint` bucket, `tests/test_plugin_release_drift_ledger.py`,
-  and `tests/hooks/`.
-- **The tag workflow** (`plugin-release.yml`, verify-only, depth-1
-  two-tag checkout) runs: the wheel-surface proof + drift-ledger contract,
-  `tests/test_plugin_structure.py` under `-m lint` (the module is
-  lint-marked; without the marker pytest collects nothing and exits 5),
-  `tests/hooks/`, the `-m lint` bucket minus BOTH
-  `test_wire_contract_pairing_lint.py` and `test_docs_reference_rot.py`
-  (each walks `v*` tag history or `origin/develop` the single-tag fetch
-  cannot resolve; ci.yml's full-history lint job still runs them), and
-  `scripts/check_cut_ledger_clean.py` against the cut's own range.
-
-Deliberately skipped everywhere, because none of them executes
-plugin-loader content: substrate gates, migration rehearsal,
-fresh-install MVVs, shakedown, and the engine floor.
-
-A CLIENT release needs no channel-specific step at all: the channel
-keeps no state a release would have to reset. The client release's own
-`source.ref` bump to `vX.Y.Z` supersedes any anchored pin, and the next
-cut derives its number from the new version's (empty) tag list.
+Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `.claude-plugin/marketplace.json`) that must ship while `develop` carries `src/` work goes out as a patch client release cut off the last client tag, with the plugin commits cherry-picked from `develop`. The procedure is the `release` skill's "Plugin-only fast lane" section; this page does not repeat it. The anchored `plugin-vX.Y.Z-n` channel of RDR-197 was retired on 2026-10-26 (nexus-rbmja.8).
 
 ### Schema/data-migration releases (conditional)
 

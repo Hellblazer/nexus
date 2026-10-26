@@ -12,8 +12,6 @@ paths:
   - "service/**"
   - "src/nexus/engine_version.py"
   - "scripts/check_engine_release_floor.py"
-  - "scripts/cut_plugin_release.py"
-  - "scripts/plugin_cut_back_merge.sh"
   - "scripts/mvnw-leased.sh"
   - "tests/e2e/release-battery.sh"
   - ".claude/skills/release/**"
@@ -31,9 +29,9 @@ Full text: [release-cadence](../../docs/agents/release-cadence.md).
 5. **Releaser is human. AI prepares; human cuts** (merge, tag, push tag).
 6. **Parity tests stay strict.** `pyproject.toml` version must match `mcpb/pyproject.toml`, `mcpb/manifest.json`, marketplace.json `plugins[].version` and `source.ref`, every plugin's `plugin.json`, and `uv.lock`. No `# noqa` escape hatches.
 
-## Independent plugin release channel (RDR-197)
+## Plugin-only releases (fast lane)
 
-Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `tool-spill/` for the opt-in `conexus-tool-spill`, `.claude-plugin/marketplace.json`) ships without a client release via an anchored tag `plugin-v{X.Y.Z}-{n}`. The cut is `scripts/cut_plugin_release.py`; the post-cut back-merge is `scripts/plugin_cut_back_merge.sh`, never a bare merge. Never cut while a release PR is open; batch related plugin work. **Rehearse before every real cut:** `tests/e2e/plugin-cut-rehearsal/run.sh` must end `PLUGIN-CUT REHEARSAL PASSED`.
+Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `.claude-plugin/marketplace.json`) ships ahead of `src/` work as a patch client release cut off the last client tag with the plugin commits cherry-picked from `develop`; the `release` skill's "Plugin-only fast lane" section is the procedure, and `scripts/check_plugin_only_eligibility.py` refuses anything that leaves the plugin surface. The anchored `plugin-vX.Y.Z-n` channel of RDR-197 is retired. Never cut while a release PR is open.
 
 ## Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
 

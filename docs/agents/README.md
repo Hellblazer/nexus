@@ -12,7 +12,7 @@ Moved from AGENTS.md on 2026-10-14 (nexus-2ziaz). AGENTS.md is loaded into every
 | CI Cost Discipline | [ci-cost-discipline.md](ci-cost-discipline.md) | [`.claude/rules/ci-and-runners.md`](../../.claude/rules/ci-and-runners.md) |
 | Self-hosted runners and fork PRs | [self-hosted-runners.md](self-hosted-runners.md) | [`.claude/rules/ci-and-runners.md`](../../.claude/rules/ci-and-runners.md) |
 | Workflows § Release cadence policy | [release-cadence.md](release-cadence.md) | [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md) |
-| Workflows § Independent plugin release channel | [plugin-release-channel.md](plugin-release-channel.md) | [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md) |
+| Workflows § Plugin-only releases | [plugin-release-channel.md](plugin-release-channel.md) | [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md) |
 | Workflows § Engine-service release (authority) | [engine-service-release.md](engine-service-release.md) | [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md) |
 | Workflows § Cutting a release | [cutting-a-release.md](cutting-a-release.md) | [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md) |
 | Worktrees: one session, one worktree | [worktrees.md](worktrees.md) | `AGENTS.md` |
