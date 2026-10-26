@@ -68,18 +68,16 @@ jobs:
 
       - name: Fetch exactly the pinned release tags
         env:
-          # The proof's fallback target before the anchored tag exists is the
-          # cut PR's HEAD COMMIT (RDR-197 anchoring rule, nexus-a2wmi.4).
-          # actions/checkout resolves the merge ref at depth 1 on
-          # pull_request, so the head sha is not in the checkout unless
-          # fetched explicitly.
+          # The wheel-surface proof's target inside a release window is the
+          # PR's HEAD COMMIT (plugin_channel.cut_head_sha). actions/checkout
+          # resolves the merge ref at depth 1 on pull_request, so the head
+          # sha is not in the checkout unless fetched explicitly.
           PR_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
         run: |
           set -euo pipefail
-          # RDR-197 (nexus-a2wmi.4): the channel's checks need MORE than the
-          # pinned refs — the BASE CLIENT TAG (blind-checkout sentinel and the
-          # wheel-surface proof's range base; in the both-anchored state no
-          # pinned ref is a client tag, so without this it is never fetched).
+          # The channel's checks need MORE than the pinned refs when a ref is
+          # absent: the BASE CLIENT TAG (blind-checkout sentinel and the
+          # wheel-surface proof's range base).
           # NOT `fetch-tags: true` on the checkout: release.yml:58-65 records
           # that a depth-1 checkout's fetch-tags does NOT deliver tags
           # (release.yml chose fetch-depth: 0, unaffordable here — see the
@@ -103,7 +101,6 @@ jobs:
           import tomllib
           print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])
           ")
-          version_re=$(printf '%s' "$version" | sed 's/\./\\./g')
           for ref in $refs; do
             if git fetch --depth=1 origin "refs/tags/$ref:refs/tags/$ref"; then
               continue
@@ -114,16 +111,11 @@ jobs:
             # tag absent is the documented sequencing, not drift. The
             # in-repo tests (_in_release_window) apply the same contract:
             # in the window the ledger must be EMPTY, and that IS checked.
-            # The ANCHORED form plugin-v<pyproject>-<n> is the same
-            # sequencing on a plugin-cut PR (RDR-197 invariant W; this site
-            # runs on the cut PR by trigger, so it needs the shape check,
-            # not the branch check — the in-repo per-plugin predicate
-            # applies all four window conditions). Any other missing tag is
-            # still a hard failure.
+            # Any other missing tag is a hard failure: the anchored plugin
+            # tag form is retired (nexus-rbmja.8) and nothing produces such
+            # a ref any more.
             if [ "$ref" = "v$version" ]; then
               echo "release window: $ref == v<pyproject> and not yet cut — tolerated"
-            elif printf '%s' "$ref" | grep -qE "^plugin-v${version_re}-[1-9][0-9]*$"; then
-              echo "plugin release window: $ref is the anchored form for v$version and not yet cut — tolerated"
             else
               echo "pinned ref $ref does not exist and is NOT this release's own tag" >&2
               exit 1

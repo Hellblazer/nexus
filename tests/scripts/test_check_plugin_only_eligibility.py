@@ -164,6 +164,9 @@ def repo(tmp_path: Path) -> Path:
     _git(r, "add", "-A")
     _git(r, "commit", "-q", "-m", "base")
     _git(r, "tag", "v7.86.3")
+    # The straddle check reads develop; with no bead named it has nothing to
+    # look up, but an unreadable ref is still UNVERIFIED, so every repo has one.
+    _git(r, "update-ref", "refs/remotes/origin/develop", "HEAD")
     return r
 
 
@@ -178,7 +181,11 @@ def _pyproject_bumped(to: str = "7.86.4") -> str:
 
 
 def _commit(
-    repo: Path, changes: dict[str, str | Link | None], *, bump: bool = True
+    repo: Path,
+    changes: dict[str, str | Link | None],
+    *,
+    bump: bool = True,
+    message: str = "change",
 ) -> None:
     """Commit *changes* on top of the tag. A release always moves the version, so
     pyproject.toml's patch bump rides along unless the case supplies its own
@@ -196,7 +203,7 @@ def _commit(
             (repo / rel).unlink(missing_ok=True)  # replaces a symlink too
             _write(repo, rel, text)
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "change")
+    _git(repo, "commit", "-q", "-m", message)
 
 
 def _run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -824,6 +831,7 @@ def _shape_repo(tmp_path: Path, files: list[str]) -> tuple[Path, str, dict[str, 
     _git(r, "add", "-A")
     _git(r, "commit", "-q", "-m", "base")
     _git(r, "tag", f"v{version}")
+    _git(r, "update-ref", "refs/remotes/origin/develop", "HEAD")
     return r, version, base
 
 
@@ -887,3 +895,177 @@ def test_working_tree_hook_source_edit_is_ineligible_beside_a_plugin_change(tmp_
     assert "INELIGIBLE: src/nexus/hooks/self_gc.py [M]" in out.stdout
     assert "INELIGIBLE: src/nexus/engine_version.py [M]" in out.stdout
     assert f"{FAIL_LINE}: 2 problem(s) in 4 paths" in out.stdout
+
+
+# ---- nexus-rbmja.10: a bead may not straddle the lane ------------------------
+# The cut script this lane replaced refused a ledger entry whose bead also
+# touched wheel content. Cherry-picking only the plugin half of such a bead
+# ships half of it, so the gate looks up every bead named in the release
+# commits on develop and judges all of that bead's commits.
+
+
+def _develop(repo: Path, commits: list[tuple[str, dict[str, str | None]]]) -> list[str]:
+    """Land *commits* on a develop line off the current HEAD, point
+    ``origin/develop`` at its tip, and return to the branch the release is
+    built on. Returns the shas, oldest first."""
+    main = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "dev-line")
+    shas: list[str] = []
+    for message, changes in commits:
+        _commit(repo, dict(changes), bump=False, message=message)
+        shas.append(_git(repo, "rev-parse", "HEAD"))
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
+    _git(repo, "checkout", "-q", main)
+    _git(repo, "branch", "-D", "dev-line")
+    return shas
+
+
+def _pick(repo: Path, sha: str) -> None:
+    """cherry-pick -x, as the skill does, then bump the version as a release does."""
+    _git(repo, "cherry-pick", "-x", sha)
+
+
+STRADDLE_ENGINE = ("feat: engine half (nexus-aaaaa)", {"src/nexus/a.py": "a = 2\n"})
+STRADDLE_PLUGIN = ("feat: plugin half (nexus-aaaaa)", {"conexus/skills/a.md": "skill v2\n"})
+
+
+def test_a_bead_with_a_src_half_on_develop_is_ineligible(repo: Path) -> None:
+    """The plugin half is picked, the src/ half is not. Mutation: drop the
+    straddle check (straddling_beads returns no findings): this exits 0."""
+    engine, plugin = _develop(repo, [STRADDLE_ENGINE, STRADDLE_PLUGIN])
+    _pick(repo, plugin)
+    _commit(repo, {}, message="chore(release): conexus 7.86.4")
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "INELIGIBLE: bead nexus-aaaaa straddles the lane" in r.stdout
+    assert engine[:10] in r.stdout
+    assert "src/nexus/a.py" in r.stdout
+    assert r.stdout.rstrip().splitlines()[-1].startswith(FAIL_LINE)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["scripts/s.py", "service/pom.xml", "tests/e2e/release-battery.sh", "conexus/daemon/d.py"],
+)
+def test_a_bead_half_in_any_refused_area_straddles(repo: Path, path: str) -> None:
+    """The gate's own classification decides, not a src/-only list. Mutation:
+    judge only src/ paths."""
+    _engine, plugin = _develop(
+        repo, [("fix: other half (nexus-aaaaa)", {path: "changed\n"}), STRADDLE_PLUGIN]
+    )
+    _pick(repo, plugin)
+    _commit(repo, {}, message="chore(release): conexus 7.86.4")
+    r = _check(repo)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"touches {path}" in r.stdout
+
+
+def test_a_bead_wholly_in_the_plugin_passes_and_says_what_it_examined(repo: Path) -> None:
+    """Mutation: refuse any bead named in the commits (a check that cannot pass)."""
+    first, second = _develop(
+        repo,
+        [
+            ("feat: one (nexus-aaaaa)", {"conexus/skills/a.md": "v2\n"}),
+            ("fix: two (nexus-aaaaa)", {"docs/a.md": "doc v2\n"}),
+        ],
+    )
+    _pick(repo, first)
+    _pick(repo, second)
+    _commit(repo, {}, message="chore(release): conexus 7.86.4")
+    r = _check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "1 bead(s) named in the commits, 2 commit(s) of theirs examined" in r.stdout
+    assert r.stdout.rstrip().splitlines()[-1] == PASS_LINE
+
+
+def test_a_bead_commit_that_only_moves_the_version_does_not_straddle(repo: Path) -> None:
+    """The check reuses classify(): a version-only edit of a version surface is
+    eligible. Mutation: treat every non-channel path as a straddle."""
+    bump, plugin = _develop(
+        repo,
+        [
+            ("chore: bump (nexus-aaaaa)", {"pyproject.toml": _pyproject_bumped()}),
+            STRADDLE_PLUGIN,
+        ],
+    )
+    _pick(repo, plugin)
+    _commit(repo, {}, message="chore(release): conexus 7.86.4")
+    r = _check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert bump  # the bump commit really sits on develop
+
+
+@pytest.mark.parametrize(
+    "other",
+    ["nexus-aaaaa.2", "nexus-aaaaab", "nexus-aaaa"],
+    ids=["child bead", "longer id", "prefix of the id"],
+)
+def test_bead_ids_match_as_whole_tokens(repo: Path, other: str) -> None:
+    """A different bead whose id merely contains this one is not this bead.
+    Mutation: substring match on the id (the old --grep did this)."""
+    _develop(repo, [(f"feat: engine work ({other})", {"src/nexus/a.py": "a = 2\n"})])
+    _git(repo, "checkout", "-q", "-b", "rel")
+    _commit(repo, {"conexus/skills/a.md": "v2\n"}, message="feat: plugin (nexus-aaaaa)")
+    r = _check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_commits_already_in_the_base_tag_are_not_a_straddle(repo: Path) -> None:
+    """A bead whose src/ half shipped in an earlier release is whole by now.
+    Mutation: scan develop's whole history instead of base..develop."""
+    _commit(repo, {"src/nexus/a.py": "a = 2\n"}, bump=False, message="feat: engine (nexus-aaaaa)")
+    _git(repo, "tag", "-f", "v7.86.3")
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
+    (plugin,) = _develop(repo, [STRADDLE_PLUGIN])
+    _pick(repo, plugin)
+    _commit(repo, {}, message="chore(release): conexus 7.86.4")
+    r = _check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_a_merge_commit_naming_the_bead_is_not_scanned(repo: Path) -> None:
+    """Only the bead's own commits are judged; a merge's message is not one.
+    Mutation: include merges (then the merge's first-parent diff is judged)."""
+    _develop(repo, [STRADDLE_PLUGIN])
+    _git(repo, "checkout", "-q", "-b", "side", "origin/develop")
+    _commit(repo, {"src/nexus/a.py": "a = 3\n"}, bump=False, message="feat: unrelated")
+    _git(repo, "checkout", "-q", "-b", "mergeline", "origin/develop")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "Merge side (nexus-aaaaa)", "side")
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    (plugin,) = _git(repo, "log", "--format=%H", "-1", "--grep=plugin half", "origin/develop").split()
+    _pick(repo, plugin)
+    _commit(repo, {}, message="chore(release): conexus 7.86.4")
+    r = _check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_an_unreadable_develop_ref_is_unverified_not_a_pass(repo: Path) -> None:
+    """Mutation: treat a ref that does not resolve as 'no other commits'."""
+    _commit(repo, {"conexus/skills/a.md": "ok\n"}, message="feat: plugin (nexus-aaaaa)")
+    r = _run(repo, "--base", "v7.86.3", "--develop-ref", "origin/nope")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "--develop-ref origin/nope does not resolve" in r.stdout
+    assert r.stdout.rstrip().splitlines()[-1] == UNVERIFIED_LINE
+    assert PASS_LINE not in r.stdout
+
+
+def test_the_default_develop_ref_is_origin_develop(repo: Path) -> None:
+    """Mutation: default to a ref the fixture lacks (here: develop)."""
+    _commit(repo, {"conexus/skills/a.md": "ok\n"})
+    r = _check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "straddle check against origin/develop" in r.stdout
+
+
+def test_develop_ref_option_selects_the_reference(repo: Path) -> None:
+    """The ref is the option's, not a constant. Mutation: ignore --develop-ref."""
+    engine, plugin = _develop(repo, [STRADDLE_ENGINE, STRADDLE_PLUGIN])
+    _git(repo, "update-ref", "refs/heads/elsewhere", "origin/develop")
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "v7.86.3")
+    _pick(repo, plugin)
+    _commit(repo, {}, message="chore(release): conexus 7.86.4")
+    assert _check(repo).returncode == 0  # origin/develop is the tag: nothing else to find
+    r = _run(repo, "--base", "v7.86.3", "--develop-ref", "elsewhere")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert engine[:10] in r.stdout

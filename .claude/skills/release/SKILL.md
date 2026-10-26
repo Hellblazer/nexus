@@ -703,7 +703,12 @@ git cherry-pick --continue
 A conflict in a plugin file means the pick depends on a commit you skipped:
 `git cherry-pick --abort`, and defer that entry and every entry that builds on
 it to the next normal release. A commit that also touches `src/` or `service/`
-cannot be cherry-picked whole either: that entry waits. A change that names an
+cannot be cherry-picked whole either: that entry waits. So does a bead whose
+other commits do: the eligibility gate (item 4) reads every bead id named in
+the picked commits and refuses the release when another commit naming that bead
+on `origin/develop` since the tag touches a path the lane does not ship. It
+matches the whole bead id in commit messages, so a commit that does not name its
+bead is not seen by that check; the per-path rules still bind the diff. A change that names an
 nx verb the tag lacks fails the existing verb-rot test in the preflight; it is
 not eligible.
 
@@ -728,8 +733,10 @@ uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z   # last li
 uv run python scripts/check_engine_release_floor.py                    # must exit 0 before the PR (item 1: red closes the lane)
 ```
 
-For the eligibility script, exit 1 lists each offending path and why; exit 2 means
-it could not check. Neither is a pass.
+For the eligibility script, exit 1 lists each offending path or straddling bead
+(naming the commit) and why; exit 2 means it could not check, including a
+`--develop-ref` (default `origin/develop`, so fetch first) that does not resolve.
+Neither is a pass.
 
 **5. Gates.** From the release worktree with a clean tree (the mode refuses
 uncommitted or untracked paths, and refuses `--skip-preflight`):

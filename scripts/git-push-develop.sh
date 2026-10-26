@@ -19,9 +19,8 @@
 #
 #   A vouched MERGE commit also vouches for everything it merges in (the
 #   commits reachable from its second and later parents that are not yet on
-#   the remote branch). That is the release back-merge and the plugin-cut
-#   back-merge: the caller made the merge, so main's release-only commits
-#   ride it. Commits under the merge on its FIRST-parent line (a peer's
+#   the remote branch). That is the release back-merge: the caller made
+#   the merge, so main's release-only commits ride it. Commits under the merge on its FIRST-parent line (a peer's
 #   unpushed work on the local branch) are never covered by it.
 #
 # Environment:

@@ -258,7 +258,7 @@ class TestDetachedSource:
 
 
 class TestBackMerge:
-    """The release and plugin-cut back-merges: origin/main merged into
+    """The release back-merge: origin/main merged into
     develop carries main-only commits nobody on develop authored."""
 
     def _main_ahead(self, repos, tmp_path):

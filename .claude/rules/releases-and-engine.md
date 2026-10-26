@@ -14,6 +14,9 @@ paths:
   - "scripts/check_engine_release_floor.py"
   - "scripts/mvnw-leased.sh"
   - "tests/e2e/release-battery.sh"
+  - "tests/e2e/plugin-delivery-proof.sh"
+  - "scripts/check_plugin_only_eligibility.py"
+  - "scripts/plugin_channel.py"
   - ".claude/skills/release/**"
   - ".claude/skills/engine-release/**"
 ---

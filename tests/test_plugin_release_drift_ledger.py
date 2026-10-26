@@ -1071,14 +1071,18 @@ class TestTheCIWiringItself:
         assert "github.event_name == 'pull_request'" in str(env["PR_HEAD_SHA"])
         assert 'git fetch --depth=1 origin "$PR_HEAD_SHA"' in step["run"]
 
-    def test_the_fetch_step_tolerates_the_anchored_shape(self) -> None:
-        """Site 2 of the window (nexus-a2wmi.4): the per-ref bash loop must
-        accept plugin-v<pyproject>-<n> for the current version on a cut PR,
-        keeping the hard exit for every other unresolvable ref."""
+    def test_the_fetch_step_no_longer_tolerates_the_anchored_shape(self) -> None:
+        """The anchored plugin-v<version>-<n> channel is retired
+        (nexus-rbmja.8) and nothing produces such a ref, so the per-ref bash
+        loop tolerates only v<pyproject>; an absent anchored ref hard-exits
+        like any other unresolvable one."""
         run = self._fetch_step()["run"]
-        assert 'grep -qE "^plugin-v${version_re}-[1-9][0-9]*$"' in run, (
-            "the anchored-shape tolerance is gone from the fetch loop: every "
-            "plugin-cut PR hard-exits at the fetch step."
+        assert "plugin-v" not in run, (
+            "the fetch loop still names the retired anchored tag shape and "
+            "would wave an absent plugin-vX.Y.Z-N ref through"
+        )
+        assert 'if [ "$ref" = "v$version" ]; then' in run, (
+            "the client release window tolerance is gone from the fetch loop"
         )
 
 

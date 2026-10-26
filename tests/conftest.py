@@ -1431,8 +1431,8 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # hook) appends one sha to ``session_commits/<session_id>`` after every
     # ``git commit`` a Claude Code session makes. Several sessions share the
     # box and commit at any time, so a 90-second unit run routinely sees a
-    # peer's file grow: MEASURED on the plugin-v7.36.1-1 cut battery
-    # (two peers' files modified during tests/hooks/). Append-only, one
+    # peer's file grow: MEASURED on the 7.36.1 plugin cut battery
+    # (the retired anchored channel, nexus-rbmja.8; two peers' files modified during tests/hooks/). Append-only, one
     # line per commit, never read by any test.
     "session_commits/",
     # The conexus plugin's git-integrity hook, REMOVED from the tree at
@@ -1515,7 +1515,7 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # configured) every live ``nx-mcp`` host and the aspect-worker daemon
     # re-mints and rewrites the lease when its 1 h TTL crosses the 20 %
     # refresh threshold -- entirely independent of pytest. MEASURED
-    # 2026-08-30 (plugin-cut rehearsal run 7, this box armed since RDR-005
+    # 2026-08-30 (rehearsal run 7 of the retired anchored plugin cut, this box armed since RDR-005
     # step (d) that morning): the guard failed a 487-passed / 0-failed
     # tests/hooks run on exactly ``MODIFIED data_token_lease.<digest>``;
     # the lease's own ``minted_by_pid`` was the live aspect-worker daemon
@@ -1529,7 +1529,7 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # ``<config_dir>/aspect_wake`` from ``HttpAspectQueue`` after EVERY
     # successful enqueue, i.e. from any live nx-mcp host or CLI on the box
     # that stores or indexes, in any session -- independent of pytest.
-    # MEASURED 2026-08-30 (plugin-cut rehearsal, final host run): the guard
+    # MEASURED 2026-08-30 (final host run of the retired anchored plugin-cut rehearsal): the guard
     # failed a 481-passed / 0-failed tests/hooks run on exactly ``MODIFIED
     # aspect_wake``; the live file's mtime was one minute old at the time,
     # with two other Claude sessions active on the box. Unit tests resolve

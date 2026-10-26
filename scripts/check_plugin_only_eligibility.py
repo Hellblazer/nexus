@@ -8,7 +8,8 @@ A patch release off the last client tag may skip the heavy battery legs
 only when its diff from that tag touches nothing the nx code under test
 is built from.
 
-    uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z [--head HEAD]
+    uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z [--head HEAD] \\
+        [--develop-ref origin/develop]
 
 ``--base`` must be a client tag ``vX.Y.Z`` and ``--head`` must descend from it.
 Diffs ``base..head`` (raw, renames off, so a move out of ``src/`` shows the
@@ -28,6 +29,18 @@ delivered, nexus-konsk) and every changed path is one of:
      ``mcpb/pyproject.toml`` (that line and the ``conexus>=`` pin),
      ``mcpb/manifest.json`` (the top-level ``version``), ``uv.lock``
      (the ``conexus`` package stanza's ``version`` line).
+
+A bead must also not straddle the lane (nexus-rbmja.10). Each bead id named
+in the commit messages of ``base..head`` (``cherry-pick -x`` keeps the original
+message) is looked up on ``--develop-ref`` (default ``origin/develop``): every
+non-merge commit in ``base..develop-ref`` whose message names that bead is
+classified by the rules above, and one that touches a path outside the eligible
+set makes the lane INELIGIBLE, naming the bead and the commit. A cherry-pick
+that takes the plugin half of a bead and leaves its ``src/`` half behind is
+exactly what this catches. Attribution is by commit message, matched on the
+whole bead token, so a straddling commit that does not name its bead escapes
+this check; the per-path rules above are what still bind it. An unreadable
+``--develop-ref`` is UNVERIFIED, never a pass.
 
 Everything else is INELIGIBLE (exit 1, each offender with its reason):
 ``src/`` (the engine pin lives there), ``service/``, any other line of the
@@ -298,6 +311,76 @@ def version_bump_problem(base: str, head: str, cwd: Path) -> str | None:
     return None
 
 
+# ---- the bead-level straddle check -------------------------------------------
+
+_BEAD_TOKEN = re.compile(r"nexus-[a-z0-9]+(?:\.[0-9]+)*")
+
+
+def bead_ids_in(text: str) -> set[str]:
+    """Whole bead tokens in *text* (``nexus-abc.2`` is not ``nexus-abc``)."""
+    return set(_BEAD_TOKEN.findall(text))
+
+
+def _log_messages(range_spec: str, cwd: Path) -> list[tuple[str, str]]:
+    """(sha, full message) of each non-merge commit in *range_spec*."""
+    out = _git(
+        ["log", "--no-merges", "--format=%H%x00%B%x01", range_spec], cwd
+    )
+    if out.returncode != 0:
+        raise Unverifiable(
+            f"git log {range_spec} failed (rc {out.returncode}): "
+            f"{out.stderr.decode(errors='replace').strip()}"
+        )
+    text = out.stdout.decode("utf-8", errors="replace")
+    commits: list[tuple[str, str]] = []
+    for record in text.split("\x01"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        sha, _, message = record.partition("\x00")
+        commits.append((sha.strip(), message))
+    return commits
+
+
+class Straddle(NamedTuple):
+    bead: str
+    sha: str
+    path: str
+    reason: str
+
+
+def straddling_beads(
+    base: str, head: str, develop_ref: str, cwd: Path
+) -> tuple[list[Straddle], int, int]:
+    """(findings, beads named in base..head, develop commits examined).
+
+    A bead straddles when a commit on *develop_ref* that names it touches a
+    path :func:`classify` refuses, judged against that commit's own parent.
+    """
+    probe = _git(["rev-parse", "--verify", "--quiet", f"{develop_ref}^{{commit}}"], cwd)
+    if probe.returncode != 0:
+        raise Unverifiable(f"--develop-ref {develop_ref} does not resolve to a commit")
+    beads: set[str] = set()
+    for _sha, message in _log_messages(f"{base}..{head}", cwd):
+        beads |= bead_ids_in(message)
+    findings: list[Straddle] = []
+    examined = 0
+    if not beads:
+        return findings, 0, 0
+    for sha, message in _log_messages(f"{base}..{develop_ref}", cwd):
+        named = sorted(beads & bead_ids_in(message))
+        if not named:
+            continue
+        examined += 1
+        for change in changed_paths(f"{sha}^", sha, cwd):
+            _category, reason = classify(change, f"{sha}^", sha, cwd)
+            if reason is not None:
+                findings.extend(
+                    Straddle(bead, sha, change.path, reason) for bead in named
+                )
+    return findings, len(beads), examined
+
+
 # ---- classification ----------------------------------------------------------
 
 
@@ -340,7 +423,9 @@ def classify(
     return "other", "outside the plugin channel, tests/, docs/ and the version surfaces"
 
 
-def evaluate(base: str, head: str, cwd: Path) -> int:
+def evaluate(
+    base: str, head: str, cwd: Path, develop_ref: str = "origin/develop"
+) -> int:
     if not _CLIENT_TAG.match(base):
         raise Unverifiable(f"--base {base!r} must be the last client tag, vX.Y.Z")
     _resolve(base, cwd, "base")
@@ -365,9 +450,20 @@ def evaluate(base: str, head: str, cwd: Path) -> int:
             offenders.append(f"INELIGIBLE: {change.path} [{change.status}] {reason}")
     if (bump := version_bump_problem(base, head, cwd)) is not None:
         offenders.append(f"INELIGIBLE: version bump: {bump}")
+    straddles, bead_count, develop_commits = straddling_beads(
+        base, head, develop_ref, cwd
+    )
+    for item in straddles:
+        offenders.append(
+            f"INELIGIBLE: bead {item.bead} straddles the lane: commit "
+            f"{item.sha[:10]} on {develop_ref} touches {item.path} ({item.reason}); "
+            f"ship the whole bead in a normal release"
+        )
     summary = ", ".join(f"{n} {name}" for name, n in sorted(categories.items()))
     sys.stdout.write(
         f"examined {base}..{head}: {len(changes)} changed paths ({summary})\n"
+        f"straddle check against {develop_ref}: {bead_count} bead(s) named in the "
+        f"commits, {develop_commits} commit(s) of theirs examined\n"
     )
     if offenders:
         sys.stdout.write("\n".join(offenders) + "\n")
@@ -383,9 +479,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--base", required=True, help="last client tag, e.g. v7.86.3")
     parser.add_argument("--head", default="HEAD")
+    parser.add_argument(
+        "--develop-ref",
+        default="origin/develop",
+        help="where the beads' other commits live (default origin/develop)",
+    )
     args = parser.parse_args(argv)
     try:
-        return evaluate(args.base, args.head, Path.cwd())
+        return evaluate(args.base, args.head, Path.cwd(), args.develop_ref)
     except Unverifiable as exc:
         sys.stdout.write(f"cannot verify: {exc}\n{UNVERIFIED_LINE}\n")
         return 2

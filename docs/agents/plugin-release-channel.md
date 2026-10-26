@@ -4,7 +4,7 @@ The independent plugin channel of RDR-197 (anchored `plugin-vX.Y.Z-n` tags, a cu
 
 Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `.claude-plugin/marketplace.json`) now ships ahead of `src/` work as a patch release on the normal client tag form: the plugin-only fast lane. The `release` skill's "Plugin-only fast lane" section is the only description of the steps. The pieces it uses:
 
-- `scripts/check_plugin_only_eligibility.py` refuses a diff that leaves the plugin surface, reusing the allowlist in `scripts/plugin_channel.py`.
+- `scripts/check_plugin_only_eligibility.py` refuses a diff that leaves the plugin surface, reusing the allowlist in `scripts/plugin_channel.py`, and refuses a release whose picked commits name a bead with another commit on `origin/develop` since the tag that touches a refused path.
 - `tests/e2e/release-battery.sh --plugin-only` runs the legs a plugin-only diff can change and reports the rest as skipped.
 - `tests/e2e/plugin-delivery-proof.sh` proves, after publish, that an install of the previous release receives the new plugin files through Claude Code's normal plugin update.
 - `conexus/PENDING_RELEASE.md` is the cherry-pick list, and `tests/test_plugin_release_drift_ledger.py` keeps it honest.

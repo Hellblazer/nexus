@@ -26,20 +26,25 @@ nothing.
 **Do not use this to justify skipping a release.** If a guard matters enough to
 mechanize, it matters enough to ship.
 
-**Deferring a straddling entry (nexus-2x3qy).** A plugin-only release
-cherry-picks ledger entries from `develop` onto a branch off the last client
-tag (`release` skill, "Plugin-only fast lane"). An entry whose bead also
-touches wheel content (`src/`, `conexus/plans/`, `conexus/daemon/`, `mcpb/`,
-`dt/`) cannot be cherry-picked whole and the eligibility gate refuses it. Move
-that entry under `## Deferred to the next client release` below so the whole
-bead ships together at the next normal release. A deferred entry is exempt
-from the release-window "ledger must be empty" rule above -- still declared
-there is correct, not stale -- and stays exactly where it is until moved back
-deliberately.
+**Deferring a straddling entry (nexus-2x3qy, nexus-rbmja.10).** A plugin-only
+release cherry-picks commits from `develop` onto a branch off the last client
+tag (`release` skill, "Plugin-only fast lane"). The eligibility gate reads the
+bead ids named in those commits and refuses the release when any other commit
+on `origin/develop` since the tag that names the same bead touches a path the
+lane does not ship (`src/`, `service/`, `scripts/`, `.github/`, `mcpb/`,
+`conexus/plans/`, `conexus/daemon/`, release machinery under `tests/`, and so
+on). Attribution is by commit message, matched on the whole bead id, so a
+commit that does not name its bead is not seen by that check. To keep a
+straddling entry out of the release, move it under
+`## Deferred to the next client release` below and do not cherry-pick its
+commits, so the whole bead ships together at the next normal release. A
+deferred entry is exempt from the release-window "ledger must be empty" rule
+above -- still declared there is correct, not stale -- and stays exactly where
+it is until moved back deliberately.
 
 ---
 
-## Awaiting the next release or plugin cut (pinned: v7.86.3)
+## Awaiting the next release (pinned: v7.86.3)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 

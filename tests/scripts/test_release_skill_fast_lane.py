@@ -21,6 +21,7 @@ REQUIRED_TOKENS = (
     "check_plugin_only_eligibility.py",
     "plugin-delivery-proof.sh",
     "cherry-pick -x",
+    "--develop-ref",
 )
 RETIRED_TOKENS = (
     "cut_plugin_release",

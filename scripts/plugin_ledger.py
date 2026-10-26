@@ -8,7 +8,7 @@ Moved out of the anchored-tag cut script (nexus-rbmja.2), since retired
 Under the plugin-only fast lane the ledger is the cherry-pick list, and an
 entry under "Deferred to the next client release" still means "do not
 cherry-pick this one". The Phase 2 guard tests the tree against the
-marketplace pin, not the cut, so it travels with the ledger test.
+marketplace pin, so it travels with the ledger test.
 """
 
 from __future__ import annotations
@@ -97,12 +97,10 @@ _HEADING_RE = re.compile(r"^##\s+(.*\S)\s*$")
 def _deferred_entries(ledger_text: str) -> list[str]:
     """Path-carrying entries sitting under :data:`DEFERRED_SECTION_HEADING`.
 
-    A deferred entry's straddling bead is exempt from
-    :func:`atomic_split_check` -- that is the whole point of deferring
-    it -- and :func:`deferred_paths` reads the same set to hold its
-    channel path(s) back from the cut's import. Reuses
-    ``_ledger_blocks`` so section membership and entry boundaries come
-    from the one grouping.
+    A deferred entry is one the releaser does not cherry-pick into a
+    plugin-only release, and :func:`deferred_paths` reads the same set for
+    the Phase 2 guard. Reuses ``_ledger_blocks`` so section membership and
+    entry boundaries come from the one grouping.
     """
     deferred: list[str] = []
     in_section = False
@@ -121,12 +119,11 @@ def _deferred_entries(ledger_text: str) -> list[str]:
 
 
 def deferred_paths(ledger_text: str) -> set[str]:
-    """Channel paths a DEFERRED entry says must not ship on this cut.
+    """Channel paths a DEFERRED entry says must not ship in this release.
 
     Only allowlisted (channel) spans count -- a deferred entry's wheel
     half was never going to ship regardless of deferral, and a bare
-    prefix root in prose (``conexus/``) is not a path, mirroring the
-    same filter :func:`_rewrite_ledger` applies to its own spans.
+    prefix root in prose (``conexus/``) is not a path.
     """
     paths: set[str] = set()
     for entry in _deferred_entries(ledger_text):
@@ -138,7 +135,7 @@ def deferred_paths(ledger_text: str) -> set[str]:
 
 
 #: RDR-228 Phase 2 guard (nexus-sv2wx.13). Phase 2's plugin parts never go
-#: out in a plugin-only cut ahead of the client release that carries
+#: out in a plugin-only release ahead of the client release that carries
 #: `--bootstrap` and the real server's setup tools. Phase 2 has SHIPPED to
 #: installs when the reference tree carries this file. Phase 1 never adds it,
 #: so its presence tells Phase 2 content from Phase 1 content in the files
@@ -157,10 +154,10 @@ PHASE1_LAUNCH_FILES = frozenset({PHASE1_LAUNCHER, "conexus/launch/nx_standin.py"
 #:
 #: Every other ``conexus/`` file Phase 2 changes is listed by name, because a
 #: partial list is a hole: the hook shim calls ``_cli_lookup.cannot_start``,
-#: so a cut that ships the shim without the lookup raises ``AttributeError``
+#: so a release that ships the shim without the lookup raises ``AttributeError``
 #: on every hook it runs, and the lockstep hook skips the upgrade dispatch
 #: for a CLI that cannot start with no setup process to repair it. The
-#: README and the command registry describe ``/conexus:setup``, which a cut
+#: README and the command registry describe ``/conexus:setup``, which a release
 #: that holds the command back does not ship. A path that is safe alone is
 #: not listed here but in :data:`PHASE2_SAFE_ALONE`, with a reason, and
 #: ``tests/test_plugin_release_drift_ledger.py`` fails on a changed
@@ -188,7 +185,7 @@ PHASE2_GUARDED_WITHOUT_LAUNCHER = (
     "conexus/.mcp.json",
 )
 #: Changed on the Phase 2 branch against the release reference, yet safe to
-#: ship in a plugin-only cut ahead of the client release: path (exact, or a
+#: ship in a plugin-only release ahead of the client release: path (exact, or a
 #: ``/``-ending prefix) -> why. Each reason is a claim about the file, and
 #: the drift-ledger test checks the one it can: that a Python file here
 #: calls no name of a guarded module that the reference lacks. An entry is
@@ -196,8 +193,8 @@ PHASE2_GUARDED_WITHOUT_LAUNCHER = (
 #: path stands alone.
 PHASE2_SAFE_ALONE: dict[str, str] = {
     "conexus/PENDING_RELEASE.md": (
-        "the ledger declares what ships; it runs nothing, and a cut rewrites "
-        "it for the cut itself"
+        "the ledger declares what ships; it runs nothing, and a release rewrites "
+        "it for the release itself"
     ),
     "conexus/.mcp.json": (
         "its change is nexus-fbtyl's (dropping the server-level alwaysLoad "
@@ -274,14 +271,12 @@ def phase2_deferral_check(
 ) -> str:
     """Every guarded path that differs from *reference* must be DEFERRED.
 
-    *reference* is what installs already have: ``origin/main`` in a cut
-    (the tree the cut branch starts from and holds deferred paths back
-    to), the marketplace pin in the drift-ledger test. NOT the client tag:
-    after one plugin cut ships Phase 1, the client tag still lacks it, and
-    measuring from there would demand deferral entries for files that no
-    longer differ from the pin, which the stale-entry test then rejects.
-    *source_ref* is the tree the cut ships from; *ledger_text* is that
-    tree's ``conexus/PENDING_RELEASE.md``.
+    *reference* is what installs already have: the marketplace pin in the
+    drift-ledger test. NOT the client tag: once a plugin-only release has
+    shipped Phase 1, the client tag still lacks it, and measuring from there
+    would demand deferral entries for files that no longer differ from the
+    pin, which the stale-entry test then rejects. *source_ref* is the tree
+    being judged; *ledger_text* is that tree's ``conexus/PENDING_RELEASE.md``.
 
     Returns a one-line account: that it had nothing to check (Phase 2 is
     not in the tree, or *reference* already carries it), or how many paths
@@ -295,8 +290,8 @@ def phase2_deferral_check(
     Phase 1 and Phase 2 then ship in the SAME client release and every path
     of both sits under "Deferred". The guard widens to the launcher's
     callers (``hooks.json``, ``.mcp.json``, the lockstep hook) in that
-    case, so a plugin-only cut cannot ship entries that call a launcher
-    the cut holds back.
+    case, so a plugin-only release cannot ship entries that call a launcher
+    it holds back.
     """
     for ref in (reference, source_ref):
         if _git(repo, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
@@ -319,7 +314,7 @@ def phase2_deferral_check(
     launcher_shipped = _exists_at(repo, reference, PHASE1_LAUNCHER)
     guarded = phase2_guarded_paths(repo, reference)
     # --no-renames: a rename lists only its new name by default, and the
-    # old name's deletion reaches installs through a cut like any edit.
+    # old name's deletion reaches installs through a release like any edit.
     differing = [
         line.strip()
         for line in _git(
@@ -338,7 +333,7 @@ def phase2_deferral_check(
             f"'## {DEFERRED_SECTION_HEADING}' in {LEDGER}. Not under that "
             f"heading:\n  " + "\n  ".join(missing)
             + "\nMove each entry under the 'Deferred to the next client "
-            "release' heading; a plugin-only cut ahead of the client release "
+            "release' heading; a plugin-only release ahead of the client release "
             "that carries --bootstrap and the real setup tools would ship "
             "setup parts that cannot work. Do not take a shared file off the "
             "guarded list to make this pass. An unrelated fix to a guarded "
