@@ -1435,22 +1435,6 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # (the retired anchored channel, nexus-rbmja.8; two peers' files modified during tests/hooks/). Append-only, one
     # line per commit, never read by any test.
     "session_commits/",
-    # The conexus plugin's git-integrity hook, REMOVED from the tree at
-    # nexus-i93tz (Sam, 2026-10-25) but still LIVE in every session whose
-    # installed plugin copy is 7.83.x to 7.86.x: it writes
-    # ``git-integrity/<session_id>/*`` on every tool call of the Claude
-    # session that is RUNNING this pytest, so the directory changes during any
-    # run launched from such a session with no test involved. MEASURED
-    # 2026-10-26 on the removing worktree: with this entry deleted, a run
-    # failed the mutation guard on 8 ``git-integrity/`` paths. DELETE THIS
-    # ENTRY (and flip ``test_git_integrity_carveout_waits_for_the_plugin_upgrade``)
-    # once the plugin cut that drops the hook is installed in the sessions
-    # that run these tests; until then it is a live writer, not a dead carve-out.
-    # MECHANICAL TRIGGER: that test goes RED, with the delete instruction, as
-    # soon as the conexus ref pinned in .claude-plugin/marketplace.json is a tag
-    # whose conexus/hooks/hooks.json no longer registers the hook (the plugin
-    # cut that drops it), so this entry cannot outlive its writer unnoticed.
-    "git-integrity/",
     # Live aspect-worker daemon's own address/heartbeat registration file
     # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
     # MEASURED directly (nexus-pfuns round 1): ran `uv run pytest tests/
