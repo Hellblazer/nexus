@@ -4190,7 +4190,8 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # real catalog engine then refuses with a 409 (referenced=0). Proven
     # by A/B: swapped -> FAILED, reverted -> passes. Not swappable;
     # reverted to the real literal.
-    "tests/test_catalog_path.py::TestIndexDocumentSourceKey::test_staleness_check_uses_content_hash_when_catalog_absent",
+    # nexus-3ajpd renamed it from test_staleness_check_uses_content_hash_when_catalog_absent; same reason.
+    "tests/test_catalog_path.py::TestIndexDocumentSourceKey::test_staleness_check_reads_the_catalog_document_not_a_content_hash_where",
     #
     # nexus-03wze fix round (review fold): test_rdr_109_phase2_
     # dispatch.py's file-level exclusion reclassified per-test.

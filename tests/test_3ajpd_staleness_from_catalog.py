@@ -194,7 +194,7 @@ def test_a_stranded_fence_is_stale_whatever_a_chunk_row_says(gate, state, monkey
 @GATES
 def test_a_complete_document_with_a_stale_model_is_stale(gate, monkeypatch, tmp_path) -> None:
     """Regression guard (passes on the parent commit): the model compare survives the rewrite."""
-    col = _SharedCol({CHASH: {"content_hash": H_A, "embedding_model": "voyage-code-3"}})
+    col = _SharedCol({CHASH: {"content_hash": H_A, "embedding_model": "an-older-model"}})
     cat = _Cat("complete", H_A, [CHASH])
     assert _run_gate(gate, monkeypatch, tmp_path, cat, col, H_A) is True
 
