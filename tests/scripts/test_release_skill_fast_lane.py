@@ -121,7 +121,10 @@ def test_engine_floor_check_precedes_the_pr_and_closes_the_lane() -> None:
     section = _section()
     commands = _fenced_lines(section)
     floor = "uv run python scripts/check_engine_release_floor.py"
-    assert any(c.startswith(floor) for c in commands), "the floor check is not a command of the lane"
+    assert any(c.split("#")[0].strip() == floor for c in commands), (
+        "the floor check is not a command of the lane, in its bare form"
+    )
+    assert "--paired-deploy-auto" in _flat(section), "the section does not say why it runs the bare form"
     # the lane is open only while the newest engine tag is the base tag's pin, and a red closes it
     flat = _flat(section)
     assert "newest published `engine-service-v*` tag is the one the base tag pins" in flat

@@ -331,6 +331,17 @@ if [ "$SOURCE_GIVEN" -eq 0 ]; then
     done <<EOF
 $LIVE_LIST
 EOF
+    # Every plugin the release ships must still be listed: a marketplace that dropped one
+    # would leave its users on the old release with every listed entry looking current.
+    # Checked after the versions, so a stale marketplace reports its stale version first.
+    LIVE_NAMES="$(printf '%s\n' "$LIVE_LIST" | cut -f1)"
+    while IFS= read -r want; do
+        [ -n "$want" ] || continue
+        printf '%s\n' "$LIVE_NAMES" | grep -qxF "$want" \
+            || problem "GitHub marketplace: $want ships in $TAG_NEW but is not listed"
+    done <<EOF
+$ALL_NAMES
+EOF
     if [ -s "$PROBLEMS" ]; then
         failed "$PREV -> $NEW: the real GitHub marketplace $REPO does not list the new release, claude $CLAUDE_VERSION (first: $(sed -n '1p' "$PROBLEMS"))"
     fi

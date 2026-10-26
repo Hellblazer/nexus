@@ -312,6 +312,22 @@ set_real none
 out="$(run_live ok --prev 1.0.0 --new 1.0.1)"
 expect_has "UNVERIFIED line" "$out" "PLUGIN DELIVERY PROOF UNVERIFIED"
 expect_has "exit 2" "$out" "rc=2"
+
+echo "Test g4: a real marketplace that lists no plugin FAILS"
+set_real v1.0.1
+/usr/bin/python3 -c 'import json,sys;p=sys.argv[1];m=json.load(open(p));m["plugins"]=[];json.dump(m,open(p,"w"))' "$SHIMS/real_market.json"
+out="$(run_live ok --prev 1.0.0 --new 1.0.1)"
+expect_has "FAILED line" "$out" "PLUGIN DELIVERY PROOF FAILED"
+expect_has "says it lists none" "$out" "the real marketplace lists no plugin"
+expect_lacks "no PASSED" "$out" "PLUGIN DELIVERY PROOF PASSED"
+
+echo "Test g5: a real marketplace that dropped a shipped plugin FAILS"
+set_real v1.0.1
+/usr/bin/python3 -c 'import json,sys;p=sys.argv[1];m=json.load(open(p));m["plugins"]=m["plugins"][1:];json.dump(m,open(p,"w"))' "$SHIMS/real_market.json"
+out="$(run_live ok --prev 1.0.0 --new 1.0.1)"
+expect_has "FAILED line" "$out" "PLUGIN DELIVERY PROOF FAILED"
+expect_has "names the dropped plugin" "$out" "but is not listed"
+expect_lacks "no PASSED" "$out" "PLUGIN DELIVERY PROOF PASSED"
 set_real v1.0.1
 
 # ── c. an empty witness set ──────────────────────────────────────────────────

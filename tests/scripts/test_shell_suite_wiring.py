@@ -212,7 +212,7 @@ SUITES = [
     # fixture repo; no network, no real claude). 73 measured: delivery, stale cache, stale installPath,
     # missing installPath, deleted-file-left, wrong/absent registry after install, the real-marketplace
     # leg, UNVERIFIED cases and the HOME/env/git/python canaries.
-    _Suite("tests/e2e/plugin_delivery_proof_test.sh", 73),
+    _Suite("tests/e2e/plugin_delivery_proof_test.sh", 79),
 ]
 
 

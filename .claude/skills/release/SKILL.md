@@ -658,7 +658,11 @@ while the newest published `engine-service-v*` tag is the one the base tag pins:
 `release.yml` runs `check_engine_release_floor.py` at tag time, its pin-currency
 check goes red when a newer engine tag exists, and the only remedy (bumping
 `REQUIRED_ENGINE_VERSION`) is a `src/` change this lane refuses. A red there
-closes the lane: cut a normal release.
+closes the lane: cut a normal release. The lane runs the bare form, not the
+workflow's `--paired-deploy-auto`: they agree when the cloud meets the floor, and
+when it does not the bare form goes red where the workflow could pass on a fresh
+paired engine tag. A paired engine tag means a normal paired release, so the
+stricter form is the right one here.
 
 The base tag must itself carry the lane's machinery, because the gate refuses
 `scripts/` and the harness in the diff and there is no exemption. The releaser
