@@ -5,14 +5,17 @@ import json
 import struct
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from tests._catalog_fixture_ops import active_reader
 from tests.conftest import fake_credentials
 
+from nexus.catalog.types import ManifestRow
 from nexus.pdf_chunker import TextChunk
 from nexus.pdf_extractor import ExtractionResult
 from nexus.db.t3 import T3Database
@@ -128,8 +131,13 @@ def throwaway_t3():
 @pytest.fixture()
 def mock_t3() -> MagicMock:
     m = create_autospec(T3Database, instance=True)
-    m.get_or_create_collection.return_value = MagicMock(
-        get=MagicMock(return_value={"ids": [], "metadatas": []}))
+
+    def _get(*, ids=None, **_kw):
+        # a post-pass reads the manifest's chunks by id (nexus-ahm18); any where-read finds nothing
+        ids = list(ids or [])
+        return {"ids": ids, "metadatas": [{} for _ in ids]}
+
+    m.get_or_create_collection.return_value = MagicMock(get=MagicMock(side_effect=_get))
     return m
 
 
@@ -177,6 +185,28 @@ def _pop_chunks(db: HttpPipelineDB, h: str, n: int) -> None:
                        embedding=_fake_embedding(i))
 
 
+@contextmanager
+def _document_owns(*chashes: str):
+    """nexus-ahm18: the manifest the metadata post-pass reads. The streaming writer double sends no
+    manifest rows, and the post-pass selects the document's own chunks from the manifest, so a test
+    that drives a post-pass over a fake T3 names the chunks the document owns here. The selection
+    against the real engine is ``tests/test_ahm18_pdf_postpass_by_manifest.py`` and the PDF journey.
+
+    The patch is a spy, and leaving the block asserts it was called with a real ``doc_id`` and this
+    test's collection, so a drive that fell back to the ``content_hash`` selection (``doc_id`` not
+    passed through, or a dry run) fails here instead of passing for the wrong reason."""
+    calls: list[tuple[str, str]] = []
+
+    def _rows(doc_id: str, collection: str):
+        calls.append((doc_id, collection))
+        return [ManifestRow(position=i, chash=c) for i, c in enumerate(chashes)]
+
+    with patch("nexus.pipeline_stages._own_manifest_rows", side_effect=_rows):
+        yield calls
+    assert calls, "the post-pass never read the document's manifest: it selected by content_hash"
+    assert all(doc_id and collection == "docs__test" for doc_id, collection in calls), calls
+
+
 def _run_with_col(db, col_get_return, fake_result, fake_chunks,
                   pdf_path="/a.pdf", content_hash="abc123", collection="docs__test"):
     mock_col = MagicMock()
@@ -184,7 +214,7 @@ def _run_with_col(db, col_get_return, fake_result, fake_chunks,
     t3 = create_autospec(T3Database, instance=True)
     t3.get_or_create_collection.return_value = mock_col
     pc = fake_result.metadata["page_count"]
-    with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+    with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns(*col_get_return.get("ids", [])):
         ME.return_value.extract.side_effect = _fx(pc, fake_result)
         MC.return_value.chunk.return_value = fake_chunks
         pipeline_index_pdf(Path(pdf_path), content_hash, collection, t3,
@@ -831,7 +861,7 @@ class TestPipelineIndexPdf:
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}),
                  ("chunk 1", 1, {"page_number": 2, "chunk_type": "text"}))
         fr = _er(3)
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("c0", "c1"):
             ME.return_value.extract.side_effect = _fx(3, fr)
             MC.return_value.chunk.return_value = fc
             total = pipeline_index_pdf(Path("/test/doc.pdf"), "abc123", "docs__test",
@@ -844,6 +874,31 @@ class TestPipelineIndexPdf:
         # stamped complete.
         assert writer.events[-2:] == [("finish",), ("complete",)]
         assert db.get_pipeline_state("abc123") is None
+
+    @pytest.mark.t2_tenant
+    def test_a_post_pass_that_selects_no_chunk_after_an_upload_keeps_the_buffer_and_stamps_nothing(
+        self, db, mock_t3, writer, monkeypatch,
+    ) -> None:
+        """nexus-ahm18: the document's manifest names no chunk of this collection although two were
+        uploaded. The post-pass has examined nothing; it must fail, not finish the PDF without a
+        title, so the buffer is kept for a retry and nothing is stamped."""
+        monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id",
+                            lambda *a, with_created=False, **kw: ("1.1.1", False) if with_created else "1.1.1")
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}),
+                 ("chunk 1", 1, {"page_number": 2, "chunk_type": "text"}))
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+                patch("nexus.pipeline_stages._own_manifest_rows", return_value=[]), \
+                capture_logs() as logs:
+            ME.return_value.extract.side_effect = _fx(3, _er(3))
+            MC.return_value.chunk.return_value = fc
+            pipeline_index_pdf(Path("/test/doc.pdf"), "abc123", "docs__test",
+                               mock_t3, db=db, embed_fn=_embed, corpus="test")
+        (warn,) = [e for e in logs if e["event"] == "post_pass_selected_no_chunks"
+                   and e["post_pass"] == "enrich"]
+        assert warn["doc_id"] == "1.1.1" and warn["chunks_uploaded"] == 2
+        assert ("complete",) not in writer.events, "a failed post-pass stamps nothing"
+        state = db.get_pipeline_state("abc123")
+        assert state is not None and state["status"] == "failed", "the buffer is kept and resumable"
 
     @pytest.mark.t2_tenant
     def test_post_pass_failure_can_be_retried_not_skipped(self, db) -> None:
@@ -874,7 +929,7 @@ class TestPipelineIndexPdf:
         # Run 1: extraction/chunking/upload all succeed (the row is
         # marked 'completed' by uploader_loop mid-run), then the
         # enrichment post-pass fails.
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("abc123_0"):
             ME.return_value.extract.side_effect = _fx(1, fr)
             MC.return_value.chunk.return_value = fc
             first_total = pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test",
@@ -892,7 +947,7 @@ class TestPipelineIndexPdf:
         # uploaded, so all three stages short-circuit near-instantly on
         # resume and execution reaches the post-pass again for a genuine
         # retry -- this must NOT be a silent 0-chunk skip.
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("abc123_0"):
             ME.return_value.extract.side_effect = _fx(1, fr)
             MC.return_value.chunk.return_value = fc
             second_total = pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test",
@@ -1045,7 +1100,7 @@ class TestPipelineIndexPdf:
         t3 = create_autospec(T3Database, instance=True)
         t3.get_or_create_collection.return_value = mock_col
         t3.update_chunks.side_effect = Exception("quota exceeded")
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("abc123_0"):
             ME.return_value.extract.side_effect = _fx(1, _er(1))
             MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
             pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test", t3,
@@ -1079,7 +1134,7 @@ class TestPipelineIndexPdf:
         monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("indexing", "abc123"))
 
         def _run() -> int:
-            with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("abc123_0"):
                 ME.return_value.extract.side_effect = _fx(1, _er(1))
                 MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
                 return pipeline_index_pdf(Path("/postpass.pdf"), "abc123", "docs__test", t3,
@@ -1112,7 +1167,7 @@ class TestPipelineIndexPdf:
         monkeypatch.setattr(writer, "complete", _complete)
         monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id",
                             lambda *a, with_created=False, **kw: ("1.1.1", False) if with_created else "1.1.1")
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns("c0"):
             ME.return_value.extract.side_effect = _fx(1, _er(1))
             MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
             with pytest.raises(type(exc)):
@@ -1150,7 +1205,7 @@ class TestPipelineIndexPdf:
             embedded.append(len(texts))
             return _embed(texts, model)
 
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, _document_owns(*[f"c{i}" for i in range(6)]):
             ME.return_value.extract.side_effect = AssertionError("the PDF must not be extracted again")
             MC.return_value.chunk.return_value = six
             n = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
@@ -1684,6 +1739,28 @@ class TestPipelineIndexPdfDryRun:
         mock_complete.assert_not_called()
         mock_fail.assert_not_called()
         mock_hook.assert_not_called()
+
+    def test_a_dry_run_handed_a_doc_id_still_reads_no_manifest(self, db, throwaway_t3) -> None:
+        """nexus-ahm18: the post-passes' content_hash carve-out keys on ``dry_run``, not on an empty
+        ``doc_id``. A direct caller handing a dry run a doc_id must not read the real catalog from a
+        preview, and the preview's post-pass must still do its work in the throwaway store."""
+        fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
+        fr = _er(1)
+        fr.metadata["docling_title"] = "Preview Title"
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
+                patch("nexus.pipeline_stages._own_manifest_rows") as manifest, \
+                patch("nexus.pipeline_stages._catalog_pdf_hook"):
+            ME.return_value.extract.side_effect = _fx(1, fr)
+            MC.return_value.chunk.return_value = fc
+            total = pipeline_index_pdf(
+                Path("/dry-run.pdf"), "dryrun456", "docs__test",
+                throwaway_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True, doc_id="x",
+            )
+        assert total == 1
+        manifest.assert_not_called()
+        col = throwaway_t3.get_or_create_collection("docs__test")
+        (meta,) = col.get(where={"content_hash": "dryrun456"}, include=["metadatas"])["metadatas"]
+        assert meta["title"] == "Preview Title", "the preview's post-pass ran, selecting by content_hash"
 
     def test_dry_run_with_default_hooks_uploader_loop_fires_zero_hooks(
         self, db, throwaway_t3,

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from nexus.catalog.types import ManifestRow
     from nexus.hook_registry import HookRegistry
 
 import structlog
@@ -1866,10 +1867,15 @@ def pipeline_index_pdf(
         # Track post-pass success — pipeline data preserved on failure (nexus-pfmr).
         post_pass_ok = True
 
+        # nexus-ahm18: how many chunks the run uploaded, so a post-pass that selects none of them
+        # (a manifest that names none of this collection's chunks) fails loud instead of passing.
+        _uploaded_state = db.get_pipeline_state(content_hash)
+        _uploaded = int(_uploaded_state["chunks_uploaded"] or 0) if _uploaded_state else 0
+
         # 1. Metadata enrichment from ExtractionResult.
         if not _enrich_metadata_from_extraction(
             content_hash, extraction_result, pdf_path, t3, col, collection,
-            title_override=title_override,
+            title_override=title_override, doc_id=doc_id, dry_run=dry_run, chunks_uploaded=_uploaded,
         ):
             post_pass_ok = False
 
@@ -1884,7 +1890,10 @@ def pipeline_index_pdf(
                     return True
                 return False
 
-            if not _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page):
+            if not _update_chunk_metadata(
+                t3, col, collection, content_hash, _tag_table_page, doc_id=doc_id,
+                dry_run=dry_run, chunks_uploaded=_uploaded,
+            ):
                 post_pass_ok = False
 
         # 3. Stale chunk pruning: DELETED dead code (nexus-tbkk1). This used
@@ -2048,8 +2057,38 @@ def _enrich_metadata_from_extraction(
     collection: str,
     *,
     title_override: str = "",
+    doc_id: str = "",
+    dry_run: bool = False,
+    chunks_uploaded: int = 0,
 ) -> bool:
     """Post-pass: update chunk metadata with fields from ExtractionResult.
+
+    nexus-ahm18: the chunks to update are the ones the PDF's own manifest names
+    (*doc_id* -> ``get_manifest`` -> chash ids), never ``where content_hash=H``. A
+    chunk row's ``content_hash`` is the last writer's, so that where missed this
+    PDF's chunks another document had restamped and hit rows the PDF does not own.
+    Selection by manifest updates every chunk the PDF holds (a shared one included)
+    and no chunk it does not.
+
+    It does NOT make the values per-document, and it writes rows develop's selection
+    never reached. A row another document restamped between this PDF's upload and
+    this post-pass (its ``content_hash`` is not *content_hash*) is now written: its
+    ``title``, ``source_author`` and ``extraction_method`` are replaced by this PDF's
+    (the last-writer-wins limitation until those keys live in the catalog,
+    nexus-6pfgb.6, and the chunk-row keys are retired, nexus-6pfgb.27). Nothing else
+    is touched on such a row: no ``delete_keys`` (the co-owner's
+    ``quality_gate_overridden`` audit flag is never removed, and this PDF's own flag
+    is not set on it), and a key whose value here is empty is skipped, so a
+    co-owner's non-empty value is never blanked. A row that still carries this
+    PDF's hash is written in full (the empty strings, the flag's removal on a healthy
+    run), as develop wrote it. Each selected row's ``content_hash`` is read first
+    (one ``col.get(ids=...)`` per 300), then only keys are written, so the
+    nexus-w94eo merge race stays closed.
+
+    *dry_run* (a throwaway store with no catalog and nothing shared) keeps the
+    ``content_hash`` selection; so does an empty *doc_id*. On a real run with
+    *doc_id* a selection of no chunk while *chunks_uploaded* is positive fails the
+    post-pass (``post_pass_selected_no_chunks``): zero rows examined is not a pass.
 
     Resolves source_title (docling_title → pdf_title → filename) and
     source_author — matching the batch path in doc_indexer._pdf_chunks.
@@ -2106,33 +2145,137 @@ def _enrich_metadata_from_extraction(
         # landing between this read and this method's own write (another
         # post-pass, a concurrent frecency reindex) was silently discarded
         # the moment this method's copy-of-the-old-state committed over it.
-        # The engine's merge makes the read unnecessary — sending only
-        # `enrichment`'s keys leaves every other key (and any write that
-        # lands in between) untouched.
-        all_ids: list[str] = []
-        offset = 0
-        while True:
-            batch = _vector_with_retry(
-                col.get,
-                where={"content_hash": content_hash},
-                limit=300,
-                offset=offset,
+        # The engine's merge makes the read of the metadata unnecessary —
+        # sending only `enrichment`'s keys leaves every other key (and any
+        # write that lands in between) untouched. (nexus-ahm18: the only read
+        # left is each selected row's content_hash, to tell a row this PDF last
+        # wrote from one another document restamped; no metadata is written
+        # back from it.)
+        if doc_id and not dry_run:
+            chashes = list(dict.fromkeys(r.chash for r in _own_manifest_rows(doc_id, collection)))
+            stored = _stored_rows_by_id(col, chashes)
+            if not stored and _selected_nothing(
+                "enrich", doc_id, collection, content_hash, len(chashes), chunks_uploaded,
+            ):
+                return False
+            own_ids = [c for c in chashes if c in stored and stored[c].get("content_hash") == content_hash]
+            other_ids = [c for c in chashes if c in stored and stored[c].get("content_hash") != content_hash]
+        else:
+            own_ids, other_ids = _throwaway_ids_by_content_hash(col, content_hash), []
+
+        if own_ids:
+            t3.update_chunks(
+                collection, own_ids, [enrichment] * len(own_ids), delete_keys=delete_keys,
             )
-            all_ids.extend(batch.get("ids", []))
-            if len(batch.get("ids", [])) < 300:
-                break
-            offset += 300
-
-        if not all_ids:
-            return True
-
-        t3.update_chunks(
-            collection, all_ids, [enrichment] * len(all_ids), delete_keys=delete_keys,
-        )
+        # Rows another document restamped: values only. No delete_keys, no empty value, and not
+        # quality_gate_overridden, which is this document's fact about its own rows.
+        shared = {k: v for k, v in enrichment.items() if k != "quality_gate_overridden" and v not in ("", None)}
+        if other_ids and shared:
+            t3.update_chunks(collection, other_ids, [shared] * len(other_ids))
         return True
     except Exception as exc:  # noqa: BLE001 - best-effort metadata enrichment; logged via log.warning, returns False
         _log.warning("metadata_enrichment_failed", content_hash=content_hash, error=str(exc))
         return False
+
+
+_MANIFEST_ID_BATCH = 300
+
+
+def _own_manifest_rows(doc_id: str, collection: str) -> list[ManifestRow]:
+    """nexus-ahm18: the rows of *doc_id*'s own manifest that belong to *collection*, in position order.
+
+    One ``get_manifest`` call. A row's own ``collection`` (nexus-kzso5) is honoured when the engine
+    sends it; ``None`` (a pre-field engine) is taken as this collection. A catalog-read failure
+    propagates: the post-passes turn it into a failed post-pass, which keeps the pipeline buffer for a
+    retry, never into a silent empty selection.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - circular-dep avoidance (nexus.catalog.factory)
+
+    reader = make_catalog_reader()
+    try:
+        rows = reader.get_manifest(doc_id)
+    finally:
+        reader.close()
+    return [
+        r for r in rows
+        if getattr(r, "chash", "") and getattr(r, "collection", None) in (None, "", collection)
+    ]
+
+
+def _stored_rows_by_id(col: Any, chashes: list[str]) -> dict[str, dict]:
+    """The stored metadata of the chunk rows *chashes*, by id, read in batches of 300.
+
+    A chash no row holds is absent from the result. A failing batch raises, before any write.
+    """
+    stored: dict[str, dict] = {}
+    for start in range(0, len(chashes), _MANIFEST_ID_BATCH):
+        batch = _vector_with_retry(
+            col.get,
+            ids=chashes[start:start + _MANIFEST_ID_BATCH],
+            include=["metadatas"],
+        )
+        stored.update(zip(batch.get("ids", []), batch.get("metadatas", [])))
+    return stored
+
+
+def _selected_nothing(
+    post_pass: str, doc_id: str, collection: str, content_hash: str, manifest_chunks: int, chunks_uploaded: int,
+) -> bool:
+    """True, after a loud warning, when a real run's post-pass selected no chunk although some were uploaded.
+
+    A manifest that names none of this collection's chunks (unreadable as empty, every row of another
+    collection, no row live) would otherwise pass having examined nothing, and the PDF would finish with
+    no title, author or extraction method and no signal (the nexus-moht0 vacuous-gate doctrine). The
+    caller turns True into a failed post-pass, which keeps the pipeline buffer for a retry. No chunk
+    uploaded (a zero-chunk PDF) is not this case.
+    """
+    if chunks_uploaded <= 0:
+        return False
+    _log.warning(
+        "post_pass_selected_no_chunks",
+        post_pass=post_pass, doc_id=doc_id, collection=collection, content_hash=content_hash,
+        manifest_chunks_in_collection=manifest_chunks, chunks_uploaded=chunks_uploaded,
+    )
+    return True
+
+
+def _throwaway_ids_by_content_hash(col: Any, content_hash: str) -> list[str]:
+    """The ids of *content_hash*'s rows in a dry run's throwaway store.
+
+    The only place a post-pass still selects by ``content_hash``: a dry run has no catalog, so no
+    manifest to read, and its store holds nothing another document wrote, so the value cannot have
+    been restamped by a co-owner (nexus-ahm18).
+    """
+    ids: list[str] = []
+    offset = 0
+    while True:
+        batch = _vector_with_retry(
+            col.get,
+            where={"content_hash": content_hash},
+            limit=300,
+            offset=offset,
+        )
+        ids.extend(batch.get("ids", []))
+        if len(batch.get("ids", [])) < 300:
+            return ids
+        offset += 300
+
+
+def _own_labels_view(meta: dict, row: Any) -> dict:
+    """A copy of a chunk row's metadata whose labels are the document's own.
+
+    A chunk several documents hold has one T3 row, and its ``page_number`` / ``section_*`` are the
+    last writer's. The manifest row carries the label of this document's own position, and
+    ``labels_written`` says it is authoritative (an engine before the label columns, and a row
+    written before them, send ``labels_written`` false: the chunk row is then the only record, and
+    is used as it stands). Page 0 travels as null on the wire and means "not paged".
+    """
+    view = dict(meta)
+    if getattr(row, "labels_written", False):
+        view["page_number"] = row.page_number or 0
+        view["section_title"] = row.section_title or ""
+        view["section_type"] = row.section_type or ""
+    return view
 
 
 def _update_chunk_metadata(
@@ -2141,56 +2284,100 @@ def _update_chunk_metadata(
     collection: str,
     content_hash: str,
     update_fn: Callable[[dict], bool],
+    *,
+    doc_id: str = "",
+    dry_run: bool = False,
+    chunks_uploaded: int = 0,
 ) -> bool:
-    """Generic post-pass: query chunks by content_hash, apply update_fn to each.
+    """Generic post-pass: apply update_fn to each chunk of the document's own manifest.
 
-    Paginates the T3 query to handle documents with 300+ chunks.
+    nexus-ahm18: the chunks are the ones *doc_id*'s manifest names, read with one ``get_manifest``,
+    never ``where content_hash=H`` (the last writer's value on a shared row). Their rows are read by
+    id in batches of 300, and *update_fn* is handed each row's metadata with the document's own
+    labels laid over it (:func:`_own_labels_view`), so a position judged by page is judged by the
+    manifest's page for this document, not by the page a co-owner wrote on the shared row. A chunk
+    the manifest names at several positions is updated if any of them says so. The overlay is never
+    written: only the keys *update_fn* added or changed against that view are.
+
+    A row another document restamped since this PDF's upload (its ``content_hash`` is not
+    *content_hash*) is written where develop's selection never reached it, so the write there is
+    non-destructive: a position whose manifest row has no label (``labels_written`` false, every row
+    on engine 0.1.164) is skipped, since the only page it has is the co-owner's and a tag judged by
+    it would mark the co-owner's chunk with this document's table page; a key whose new value is
+    empty is skipped, so a co-owner's non-empty value is never blanked; nothing is deleted (no
+    caller deletes a key). A row that still carries *content_hash* behaves as it always did, the
+    chunk row's page being this document's own. Document-level keys written onto a shared row
+    still overwrite the co-owner's until they move to the catalog (nexus-6pfgb.6) and the chunk-row
+    keys are retired (nexus-6pfgb.27).
+
+    *dry_run* (a throwaway store with no catalog and nothing shared) selects by *content_hash*, as
+    does an empty *doc_id*, and has no manifest labels to overlay. On a real run with *doc_id* a
+    selection of no chunk while *chunks_uploaded* is positive fails the post-pass.
+
     Returns True on success, False on failure (nexus-f8it).
 
-    nexus-vhyar: *update_fn* mutates a copy of the row it was given, and only
-    the keys it added or changed are written. The engine merges, so the rest
-    of the row is untouched; writing the whole row back re-asserted every key
-    as it stood at read time over any write that committed in between (the
-    read-modify-write race nexus-w94eo removed from the enrichment post-pass).
-    A key *update_fn* deletes is not written and so not removed; no caller
-    deletes one today.
+    nexus-vhyar: only the keys *update_fn* added or changed are written. The engine merges, so the
+    rest of the row is untouched; writing the whole row back re-asserted every key as it stood at
+    read time over any write that committed in between (the read-modify-write race nexus-w94eo
+    removed from the enrichment post-pass). A key *update_fn* deletes is not written and so not
+    removed; no caller deletes one today.
     """
     try:
-        all_ids: list[str] = []
-        all_metas: list[dict] = []
-        offset = 0
-        while True:
-            batch = _vector_with_retry(
-                col.get,
-                where={"content_hash": content_hash},
-                include=["metadatas"],
-                limit=300,
-                offset=offset,
-            )
-            all_ids.extend(batch.get("ids", []))
-            all_metas.extend(batch.get("metadatas", []))
-            if len(batch.get("ids", [])) < 300:
-                break
-            offset += 300
+        # (chunk id, the manifest row whose labels judge it or None, the row's metadata, whether this
+        # document was the row's last writer)
+        selected: list[tuple[str, Any, dict, bool]] = []
+        if doc_id and not dry_run:
+            rows = _own_manifest_rows(doc_id, collection)
+            chashes = list(dict.fromkeys(r.chash for r in rows))
+            stored = _stored_rows_by_id(col, chashes)
+            selected = [
+                (r.chash, r, stored[r.chash], stored[r.chash].get("content_hash") == content_hash)
+                for r in rows if r.chash in stored
+            ]
+            if not selected and _selected_nothing(
+                "table_page", doc_id, collection, content_hash, len(chashes), chunks_uploaded,
+            ):
+                return False
+        else:
+            all_ids: list[str] = []
+            all_metas: list[dict] = []
+            offset = 0
+            while True:
+                batch = _vector_with_retry(
+                    col.get,
+                    where={"content_hash": content_hash},
+                    include=["metadatas"],
+                    limit=300,
+                    offset=offset,
+                )
+                all_ids.extend(batch.get("ids", []))
+                all_metas.extend(batch.get("metadatas", []))
+                if len(batch.get("ids", [])) < 300:
+                    break
+                offset += 300
+            selected = [(cid, None, meta, True) for cid, meta in zip(all_ids, all_metas)]
     except Exception as exc:  # noqa: BLE001 - best-effort chunk-metadata query; logged via log.warning, returns False
-        _log.warning("chunk_metadata_query_failed", content_hash=content_hash, error=str(exc))
+        _log.warning("chunk_metadata_query_failed", content_hash=content_hash, doc_id=doc_id, error=str(exc))
         return False
 
-    ids_to_update: list[str] = []
-    updated_metas: list[dict] = []
-    for cid, meta in zip(all_ids, all_metas):
-        before = dict(meta)
-        if update_fn(meta):
-            delta = {k: v for k, v in meta.items() if k not in before or before[k] != v}
+    deltas: dict[str, dict] = {}
+    for cid, row, meta, own in selected:
+        if not own and not getattr(row, "labels_written", False):
+            continue  # the page on this row is the co-owner's: it cannot judge this document's chunk
+        view = _own_labels_view(meta, row) if row is not None else meta
+        before = dict(view)
+        if update_fn(view):
+            delta = {k: v for k, v in view.items() if k not in before or before[k] != v}
+            if not own:
+                delta = {k: v for k, v in delta.items() if v not in ("", None)}
             if delta:
-                ids_to_update.append(cid)
-                updated_metas.append(delta)
+                deltas.setdefault(cid, {}).update(delta)
 
-    if ids_to_update:
+    if deltas:
         try:
-            t3.update_chunks(collection, ids_to_update, updated_metas)
+            t3.update_chunks(collection, list(deltas), list(deltas.values()))
         except Exception as exc:  # noqa: BLE001 - best-effort chunk-metadata update; logged via log.warning, returns False
-            _log.warning("chunk_metadata_update_failed", count=len(ids_to_update), error=str(exc))
+            _log.warning("chunk_metadata_update_failed", count=len(deltas), error=str(exc))
             return False
     return True
 

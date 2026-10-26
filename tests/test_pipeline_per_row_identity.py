@@ -23,6 +23,8 @@ from unittest.mock import MagicMock, create_autospec, patch
 import httpx
 import pytest
 
+from nexus.catalog.types import ManifestRow
+
 from nexus.db.t3 import T3Database
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.pipeline_stages import pipeline_index_pdf
@@ -80,6 +82,15 @@ def _seed_completed_leftover(engine: FakePipelineEngine, pdf_path: str, collecti
     return db.pipeline_id_for(_HASH)
 
 
+@pytest.fixture(autouse=True)
+def _document_manifest(monkeypatch) -> None:
+    """nexus-ahm18: the writer double sends no manifest rows; the post-pass reads the document's own."""
+    monkeypatch.setattr(
+        "nexus.pipeline_stages._own_manifest_rows",
+        lambda doc_id, collection: [ManifestRow(position=0, chash="c0")],
+    )
+
+
 def _run(engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str, *, force: bool = False):
     hooks = MagicMock()
     # The uploader leaves the manifest hook out (the writer writes the manifest with the chunks) by
@@ -87,7 +98,9 @@ def _run(engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str
     hooks.without_batch.return_value = hooks
     t3 = create_autospec(T3Database, instance=True)
     col = MagicMock()
-    col.get.return_value = {"ids": [], "metadatas": []}
+    # nexus-ahm18: the metadata post-pass reads its chunk rows by id (the autouse fixture below names
+    # the manifest); a post-pass that selects nothing after an upload now fails.
+    col.get.side_effect = lambda *, ids=None, **kw: {"ids": list(ids or []), "metadatas": [{} for _ in ids or []]}
     t3.get_or_create_collection.return_value = col
     fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}),
              ("chunk 1", 1, {"page_number": 2, "chunk_type": "text"}))
