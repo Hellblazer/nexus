@@ -7,7 +7,7 @@ store expire`` sees for both. Each note's catalog entry holds its own values ins
 ``meta.ttl_days`` and ``meta.put_at``. This module is the one place that reads them, so the expiry
 sweep and the ``expires in Nd`` display cannot disagree.
 
-Three spellings to keep apart:
+Four things to keep apart:
 
 - ``ttl_days`` absent or ``0`` is permanent. ``0`` is the retraction value a re-put without a TTL
   writes over a ``ttl_days`` the entry held (catalog ``update`` cannot delete a ``meta`` key); it is
@@ -131,13 +131,24 @@ def row_names_note(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bo
     """Whether a chunk row is evidence about the put of the note *owner_tumbler* titled *owner_title*.
 
     The wider cousin of :func:`row_written_by`, for a check that can only REFUSE to retire a note, never
-    retire one: a row whose ``title`` is the note's counts even when its ``catalog_doc_id`` is not the
-    note's tumbler, because an ``.nxexp`` import keeps the SOURCE box's stamp on rows it writes over this
-    note's. A note title names one note in a collection, so a same-titled row is that note's row.
+    retire one, so it over-matches on purpose. A row names the note when EITHER
+
+    - its ``catalog_doc_id`` is the owner's tumbler, whatever title the row carries: a put by an older
+      client of the note's text under no title, or under another title, stamps the row with the note's
+      own tumbler and the put's title (nexus-6pfgb.30 round 2), and the note may itself be untitled; or
+    - its ``title`` is the owner's non-empty title, whatever its stamp: an ``.nxexp`` import keeps the
+      SOURCE box's stamp on rows it writes over this note's, and a note title names one note in a
+      collection.
+
+    A stale import stamp that happens to equal an unrelated note's tumbler can then only HOLD that note.
+    A row with neither is nobody's here.
     """
-    if row_written_by(owner_tumbler, row_meta, owner_title=owner_title):
+    if not isinstance(row_meta, dict):
+        return False
+    stamp = row_meta.get("catalog_doc_id")
+    if isinstance(stamp, str) and stamp and stamp == str(owner_tumbler):
         return True
-    return isinstance(row_meta, dict) and bool(owner_title) and row_meta.get("title") == owner_title
+    return bool(owner_title) and row_meta.get("title") == owner_title
 
 
 def catalog_ttl_stale(
@@ -149,8 +160,9 @@ def catalog_ttl_stale(
     The note's catalog ``ttl_days`` and ``put_at`` are written only by the put path of a client that has
     nexus-6pfgb.5; a re-put by an older client, or by any writer that bypasses the catalog hook (the
     ``.nxexp`` import), rewrites the chunk row and leaves them as they were, so a note its owner just made
-    permanent still looks lapsed. Both signs are read from the note's OWN rows (:func:`row_names_note`; a
-    row another note wrote last says nothing about this one):
+    permanent still looks lapsed. Both signs are read from the rows that name the note
+    (:func:`row_names_note`: stamped with its tumbler, or carrying its title; a row another note wrote
+    last says nothing about this one):
 
     - the row's TTL is not the catalog's (a permanent row under a catalog ``ttl_days`` > 0, or another
       number of days), or

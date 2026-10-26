@@ -611,8 +611,8 @@ def resolve_knowledge_doc_for_chash(
     whose ``title`` equals it, BEFORE the ambiguity count (nexus-6pfgb.31).
     The put path passes it: a note's identity is (collection, title), so a put
     reconciles only onto the note it names, and an untitled put only onto an
-    untitled one. Without it a put adopted whatever note held the text, retitled
-    it and stamped its own ``ttl_days`` on it; with the filter after the count,
+    untitled one. Without it a put adopted whatever note held the text, rewrote
+    its source_uri and stamped its own ``ttl_days`` on it; with the filter after the count,
     a titled note sharing the text would hide the put's own note as ambiguous.
 
     *collection*, when given, additionally restricts candidates to
@@ -702,6 +702,17 @@ def resolve_knowledge_doc_for_chash(
             )
         ):
             candidates.append(entry)
+    if len(candidates) > 1 and title == "":
+        # Several UNTITLED documents share the text (concurrent first untitled puts leave them: no unique
+        # index guards source_uri ""). They are interchangeable, and calling them ambiguous made every
+        # later untitled put mint another (2 -> 5 after 3 puts). Reconcile onto the lowest tumbler, the
+        # oldest. Only for the untitled put: it writes no source_uri, so the pick cannot collide with the
+        # live-source_uri index; a titled put stays ambiguous and finds its note by source_uri.
+        _log.warning(
+            f"{log_event}_duplicate_untitled",
+            chash=chash, candidate_count=len(candidates), tumblers=[str(c.tumbler) for c in candidates],
+        )
+        return min(candidates, key=lambda c: c.tumbler)
     if len(candidates) > 1:
         _log.warning(
             f"{log_event}_ambiguous_chash",
@@ -855,10 +866,12 @@ def catalog_store_hook_tracked(
     catalog — the Java service owns it; nexus-f1itv) — the schema
     funnel drops empty ``doc_id`` at the boundary.
 
-    A put never adopts, retitles or re-keys another note (nexus-6pfgb.31): the
+    A put never adopts, re-sources or re-keys another note (nexus-6pfgb.31): the
     chash dedup considers only a document with this put's own *title* (an
     untitled put: only an untitled one), and every other holder of the text
     stays as it was while the put mints a second document sharing the chunk.
+    A repeated untitled put reuses its untitled document (the lowest tumbler when several share
+    the text) and never overwrites a non-empty ``source_uri`` with an empty one.
 
     ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6;
     the FULL ``sha256(content)`` hex per RDR-180). It is consulted for legacy
@@ -874,9 +887,10 @@ def catalog_store_hook_tracked(
     regardless of chunk_count. When that also misses, a third,
     title-scoped lookup (:func:`_find_ghost_by_title`) reuses a
     pre-existing GHOST entry's tumbler instead of minting a duplicate
-    (GH #1370 Defect 4a; legacy rows registered before this fix carry
-    ``source_uri=""`` and are unreachable by the second lookup, so this
-    third one stays the reconciliation path for them). Only when all
+    (GH #1370 Defect 4a). A legacy row registered before that fix carries
+    ``source_uri=""``, which the second lookup cannot see: the first
+    lookup reaches it under its own title and heals its ``source_uri``
+    (nexus-6pfgb.31), and this third one is the path for a ghost. Only when all
     three lookups miss does the hook register a brand-new document —
     with the synthesized ``source_uri`` attached, so a LATER re-put finds
     it via the second lookup instead of falling through to this one.
@@ -1049,11 +1063,14 @@ def catalog_store_hook_tracked(
             # nexus-sdp0u ghost-reconcile fix-round below, could still
             # carry a stale/empty one).
             writer = make_catalog_writer()
+            # An untitled put has no source_uri of its own and must never blank the one the document
+            # holds (nexus-6pfgb.31): send source_uri only when this put has one.
+            uri_field = {"source_uri": source_uri} if source_uri else {}
             writer.update(
                 existing.tumbler,
                 physical_collection=collection_name,
                 meta=stamp_for(existing),
-                source_uri=source_uri or "",
+                **uri_field,
             )
             return str(existing.tumbler), False
 
@@ -1152,9 +1169,13 @@ def catalog_store_hook_tracked(
             return str(ghost.tumbler), False
 
         # KNOWN RESIDUAL (nexus-n90xg): a legacy NON-ghost row (chunk_count
-        # > 0, source_uri="" — populated before nexus-sdp0u) is unreachable
-        # by all three lookups above, so its first post-fix re-put falls
-        # through here and mints ONE bounded duplicate. That new document
+        # > 0, source_uri="" — populated before nexus-sdp0u) whose chash is
+        # no longer its put's chash (the row's meta.doc_id is stale, e.g. the
+        # note's text changed, or a pre-Phase-4 16-char id) is unreachable by
+        # all three lookups above, so its first post-fix re-put falls
+        # through here and mints ONE bounded duplicate. A legacy row whose
+        # meta.doc_id still is the text's chash IS reached, by the first
+        # lookup, under its own title (nexus-6pfgb.31). The new document
         # carries the synthesized source_uri, so the second-and-later
         # re-puts converge onto it via by_source_uri. The legacy row itself
         # is collapsed by the nexus-n90xg one-shot backfill sweep, not here.

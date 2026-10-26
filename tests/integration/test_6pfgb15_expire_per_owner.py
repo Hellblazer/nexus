@@ -79,11 +79,14 @@ class _World:
                     self.collection, ids=[manifest_row.chash], documents=[row["content"]],
                     metadatas=[{"indexed_at": aged}], embed=True)
 
-    def age_row(self, body: str, *, ttl_days: int | None, days: int) -> None:
-        """Set the shared chunk row's own ``ttl_days`` and ``indexed_at``: what the old sweep read."""
+    def age_row(self, body: str, *, ttl_days: int | None, days: int, title: str | None = None) -> None:
+        """Set the shared chunk row's own ``ttl_days`` and ``indexed_at`` (and its ``title``, when given):
+        what the old sweep read."""
+        meta: dict = {"ttl_days": ttl_days, "indexed_at": _days_ago(days)}
+        if title is not None:
+            meta["title"] = title
         seed_chunks_direct(
-            self.collection, ids=[_chash(body)], documents=[body],
-            metadatas=[{"ttl_days": ttl_days, "indexed_at": _days_ago(days)}], embed=True)
+            self.collection, ids=[_chash(body)], documents=[body], metadatas=[meta], embed=True)
 
     def live(self, title: str) -> bool:
         return self._entry(title) is not None
@@ -325,6 +328,31 @@ def test_a_note_re_put_permanent_by_a_writer_that_bypasses_the_catalog_hook_is_n
     w.put("stale-ttl", body)
     w.age_note("stale-ttl", 400)
     assert w.client.expire_report().notes_tombstoned == 0 and w.live("stale-ttl")
+
+
+@pytest.mark.parametrize("older_client_title", ["", "some-other-title"], ids=["untitled-put", "put-under-another-title"])
+def test_a_note_an_older_client_re_put_permanent_under_no_title_or_another_title_is_not_retired(
+    t2_service_env, older_client_title,
+):
+    """nexus-6pfgb.30 round 2. An older client's untitled put, or put under another title, of the note's text
+    stamps the chunk row with the note's own tumbler and the put's title (here "" or another), permanent,
+    indexed now. The catalog still says 1 day, lapsed. The row names the note by its stamp, so the sweep
+    holds it; before, only a row carrying the note's title counted and the note was retired."""
+    w = _World(t2_service_env, f"6pfgb30-title-{len(older_client_title)}")
+    body = f"6pfgb30 text an older client re-put permanent under title {older_client_title!r}"
+    w.put("named-ttl", body, ttl="1d")
+    w.age_note("named-ttl", 2)
+    w.age_row(body, ttl_days=None, days=0, title=older_client_title)
+    entry = w._entry("named-ttl")
+    row = w.client._note_rows(w.collection, [_chash(body)])[_chash(body)]
+    assert entry is not None and row.get("catalog_doc_id") == str(entry.tumbler) and row.get("title") == older_client_title
+    assert not note_ttl.row_written_by(entry.tumbler, row, owner_title="named-ttl"), "control: the strict rule does not see it"
+
+    report = w.client.expire_report()
+
+    assert w.live("named-ttl") and w.chunk_served(body), "a note its owner made permanent is not retired"
+    assert [t for _, t in report.catalog_ttl_stale] == ["named-ttl"]
+    assert (report.notes_tombstoned, report.chunks_deleted, report.failures) == (0, 0, ())
 
 
 def test_a_genuinely_lapsed_note_is_retired_with_its_own_rows_read(t2_service_env):

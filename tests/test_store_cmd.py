@@ -596,7 +596,25 @@ def test_store_expire_names_a_note_left_live_by_a_stale_catalog_ttl_and_the_reme
     result = runner.invoke(main, ["store", "expire"])
     assert result.exit_code == 0
     assert "1.1.9" in result.output and "meeting-notes" in result.output and "NOT retired" in result.output
-    assert "Re-put it" in result.output and "nx store delete --title" in result.output
+    assert "re-put with this client" in result.output and "nx store delete --title" in result.output
+    # the cause is a possibility, not a diagnosis (a slow put or a restored stamp gives the same result)
+    assert "may be an older client or an import" in result.output
+    assert "never expires until" in result.output
+    # a scheduled sweep reads stdout: the held count is on the summary line there, not only on stderr
+    assert "Expired 0 entries. 1 lapsed note held, not retired." in result.stdout
+
+
+def test_store_expire_summary_counts_every_held_note_and_says_nothing_when_none_were_held(runner, mock_store):
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(
+        chunks_deleted=0, notes_tombstoned=0, catalog_ttl_stale=(("1.1.8", "a"), ("1.1.9", "b")))
+    result = runner.invoke(main, ["store", "expire"])
+    assert "Expired 0 entries. 2 lapsed notes held, not retired." in result.stdout
+
+    mock_store.expire_report.return_value = ExpireReport(chunks_deleted=2, notes_tombstoned=1)
+    result = runner.invoke(main, ["store", "expire"])
+    assert "held" not in result.output
 
 
 # ── nx collection ────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-6pfgb.31 against the real engine: a put never adopts, retitles or re-keys another note.
+"""nexus-6pfgb.31 against the real engine: a put never adopts, re-sources or re-keys another note.
 
 Two sequences from the nexus-6pfgb.15 confirmation review turned a permanent note into an expiring
 one through the put path's identity reconcile (the chash dedup in ``catalog_store_hook_tracked``):
@@ -7,7 +7,7 @@ one through the put path's identity reconcile (the chash dedup in ``catalog_stor
 1. a titled permanent note A, then the same text stored with NO title and ``ttl=1d``: the dedup
    adopted A, blanked its ``source_uri`` and stamped ``ttl_days``/``put_at`` on it;
 2. a legacy permanent note A (empty ``source_uri``), then the same text under ANOTHER title with
-   ``ttl=1d``: A was adopted, retitled and given the TTL.
+   ``ttl=1d``: A was adopted, given the put's source_uri and the TTL.
 
 ``nx store expire`` then retired A. Now each put gets a document of its own (identical text under
 another title, or none, is a second document sharing the chunk, RDR-108) and A is never written.
@@ -88,7 +88,7 @@ def test_an_untitled_ttl_put_of_a_titled_notes_text_leaves_the_note_permanent(t2
     docs = w.holders(body)
     assert len(docs) == 2, [(d.title, d.source_uri) for d in docs]
     mine = next(d for d in docs if d.tumbler == a.tumbler)
-    assert _snapshot(mine) == before, "the titled note is not retitled, re-sourced or re-keyed"
+    assert _snapshot(mine) == before, "the titled note is not re-sourced or re-keyed"
     assert "ttl_days" not in mine.meta
     other = next(d for d in docs if d.tumbler != a.tumbler)
     assert other.title == "" and other.meta.get("ttl_days") == 1
@@ -126,7 +126,7 @@ def test_a_second_title_ttl_put_of_a_legacy_notes_text_leaves_the_note_permanent
     docs = w.holders(body)
     assert sorted(d.title for d in docs) == ["legacy-A", "other-title"]
     mine = next(d for d in docs if d.tumbler == a.tumbler)
-    assert _snapshot(mine) == before, "the legacy note is not retitled, re-sourced or re-keyed"
+    assert _snapshot(mine) == before, "the legacy note is not re-sourced or re-keyed"
     other = next(d for d in docs if d.tumbler != a.tumbler)
     assert other.source_uri == uri_for(w.collection, "other-title") and other.meta.get("ttl_days") == 1
 

@@ -167,7 +167,7 @@ class TestDedupA1:
         assert cat.resolve(legacy).source_uri == uri_for(collection, "Legacy Doc")
 
     def test_same_chash_legacy_row_under_another_title_is_a_second_document(self, tmp_path, monkeypatch):
-        """nexus-6pfgb.31: this used to reconcile onto the legacy note, retitle it and stamp
+        """nexus-6pfgb.31: this used to reconcile onto the legacy note, rewrite its source_uri and stamp
         the put's keys (a ttl_days) on it. A note's identity is (collection, title)."""
         from nexus.catalog.store_hook import catalog_store_hook_tracked
 

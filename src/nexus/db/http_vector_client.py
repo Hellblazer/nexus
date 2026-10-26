@@ -2533,7 +2533,7 @@ class ExpireReport:
     row TTL lapsed but that several notes hold, or that one note holds whose TTL the catalog does
     not record and whose own write the row is not, so the row (the last writer's) cannot say which
     note expires: they are left alone. *catalog_ttl_stale* are ``(tumbler, title)`` of lapsed notes
-    left live because a chunk row of the note's own records a later put than its catalog TTL keys do
+    left live because a chunk row naming the note records a later put than its catalog TTL keys do
     (a re-put by a client older than nexus-6pfgb.5, or by a writer that bypasses the catalog hook,
     nexus-6pfgb.30); a re-put with this client, or ``nx store delete --title``, settles each.
     """
@@ -6179,9 +6179,9 @@ class HttpVectorClient:
         the put path of a client that has nexus-6pfgb.5. A re-put by an older client, or by any writer
         that bypasses the catalog hook (the ``.nxexp`` import), rewrites the chunk row and leaves the keys
         as they were, so a note its owner made permanent could look lapsed. Before a lapsed note is
-        retired its own chunk rows are read (:meth:`_note_rows`; those the note wrote, or that carry its
-        title); one whose TTL is not the catalog's, or whose ``indexed_at`` is later than the catalog's
-        clock by more than five minutes, records a put the catalog missed, and the note is NOT retired:
+        retired its own chunk rows are read (:meth:`_note_rows`; those stamped with the note's tumbler
+        or carrying its title, :func:`~nexus.catalog.note_ttl.row_names_note`); one whose TTL is not
+        the catalog's, or whose ``indexed_at`` is later than the catalog's clock by more than five minutes, records a put the catalog missed, and the note is NOT retired:
         it is reported in ``catalog_ttl_stale``. Rows that cannot be read fail closed: the note stays and
         is reported in ``failures``. A row another note wrote last says nothing about this note, so a
         permanent re-put by an older client that a co-owner of the same text then overwrote is not seen.
@@ -6433,6 +6433,15 @@ class HttpVectorClient:
             )
             ids = result.get("ids") or []
             metas = result.get("metadatas") or []
+            # nexus-hdx2u: this call bypasses _ServiceCollectionStub.get, so it repeats that tripwire. An
+            # engine-reported count above the rows returned means rows were dropped, and a dropped row
+            # would read as "no later put" (the sweep would retire the note): raise, so the guard holds.
+            reported = result.get("count")
+            if isinstance(reported, int) and not isinstance(reported, bool) and reported > len(ids):
+                raise VectorServiceError(
+                    f"store-get for collection '{collection}': engine reports {reported} matched-live rows "
+                    f"for this batch but returned only {len(ids)} (batch size {len(batch)})."
+                )
             for doc_id, meta in zip(ids, metas):
                 if isinstance(meta, dict):
                     out[doc_id] = meta

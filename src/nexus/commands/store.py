@@ -801,7 +801,9 @@ def expire_cmd() -> None:
         return
     report = db.expire_report()
     count = report.chunks_deleted
-    click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
+    held = len(report.catalog_ttl_stale)
+    held_text = f" {held} lapsed {'note' if held == 1 else 'notes'} held, not retired." if held else ""
+    click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.{held_text}")
     if report.notes_tombstoned:
         n = report.notes_tombstoned
         click.echo(f"{n} {'note' if n == 1 else 'notes'} retired; {count} {'chunk' if count == 1 else 'chunks'} deleted.")
@@ -816,9 +818,9 @@ def expire_cmd() -> None:
         for tumbler, title in report.catalog_ttl_stale:
             click.echo(
                 f"  note {tumbler} ({title!r}) has lapsed in the catalog but was NOT retired: a chunk row of it "
-                "records a later put than its catalog TTL (put by a client older than the one that records "
-                "TTLs, or imported). Re-put it with this client (with or without --ttl) to settle it, or "
-                "delete it with nx store delete --title.",
+                "records a later put than its catalog TTL (the cause may be an older client or an import). "
+                "It never expires until it is re-put with this client (with or without --ttl) or deleted "
+                "with nx store delete --title.",
                 err=True,
             )
     if report.failures:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-6pfgb.31: a put never adopts, retitles or re-keys another note.
+"""nexus-6pfgb.31: a put never adopts, re-sources or re-keys another note.
 
 The store hook's chash dedup reconciled a put onto any document in the collection holding the
 chunk, unless the put had a title AND that document had a different non-empty ``source_uri``.
@@ -71,9 +71,9 @@ class _FakeCatalog:
         if source_uri is not None:
             doc.source_uri = source_uri
 
-    def seed(self, title: str, *, source_uri: str, meta: dict | None = None) -> str:
+    def seed(self, title: str, *, source_uri: str, meta: dict | None = None, tumbler: str | None = None) -> str:
         """A live note holding ``_CHASH``; ``source_uri=""`` is a pre-nexus-sdp0u (legacy) row."""
-        tumbler = f"1.1.{len(self.docs) + 1}"
+        tumbler = tumbler or f"1.1.{len(self.docs) + 1}"
         self.docs[tumbler] = SimpleNamespace(
             tumbler=Tumbler.parse(tumbler), title=title, content_type="knowledge", file_path="",
             physical_collection=_COLLECTION, source_uri=source_uri, chunk_count=1,
@@ -118,7 +118,7 @@ def test_an_untitled_put_of_a_titled_notes_text_mints_its_own_document(cat):
 
 
 def test_a_put_under_a_second_title_never_adopts_a_legacy_note_with_no_source_uri(cat):
-    """Repro 2: a legacy note (empty source_uri, its own title) is not retitled or given the TTL."""
+    """Repro 2: a legacy note (empty source_uri, its own title) is not re-sourced or given the TTL."""
     a = cat.seed("legacy-A", source_uri="")
     before = dict(cat.docs[a].meta)
 
@@ -132,7 +132,7 @@ def test_a_put_under_a_second_title_never_adopts_a_legacy_note_with_no_source_ur
 
 
 def test_a_titled_put_never_adopts_an_untitled_note(cat):
-    """The other direction: an untitled note is not retitled by a titled put of its text."""
+    """The other direction: an untitled note is not adopted by a titled put of its text."""
     a = cat.seed("", source_uri="")
     before = dict(cat.docs[a].meta)
 
@@ -209,3 +209,57 @@ def test_an_untitled_put_then_another_makes_one_untitled_document(cat):
 
     assert created_first and not created_second and first == second
     assert len(cat.docs) == 2
+
+
+def test_two_untitled_documents_sharing_the_text_do_not_multiply_with_every_untitled_put(cat):
+    """nexus-6pfgb.31 round 2: two untitled documents (concurrent first puts leave them) made every later
+    untitled put ambiguous, so each minted another (2 -> 5 after 3 puts). A put reconciles onto the
+    LOWEST tumbler instead, however the catalog orders the matches."""
+    higher = cat.seed("", source_uri="", tumbler="1.1.10")
+    lower = cat.seed("", source_uri="", tumbler="1.1.9")
+
+    results = [_put("", ttl_days=1) for _ in range(3)]
+
+    assert [t for t, _ in results] == [lower] * 3 and [c for _, c in results] == [False] * 3
+    assert len(cat.docs) == 2
+    assert cat.docs[lower].meta["ttl_days"] == 1 and "ttl_days" not in cat.docs[higher].meta
+
+
+def test_a_titled_put_keeps_the_ambiguity_and_reaches_its_note_by_source_uri(cat):
+    """Lowest-tumbler is for the untitled put only: a titled put that picked the lowest of two same-titled
+    documents could stamp a source_uri the other already holds. It stays ambiguous and finds its note by URI."""
+    uri = uri_for(_COLLECTION, "dup")
+    legacy = cat.seed("dup", source_uri="", tumbler="1.1.9")
+    keyed = cat.seed("dup", source_uri=uri, tumbler="1.1.10")
+
+    tumbler, created = _put("dup", ttl_days=2)
+
+    assert (tumbler, created) == (keyed, False)
+    assert cat.docs[legacy].source_uri == "" and "ttl_days" not in cat.docs[legacy].meta
+
+
+def test_an_untitled_put_never_blanks_the_source_uri_of_the_untitled_document_it_reconciles_onto(cat):
+    """A non-empty source_uri on an untitled document (a path-keyed import) is not overwritten with ''."""
+    a = cat.seed("", source_uri="chroma://elsewhere/doc")
+
+    tumbler, created = _put("", ttl_days=1)
+
+    assert (tumbler, created) == (a, False)
+    assert cat.docs[a].source_uri == "chroma://elsewhere/doc"
+    assert cat.docs[a].meta["ttl_days"] == 1
+    assert all(u[1]["source_uri"] != "" for u in cat.updates), "no update wrote an empty source_uri"
+
+
+def test_the_store_put_wire_text_states_the_untitled_contract():
+    """The MCP tool text is what a caller reads: an empty title does NOT always make a new document."""
+    from nexus.mcp import core  # noqa: PLC0415 — heavy import, only this test needs it
+
+    tool = core.mcp._tool_manager._tools["store_put"]
+    title_text = tool.parameters["properties"]["title"]["description"]
+    claim = ("Empty registers an untitled document; a repeated untitled put of the same text reuses it, "
+             "and it never adopts a titled note.")
+    assert claim in " ".join(title_text.split())
+    assert "always" not in " ".join(title_text.split()).lower().split("empty")[-1]
+    doc = " ".join((tool.description or "").split())
+    assert "always creates a new document" not in doc
+    assert "never adopts a titled note" in doc

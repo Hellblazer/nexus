@@ -133,10 +133,10 @@ def test_an_owner_with_no_title_is_never_the_writer_of_a_row():
 # ── the sweep ────────────────────────────────────────────────────────────────
 
 
-def _entry(tumbler, *, meta, title="", content_type="knowledge", file_path="", collection=_COLLECTION,
+def _entry(tumbler, *, meta, title=None, content_type="knowledge", file_path="", collection=_COLLECTION,
            indexed_at=None):
     return SimpleNamespace(
-        tumbler=Tumbler.parse(tumbler), title=title or f"note-{tumbler}", content_type=content_type,
+        tumbler=Tumbler.parse(tumbler), title=f"note-{tumbler}" if title is None else title, content_type=content_type,
         file_path=file_path, physical_collection=collection, indexed_at=indexed_at or _ago(0), meta=meta)
 
 
@@ -182,6 +182,7 @@ class _World:
         self.deleted: list[list[str]] = []
         self.row_reads: list[list[str]] = []
         self.row_read_error: Exception | None = None
+        self.store_get_count: int | None = None   # when set, the store-get response reports this count
         self.get_wheres: list[dict] = []
         self.reaped_chashes: list[str] = []
         monkeypatch.setattr(HttpVectorClient, "list_collections", lambda self: [
@@ -209,7 +210,10 @@ class _World:
                 if self.row_read_error is not None:
                     raise self.row_read_error
                 hit = [c for c in body["ids"] if c in rows]
-                return {"ids": hit, "metadatas": [rows[c] for c in hit]}
+                resp = {"ids": hit, "metadatas": [rows[c] for c in hit]}
+                if self.store_get_count is not None:
+                    resp["count"] = self.store_get_count
+                return resp
             if path == "/v1/vectors/store-delete":
                 self.deleted.append(list(body["ids"]))
                 return {"deleted": len(body["ids"])}
@@ -506,7 +510,7 @@ def test_the_sweep_still_asks_the_wire_only_for_positive_row_ttls(monkeypatch):
 def _older_client_row(*, written_by="1.1.1", ttl=None, indexed_at=None, title=None):
     """The chunk row an older client's re-put leaves: stamped and titled as the note, its own TTL (None is
     permanent) and a fresh indexed_at, with no catalog write behind it."""
-    row = {"catalog_doc_id": written_by, "title": title or f"note-{written_by}", "indexed_at": indexed_at or _ago(0.5)}
+    row = {"catalog_doc_id": written_by, "title": f"note-{written_by}" if title is None else title, "indexed_at": indexed_at or _ago(0.5)}
     if ttl is not None:
         row["ttl_days"] = ttl
     return row
@@ -570,6 +574,64 @@ def test_a_row_an_import_wrote_over_the_note_counts_by_its_title_though_its_stam
     assert cat.tombstoned == [] and report.catalog_ttl_stale == (("1.1.1", "note-1.1.1"),)
 
 
+def test_a_row_an_older_client_stamped_with_the_note_under_no_title_holds_the_note(monkeypatch):
+    """nexus-6pfgb.30 round 2 (a): an older client's untitled put of the note's text rewrites the row with
+    the note's catalog_doc_id, title "" and no ttl_days; the catalog still says ttl 1, put 6 days ago."""
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(6)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(title="", ttl=None)})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and cat.manifests["1.1.1"] == ["c1"] and w.deleted == []
+    assert report.catalog_ttl_stale == (("1.1.1", "note-1.1.1"),) and report.notes_tombstoned == 0
+
+
+def test_a_row_an_older_client_stamped_with_the_note_under_another_title_holds_the_note(monkeypatch):
+    """(b): the put under a second title stamps the note's tumbler and its own title."""
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(6)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(title="some-other-title", ttl=None)})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and w.deleted == []
+    assert report.catalog_ttl_stale == (("1.1.1", "note-1.1.1"),)
+
+
+def test_an_untitled_note_made_permanent_by_an_older_client_is_not_retired(monkeypatch):
+    """(c): the owner has no title, so only the stamp can attribute the row."""
+    cat = _FakeCatalog([_entry("1.1.1", title="", meta={"ttl_days": 1, "put_at": _ago(6)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": {"catalog_doc_id": "1.1.1", "title": "", "indexed_at": _ago(0.5)}})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and w.deleted == []
+    assert report.catalog_ttl_stale == (("1.1.1", ""),) and report.notes_tombstoned == 0
+
+
+def test_an_untitled_note_with_nobody_elses_row_is_still_retired(monkeypatch):
+    """The wider guard must not hold a note whose row names no one: an untitled lapsed note is retired
+    when its row is another note's."""
+    cat = _FakeCatalog([_entry("1.1.1", title="", meta={"ttl_days": 1, "put_at": _ago(6)})], {"1.1.1": ["c1"]})
+    w = _World(monkeypatch, cat, {"c1": {"catalog_doc_id": "1.1.9", "title": "", "indexed_at": _ago(0.5)}})
+
+    report = w.sweep()
+
+    assert cat.tombstoned == ["1.1.1"] and report.catalog_ttl_stale == ()
+
+
+def test_a_store_get_that_reports_more_rows_than_it_returned_fails_closed(monkeypatch):
+    """nexus-6pfgb.30 round 2: _note_rows bypasses the stub's nexus-hdx2u tripwire. A response whose
+    count says more rows matched than came back dropped rows, which would fail open (retire)."""
+    cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1", "c2"]})
+    w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=1, indexed_at=(NOW - timedelta(days=2)).isoformat())})
+    w.store_get_count = 2   # the engine matched 2 live rows; the page carries only c1
+
+    report = w.sweep()
+
+    assert cat.tombstoned == [] and w.deleted == []
+    assert [t for t, _ in report.failures] == ["1.1.1"] and "could not be read" in report.failures[0][1]
+
+
 def test_unreadable_rows_fail_closed(monkeypatch):
     cat = _FakeCatalog([_entry("1.1.1", meta={"ttl_days": 1, "put_at": _ago(2)})], {"1.1.1": ["c1"]})
     w = _World(monkeypatch, cat, {"c1": _older_client_row(ttl=1)})
@@ -627,11 +689,45 @@ def test_the_rows_of_a_large_note_are_read_in_pages(monkeypatch):
     ({"catalog_doc_id": "1.1.1", "title": "N", "ttl_days": float("inf")}, True),       # garbage reads permanent
     ({"catalog_doc_id": "1.1.9", "title": "other"}, False),                            # not this note's row
     ({"title": "N"}, True),                                                            # title alone names the note
+    # nexus-6pfgb.30 round 2: an older client's untitled or other-title put of the same text stamps the
+    # row with the note's own tumbler under a different title; the guard can only refuse, so it counts
+    ({"catalog_doc_id": "1.1.1", "title": ""}, True),                                  # untitled put, stamped
+    ({"catalog_doc_id": "1.1.1", "title": "B"}, True),                                 # put under another title
+    ({"catalog_doc_id": "1.1.1"}, True),                                               # stamped, no title key
+    ({"catalog_doc_id": "1.1.9", "title": ""}, False),                                 # someone else's untitled row
 ])
 def test_catalog_ttl_stale_rule(row, stale):
     meta = {"ttl_days": 1, "put_at": _ago(2)}
     assert note_ttl.catalog_ttl_stale(
         meta, _ago(0), [row], owner_tumbler="1.1.1", owner_title="N") is stale
+
+
+@pytest.mark.parametrize(("row", "stale"), [
+    ({"catalog_doc_id": "1.1.1", "title": ""}, True),     # the owner's own stamp, untitled row
+    ({"catalog_doc_id": "1.1.1", "title": "B"}, True),    # the owner's stamp under a title the owner never had
+    ({"catalog_doc_id": "1.1.9", "title": ""}, False),    # another note's untitled row
+    ({"title": ""}, False),                               # no stamp, no title to match: nobody's
+])
+def test_an_untitled_owner_is_still_seen_by_its_own_stamp(row, stale):
+    meta = {"ttl_days": 1, "put_at": _ago(2)}
+    assert note_ttl.catalog_ttl_stale(meta, _ago(0), [row], owner_tumbler="1.1.1", owner_title="") is stale
+
+
+@pytest.mark.parametrize(("owner_title", "row", "names"), [
+    ("N", {"catalog_doc_id": "1.1.1", "title": "N"}, True),
+    ("N", {"catalog_doc_id": "1.1.1", "title": ""}, True),
+    ("N", {"catalog_doc_id": "1.1.1", "title": "B"}, True),
+    ("N", {"catalog_doc_id": "9.9.9", "title": "N"}, True),    # an import's foreign stamp, the note's title
+    ("N", {"catalog_doc_id": "9.9.9", "title": "B"}, False),
+    ("N", {"catalog_doc_id": "9.9.9", "title": ""}, False),
+    ("", {"catalog_doc_id": "1.1.1", "title": ""}, True),
+    ("", {"catalog_doc_id": "9.9.9", "title": ""}, False),    # an empty title never names a note
+    ("N", None, False),
+    ("N", "junk", False),
+    ("N", {"catalog_doc_id": 111, "title": "B"}, False),
+])
+def test_a_row_names_a_note_by_its_stamp_or_its_nonempty_title(owner_title, row, names):
+    assert note_ttl.row_names_note("1.1.1", row, owner_title=owner_title) is names
 
 
 def test_catalog_ttl_stale_allows_clock_skew_between_the_row_and_the_catalog_stamp():

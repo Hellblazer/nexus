@@ -5556,8 +5556,9 @@ def store_put(
         description=(
             "Document title (recommended). Non-empty makes catalog identity "
             "stable: re-putting the same (collection, title) replaces the "
-            "document's manifest rather than duplicating it. Empty always "
-            "registers a new, untitled document."
+            "document's manifest rather than duplicating it. Empty "
+            "registers an untitled document; a repeated untitled put of the "
+            "same text reuses it, and it never adopts a titled note."
         ),
     )] = "",
     tags: Annotated[str, Field(description="Comma-separated tags.")] = "",
@@ -5597,8 +5598,9 @@ def store_put(
     - `collection` must be a bare subject area, never a placeholder or a
       pre-rendered four-segment/model-token name.
     - A non-empty `title` reconciles onto the existing (collection, title)
-      document instead of duplicating it; an empty title always creates a
-      new document.
+      document instead of duplicating it. An empty title registers an
+      untitled document; a repeated untitled put of the same text reuses
+      it, and it never adopts a titled note.
     - `ttl` accepts "Nd", "Nw", or "permanent" (default).
     """
     try:
