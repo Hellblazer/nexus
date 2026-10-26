@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-h4w9o: nexus.partition_copy_access no longer copies a grant held by a role that bypasses
+    row-level security (pg_roles.rolbypassrls) onto a new chunk leaf, taxonomy_centroids leaf or model partition.
+
+    THE DEFECT. partition_copy_access(parent, child, force) (vectors-030-1) mirrors the parent table's ACL onto
+    the child: it revokes every non-owner grantee from the child, then GRANTs every non-owner ACL entry of the
+    parent. It is the single sink for leaf creation (partition_ensure_leaf, run by the service_tokens trigger
+    through create_tenant_partitions), for a new model partition (create_model_partition) and for
+    partition_sync_access. The parent nexus.chunks carries SELECT for nexus_diag (BYPASSRLS), re-granted on every
+    boot by grants-nexus-diag-3 for the security_invoker diag_chash_conformance view. grants-nexus-diag-2 strips
+    nexus_diag from every nexus relation, leaves included, but only at the next boot. A tenant (or a model)
+    created between boots therefore got nexus_diag SELECT on its leaves, a second path for a BYPASSRLS role to
+    the same rows the parent grant already exposes, and one that made the catalogue ACL depend on boot timing.
+    Introduced by engine-service-v0.1.150 (vectors-030-1). The parent keeps its nexus_diag grant: PostgreSQL
+    checks privileges on the named parent only for a query through it.
+
+    THE FIX. The GRANT loop skips any grantee whose pg_roles row has rolbypassrls. That covers nexus_diag and any
+    BYPASSRLS role added later, with no role name in the function. PUBLIC (grantee 0) has no pg_roles row and is
+    still copied. The revoke loop, the policy copy and the signature are vectors-030-1's, unchanged. No repair DML:
+    a leaf that already carries the grant is stripped by grants-nexus-diag-2 on the deploy boot, and no leaf made
+    after that is given it again.
+
+    vectors-030-1 and vectors-034-1 are one-shot changesets and are not edited (a checksum change refuses boot);
+    this changeset redefines the function after both.
+
+    No DATA EFFECT: a function definition only. After vectors-038, before the runAlways grants blocks.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-039-1" author="nexus-h4w9o">
+        <comment>nexus-h4w9o: nexus.partition_copy_access skips any grantee whose role has rolbypassrls when it copies the parent's ACL onto a new leaf or model partition, so nexus_diag's SELECT on nexus.chunks (re-granted every boot for the diag view) no longer lands on a tenant's leaves between boots. Everything else in the body is vectors-030-1's. No data effect: a function definition only; the rollback restores the vectors-030-1 body.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.partition_copy_access(p_parent regclass, p_child regclass, p_force boolean)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns    text;
+    v_child text;
+    r       record;
+BEGIN
+    SELECT n.nspname::text, c.relname::text INTO v_ns, v_child
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_child;
+
+    EXECUTE pg_catalog.format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', v_ns, v_child);
+    IF p_force THEN
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', v_ns, v_child);
+    ELSE
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I NO FORCE ROW LEVEL SECURITY', v_ns, v_child);
+    END IF;
+
+    -- Policies: drop what the parent does not have, then (re)create each of the parent's.
+    FOR r IN
+        SELECT p.polname
+          FROM pg_catalog.pg_policy p
+         WHERE p.polrelid = p_child
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy q WHERE q.polrelid = p_parent AND q.polname = p.polname)
+    LOOP
+        EXECUTE pg_catalog.format('DROP POLICY %I ON %I.%I', r.polname, v_ns, v_child);
+    END LOOP;
+    FOR r IN
+        SELECT p.polname, p.polcmd, p.polpermissive,
+               (SELECT pg_catalog.string_agg(pg_catalog.quote_ident(ro.rolname), ', ' ORDER BY ro.rolname)
+                  FROM pg_catalog.pg_roles ro WHERE ro.oid = ANY (p.polroles)) AS roles,
+               pg_catalog.pg_get_expr(p.polqual, p.polrelid) AS qual,
+               pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid) AS chk
+          FROM pg_catalog.pg_policy p
+         WHERE p.polrelid = p_parent
+         ORDER BY p.polname
+    LOOP
+        EXECUTE pg_catalog.format('DROP POLICY IF EXISTS %I ON %I.%I', r.polname, v_ns, v_child);
+        EXECUTE pg_catalog.format('CREATE POLICY %I ON %I.%I AS %s FOR %s TO %s%s%s',
+            r.polname, v_ns, v_child,
+            CASE WHEN r.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END,
+            CASE r.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE'
+                          WHEN 'd' THEN 'DELETE' ELSE 'ALL' END,
+            COALESCE(r.roles, 'PUBLIC'),
+            CASE WHEN r.qual IS NULL THEN '' ELSE ' USING (' || r.qual || ')' END,
+            CASE WHEN r.chk IS NULL THEN '' ELSE ' WITH CHECK (' || r.chk || ')' END);
+    END LOOP;
+
+    -- Grants: revoke what the child has beyond its owner, then grant what the parent has beyond its owner.
+    FOR r IN
+        SELECT DISTINCT a.grantee
+          FROM pg_catalog.pg_class c
+         CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
+         WHERE c.oid = p_child AND a.grantee <> c.relowner
+    LOOP
+        EXECUTE pg_catalog.format('REVOKE ALL ON %I.%I FROM %s', v_ns, v_child,
+            CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(r.grantee)) END);
+    END LOOP;
+    FOR r IN
+        SELECT a.grantee, a.privilege_type, a.is_grantable
+          FROM pg_catalog.pg_class c
+         CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
+         WHERE c.oid = p_parent AND a.grantee <> c.relowner
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles ro WHERE ro.oid = a.grantee AND ro.rolbypassrls)
+         ORDER BY a.grantee, a.privilege_type
+    LOOP
+        EXECUTE pg_catalog.format('GRANT %s ON %I.%I TO %s%s', r.privilege_type, v_ns, v_child,
+            CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(r.grantee)) END,
+            CASE WHEN r.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+    END LOOP;
+END
+$fn$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+-- vectors-030-1's partition_copy_access, verbatim.
+CREATE OR REPLACE FUNCTION nexus.partition_copy_access(p_parent regclass, p_child regclass, p_force boolean)
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_ns    text;
+    v_child text;
+    r       record;
+BEGIN
+    SELECT n.nspname::text, c.relname::text INTO v_ns, v_child
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = p_child;
+
+    EXECUTE pg_catalog.format('ALTER TABLE %I.%I ENABLE ROW LEVEL SECURITY', v_ns, v_child);
+    IF p_force THEN
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I FORCE ROW LEVEL SECURITY', v_ns, v_child);
+    ELSE
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I NO FORCE ROW LEVEL SECURITY', v_ns, v_child);
+    END IF;
+
+    -- Policies: drop what the parent does not have, then (re)create each of the parent's.
+    FOR r IN
+        SELECT p.polname
+          FROM pg_catalog.pg_policy p
+         WHERE p.polrelid = p_child
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy q WHERE q.polrelid = p_parent AND q.polname = p.polname)
+    LOOP
+        EXECUTE pg_catalog.format('DROP POLICY %I ON %I.%I', r.polname, v_ns, v_child);
+    END LOOP;
+    FOR r IN
+        SELECT p.polname, p.polcmd, p.polpermissive,
+               (SELECT pg_catalog.string_agg(pg_catalog.quote_ident(ro.rolname), ', ' ORDER BY ro.rolname)
+                  FROM pg_catalog.pg_roles ro WHERE ro.oid = ANY (p.polroles)) AS roles,
+               pg_catalog.pg_get_expr(p.polqual, p.polrelid) AS qual,
+               pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid) AS chk
+          FROM pg_catalog.pg_policy p
+         WHERE p.polrelid = p_parent
+         ORDER BY p.polname
+    LOOP
+        EXECUTE pg_catalog.format('DROP POLICY IF EXISTS %I ON %I.%I', r.polname, v_ns, v_child);
+        EXECUTE pg_catalog.format('CREATE POLICY %I ON %I.%I AS %s FOR %s TO %s%s%s',
+            r.polname, v_ns, v_child,
+            CASE WHEN r.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END,
+            CASE r.polcmd WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE'
+                          WHEN 'd' THEN 'DELETE' ELSE 'ALL' END,
+            COALESCE(r.roles, 'PUBLIC'),
+            CASE WHEN r.qual IS NULL THEN '' ELSE ' USING (' || r.qual || ')' END,
+            CASE WHEN r.chk IS NULL THEN '' ELSE ' WITH CHECK (' || r.chk || ')' END);
+    END LOOP;
+
+    -- Grants: revoke what the child has beyond its owner, then grant what the parent has beyond its owner.
+    FOR r IN
+        SELECT DISTINCT a.grantee
+          FROM pg_catalog.pg_class c
+         CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
+         WHERE c.oid = p_child AND a.grantee <> c.relowner
+    LOOP
+        EXECUTE pg_catalog.format('REVOKE ALL ON %I.%I FROM %s', v_ns, v_child,
+            CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(r.grantee)) END);
+    END LOOP;
+    FOR r IN
+        SELECT a.grantee, a.privilege_type, a.is_grantable
+          FROM pg_catalog.pg_class c
+         CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
+         WHERE c.oid = p_parent AND a.grantee <> c.relowner
+         ORDER BY a.grantee, a.privilege_type
+    LOOP
+        EXECUTE pg_catalog.format('GRANT %s ON %I.%I TO %s%s', r.privilege_type, v_ns, v_child,
+            CASE WHEN r.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(r.grantee)) END,
+            CASE WHEN r.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+    END LOOP;
+END
+$fn$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

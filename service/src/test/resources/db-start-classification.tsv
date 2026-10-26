@@ -66,3 +66,4 @@ LeafBloatCatalogIntegrationTest	clone	CLONE_OWNER	reads leaf statistics and relo
 PartitionAccessSelfHealIntegrationTest	clone	CLONE_OWNER	injects drift by owner DDL on a migrated store and re-runs migrate; the first walk is the template's (nexus-0ty8z)
 SchemaMigratorStaleChangelogLockIntegrationTest	clone	CLONE	needs a completed first walk, then drives the lock cases; a template clone is that walk (nexus-0ty8z)
 Catalog046ManifestSectionLabelsSchemaLiquibaseTest	startEmptyDatabase	WALK	migrates to just before catalog-046-1, asserts the three columns are absent, applies it, rolls it back and reapplies it
+PartitionCopyAccessDiagExclusionIntegrationTest	startEmptyDatabase	OWNERSHIP	creates the nexus_diag role itself (declared exclusive) and reads the ACL of leaves and model partitions made after a full walk
