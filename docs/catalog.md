@@ -451,7 +451,12 @@ Locked format decisions (design of record: T2
   note written before the catalog kept these keys, or stored with none of
   them, takes the chunk row's values only when the row's last writer is
   that note (the row's `catalog_doc_id`; a row with none is taken only when
-  no other live document in its collection holds the chunk); otherwise it
+  no other live document in its collection holds the chunk). A row with no
+  `catalog_doc_id` cannot tell a departed co-owner's values from the note's
+  own, so for such a legacy row that sole-owner fallback can export another
+  note's `tags`, `category` or `ttl_days` (a permanent note can come back
+  expiring); it is expected to adopt the expiry sweep's stricter rule when
+  nexus-6pfgb.15 lands. Otherwise it
   exports with them empty and the export summary counts it when the row
   held a value (`note keys not recovered`). Import restarts a note's TTL
   clock: the expiry is `ttl_days` from the import, not from the original

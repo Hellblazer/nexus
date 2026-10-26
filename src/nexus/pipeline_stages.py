@@ -2057,7 +2057,7 @@ def _enrich_metadata_from_extraction(
     collection: str,
     *,
     title_override: str = "",
-    doc_id: str = "",
+    doc_id: str,
     dry_run: bool = False,
     chunks_uploaded: int = 0,
 ) -> bool:
@@ -2085,8 +2085,9 @@ def _enrich_metadata_from_extraction(
     (one ``col.get(ids=...)`` per 300), then only keys are written, so the
     nexus-w94eo merge race stays closed.
 
-    *dry_run* (a throwaway store with no catalog and nothing shared) keeps the
-    ``content_hash`` selection; so does an empty *doc_id*. On a real run with
+    *doc_id* is keyword-required, so a caller states whether it has a document: an empty one
+    (``""``, a direct caller with no catalog identity) keeps the ``content_hash`` selection, as
+    does *dry_run* (a throwaway store with no catalog and nothing shared). On a real run with
     *doc_id* a selection of no chunk while *chunks_uploaded* is positive fails the
     post-pass (``post_pass_selected_no_chunks``): zero rows examined is not a pass.
 
@@ -2158,6 +2159,7 @@ def _enrich_metadata_from_extraction(
                 "enrich", doc_id, collection, content_hash, len(chashes), chunks_uploaded,
             ):
                 return False
+            _warn_manifest_chunks_not_live("enrich", doc_id, collection, content_hash, chashes, stored)
             own_ids = [c for c in chashes if c in stored and stored[c].get("content_hash") == content_hash]
             other_ids = [c for c in chashes if c in stored and stored[c].get("content_hash") != content_hash]
         else:
@@ -2235,8 +2237,33 @@ def _selected_nothing(
         "post_pass_selected_no_chunks",
         post_pass=post_pass, doc_id=doc_id, collection=collection, content_hash=content_hash,
         manifest_chunks_in_collection=manifest_chunks, chunks_uploaded=chunks_uploaded,
+        remedy=_SELECTED_NO_CHUNKS_REMEDY,
     )
     return True
+
+
+_SELECTED_NO_CHUNKS_REMEDY = (
+    "a rerun resumes the kept pipeline buffer and fails this post-pass again; "
+    "`nx index pdf --force <path>` drops the buffer and re-extracts"
+)
+
+
+def _warn_manifest_chunks_not_live(
+    post_pass: str, doc_id: str, collection: str, content_hash: str, chashes: list[str], stored: dict[str, dict],
+) -> None:
+    """Warn, with the count, when some of the manifest's chunks have no live T3 row although others do.
+
+    The post-pass updates the rows that exist and passes; a manifest chash with no row (purged, or
+    never written) is otherwise dropped without a trace. (None live at all is the louder
+    ``post_pass_selected_no_chunks`` failure.)
+    """
+    missing = len(chashes) - len(stored)
+    if stored and missing > 0:
+        _log.warning(
+            "post_pass_manifest_chunks_not_live",
+            post_pass=post_pass, doc_id=doc_id, collection=collection, content_hash=content_hash,
+            manifest_chunks_in_collection=len(chashes), not_live=missing, live=len(stored),
+        )
 
 
 def _throwaway_ids_by_content_hash(col: Any, content_hash: str) -> list[str]:
@@ -2285,7 +2312,7 @@ def _update_chunk_metadata(
     content_hash: str,
     update_fn: Callable[[dict], bool],
     *,
-    doc_id: str = "",
+    doc_id: str,
     dry_run: bool = False,
     chunks_uploaded: int = 0,
 ) -> bool:
@@ -2338,6 +2365,7 @@ def _update_chunk_metadata(
                 "table_page", doc_id, collection, content_hash, len(chashes), chunks_uploaded,
             ):
                 return False
+            _warn_manifest_chunks_not_live("table_page", doc_id, collection, content_hash, chashes, stored)
         else:
             all_ids: list[str] = []
             all_metas: list[dict] = []

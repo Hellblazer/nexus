@@ -160,7 +160,7 @@ def test_a_catalog_read_failure_fails_the_post_pass_so_the_buffer_is_kept(manife
 def test_a_dry_run_with_no_document_keeps_the_throwaway_stores_content_hash_selection(manifests) -> None:
     store = _Store({"a1": {"content_hash": _H_A}, "o": {"content_hash": _H_B}})
     assert _enrich_metadata_from_extraction(
-        _H_A, _extraction(), Path("/x/a.pdf"), store, store, _COLLECTION) is True
+        _H_A, _extraction(), Path("/x/a.pdf"), store, store, _COLLECTION, doc_id="") is True
     assert manifests["calls"] == []
     (ids, _, _), = store.updates
     assert ids == ["a1"]
@@ -298,6 +298,8 @@ def test_a_selection_of_no_chunk_after_an_upload_fails_loud_and_keeps_the_buffer
         assert _run(5) is False
     (warn,) = [e for e in logs if e["event"] == "post_pass_selected_no_chunks"]
     assert warn["log_level"] == "warning" and warn["doc_id"] == "doc-a" and warn["chunks_uploaded"] == 5
+    # the warning names the way out: a rerun resumes the kept buffer and fails again until --force
+    assert "nx index pdf --force" in warn["remedy"] and "fails this post-pass again" in warn["remedy"]
     assert store.updates == []
     # a zero-chunk PDF has nothing to select: that is not this failure
     assert _run(0) is True
@@ -315,6 +317,55 @@ def test_a_selection_of_no_live_chunk_after_an_upload_also_fails_loud(manifests,
         ok = _update_chunk_metadata(
             store, store, _COLLECTION, _H_A, _tag({3}), doc_id="doc-a", chunks_uploaded=1)
     assert ok is False
+
+
+@pytest.mark.parametrize("helper", ["enrich", "table"])
+def test_a_manifest_chunk_with_no_live_row_is_warned_with_the_count(manifests, helper) -> None:
+    """Two of the manifest's four chunks have no T3 row (purged); two are live. The post-pass still
+    updates the live ones and passes, but the dropped ones are counted in a warning, not silent."""
+    store = _Store({"a1": {"content_hash": _H_A, "page_number": 1, "chunk_type": "text"},
+                    "a2": {"content_hash": _H_A, "page_number": 1, "chunk_type": "text"}})
+    manifests["by_doc"]["doc-a"] = _rows("a1", "a2", "gone1", "gone2")
+
+    with capture_logs() as logs:
+        if helper == "enrich":
+            ok = _enrich_metadata_from_extraction(
+                _H_A, _extraction(), Path("/x/a.pdf"), store, store, _COLLECTION, doc_id="doc-a", chunks_uploaded=4)
+        else:
+            ok = _update_chunk_metadata(
+                store, store, _COLLECTION, _H_A, _tag({1}), doc_id="doc-a", chunks_uploaded=4)
+
+    assert ok is True
+    (warn,) = [e for e in logs if e["event"] == "post_pass_manifest_chunks_not_live"]
+    assert warn["log_level"] == "warning" and warn["doc_id"] == "doc-a"
+    assert (warn["manifest_chunks_in_collection"], warn["not_live"], warn["live"]) == (4, 2, 2)
+    assert not [e for e in logs if e["event"] == "post_pass_selected_no_chunks"]
+    assert sorted(i for u in store.updates for i in u[0]) == ["a1", "a2"]
+
+
+@pytest.mark.parametrize("helper", ["enrich", "table"])
+def test_a_manifest_whose_chunks_are_all_live_warns_of_nothing(manifests, helper) -> None:
+    store = _Store({"a1": {"content_hash": _H_A, "page_number": 1, "chunk_type": "text"}})
+    manifests["by_doc"]["doc-a"] = _rows("a1")
+    with capture_logs() as logs:
+        if helper == "enrich":
+            _enrich_metadata_from_extraction(
+                _H_A, _extraction(), Path("/x/a.pdf"), store, store, _COLLECTION, doc_id="doc-a", chunks_uploaded=1)
+        else:
+            _update_chunk_metadata(
+                store, store, _COLLECTION, _H_A, _tag({1}), doc_id="doc-a", chunks_uploaded=1)
+    assert not [e for e in logs if e["event"] in ("post_pass_manifest_chunks_not_live", "post_pass_selected_no_chunks")]
+
+
+def test_doc_id_is_keyword_required() -> None:
+    """A caller states whether it has a document: omitting doc_id is a TypeError, not a silent
+    fall-back to the content_hash selection (nexus-ahm18 review F2)."""
+    store = _Store({})
+    with pytest.raises(TypeError, match="doc_id"):
+        _enrich_metadata_from_extraction(  # type: ignore[call-arg]
+            _H_A, _extraction(), Path("/x/a.pdf"), store, store, _COLLECTION)
+    with pytest.raises(TypeError, match="doc_id"):
+        _update_chunk_metadata(store, store, _COLLECTION, _H_A, lambda m: False)  # type: ignore[call-arg]
 
 
 # ── a failing read writes nothing ──────────────────────────────────────────────────────────────────

@@ -1902,7 +1902,7 @@ def test_update_chunk_metadata(get_exc, upd_exc, expected) -> None:
         m["chunk_type"] = "table_page"
         return True
 
-    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", _tag) is expected
+    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", _tag, doc_id="") is expected
 
 
 def test_update_chunk_metadata_writes_only_the_changed_keys() -> None:
@@ -1924,7 +1924,7 @@ def test_update_chunk_metadata_writes_only_the_changed_keys() -> None:
         m["chunk_type"] = "table_page"
         return True
 
-    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", _tag) is True
+    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", _tag, doc_id="") is True
     t3.update_chunks.assert_called_once_with("docs__test", ["id1"], [{"chunk_type": "table_page"}])
 
 
@@ -1944,7 +1944,7 @@ def test_pipeline_data_kept_on_enrichment_failure(db) -> None:
     t3.update_chunks.side_effect = Exception("quota exceeded")
     ro = MagicMock(spec=ExtractionResult)
     ro.text, ro.metadata, ro.title = "some text", {"page_count": 1, "docling_title": "Test"}, "Test"
-    assert _enrich_metadata_from_extraction("h1", ro, Path("/test.pdf"), t3, col, "docs__test") is False
+    assert _enrich_metadata_from_extraction("h1", ro, Path("/test.pdf"), t3, col, "docs__test", doc_id="") is False
 
 
 def test_enrich_metadata_title_override_wins_over_resolve_pdf_title() -> None:
@@ -1960,7 +1960,7 @@ def test_enrich_metadata_title_override_wins_over_resolve_pdf_title() -> None:
     override = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation"
 
     assert _enrich_metadata_from_extraction(
-        "h1", ro, Path("/test.pdf"), t3, col, "docs__test", title_override=override,
+        "h1", ro, Path("/test.pdf"), t3, col, "docs__test", title_override=override, doc_id="",
     ) is True
 
     written_metas = t3.update_chunks.call_args[0][2]

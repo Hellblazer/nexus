@@ -234,7 +234,10 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
     Every put since nexus-6pfgb.5 writes each key it gives a real value and retracts one the entry
     held, so an entry with at least one note key has an authoritative answer for the rest: an absent
     key is unset, never "ask the chunk row". An entry with none is a legacy one, or a note stored
-    with every key unset, which the row can fill only when the chunk has one live owner.
+    with every key unset. :func:`export_knowledge_doc` lets the chunk row fill such an entry only
+    through the row's last-writer gate: the row's ``catalog_doc_id`` is this entry's tumbler or,
+    for a row with none, the chunk has one live owner (a fallback that can take a departed
+    co-owner's values; see ``docs/storage-tiers.md``).
     """
     from nexus.catalog.store_hook import NOTE_META_KEYS  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
 

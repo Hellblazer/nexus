@@ -58,7 +58,7 @@ def test_stub_and_post_pass_touch_disjoint_keys(overridden: bool) -> None:
 
     ok = _enrich_metadata_from_extraction(
         "h" * 64, ExtractionResult(text="body", metadata=meta), Path("/repo/x.pdf"),
-        t3, _Col(), "docs__test",
+        t3, _Col(), "docs__test", doc_id="",
     )
 
     assert ok is True

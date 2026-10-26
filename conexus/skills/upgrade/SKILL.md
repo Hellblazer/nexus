@@ -138,9 +138,12 @@ If the user wants the managed cloud, that is a second hop with the CURRENT
 client after the upgrade back. It has NOT been rehearsed end to end (nexus-xbqh9)
 and carries less than the old direct path. Not carried: T2 plans, taxonomy
 (topics, assignments, links, centroids), `document_aspects`, the aspect queue and
-`aspect_promotion_log`, `frecency` and `relevance_log` (so a note's TTL is lost:
-an expiring note becomes permanent), the telemetry stores, DEVONthink
-highlights, curated catalog metadata (author, year, corpus, `meta`, collection
+`aspect_promotion_log`, `frecency` and `relevance_log` (a note's TTL is not in
+those tables: the `nx store export` file carries each chunk's `ttl_days` and
+`indexed_at` as stored, and the `nx catalog export` recovery bundle gives each
+`store_put` note its own `ttl_days` and restarts its clock at the import, so a note
+already expired but not reaped comes back with a full TTL), the telemetry stores,
+DEVONthink highlights, curated catalog metadata (author, year, corpus, `meta`, collection
 supersession), and owner tumblers are re-minted. T2 memory is carried only by
 hand (`nx memory list`, `nx memory get --project NAME --title NAME`, then
 `nx memory put` in the cloud), which has to happen BEFORE the switch to the

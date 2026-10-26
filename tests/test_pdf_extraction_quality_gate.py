@@ -319,7 +319,7 @@ class TestQualityGateOverriddenPropagation:
         t3 = MagicMock()
 
         ok = _enrich_metadata_from_extraction(
-            "hash123", result, Path("/repo/x.pdf"), t3, col, "docs__test",
+            "hash123", result, Path("/repo/x.pdf"), t3, col, "docs__test", doc_id="",
         )
         assert ok is True
         t3.update_chunks.assert_called_once()
@@ -343,7 +343,7 @@ class TestQualityGateOverriddenPropagation:
         t3 = MagicMock()
 
         ok = _enrich_metadata_from_extraction(
-            "hash123", result, Path("/repo/x.pdf"), t3, col, "docs__test",
+            "hash123", result, Path("/repo/x.pdf"), t3, col, "docs__test", doc_id="",
         )
         assert ok is True
         t3.update_chunks.assert_called_once()
