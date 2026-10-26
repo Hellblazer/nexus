@@ -471,8 +471,10 @@ Locked format decisions (design of record: T2
   row's `catalog_doc_id` is the note's tumbler and its `title` the note's
   title. A row with no stamp is nobody's for `ttl_days`, even when the note
   is the only owner left, since a departed co-owner's values stay on the
-  row (nexus-6pfgb.34); for `tags` and `category` alone it counts when the
-  note is the chunk's sole live owner (nexus-6pfgb.35); an untitled note never matches, and a note brought in
+  row (nexus-6pfgb.34). For `tags` and `category` alone, a note that is the
+  chunk's sole live owner in its collection takes them from any row whose
+  stamp and title do not both name another note (nexus-6pfgb.35). For
+  `ttl_days`, an untitled note never matches, and a note brought in
   by an `.nxexp` import does not unless the destination minted the source
   box's tumbler for it (its rows keep the source's stamp). Otherwise it
   exports with them empty and the export summary counts it when the row

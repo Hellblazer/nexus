@@ -54,7 +54,7 @@ from typing import Any, Callable, Iterable
 import structlog
 
 from nexus.aspect_readers import FILE_ROUTED_PREFIXES, uri_for
-from nexus.catalog.note_ttl import row_written_by
+from nexus.catalog.note_ttl import row_may_give_tags, row_written_by
 from nexus.catalog.types import CatalogEntry
 
 _log = structlog.get_logger(__name__)
@@ -228,8 +228,9 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
     key is unset, never "ask the chunk row". ``put_at`` counts: every put since nexus-6pfgb.15
     writes it, so a note stored with every other key unset still has an answer (all empty, and not
     counted as unrecovered). An entry with none is a legacy one, or a note stored with every key
-    unset before nexus-6pfgb.15. :func:`export_knowledge_doc` lets the chunk row fill such an entry only
-    when :func:`nexus.catalog.note_ttl.row_written_by` says the row is this note's own write.
+    unset before nexus-6pfgb.15. :func:`export_knowledge_doc` lets a chunk row fill such an entry when
+    :func:`nexus.catalog.note_ttl.row_written_by` says the row is this note's own write, and fill its
+    tags and category alone on sole ownership (nexus-6pfgb.35).
     """
     from nexus.catalog.store_hook import NOTE_META_KEYS  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
 
@@ -271,12 +272,15 @@ def export_knowledge_doc(
     ``.nxexp`` stamp under another title are not, whoever else holds the chunk now: a row is not
     rewritten when a co-owner leaves (nexus-6pfgb.34).
 
-    A row no note write stamped is nobody's for ``ttl_days``, since a TTL a departed co-owner left on it
-    would make a permanent note expire after import. For ``tags`` and ``category`` alone, a wrong value
-    being cosmetic, such a row counts when this note is the chunk's sole live owner
-    (*owners_by_chash*, from :func:`export_bundle`'s one owner lookup): the first such piece in
-    position order (Sam, nexus-6pfgb.35 option B). *summary* counts the note when a piece row held a
-    value the record does not carry. ``ttl_days`` is a positive integer or ``None``.
+    ``ttl_days`` comes from no other row, since a TTL a departed co-owner left on a row would make a
+    permanent note expire after import. ``tags`` and ``category`` alone, a wrong value being cosmetic,
+    also come from a piece row this note is the sole live owner of (*owners_by_chash*, from
+    :func:`export_bundle`'s one owner lookup, owners in other collections left out), unless the row's
+    stamp AND title both name another note (:func:`nexus.catalog.note_ttl.row_may_give_tags`): the first such piece in position
+    order (Sam, nexus-6pfgb.35 option B, the middle reading). That recovers an unstamped legacy row, a
+    renamed note (its own stamp, its old title) and an ``.nxexp`` import (the source box's stamp, its
+    own title). *summary* counts the note when a piece row held a value where the record has none.
+    ``ttl_days`` is a positive integer or ``None``.
     """
     ordered = sorted(manifest_rows, key=lambda r: r.position)
     pieces = [rows_by_chash.get(mrow.chash) for mrow in ordered]
@@ -308,8 +312,7 @@ def export_knowledge_doc(
             me = str(entry.tumbler)
             sole = next((
                 piece for mrow, piece in zip(ordered, rows)
-                if not piece.get("catalog_doc_id")
-                and set((owners_by_chash or {}).get(mrow.chash, [])) == {me}
+                if row_may_give_tags(entry.tumbler, piece, owner_title=entry.title or "") and set((owners_by_chash or {}).get(mrow.chash, [])) == {me}
             ), None)
             if sole is not None:
                 keys.update(tags=_row_keys(sole)["tags"], category=_row_keys(sole)["category"])
@@ -356,14 +359,21 @@ def _collection_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, 
         return {}
 
 
-def _sole_owner_candidates_owners(
-    reader: Any, selected: list[tuple[CatalogEntry, str, list]], rows_by_collection: dict[str, dict[str, dict]],
+def _tag_row_owners(
+    reader: Any,
+    selected: list[tuple[CatalogEntry, str, list]],
+    rows_by_collection: dict[str, dict[str, dict]],
+    collection_of: dict[str, str],
 ) -> dict[str, list[str]]:
-    """``chash -> live owner tumblers`` for the pieces whose ownership can decide a record's tags and
-    category (:func:`export_knowledge_doc`, nexus-6pfgb.35 option B): unstamped piece rows of keyless
-    notes none of whose pieces is their own write. One ``docs_for_chashes`` lookup for all of them, and
-    none at all when there are none."""
-    wanted: list[str] = []
+    """``chash -> live owner tumblers in the chash's own collection`` for the pieces whose ownership can
+    decide a record's tags and category (:func:`export_knowledge_doc`, nexus-6pfgb.35 option B): rows
+    that hold a tag or category and :func:`~nexus.catalog.note_ttl.row_may_give_tags` allows, of keyless notes none of whose
+    pieces is their own write. One ``docs_for_chashes`` lookup for all of them, none when there are
+    none. ``docs_for_chashes`` is catalog-wide, so an owner the catalog walk places in another
+    collection (a different T3 row with the same text) is dropped; an owner the walk did not see is
+    kept, which can only withhold tags. A failed lookup withholds every such tag rather than the
+    backup: those notes are counted and named as unrecovered."""
+    wanted: dict[str, str] = {}
     for entry, _leg, mrows in selected:
         if _own_note_keys(entry) is not None:
             continue
@@ -371,10 +381,20 @@ def _sole_owner_candidates_owners(
         pieces = [(m.chash, rows_by_chash.get(m.chash)) for m in mrows]
         if any(p is not None and row_written_by(entry.tumbler, p, owner_title=entry.title) for _c, p in pieces):
             continue
-        wanted.extend(c for c, p in pieces if p is not None and not p.get("catalog_doc_id"))
+        for chash, row in pieces:
+            if row is not None and (row.get("tags") or row.get("category")) and row_may_give_tags(entry.tumbler, row, owner_title=entry.title or ""):
+                wanted.setdefault(chash, entry.physical_collection)
     if not wanted:
         return {}
-    return reader.docs_for_chashes(list(dict.fromkeys(wanted)))
+    try:
+        owners = reader.docs_for_chashes(list(wanted))
+    except Exception as exc:  # noqa: BLE001 — the lookup only adds cosmetic keys; its loss is counted per note, the backup goes on
+        _log.warning("recovery_export_owner_lookup_failed", chashes=len(wanted), error=str(exc))
+        return {}
+    return {
+        chash: [str(t) for t in ts if collection_of.get(str(t), wanted[chash]) == wanted[chash]]
+        for chash, ts in (owners or {}).items() if chash in wanted
+    }
 
 
 def _row_keys(row: dict) -> dict[str, Any]:
@@ -505,7 +525,8 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
         collection: _collection_rows(t3, collection, list(dict.fromkeys(chashes)))
         for collection, chashes in chashes_by_collection.items()
     }
-    owners_by_chash = _sole_owner_candidates_owners(reader, selected, rows_by_collection)
+    collection_of = {str(e.tumbler): e.physical_collection for e in entries}
+    owners_by_chash = _tag_row_owners(reader, selected, rows_by_collection, collection_of)
     for entry, _leg, rows in selected:
         rec = export_knowledge_doc(
             entry, rows, rows_by_collection[entry.physical_collection], summary, owners_by_chash,

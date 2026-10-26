@@ -28,6 +28,7 @@ import pytest
 
 import nexus.catalog.recovery_bundle as rb
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.catalog.note_ttl import row_may_give_tags
 from nexus.catalog.recovery_bundle import (
     ExportSummary,
     ImportSummary,
@@ -39,6 +40,7 @@ from nexus.catalog.recovery_bundle import (
 )
 from nexus.catalog.types import CatalogEntry
 from nexus.catalog.tumbler import Tumbler
+from nexus.db.http_vector_client import VectorServiceError
 
 CH_A = "a" * 64
 CH_B = "b" * 64
@@ -410,8 +412,6 @@ def test_a_note_whose_manifest_skips_a_position_is_counted_incomplete(fake_catal
 def test_a_store_read_failure_stops_the_export_and_writes_no_bundle(fake_catalog, tmp_path):
     """nexus-6pfgb.36: a piece the store could not return is not a piece that is gone; the error
     propagates and no file is written."""
-    from nexus.db.http_vector_client import VectorServiceError
-
     class _Failing(_FakeT3):
         def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
             raise VectorServiceError("503 from store-get")
@@ -423,8 +423,6 @@ def test_a_store_read_failure_stops_the_export_and_writes_no_bundle(fake_catalog
 
 
 def _unregistered(collection: str) -> Exception:
-    from nexus.db.http_vector_client import VectorServiceError
-
     body = {"error": f"collection {collection} is not registered", "collection": collection,
             "reason": "unregistered_collection"}
     return VectorServiceError("422", code=422, reason="unregistered_collection", engine_body=body)
@@ -449,8 +447,6 @@ def test_notes_of_a_collection_the_engine_no_longer_registers_are_ghosts(fake_ca
 
 def test_any_other_422_from_the_store_still_stops_the_export(fake_catalog, tmp_path):
     """A 422 with another reason is a store that could not answer, not an empty collection."""
-    from nexus.db.http_vector_client import VectorServiceError
-
     class _Other(_FakeT3):
         def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
             raise VectorServiceError("422", code=422, reason="model_unavailable",
@@ -1077,16 +1073,17 @@ def test_a_note_with_no_keys_that_is_the_rows_last_writer_takes_the_rows_values(
     "row_writer",
     [{"catalog_doc_id": "1.9.1"}, {"catalog_doc_id": "1.9.1", "title": "note-b"},
      {"catalog_doc_id": "1.4.4", "title": "note-a"}],
-    ids=["stamp-without-title", "stamp-with-another-title", "another-boxs-stamp-with-this-title"],
+    ids=["stamp-without-title", "renamed-note-own-stamp-old-title", "nxexp-import-other-boxs-stamp-own-title"],
 )
 def test_a_row_is_a_keyless_notes_own_only_when_both_its_stamp_and_its_title_are(
     fake_catalog, tmp_path, row_writer,
 ):
     """An ``.nxexp`` import keeps the SOURCE box's ``catalog_doc_id`` on the rows it writes while the
     destination mints its own tumblers, so a stale stamp can equal A's tumbler: the export reads a row
-    as A's only through ``note_ttl.row_written_by`` (stamp AND title), never on one of them alone. A
-    row that carries any stamp is never taken on sole ownership either (nexus-6pfgb.35 option B covers
-    unstamped rows only), so none of these gives A even its tags."""
+    as A's own write, and takes its ``ttl_days``, only through ``note_ttl.row_written_by`` (stamp AND
+    title), never on one of them alone. A sole owner still takes such a row's tags and category, since
+    neither its stamp nor its title is another note's for sure (Sam, nexus-6pfgb.35 option B, middle
+    reading); the dropped TTL counts the note."""
     url, state = fake_catalog
     t3 = _FakeT3()
     _shared_pair(state, t3, a_meta={}, b_meta={})
@@ -1095,8 +1092,28 @@ def test_a_row_is_a_keyless_notes_own_only_when_both_its_stamp_and_its_title_are
     summary, docs = _export_docs(url, t3, tmp_path)
 
     a = docs["note-a"]
-    assert (a["tags"], a["category"], a["ttl_days"]) == ("", "", None)
+    assert (a["tags"], a["category"], a["ttl_days"]) == ("beta", "finding", None)
     assert summary.note_keys_unrecovered == 1
+
+
+@pytest.mark.parametrize(
+    ("row", "allowed"),
+    [
+        ({}, True),
+        ({"title": "note-b"}, True),
+        ({"catalog_doc_id": "1.9.1", "title": "note-b"}, True),
+        ({"catalog_doc_id": "1.4.4", "title": "note-a"}, True),
+        ({"catalog_doc_id": "1.9.2"}, True),
+        ({"catalog_doc_id": "1.9.2", "title": "note-b"}, False),
+        ("not a dict", False),
+    ],
+    ids=["unstamped-untitled", "unstamped-other-title", "own-stamp-other-title", "other-stamp-own-title",
+         "other-stamp-untitled", "other-stamp-other-title", "not-a-row"],
+)
+def test_row_may_give_tags_refuses_only_a_row_another_note_wrote(row, allowed):
+    """nexus-6pfgb.35 option B, the middle reading: the one importable rule (note_ttl) the export uses
+    and the nexus-6pfgb.10 backfill is specified to reuse (RDR-236)."""
+    assert row_may_give_tags("1.9.1", row, owner_title="note-a") is allowed
 
 
 def test_a_legacy_row_with_ttl_zero_exports_as_permanent(fake_catalog, tmp_path):
@@ -1126,6 +1143,53 @@ def test_the_export_asks_who_owns_a_chunk_only_for_a_keyless_note_on_an_unstampe
 
     del t3.rows[CH_S]["catalog_doc_id"]
     _export_docs(url, t3, tmp_path)
+    assert state.docs_for_chashes_requests == [[CH_S]]
+
+
+def test_a_split_keyless_note_with_an_own_written_piece_makes_no_owner_lookup(fake_catalog, tmp_path):
+    """A piece that is the note's own write answers for all three keys, so no other piece's ownership
+    is asked about, even an unstamped one."""
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(state, t3, a_meta={}, b_meta={})
+    CH_T = "f" * 64
+    state.manifests["1.9.1"] = [{"chash": CH_S, "position": 0}, {"chash": CH_T, "position": 1}]
+    t3.rows[CH_S].update({"catalog_doc_id": "1.9.1", "title": "note-a"})
+    t3.rows[CH_T] = {"id": CH_T, "content": " and more", "tags": "other", "category": "", "ttl_days": None}
+    _summary, docs = _export_docs(url, t3, tmp_path)
+
+    assert docs["note-a"]["tags"] == "beta"
+    assert state.docs_for_chashes_requests == []
+
+
+def test_a_failed_owner_lookup_withholds_tags_and_never_the_backup(fake_catalog, tmp_path, monkeypatch):
+    """The lookup only adds cosmetic keys: when it fails the export goes on, and the notes whose tags it
+    withheld are counted and named."""
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(state, t3, a_meta={}, b_meta={})
+    state.manifests = {"1.9.1": [{"chash": CH_S, "position": 0}]}
+    t3.rows[CH_S]["ttl_days"] = None
+    monkeypatch.setattr(HttpCatalogClient, "docs_for_chashes",
+                        lambda self, chashes: (_ for _ in ()).throw(RuntimeError("catalog 503")))
+    summary, docs = _export_docs(url, t3, tmp_path)
+
+    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == ("", "")
+    assert summary.note_keys_unrecovered_notes == [(KNOW, "note-a")]
+
+
+def test_an_owner_in_another_collection_does_not_count_against_sole_ownership(fake_catalog, tmp_path):
+    """The owner lookup is catalog-wide; the same text in another collection is a different T3 row, so
+    an owner the catalog walk places there is not a co-owner of this one."""
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(state, t3, a_meta={}, b_meta={})
+    state.docs[1]["physical_collection"] = CODE  # note-b holds the same chash, in another collection
+    t3.rows[CH_S]["ttl_days"] = None
+    summary, docs = _export_docs(url, t3, tmp_path)
+
+    assert (docs["note-a"]["tags"], docs["note-a"]["category"]) == ("beta", "finding")
+    assert (KNOW, "note-a") not in summary.note_keys_unrecovered_notes
     assert state.docs_for_chashes_requests == [[CH_S]]
 
 

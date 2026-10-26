@@ -111,7 +111,8 @@ def row_written_by(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bo
     A row with no ``catalog_doc_id`` (written before the stamp, or by a path that omits it) is nobody's:
     ``False``, never a fall-back to "the only owner left". The expiry sweep asks this before reading a
     row's TTL as a note's, and the recovery-bundle export before taking a keyless note's row values
-    (nexus-6pfgb.34).
+    (nexus-6pfgb.34). For ``tags`` and ``category`` alone the export also accepts a sole-owner row
+    :func:`row_may_give_tags` allows (nexus-6pfgb.35).
     """
     if not isinstance(row_meta, dict) or not owner_title:
         return False
@@ -120,6 +121,22 @@ def row_written_by(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bo
         return False
     title = row_meta.get("title")
     return isinstance(title, str) and title == owner_title
+
+
+def row_may_give_tags(owner_tumbler: Any, row_meta: Any, *, owner_title: str) -> bool:
+    """Whether a chunk row may give a note with no keys of its own its ``tags`` and ``category`` when
+    the note is the chunk's sole live owner (Sam, nexus-6pfgb.35 option B, the middle reading).
+
+    The caller checks sole ownership; this rules out only a row another note wrote: one whose
+    ``catalog_doc_id`` names another tumbler AND whose ``title`` names another title. An unstamped
+    legacy row, a renamed note's row (its own stamp, its old title) and an ``.nxexp`` import's row (the
+    source box's stamp, its own title) are allowed. Never a basis for ``ttl_days``: a TTL a departed
+    co-owner left would make a permanent note expire, so TTL needs :func:`row_written_by`.
+    """
+    if not isinstance(row_meta, dict):
+        return False
+    stamp, title = row_meta.get("catalog_doc_id"), row_meta.get("title")
+    return not (stamp and str(stamp) != str(owner_tumbler) and title and title != owner_title)
 
 
 #: How far a chunk row's ``indexed_at`` may sit after the catalog's ``put_at`` and still be the same
