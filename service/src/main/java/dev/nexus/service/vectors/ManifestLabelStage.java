@@ -50,7 +50,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *       exactly as NULL does: a current client writes {@code ""} for a chunk with no heading. The one
  *       exception is an operand that is itself the empty string: an unlabelled value is compared with
  *       {@code ""} first, so {@code $eq ""} and {@code $in [""]} match it and {@code $ne ""} and {@code $nin
- *       [""]} drop it, as the chunk-row filter did.</li>
+ *       [""]} drop it. The chunk-row filter matched only a stored {@code ""} on these operands; a value
+ *       that is missing now matches {@code ""} too ({@code $eq ""}, {@code $in [""]}) and is dropped by
+ *       {@code $ne ""} and {@code $nin [""]}.</li>
  *   <li>{@code labels_written} (catalog-046): a manifest row says whether its labels are its document's
  *       own answer. A WRITTEN row is authoritative, its empty or NULL label included: the chunk row is
  *       never consulted, because the chunk row belongs to the last writer and a document that indexed a
@@ -263,6 +265,7 @@ final class ManifestLabelStage {
     private static boolean test(Predicate p, Object label) {
         if (label == null || (label instanceof String text && text.isEmpty())) {
             // An explicit empty-string operand names exactly this value: compare it before the unlabelled rule.
+            // A missing value (null) counts as empty here; the chunk-row filter matched only a stored "".
             return switch (p.operator()) {
                 case "$eq" -> isEmptyString(p.operand());
                 case "$ne" -> !isEmptyString(p.operand());

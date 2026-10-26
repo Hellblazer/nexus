@@ -76,6 +76,12 @@ class PgVectorManifestDocKeyFilterTest {
     private static final String Q = Chash.ofText("dockey-filter-q").toHex();
     private static final String L = Chash.ofText("dockey-filter-l").toHex();
     private static final String R = Chash.ofText("dockey-filter-r").toHex();
+    private static final String T = Chash.ofText("dockey-filter-t").toHex();
+
+    /** A second collection holding document E alone, so its extra shape leaves the A to D expectations as they are. */
+    private static final String COLLECTION_E = "knowledge__dockey-filter-e__minilm-l6-v2-384__v1";
+    private static final String DOC_E = "dockey-doc-e";
+    private static final String TEXT_T = "dockeyprobe chunk only document e holds";
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -106,12 +112,22 @@ class PgVectorManifestDocKeyFilterTest {
         embedder.register(TEXT_Q, 0.8f, 0.6f);
         embedder.register(TEXT_L, 0.6f, 0.8f);
         embedder.register(TEXT_R, 0.3f, 0.9539392f);
+        embedder.register(TEXT_T, 1.0f, 0.0f);
         vec = new PgVectorRepository(tenantScope, embedder, embedder);
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(seed, TENANT, COLLECTION);
+            PgContainerHelper.insertCollection(seed, TENANT, COLLECTION_E);
+            // E: no author and no index time (both NULL), unenriched; lives alone in COLLECTION_E.
+            seed.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENTS.TUMBLER, DOC_E)
+                .set(CATALOG_DOCUMENTS.TITLE, "Document E")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION_E)
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + DOC_E + ".md")
+                .execute();
             // A: enriched. Its catalog meta says tags=alpha, which no search consults (not an answered key).
             seed.insertInto(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT)
@@ -174,6 +190,8 @@ class PgVectorManifestDocKeyFilterTest {
             "bib_year", 2040, "bib_citation_count", 99);
         vec.upsertChunks(TENANT, COLLECTION, List.of(S, P, Q, L, R),
             List.of(TEXT_S, TEXT_P, TEXT_Q, TEXT_L, TEXT_R), List.of(ms, mp, mq, ml, mr));
+        // T carries neither source_author nor indexed_at on its row.
+        vec.upsertChunks(TENANT, COLLECTION_E, List.of(T), List.of(TEXT_T), List.of(row("tags", "e")));
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -184,6 +202,15 @@ class PgVectorManifestDocKeyFilterTest {
             manifest(seed, DOC_B, 1, Q, null, false);
             manifest(seed, DOC_C, 0, L, null, false);
             manifest(seed, DOC_D, 0, R, null, false);
+            seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+                .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, DOC_E)
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(T))
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION_E)
+                .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, false)
+                .execute();
         }
     }
 
@@ -218,7 +245,7 @@ class PgVectorManifestDocKeyFilterTest {
     private static String label(Map<String, Object> r) {
         String chash = (String) r.get("id");
         String name = chash.equals(S) ? "S" : chash.equals(P) ? "P" : chash.equals(Q) ? "Q"
-                    : chash.equals(L) ? "L" : chash.equals(R) ? "R" : chash;
+                    : chash.equals(L) ? "L" : chash.equals(R) ? "R" : chash.equals(T) ? "T" : chash;
         String doc = (String) r.get("doc_id");
         String owner = doc == null ? "none" : doc.substring(doc.length() - 1).toUpperCase();
         return name + "@" + owner;
@@ -244,6 +271,14 @@ class PgVectorManifestDocKeyFilterTest {
 
     private void expect(Map<String, Object> where, String... expected) {
         assertThat(labels(search(where))).as("where %s", where).containsExactly(expected);
+    }
+
+    private List<Map<String, Object>> searchE(Map<String, Object> where) {
+        return vec.search(TENANT, QUERY, List.of(COLLECTION_E), 10, where);
+    }
+
+    private static void expect(List<Map<String, Object>> rows, String... expected) {
+        assertThat(labels(rows)).containsExactly(expected);
     }
 
     private static Map<String, Object> rowOf(List<Map<String, Object>> rows, String label) {
@@ -298,7 +333,7 @@ class PgVectorManifestDocKeyFilterTest {
     }
 
     @Test
-    void anExplicitEmptyStringOperand_matchesAnUnrecordedValue_asTheChunkRowFilterDid() {
+    void anExplicitEmptyStringOperand_matchesAnUnrecordedValue_andDropsItOnNeAndNin() {
         // A has a venue; B and C are unenriched and D's venue is not recorded: all four are ''.
         expect(where("bib_venue", ""), "S@B", "Q@B", "L@C", "R@D");
         expect(where("bib_venue", op("$in", List.of("", "x"))), "S@B", "Q@B", "L@C", "R@D");
@@ -310,7 +345,26 @@ class PgVectorManifestDocKeyFilterTest {
     }
 
     @Test
+    void aMissingNonAuthoritativeValue_matchesTheEmptyStringOperand_whichTheChunkRowFilterDidNot() {
+        // E: no author, no index time, and its chunk row has neither key, so the fallback finds nothing
+        // either. The value is missing, not a stored "". The chunk-row filter did not match it on $eq "" and
+        // kept it on $ne ""; the stage now treats it as the empty value.
+        expect(searchE(where("source_author", "")), "T@E");
+        expect(searchE(where("source_author", op("$in", List.of("", "x")))), "T@E");
+        expect(searchE(where("source_author", op("$ne", ""))));
+        expect(searchE(where("source_author", op("$nin", List.of("")))));
+        expect(searchE(where("indexed_at", "")), "T@E");
+        expect(searchE(where("indexed_at", op("$ne", ""))));
+        // Any other operand keeps the unlabelled rule: kept by $ne, dropped by $eq.
+        expect(searchE(where("source_author", op("$ne", "Alice"))), "T@E");
+        expect(searchE(where("source_author", "Alice")));
+    }
+
+    @Test
     void aNumericKeyAcceptsTheNumberAsText_aStringKeyDoesNot() {
+        // 2021.0 is the same number as 2021 only through the numeric tolerance; as a string it is not "2021".
+        expect(where("bib_year", 2021.0), "S@A", "P@A");
+        expect(where("bib_year", "2021.0"), "S@A", "P@A");
         expect(where("bib_year", "2021"), "S@A", "P@A");
         expect(where("bib_citation_count", "40"), "S@A", "P@A");
         expect(where("bib_doi", "10.1/a"), "S@A", "P@A");

@@ -223,6 +223,8 @@ class ManifestLabelStageTest {
 
     @Test
     void anExplicitEmptyStringOperand_isComparedWithAnUnlabelledValueAsTheEmptyString() {
+        // null is a MISSING value and "" a stored empty one; both are the empty string here. The chunk-row
+        // filter matched only a stored "" on $eq "" and kept a missing key on $ne "".
         for (Object unlabelled : java.util.Arrays.asList(null, "")) {
             Map<String, Object> value = w("source_author", unlabelled);
             assertThat(ManifestLabelStage.passes(
