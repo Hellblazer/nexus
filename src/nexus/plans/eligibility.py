@@ -33,11 +33,12 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
 * ``grown``: the ``grown`` tag OR a declaration that says ``grown``, whichever is the less trusted
   reading. A ``curated`` declaration on a row without the builtin tag is not trusted: it reads as grown
   with kind ``unknown`` (``untrusted_curated_claim``). A grown plan's recorded kind counts only when its
-  route is ``explicit`` (the caller named the kind). A ``heuristic`` or ``model-assisted`` stamp is the
-  request's guessed kind, not a property of the plan's steps, and the RDR relaxes the unknown-kind
-  restriction for recorded provenance only "after review": until a reviewed decision says otherwise such
-  a plan reads as grown with kind ``unknown`` (``unreviewed_route``). The route is still recorded at the
-  grow site; only eligibility discounts it;
+  route is in :data:`TRUSTED_ROUTES`, which ships empty. Every recorded stamp (``explicit``,
+  ``heuristic``, ``model-assisted``) is the request's label for the kind, not a property of the plan's steps
+  (an ``explicit`` hint is the caller's, and the planner builds its steps without it), and the RDR relaxes
+  the unknown-kind restriction for recorded provenance only "after review": until a reviewed decision
+  (nexus-jypmj.2.8) adds a route, a grown plan reads as grown with kind ``unknown`` (``unreviewed_route``).
+  The route is still recorded at the grow site; only eligibility discounts it;
 * ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``,
   and it is treated like any other untrusted unknown plan. A builtin seeded before nexus-jypmj.2.1 is
   this until ``nx plan reseed`` (or the upgrade ladder) writes its declaration; the exclusion reason is
@@ -115,9 +116,11 @@ REASONS: frozenset[str] = frozenset({
     "judge_error",
 })
 
-#: The grown-plan route whose recorded kind eligibility honours (the caller named it). The other routes
-#: (``heuristic``, ``model-assisted``) are discounted until a reviewed decision adds them here.
-TRUSTED_ROUTES: frozenset[str] = frozenset({"explicit"})
+#: The grown-plan routes whose recorded kind eligibility honours. EMPTY on purpose: even ``explicit`` is the
+#: request's label (the caller's ``dimensions["answer_kind"]`` hint), not a check of the plan's steps, and
+#: the inline planner builds its steps before any stamp. Until a reviewed decision (nexus-jypmj.2.8)
+#: names a route here, every grown plan reads as ``unknown`` kind whatever its recorded route.
+TRUSTED_ROUTES: frozenset[str] = frozenset()
 
 #: At most this many refused plan ids are listed in the envelope.
 _MAX_LISTED_IDS = 20

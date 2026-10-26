@@ -39,6 +39,9 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -59,6 +62,34 @@ from nexus.catalog.types import CatalogEntry, ManifestRow
 from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRange, SourceRef, SourceRefError
 
 _log = structlog.get_logger(__name__)
+
+#: Whether the named-source failure logs must leave the source id out (nexus-jypmj.2 follow-up, code review S5).
+#: An id the caller BOUND is a parameter of the call; an id read from the question text is the caller's wording,
+#: and under ``trace=False`` that wording is not logged. ``nx_answer`` sets this around the resolution stage; a
+#: ContextVar so that the worker thread the stage runs in (``asyncio.to_thread`` copies the context) sees it.
+_REDACT_SOURCE_LOGS: ContextVar[bool] = ContextVar("nx_redact_source_logs", default=False)
+
+#: What a redacted log carries in place of the id.
+REDACTED_SOURCE = "[from the question]"
+
+
+@contextmanager
+def redacted_source_logs(on: bool) -> Iterator[None]:
+    """Within the block, the named-source failure logs carry :data:`REDACTED_SOURCE` and the exception TYPE
+    instead of the source id and the exception text (the text can quote the id)."""
+    token = _REDACT_SOURCE_LOGS.set(bool(on))
+    try:
+        yield
+    finally:
+        _REDACT_SOURCE_LOGS.reset(token)
+
+
+def _source_log_fields(ref: SourceRef, exc: BaseException, *, text: bool = True) -> dict[str, str]:
+    """The ``source`` and ``error`` fields of a named-source failure log. *text* False keeps the exception
+    type only even when the id is shown."""
+    if _REDACT_SOURCE_LOGS.get():
+        return {"source": REDACTED_SOURCE, "error": type(exc).__name__}
+    return {"source": ref.value, "error": str(exc) if text else type(exc).__name__}
 
 __all__ = [
     "DEFAULT_CAPS",
@@ -143,6 +174,10 @@ DEFAULT_CAPS = PrimaryEvidenceCaps()
 #: A CALIBRATION PARAMETER, not a derived value: the developer chose 3 (the resolver's own cap is 6, and
 #: RDR-232 is silent). Nothing measured it; the held-out set of nexus-jypmj.2.8 is where to calibrate it.
 QUESTION_SOURCE_CAP = 3
+
+#: The most dropped source ids the resolution lists (wire and text notice); ``dropped_omitted`` counts the
+#: rest. The drop itself is unchanged: every id past the cap is dropped and disclosed as a count at least.
+LISTED_DROPPED = 20
 
 
 def question_source_caps(caps: PrimaryEvidenceCaps = DEFAULT_CAPS) -> PrimaryEvidenceCaps:
@@ -292,7 +327,8 @@ class NamedSourceResolution:
     def to_wire(self) -> dict[str, Any]:
         return {
             "sources": [{**s.to_wire(), "origin": self.origin} for s in self.sources],
-            "dropped": list(self.dropped),
+            "dropped": list(self.dropped[:LISTED_DROPPED]),
+            **({"dropped_omitted": len(self.dropped) - LISTED_DROPPED} if len(self.dropped) > LISTED_DROPPED else {}),
             "catalog_calls": self.catalog_calls,
             "origin": self.origin,
             "ranges": [r.to_wire() for r in self.ranges],
@@ -352,7 +388,9 @@ class NamedSourceResolution:
             from_q, fate = (" read from the question", "dropped, not resolved") if self.origin == "question" else ("", "dropped")
             lines.append(
                 f"[evidence request: {len(self.dropped)} named source(s){from_q} beyond the cap of "
-                f"{self.caps.max_named_sources} were {fate}: {', '.join(self.dropped)}]"
+                f"{self.caps.max_named_sources} were {fate}: {', '.join(self.dropped[:LISTED_DROPPED])}"
+                + (f" and {len(self.dropped) - LISTED_DROPPED} more" if len(self.dropped) > LISTED_DROPPED else "")
+                + "]"
             )
         for rng in self.ranges:
             if text := rng.disclosure():
@@ -516,7 +554,7 @@ def _resolve_tumbler(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls
     try:
         entry = calls.resolve(ref.value)
     except Exception as exc:  # noqa: BLE001 — reported, never raised
-        _log.warning("named_source_resolve_failed", source=ref.value, error=str(exc))
+        _log.warning("named_source_resolve_failed", **_source_log_fields(ref, exc))
         return _unresolved(ref, calls.failed(ref.value, exc))
     if entry is None:
         return _unresolved(ref, f"document {ref.value} is not in the catalog")
@@ -771,7 +809,7 @@ def _carrier_group(
             try:
                 got = lookup(entry, calls.call_timeout(caps.frontmatter_call_seconds), source_prefix)
             except Exception as exc:  # noqa: BLE001 — reported, never raised
-                _log.warning("named_source_frontmatter_id_failed", source=ref.value, error=type(exc).__name__)
+                _log.warning("named_source_frontmatter_id_failed", **_source_log_fields(ref, exc, text=False))
                 failure = (
                     _deadline_detail("the frontmatter id lookup", caps) if isinstance(exc, LookupDeadline)
                     else f"the frontmatter id lookup failed ({type(exc).__name__})"
@@ -885,7 +923,7 @@ def _resolve_rdr(
             if any(admitted(e) for e in found):
                 break
     except Exception as exc:  # noqa: BLE001 — reported, never raised
-        _log.warning("named_source_find_failed", source=ref.value, error=str(exc))
+        _log.warning("named_source_find_failed", **_source_log_fields(ref, exc))
         return _unresolved(ref, calls.failed(ref.value, exc))
 
     scoped = [e for e in found if admitted(e)]

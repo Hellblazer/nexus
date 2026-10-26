@@ -647,6 +647,10 @@ def _measure_with_grown_473_clone(library, queries, art, floor_observations, flo
     return {"selections": selections, "measures": with_clone, "floor": floor, "eligibility": eligibility}
 
 
+#: The golden label of the builtin template plan 473 came from (RDR-232 line 1606).
+BUILTIN_473_LABEL = "lookup:hybrid-factual-lookup"
+
+
 class _LegacyBuiltins:
     """The plan library as it was before nexus-jypmj.2.1: builtin rows without their declaration."""
 
@@ -747,6 +751,31 @@ def _measure_eligibility(library, queries, with_clone_selections) -> dict:
     assert g06["selected_off"] == g.GROWN_473_KEY, g06
     assert g06["selected_on"] != g.GROWN_473_KEY, g06
     assert g06["excluded_total"] >= 1 and g06["derived_kind"] == "synthesis", g06
+    # Plan 473's template, the REAL seeded row (critique S3, RDR-232 Test Plan scenario 1): with the gate
+    # enforcing and the builtins seeded with their declarations, `lookup:hybrid-factual-lookup` is refused for
+    # the incident request, and the reason is the matrix's `kind_mismatch` (a curated lookup plan, a
+    # synthesis request). At the production floor this library does not OFFER the template for G06 (the
+    # incident selected 473 live; the builtins-only floor selects research:default), so the request is
+    # observed once more with the confidence floor open: the matcher then examines the row, and the
+    # enforcing filter must refuse it.
+    g06_q = next(q for q in queries if q.qid.startswith("G06"))
+    sc, bd = g.request_call_shape(g06_q)
+    cov = derive_request_coverage(g06_q.text, scope=sc)
+    gate = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=True)
+    open_floor = g.observe_plan_selection(
+        library, g06_q.text, scope=sc, bindings=bd, eligibility=gate, min_confidence=0.0)
+    unfiltered = g.observe_plan_selection(library, g06_q.text, scope=sc, bindings=bd, min_confidence=0.0)
+    assert BUILTIN_473_LABEL in unfiltered.candidates, (unfiltered.candidates, "the open-floor run must offer the template")
+    assert BUILTIN_473_LABEL not in open_floor.candidates, (open_floor.candidates, "the enforcing filter offered the 473 template")
+    row = library.get_plan(dict(zip(unfiltered.candidates, unfiltered.plan_ids))[BUILTIN_473_LABEL])
+    assert "builtin-template" in str(row["tags"]), row["tags"]
+    assert row["id"] in gate.excluded_plan_ids, (gate.excluded_plan_ids, row["id"])
+    reasons = {r for b in gate.to_wire()["branches"].values() for r in b["reasons"]}
+    assert "kind_mismatch" in reasons, gate.to_wire()
+    standing = el.classify_plan(row["tags"], row["plan_json"])
+    assert (standing.kind.value, standing.provenance, standing.flag) == ("lookup", "curated", None), standing
+    verdict = el.eligibility(el.coerce_kind(cov.answer_kind), standing.kind, standing.provenance)
+    assert (verdict.eligible, verdict.reason) == (False, "kind_mismatch"), verdict
     changed = [r["qid"] for r in rows if r["selected_off"] != r["selected_on"]]
     # selection moves only through the filter: every changed request had a plan selected with the gate off, and
     # that plan's label is among the labels the enforcing run refused for that request

@@ -5496,7 +5496,14 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   (matched case-insensitively against the owner names) that is not the
   session's; both give the `candidates` ambiguity, and `active_project.reason`
   says the inference was set aside. The title counts only with at least two
-  distinctive words ("in detail" vetoes nothing). If the owner names cannot be
+  distinctive words ("in detail" vetoes nothing). A title is read in two
+  forms: after a cue verb as the topic sentence (`Synthesize RDR-084, LIST
+  PARSE Canonical Consolidation`), and, anywhere in the question, in
+  parentheses or double quotes right after the id (`What did RDR-084 (LIST
+  PARSE Canonical Consolidation) decide?`, `RDR-084 titled "..."`; a comma,
+  colon, `titled`, `called` or `named` may sit between). A parenthesis that
+  names another RDR or opens like an aside (`see`, `e.g.`, `also`) is not a
+  title, and single quotes are not read. If the owner names cannot be
   read while the question has a word that could name a project, the inference
   is declined and the reason says "name check unavailable". A number the
   session's project does not hold resolves to the other project's document and
@@ -5509,7 +5516,13 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   same resolution, through the same three tiers (nexus-jypmj.2.4): the request
   then carries `source_origin: "question"` and `sources` holds the ids read from
   the text, at most 3 resolved per request (the rest are in
-  `named_sources.dropped`). A range (`RDR-078 through RDR-095`) keeps its two
+  `named_sources.dropped`). The question is scanned for ids, ranges, project
+  names and titles up to 64,000 characters (a longer one adds a `scan_limit`
+  ambiguity with subject `question`), and the envelope lists at most 20 of
+  them: `sources` and `request_coverage.named_sources` stop at 20
+  (`sources_omitted` and `named_source_count` give the rest),
+  `named_sources.dropped` stops at 20 (`dropped_omitted` counts the rest, and
+  the text notice says `and N more`). A range (`RDR-078 through RDR-095`) keeps its two
   ends as sources (the second end may be a bare number: `RDR-078 through 095`)
   and is listed in `named_sources.ranges` and in a text notice
   ("range RDR-078 to RDR-095 not expanded: RDR-079 to RDR-094 not resolved"):
@@ -5637,14 +5650,14 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   is the RDR number the resolved document's path carries (`null` when it is
   not an RDR file). The stream is read only when the request has a
   gate, lifecycle or status facet (see `request_coverage`), or when the clause
-  structure is uncertain and the caller bound an RDR source (it fails open);
+  structure is uncertain and the request names an RDR source, bound or read from the question (it fails open);
   a request about something else leaves it `null` even for a named RDR.
 - `request_coverage` (nexus-jypmj.2.2, RDR-232 Phase 2, shadow mode): what the
   request asks for, derived before plan matching without a model call. It is
   reported and does not choose a plan; the one plan-visible use is the
   lifecycle-stream gate above. `{answer_kind, kind_decision, facets,
   constraints, named_sources, named_source_count, source_origin, source_hints,
-  source_hint_count, subject, explicit_scope, current_code_requested,
+  source_hint_count, source_ranges, subject, explicit_scope, current_code_requested,
   ambiguities, wants_lifecycle_stream, facets_certain, active_project_tier,
   active_project, extraction, derive_ms}`. `answer_kind` is `lookup`,
   `synthesis`, `discovery/listing`, `comparison`, `audit`, `debug` or
@@ -5663,7 +5676,13 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   (`source_unqualified`, withdrawn once the resolver resolved it to one
   document; replaced by `source_inferred` when the active project chose among
   documents that other projects also carry), a conflicting or unresolved qualifier, a project named only in
-  the text. `extraction` is `{outcome, calls, timeout_s, latency_ms,
+  the text, a `dimensions["answer_kind"]` that is not a kind (`kind_hint_invalid`:
+  ignored, and the kind is derived from the question), a question scanned only
+  in part or more ids than are listed (`scan_limit`). When the inline planner
+  has to plan, its prompt carries the request's answer kind, up to six facets and
+  up to six constraints (each clipped, 600 characters in all; nothing when the
+  coverage holds no more than `unknown`); the prompt is never logged.
+  `extraction` is `{outcome, calls, timeout_s, latency_ms,
   cost_usd}` for the optional structured call (`NX_ANSWER_STRUCTURED_EXTRACT`;
   `outcome` `disabled`, `not_needed`, `skipped_deadline`, `ok`, `unchanged`,
   `timeout`, `error` or `invalid`; at most one call). With `trace=False` the
@@ -5680,9 +5699,9 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   `unknown_request_untrusted_plan`, `unknown_request_narrow_plan`,
   `untrusted_unknown_plan`, `undeclared_builtin` (a builtin seeded before
   nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration),
-  `untrusted_curated_claim`, `unreviewed_route` (a grown plan whose recorded kind came
-  from a `heuristic` or `model-assisted` route, which is discounted until a reviewed
-  decision says otherwise; only an `explicit` route is honoured) or `judge_error`
+  `untrusted_curated_claim`, `unreviewed_route` (a grown plan whose recorded kind is discounted:
+  `eligibility.TRUSTED_ROUTES` is empty until a reviewed decision, nexus-jypmj.2.8,
+  names a route, so every grown plan reads as unknown-kind) or `judge_error`
   (judging the candidate failed; kept when not enforcing, dropped when enforcing).
   The filter judges after every other drop (unmet binding, scope conflict,
   always-failing, FTS literal drop), so a count is "would have been returned, but for
@@ -5698,7 +5717,7 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   `all_candidates_ineligible` or `below_confidence_floor`. A plan grown by the inline
   planner records the request's kind and route in its `plan_json` only when
   `kind_decision` is `explicit`, `heuristic` or `model-assisted`; eligibility honours
-  the recorded kind only for `explicit`. Any agreement or wrong-shape figure measured
+  the recorded kind for no route yet. Any agreement or wrong-shape figure measured
   on the 24 golden requests is in-sample: the request kinds are the first pass fitted
   to that set, so a wrong-shape count of 0 is a floor and the figures are not rates.
 - `evidence_diagnostics` (nexus-jypmj.1.8): per-stream counts, the reducer input,

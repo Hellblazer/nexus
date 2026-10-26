@@ -52,7 +52,7 @@ def _run(
     tmp_path: Path, *, question: str = G06, scope: str = "rdr", bindings: dict[str, Any] | None = INCIDENT_BINDINGS,
     project: str | None = ART_OWNER, declare: bool = True, extra_docs: tuple[tuple[str, ...], ...] = (),
     configure: Callable[[SessionCatalog], None] | None = None, monkeypatch: pytest.MonkeyPatch | None = None,
-    budget_seconds: float | None = None,
+    budget_seconds: float | None = None, trace: bool = True,
 ) -> tuple[dict, AsyncMock, AsyncMock, SessionCatalog]:
     """``nx_answer`` on the fake catalog, the model-free plan runner replaced by a recorder. *project* is the
     owner the session's directory is registered under (``None``: never indexed); *declare* False leaves
@@ -91,6 +91,7 @@ def _run(
         env, _ = _drive_nx_answer(
             _match(MULTI_STEP_PLAN, default_bindings={"intent": "q"}), scope=scope, structured=True,
             question=question, bindings=bindings, catalog=cat, budget_seconds=budget_seconds,
+            trace=trace,
         )
     return env, run, life, cat
 

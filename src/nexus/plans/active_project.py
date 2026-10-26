@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -54,10 +56,12 @@ __all__ = [
     "PROJECT_DIR_ENV",
     "ActiveProject",
     "ActiveProjectTier",
+    "OWNER_NAMES_TTL_S",
     "REMEDY",
     "apply_active_project",
     "detect_active_project",
     "registered_owner_names",
+    "reset_active_project_caches_for_tests",
 ]
 
 #: The environment variable the host sets to the session's project directory.
@@ -70,6 +74,31 @@ ACTIVE_PROJECT_ORIGIN = "active_project"
 #: What to do when the session's project cannot be inferred. The same words are in the envelope's reason, the
 #: ``bindings`` description of ``nx_answer``, ``docs/cli-reference.md`` and the CHANGELOG.
 REMEDY = "pass owner or project (an owner name such as ART, or its tumbler) to choose"
+
+#: How long a reliable detection and a read of the registered owner names are reused within one process
+#: (nexus-jypmj.2 follow-up, code review S4). The environment and the working directory are stable for the life
+#: of a server process, so the detection is keyed by them and by the catalog handle: a change of either is a new
+#: key and a new lookup. The detection's lifetime is a safety bound on a catalog that changed under the process
+#: (an owner re-registered); the owner names are kept for the short TTL because other sessions register owners.
+DETECTION_TTL_S = 600.0
+OWNER_NAMES_TTL_S = 60.0
+
+#: The clock the caches age by; a test replaces it here, never ``time.monotonic`` itself.
+_clock: Callable[[], float] = time.monotonic
+_cache_lock = threading.Lock()
+#: ``(key, catalog, value, stored at)`` of the last reliable detection; one entry, the process has one session.
+_detection_cache: tuple[tuple[str, str], Any, "ActiveProject", float] | None = None
+#: ``(catalog, names, stored at)`` of the last successful owner-name read.
+_owner_names_cache: tuple[Any, frozenset[str], float] | None = None
+
+
+def reset_active_project_caches_for_tests() -> None:
+    """Drop both per-process caches (a test that reuses a catalog handle across states calls this)."""
+    global _detection_cache, _owner_names_cache
+    with _cache_lock:
+        _detection_cache = None
+        _owner_names_cache = None
+
 
 #: An owner tumbler: two segments (``1.2``). Anything else the catalog returns is not an owner.
 _OWNER_RE = re.compile(r"^\d+\.\d+$")
@@ -128,6 +157,7 @@ def _detect(
     cat: Any, get_catalog: Callable[[], Any] | None, environ: Mapping[str, str], getcwd: Callable[[], str],
     owner_of: OwnerOf,
 ) -> ActiveProject:
+    global _detection_cache
     declared = str(environ.get(PROJECT_DIR_ENV, "") or "").strip()
     if not declared:
         return _unreliable(
@@ -156,6 +186,24 @@ def _detect(
     if cat is None:
         return _unreliable("the catalog is unavailable, so the project's owner cannot be looked up")
     root = os.path.realpath(declared)
+    # Reused only on the production path (the process's own environment, directory and owner lookup): a caller
+    # that replaced one of those seams is testing the lookup and wants it made.
+    cacheable = owner_of is _default_owner_of and environ is os.environ and getcwd is os.getcwd
+    key = (declared, os.path.realpath(cwd))
+    if cacheable:
+        with _cache_lock:
+            hit = _detection_cache
+        if hit is not None and hit[0] == key and hit[1] is cat and _clock() - hit[3] < DETECTION_TTL_S:
+            return hit[2]
+    found = _lookup(cat, root, owner_of)
+    if cacheable and found.reliable:
+        with _cache_lock:
+            _detection_cache = (key, cat, found, _clock())
+    return found
+
+
+def _lookup(cat: Any, root: str, owner_of: OwnerOf) -> ActiveProject:
+    """The catalog half of the detection: *root*'s owner, and that owner's registry row."""
     try:
         owner = owner_of(cat, root)
     except Exception as exc:  # noqa: BLE001 — reported as the reason, never raised
@@ -176,19 +224,32 @@ def _detect(
     return ActiveProject(True, owner=tumbler, name=str(row.get("name") or ""))
 
 
-def registered_owner_names(cat: Any) -> frozenset[str] | None:
+def registered_owner_names(cat: Any, *, ttl: float = 0.0) -> frozenset[str] | None:
     """The registered owner names, case-folded, or ``None`` when the registry cannot be read. Never raises.
 
     A name in the question counts as a project only if it is in this set (``nexus`` and ``Nexus`` both are, ``in
     detail`` is not). ``None`` is not an empty registry: :func:`apply_active_project` reads it as "no name can
     be vouched for" and declines to infer while the question has a word that could name a project. Blocking
     catalog I/O: call it from a worker thread.
+
+    With *ttl* above zero a successful read of the same catalog handle is reused for that many seconds (one
+    ``list_owners`` call per process per TTL, not one per question); a failed read is never kept.
     """
+    global _owner_names_cache
     if cat is None:
         return None
+    if ttl > 0:
+        with _cache_lock:
+            hit = _owner_names_cache
+        if hit is not None and hit[0] is cat and _clock() - hit[2] < ttl:
+            return hit[1]
     try:
         rows = cat.list_owners()
-        return frozenset(str(r.get("name") or "").strip().casefold() for r in rows if isinstance(r, Mapping)) - {""}
+        names = frozenset(str(r.get("name") or "").strip().casefold() for r in rows if isinstance(r, Mapping)) - {""}
+        if ttl > 0:
+            with _cache_lock:
+                _owner_names_cache = (cat, names, _clock())
+        return names
     except Exception as exc:  # noqa: BLE001 — an unreadable registry is reported as None, never raised
         _log.warning("active_project_owner_names_failed", error=type(exc).__name__)
         return None

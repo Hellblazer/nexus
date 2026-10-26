@@ -10237,7 +10237,7 @@ def _nx_answer_seconds_left(ceiling: float, deadline: float | None) -> float:
 
 def _nx_answer_split_kind_hint(
     dimensions: dict[str, Any] | None,
-) -> "tuple[dict[str, Any] | None, str | None]":
+) -> "tuple[dict[str, Any] | None, Any]":
     """``(dimensions, hint)``: the caller's answer-kind hint taken out of *dimensions* (RDR-232 Phase 2,
     nexus-jypmj.2.2). ``dimensions`` is a hard superset filter over plans, and no plan carries an
     ``answer_kind`` dimension, so the hint must not reach ``plan_match``; it is read by the request
@@ -10246,7 +10246,7 @@ def _nx_answer_split_kind_hint(
         return dimensions, None
     rest = {k: v for k, v in dimensions.items() if k != "answer_kind"}
     hint = dimensions["answer_kind"]
-    return (rest or None), (hint if isinstance(hint, str) else None)
+    return (rest or None), hint
 
 
 async def _nx_answer_request_coverage(
@@ -10254,7 +10254,7 @@ async def _nx_answer_request_coverage(
     question: str,
     scope: str,
     evidence_request: EvidenceRequest,
-    explicit_kind: str | None,
+    explicit_kind: object,
     deadline: float | None,
     trace: bool,
 ) -> "RequestCoverage":
@@ -10308,7 +10308,9 @@ async def _nx_answer_request_coverage(
     else:
         coverage = replace(coverage, extraction=ExtractionReport("disabled"))
     # A logger fetched per call (as nx_answer does), so a test's log capture sees the event.
-    structlog.get_logger().info("nx_answer_request_coverage", **log_fields(coverage, trace=trace))
+    fields = _nx_answer_isolated("coverage_log", None, log_fields, coverage, trace=trace)
+    if fields is not None:
+        structlog.get_logger().info("nx_answer_request_coverage", **fields)
     return coverage
 
 
@@ -10406,6 +10408,21 @@ def _nx_answer_settle_inference(request: EvidenceRequest, named: "NamedSourceRes
     return replace(request, owner=OwnerResolution("none"), active_project=tier)
 
 
+def _nx_answer_isolated(stage: str, default: Any, fn: "Callable[..., Any]", /, *args: Any, **kwargs: Any) -> Any:
+    """``fn(*args, **kwargs)``, or *default* if it raises (nexus-jypmj.2 follow-up, code review I2).
+
+    The pre-match disclosure stages (request coverage, question sources, active project, eligibility
+    fallback) are pure helpers that promise never to raise, and that promise is each helper's own. This
+    wrapper is the call site's: a fault in one leaves that stage at its default and the answer goes on. The
+    log carries the stage name and the exception TYPE only, never its text (which can quote the question).
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — a disclosure stage never fails an answer
+        _log.warning("nx_answer_pre_match_stage_failed", stage=stage, error=type(exc).__name__)
+        return default
+
+
 def _nx_answer_question_sources(request: EvidenceRequest, coverage: "RequestCoverage") -> EvidenceRequest:
     """Feed the RDR ids the question names into named-source resolution (RDR-232 Phase 2, nexus-jypmj.2.4).
 
@@ -10422,7 +10439,9 @@ def _nx_answer_question_sources(request: EvidenceRequest, coverage: "RequestCove
     """
     if coverage.source_origin != "question":
         return request
-    return request.with_question_sources(coverage.named_sources, coverage.source_ranges)
+    return _nx_answer_isolated(
+        "question_sources", request, request.with_question_sources, coverage.named_sources, coverage.source_ranges,
+    )
 
 
 async def _nx_answer_active_project(
@@ -10472,7 +10491,7 @@ async def _nx_answer_active_project(
         registered: frozenset[str] | None = frozenset()
         if active.reliable and project_names:
             try:
-                registered = _ap.registered_owner_names(_get_catalog())
+                registered = _ap.registered_owner_names(_get_catalog(), ttl=_ap.OWNER_NAMES_TTL_S)
             except Exception as exc:  # noqa: BLE001 — no registry means no name can be vouched for
                 _log.warning("nx_answer_active_project_registry_unavailable", error=type(exc).__name__)
                 registered = None
@@ -10488,23 +10507,32 @@ async def _nx_answer_active_project(
     except Exception as exc:  # noqa: BLE001 — the disclosure stage never raises
         _log.warning("nx_answer_active_project_failed", error=type(exc).__name__)
         active = _ap.ActiveProject(False, reason=f"the session's project could not be determined ({type(exc).__name__})")
-    tier = _ap.apply_active_project(
+    tier = _nx_answer_isolated(
+        "active_project", None, _ap.apply_active_project,
         request.owner, active, scope=scope, project_names=project_names, registered=registered,
     )
+    if tier is None:
+        return request
     return replace(request, owner=tier.owner, active_project=tier.to_wire())
 
 
 async def _nx_answer_named_sources(
     request: EvidenceRequest, *, deadline: float | None = None,
-    title_hints: dict[str, list[str]] | None = None,
+    title_hints: dict[str, list[str]] | None = None, trace: bool = True,
 ) -> NamedSourceResolution | None:
     """:func:`_nx_answer_named_sources_stage`, made total: the stage never raises into ``nx_answer``. A failure
     anywhere in it (an import, the catalog handle, the worker thread) leaves every named source ``unresolved``
-    with the exception's TYPE as the reason (never its text), and the answer goes on."""
+    with the exception's TYPE as the reason (never its text), and the answer goes on.
+
+    With ``trace=False`` the stage's failure logs leave out the id of a source read from the question text (the
+    caller's wording); the id of a source the caller bound is logged as before (nexus-jypmj.2 follow-up, S5)."""
     if not request.sources:
         return None
+    from nexus.plans.primary_evidence import redacted_source_logs  # noqa: PLC0415 — deferred; matches this module's convention
+
     try:
-        return await _nx_answer_named_sources_stage(request, deadline=deadline, title_hints=title_hints)
+        with redacted_source_logs(not trace and request.source_origin == "question"):
+            return await _nx_answer_named_sources_stage(request, deadline=deadline, title_hints=title_hints)
     except Exception as exc:  # noqa: BLE001 — the disclosure stage never fails an answer
         _log.warning("nx_answer_named_sources_failed", error=type(exc).__name__)
         from dataclasses import replace as _replace  # noqa: PLC0415 — stdlib, branch-local
@@ -11132,6 +11160,44 @@ def _format_plan_few_shot(matches: "list | None") -> str:
     )
 
 
+#: The most text the request coverage may add to the planner's prompt (RDR-232 Phase 2 step 3), and the most
+#: facets and constraints it lists. The prompt is model input, not a log; it is never logged.
+_PLANNER_REQUEST_MAX_CHARS = 600
+_PLANNER_REQUEST_MAX_ITEMS = 6
+_PLANNER_REQUEST_ITEM_CHARS = 90
+
+
+def _nx_answer_planner_request_block(coverage: "RequestCoverage | None") -> str:
+    """What the request asks for, as prompt lines (RDR-232 Phase 2 step 3, critique S2): its answer kind, its
+    facets as a short list and its constraints, so the inline planner builds steps that cover every clause
+    instead of planning blind. Empty (the prompt is exactly the pre-Phase-2 one) when there is no coverage or
+    it holds nothing beyond ``unknown``. Capped at ``_PLANNER_REQUEST_MAX_CHARS``; a facet or constraint
+    past ``_PLANNER_REQUEST_MAX_ITEMS`` is counted, not listed. Never raises."""
+    if coverage is None:
+        return ""
+    try:
+        def _clip(text: str) -> str:
+            text = " ".join(str(text).split())
+            return text if len(text) <= _PLANNER_REQUEST_ITEM_CHARS else text[:_PLANNER_REQUEST_ITEM_CHARS - 1] + "…"
+
+        def _listed(label: str, items: "tuple[Any, ...]") -> str:
+            if not items:
+                return ""
+            shown = "; ".join(_clip(i.text) for i in items[:_PLANNER_REQUEST_MAX_ITEMS])
+            more = len(items) - _PLANNER_REQUEST_MAX_ITEMS
+            return f"{label}: {shown}" + (f" (and {more} more)" if more > 0 else "") + "\n"
+
+        lines = ""
+        if coverage.answer_kind and coverage.answer_kind != "unknown":
+            lines += f"The request asks for a {coverage.answer_kind} answer.\n"
+        lines += _listed("Cover each of these", tuple(coverage.facets))
+        lines += _listed("The answer must also respect", tuple(coverage.constraints))
+        return lines[:_PLANNER_REQUEST_MAX_CHARS]
+    except Exception as exc:  # noqa: BLE001 — a prompt hint never fails the planner
+        _log.warning("nx_answer_planner_request_block_failed", error=type(exc).__name__)
+        return ""
+
+
 async def _nx_answer_plan_miss(
     question: str,
     *,
@@ -11200,6 +11266,7 @@ async def _nx_answer_plan_miss(
         f"with at most {max_steps} steps:{corpus_hint}\n\n"
         f"{few_shot_block}"
         f"Question: {question}\n"
+        f"{_nx_answer_planner_request_block(coverage)}"
         f"{corpus_names_hint}\n\n"
         f"{_PLANNER_SCOPING_RULES}\n\n"
         f"{_PLANNER_TOOL_REFERENCE}\n"
@@ -11586,7 +11653,7 @@ async def nx_answer(
         description=(
             "Dimensional filter for the plan-match gate, e.g. "
             "{\"verb\": \"research\"}. Unset considers every active plan. "
-            "The key answer_kind (lookup, synthesis, discovery, comparison, audit, "
+            "The key answer_kind (lookup, synthesis, discovery/listing, comparison, audit, "
             "debug) is a hint about the answer you want, not a filter."
         ),
     )] = None,
@@ -11869,14 +11936,15 @@ async def nx_answer(
 
     _source_deadline = _nx_answer_source_stage_deadline(deadline)
     _evidence_request = await _nx_answer_active_project(
-        _evidence_request, project_name_candidates(question or ""), scope=scope, deadline=_source_deadline,
+        _evidence_request, _nx_answer_isolated("project_names", (), project_name_candidates, question or ""),
+        scope=scope, deadline=_source_deadline,
     )
     _title_hints: dict[str, list[str]] = {}
     for _hint in _request_coverage.source_hints:
         if _hint.kind == "title":
             _title_hints.setdefault(_hint.source, []).append(_hint.text)
     _named_sources = await _nx_answer_named_sources(
-        _evidence_request, deadline=_source_deadline, title_hints=_title_hints or None,
+        _evidence_request, deadline=_source_deadline, title_hints=_title_hints or None, trace=trace,
     )
     _evidence_request = _nx_answer_settle_inference(_evidence_request, _named_sources)
     # A source the resolver resolved to exactly one document has nothing left to tell apart, so its
@@ -11885,16 +11953,19 @@ async def nx_answer(
     # One the session's project could not hold (`fallback`) was resolved to ANOTHER project's document by
     # elimination, not confirmed by any qualifier: its line stays (nexus-jypmj.2.4, confirmation N1).
     if _named_sources is not None:
-        _request_coverage = _request_coverage.without_unqualified_for(
-            (s.ref.value for s in _named_sources.resolved() if not s.fallback),
-            inferred_over={
-                s.ref.value: (
-                    f"{s.ref.value} was resolved to {s.tumbler} by the session's project, inferred; "
-                    f"{s.foreign} document(s) in other projects carry the same number"
-                )
-                for s in _named_sources.resolved() if s.inferred and s.foreign
-            },
-        )
+        def _withdraw_unqualified() -> "RequestCoverage":
+            return _request_coverage.without_unqualified_for(
+                (s.ref.value for s in _named_sources.resolved() if not s.fallback),
+                inferred_over={
+                    s.ref.value: (
+                        f"{s.ref.value} was resolved to {s.tumbler} by the session's project, inferred; "
+                        f"{s.foreign} document(s) in other projects carry the same number"
+                    )
+                    for s in _named_sources.resolved() if s.inferred and s.foreign
+                },
+            )
+
+        _request_coverage = _nx_answer_isolated("withdraw_unqualified", _request_coverage, _withdraw_unqualified)
     # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
     # plan_match, which asks it of every branch's candidates; enforcing only when the module constant is on
     # (it ships off: the filter then counts what it would exclude and excludes nothing). Reported in the
@@ -12586,7 +12657,8 @@ async def nx_answer(
         matches[0].confidence, threshold=effective_min_confidence,
     )
     # RDR-232 Phase 2 (nexus-jypmj.2.3): why this call plans inline, if it does (reported in the envelope).
-    _plan_eligibility.set_fallback(_eligibility.fallback_reason(
+    _plan_eligibility.set_fallback(_nx_answer_isolated(
+        "fallback_reason", None, _eligibility.fallback_reason,
         force_dynamic=bool(force_dynamic), matches=matches, hit=_plan_hit, filt=_plan_eligibility,
     ))
     if not _plan_hit:

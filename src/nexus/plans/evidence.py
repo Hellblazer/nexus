@@ -515,6 +515,10 @@ def catalog_name_lookup(cat: Any) -> NameLookup:
 # ── The request as a whole ───────────────────────────────────────────────────
 
 
+#: The most named sources the envelope's ``evidence_request`` lists; ``sources_omitted`` counts the rest.
+LISTED_SOURCES = 20
+
+
 @dataclass(frozen=True)
 class EvidenceRequest:
     """What the caller asked for through the reserved bindings and ``scope``."""
@@ -567,8 +571,10 @@ class EvidenceRequest:
             "source": self.source.to_wire() if self.source else None,
             "source_error": self.source_error,
             "owner": self.owner.to_wire(),
-            "sources": [s.to_wire() for s in self.sources],
+            "sources": [s.to_wire() for s in self.sources[:LISTED_SOURCES]],
         }
+        if len(self.sources) > LISTED_SOURCES:
+            wire["sources_omitted"] = len(self.sources) - LISTED_SOURCES
         if self.source_origin != "explicit":
             wire["source_origin"] = self.source_origin
         if self.active_project is not None:

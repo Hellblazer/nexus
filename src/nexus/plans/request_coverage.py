@@ -123,6 +123,22 @@ ACTIVE_PROJECT_TIER = "wired"
 _MAX_QUESTION_CHARS = 8_000
 _MAX_FACETS = 12
 _MAX_CONSTRAINTS = 8
+#: The most of a question the text scans read (RDR ids, ranges, project and title words, lifecycle topics in
+#: the tail past the structural cap). The scans run on the event loop before ``plan_match``; past this the
+#: rest is not read and the coverage says so (``scan_limit`` ambiguity), so a megabyte of text costs the
+#: same as 64 KB. Cut at a space, so an id is never read half-written.
+MAX_SCAN_CHARS = 64_000
+#: At most this many named sources, source hints and per-source ambiguities are LISTED in the envelope; the
+#: ``named_source_count`` and ``source_hint_count`` keys carry the totals. Resolution has its own, lower cap.
+MAX_LISTED_SOURCES = 20
+
+
+def _scan_prefix(text: str) -> str:
+    """*text* cut to :data:`MAX_SCAN_CHARS` at a space (all of it when it is shorter)."""
+    if len(text) <= MAX_SCAN_CHARS:
+        return text
+    cut = text.rfind(" ", 0, MAX_SCAN_CHARS)
+    return text[: cut if cut > 0 else MAX_SCAN_CHARS]
 
 
 def normalize_kind(raw: object) -> str | None:
@@ -156,7 +172,7 @@ class Facet:
         wire: dict[str, Any] = {"id": self.id, "origin": self.origin, "topics": list(self.topics)}
         if not redact:
             wire["text"] = self.text
-            wire["source_hints"] = list(self.source_hints)
+            wire["source_hints"] = list(self.source_hints[:MAX_LISTED_SOURCES])
         return wire
 
 
@@ -198,7 +214,7 @@ class Ambiguity:
 
     code: Literal[
         "source_unqualified", "source_inferred", "owner_conflict", "owner_unresolved", "project_hint_conflict",
-        "project_hint_unapplied", "kind_ambiguous",
+        "project_hint_unapplied", "kind_ambiguous", "scan_limit", "kind_hint_invalid",
     ]
     subject: str
     detail: str
@@ -270,14 +286,17 @@ class RequestCoverage:
     def wants_lifecycle_stream(self) -> bool:
         """Whether the T2 lifecycle stream is read (RDR-232 Phase 2 step 8): the request has a gate, lifecycle
         or status facet. It also FAILS OPEN: with uncertain facets (the clause structure could not be read,
-        the question ran past a cap, or the derivation failed) and an RDR source the caller bound, a topic
+        the question ran past a cap, or the derivation failed) and an RDR source (bound, or named in the question), a topic
         may sit where nothing looked, so the stream is read."""
         if any(t in LIFECYCLE_TOPICS for f in self.facets for t in f.topics):
             return True
         # A topic sentence ("Summarize RDR-210 status.") is the subject, not a facet, but its topic still counts.
         if any(t in LIFECYCLE_TOPICS for s in self.subject for t in _topics(_CUE_VERB.sub("", s, count=1))):
             return True
-        return (not self.facets_certain and self.source_origin == "explicit"
+        # A source read from the question fails open like a bound one: whatever RDR it names is read for its
+        # lifecycle only if it resolves (the stream is built from the RESOLVED sources), but whether to look
+        # cannot depend on where the id was written.
+        return (not self.facets_certain and self.source_origin in ("explicit", "question")
                 and any(s.kind == "rdr" for s in self.named_sources))
 
     def without_unqualified_for(
@@ -308,10 +327,10 @@ class RequestCoverage:
             "kind_decision": self.kind_decision,
             "facets": [f.to_wire(redact=redact) for f in self.facets],
             "constraints": [c.to_wire(redact=redact) for c in self.constraints],
-            "named_sources": [] if redact else [s.to_wire() for s in self.named_sources],
+            "named_sources": [] if redact else [s.to_wire() for s in self.named_sources[:MAX_LISTED_SOURCES]],
             "named_source_count": len(self.named_sources),
             "source_origin": self.source_origin,
-            "source_hints": [] if redact else [h.to_wire() for h in self.source_hints],
+            "source_hints": [] if redact else [h.to_wire() for h in self.source_hints[:MAX_LISTED_SOURCES]],
             "source_hint_count": len(self.source_hints),
             "source_ranges": [r.to_wire() for r in self.source_ranges],
             "subject": [] if redact else list(self.subject),
@@ -858,17 +877,15 @@ _PROJECT_BEFORE = re.compile(r"\b([A-Z][A-Z0-9_-]{1,10})\s+RDR[-_ ]?(\d{1,4})\b"
 
 
 def _rdr_sources(text: str) -> tuple[SourceRef, ...]:
-    found: list[SourceRef] = []
+    """The RDR ids *text* names, in order, once each. Reads at most :data:`MAX_SCAN_CHARS` of it."""
+    text = _scan_prefix(text)
+    found: dict[SourceRef, None] = {}
     for m in _RDR_REF.finditer(text):
-        ref = SourceRef.parse(f"RDR-{int(m.group(1))}")
-        if ref not in found:
-            found.append(ref)
+        found.setdefault(SourceRef.parse(f"RDR-{int(m.group(1))}"))
     # A range's bare second end ("RDR-078 through 095") has no RDR prefix of its own, so the scan above misses it.
     for rng in _source_ranges(text):
         for end in (rng.start_value, rng.end_value):
-            ref = SourceRef.parse(end)
-            if ref not in found:
-                found.append(ref)
+            found.setdefault(SourceRef.parse(end))
     return tuple(found)
 
 
@@ -900,7 +917,9 @@ def _source_ranges(text: str) -> tuple[SourceRange, ...]:
         bare = m.group("bare")
         if bare is not None and (conn in ("to", "-") or len(bare) < len(m.group(1))):
             continue
-        if conn == "to" and _COMPARISON_LEAD.search(text[: m.start()]):
+        # the lead is a comparison word and at most 60 characters before the id: a bounded window, not the
+        # whole prefix (a slice per match made the scan quadratic)
+        if conn == "to" and _COMPARISON_LEAD.search(text[max(0, m.start() - 100): m.start()]):
             continue
         rng = SourceRange(int(m.group(1)), int(m.group(3) if bare is None else bare))
         if rng not in out:
@@ -922,6 +941,7 @@ def project_name_candidates(text: str) -> list[str]:
     lower-case ``nexus`` is. Pure: no catalog, no stoplist beyond the articles and prepositions.
     """
     names: list[str] = []
+    text = _scan_prefix(text)
     for pattern, group in ((_NAME_BEFORE, 1), (_PROJECT_AFTER, 2), (_PROJECT_POSSESSIVE, 1)):
         for m in pattern.finditer(text):
             name = m.group(group)
@@ -932,6 +952,7 @@ def project_name_candidates(text: str) -> list[str]:
 
 
 def _project_hints(text: str) -> list[SourceHint]:
+    text = _scan_prefix(text)
     hints: list[SourceHint] = []
 
     def add(number: str, name: str) -> None:
@@ -950,16 +971,52 @@ def _project_hints(text: str) -> list[SourceHint]:
     return hints
 
 
-def _title_hints(topics: Sequence[str]) -> list[SourceHint]:
-    """The title after the id in a topic sentence: ``Synthesize RDR-084, LIST PARSE Canonical Consolidation``."""
+#: A title written right after an RDR id, ANYWHERE in the question, in parentheses or double quotes:
+#: ``What did RDR-084 (LIST PARSE Canonical Consolidation) decide?``, ``RDR-084 titled "LIST PARSE ..."``.
+#: The id may be followed by a comma or colon and by ``titled``/``called``/``named``. Single quotes are not
+#: read (an apostrophe is not a quote).
+_INLINE_TITLE = re.compile(
+    r"\bRDR[-_ ]?(\d{1,4})\b[ ,:]*(?:(?:titled|entitled|called|named)\s+)?"
+    r"(?:\((?P<paren>[^()]{3,200})\)|[\"\u201c](?P<quote>[^\"\u201d]{3,200})[\"\u201d])",
+    re.IGNORECASE,
+)
+_TITLE_LEAD = re.compile(r"^(?:titled|entitled|called|named)\s+", re.IGNORECASE)
+#: A parenthesis that opens like an aside is not a title (``RDR-084 (see RDR-090)``, ``(i.e. the gate)``).
+_ASIDE_OPENER = re.compile(
+    r"^(?:see|cf\.?|e\.g\.?|i\.e\.?|also|from|in|for|on|about|per|and|or|re|vs\.?|but|note|including)\b", re.IGNORECASE,
+)
+
+
+def _title_hints(topics: Sequence[str], text: str = "") -> list[SourceHint]:
+    """The title a question gives for an RDR id, so the active-project tier can tell it does not fit.
+
+    Two forms are read: the title after the id in a topic sentence (``Synthesize RDR-084, LIST PARSE
+    Canonical Consolidation``), and a title written in parentheses or double quotes right after the id
+    anywhere in *text* (``What did RDR-084 (LIST PARSE Canonical Consolidation) decide?``). A title is two
+    or more words; a parenthesis that names another RDR or opens like an aside is not one. A topic-sentence
+    title for an id wins over an inline one for the same id.
+    """
     hints: list[SourceHint] = []
     for topic in topics:
         m = _RDR_REF.search(topic)
         if not m:
             continue
-        rest = topic[m.end():].lstrip(" ,:-—").strip()
+        rest = _TITLE_LEAD.sub("", topic[m.end():].lstrip(" ,:-—").strip(), count=1)
+        for opener, closer in (("(", ")"), ('"', '"'), ("\u201c", "\u201d")):
+            if len(rest) > 2 and rest[0] == opener and rest[-1] == closer and closer not in rest[1:-1]:
+                rest = rest[1:-1].strip()
+                break
         if len(rest.split()) >= 2:
             hints.append(SourceHint(f"RDR-{int(m.group(1)):03d}", "title", rest))
+    have = {h.source for h in hints}
+    for m in _INLINE_TITLE.finditer(_scan_prefix(text)):
+        title = " ".join((m.group("paren") or m.group("quote") or "").split())
+        source = f"RDR-{int(m.group(1)):03d}"
+        if source in have or len(title.split()) < 2 or _RDR_REF.search(title) or _ASIDE_OPENER.match(title):
+            continue
+        hint = SourceHint(source, "title", title)
+        if hint not in hints:
+            hints.append(hint)
     return hints
 
 
@@ -985,7 +1042,8 @@ def derive_request_coverage(
 
     *evidence_request* carries the caller's ``source``/``owner``/``project`` bindings after
     :func:`~nexus.plans.evidence.build_evidence_request`; they outrank anything read from *question*.
-    *explicit_kind* is a caller hint (``dimensions["answer_kind"]``); an invalid value is ignored.
+    *explicit_kind* is a caller hint (``dimensions["answer_kind"]``); an invalid value is ignored and recorded
+    as a ``kind_hint_invalid`` ambiguity.
 
     *active_project* is a disclosure seam, recorded and never used here: it returns a project name, not a
     tumbler or an owner, and runs too early to qualify a source. The tier itself is
@@ -1022,7 +1080,10 @@ def _derive(
     over_cap = len(full) > _MAX_QUESTION_CHARS
     cut = (full.rfind(" ", 0, _MAX_QUESTION_CHARS) if over_cap else len(full))
     cut = cut if cut > 0 else _MAX_QUESTION_CHARS
-    text, tail = full[:cut], full[cut:]
+    text = full[:cut]
+    scan = _scan_prefix(full)
+    scan_cut = len(scan) < len(full)
+    tail = scan[len(text):] if len(scan) > len(text) else ""
     parsed = _parse(text)
 
     constraints = tuple(
@@ -1048,7 +1109,7 @@ def _derive(
         # constraint clauses, plus the unparsed tail (a gate or status clause past the cap still counts).
         topics = tuple(dict.fromkeys(_topics(stripped) + (_topics(tail) if tail else ())))
         facets = (
-            Facet("f1", full, "whole_question", topics, tuple(s.value for s in _rdr_sources(full))),
+            Facet("f1", full, "whole_question", topics, tuple(s.value for s in _rdr_sources(scan))),
         ) if full else ()
     else:
         facets = tuple(
@@ -1059,6 +1120,13 @@ def _derive(
     # kind: an explicit hint, else the patterns over the question without its constraint clauses
     hint = normalize_kind(explicit_kind)
     ambiguities: list[Ambiguity] = []
+    if explicit_kind is not None and hint is None:
+        # the caller named a kind and it is not one: ignored, and said so (never the value: it is input)
+        ambiguities.append(Ambiguity(
+            "kind_hint_invalid", "answer_kind",
+            "dimensions['answer_kind'] is not one of " + ", ".join(REQUEST_KINDS) + "; it was ignored and the "
+            "kind was derived from the question",
+        ))
     if hint is not None and hint != "unknown":
         kind, decision = hint, "explicit"
     else:
@@ -1073,7 +1141,7 @@ def _derive(
     current_code = bool(_CURRENT_CODE.search(stripped))
 
     # named sources: bindings outrank the text
-    from_text = _rdr_sources(full)
+    from_text = _rdr_sources(scan)
     if request is not None and request.sources:
         sources, origin = tuple(request.sources), "explicit"
     elif from_text:
@@ -1081,8 +1149,14 @@ def _derive(
     else:
         sources, origin = (), "none"
 
-    hints = _title_hints(parsed.topics) + _project_hints(full)
+    hints = _title_hints(parsed.topics, scan) + _project_hints(scan)
     ambiguities.extend(_source_ambiguities(sources, hints, request))
+    if scan_cut:
+        ambiguities.append(Ambiguity(
+            "scan_limit", "question",
+            f"the question is longer than {MAX_SCAN_CHARS} characters; RDR ids, ranges and project names past that "
+            "point were not read",
+        ))
     qualifier = None
     if active_project is not None:
         try:
@@ -1100,7 +1174,7 @@ def _derive(
         kind_decision=decision,  # type: ignore[arg-type]
         source_origin=origin,  # type: ignore[arg-type]
         source_hints=tuple(hints),
-        source_ranges=_source_ranges(full) if origin == "question" else (),
+        source_ranges=_source_ranges(scan) if origin == "question" else (),
         subject=tuple(parsed.topics),
         ambiguities=tuple(ambiguities),
         facets_certain=facets_certain,
@@ -1119,7 +1193,7 @@ def _source_ambiguities(
     elif owner.status == "unresolved" and sources:
         out.append(Ambiguity("owner_unresolved", "owner", owner.detail))
     elif owner.status == "none":
-        for s in rdr_sources:
+        for s in rdr_sources[:MAX_LISTED_SOURCES]:
             named = sorted({h.text for h in hints if h.kind == "project" and h.source == s.value})
             extra = (
                 f" The question names project {', '.join(repr(n) for n in named)} in its text, which is not used "
@@ -1133,11 +1207,17 @@ def _source_ambiguities(
                 "(evidence_request.active_project says what it did); without it a project that shares this number "
                 f"cannot be told apart.{extra}",
             ))
+    if owner.status == "none" and len(rdr_sources) > MAX_LISTED_SOURCES:
+        out.append(Ambiguity(
+            "scan_limit", "sources",
+            f"{len(rdr_sources) - MAX_LISTED_SOURCES} more RDR ids are named than are listed "
+            f"({MAX_LISTED_SOURCES}); none of them has a project qualifier either",
+        ))
     by_source: dict[str, set[str]] = {}
     for h in hints:
         if h.kind == "project":
             by_source.setdefault(h.source, set()).add(h.text)
-    for source, names in sorted(by_source.items()):
+    for source, names in sorted(by_source.items())[:MAX_LISTED_SOURCES]:
         if len({n.lower() for n in names}) > 1:
             out.append(Ambiguity(
                 "project_hint_conflict", source,

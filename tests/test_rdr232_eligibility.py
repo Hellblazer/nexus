@@ -133,13 +133,14 @@ def _pj(kind: K | None = None, provenance: str = "curated", route: str | None = 
         pytest.param("builtin-template,grown", _pj(L), U, "grown", None, id="the-grown-tag-wins-over-a-curated-pair"),
         pytest.param("ad-hoc,grown", _pj(), U, "grown", None, id="grown-tag-no-declaration"),
         pytest.param("ad-hoc,grown", _pj(U, "grown"), U, "grown", None, id="grown-unknown"),
-        pytest.param("ad-hoc,grown", _pj(S, "grown", "explicit"), S, "grown", None,
-                     id="grown-with-an-explicit-route-keeps-its-kind"),
+        pytest.param("ad-hoc,grown", _pj(S, "grown", "explicit"), U, "grown", "unreviewed_route",
+                     id="grown-with-an-explicit-route-reads-as-unknown-no-route-is-trusted-yet"),
         pytest.param("ad-hoc,grown", _pj(S, "grown", "heuristic"), U, "grown", "unreviewed_route",
                      id="grown-with-a-heuristic-route-reads-as-unknown"),
         pytest.param("ad-hoc,grown", _pj(S, "grown", "model-assisted"), U, "grown", "unreviewed_route",
                      id="grown-with-a-model-assisted-route-reads-as-unknown"),
-        pytest.param("", _pj(S, "grown", "explicit"), S, "grown", None, id="the-declaration-alone-says-grown"),
+        pytest.param("", _pj(S, "grown", "explicit"), U, "grown", "unreviewed_route",
+                     id="the-declaration-alone-says-grown"),
         pytest.param("builtin-template", _pj(S, "grown", "heuristic"), U, "grown", "unreviewed_route",
                      id="builtin-tag-but-a-grown-declaration-is-grown"),
         pytest.param("", _pj(), U, "unattested", None, id="a-plan-save-row-declares-nothing"),
@@ -157,37 +158,46 @@ def test_provenance_is_decided_from_the_row_and_fails_closed(tags, plan_json, ki
 
 @pytest.mark.parametrize(
     ("route", "honoured"),
-    [("explicit", True), ("heuristic", False), ("model-assisted", False), (None, False)],
+    [("explicit", False), ("heuristic", False), ("model-assisted", False), (None, False)],
     ids=["explicit", "heuristic", "model-assisted", "none"],
 )
-def test_a_grown_plans_recorded_kind_counts_only_on_an_explicit_route(route, honoured) -> None:
-    """RDR-232: recorded kind provenance relaxes the unknown-kind restriction "after review". Until a reviewed
-    decision says otherwise only the route the caller named counts; the others are unknown-kind grown plans,
-    with a reason of their own. ``None`` is a stored row that records no route (not producible by the grow
-    site, and not a valid declaration either: it decodes as no declaration)."""
+def test_a_grown_plans_recorded_kind_counts_on_no_route_until_one_is_trusted(route, honoured) -> None:
+    """RDR-232: recorded kind provenance relaxes the unknown-kind restriction "after review". No review has
+    happened (nexus-jypmj.2.8), so ``TRUSTED_ROUTES`` ships empty and EVERY grown plan reads as unknown-kind,
+    the caller's ``explicit`` hint included: it labels the request, and nothing checks it against the plan's
+    steps. ``None`` is a stored row that records no route (not producible by the grow site, and not a valid
+    declaration either: it decodes as no declaration)."""
     plan_json = _pj(S, "grown", route) if route is not None else json.dumps(
         {"steps": [], ANSWER_KIND_KEY: {"version": 1, "kind": "synthesis", "provenance": "grown"}},
     )
     standing = el.classify_plan("ad-hoc,grown", plan_json)
+    assert not honoured and el.TRUSTED_ROUTES == frozenset()
     assert standing.provenance == "grown"
-    if honoured:
-        assert (standing.kind, standing.flag, standing.route) == (S, None, "explicit")
-        assert el.eligibility(S, standing.kind, standing.provenance).eligible
-    else:
-        assert standing.kind is U
-        assert standing.flag == ("unreviewed_route" if route is not None else None)
-        assert not el.eligibility(S, standing.kind, standing.provenance).eligible
+    assert standing.kind is U
+    assert standing.flag == ("unreviewed_route" if route is not None else None)
+    assert not el.eligibility(S, standing.kind, standing.provenance).eligible
     # either way the stored route is reported, so the envelope can say why
     assert standing.route == route
+
+
+@pytest.mark.parametrize("route", ["explicit", "heuristic", "model-assisted"])
+def test_adding_a_route_to_the_trusted_set_makes_that_route_count(route, monkeypatch) -> None:
+    """The mechanism a reviewed decision will use: a route in ``TRUSTED_ROUTES`` keeps its recorded kind, the
+    others stay unknown."""
+    monkeypatch.setattr(el, "TRUSTED_ROUTES", frozenset({route}))
+    for other in ("explicit", "heuristic", "model-assisted"):
+        standing = el.classify_plan("ad-hoc,grown", _pj(S, "grown", other))
+        if other == route:
+            assert (standing.kind, standing.flag, standing.route) == (S, None, other)
+            assert el.eligibility(S, standing.kind, standing.provenance).eligible
+        else:
+            assert (standing.kind, standing.flag) == (U, "unreviewed_route")
 
 
 @pytest.mark.parametrize("route", ["explicit", "heuristic", "model-assisted"])
 def test_a_discounted_route_is_refused_with_its_own_reason_and_still_serves_lookup_and_listing(route) -> None:
     row = _row(910, "grown-synth", kind=S, tags="ad-hoc,grown", provenance="grown", route=route)
     out, filt = _match([row], [(910, 0.05)], S)
-    if route == "explicit":
-        assert _ids(out) == [910]
-        return
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
     for request in (L, D):
@@ -339,9 +349,13 @@ def test_scenario_4_it_is_refused_for_every_broad_kind(request_kind: K) -> None:
     assert out == []
 
 
-def test_a_grown_plan_that_recorded_an_explicit_route_kind_is_judged_by_the_matrix() -> None:
+def test_a_grown_plan_that_recorded_an_explicit_route_kind_is_unknown_until_the_route_is_trusted(monkeypatch) -> None:
     out, _ = _match([GROWN_LOOKUP], [(902, 0.05)], L)
     assert _ids(out) == [902]
+    out, filt = _match([GROWN_LOOKUP], [(902, 0.05)], S)
+    assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"unreviewed_route": 1}
+    # once a reviewed decision trusts the route, the recorded kind is judged by the matrix
+    monkeypatch.setattr(el, "TRUSTED_ROUTES", frozenset({"explicit"}))
     out, filt = _match([GROWN_LOOKUP], [(902, 0.05)], S)
     assert out == [] and filt.to_wire()["branches"]["cosine"]["reasons"] == {"kind_mismatch": 1}
 
@@ -355,7 +369,7 @@ def test_scenario_5_an_unknown_request_never_selects_a_grown_plan() -> None:
     )
     assert out == []
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {
-        "unknown_request_untrusted_plan": 2, "unreviewed_route": 1,
+        "unknown_request_untrusted_plan": 1, "unreviewed_route": 2,
     }
 
 
@@ -741,7 +755,7 @@ async def test_with_the_gate_off_the_planner_prompt_is_unchanged() -> None:
          patch("nexus.mcp_infra.get_collection_names", lambda: []):
         await core._nx_answer_plan_miss("q", few_shot_matches=near_misses)
         await core._nx_answer_plan_miss(
-            "q", few_shot_matches=near_misses, coverage=RequestCoverage(answer_kind="synthesis"),
+            "q", few_shot_matches=near_misses, coverage=RequestCoverage(),
         )
     assert prompts[0] == prompts[1] and "LOOKUP-SHAPED-EXAMPLE" in prompts[0]
 
