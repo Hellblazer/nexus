@@ -233,8 +233,10 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
 
     Every put since nexus-6pfgb.5 writes each key it gives a real value and retracts one the entry
     held, so an entry with at least one note key has an authoritative answer for the rest: an absent
-    key is unset, never "ask the chunk row". An entry with none is a legacy one, or a note stored
-    with every key unset. :func:`export_knowledge_doc` lets the chunk row fill such an entry only
+    key is unset, never "ask the chunk row". ``put_at`` counts: every put since nexus-6pfgb.15
+    writes it, so a note stored with every other key unset still has an answer (all empty, and not
+    counted as unrecovered). An entry with none is a legacy one, or a note stored with every key
+    unset before nexus-6pfgb.15. :func:`export_knowledge_doc` lets the chunk row fill such an entry only
     through the row's last-writer gate: the row's ``catalog_doc_id`` is this entry's tumbler or,
     for a row with none, the chunk has one live owner (a fallback that can take a departed
     co-owner's values; see ``docs/storage-tiers.md``).
@@ -294,7 +296,8 @@ def export_knowledge_doc(
     ``tags``, ``category`` and ``ttl_days`` are the NOTE'S OWN, read from its catalog entry's ``meta``
     (nexus-6pfgb.5): two notes with identical text share one chunk row, and the row carries only the
     last writer's. An entry with none of the note keys (written before nexus-6pfgb.5, or stored with
-    none of them) takes the row's values only when the row's last writer is this note: every note
+    none of them before nexus-6pfgb.15 made every put write ``put_at``) takes the row's values only
+    when the row's last writer is this note: every note
     write stamps its ``catalog_doc_id`` on the row and a later write by another note replaces it. A
     row with no ``catalog_doc_id`` at all (no note write stamped it) is taken only when
     *shared_chunk* is false (the chunk has a single live owner). Otherwise the record carries none

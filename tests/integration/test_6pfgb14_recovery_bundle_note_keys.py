@@ -13,8 +13,10 @@ from unittest.mock import patch
 import pytest
 
 from nexus.aspect_readers import uri_for
+from nexus.catalog import store_hook
 from nexus.catalog.factory import make_catalog_reader
 from nexus.catalog.note_write import STORED, put_note
+from nexus.catalog.store_hook import NOTE_META_KEYS
 from nexus.catalog.recovery_bundle import export_bundle, import_bundle, read_bundle
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
@@ -70,15 +72,41 @@ def _exported(client, tmp_path, collection):
                      if r["record"] == "knowledge_doc" and r["collection"] == collection}
 
 
-def test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys(t2_service_env, tmp_path):
-    """A (every key unset, so no key in its catalog entry) and B (keys) store the same text; B then
-    moves to other text. A is the chunk's only owner, and the row still names B and holds B's tags,
-    category and ttl_days: A must export none of them."""
+def _put_without_put_at(**kw):
+    """``put_note`` as a client before nexus-6pfgb.15 wrote it: no ``meta.put_at``. With every other
+    key unset the entry then holds no note key at all, the shape the export's row gate is for."""
+    real = store_hook.catalog_store_hook_tracked
+
+    def _hook(*args, **kwargs):
+        return real(*args, **{**kwargs, "put_at": ""})
+
+    with patch.object(store_hook, "catalog_store_hook_tracked", _hook):
+        return put_note(**kw)
+
+
+@pytest.mark.parametrize(
+    ("put_a", "a_holds_put_at", "unrecovered"),
+    [(_put_without_put_at, False, 1), (put_note, True, 0)],
+    ids=["entry-with-no-note-key", "entry-with-put-at-only"],
+)
+def test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys(
+    t2_service_env, tmp_path, put_a, a_holds_put_at, unrecovered,
+):
+    """A (every key unset) and B (keys) store the same text; B then moves to other text. A is the
+    chunk's only owner, and the row still names B and holds B's tags, category and ttl_days: A must
+    export none of them.
+
+    Whether A is counted depends on its entry. One with no note key (written before nexus-6pfgb.5,
+    or with every key unset before nexus-6pfgb.15) cannot say what A's keys were, so the dropped row
+    values are counted. A put since nexus-6pfgb.15 always writes ``put_at``, which makes the entry
+    authoritative: A's keys are known to be empty, nothing of A's is lost, and A is not counted."""
     client = HttpVectorClient(tenant=t2_service_env)
     collection = t3_collection_name("6pfgb14-departed", t3=client)
     body = "6pfgb14 body that outlives its second owner"
-    a = put_note(content=body, collection=collection, title="unset-A")
+    a = put_a(content=body, collection=collection, title="unset-A")
     assert a.status == STORED, a.reason
+    a_meta = make_catalog_reader().by_source_uri(uri_for(collection, "unset-A")).meta or {}
+    assert [k for k in NOTE_META_KEYS if k in a_meta] == (["put_at"] if a_holds_put_at else []), a_meta
     b = put_note(content=body, collection=collection, title="keyed-B", tags="beta", category="finding",
                  ttl_days=7, source_agent="agent-b")
     assert b.status == STORED, b.reason
@@ -93,7 +121,7 @@ def test_a_note_stored_with_no_keys_never_exports_a_departed_co_owners_keys(t2_s
 
     assert (docs["unset-A"]["tags"], docs["unset-A"]["category"], docs["unset-A"]["ttl_days"]) == ("", "", None)
     assert docs["keyed-B"]["ttl_days"] == 7
-    assert summary.note_keys_unrecovered == 1
+    assert summary.note_keys_unrecovered == unrecovered
 
 
 def test_a_note_stored_with_no_keys_that_wrote_the_row_last_exports_the_rows_values(t2_service_env, tmp_path):

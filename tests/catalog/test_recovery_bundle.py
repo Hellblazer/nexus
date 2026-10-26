@@ -793,14 +793,20 @@ def test_a_retracted_or_absent_ttl_exports_as_permanent(fake_catalog, tmp_path):
     assert docs["note-b"]["ttl_days"] is None
 
 
-@pytest.mark.parametrize("own_meta", [{"source_agent": "x"}, {"tags": ""}, {"ttl_days": 0}])
+@pytest.mark.parametrize(
+    "own_meta",
+    [{"source_agent": "x"}, {"tags": ""}, {"ttl_days": 0}, {"put_at": "2026-10-26T00:00:00+00:00"}],
+)
 @pytest.mark.parametrize("row_owner", [None, "1.9.1", "1.9.2"], ids=["row-unowned", "row-ours", "row-theirs"])
 def test_an_entry_with_any_note_key_is_authoritative_over_a_single_owner_row(
     fake_catalog, tmp_path, own_meta, row_owner,
 ):
     """A is the chunk's only live owner and holds one note key, even an empty or retracted one: its
     other keys are unset, never refilled from a row that says 'beta', whoever wrote it. This is the
-    test that fails if an empty key reads as absent, or authority is keyed on one key only."""
+    test that fails if an empty key reads as absent, or authority is keyed on one key only.
+
+    ``put_at`` alone is the shape every put since nexus-6pfgb.15 leaves on a note stored with every
+    other key unset: such a note's empties are its own, so it is not counted as unrecovered."""
     url, state = fake_catalog
     t3 = _FakeT3()
     _shared_pair(state, t3, a_meta=own_meta, b_meta={})
@@ -854,7 +860,8 @@ def test_a_legacy_note_alone_on_its_chunk_takes_the_rows_values(fake_catalog, tm
 
 
 def test_a_note_with_no_keys_of_its_own_never_takes_a_departed_co_owners_keys(fake_catalog, tmp_path):
-    """A stored with every key unset (or written before nexus-6pfgb.5) is now the chunk's only owner,
+    """A written before nexus-6pfgb.5, or with every key unset before nexus-6pfgb.15 added ``put_at``
+    (so its entry holds no note key), is now the chunk's only owner,
     but the row still holds B's tags, category and ttl_days, and names B as its last writer: A exports
     none of them, and is counted. A permanent note must not come back expiring."""
     url, state = fake_catalog

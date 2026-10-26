@@ -449,7 +449,9 @@ Locked format decisions (design of record: T2
   their own. `ttl_days` is a positive integer or `null` (permanent); a
   recorded value that is not a positive integer imports as permanent. A
   note written before the catalog kept these keys, or stored with none of
-  them, takes the chunk row's values only when the row's last writer is
+  them before every put wrote `put_at` (nexus-6pfgb.15; an entry holding
+  `put_at` answers for its note, so its unset keys export empty and are not
+  counted), takes the chunk row's values only when the row's last writer is
   that note (the row's `catalog_doc_id`; a row with none is taken only when
   no other live document in its collection holds the chunk). A row with no
   `catalog_doc_id` cannot tell a departed co-owner's values from the note's
