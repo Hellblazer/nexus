@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import _tmp_root as tr
+
 SCRIPT = Path(__file__).resolve().parents[2] / "tests" / "e2e" / "plugin-lockstep-tests.sh"
 
 
@@ -34,7 +36,9 @@ def _run(tmp_path: Path, summary: str, rc: int, **env: str) -> subprocess.Comple
     return subprocess.run(
         ["bash", str(repo / "tests" / "e2e" / "plugin-lockstep-tests.sh")],
         capture_output=True, text=True, timeout=60, cwd=repo,
-        env={"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path), **env},
+        env=tr.child_env_with_tmpdir(
+            {"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path), **env}, tmp_path
+        ),
     )
 
 
