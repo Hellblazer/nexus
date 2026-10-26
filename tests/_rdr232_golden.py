@@ -140,6 +140,47 @@ ART_CODE_DOCS = 90
 NEXUS_CODE_DOCS = 25
 PIECES_PER_CODE_DOC = 4
 
+#: nexus-jypmj.1.8. The fixture's 17 RDR chunks are fewer than the search limit (40), so the vector
+#: stream held every one of them by construction and primary and facet coverage saturated at 1.0
+#: whatever the ranking did. Two additions break that, both in the ART owner's ``rdr`` collection
+#: (so ``scope="rdr"`` admits them):
+#:
+#: * ``DISTRACTOR_RDR_DOCS`` other RDRs, one chunk each, written as near-copies of the golden
+#:   request's wording (another RDR number, another subject), so they outrank the real RDR-084
+#:   sections for the 40 slots: the vector stream is full (40 of more than 100 RDR chunks) and holds
+#:   only some of the named source's sections.
+#: * ``SECONDARY_ROLE_DOCS`` secondary documents, one chunk each, linked to the ART RDR-084 with
+#:   mixed link roles (``cites`` is a citation, ``implements`` an implementation, ``relates`` a
+#:   related link). They are unrelated in wording, so they never enter the vector stream; the walk
+#:   reaches them. More of them than the traversal document cap (50), so the cap, the role ranking
+#:   and ``dropped_cap`` run on the substrate.
+DISTRACTOR_RDR_DOCS = 32
+SECONDARY_ROLE_DOCS: tuple[tuple[str, int], ...] = (("cites", 22), ("implements", 20), ("relates", 20))
+SECONDARY_DOCS = sum(n for _role, n in SECONDARY_ROLE_DOCS)
+#: ``rank`` rows the oversized-input case searches for: more than ``runner._OPERATOR_MAX_INPUTS``.
+OVERSIZED_SEARCH_LIMIT = 120
+
+_SECONDARY_ROLE_OF_LINK_TYPE = {"cites": "citation", "implements": "implementation", "relates": "related"}
+
+
+def _distractor_piece(i: int) -> str:
+    n = 101 + i
+    subject = f"WIDGET QUEUE {i:02d}"
+    return (
+        f"Synthesize RDR-{n:03d}, {subject} Canonical Consolidation. State the locked architecture and "
+        "numerical conventions, the evidence and gate history supporting them, the implementation work "
+        "recorded as complete or pending, and what remains open by design. Distinguish facts at the "
+        f"RDR's acceptance from later records, cite source documents. This RDR is about {subject}, not "
+        "any other record."
+    )
+
+
+def _secondary_piece(role: str, i: int) -> str:
+    return (
+        f"Kiln log {role} {i:02d}: the harbour lamp schedule moved the firing window by {i + 3} minutes "
+        "and the glaze batch cooled on the stone bench before inspection."
+    )
+
 
 def _art_code_pieces(i: int) -> list[str]:
     """Four pieces for ART code module *i*; each names the RDR and subject in its docstring, as
@@ -195,6 +236,15 @@ class Fixture:
     chunks: dict[str, tuple[str, str, frozenset[str]]] = field(default_factory=dict)
     code_chunk_count: int = 0
     link_count: int = 0
+    #: nexus-jypmj.1.8: the distractor RDR documents, the secondary documents with the link role each
+    #: was given, and per chunk the collection it was written to and (secondary chunks) its role.
+    distractor_docs: list[str] = field(default_factory=list)
+    secondary_docs: dict[str, str] = field(default_factory=dict)
+    chunk_collection: dict[str, str] = field(default_factory=dict)
+    secondary_role_of_chash: dict[str, str] = field(default_factory=dict)
+
+    def collection_of(self, chash: str) -> str:
+        return self.chunk_collection.get(chash, "")
 
     def evidence_item(self, chash: str):
         from bench.answer_shape_metrics import EvidenceItem
@@ -222,6 +272,8 @@ def build_rdr084_fixture() -> Fixture:
     from nexus.catalog.store_hook import note_content_hash, note_manifest_metadata
 
     fx_chunks: dict[str, tuple[str, str, frozenset[str]]] = {}
+    fx_collection: dict[str, str] = {}
+    secondary_role_of_chash: dict[str, str] = {}
     counts = {"code_chunks": 0, "links": 0}
 
     with HttpCatalogClient() as cat:
@@ -243,6 +295,7 @@ def build_rdr084_fixture() -> Fixture:
             )
             for piece, fs in zip(pieces, facets, strict=True):
                 fx_chunks[chash_of(piece)] = (source, kind, fs)
+                fx_collection[chash_of(piece)] = collection
             return tumbler
 
         # The code documents register FIRST and the RDRs last, so each RDR sorts after the code
@@ -284,6 +337,26 @@ def build_rdr084_fixture() -> Fixture:
                 cat.link(t, rdr, "implements" if i % 2 == 0 else "relates", "rdr232-fixture")
                 counts["links"] += 1
 
+        # nexus-jypmj.1.8: distractor RDRs (beyond the search limit) and secondary in-scope documents.
+        distractors: list[str] = []
+        for i in range(DISTRACTOR_RDR_DOCS):
+            distractors.append(put(
+                art_owner, "rdr", f"RDR-{101 + i:03d}-widget-queue-{i:02d}",
+                f"docs/rdr/RDR-{101 + i:03d}-widget-queue-{i:02d}.md", [_distractor_piece(i)],
+                f"RDR-{101 + i:03d}@ART", [frozenset()]))
+        secondary: dict[str, str] = {}
+        for link_type, n in SECONDARY_ROLE_DOCS:
+            for i in range(n):
+                piece = _secondary_piece(link_type, i)
+                t = put(
+                    art_owner, "rdr", f"RDR-2{len(secondary):02d}-kiln-{link_type}-{i:02d}",
+                    f"docs/rdr/RDR-2{len(secondary):02d}-kiln-{link_type}-{i:02d}.md", [piece],
+                    f"SEC-{link_type}-{i:02d}@ART", [frozenset()])
+                secondary[t] = _SECONDARY_ROLE_OF_LINK_TYPE[link_type]
+                secondary_role_of_chash[chash_of(piece)] = _SECONDARY_ROLE_OF_LINK_TYPE[link_type]
+                cat.link(t, art_rdr, link_type, "rdr232-fixture")
+                counts["links"] += 1
+
     # The RDRs' T2 lifecycle records (nexus-jypmj.1.7): the ambient tenant's, under each owner's
     # `<repo>_rdr` project.
     from nexus.db.t2.http_memory_store import HttpMemoryStore
@@ -304,6 +377,8 @@ def build_rdr084_fixture() -> Fixture:
         nexus_code_collection=_owner_collection("code", nexus_owner),
         code_docs=code_docs, chunks=fx_chunks,
         code_chunk_count=counts["code_chunks"], link_count=counts["links"],
+        distractor_docs=distractors, secondary_docs=secondary,
+        chunk_collection=fx_collection, secondary_role_of_chash=secondary_role_of_chash,
     )
 
 
@@ -378,6 +453,26 @@ def observe_plan_selection(
     keys = [builtin_plan_key(m.dimensions) for m in matches]
     hit = bool(matches) and _nx_answer_match_is_hit(matches[0].confidence, threshold=_PLAN_MATCH_MIN_CONFIDENCE)
     return PlanSelection(keys[0] if hit else None, keys, [m.confidence for m in matches])
+
+
+def library_match(library, question: str, *, scope: str = "", bindings: dict[str, Any] | None = None,
+                  dimensions: dict[str, Any]):
+    """The seeded library's own ``Match`` (real plan id, stored default bindings) the matcher offers for
+    *question* under *dimensions*, asked as ``nx_answer`` asks (same bindings, availability set and
+    ``n``) but with the confidence floor open. Used to pin the plan of a production journey."""
+    from nexus.mcp.core import _nx_answer_caller_bindings
+    from nexus.mcp_infra import get_t1_plan_cache
+    from nexus.plans.matcher import plan_match
+    from nexus.plans.verb_infer import infer_verb
+
+    _run, available = _nx_answer_caller_bindings(question=question, scope=scope, bindings=bindings)
+    matches = plan_match(
+        question, library=library, cache=get_t1_plan_cache(populate_from=library), dimensions=dimensions,
+        scope_preference=scope, context=None, min_confidence=0.0, n=5, available_bindings=available,
+        category_verb=infer_verb(question),
+    )
+    assert matches, f"the seeded library offers no plan for {dimensions}"
+    return matches[0]
 
 
 #: The first operator step of the factual-lookup plan (0-based index into plan_json steps): the
@@ -471,6 +566,45 @@ def request_call_shape(q) -> tuple[str, dict[str, Any] | None]:
     if q.scope == "rdr":
         return "rdr", {"content_type": "rdr"}
     return q.scope, None
+
+
+def golden_source_bindings(q, owners: dict[str, str] | None = None) -> tuple[dict[str, Any], list[str]]:
+    """The reserved ``nx_answer`` bindings for golden request *q*'s ``required_sources`` and the
+    labels no ``SourceRef`` can name (nexus-jypmj.1.8).
+
+    Each label goes through ``SourceRef.parse_labeled``: ``RDR-084@ART`` is ``source=RDR-084`` plus the
+    project ``ART``, which *owners* maps to an owner tumbler (``owner`` binding; a project with no
+    mapping is not guessed and travels as the ``project`` binding). A bare id (``RDR-049``) has no
+    qualifier, so its binding carries no owner: where sibling files share the number it resolves to
+    candidates, and what to do about that is nexus-xho6c's decision, not made here. A label that is not
+    an RDR id or a tumbler (the paper title ``HybridRAG``, G05) is returned in the second list and is
+    scored by its label only.
+    """
+    from nexus.plans.evidence import SourceRef, SourceRefError
+
+    sources: list[str] = []
+    qualifiers: set[str] = set()
+    label_only: list[str] = []
+    for label in q.required_sources:
+        try:
+            ref, project = SourceRef.parse_labeled(label)
+        except SourceRefError:
+            label_only.append(label)
+            continue
+        sources.append(ref.value)
+        if project:
+            qualifiers.add(project)
+    out: dict[str, Any] = {}
+    if sources:
+        out["source"] = sources[0] if len(sources) == 1 else sources
+    if len(qualifiers) == 1:
+        (project,) = qualifiers
+        owner = (owners or {}).get(project)
+        if owner:
+            out["owner"] = owner
+        else:
+            out["project"] = project
+    return out, label_only
 
 
 def head_sha() -> str:

@@ -9394,6 +9394,17 @@ def _nx_answer_is_empty_retrieval(steps: "list") -> bool:
     return had_retrieval and total_evidence == 0
 
 
+def _nx_answer_reserved_stream_is_evidence(stream: "ReservedStream | None") -> bool:
+    """Whether the runner merged a reserved primary stream into a reduction (RDR-232, nexus-jypmj.1.8).
+
+    The empty-retrieval guard looks at the retrieval steps' ids and tumblers only. A resolved source
+    whose vector and graph streams found nothing still feeds the reducer its primary chunks and T2
+    records, so a merged, non-empty reserved stream is evidence and the reducer's answer stands. A
+    stream no operator consumed (``merged`` false) reached no reducer and is not.
+    """
+    return stream is not None and stream.merged and bool(stream.items)
+
+
 def _nx_answer_scope_conflict_sentence(diagnostics: Any) -> str:
     """``scope conflict: step 1 (search) declares corpus 'code', ...`` for the no-match
     text, or ``""`` when no step conflicted (RDR-232 section 2a, nexus-jypmj.1.3)."""
@@ -11237,6 +11248,53 @@ async def nx_answer(
     _reserved_stream: "ReservedStream | None" = None
     # nexus-jypmj.1.7: the T2 lifecycle records of a resolved RDR source, read just before plan_run.
     _lifecycle: "LifecycleStream | None" = None
+    # nexus-jypmj.1.8: what the first evidence-consuming operator was handed (the runner's hydration
+    # reports it), and the inputs of the run's evidence diagnostics, built once at the first envelope.
+    from nexus.plans.evidence_diagnostics import ReducerInputRecorder, reducer_input_scope  # noqa: PLC0415 — deferred; matches this module's convention
+
+    _reducer_recorder = ReducerInputRecorder()
+    _diag_inputs: "dict[str, Any]" = {}
+    _diag_cache: "list[dict[str, Any] | None]" = []
+
+    def _set_evidence_inputs(plan_result: Any, plan_json: Any, plan_id: int) -> None:
+        # Defensive isinstance, same landmine as _set_scope_diagnostics: a MagicMock result's
+        # unconfigured attribute is a truthy non-list.
+        steps = getattr(plan_result, "steps", None)
+        resolved = getattr(plan_result, "resolved_step_args", None)
+        _diag_inputs.clear()
+        _diag_inputs.update(
+            steps=list(steps) if isinstance(steps, list) else [], plan_json=plan_json, plan_id=plan_id,
+            resolved_args=list(resolved) if isinstance(resolved, list) else [],
+        )
+        _diag_cache.clear()
+
+    def _evidence_diagnostics_now() -> "dict[str, Any] | None":
+        # Built once, at the first envelope the call returns after a run, and logged once.
+        if not _diag_inputs:
+            return None
+        if _diag_cache:
+            return _diag_cache[0]
+        from nexus.plans.evidence import ScopeConstraint  # noqa: PLC0415 — deferred; matches this module's convention
+        from nexus.plans.evidence_diagnostics import (  # noqa: PLC0415 — deferred; matches this module's convention
+            build_evidence_diagnostics,
+            log_evidence_diagnostics,
+            plan_tools,
+        )
+
+        try:
+            diag = build_evidence_diagnostics(
+                steps=_diag_inputs["steps"], tools=plan_tools(_diag_inputs["plan_json"]),
+                scope=ScopeConstraint.parse(scope), scope_diagnostics=_scope_diagnostics,
+                resolved_args=_diag_inputs["resolved_args"], recorder=_reducer_recorder,
+                reserved=_reserved_stream, primary=_primary_evidence, lifecycle=_lifecycle,
+                named_sources=_named_sources,
+            )
+            log_evidence_diagnostics(diag, plan_id=_diag_inputs["plan_id"])
+        except Exception as exc:  # noqa: BLE001 — diagnostics never fail an answer
+            _log.warning("nx_answer_evidence_diagnostics_failed", error=str(exc))
+            diag = None
+        _diag_cache[:] = [diag]
+        return diag
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -11472,6 +11530,11 @@ async def nx_answer(
             # PlanResult.scope_diagnostics. Always present, [] when the caller
             # gave no scope or the call never reached a retrieval step.
             "scope_diagnostics": [dict(d) for d in _scope_diagnostics],
+            # RDR-232 Phase 1 (nexus-jypmj.1.8): per-stream corpus counts, the reducer input by stream
+            # and collection, and the deterministic source and scope checks. Envelope and logs only
+            # until Phase 3 persists a run summary. Always present; None when no retrieval ran
+            # (an error before the plan, a plan-miss refusal) or the single_query fast path was text mode.
+            "evidence_diagnostics": _evidence_diagnostics_now(),
         }
 
     # nexus-f9kxd: single emitter for every error return. The tool contract
@@ -12379,6 +12442,24 @@ async def nx_answer(
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
+            if structured:
+                # nexus-jypmj.1.8: the fast path's one query is the vector stream; it has no reducer.
+                _set_evidence_inputs(
+                    SimpleNamespace(
+                        steps=[
+                            {"ids": [], "tumblers": [], "scope_conflict": {
+                                "step_index": 0, "tool": "query", "plan_corpus": _fast_narrowing.plan_corpus,
+                                "caller_scope": scope, "scope_kind": _fast_scope.kind}}
+                            if _fast_conflict else {
+                                "ids": [c["id"] for c in chunks],
+                                "chunk_collections": [c["collection"] for c in chunks],
+                                "chunk_text_hash": [c["chash"] for c in chunks],
+                            }
+                        ],
+                        resolved_step_args=[],
+                    ),
+                    best.plan_json, best.plan_id,
+                )
             if _fast_conflict:
                 return _error_result(
                     no_match, shape="no_evidence", plan_id=best.plan_id, step_count=1, chunks=chunks,
@@ -12559,8 +12640,12 @@ async def nx_answer(
                 _continuation_engaged = True
                 _plan_run_kwargs["continuation_cut_at_step"] = _cut.cut_at_step
 
+    async def _plan_run_recorded(*args: Any, **kwargs: Any) -> Any:
+        with reducer_input_scope(_reducer_recorder):
+            return await _plan_run(*args, **kwargs)
+
     try:
-        result = await _plan_run(best, run_bindings, **_plan_run_kwargs)
+        result = await _plan_run_recorded(best, run_bindings, **_plan_run_kwargs)
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
@@ -12611,6 +12696,7 @@ async def nx_answer(
     if not isinstance(_dropped_reduce_steps, list):
         _dropped_reduce_steps = []
     _set_scope_diagnostics(result)
+    _set_evidence_inputs(result, best.plan_json, best.plan_id)
     # nexus-vply6 fix round 2 (coordinator follow-up, "never silent" for
     # the person reading the answer): a retrieval step's own structured
     # output carries an additive "warnings" list when
@@ -12742,7 +12828,7 @@ async def nx_answer(
             # same reserved stream and the caller-side reduction sees the same evidence.
             from nexus.plans.reserved_stream import reserved_scope  # noqa: PLC0415 — rare/branch-local path
 
-            with reserved_scope(_reserved_stream):
+            with reserved_scope(_reserved_stream), reducer_input_scope(_reducer_recorder):
                 _continuation_envelope = assemble_continuation_envelope(
                     cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
                     step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
@@ -12833,7 +12919,7 @@ async def nx_answer(
         _continuation_fallback_kwargs = dict(_plan_run_kwargs)
         _continuation_fallback_kwargs.pop("continuation_cut_at_step", None)
         try:
-            result = await _plan_run(best, run_bindings, **_continuation_fallback_kwargs)
+            result = await _plan_run_recorded(best, run_bindings, **_continuation_fallback_kwargs)
         except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller — mirrors the primary plan_run call's own except-arm above
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
@@ -12871,6 +12957,7 @@ async def nx_answer(
         if not isinstance(_dropped_reduce_steps, list):
             _dropped_reduce_steps = []
         _set_scope_diagnostics(result)
+        _set_evidence_inputs(result, best.plan_json, best.plan_id)
         _budget_response = _budget_exhausted_response(result)
         if _budget_response is not None:
             return _budget_response
@@ -12943,7 +13030,7 @@ async def nx_answer(
     # is also the telemetry row's final_text); `_result` then adds no notice line.
     _conflict_part = _nx_answer_scope_conflict_sentence(_scope_diagnostics)
     _conflict_part = f"; {_conflict_part}" if _conflict_part else ""
-    if _nx_answer_is_empty_retrieval(result.steps):
+    if _nx_answer_is_empty_retrieval(result.steps) and not _nx_answer_reserved_stream_is_evidence(_reserved_stream):
         _log.info(
             "nx_answer_empty_retrieval_guard",
             plan_id=best.plan_id,

@@ -5396,10 +5396,10 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has six RDR-232 keys, all always present (`scope_diagnostics`,
-`evidence_request`, `named_sources`, `primary_evidence`, `reserved_stream` and
-`lifecycle_stream`; the first is `[]` and the other five `null` when they have
-nothing to report):
+The envelope has seven RDR-232 keys, all always present (`scope_diagnostics`,
+`evidence_request`, `named_sources`, `primary_evidence`, `reserved_stream`,
+`lifecycle_stream` and `evidence_diagnostics`; the first is `[]` and the other six
+`null` when they have nothing to report):
 
 - `scope_diagnostics` (nexus-jypmj.1.3): a list with one entry per
   corpus-taking retrieval step the caller's `scope` reached,
@@ -5479,6 +5479,75 @@ nothing to report):
   `caps_hit`. `named_sources[].rdr_number`
   is the RDR number the resolved document's path carries (`null` when it is
   not an RDR file).
+- `evidence_diagnostics` (nexus-jypmj.1.8): per-stream counts, the reducer input,
+  and two deterministic checks, built without a model call from the run's step
+  outputs and what the runner handed the first evidence-consuming operator. The
+  same counts go to one structured log event, `nx_answer_evidence_diagnostics`,
+  which carries ids and counts only (no question, source label, title or text,
+  whatever `trace` is). Not persisted before RDR-232 Phase 3. `null` when no
+  retrieval ran (an error before the plan, a plan-miss refusal) or the
+  single-query fast path ran in text mode. Shape:
+  - `streams`: `vector` (the search family), `graph` (`traverse`) and `primary`
+    (the named source's chunks) each `{references, by_collection, in_scope,
+    out_of_scope}` (`vector` and `graph` add `steps: [{step_index, tool,
+    corpus}]`, the corpus the step resolved to; `primary` adds `by_source`);
+    `t2`: `{references, by_project}`. `by_collection` keys are collection names
+    (never parsed; an output with no per-chunk collections counts under `""`).
+    `in_scope` and `out_of_scope` are `null` without a corpus or collection
+    scope or when any reference is unattributed. A chunk in both retrieval
+    streams counts once in each stream.
+  - `reducer_input`: what the first operator that consumes retrieved evidence
+    received, after the reserved merge and the input cap: `{step, items, chars,
+    by_stream, by_stream_collection, by_collection, in_scope, out_of_scope,
+    unattributed}`. `by_stream` keys are `primary`, `t2`, `vector`, `graph` and
+    `unattributed`. A reserved item carries its stream and collection; any other
+    item is attributed by the hash of its text (with the `[source: ...]` line
+    removed) against the ids the retrieval steps returned, the stream that
+    produced it first winning; an item that hashes to nothing retrieved (a
+    manifest-joined document) is `unattributed`, counted and never assumed in
+    scope. `null` when no operator consumed retrieved evidence (a handoff cut
+    before it, a fast-path query, an error).
+  - `source_check`: `{state, sources, reducer_input_recorded, unresolved}`.
+    `state` is the worst source's: `missing` (not resolved, ambiguous, nothing
+    read, no reduction handed it, or none of its chunks reached the reducer),
+    `partial` (the document is over the primary budget, or some selected chunks
+    did not reach the reducer) or `covered`; `not_applicable` when no source was
+    named. Each source row is `{source, tumbler, state, detail, selected,
+    reached_reducer, manifest_rows, lifecycle}`; `lifecycle` is `{state,
+    status, detail, delivered, reached_reducer}` with `state` `resolved`,
+    `partial` (one of the two records absent or lost before the reducer),
+    `unresolved` (`no_records`, `project_undetermined`, `read_capped`,
+    `read_failed` or `over_cap`: the records may exist, so this is a facet
+    unresolved, not silence), `not_applicable` (`not_rdr`, `duplicate`,
+    `not_resolved`) or `null` when no T2 stream ran. `unresolved` lists the
+    `{source, facet: "lifecycle", status}` entries that are `unresolved` or
+    `partial`.
+  - `scope_check`: `{state, scope, scope_kind, conflict_steps, recorded_reasons,
+    violations, streams_out_of_scope, out_of_scope, reducer_out_of_scope,
+    reducer_unattributed, detail}`. `state`: `violated` (a collection outside the
+    scope reached a retrieval stream with no recorded reason; `violations` names
+    stream, collection and how many are in the reducer input), `conflict` (a step
+    was skipped for the scope; `conflict_steps`), `widened` (a named source sits
+    outside the scope by request; `recorded_reasons`), `satisfied`,
+    `not_applicable` (no scope or `all`) or `not_evaluated` (a catalog subtree,
+    which a multi-step plan does not intersect with its corpora). Violated wins
+    over conflict, conflict over widened.
+  - `skipped_steps`: `[{step_index, tool, reason: "scope_conflict", plan_corpus,
+    caller_scope}]`. A skipped step dispatched nothing, so it has no `steps`
+    record and no telemetry row; `step_count` and `steps` count executed steps
+    and `skipped_steps` the rest.
+  - `traversals`: one summary per `traverse` step (`policy_applied`,
+    `policy_failed`, `possibly_truncated`, `contained`, `nodes_walked`,
+    `nodes_retained`, `dropped_out_of_scope`, `dropped_role`, `dropped_cap`,
+    `widened`); `capped_traversals`: how many came back at the engine's 500-node
+    cap (the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13).
+  - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
+    secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
+    report in brief; `null` when no stream was built.
+  An empty set of retrieval ids no longer turns an answer into the no-match
+  notice when the reserved stream was merged into the reduction (a resolved
+  source with no vector or graph hits is answered from its primary chunks and T2
+  records); a stream no operator consumed does not count.
 
 ### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
 

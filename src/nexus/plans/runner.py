@@ -663,6 +663,11 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 #: on either side can't silently drop the sentinel (substantive-critic C2).
 from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY, _extract_tool_name  # noqa: E402
 import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
+from nexus.plans.evidence_diagnostics import (  # noqa: E402
+    active_recorder,
+    note_reducer_input,
+    set_recorder_step,
+)
 from nexus.plans.reserved_stream import (  # noqa: E402
     EVIDENCE_KEYS as _RESERVED_EVIDENCE_KEYS,
     ReservedStream,
@@ -1255,7 +1260,9 @@ def _apply_traversal_policy_to_args(
 def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
     """Tell the reserved stream which plan step is about to hydrate, and which tools produced its
     evidence args (the ``$stepN`` refs in the step's raw args), so only a producer that keeps or
-    reorders items can be blamed for a missing reserved item. No-op without a stream."""
+    reorders items can be blamed for a missing reserved item. The reducer-input recorder
+    (nexus-jypmj.1.8) is told the step too. No-op without a stream or a recorder."""
+    set_recorder_step(index)
     if active_reserved_stream() is None:
         return
     producers: list[str] = []
@@ -2139,6 +2146,7 @@ def _hydrate_operator_args(
                 "kept_count": _OPERATOR_MAX_INPUTS,
             }
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
+        note_reducer_input(non_empty)  # nexus-jypmj.1.8: reads the final list, changes nothing
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
         if resolved_tool == "operator_summarize":
             args.setdefault("content", "\n\n".join(non_empty))
@@ -2187,6 +2195,8 @@ def _hydrate_operator_args(
             args["inputs"] = _merge_reserved_explicit_inputs(
                 [v for v in args["inputs"] if v], args, tool, resolved_tool,
             )
+    if resolved_tool == "operator_extract" and isinstance(args.get("inputs"), list):
+        note_reducer_input([v for v in args["inputs"] if v])
 
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
@@ -2210,6 +2220,7 @@ def _hydrate_operator_args(
                     original_count=original_count, kept_count=len(value),
                 )
             value = _merge_reserved_explicit_inputs(value, args, tool, resolved_tool)
+            note_reducer_input(value)  # nexus-jypmj.1.8: the explicit-inputs reducer input, after merge and cap
             if target_key == "items":
                 value = json.dumps(value)
         args[target_key] = value
@@ -3602,6 +3613,9 @@ async def plan_run(
     """
     if reserved_stream is not None:
         reserved_stream.reset_run()
+    _recorder = active_recorder()
+    if _recorder is not None:  # nexus-jypmj.1.8: a whole-plan re-run starts from a clean reducer input
+        _recorder.reset_run()
     with reserved_scope(reserved_stream):
         result = await _plan_run_impl(
             match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,

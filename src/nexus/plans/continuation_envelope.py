@@ -78,6 +78,7 @@ from nexus.plans.bundle import (
     compose_bundle_prompt,
 )
 from nexus.plans.continuation import CutShape
+from nexus.plans.reserved_stream import active_reserved_stream
 from nexus.plans.runner import (
     _apply_caller_scope_to_args,
     _apply_mode_to_args,
@@ -571,7 +572,11 @@ def _prefix_produced_zero_evidence(
             had_retrieval = True
             total_evidence += len(tumblers)
 
-    if had_retrieval and total_evidence == 0:
+    # RDR-232 (nexus-jypmj.1.8): the reserved primary stream is evidence the retrieval steps do not
+    # show. With it active, empty retrieval is not "no items"; the payload check below still
+    # catches an operator that was handed nothing.
+    _rs = active_reserved_stream()
+    if had_retrieval and total_evidence == 0 and not (_rs is not None and _rs.items):
         return "no_items"
 
     if cut_step_payloads and not _cut_payload_has_evidence(cut_step_payloads):

@@ -49,6 +49,7 @@ __all__ = [
     "active_reserved_stream",
     "reserved_scope",
     "set_reserved_step",
+    "strip_source_note",
 ]
 
 #: Reserved items one run may merge. Calibration constant; must stay below
@@ -68,13 +69,22 @@ _SOURCE_MARKER = "[source: "
 
 @dataclass(frozen=True)
 class ReservedItem:
+    """One merged reserved item. ``stream`` is ``primary`` (a chunk of a named source) or ``t2`` (a
+    lifecycle record); ``collection``, ``doc_id`` and ``source`` say where it came from, so the
+    reducer-input diagnostics (nexus-jypmj.1.8) count the input by stream and collection without
+    reading the text."""
+
     token: str
     chash: str
     raw: str
     text: str
+    stream: str = "primary"
+    collection: str = ""
+    doc_id: str = ""
+    source: str = ""
 
     @classmethod
-    def record(cls, ident: str, text: str, *, label: str = "") -> ReservedItem:
+    def record(cls, ident: str, text: str, *, label: str = "", source: str = "") -> ReservedItem:
         """A reserved item that is not a T3 chunk (the T2 lifecycle records, nexus-jypmj.1.7):
         no chash, so only the text dedupe applies. *ident* names it in the header and the token.
 
@@ -84,7 +94,10 @@ class ReservedItem:
         dropped record as one."""
         token = f"primary:{ident.replace('#', '%23')}#"
         head = f"{label}; " if label else ""
-        return cls(token=token, chash="", raw=text, text=f"[primary record {head}{token}]\n{text}")
+        return cls(
+            token=token, chash="", raw=text, text=f"[primary record {head}{token}]\n{text}",
+            stream="t2", source=source,
+        )
 
 
 def _item(chunk: SelectedChunk) -> ReservedItem:
@@ -95,14 +108,19 @@ def _item(chunk: SelectedChunk) -> ReservedItem:
     return ReservedItem(
         token=token, chash=chunk.chash, raw=chunk.text,
         text=f"[primary source {where}; {token}]\n{chunk.text}",
+        stream="primary", collection=chunk.collection, doc_id=chunk.doc_id, source=chunk.source,
     )
 
 
-def _strip_source_note(text: str) -> str:
+def strip_source_note(text: str) -> str:
+    """*text* without the ``[source: ...]`` line the hydration prefixes to a chunk."""
     if text.startswith(_SOURCE_MARKER):
         _, _, rest = text.partition("\n")
         return rest
     return text
+
+
+_strip_source_note = strip_source_note
 
 
 @dataclass

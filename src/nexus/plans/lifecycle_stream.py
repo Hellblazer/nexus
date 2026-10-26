@@ -123,6 +123,7 @@ class LifecycleRecord:
         return ReservedItem.record(
             f"t2:{self.project}/{self.title}", self.text,
             label=f"RDR-{rdr_number:03d} {self.kind} record, T2 {self.project}/{self.title}",
+            source=self.source,
         )
 
 
