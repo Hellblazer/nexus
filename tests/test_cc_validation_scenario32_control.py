@@ -402,8 +402,7 @@ def test_marker_hook_is_appended_to_the_bash_group_and_nothing_else_changes(tmp_
     out = json.loads(p.read_text())
     before = [g for g in src["hooks"]["PreToolUse"] if g.get("matcher") == "Bash"][0]["hooks"]
     after = [g for g in out["hooks"]["PreToolUse"] if g.get("matcher") == "Bash"][0]["hooks"]
-    # 3 = the two guards plus the Pre half of the integrity check (nexus-i93tz).
-    assert after[:-1] == before and len(before) == 3, "the plugin's own Bash hooks must be untouched"
+    assert after[:-1] == before and len(before) == 2, "the plugin's own Bash hooks must be untouched"
     assert after[-1] == {"type": "command", "command": "touch", "args": ["/tmp/m"]}
     # every other event and group is byte-for-byte what the plugin ships
     src["hooks"]["PreToolUse"] = [g for g in src["hooks"]["PreToolUse"] if g.get("matcher") != "Bash"]

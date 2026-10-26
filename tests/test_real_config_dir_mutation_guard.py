@@ -12,8 +12,14 @@ approach for the sibling nexus-nifd guard.
 """
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from tests.conftest import (
     _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES,
@@ -22,6 +28,68 @@ from tests.conftest import (
     _is_allowlisted_config_dir_path,
     _snapshot_real_config_dir,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_INTEGRITY_HOOK_SCRIPT = "subagent_git_integrity_check.py"
+
+
+def _pinned_conexus_ref() -> str:
+    marketplace = json.loads((_REPO_ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    for plugin in marketplace["plugins"]:
+        if plugin.get("name") == "conexus":
+            return str(plugin["source"]["ref"])
+    raise AssertionError("marketplace.json no longer declares a conexus plugin with a source.ref")
+
+
+def _hooks_json_at_ref(ref: str) -> str | None:
+    """``conexus/hooks/hooks.json`` as of *ref*, or None when the ref (or the
+    file at it) cannot be read locally."""
+    proc = subprocess.run(
+        ["git", "show", f"{ref}:conexus/hooks/hooks.json"],
+        cwd=_REPO_ROOT, capture_output=True, text=True, timeout=60,
+    )
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _check_integrity_carveout_still_needed(ref: str, hooks_json_at: Callable[[str], str | None]) -> None:
+    """Fail when the pinned plugin ref no longer registers the integrity hook.
+
+    The ``git-integrity/`` allowlist entry exists for installed plugin copies
+    that still run the hook. Once the conexus ref pinned in the marketplace is
+    a tag without the hook, a fresh install no longer writes there and the
+    entry is a carve-out with no live writer.
+    """
+    text = hooks_json_at(ref)
+    if text is None:
+        if os.environ.get("NX_REQUIRE_PLUGIN_DRIFT_CHECK") == "1":
+            raise AssertionError(
+                f"NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 but the pinned conexus ref {ref!r} cannot be "
+                "resolved locally (no tags fetched?), so whether the git-integrity carve-out is "
+                "still needed is UNKNOWN. Failing loudly rather than checking nothing."
+            )
+        pytest.skip(
+            f"the pinned conexus ref {ref!r} cannot be resolved locally (shallow clone), so the "
+            "git-integrity carve-out's removal trigger was NOT evaluated; CI sets "
+            "NX_REQUIRE_PLUGIN_DRIFT_CHECK=1 so this cannot go unnoticed there."
+        )
+    try:
+        manifest = json.loads(text)
+    except ValueError:
+        manifest = None
+    events = manifest.get("hooks") if isinstance(manifest, dict) else None
+    assert events, (
+        f"conexus/hooks/hooks.json at {ref!r} is unreadable or registers no hooks, so the "
+        "git-integrity carve-out's removal trigger cannot be evaluated."
+    )
+    assert _INTEGRITY_HOOK_SCRIPT in json.dumps(events), (
+        f"The conexus ref pinned in .claude-plugin/marketplace.json ({ref}) no longer registers "
+        f"{_INTEGRITY_HOOK_SCRIPT}, so no current plugin install writes ~/.config/nexus/git-integrity/. "
+        'DELETE the "git-integrity/" entry from _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES in '
+        "tests/conftest.py, and delete the carve-out assertions and this check from "
+        "test_git_integrity_carveout_waits_for_the_plugin_upgrade (replace them with an assertion "
+        "that the entry is absent). A carve-out with no live writer masks a real leak of that shape "
+        "(nexus-i93tz)."
+    )
 
 
 class TestSnapshotRealConfigDir:
@@ -177,12 +245,51 @@ class TestAllowlist:
         assert _is_allowlisted_config_dir_path("logs/mcp.log") is True
         assert _is_allowlisted_config_dir_path("logs/mcp.log.1") is True
 
-    def test_user_hook_integrity_dir_is_allowlisted(self) -> None:
-        """The live session's user-level integrity hook writes
-        ``<name>/<session_id>/*`` per tool call, during any run launched
-        from that session; no test touches it."""
+    def test_git_integrity_carveout_waits_for_the_plugin_upgrade(self) -> None:
+        """nexus-i93tz: the subagent integrity hook is gone from the tree
+        (Sam, 2026-10-25) but sessions on a 7.83.x to 7.86.x plugin copy still
+        write ``git-integrity/<session_id>/*`` per tool call, during any run
+        launched from them; no test touches it, so the allowlist entry stays
+        while the pinned plugin still registers the hook.
+
+        The removal condition is mechanical: this test FAILS once the conexus
+        ref pinned in ``.claude-plugin/marketplace.json`` is a tag whose
+        ``hooks.json`` no longer registers the hook (the plugin cut that drops
+        it), telling the next editor to delete the entry and this branch (a
+        carve-out with no live writer masks a real leak of that shape)."""
         assert _is_allowlisted_config_dir_path("git-integrity/0c85547d-6e3f/state.json") is True
         assert _is_allowlisted_config_dir_path("git-integrity-x/state.json") is False
+        _check_integrity_carveout_still_needed(_pinned_conexus_ref(), _hooks_json_at_ref)
+
+    def test_carveout_trigger_fires_on_a_pin_without_the_hook(self) -> None:
+        """Non-vacuity of the trigger above. A ref whose ``hooks.json`` lacks
+        the hook (the working tree's own, here) must FAIL the check with the
+        delete instruction; one that registers it must pass; an unreadable or
+        empty manifest must not read as "hook absent"."""
+        without = (_REPO_ROOT / "conexus" / "hooks" / "hooks.json").read_text(encoding="utf-8")
+        assert _INTEGRITY_HOOK_SCRIPT not in without
+        with pytest.raises(AssertionError, match=r"DELETE the .git-integrity/. entry"):
+            _check_integrity_carveout_still_needed("v-next", lambda _ref: without)
+
+        with_hook = json.dumps(
+            {"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "args": [f"x/{_INTEGRITY_HOOK_SCRIPT}"]}]}]}}
+        )
+        _check_integrity_carveout_still_needed("v-old", lambda _ref: with_hook)
+
+        for garbled in ("not json", "{}", json.dumps({"hooks": {}})):
+            with pytest.raises(AssertionError, match="unreadable"):
+                _check_integrity_carveout_still_needed("v-bad", lambda _ref, g=garbled: g)
+
+    def test_carveout_trigger_on_an_unresolvable_pin_says_so(self, monkeypatch) -> None:
+        """A shallow clone cannot resolve the pinned tag. That skips, loudly
+        worded, the way ``test_plugin_release_drift_ledger`` does, and fails
+        under the same ``NX_REQUIRE_PLUGIN_DRIFT_CHECK=1`` flag CI sets."""
+        monkeypatch.delenv("NX_REQUIRE_PLUGIN_DRIFT_CHECK", raising=False)
+        with pytest.raises(pytest.skip.Exception, match="cannot be resolved locally"):
+            _check_integrity_carveout_still_needed("v0.0.0-absent", lambda _ref: None)
+        monkeypatch.setenv("NX_REQUIRE_PLUGIN_DRIFT_CHECK", "1")
+        with pytest.raises(AssertionError, match="cannot be resolved locally"):
+            _check_integrity_carveout_still_needed("v0.0.0-absent", lambda _ref: None)
 
     def test_context_l1_cache_dir_is_allowlisted(self) -> None:
         """nexus-pfuns follow-up (2026-09-25): ``context/<repo>-<hash>.txt``

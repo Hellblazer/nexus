@@ -41,18 +41,22 @@ them sequentially. Current count (the review-coverage push gate,
 `git_add_all_redirects_to_explicit_paths`, was deleted 2026-08-22 —
 Sam's decision, see the file's former history; the bd-close review
 gate and the phase-review close gate were deleted at cleanup steps A2
-and A3, nexus-0r1uz):
+and A3, nexus-0r1uz; the subagent git-state integrity check, nexus-i93tz,
+was added and removed again, by Sam's decision of 2026-10-25):
 
 | Plugin | Routing rules | Other PreToolUse:Bash | Subtotal |
 |--------|----|----|----|
-| nx | 3 (`subagent_git_write`, `credential_print_guard`, `subagent_git_integrity_check`) | 0 | 3 |
+| nx | 2 (`subagent_git_write`, `credential_print_guard`) | 0 | 2 |
 | sn | 0 | 0 | 0 |
-| **Aggregate** | | | **3** |
+| **Aggregate** | | | **2** |
 
-`subagent_git_integrity_check` (nexus-i93tz) is registered for three events on
-the Bash matcher (PreToolUse, PostToolUse, PostToolUseFailure). A Bash call
-fires PostToolUse or PostToolUseFailure, never both, so the per-call count the
-registration-surface lint holds to the cap is 2 + 1 + 1 = 4: at the cap.
+**The subagent git-write guard is frozen** (Sam, 2026-10-25, nexus-i93tz). The
+integrity check that used to back it is gone, so the guard is the only line,
+and it changes only for a real incident. Routes it does not cover are known
+and accepted, and are not to be patched with more spellings: raw writes into
+`.git/config` and `.git/hooks`; index, ref and HEAD writers reached through
+plumbing; verbs held in `$VAR`; decode-then-exec; and writing a script and
+then running it. The guard's own KNOWN LIMITS docstring carries the same list.
 
 The cap is 4. Adding a fifth routing rule in any plugin requires either
 consolidation or a budget revision in a successor RDR. The
