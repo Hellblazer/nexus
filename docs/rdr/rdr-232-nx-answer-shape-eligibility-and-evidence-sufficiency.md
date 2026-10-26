@@ -320,6 +320,51 @@ listed under Critical Assumptions before gate.
   archived in DEVONthink `A7004B0A-B6D7-4F4F-840F-4C98FF8B461B`; T2
   `nexus_rdr/232-research-6`.*
 
+- **✅ Verified** (spike) — A2 in production, Phase 1. The resolver
+  (`plans/primary_evidence.py`) finds ART RDR-084 only through an explicit
+  owner or project binding, never through a first global match. Section labels
+  come from chunk content in manifest order, because engine 0.1.164 writes no
+  label keys. On the engine substrate all 12 rows reached the reducer, and the
+  over-budget case was marked partial (6 of 12). In the live canary
+  (2026-10-26, develop `b72c3cd3d`) G06 resolved to owner 1.2 and 24 of 80
+  primary chunks reached the reducer, disclosed as partial. Two gaps were open
+  at Phase 1 exit: sibling files that share an RDR number resolved to
+  candidates (decided since, not yet built: the file whose frontmatter carries
+  the id wins),
+  and the owner did not filter the vector stream (28 of 40 G06 vector hits
+  came from another project; fixed by 1.18, see section 2a).
+  *Source: golden journey and live canary. T2: `nexus_rdr/232-research-19`,
+  `nexus/rdr232-golden-phase1`, `nexus/rdr232-canary-phase1`.*
+
+- **✅ Verified** (spike) — A6 in production, Phase 1 client side. The
+  traversal policy runs inside `traverse` after the walk and before manifest
+  expansion (`plans/traversal_policy.py`). With 320 out-of-scope ids ahead of
+  3 in-scope ones, the old 300-id cut lost all 3; the policy kept exactly the
+  3. A call with no policy returns the old shape unchanged. A 500-node
+  response is reported as possibly truncated, never as contained. On the same
+  fixture, scope leakage at the reducer fell from 0.40 to 0.0. In the live
+  canary 1 of 4 traversals hit the 500-node engine cap (G06), and 243 of
+  those 500 nodes were out of scope, cut only after the engine truncated. That
+  meets the gate for the engine pre-cap filter (Phase 1 step 6). The ranking
+  puts link role before distance, so all 38 one-hop documents lost to two-hop
+  implementation-role ones; that weighting is not yet calibrated.
+  *Source: golden journey and live canary. T2: `nexus_rdr/232-research-20`,
+  `nexus/rdr232-canary-phase1`.*
+
+- **✅ Verified** (spike) — A7 in production, Phase 1. For a resolved RDR
+  file, the lifecycle stream reads the owner's `<owner>_rdr` T2 project by
+  exact title only (`plans/lifecycle_stream.py`), within 6 records, 24 reads,
+  4,000 and 18,000 characters, and the `nx_answer` deadline. Its records lead
+  the reserved share and are never evicted by chunks. On the substrate with a
+  second tenant, ART RDR-084 read its metadata and latest gate record in 3
+  reads; an ambiguous source, a code source and another tenant's source made 0
+  reads, and no tenant saw another's records. In the live canary G06 got 2 T2
+  records to the reducer and G15 got 4. Not settled: the owner-name-to-project
+  rule depends on `nx rdr` and the indexer deriving the same name, which a test
+  pins but no shared helper enforces.
+  *Source: golden journey and live canary. T2: `nexus_rdr/232-research-21`,
+  `nexus/rdr232-canary-phase1`.*
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6; A7 has none yet. They establish
@@ -737,6 +782,22 @@ removing them is unnecessary for scope, and it would change unscoped
 behavior: the taxonomy-domain steps would take a domain corpus, and the two
 `search_metadata_scoped` plans would fall to that tool's default
 `knowledge,code,docs`, losing `rdr` (research 17). Source census: research 14.
+
+An explicit owner also narrows the secondary streams (added 2026-10-26,
+nexus-jypmj.1.18). The Phase 1 canary showed why: with `owner="1.2"` given,
+28 of 40 G06 vector hits still came from another project's RDR collection.
+Only a resolved `owner` or `project` binding narrows. A catalog-subtree
+`scope` alone does not, and neither does an owner that resolution inferred;
+an unresolved or conflicting qualifier narrows nothing and says so. After the
+corpus rule above, a retrieval step keeps only those `code`, `docs` and `rdr`
+collections whose owner segment matches; `knowledge` collections pass, and a
+collection with no tumbler-shaped owner is kept and reported as unattributed.
+The traversal policy drops non-seed nodes outside the owner only when they sit
+in a project-owned collection, so cited papers still arrive. A step left with
+no collection takes the conflict path above: it is skipped and the notice
+gives the cause. Steps pinned through `collection`/`collections` run as
+written and are reported as unscoped. The decision record is T2
+`nexus/rdr232-1.18-owner-narrowing-decision-2026-10-26`.
 
 #### 3. Traversal as a bounded secondary stream
 
@@ -1665,3 +1726,6 @@ remain coherent without it.
   500-node proof. RDR-189 now carries the matching shared-contract section.
 - 2026-10-25: Gate round 1 — BLOCKED (2 Critical, 8 Significant, 2 ship-blocker(s)); commit `6b2f94e66`; critique `nexus_rdr/232-gate-critique-2026-10-25-r1`.
 - 2026-10-25: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `44a11f3fa`; critique `nexus_rdr/232-gate-critique-2026-10-25-r2`.
+- 2026-10-26: Phase 1 closed. Key Discoveries record A2, A6 and A7 as
+  verified in production (research 19-21). Section 2a adds the owner-narrowing
+  rule for secondary streams (nexus-jypmj.1.18), approved by Sam.
