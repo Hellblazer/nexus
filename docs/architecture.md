@@ -557,6 +557,11 @@ had stamped a row). The fence is the per-document record of what a completed run
 `apply_catalog_content_hashes` fills the hash from each `complete` fence, so
 a document the overlay does not reach is stale (`check_staleness` with no
 cache applies the gate above).
+`nx index repo --since-head` does not sweep the collection: it seeds the cache
+for the delta's own documents from the catalog
+(`seed_staleness_cache_from_catalog`, one batched manifest read and batched chunk
+reads), so a delta file already indexed at its current hash is skipped
+(nexus-a3rl7).
 
 **Completion riding the manifest write (nexus-5xn3k.4).** The hot indexing
 path rarely calls `/index-run/complete` directly — completion instead

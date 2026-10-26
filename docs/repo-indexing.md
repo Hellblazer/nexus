@@ -226,7 +226,7 @@ catalog document, not from T3 chunk metadata: a chunk is stored once per distinc
 two files share carries the `content_hash` of whichever wrote it last. A file with no `complete`
 fence (indexed before the fence existed, or a failed or interrupted run) is indexed on the next
 run, and its completion records the fence. After that the file is skipped, provided the document
-has at least one chunk of its own to check: a file that yields no chunks is indexed on every run.
+has at least one chunk of its own to check: a file that yields no chunks is indexed on every run. A `--since-head` run applies the same test to the files its delta names, so a delta file that was already indexed at its current hash is skipped.
 A note or other document with no source file in an index walk is indexed again only when its
 source is.
 

@@ -5948,15 +5948,39 @@ def _run_index(
         return build_staleness_cache(col)
 
     if delta_changed is not None:
-        # nexus-fltb4: the delta files are known-changed; the caches exist to
-        # SKIP unchanged files, which the delta already excludes. The caches
-        # are empty StalenessCache objects (not None), so check_staleness takes
-        # its cached branch and every delta file is a cache miss: a delta file
-        # always re-indexes, a content-identical rewrite included (the engine
-        # skips re-embedding chunks it already holds).
+        # nexus-fltb4: the delta names the files git says changed since the
+        # base, so the whole-collection sweep the full run pays would read
+        # every unchanged document for nothing. But the delta is not "files
+        # whose content differs from the last index": a base that did not
+        # advance, or a file that changed and changed back, offers a file the
+        # catalog already holds at its current hash. An empty StalenessCache
+        # (not None, so check_staleness takes its cached branch) would call
+        # every one a miss and re-index it (nexus-a3rl7). So the caches are
+        # built from the catalog for the delta's own documents only: the
+        # fence hash from the registration pass above (_complete_doc_hashes)
+        # and the model from one chunk of each document's own manifest, a few
+        # batched reads for the whole delta instead of a sweep. A document
+        # with no complete fence, no chunk in T3, or the wrong model gets no
+        # entry and is indexed; never_fresh still wins below.
+        from nexus.indexer_utils import seed_staleness_cache_from_catalog  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
+
+        def _delta_doc_ids(files: "list[tuple[float, Path]]") -> list[str]:
+            return [file_to_doc_id[f] for _, f in files if f in file_to_doc_id]
+
         code_staleness = StalenessCache()
         docs_staleness = StalenessCache()
         rdr_staleness = StalenessCache()
+        _delta_seeded = (
+            seed_staleness_cache_from_catalog(
+                code_staleness, code_col, _delta_doc_ids(code_files), _complete_doc_hashes)
+            + seed_staleness_cache_from_catalog(
+                docs_staleness, docs_col,
+                _delta_doc_ids(prose_files) + _delta_doc_ids(pdf_files), _complete_doc_hashes)
+            + seed_staleness_cache_from_catalog(
+                rdr_staleness, rdr_col, _delta_doc_ids(rdr_md_paths), _complete_doc_hashes)
+        )
+        _log.info("delta_staleness_caches_seeded", seeded=_delta_seeded,
+                  complete_fence_docs=len(_complete_doc_hashes))
     else:
         code_staleness = _build_with_marker("code", code_col)
         docs_staleness = _build_with_marker("docs", docs_col)

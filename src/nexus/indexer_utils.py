@@ -936,6 +936,91 @@ def apply_catalog_content_hashes(
     return applied
 
 
+#: Chunk ids per ``get`` when :func:`seed_staleness_cache_from_catalog` probes T3.
+_SEED_PROBE_BATCH = 200
+
+
+def seed_staleness_cache_from_catalog(
+    cache: StalenessCache,
+    col: object | None,
+    doc_ids: Iterable[str],
+    complete_doc_hashes: Mapping[str, str],
+) -> int:
+    """Fill *cache* for just *doc_ids*, from the catalog, without sweeping the
+    collection (nexus-a3rl7). Returns how many entries were recorded.
+
+    A ``--since-head`` run indexes only the files the delta names, so it must
+    not pay :func:`build_staleness_cache`'s whole-collection sweep
+    (nexus-fltb4). It still has to be able to skip a delta file whose content
+    the last run already indexed (a base that did not advance, a file that
+    changed and changed back), and an empty :class:`StalenessCache` makes every
+    file a miss. This builds the same entries the full run does, for the
+    delta's documents only: a document fenced ``'complete'`` gets
+    ``(fence hash, model)``, where the model is read from the first chunk of
+    its OWN manifest, in one batched catalog read and a few batched T3 reads
+    for the whole delta. That is the decision
+    ``doc_indexer._document_is_current`` makes per file, and an entry means the
+    same as a full-run entry: the document is present in T3 with that model, at
+    the fence's hash. A document with no ``'complete'`` fence (absent from
+    *complete_doc_hashes*), no manifest row, or whose chunk is not in *col*
+    gets no entry and reads stale, so it is indexed. ``never_fresh`` is applied
+    by :func:`check_staleness` ahead of any entry here, as for a full run.
+
+    Never raises: a failed catalog or T3 read leaves the affected documents
+    unseeded (a re-index, never a skipped file).
+    """
+    if col is None:
+        return 0
+    wanted = sorted({d for d in doc_ids if d and complete_doc_hashes.get(d)})
+    if not wanted:
+        return 0
+    import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+    log = structlog.get_logger(__name__)
+    name = getattr(col, "name", "<unknown>")
+    reader = None
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred import; circular-dep avoidance
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return 0
+        manifests = reader.get_manifests(wanted)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — best-effort seed; an unseeded document is re-indexed, never skipped
+        log.warning("seed_staleness_manifest_read_failed", collection=name, docs=len(wanted), exc_info=True)
+        return 0
+    finally:
+        close = getattr(reader, "close", None)
+        if close is not None:
+            close()
+    first_chash: dict[str, str] = {}
+    for doc_id in wanted:
+        rows = [r for r in (manifests or {}).get(doc_id, []) if getattr(r, "chash", "")]
+        if rows:
+            first_chash[doc_id] = min(rows, key=lambda r: getattr(r, "position", 0) or 0).chash
+    chashes = sorted(set(first_chash.values()))
+    metas: dict[str, dict] = {}
+    from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import; circular-dep avoidance
+
+    for start in range(0, len(chashes), _SEED_PROBE_BATCH):
+        batch = chashes[start:start + _SEED_PROBE_BATCH]
+        try:
+            got = _vector_with_retry(col.get, ids=batch, include=["metadatas"])  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — best-effort seed; the documents behind this batch stay unseeded
+            log.warning("seed_staleness_t3_read_failed", collection=name, exc_info=True)
+            continue
+        for chash, meta in zip((got or {}).get("ids") or [], (got or {}).get("metadatas") or []):
+            if meta:
+                metas[chash] = meta
+    seeded = 0
+    for doc_id, chash in first_chash.items():
+        model = (metas.get(chash) or {}).get("embedding_model", "")
+        if model:
+            cache.by_doc_id[doc_id] = (complete_doc_hashes[doc_id], model)
+            seeded += 1
+    return seeded
+
+
 def complete_doc_hashes_for(
     catalog: object,
     doc_ids: Iterable[str],

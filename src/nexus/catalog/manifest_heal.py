@@ -50,6 +50,27 @@ last row and, once the count matched, hide the gap for good.
   and the fence is failed; that document still has no rows and is listed again until
   a re-index.
 
+* A document with NO manifest rows that the pass cannot rebuild and whose ``chunk_count``
+  is above zero (nexus-v9xwj) is ``ManifestHealResult.lost``, and is marked the same way
+  (also in ``reindex``, with 0 rows): T3 holds no chunk under its content hash (a chunk it
+  shares with a document that wrote it last carries the other document's hash, so that
+  document reads lost here too), or no content hash or collection is recorded, or its
+  collection does not exist (not in the service's live listing: a collection whose every
+  document is trashed reads absent). A file-walking staleness path already re-indexes an
+  empty manifest when none of the document's T3 chunks carries a ``doc_id`` metadata key
+  (every chunk written since RDR-108 Phase 3; nexus-3ajpd), so for that document the mark
+  does not change whether the next index run indexes the file; it changes what the fence
+  says, which is what the PDF early probe in ``nx index repo`` (it decides from the fence
+  alone) and ``nx t3 gc`` read. A pre-Phase-3 chunk that still carries ``doc_id`` puts the
+  document in the staleness cache by that key, and then the mark is what makes the run
+  re-index it.
+  It is NOT marked when the evidence may be transient: a T3 fetch that failed, or a service
+  that could not be asked whether the collection exists (the collection listing failed:
+  ``HttpVectorClient.get_collection`` lists strictly and raises ``CollectionNotFoundError``
+  with the ``VectorServiceError`` as ``__cause__``; a collection that is truly absent raises
+  it with no cause). Those are listed ``lost`` and left alone, as is a document a re-read
+  shows no longer owes the mark; ``ManifestHealResult.lost_unmarked_why`` says why for each.
+
 A marked document stays marked until an index run re-indexes it. One whose source
 the run does not walk stays ``failed``: ``--since-head`` offers only changed files, a
 deleted file offers none, and a document indexed by ``nx index pdf``/``md``/``rdr``
@@ -70,6 +91,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import structlog
+
+from nexus.errors import collection_not_found_errors
 
 _log = structlog.get_logger(__name__)
 
@@ -123,10 +146,18 @@ class ManifestHealResult:
     skipped_indexing: list = field(default_factory=list)
     #: Entries that could not be matched to T3 chunks, split by class:
     #: ``lost`` had chunk_count > 0 and NO manifest rows (a REAL gap: chunks
-    #: are gone); ``never_chunked`` had chunk_count == 0 (expected: nothing to
-    #: rebuild). A gapped document that has manifest rows is ``reindex``.
+    #: are gone, or could not be looked for); ``never_chunked`` had chunk_count
+    #: == 0 (expected: nothing to rebuild). A gapped document that has manifest
+    #: rows is ``reindex``. A lost document is also in ``reindex`` (and its
+    #: fence failed) unless the evidence may be transient (nexus-v9xwj).
     lost: list = field(default_factory=list)
     never_chunked: list = field(default_factory=list)
+    #: Why a ``lost`` document was NOT marked, keyed by tumbler string: the T3
+    #: fetch failed, the service could not be asked whether its collection
+    #: exists, or a re-read showed the document no longer owes a mark (a run
+    #: landed its rows, moved its ``chunk_count`` to 0, or holds its fence at
+    #: ``'indexing'``). A lost document that is marked has no entry.
+    lost_unmarked_why: dict = field(default_factory=dict)
 
     @property
     def unmatched(self) -> list:
@@ -233,7 +264,9 @@ def heal_manifest_gaps(
         for entry in without_rows:
             content_hash = _content_hash(entry)
             if not content_hash or not entry.physical_collection:
-                healer.classify_unmatched(entry)
+                healer.classify_unmatched(
+                    entry,
+                    mark_why="no content hash or collection recorded to find its chunks by")
                 continue
             by_coll[entry.physical_collection].append((entry, content_hash))
 
@@ -272,12 +305,56 @@ class _Healer:
         self.manifests = manifests
         self.dry_run = dry_run
 
-    def classify_unmatched(self, entry: Any) -> None:
+    def classify_unmatched(
+        self, entry: Any, *, mark_why: str | None = None, left_why: str | None = None,
+    ) -> None:
         """No chunk of the document's hash can be found. A document with rows
         never reaches here (it goes to ``reindex``); one without is lost or
-        was never chunked."""
-        (self.result.never_chunked if entry.chunk_count == 0
-         else self.result.lost).append(entry)
+        was never chunked.
+
+        A LOST document (``chunk_count`` above zero, no manifest rows, nothing
+        to rebuild them from) is also marked for re-index when *mark_why* is
+        given (nexus-v9xwj), the same mark a gapped document with rows gets: its
+        fence is failed so every reader of the fence sees a document that is
+        not indexed, whatever the file-walking staleness paths do with an empty
+        manifest. *mark_why* is ``None`` where the evidence may be transient (a
+        T3 fetch that failed, a service that could not be asked): the document
+        is reported and nothing is written, and *left_why* says why. A
+        never-chunked document is never marked: there is nothing to rebuild.
+        """
+        if entry.chunk_count == 0:
+            self.result.never_chunked.append(entry)
+            return
+        self.result.lost.append(entry)
+        if mark_why is not None:
+            self.mark_lost_for_reindex(entry, mark_why)
+        elif left_why is not None:
+            self.result.lost_unmarked_why[str(entry.tumbler)] = left_why
+
+    def mark_lost_for_reindex(self, entry: Any, why: str) -> None:
+        """Fail the fence of a lost document, judged against the document as it
+        is now: rows a run landed since the snapshot make it a document with rows
+        (the ordinary gapped rule), a ``chunk_count`` a run moved to 0 owes
+        nothing, and an ``'indexing'`` fence is skipped. Each stand-down is
+        recorded in ``lost_unmarked_why`` so the report can say why the
+        document is ``LOST`` and not marked."""
+        state, rows, count = self.fresh(entry)
+        left = None
+        if rows:
+            left = self.reindex_if_still_gapped(entry)
+        elif count == 0:
+            left = "its chunk_count is now 0 (a run re-indexed it as empty)"
+        elif not self.mark_for_reindex(entry, state, 0, 0, why):
+            left = self.not_marked_reason(state)
+        if left is not None:
+            self.result.lost_unmarked_why[str(entry.tumbler)] = left
+
+    @staticmethod
+    def not_marked_reason(state: str | None) -> str:
+        """Why ``mark_for_reindex`` returned False for a document in *state*."""
+        if state == "indexing":
+            return "an index run is in progress on it (fence 'indexing')"
+        return "the fence write failed (see the log)"
 
     def fresh(self, entry: Any) -> tuple[str | None, int, int]:
         """The document's fence state, manifest row count and ``chunk_count``
@@ -333,8 +410,12 @@ class _Healer:
             ReindexDoc(entry, rows_after, entry.chunk_count))
         return True
 
-    def reindex_if_still_gapped(self, entry: Any) -> None:
-        """A gapped document that has manifest rows: write nothing into it."""
+    def reindex_if_still_gapped(self, entry: Any) -> str | None:
+        """A gapped document that has manifest rows: write nothing into it.
+
+        Returns why it did not mark the document (a run completed it since the
+        snapshot, it is mid-run, the fence write failed), or None when it
+        marked it."""
         state, rows, count = self.fresh(entry)
         # Judge against the document as it is NOW, not the snapshot: a run that
         # re-indexed it since may have moved its chunk_count (a snapshot count of
@@ -343,9 +424,12 @@ class _Healer:
         # off a fence a run moved to 'complete'; a fence a run began is
         # 'indexing' and mark_for_reindex skips it.
         if rows >= count:
-            return  # no longer gapped: a run completed it since the snapshot
-        self.mark_for_reindex(
-            entry, state, rows, rows, "manifest rows kept, not rebuilt")
+            # no longer gapped: a run completed it since the snapshot
+            return "a run landed its manifest rows since the pass began"
+        if not self.mark_for_reindex(
+                entry, state, rows, rows, "manifest rows kept, not rebuilt"):
+            return self.not_marked_reason(state)
+        return None
 
 
 def _heal_collections(
@@ -371,8 +455,24 @@ def _heal_collections(
                 "manifest_heal_collection_unavailable",
                 collection=coll_name, docs=len(pairs), error=str(exc),
             )
+            # Absent is a fact about the collection; "could not ask" is not.
+            # get_collection raises CollectionNotFoundError for both, with the
+            # service failure as __cause__ in the second (it lists strictly, so
+            # an outage is not read as an empty listing), and only the first
+            # marks (a transient outage must not fail a fence).
+            absent = (
+                isinstance(exc, collection_not_found_errors())
+                and exc.__cause__ is None
+            )
             for e, _ in pairs:
-                healer.classify_unmatched(e)
+                healer.classify_unmatched(
+                    e,
+                    mark_why="its collection does not exist in T3" if absent else None,
+                    left_why=(
+                        None if absent else
+                        "the service could not be asked whether its collection exists"
+                    ),
+                )
             say(
                 f"  [{coll_i}/{len(by_coll)}] {coll_name}: "
                 f"UNAVAILABLE — {len(pairs)} doc(s) unmatched"
@@ -408,7 +508,10 @@ def _heal_collections(
                 batch_set = set(batch)
                 dropped = [e for e, ch in pairs if ch in batch_set]
                 for e in dropped:
-                    healer.classify_unmatched(e)
+                    # Reported, not marked (nexus-v9xwj): a failed fetch is not
+                    # evidence the chunks are gone.
+                    healer.classify_unmatched(
+                        e, left_why="the T3 fetch for its chunks failed")
                 fetch_failed_docs += len(dropped)
                 pairs = [(e, ch) for e, ch in pairs if ch not in batch_set]
                 continue
@@ -434,7 +537,8 @@ def _heal_collections(
         for entry, content_hash in pairs:
             ids, metas = rows_by_hash.get(content_hash, ([], []))
             if not ids:
-                healer.classify_unmatched(entry)
+                healer.classify_unmatched(
+                    entry, mark_why="T3 holds no chunk carrying its content hash")
                 continue
             tumbler = str(entry.tumbler)
             ordered = sorted(zip(ids, metas), key=_order_key)
@@ -447,7 +551,8 @@ def _heal_collections(
                 indexed_metas.append((k, m))
             chunks = _manifest_chunk_rows(indexed_metas)
             if not any(c["chash"] for c in chunks):
-                healer.classify_unmatched(entry)
+                healer.classify_unmatched(
+                    entry, mark_why="the T3 chunks carrying its content hash name no chunk hash")
                 continue
             n = len(chunks)
             cc = entry.chunk_count
