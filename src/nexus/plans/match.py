@@ -76,7 +76,9 @@ class Match:
         """The plan's declared answer kind, ``UNKNOWN`` when it declares none (RDR-232 Phase 2).
 
         Read-only and decoded from ``plan_json`` on demand, so every way of building a ``Match``
-        carries it. Nothing in the matcher filters on it yet (nexus-jypmj.2.3).
+        carries it. The matcher's eligibility filter (``nexus.plans.eligibility``,
+        nexus-jypmj.2.3) reads the stored row's tags and ``plan_json`` rather than this property, so
+        provenance is decided from the same bytes the kind is.
         """
         return decode_answer_kind(self.plan_json)
 

@@ -428,8 +428,10 @@ def test_coverage_is_built_before_plan_match_and_reported_in_the_envelope_and_th
 
 @pytest.mark.parametrize("qid", sorted(_golden()))
 def test_the_matcher_is_handed_the_same_arguments_whatever_the_coverage_says(qid: str) -> None:
-    """Shadow mode: the matcher's call does not depend on the coverage. Swap the real derivation for a
-    coverage that claims the opposite kind and a gate facet; the matcher sees identical arguments."""
+    """The matcher's selection inputs do not depend on the coverage while the eligibility gate is off. Swap the
+    real derivation for a coverage that claims the opposite kind and a gate facet; the matcher sees identical
+    arguments. The one new argument, the eligibility filter (nexus-jypmj.2.3), names the request kind it judges
+    for, so it is compared by what it can change: it is not enforcing in either run."""
     from tests.test_rdr232_caller_scope import _MULTI_PLAN
 
     q = _golden()[qid]
@@ -446,7 +448,10 @@ def test_the_matcher_is_handed_the_same_arguments_whatever_the_coverage_says(qid
     )
     with patch("nexus.mcp.core._nx_answer_request_coverage", AsyncMock(return_value=skew)):
         _drive(q["text"], plan_match=matcher, scope="")
-    assert len(seen) == 2 and seen[0] == seen[1], (seen[0], seen[1])
+    assert len(seen) == 2
+    filters = [call.pop("eligibility") for call in seen]
+    assert [f.enforce for f in filters] == [False, False], "the gate ships off: the filter only reports"
+    assert seen[0] == seen[1], (seen[0], seen[1])
     assert real_run[0]["request_coverage"]["answer_kind"] in REQUEST_KINDS
 
 
@@ -1124,7 +1129,7 @@ def test_an_unresolved_or_ambiguous_source_stays_reported_unqualified() -> None:
 
 def test_the_cli_reference_documents_the_request_coverage_key() -> None:
     docs = (Path(__file__).resolve().parents[1] / "docs" / "cli-reference.md").read_text(encoding="utf-8")
-    assert "nine RDR-232 keys" in docs and "eight RDR-232 keys" not in docs
+    assert "ten RDR-232 keys" in docs and "nine RDR-232 keys" not in docs
     assert "- `request_coverage` (nexus-jypmj.2.2" in docs
     life = docs[docs.index("- `lifecycle_stream` (nexus-jypmj.1.7)"):]
     assert "gate, lifecycle or status facet" in life[: life.index("\n- `", 10)]

@@ -584,13 +584,16 @@ class PlanSelection:
     selected: str | None
     candidates: list[str]
     confidences: list[float | None]
+    #: The plan ids the matcher offered, in order (nexus-jypmj.2.3).
+    plan_ids: list[int] = field(default_factory=list)
 
 
 def observe_plan_selection(
-    library, question: str, *, scope: str = "", bindings: dict[str, Any] | None = None,
+    library, question: str, *, scope: str = "", bindings: dict[str, Any] | None = None, eligibility=None,
 ) -> PlanSelection:
-    """What the UNMODIFIED matcher offers and picks for *question*, called as ``nx_answer`` calls it
-    (same bindings, availability set, floor, ``n`` and category verb). A plan miss selects ``None``."""
+    """What the matcher offers and picks for *question*, called as ``nx_answer`` calls it
+    (same bindings, availability set, floor, ``n`` and category verb). A plan miss selects ``None``.
+    *eligibility* is the answer-kind filter (nexus-jypmj.2.3); none, as before, is the unmodified matcher."""
     from nexus.mcp.core import _PLAN_MATCH_MIN_CONFIDENCE, _nx_answer_caller_bindings, _nx_answer_match_is_hit
     from nexus.mcp_infra import get_t1_plan_cache
     from nexus.plans.matcher import plan_match
@@ -601,11 +604,13 @@ def observe_plan_selection(
     matches = plan_match(
         question, library=library, cache=cache, dimensions=None, scope_preference=scope,
         context=None, min_confidence=_PLAN_MATCH_MIN_CONFIDENCE, n=5,
-        available_bindings=available, category_verb=infer_verb(question),
+        available_bindings=available, category_verb=infer_verb(question), eligibility=eligibility,
     )
     keys = [plan_label_key(m.dimensions, m.tags) for m in matches]
     hit = bool(matches) and _nx_answer_match_is_hit(matches[0].confidence, threshold=_PLAN_MATCH_MIN_CONFIDENCE)
-    return PlanSelection(keys[0] if hit else None, keys, [m.confidence for m in matches])
+    return PlanSelection(
+        keys[0] if hit else None, keys, [m.confidence for m in matches], [m.plan_id for m in matches],
+    )
 
 
 def library_match(library, question: str, *, scope: str = "", bindings: dict[str, Any] | None = None,

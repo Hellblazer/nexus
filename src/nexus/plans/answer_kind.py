@@ -32,8 +32,8 @@ caller cannot forge either one; a row it saves declares nothing. Read paths
 (``nx plan hygiene``, the matcher, the session cache) never refuse or retire a
 row for its declaration: a bad one decodes to ``unknown``.
 
-Provenance rule the eligibility step (nexus-jypmj.2.3) must apply, failing
-closed:
+Provenance rule the eligibility step (``nexus.plans.eligibility``,
+nexus-jypmj.2.3) applies, failing closed:
 
 * a row is **curated** only if its tags carry ``builtin-template`` AND its
   declaration says ``curated``; a ``curated`` declaration on a row without the
@@ -52,7 +52,7 @@ The session cache carries ``answer_kind``, ``answer_provenance`` and
 Decoding never raises and never reads the plan text: an absent, malformed,
 wrongly versioned or unsupported declaration is ``unknown``. No migration
 may guess a kind from the steps and promote it to a hard constraint. Nothing
-in this module filters plans; eligibility is a later step (nexus-jypmj.2.3).
+in this module filters plans; ``nexus.plans.eligibility`` does (nexus-jypmj.2.3).
 """
 from __future__ import annotations
 

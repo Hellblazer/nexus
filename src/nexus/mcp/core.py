@@ -10973,9 +10973,15 @@ async def _nx_answer_plan_miss(
     scope: str = "",
     max_steps: int = 6,
     few_shot_matches: "list | None" = None,
+    coverage: "RequestCoverage | None" = None,
 ) -> Any:
     """Decompose *question* into a plan via claude_dispatch, execute it,
     and return a synthetic Match for plan_run.
+
+    *coverage* (RDR-232 Phase 2, nexus-jypmj.2.3) is the request's derived coverage. With the eligibility
+    gate on, the near-miss plans offered as few-shot examples are only those the request's answer kind may
+    use: a rejected shape must not teach the planner its structure. With the gate off, or no coverage, the
+    examples are those passed in.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
     from nexus.plans.match import Match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -11004,6 +11010,12 @@ async def _nx_answer_plan_miss(
     # examples. On a miss these near-miss matches are still the most similar
     # historical plans; demonstrating their structure measurably lifts plan
     # quality over the prior zero-shot prompt.
+    from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so the gate constant is honored (nexus-jypmj.2.3)
+
+    if coverage is not None and _eligibility.ANSWER_KIND_ELIGIBILITY_ENABLED:
+        few_shot_matches = _eligibility.eligible_matches(
+            _eligibility.coerce_kind(coverage.answer_kind), few_shot_matches,
+        )
     few_shot_block = _format_plan_few_shot(few_shot_matches)
     if few_shot_block:
         import structlog as _slog2  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -11511,6 +11523,7 @@ async def nx_answer(
         estimate_plan_cost,
         get_cached_price_table,
     )
+    from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so a test's patch of the constant is honored (RDR-232 nexus-jypmj.2.3)
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.verb_infer import infer_verb as _infer_verb  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -11678,6 +11691,14 @@ async def nx_answer(
         _request_coverage = _request_coverage.without_unqualified_for(
             s.ref.value for s in _named_sources.resolved()
         )
+    # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
+    # plan_match, which asks it of every branch's candidates; enforcing only when the module constant is on
+    # (it ships off: the filter then counts what it would exclude and excludes nothing). Reported in the
+    # envelope as `plan_eligibility`, always present.
+    _plan_eligibility = _eligibility.EligibilityFilter(
+        _request_coverage.answer_kind, _request_coverage.kind_decision,
+        enforce=_eligibility.ANSWER_KIND_ELIGIBILITY_ENABLED,
+    )
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.
     _single_query_fast_path = False
@@ -11988,6 +12009,12 @@ async def nx_answer(
             # extraction: {outcome, calls, timeout_s, latency_ms, cost_usd}, derive_ms}. Reported only; it
             # does not choose a plan. Always present.
             "request_coverage": _request_coverage.to_wire(),
+            # RDR-232 Phase 2 (nexus-jypmj.2.3): answer-kind eligibility of the plan candidates: {request_kind,
+            # kind_decision, enforced, branches: {cosine, category_route, fts: {examined, excluded, reasons}},
+            # excluded_total, excluded_plan_ids, returned: {total, eligible}, selected: {plan_id, eligible,
+            # kind, provenance, reason}, fallback_reason}. With the gate off (`enforced` false) it reports
+            # what the gate would exclude; nothing was. Always present; `selected` is None for an inline plan.
+            "plan_eligibility": _plan_eligibility.to_wire(),
             # RDR-232 section 2a (nexus-jypmj.1.3): one entry per corpus-taking
             # retrieval step the caller's scope reached: {step_index, tool,
             # plan_corpus, caller_scope, scope_kind, outcome, resolved_corpus}.
@@ -12335,15 +12362,21 @@ async def nx_answer(
                     # only typed bindings can make a plan unrunnable.
                     available_bindings=_caller_available,
                     category_verb=_category_verb,
+                    eligibility=_plan_eligibility,
                 ),
                 op="plan_match",
             )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _error_result(f"Error during plan match: {exc}")
 
-    if not matches or not _nx_answer_match_is_hit(
+    _plan_hit = bool(matches) and _nx_answer_match_is_hit(
         matches[0].confidence, threshold=effective_min_confidence,
-    ):
+    )
+    # RDR-232 Phase 2 (nexus-jypmj.2.3): why this call plans inline, if it does (reported in the envelope).
+    _plan_eligibility.set_fallback(_eligibility.fallback_reason(
+        force_dynamic=bool(force_dynamic), matches=matches, hit=_plan_hit, filt=_plan_eligibility,
+    ))
+    if not _plan_hit:
         # Plan miss — inline LLM planner via claude_dispatch.
         _log.info(
             "nx_answer_plan_miss",
@@ -12363,7 +12396,7 @@ async def nx_answer(
             with _ambient_usage_sink(_planner_usage_sink):
                 best = await _nx_answer_plan_miss(
                     question, scope=scope, max_steps=max_steps,
-                    few_shot_matches=matches,
+                    few_shot_matches=matches, coverage=_request_coverage,
                 )
         except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -12463,6 +12496,8 @@ async def nx_answer(
         except Exception:  # noqa: BLE001 — boundary catch; degrade to top-confidence match, must not crash caller
             _log.warning("nx_answer_plan_cost_ranking_failed", exc_info=True)
 
+    # RDR-232 Phase 2 (nexus-jypmj.2.3): what was returned and which plan was selected, with its verdict.
+    _plan_eligibility.record_returned(matches, best)
     if best.plan_id == 0:
         conf_str = "ad-hoc"
     elif best.confidence is None:
@@ -13775,14 +13810,16 @@ async def nx_answer(
                 )
                 # nexus-j5geq: route through daemon (eliminates second WAL writer).
                 _grow_scope_tags = scope or None
-                # RDR-232 Phase 2 (nexus-jypmj.2.1): record the grown plan's answer kind as unknown with
-                # grown provenance. A kind is recorded only when the request route that produced the plan
-                # was known; nothing passes a route to the inline planner yet (RequestCoverage and the
-                # eligibility filter are nexus-jypmj.2.2 and .2.3), so route_kind/route_source are None.
+                # RDR-232 Phase 2 (nexus-jypmj.2.1, .2.3): record the grown plan's answer kind with grown
+                # provenance. A kind is recorded only when the request route that produced the plan was
+                # known: the route is the request's RequestCoverage (its kind and how it was decided). An
+                # unknown kind, or a kind whose decision is "unknown", records the plan as unknown.
                 from nexus.plans.answer_kind import grown_plan_json  # noqa: PLC0415 — deferred, rare/branch-local
 
                 _grow_plan_json = grown_plan_json(
-                    best.plan_json, route_kind=None, route_source=None,
+                    best.plan_json,
+                    route_kind=_request_coverage.answer_kind,
+                    route_source=_request_coverage.kind_decision,
                 )
                 _grow_project = project_name
                 def _do_grow(db):

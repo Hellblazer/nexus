@@ -622,7 +622,121 @@ def _measure_with_grown_473_clone(library, queries, art, floor_observations, flo
         f"with_clone={c.value} ({c.detail['selected_unacceptable']}/{c.n}) "
         f"eligible_plan_recall floor={floor['eligible_plan_recall'].value} "
         f"with_clone={with_clone['eligible_plan_recall'].value}")
-    return {"selections": selections, "measures": with_clone, "floor": floor}
+    eligibility = _measure_eligibility(library, queries, selections)
+    return {"selections": selections, "measures": with_clone, "floor": floor, "eligibility": eligibility}
+
+
+class _LegacyBuiltins:
+    """The plan library as it was before nexus-jypmj.2.1: builtin rows without their declaration."""
+
+    def __init__(self, library) -> None:
+        self._lib = library
+
+    def __getattr__(self, name):
+        return getattr(self._lib, name)
+
+    @staticmethod
+    def _strip(row):
+        if not row or "builtin-template" not in str(row.get("tags", "")):
+            return row
+        import json as _json
+
+        plan = _json.loads(row["plan_json"])
+        plan.pop("answer_kind", None)
+        return {**row, "plan_json": _json.dumps(plan)}
+
+    def get_plan(self, plan_id):
+        return self._strip(self._lib.get_plan(plan_id))
+
+    def search_plans(self, *args, **kwargs):
+        return [self._strip(r) for r in self._lib.search_plans(*args, **kwargs)]
+
+
+def _measure_eligibility(library, queries, with_clone_selections) -> dict:
+    """nexus-jypmj.2.3: the answer-kind eligibility filter over the golden set, gate off (shadow) and on.
+
+    Each request's kind is derived by the deterministic first pass of ``RequestCoverage`` (no model call),
+    the filter is built for that kind, and the unmodified call shape of ``observe_plan_selection`` is made
+    twice over the same library (builtins plus the grown clone of plan 473): with a shadow filter (the
+    shipped setting) and with an enforcing one. Asserted relations, not values: the shadow run selects
+    exactly what the unfiltered run did for every request (selection does not move), the enforcing run
+    never selects a plan the filter refused, and the incident request no longer selects the grown clone.
+    The numbers are emitted; nexus-jypmj.2.8 sets thresholds from them before the gate is enabled.
+
+    Limits: the request kinds are the derivation's own (the golden label is printed beside it, and the
+    derivation was written with this set in view), the library is the 12 builtins plus one grown clone, and
+    only the incident request reaches the clone. A builtin seeded before nexus-jypmj.2.1 and not reseeded
+    declares nothing and would read as an untrusted unknown plan; the library here was seeded by this
+    build, so its builtins carry their declarations.
+    """
+    from nexus.plans import eligibility as el
+    from nexus.plans.request_coverage import derive_request_coverage
+
+    shadow_obs: list[RunObservation] = []
+    enforced_obs: list[RunObservation] = []
+    rows: list[dict] = []
+    for q in queries:
+        sc, bd = g.request_call_shape(q)
+        cov = derive_request_coverage(q.text, scope=sc)
+        shadow = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=False)
+        sel_off = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd, eligibility=shadow)
+        gate = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=True)
+        sel_on = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd, eligibility=gate)
+        base = with_clone_selections[q.qid]
+        assert (sel_off.selected, sel_off.candidates) == (base["selected"], base["candidates"]), (
+            q.qid, "a shadow filter moved the selection", sel_off, base)
+        refused = set(gate.excluded_plan_ids)
+        assert not (refused & set(sel_on.plan_ids)), (q.qid, "the enforcing run offered a refused plan", refused)
+        shadow_obs.append(RunObservation(qid=q.qid, selected_plan=sel_off.selected, candidate_plans=sel_off.candidates))
+        enforced_obs.append(RunObservation(qid=q.qid, selected_plan=sel_on.selected, candidate_plans=sel_on.candidates))
+        rows.append({
+            "qid": q.qid.split("-")[0], "golden_kind": q.answer_kind, "derived_kind": cov.answer_kind,
+            "decision": cov.kind_decision, "selected_off": sel_off.selected, "selected_on": sel_on.selected,
+            "would_exclude": shadow.excluded_plan_ids, "branches_off": shadow.to_wire()["branches"],
+            "excluded_total": shadow.excluded_total,
+        })
+    off = compute_measures(queries, shadow_obs)
+    on = compute_measures(queries, enforced_obs)
+    # The same enforcing run over the library as it stands BEFORE `nx plan reseed`: builtins seeded before
+    # nexus-jypmj.2.1 carry no declaration, so with the gate on each reads as an untrusted unknown plan.
+    legacy_view = _LegacyBuiltins(library)
+    legacy_sel: dict[str, str | None] = {}
+    legacy_reasons: dict[str, int] = {}
+    for q in queries:
+        sc, bd = g.request_call_shape(q)
+        cov = derive_request_coverage(q.text, scope=sc)
+        gate = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=True)
+        legacy_sel[q.qid.split("-")[0]] = g.observe_plan_selection(
+            legacy_view, q.text, scope=sc, bindings=bd, eligibility=gate).selected
+        for branch in gate.to_wire()["branches"].values():
+            for reason, n in branch["reasons"].items():
+                legacy_reasons[reason] = legacy_reasons.get(reason, 0) + n
+    legacy_on = {r["qid"]: r["selected_on"] for r in rows}
+    print(
+        f"RDR232-ELIGIBILITY-LEGACY gate_on_after_reseed_vs_before: miss={sum(1 for v in legacy_on.values() if v is None)}"
+        f"->{sum(1 for v in legacy_sel.values() if v is None)} "
+        f"selection_differs={[k for k in legacy_sel if legacy_sel[k] != legacy_on[k]]} reasons_before_reseed={legacy_reasons}")
+    assert legacy_reasons.get("undeclared_builtin", 0) > 0, "the legacy view must have exercised the reason it reports"
+    g06 = next(r for r in rows if r["qid"] == "G06")
+    assert g06["selected_off"] == g.GROWN_473_KEY, g06
+    assert g06["selected_on"] != g.GROWN_473_KEY, g06
+    assert g06["excluded_total"] >= 1 and g06["derived_kind"] == "synthesis", g06
+    changed = [r["qid"] for r in rows if r["selected_off"] != r["selected_on"]]
+    # selection moves only through the filter, so every changed request had its selected plan refused
+    assert all(r["selected_off"] is not None for r in rows if r["qid"] in changed), changed
+    print(
+        f"RDR232-ELIGIBILITY requests={len(rows)} selection_changed={changed} "
+        f"wrong_shape off={off['wrong_shape_admission_rate'].value} on={on['wrong_shape_admission_rate'].value} "
+        f"eligible_plan_recall off={off['eligible_plan_recall'].value} on={on['eligible_plan_recall'].value} "
+        f"would_exclude_any={sum(1 for r in rows if r['excluded_total'])} "
+        f"miss_off={sum(1 for r in rows if r['selected_off'] is None)} "
+        f"miss_on={sum(1 for r in rows if r['selected_on'] is None)}")
+    for r in rows:
+        print(
+            f"RDR232-ELIGIBILITY[{r['qid']}] golden={r['golden_kind']} derived={r['derived_kind']}/{r['decision']} "
+            f"off={r['selected_off']} on={r['selected_on']} would_exclude={r['would_exclude']} "
+            f"excluded_by_branch={ {b: c['excluded'] for b, c in r['branches_off'].items()} }")
+    return {"rows": rows, "off": off, "on": on}
 
 
 def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, production) -> dict:
