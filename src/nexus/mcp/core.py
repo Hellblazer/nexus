@@ -9857,6 +9857,26 @@ def _step_record_to_wire(step: Any) -> dict[str, Any]:
     }
 
 
+def _run_cost_usd(step_records: list[Any] | None, planner_cost_usd: float | None = None) -> float | None:
+    """The cost of one ``nx_answer`` run: every step's known cost plus the inline planner's own
+    dispatch cost (nexus-jypmj.1.20), or ``None`` when neither is known, never a fabricated zero.
+
+    The envelope's ``cost_usd`` and the stored ``nx_answer_runs.cost_usd`` both come from here, so
+    they cannot disagree. A plan-match hit has no planner dispatch (``planner_cost_usd`` is ``None``).
+    """
+    known = [s.cost_usd for s in (step_records or []) if getattr(s, "cost_usd", None) is not None]
+    if planner_cost_usd is not None:
+        known.append(planner_cost_usd)
+    return sum(known) if known else None
+
+
+def _planner_cost_usd(usage_sink: list[Any]) -> float | None:
+    """The summed known cost of the inline planner's dispatches captured in *usage_sink*, or ``None``
+    when none was captured or none reported a cost (a plan-match hit never dispatches a planner)."""
+    known = [u.cost_usd for u in usage_sink if getattr(u, "cost_usd", None) is not None]
+    return sum(known) if known else None
+
+
 def _nx_answer_record_run(
     telemetry: Any,
     *,
@@ -9868,6 +9888,7 @@ def _nx_answer_record_run(
     step_records: list[Any] | None,
     duration_ms: int,
     trace: bool,
+    planner_cost_usd: float | None = None,
 ) -> None:
     """Persist one ``nx_answer_runs`` row (+ its ``step_records``, when any)
     via the telemetry store. Redacts when ``trace=False``.
@@ -9894,8 +9915,7 @@ def _nx_answer_record_run(
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     steps = step_records or []
-    _known_costs = [s.cost_usd for s in steps if s.cost_usd is not None]
-    cost_usd = sum(_known_costs) if _known_costs else None
+    cost_usd = _run_cost_usd(steps, planner_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
     try:
         telemetry.record_nx_answer_run(
@@ -10366,6 +10386,7 @@ def _nx_answer_record_complete(
     success: bool | None,
     composite_supported_at_start: bool,
     early_bump_fired: bool,
+    planner_cost_usd: float | None = None,
 ) -> None:
     """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
     outcome-counter bump for ONE converting arm, issued as ONE function
@@ -10486,8 +10507,7 @@ def _nx_answer_record_complete(
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     steps = step_records or []
-    _known_costs = [s.cost_usd for s in steps if s.cost_usd is not None]
-    cost_usd = sum(_known_costs) if _known_costs else None
+    cost_usd = _run_cost_usd(steps, planner_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
 
     if composite_supported_at_start and success is not None:
@@ -11512,10 +11532,7 @@ async def nx_answer(
         # the sum of every step's non-None cost, or None when no step
         # reports a known cost — never a fabricated 0.0.
         _steps = step_records or []
-        _known_costs = [
-            s.cost_usd for s in _steps if getattr(s, "cost_usd", None) is not None
-        ]
-        cost_usd = sum(_known_costs) if _known_costs else None
+        cost_usd = _run_cost_usd(_steps, _planner_cost_usd(_planner_usage_sink))
         return {
             "final_text": _text,
             "chunks": chunks if chunks is not None else [],
@@ -11787,6 +11804,7 @@ async def nx_answer(
                     success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -12005,6 +12023,7 @@ async def nx_answer(
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         step_records=[], duration_ms=elapsed_ms, trace=trace,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -12360,6 +12379,7 @@ async def nx_answer(
                             duration_ms=elapsed_ms, trace=trace, success=False,
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
+                            planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -12401,6 +12421,7 @@ async def nx_answer(
                             duration_ms=elapsed_ms, trace=trace, success=False,
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
+                            planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -12534,6 +12555,7 @@ async def nx_answer(
                         success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -12578,6 +12600,7 @@ async def nx_answer(
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -12652,6 +12675,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
             pass
@@ -12770,6 +12794,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -12971,6 +12996,7 @@ async def nx_answer(
                         step_count=len(result.steps),
                         final_text=_handoff_text, step_records=_result_step_records,
                         duration_ms=_continuation_elapsed_ms, trace=trace,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -13033,6 +13059,7 @@ async def nx_answer(
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -13181,6 +13208,7 @@ async def nx_answer(
                     success=_nx_answer_empty_retrieval_outcome(result.steps),
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -13244,6 +13272,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the notice must still surface
             pass
@@ -13413,6 +13442,7 @@ async def nx_answer(
                 duration_ms=elapsed_ms, trace=trace, success=True,
                 composite_supported_at_start=composite_supported_at_start,
                 early_bump_fired=early_bump_fired,
+                planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
             ),
             op="record_run",
         )

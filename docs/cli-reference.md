@@ -5342,7 +5342,12 @@ executed-failed with `--include-failed`; see above):
   disagrees with `sum(steps.cost_usd)` beyond a relative epsilon (0.5%,
   sub-cent absolute floor — a literal to-the-cent tolerance is too loose
   for typical $0.0001-$0.05 per-call costs). Both unknown (`None`) agrees
-  trivially; exactly one unknown never agrees.
+  trivially; exactly one unknown never agrees. A run that took the inline
+  planner (`plan_id` 0) also carries the planner dispatch's cost, which
+  belongs to no step (nexus-jypmj.1.20): for those rows a run cost at or above
+  the step sum agrees, and a known run cost agrees with no known step cost; a
+  run cost below its steps is still flagged. `by_plan` medians stay step sums,
+  so they remain comparable with the predicted cost.
 
 A step's `cost_usd` of `None` ("unknown", not a measured cost — see
 `StepRecord`'s own docstring, `plans/runner.py`) is excluded from every
