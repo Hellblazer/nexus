@@ -64,3 +64,4 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/skills/nexus/SKILL.md` (nexus-jypmj.1.16): the `nx_answer` `scope="1.2"` example says a catalog subtree filters `query` and `search_metadata_scoped` steps and that a `search` step runs unscoped and is named in the answer.
 - `conexus/skills/nexus/reference.md` (nexus-jypmj.1.16): the `scope` parameter row says a subtree is a filter and never a corpus, which tools it reaches, that a document-level address filters nothing, and the `[scope not applied: ...]` line and `subtree_not_applied` outcome that disclose it.
+- `conexus/skills/upgrade/SKILL.md` (nexus-6pfgb.14): the list of what an upgrade does not carry no longer says a note's TTL is lost; it names `nx store export` (each chunk's `ttl_days` and `indexed_at` as stored) and the `nx catalog export` recovery bundle (each `store_put` note's own `ttl_days`, clock restarted at import). Deferred: the bead also changes `src/nexus/catalog/recovery_bundle.py`.
