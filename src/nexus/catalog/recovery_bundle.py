@@ -253,9 +253,11 @@ def export_knowledge_doc(
     The content is every piece of the note joined in manifest position order (nexus-6pfgb.36):
     ``put_note`` writes a long note as several pieces (RDR-223) and ``"".join(pieces) == content``
     by construction (:func:`nexus.catalog.store_hook.note_pieces`). A note with every piece gone from
-    T3 is a ghost. A note with some pieces gone, or whose manifest positions do not run ``0..n-1`` (a
-    lost row), is incomplete: no truncated text reaches the bundle, because importing it would
-    overwrite the whole note wherever it still exists.
+    T3 is a ghost, and so is every note of a collection the engine has no catalog row for. A note with
+    some pieces gone, or whose manifest positions do not run ``0..n-1`` (a lost leading or middle row),
+    is incomplete and left out, because importing a shortened text would overwrite the whole note
+    wherever it still exists. A lost FINAL manifest row leaves positions that still run ``0..n-2`` and
+    is not detected: the manifest carries no piece count, and the span columns are not trusted for it.
 
     ``tags``, ``category`` and ``ttl_days`` are the NOTE'S OWN, read from its catalog entry's ``meta``
     (nexus-6pfgb.5): two notes with identical text share one chunk row, and the row carries only the
@@ -316,6 +318,24 @@ def export_knowledge_doc(
         "ttl_days": keys["ttl_days"],
         "content": content,
     }
+
+
+def _collection_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, dict]:
+    """``t3.chunk_rows`` for one collection, where a collection the engine has no catalog row for
+    holds no chunks: its notes count as ghosts, as they did when each piece was read alone. Any other
+    store error propagates and stops the export."""
+    from nexus.db.http_vector_client import (  # noqa: PLC0415 — deferred, heavy import graph
+        VectorServiceError,
+        is_unregistered_collection_error,
+    )
+
+    try:
+        return t3.chunk_rows(collection, chashes)
+    except VectorServiceError as exc:
+        if not is_unregistered_collection_error(exc):
+            raise
+        _log.warning("recovery_export_collection_unregistered", collection=collection, pieces=len(chashes))
+        return {}
 
 
 def _row_keys(row: dict) -> dict[str, Any]:
@@ -443,7 +463,7 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     for entry, _leg, rows in selected:
         chashes_by_collection.setdefault(entry.physical_collection, []).extend(r.chash for r in rows)
     rows_by_collection = {
-        collection: t3.chunk_rows(collection, list(dict.fromkeys(chashes)))
+        collection: _collection_rows(t3, collection, list(dict.fromkeys(chashes)))
         for collection, chashes in chashes_by_collection.items()
     }
     for entry, _leg, rows in selected:

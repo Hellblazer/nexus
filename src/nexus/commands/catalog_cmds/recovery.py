@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import json
+import urllib.error
 
 import click
 
@@ -48,9 +49,11 @@ def export_cmd(output: Path) -> None:
     reader = _cat_cmd._get_catalog()
     try:
         summary = export_bundle(reader, make_t3(), output)
-    except VectorServiceError as exc:
+    except (VectorServiceError, urllib.error.URLError, ConnectionError, TimeoutError) as exc:
         # nexus-6pfgb.36: a note piece the store could not return is not a piece that is gone; stop
-        # rather than write a bundle that silently lacks it. The bundle file is written last.
+        # rather than write a bundle that silently lacks it. The bundle file is written last. The
+        # transport errors are what a local endpoint raises unwrapped; a failure writing the output
+        # file is none of these and keeps its own traceback.
         click.echo(
             f"Export failed: the vector store could not be read ({exc}). No bundle was written; "
             "run the export again.",

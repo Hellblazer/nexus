@@ -422,6 +422,47 @@ def test_a_store_read_failure_stops_the_export_and_writes_no_bundle(fake_catalog
     assert not (tmp_path / "b.jsonl").exists()
 
 
+def _unregistered(collection: str) -> Exception:
+    from nexus.db.http_vector_client import VectorServiceError
+
+    body = {"error": f"collection {collection} is not registered", "collection": collection,
+            "reason": "unregistered_collection"}
+    return VectorServiceError("422", code=422, reason="unregistered_collection", engine_body=body)
+
+
+def test_notes_of_a_collection_the_engine_no_longer_registers_are_ghosts(fake_catalog, tmp_path):
+    """nexus-6pfgb.36: the engine's typed 422 for a collection with no catalog row means that
+    collection holds no chunks; its notes count as ghosts and the rest of the export goes on, as it
+    did when each piece was read alone."""
+    class _Unregistered(_FakeT3):
+        def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+            raise _unregistered(collection)
+
+    url, _state = fake_catalog
+    with _client(url) as reader:
+        summary = export_bundle(reader, _Unregistered(), tmp_path / "b.jsonl")
+    assert summary.docs_exported == 0
+    assert summary.ghosts_skipped == 4  # ghost-note (no manifest), title-a, title-b, legacy-note
+    assert summary.notes_incomplete == 0
+    assert summary.links_exported == 2
+
+
+def test_any_other_422_from_the_store_still_stops_the_export(fake_catalog, tmp_path):
+    """A 422 with another reason is a store that could not answer, not an empty collection."""
+    from nexus.db.http_vector_client import VectorServiceError
+
+    class _Other(_FakeT3):
+        def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+            raise VectorServiceError("422", code=422, reason="model_unavailable",
+                                     engine_body={"error": "model unavailable", "collection": collection,
+                                                  "reason": "model_unavailable"})
+
+    url, _state = fake_catalog
+    with _client(url) as reader, pytest.raises(VectorServiceError):
+        export_bundle(reader, _Other(), tmp_path / "b.jsonl")
+    assert not (tmp_path / "b.jsonl").exists()
+
+
 def test_export_links_drives_pagination_to_exhaustion(fake_catalog, tmp_path, monkeypatch):
     url, state = fake_catalog
     # 12 links across page size 5 -> 3 /link_query requests minimum.

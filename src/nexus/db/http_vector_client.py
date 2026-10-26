@@ -1972,6 +1972,13 @@ def _note_request(exc: BaseException, method: str, path: str) -> None:
     exc.add_note(f"request: {method} {base}{path}")
 
 
+def is_unregistered_collection_error(exc: VectorServiceError) -> bool:
+    """Whether *exc* is the engine's typed 422 for a collection with no catalog row (keyed on the
+    ``reason`` field, with the wording fallback for an engine that predates it), as against a store
+    that could not be read."""
+    return _unregistered_collection_message(exc.code or 0, exc.engine_body) is not None
+
+
 def _unregistered_collection_message(code: int, err: Any) -> str | None:
     """A readable message for the engine's typed "not registered" 422, or None.
 

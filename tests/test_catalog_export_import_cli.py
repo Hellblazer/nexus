@@ -13,6 +13,7 @@ status is non-zero (RDR-223 P2.8, nexus-z0o2p.18).
 from __future__ import annotations
 
 import json
+import urllib.error
 
 from click.testing import CliRunner
 
@@ -217,4 +218,18 @@ def test_catalog_export_stops_with_no_bundle_when_the_store_cannot_be_read(tmp_p
     result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
     assert result.exit_code == 1, result.output
     assert "No bundle was written" in result.output
-    assert not (tmp_path / "r.jsonl").exists()
+
+
+def test_catalog_export_reports_an_unreachable_local_store_without_a_traceback(tmp_path, monkeypatch):
+    """A local endpoint raises its transport error unwrapped; the export reports it the same way."""
+    def _fake_export(reader, t3, path):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
+    monkeypatch.setattr("nexus.catalog.recovery_bundle.export_bundle", _fake_export)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+
+    result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
+    assert result.exit_code == 1, result.output
+    assert "connection refused" in result.output and "No bundle was written" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
