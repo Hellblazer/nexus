@@ -222,11 +222,13 @@ async def test_an_abandoned_owner_lookup_thread_starts_no_further_lookup() -> No
 
 
 @pytest.mark.asyncio
-async def test_a_call_with_no_reserved_binding_does_no_threaded_work() -> None:
+async def test_a_call_with_no_reserved_binding_touches_no_catalog() -> None:
+    # asyncio is imported inside the function, so a module-local seam cannot see to_thread; the
+    # catalog guard is the observable claim (no reserved binding returns before any lookup or thread).
     from nexus.mcp import core as mcp_core
 
     with patch.object(mcp_core, "_get_catalog", side_effect=AssertionError("no catalog call")), \
-         patch("asyncio.to_thread", side_effect=AssertionError("no thread")):
+         patch("nexus.plans.evidence.catalog_name_lookup", side_effect=AssertionError("no lookup")):
         req = await mcp_core._nx_answer_evidence_request(bindings={"topic": "x"}, scope="rdr")
     assert not req.requested
 

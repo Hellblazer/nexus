@@ -8904,9 +8904,8 @@ def traverse(
 ) -> dict:
     """Walk the catalog link graph from seed tumblers (RDR-078 P3).
 
-    The walk is unranked: without a `policy` the documents and chunk ids come
-    back in graph order. With a `policy` (below) they are ranked by link role
-    and distance, and the chunk budget is shared per document.
+    Without a `policy` documents and chunk ids come back in graph order; with
+    one they are ranked and the chunk budget is shared (below).
 
     Use `search_graph_hop` instead when the reachable set should also be
     vector-ranked in one call. Accepts either `link_types` or `purpose`,
