@@ -6422,7 +6422,25 @@ class HttpVectorClient:
         (a chash with no live row is absent; the note being judged is live, so its chunks are). Pages at 300 ids per request. Raises on any
         service failure: the caller (the TTL sweep's guard, nexus-6pfgb.30) treats "could not read" as
         "do not retire", never as "no row"."""
-        out: dict[str, dict] = {}
+        return {doc_id: meta for doc_id, _doc, meta in self._store_get_pages(collection, chashes)}
+
+    def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        """``chash -> row`` for the live chunks of *collection* named by *chashes*, each row the flat
+        shape :meth:`get_by_id` returns (``id``, ``content`` and the metadata fields). A chash with no
+        live row is absent. Pages at 300 ids per request.
+
+        Unlike :meth:`get_by_id`, which reads any service failure as "no such chunk", this raises
+        :class:`VectorServiceError`: the recovery-bundle export (nexus-6pfgb.36) must not report a
+        piece it could not read as a piece that is gone."""
+        return {
+            doc_id: {"id": doc_id, "content": doc, **meta}
+            for doc_id, doc, meta in self._store_get_pages(collection, chashes)
+        }
+
+    def _store_get_pages(self, collection: str, chashes: list[str]) -> Iterator[tuple[str, str, dict]]:
+        """``(id, document, metadata)`` for each live row of *collection* named by *chashes*, 300 ids
+        per ``/v1/vectors/store-get`` request. Raises :class:`VectorServiceError` on any service
+        failure and when the engine reports more matched rows than it returned."""
         page = 300
         for start in range(0, len(chashes), page):
             batch = chashes[start:start + page]
@@ -6432,20 +6450,21 @@ class HttpVectorClient:
                 tenant=self._tenant,
             )
             ids = result.get("ids") or []
+            docs = result.get("documents") or []
             metas = result.get("metadatas") or []
             # nexus-hdx2u: this call bypasses _ServiceCollectionStub.get, so it repeats that tripwire. An
             # engine-reported count above the rows returned means rows were dropped, and a dropped row
-            # would read as "no later put" (the sweep would retire the note): raise, so the guard holds.
+            # would read as "no later put" (the sweep would retire the note) or as a missing piece of a
+            # note (the export would leave it out): raise, so the callers' guards hold.
             reported = result.get("count")
             if isinstance(reported, int) and not isinstance(reported, bool) and reported > len(ids):
                 raise VectorServiceError(
                     f"store-get for collection '{collection}': engine reports {reported} matched-live rows "
                     f"for this batch but returned only {len(ids)} (batch size {len(batch)})."
                 )
-            for doc_id, meta in zip(ids, metas):
+            for i, (doc_id, meta) in enumerate(zip(ids, metas)):
                 if isinstance(meta, dict):
-                    out[doc_id] = meta
-        return out
+                    yield doc_id, (docs[i] if i < len(docs) and docs[i] is not None else ""), meta
 
     def collection_info(self, name: str) -> dict:
         """Return ``{"count": N, "metadata": {}}`` for *name*.

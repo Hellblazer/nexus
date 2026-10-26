@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from nexus.catalog.recovery_bundle import ExportSummary, ImportSummary
 from nexus.cli import main
+from nexus.db.http_vector_client import VectorServiceError
 
 
 def test_catalog_export_writes_jsonl_bundle_file(tmp_path, monkeypatch):
@@ -186,7 +187,7 @@ def test_catalog_export_caps_the_unrecovered_titles_it_prints(tmp_path, monkeypa
 
 def test_catalog_export_names_the_split_notes_left_out_for_a_missing_piece(tmp_path, monkeypatch):
     """nexus-6pfgb.36: a note with a piece gone from the store is left out, and the command names it."""
-    notes = [("knowledge__x", f"split-{i}") for i in range(21)] + [("knowledge__y", "bad\x1b[2Jtitle")]
+    notes = [("knowledge__y", "bad\x1b[2Jtitle")] + [("knowledge__x", f"split-{i}") for i in range(21)]
 
     def _fake_export(reader, t3, path):
         path.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": 1}) + "\n")
@@ -199,5 +200,21 @@ def test_catalog_export_names_the_split_notes_left_out_for_a_missing_piece(tmp_p
     result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
     assert result.exit_code == 0, result.output
     assert "WARNING: 22 note(s) written as several pieces have a piece missing" in result.output
-    assert '    knowledge__x: "split-19"\n' in result.output and "split-20" not in result.output
+    assert '    knowledge__x: "split-18"\n' in result.output and "split-19" not in result.output
     assert "... and 2 more" in result.output
+    assert "\x1b" not in result.output and '"bad\\u001b[2Jtitle"' in result.output, "a title is escaped"
+
+
+def test_catalog_export_stops_with_no_bundle_when_the_store_cannot_be_read(tmp_path, monkeypatch):
+    """nexus-6pfgb.36: a store read failure is an error with a non-zero exit, never a short bundle."""
+    def _fake_export(reader, t3, path):
+        raise VectorServiceError("503 from store-get")
+
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
+    monkeypatch.setattr("nexus.catalog.recovery_bundle.export_bundle", _fake_export)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+
+    result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
+    assert result.exit_code == 1, result.output
+    assert "No bundle was written" in result.output
+    assert not (tmp_path / "r.jsonl").exists()

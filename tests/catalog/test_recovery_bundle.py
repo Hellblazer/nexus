@@ -210,9 +210,14 @@ class _FakeT3:
             CH_L: {"id": CH_L, "content": "legacy live-chunk body", "tags": "", "category": ""},
         }
         self.puts: list[dict] = []
+        self.chunk_rows_requests: list[tuple[str, list[str]]] = []
 
     def get_by_id(self, collection: str, doc_id: str) -> dict | None:
         return self.rows.get(doc_id)
+
+    def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        self.chunk_rows_requests.append((collection, list(chashes)))
+        return {c: self.rows[c] for c in chashes if c in self.rows}
 
     def put(self, **kwargs: Any) -> str:
         self.puts.append(kwargs)
@@ -311,19 +316,22 @@ def _split_note_t3() -> _FakeT3:
 def test_a_note_written_as_several_pieces_exports_its_whole_text_in_position_order(fake_catalog, tmp_path):
     """nexus-6pfgb.36: a note put_note split into pieces exports as one record holding every piece,
     joined in manifest position order whatever order the manifest arrives in, with the keyless note's
-    keys taken from the first piece's row only."""
+    keys taken from its own piece's row and never from a piece another note restamped. Every piece of
+    the collection is read in one request."""
     url, state = fake_catalog
     state.manifests["1.9.1"] = [
         {"chash": CH_P2, "position": 2}, {"chash": CH_A, "position": 0}, {"chash": CH_P1, "position": 1},
     ]
+    t3 = _split_note_t3()
     with _client(url) as reader:
-        summary = export_bundle(reader, _split_note_t3(), tmp_path / "b.jsonl")
+        summary = export_bundle(reader, t3, tmp_path / "b.jsonl")
     _header, records = read_bundle(tmp_path / "b.jsonl")
     doc = {r["title"]: r for r in records if r["record"] == "knowledge_doc"}["title-a"]
     assert doc["content"] == "first piece, second piece, third piece"
     assert (doc["tags"], doc["category"], doc["ttl_days"]) == ("own-tags", "own-cat", 9)
     assert summary.docs_exported == 3
     assert summary.notes_incomplete == 0
+    assert len(t3.chunk_rows_requests) == 1, t3.chunk_rows_requests
 
 
 def test_a_note_missing_a_piece_is_counted_and_never_exported_truncated(fake_catalog, tmp_path):
@@ -345,6 +353,73 @@ def test_a_note_missing_a_piece_is_counted_and_never_exported_truncated(fake_cat
     assert summary.notes_incomplete == 1
     assert summary.notes_incomplete_notes == [(KNOW, "title-a")]
     assert summary.ghosts_skipped == 1  # ghost-note only
+
+
+def test_a_split_note_whose_first_piece_another_note_restamped_takes_its_keys_from_its_own_piece(
+    fake_catalog, tmp_path,
+):
+    """nexus-6pfgb.36: a note sharing its opening piece with another note can find that piece's row
+    restamped by the other; the keys come from the first piece that is the note's own write."""
+    url, state = fake_catalog
+    state.manifests["1.9.1"] = [{"chash": CH_A, "position": 0}, {"chash": CH_P1, "position": 1}]
+    t3 = _split_note_t3()
+    t3.rows[CH_A] = {**t3.rows[CH_A], "tags": "other", "catalog_doc_id": "1.7.7", "title": "someone-else"}
+    t3.rows[CH_P1] = {**t3.rows[CH_P1], "tags": "own-tags", "category": "own-cat", "ttl_days": 9,
+                      "catalog_doc_id": "1.9.1", "title": "title-a"}
+    with _client(url) as reader:
+        summary = export_bundle(reader, t3, tmp_path / "b.jsonl")
+    _header, records = read_bundle(tmp_path / "b.jsonl")
+    doc = {r["title"]: r for r in records if r["record"] == "knowledge_doc"}["title-a"]
+    assert doc["content"] == "first piece, second piece, "
+    assert (doc["tags"], doc["category"], doc["ttl_days"]) == ("own-tags", "own-cat", 9)
+    assert (KNOW, "title-a") not in summary.note_keys_unrecovered_notes
+
+
+def test_a_note_with_every_piece_gone_is_a_ghost_not_an_incomplete_note(fake_catalog, tmp_path):
+    """nexus-6pfgb.36: a split note none of whose pieces is left, and a one-piece note whose chunk is
+    gone, are ghosts; neither is counted incomplete."""
+    url, state = fake_catalog
+    state.manifests["1.9.1"] = [
+        {"chash": CH_A, "position": 0}, {"chash": CH_P1, "position": 1}, {"chash": CH_P2, "position": 2},
+    ]
+    t3 = _split_note_t3()
+    for chash in (CH_A, CH_P1, CH_P2, CH_B):  # CH_B: title-b's only chunk
+        del t3.rows[chash]
+    with _client(url) as reader:
+        summary = export_bundle(reader, t3, tmp_path / "b.jsonl")
+    _header, records = read_bundle(tmp_path / "b.jsonl")
+    assert {r["title"] for r in records if r["record"] == "knowledge_doc"} == {"legacy-note"}
+    assert summary.ghosts_skipped == 3  # ghost-note, title-a, title-b
+    assert summary.notes_incomplete == 0
+    assert _header["notes_incomplete"] == 0
+
+
+def test_a_note_whose_manifest_skips_a_position_is_counted_incomplete(fake_catalog, tmp_path):
+    """nexus-6pfgb.36: positions 0 and 2 with no 1 mean a manifest row was lost; the pieces that are
+    there would join to a shorter text, so the note is left out and named, and the header says so."""
+    url, state = fake_catalog
+    state.manifests["1.9.1"] = [{"chash": CH_A, "position": 0}, {"chash": CH_P2, "position": 2}]
+    with _client(url) as reader:
+        summary = export_bundle(reader, _split_note_t3(), tmp_path / "b.jsonl")
+    header, records = read_bundle(tmp_path / "b.jsonl")
+    assert "title-a" not in {r["title"] for r in records if r["record"] == "knowledge_doc"}
+    assert summary.notes_incomplete_notes == [(KNOW, "title-a")]
+    assert header["notes_incomplete"] == 1
+
+
+def test_a_store_read_failure_stops_the_export_and_writes_no_bundle(fake_catalog, tmp_path):
+    """nexus-6pfgb.36: a piece the store could not return is not a piece that is gone; the error
+    propagates and no file is written."""
+    from nexus.db.http_vector_client import VectorServiceError
+
+    class _Failing(_FakeT3):
+        def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+            raise VectorServiceError("503 from store-get")
+
+    url, _state = fake_catalog
+    with _client(url) as reader, pytest.raises(VectorServiceError):
+        export_bundle(reader, _Failing(), tmp_path / "b.jsonl")
+    assert not (tmp_path / "b.jsonl").exists()
 
 
 def test_export_links_drives_pagination_to_exhaustion(fake_catalog, tmp_path, monkeypatch):

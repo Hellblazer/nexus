@@ -43,9 +43,20 @@ def export_cmd(output: Path) -> None:
     from nexus.catalog.recovery_bundle import export_bundle  # noqa: PLC0415 — command-local import
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.db import make_t3  # noqa: PLC0415 — command-local import
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — command-local import
 
     reader = _cat_cmd._get_catalog()
-    summary = export_bundle(reader, make_t3(), output)
+    try:
+        summary = export_bundle(reader, make_t3(), output)
+    except VectorServiceError as exc:
+        # nexus-6pfgb.36: a note piece the store could not return is not a piece that is gone; stop
+        # rather than write a bundle that silently lacks it. The bundle file is written last.
+        click.echo(
+            f"Export failed: the vector store could not be read ({exc}). No bundle was written; "
+            "run the export again.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from exc
     click.echo(f"Exported recovery bundle: {output}")
     click.echo(
         f"  knowledge docs: {summary.docs_exported}   links: {summary.links_exported}"
@@ -57,7 +68,8 @@ def export_cmd(output: Path) -> None:
     if summary.notes_incomplete:
         click.echo(
             f"  WARNING: {summary.notes_incomplete} note(s) written as several pieces have a piece "
-            "missing from the store and were left out of the bundle rather than exported truncated:"
+            "missing from the store or a gap in their manifest and were left out of the bundle "
+            "rather than exported truncated:"
         )
         incomplete = summary.notes_incomplete_notes
         for collection, title in incomplete[:_UNRECOVERED_TITLES_SHOWN]:

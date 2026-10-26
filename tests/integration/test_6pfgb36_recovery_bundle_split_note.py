@@ -17,6 +17,7 @@ from nexus.catalog import store_hook
 from nexus.catalog.factory import make_catalog_reader
 from nexus.catalog.note_write import STORED, put_note
 from nexus.catalog.recovery_bundle import export_bundle, import_bundle, read_bundle
+from nexus.catalog.store_hook import NOTE_META_KEYS
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
 
@@ -65,6 +66,9 @@ def test_a_split_note_exports_its_whole_text_and_round_trips_through_import(t2_s
 
     reader = make_catalog_reader()
     assert reader is not None
+    keyless_doc = reader.by_source_uri(uri_for(collection, "split-keyless"))
+    assert keyless_doc is not None
+    assert not any(k in (keyless_doc.meta or {}) for k in NOTE_META_KEYS), keyless_doc.meta
     # Non-vacuity: both notes really are split, or this pins nothing the single-chunk export missed.
     for title, body in (("split-keyed", keyed_body), ("split-keyless", keyless_body)):
         text, pieces = _stored_text(reader, client, collection, title)

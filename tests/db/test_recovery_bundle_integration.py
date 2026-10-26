@@ -232,9 +232,9 @@ def test_reimport_is_idempotent_against_the_real_engine(cat, pg_instance, tmp_pa
     cat.atomic_manifest_replace(a_t, [{"chash": chash, "position": 0}], collection=know_col)
 
     class _T3:
-        def get_by_id(self, collection: str, doc_id: str):
-            assert doc_id == chash
-            return {"id": doc_id, "content": "note-a body", "tags": "", "category": ""}
+        def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+            assert chashes == [chash]
+            return {chash: {"id": chash, "content": "note-a body", "tags": "", "category": ""}}
 
     bundle = tmp_path / "bundle.jsonl"
     summary = export_bundle(cat, _T3(), bundle)

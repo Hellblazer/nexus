@@ -443,9 +443,14 @@ Locked format decisions (design of record: T2
   stores a long note as pieces under one catalog document (RDR-223); the
   export joins every piece in manifest position order into one record, and
   import hands the whole text to the note writer, which splits it again.
-  A note with some pieces gone from T3 is left out of the bundle, never
-  exported truncated, and the export names it (`written as several pieces
-  have a piece missing`); a note with every piece gone counts as a ghost.
+  A note with some pieces gone from T3, or whose manifest positions skip a
+  number, is left out of the bundle, never exported truncated; the export
+  names it (`have a piece missing from the store or a gap in their
+  manifest`) and the bundle header counts it (`notes_incomplete`). A note
+  with every piece gone counts as a ghost. A store read error stops the
+  export with a non-zero exit and no bundle, so an unreadable piece is never
+  reported as a missing one. A keyless note takes its chunk-row keys from
+  the first piece whose row is its own write.
 - **Spans degrade gracefully.** A `chash:`-anchored link span whose
   chunk no longer exists on the target is stripped and counted in the
   import report; the link itself still imports.

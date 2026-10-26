@@ -244,63 +244,61 @@ def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
 
 
 def export_knowledge_doc(
-    t3: Any, entry: CatalogEntry, manifest_rows: list, *, summary: ExportSummary | None = None,
+    entry: CatalogEntry, manifest_rows: list, rows_by_chash: dict[str, dict], summary: ExportSummary,
 ) -> dict | None:
-    """Build one ``knowledge_doc`` record; ``None`` when the chunk is gone
-    from T3 (reported by the caller, never raised).
+    """Build one ``knowledge_doc`` record from the note's manifest rows and the chunk rows
+    :func:`export_bundle` read for its collection (*rows_by_chash*); ``None`` when the note cannot be
+    exported whole, counted on *summary*, never raised.
+
+    The content is every piece of the note joined in manifest position order (nexus-6pfgb.36):
+    ``put_note`` writes a long note as several pieces (RDR-223) and ``"".join(pieces) == content``
+    by construction (:func:`nexus.catalog.store_hook.note_pieces`). A note with every piece gone from
+    T3 is a ghost. A note with some pieces gone, or whose manifest positions do not run ``0..n-1`` (a
+    lost row), is incomplete: no truncated text reaches the bundle, because importing it would
+    overwrite the whole note wherever it still exists.
 
     ``tags``, ``category`` and ``ttl_days`` are the NOTE'S OWN, read from its catalog entry's ``meta``
     (nexus-6pfgb.5): two notes with identical text share one chunk row, and the row carries only the
     last writer's. An entry with none of the note keys (written before nexus-6pfgb.5, or stored with
-    none of them before nexus-6pfgb.15 made every put write ``put_at``) takes the row's values only
+    none of them before nexus-6pfgb.15 made every put write ``put_at``) takes a piece row's values only
     when the row is this note's own write (:func:`nexus.catalog.note_ttl.row_written_by`: the row's
-    ``catalog_doc_id`` is this entry's tumbler AND its ``title`` this entry's title). A row a later
-    note wrote, a row no note write stamped, and a row carrying a stale ``.nxexp`` stamp under another
-    title are not, whoever else holds the chunk now: a row is not rewritten when a co-owner leaves,
-    so being the only owner left says nothing about who wrote it (nexus-6pfgb.34). Otherwise the
-    record carries none and *summary* counts the note, when the row held a value that was dropped.
-    ``ttl_days`` is a positive integer or ``None``.
-
-    The content is every piece of the note joined in manifest position order (nexus-6pfgb.36):
-    ``put_note`` writes a long note as several pieces (RDR-223) and ``"".join(pieces) == content``
-    by construction (:func:`nexus.catalog.store_hook.note_pieces`). The key rule above reads the
-    first piece's row. A note with some pieces gone from T3 returns ``None`` and *summary* counts it
-    as incomplete, so no truncated text reaches the bundle; a note with every piece gone returns
-    ``None`` for the caller to count as a ghost.
+    ``catalog_doc_id`` is this entry's tumbler AND its ``title`` this entry's title), the first such
+    piece in position order: every piece of one put carries that put's values, and a piece another
+    note shares may have been restamped by it. A row a later note wrote, a row no note write stamped,
+    and a row carrying a stale ``.nxexp`` stamp under another title are not, whoever else holds the
+    chunk now: a row is not rewritten when a co-owner leaves, so being the only owner left says
+    nothing about who wrote it (nexus-6pfgb.34). Otherwise the record carries none and *summary*
+    counts the note, when a piece row held a value that was dropped. ``ttl_days`` is a positive
+    integer or ``None``.
     """
     ordered = sorted(manifest_rows, key=lambda r: r.position)
-    pieces: list[dict | None] = []
-    for mrow in ordered:
-        piece = t3.get_by_id(entry.physical_collection, mrow.chash)
-        pieces.append(piece if piece is not None and piece.get("content") else None)
-    missing = [mrow.chash for mrow, piece in zip(ordered, pieces) if piece is None]
-    if missing:
+    pieces = [rows_by_chash.get(mrow.chash) for mrow in ordered]
+    missing = [mrow.chash for mrow, piece in zip(ordered, pieces) if piece is None or not piece.get("content")]
+    gapped = [mrow.position for mrow in ordered] != list(range(len(ordered)))
+    if missing or gapped:
         _log.warning(
-            "recovery_export_chunk_missing",
+            "recovery_export_note_not_whole",
             tumbler=str(entry.tumbler),
             title=entry.title,
-            chashes=missing,
-            pieces=len(ordered),
+            missing_chashes=missing,
+            positions=[mrow.position for mrow in ordered],
         )
-        if len(missing) < len(ordered) and summary is not None:
+        if len(missing) == len(ordered):
+            summary.ghosts_skipped += 1
+        else:
             summary.notes_incomplete += 1
             summary.notes_incomplete_notes.append((entry.physical_collection, entry.title or ""))
         return None
-    row = pieces[0]
-    assert row is not None  # every piece is present past the check above
-    content = "".join(str(p["content"]) for p in pieces if p is not None)
+    rows = [p for p in pieces if p is not None]
+    content = "".join(str(p["content"]) for p in rows)
     keys = _own_note_keys(entry)
     if keys is None:
-        row_keys = {
-            "tags": row.get("tags", "") or "",
-            "category": row.get("category", "") or "",
-            "ttl_days": _positive_ttl(row.get("ttl_days")),
-        }
-        if row_written_by(entry.tumbler, row, owner_title=entry.title):
-            keys = row_keys
+        written = next((p for p in rows if row_written_by(entry.tumbler, p, owner_title=entry.title)), None)
+        if written is not None:
+            keys = _row_keys(written)
         else:
             keys = {"tags": "", "category": "", "ttl_days": None}
-            if summary is not None and (row_keys["tags"] or row_keys["category"] or row_keys["ttl_days"]):
+            if any(k["tags"] or k["category"] or k["ttl_days"] for k in map(_row_keys, rows)):
                 summary.note_keys_unrecovered += 1
                 summary.note_keys_unrecovered_notes.append((entry.physical_collection, entry.title or ""))
                 _log.info(
@@ -317,6 +315,15 @@ def export_knowledge_doc(
         "category": keys["category"],
         "ttl_days": keys["ttl_days"],
         "content": content,
+    }
+
+
+def _row_keys(row: dict) -> dict[str, Any]:
+    """A chunk row's ``tags``, ``category`` and ``ttl_days`` in the record's shape."""
+    return {
+        "tags": row.get("tags", "") or "",
+        "category": row.get("category", "") or "",
+        "ttl_days": _positive_ttl(row.get("ttl_days")),
     }
 
 
@@ -398,6 +405,7 @@ def write_bundle(
         "knowledge_docs": len(knowledge_docs),
         "links": len(links),
         "ghosts_skipped": summary.ghosts_skipped,
+        "notes_incomplete": summary.notes_incomplete,
     }
     with path.open("w", encoding="utf-8") as f:
         f.write(json.dumps(header) + "\n")
@@ -409,7 +417,11 @@ def write_bundle(
 
 def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     """Full export: one catalog walk, batch manifest fetch, link
-    denormalization, JSONL write. Read-only against the store."""
+    denormalization, JSONL write. Read-only against the store.
+
+    *t3* must offer ``chunk_rows(collection, chashes)``
+    (:meth:`~nexus.db.http_vector_client.HttpVectorClient.chunk_rows`), which raises when the store
+    cannot be read; the error propagates and no bundle is written, since the file is written last."""
     summary = ExportSummary()
     entries = enumerate_all_documents(reader)
 
@@ -425,14 +437,19 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     manifests = reader.get_manifests([str(e.tumbler) for e in candidates]) if candidates else {}
     docs: list[dict] = []
     selected = select_store_put_documents(entries, manifests, summary)
+    # One paged read per collection for every piece of its notes (nexus-6pfgb.36). It raises when the
+    # store cannot be read, so a piece the export could not read is never reported as a piece gone.
+    chashes_by_collection: dict[str, list[str]] = {}
     for entry, _leg, rows in selected:
-        incomplete_before = summary.notes_incomplete
-        rec = export_knowledge_doc(t3, entry, rows, summary=summary)
-        if rec is None:
-            if summary.notes_incomplete == incomplete_before:
-                summary.ghosts_skipped += 1
-            continue
-        docs.append(rec)
+        chashes_by_collection.setdefault(entry.physical_collection, []).extend(r.chash for r in rows)
+    rows_by_collection = {
+        collection: t3.chunk_rows(collection, list(dict.fromkeys(chashes)))
+        for collection, chashes in chashes_by_collection.items()
+    }
+    for entry, _leg, rows in selected:
+        rec = export_knowledge_doc(entry, rows, rows_by_collection[entry.physical_collection], summary)
+        if rec is not None:
+            docs.append(rec)
 
     links = export_links(reader, tumbler_to_uri, summary)
     summary.docs_exported = len(docs)
