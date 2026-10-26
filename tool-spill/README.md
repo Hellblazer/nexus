@@ -16,7 +16,16 @@ or from a shell:
 claude plugin install conexus-tool-spill@nexus-plugins
 ```
 
-It takes effect in the running session. To turn it off, `claude plugin disable conexus-tool-spill`. The `nexus-plugins` marketplace is the one `conexus` and `sn` come from; add it first with `/plugin marketplace add Hellblazer/nexus` if you have not.
+There is nothing to set up. The install lists four options as "not set", and `/plugin configure` shows their fields blank: Claude Code does not prefill declared defaults. Leave them blank and the defaults apply:
+
+| Option | Blank means | What it changes, and why you might |
+|---|---|---|
+| `limit` | 4000 bytes | Output larger than this is cut. Raise it to see more whole; lower it to save more context. |
+| `head` | 1400 bytes | How much of the start the model still sees. |
+| `tail` | 800 bytes | How much of the end the model still sees; a test summary or a script's failure usually sits there. |
+| `includeHeadless` | off | Whether `claude -p` runs are cut too. Off, because nobody is there to follow the note. |
+
+A cut result ends its head with a line like `[tool-spill: 14 KB, 3001 lines; 2470 middle lines cut, 0 of them mention an error or failure. Full output: <path>. ...]`, which is how you can tell it is working. It loads when a session starts. To turn it off, `claude plugin disable conexus-tool-spill`. The `nexus-plugins` marketplace is the one `conexus` and `sn` come from; add it first with `/plugin marketplace add Hellblazer/nexus` if you have not.
 
 **This plugin replaces any machine-local copy of the mod.** If you wrote a `tool-spill` mod under `~/.claude/mods/` (or any other `tool.call` hook that cuts output), remove it before installing: two loaded together would both act on the same result.
 

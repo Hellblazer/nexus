@@ -1,7 +1,7 @@
 {
   "name": "conexus-tool-spill",
   "version": "7.86.3",
-  "description": "Opt-in: a main-session Bash output or whole-file Read over a size limit is cut to its head and tail (Bash: the full text goes to a file), so a big read costs a few KB of context instead of all of it. Replaces any machine-local copy of the mod.",
+  "description": "Keeps big tool output out of your context with no setup. In the main conversation, a Bash output or whole-file Read over 4000 bytes is cut to its first 1400 and last 800 bytes, with a note saying where the full text is (Bash output is saved to a file), so one big command costs a few KB of context instead of all of it. Every option can stay blank: blank means the default shown in its name.",
   "author": {
     "name": "Hal Hildebrand",
     "url": "https://github.com/Hellblazer"
@@ -11,26 +11,26 @@
   "userConfig": {
     "limit": {
       "type": "number",
-      "title": "Spill limit (bytes)",
-      "description": "A main-session Bash result or whole-file Read larger than this many bytes is cut. Results at or under it pass unchanged.",
+      "title": "Cut output larger than this many bytes (blank = 4000)",
+      "description": "The size at which a main-session Bash output or whole-file Read is cut. Raise it to see more output whole; lower it to save more context. Blank uses 4000.",
       "default": 4000
     },
     "head": {
       "type": "number",
-      "title": "Head kept (bytes)",
-      "description": "Bytes kept from the start of a cut result, trimmed back to a line end. With the tail it is scaled down to fit the spill limit.",
+      "title": "Bytes kept from the start of a cut output (blank = 1400)",
+      "description": "How much of the beginning the model still sees, cut back to a line end. Blank uses 1400.",
       "default": 1400
     },
     "tail": {
       "type": "number",
-      "title": "Tail kept (bytes)",
-      "description": "Bytes kept from the end of a cut Bash result, where a script's verdict usually sits. Zero or less restores the default.",
+      "title": "Bytes kept from the end, where errors and verdicts land (blank = 800)",
+      "description": "How much of the end of a cut Bash output the model still sees; a test run's summary or a script's failure is usually there. Blank uses 800.",
       "default": 800
     },
     "includeHeadless": {
       "type": "boolean",
-      "title": "Cut headless runs too",
-      "description": "Also cut results in claude -p runs (nx_answer operators, headless critics). Off by default: a headless run has no one to follow the note.",
+      "title": "Also cut claude -p runs (default off)",
+      "description": "Off: headless runs (nx_answer operators, scripted critics) get full output, since nobody is there to follow the note. Turn on only to save context in those runs too.",
       "default": false
     }
   }

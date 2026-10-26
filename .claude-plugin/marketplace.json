@@ -35,7 +35,7 @@
         "path": "tool-spill",
         "ref": "v7.86.3"
       },
-      "description": "Opt-in Claude Code mod: a main-session tool result over a size limit is written to a file, and the model sees its head, its tail and the path instead of all of it.",
+      "description": "Keeps big tool output out of your context, no setup needed: a main-session Bash output or whole-file Read over 4000 bytes is cut to its head and tail, with a note saying where the full text is. Options can stay blank (blank = default).",
       "version": "7.86.3"
     }
   ]
