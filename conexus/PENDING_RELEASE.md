@@ -43,12 +43,9 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v7.87.0)
+## Awaiting the next release (pinned: v7.87.1)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `tool-spill/hooks/register.ts` (nexus-i9a1p, nexus-a9e7j): a Bash command that names the spill directory (reading a spill file back with `sed`, `head` or `grep`, in any spelling of the path) passes whole up to 4 times the limit instead of being cut and spilled again, and the note says to read a slice with the Read tool, which is never cut. Each spill first makes the spill directory owner-only (mode 700) through /bin/sh; a symbolic link, a file, or a directory another user owns turns spilling off for the session with one toast (nexus-a9e7j)
-- `tool-spill/README.md` (nexus-a9e7j): the spill-directory paragraph says the directory is made private before each spill and what happens when it cannot be
 
 ## Deferred to the next client release
 
