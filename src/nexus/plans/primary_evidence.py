@@ -35,6 +35,7 @@ Merging this evidence ahead of the plan's inputs is :mod:`nexus.plans.reserved_s
 from __future__ import annotations
 
 import re
+import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -103,6 +104,10 @@ class PrimaryEvidenceCaps:
     max_selected_chars: int = 60_000
     #: Chashes per T3 fetch.
     fetch_batch_ids: int = 100
+    #: Seconds named-source resolution may take, and the same again for the primary read. The caller's
+    #: own deadline (``nx_answer``'s ``budget_seconds``) can make either shorter; neither runs on the
+    #: event loop, and a hit is disclosed (the answer proceeds without the stream).
+    max_seconds: float = 20.0
 
     def to_wire(self) -> dict[str, int]:
         return asdict(self)
@@ -208,6 +213,19 @@ class NamedSourceResolution:
     def resolved(self) -> tuple[ResolvedSource, ...]:
         return tuple(s for s in self.sources if s.status == "resolved")
 
+    @classmethod
+    def deadline_hit(
+        cls, sources: Sequence[SourceRef], *, caps: PrimaryEvidenceCaps = DEFAULT_CAPS,
+    ) -> NamedSourceResolution:
+        """Every source unresolved at the deadline: a catalog call that did not return in time (a thread
+        cannot be cancelled), so nothing is known about any of them."""
+        refs = list(sources)
+        kept, dropped = refs[: caps.max_named_sources], refs[caps.max_named_sources:]
+        return cls(
+            sources=tuple(_unresolved(r, _deadline_detail(f"the lookup of {r.value}", caps)) for r in kept),
+            dropped=tuple(r.value for r in dropped), catalog_calls=0, caps=caps,
+        )
+
     def to_wire(self) -> dict[str, Any]:
         return {
             "sources": [s.to_wire() for s in self.sources],
@@ -277,25 +295,53 @@ class _Qualifier:
         return str(self.document or self.owner)
 
 
-class _Calls:
-    """Counts the catalog calls one resolution makes."""
+class LookupDeadline(Exception):  # noqa: N818 — a control-flow signal, caught where a catalog failure is
+    """Raised before a catalog call that the deadline no longer leaves time for."""
 
-    def __init__(self, cat: NamedSourceCatalog | None) -> None:
+
+def _deadline_detail(what: str, caps: PrimaryEvidenceCaps) -> str:
+    return (
+        f"{what} stopped at the deadline (at most {caps.max_seconds:g} s, or the answer's own budget if that "
+        "was shorter); nothing was resolved"
+    )
+
+
+class _Calls:
+    """Counts the catalog calls one resolution makes, and starts none past its deadline."""
+
+    def __init__(
+        self, cat: NamedSourceCatalog | None, *, end: float | None = None,
+        clock: Callable[[], float] = time.monotonic, caps: PrimaryEvidenceCaps = DEFAULT_CAPS,
+    ) -> None:
         self.cat = cat
         self.n = 0
+        self.end, self.clock, self.caps = end, clock, caps
+
+    def _gate(self) -> None:
+        if self.end is not None and self.clock() >= self.end:
+            raise LookupDeadline
+
+    def failed(self, what: str, exc: Exception) -> str:
+        """The ``detail`` for a catalog call that raised *exc*."""
+        if isinstance(exc, LookupDeadline):
+            return _deadline_detail(f"the lookup of {what}", self.caps)
+        return f"catalog lookup of {what} failed ({type(exc).__name__})"
 
     def find(self, query: str, content_type: str, limit: int) -> list[CatalogEntry]:
         assert self.cat is not None
+        self._gate()
         self.n += 1
         return list(self.cat.find(query, content_type=content_type, limit=limit))
 
     def owner(self, prefix: str) -> dict | None:
         assert self.cat is not None
+        self._gate()
         self.n += 1
         return self.cat.get_owner_by_prefix(prefix)
 
     def resolve(self, tumbler: str) -> CatalogEntry | None:
         assert self.cat is not None
+        self._gate()
         self.n += 1
         return self.cat.resolve(tumbler)
 
@@ -319,7 +365,7 @@ def _qualifier(owner: OwnerResolution, calls: _Calls) -> tuple[_Qualifier | None
         row = calls.owner(str(owner_addr))
     except Exception as exc:  # noqa: BLE001 — the disclosure stage never raises; a failed probe is reported
         _log.warning("named_source_owner_probe_failed", owner=str(owner_addr), error=str(exc))
-        return None, f"catalog lookup of owner {owner_addr} failed ({type(exc).__name__})"
+        return None, calls.failed(f"owner {owner_addr}", exc)
     if row is None:
         return None, (
             f"owner {owner_addr} is not in the catalog (the qualifier {owner.tumbler} names no "
@@ -347,7 +393,7 @@ def _resolve_tumbler(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls
         entry = calls.resolve(ref.value)
     except Exception as exc:  # noqa: BLE001 — reported, never raised
         _log.warning("named_source_resolve_failed", source=ref.value, error=str(exc))
-        return _unresolved(ref, f"catalog lookup of {ref.value} failed ({type(exc).__name__})")
+        return _unresolved(ref, calls.failed(ref.value, exc))
     if entry is None:
         return _unresolved(ref, f"document {ref.value} is not in the catalog")
     if qualifier is not None:
@@ -375,7 +421,7 @@ def _resolve_rdr(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, ca
                 break
     except Exception as exc:  # noqa: BLE001 — reported, never raised
         _log.warning("named_source_find_failed", source=ref.value, error=str(exc))
-        return _unresolved(ref, f"catalog lookup of {ref.value} failed ({type(exc).__name__})")
+        return _unresolved(ref, calls.failed(ref.value, exc))
 
     scoped = found
     foreign = 0
@@ -433,15 +479,23 @@ def resolve_named_sources(
     *,
     cat: NamedSourceCatalog | None,
     caps: PrimaryEvidenceCaps = DEFAULT_CAPS,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> NamedSourceResolution:
     """Resolve each named source inside the owner qualifier. Never raises.
 
     Catalog calls: one owner probe (when a qualifier resolved) plus, per source, one
     ``resolve`` (a tumbler) or at most two capped ``find`` calls (an RDR id).
+
+    *deadline* is an absolute time on *clock* (the caller's own budget); the run also stops at
+    ``caps.max_seconds`` from its start, whichever is sooner. No catalog call is started past it, so a
+    thread the caller abandoned at the deadline ends after the call it is in; each source it did not reach
+    is ``unresolved`` with the deadline as the reason.
     """
     refs = list(sources)
     kept, dropped = refs[: caps.max_named_sources], refs[caps.max_named_sources:]
-    calls = _Calls(cat)
+    end = clock() + caps.max_seconds
+    calls = _Calls(cat, end=end if deadline is None else min(end, deadline), clock=clock, caps=caps)
     qualifier, failure = _qualifier(owner, calls)
     out: list[ResolvedSource] = []
     for ref in kept:
@@ -568,6 +622,9 @@ class PrimaryEvidence:
     selected_chars: int = 0
     fetch_errors: int = 0
     caps: PrimaryEvidenceCaps = DEFAULT_CAPS
+    #: Exception type name when the whole read failed (nothing was read and the reason is disclosed); ``""``
+    #: for a read that ran.
+    error: str = ""
 
     @property
     def selected_items(self) -> int:
@@ -584,6 +641,7 @@ class PrimaryEvidence:
             "manifest_rows_hydrated": self.manifest_rows_hydrated,
             "fetched_chars": self.fetched_chars,
             "fetch_errors": self.fetch_errors,
+            "error": self.error,
             "partial": self.partial,
             "caps_hit": list(self.caps_hit),
             "caps": self.caps.to_wire(),
@@ -593,6 +651,11 @@ class PrimaryEvidence:
 
     def disclosures(self) -> list[str]:
         lines: list[str] = []
+        if self.error:
+            lines.append(
+                f"[evidence request: the named source(s) resolved but the primary evidence could not be read "
+                f"({self.error}); no primary evidence was read]"
+            )
         for d in self.documents:
             who = f"{d.source} ({d.doc_id})"
             if d.status == "no_manifest":
@@ -621,8 +684,15 @@ class PrimaryEvidence:
                     f"[evidence request: primary evidence for {who} is partial: {d.selected_rows} of "
                     f"{d.manifest_rows} chunks selected]"
                 )
-        if self.caps_hit:
-            lines.append(f"[evidence request: primary evidence caps reached: {', '.join(self.caps_hit)}]")
+        if "deadline" in self.caps_hit:
+            lines.append(
+                f"[evidence request: the primary evidence read stopped at the deadline (at most "
+                f"{self.caps.max_seconds:g} s, or the answer's own budget if that was shorter); chunks not "
+                "fetched by then are missing]"
+            )
+        other = [c for c in self.caps_hit if c != "deadline"]
+        if other:
+            lines.append(f"[evidence request: primary evidence caps reached: {', '.join(other)}]")
         if self.fetch_errors:
             lines.append(f"[evidence request: {self.fetch_errors} chunk fetch(es) failed; those chunks are missing]")
         return lines
@@ -716,16 +786,27 @@ def select_primary_evidence(
     cat: NamedSourceCatalog,
     fetch_chunks: ChunkFetcher,
     caps: PrimaryEvidenceCaps | None = None,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> PrimaryEvidence:
     """Read each resolved source's manifest, hydrate its chunks and select the evidence.
 
     Never raises. Everything cut by a cap, sampled, missing or unlabelled is on the result.
+
+    *deadline* is an absolute time on *clock* (the caller's own budget); the read also stops at
+    ``caps.max_seconds`` from its start. No manifest read or chunk fetch is started past it (``deadline``
+    on ``caps_hit``): the chunks fetched by then are selected, the rest are missing and said so.
     """
     caps = caps or resolution.caps
     docs = resolution.resolved()
     if not docs:
         return PrimaryEvidence(caps=caps)
+    end = clock() + caps.max_seconds
+    if deadline is not None:
+        end = min(end, deadline)
 
+    if clock() >= end:
+        return PrimaryEvidence(caps_hit=("deadline",), caps=caps)
     try:
         manifests = cat.get_manifests([d.tumbler for d in docs if d.tumbler])
         manifest_failed = False
@@ -773,6 +854,9 @@ def select_primary_evidence(
     for start in range(0, len(pending), caps.fetch_batch_ids):
         if fetched_chars >= caps.max_fetched_chars:
             caps_hit.append("max_fetched_chars")
+            break
+        if clock() >= end:
+            caps_hit.append("deadline")
             break
         by_collection: dict[str, list[str]] = defaultdict(list)
         for collection, chash in pending[start:start + caps.fetch_batch_ids]:

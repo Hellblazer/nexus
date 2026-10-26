@@ -614,7 +614,9 @@ def test_an_unreadable_source_does_not_fail_the_answer() -> None:
     select.assert_called_once()
     assert run.await_count == 1 and env["final_text"].endswith("answer")
     assert "reserved_stream" not in run.await_args.kwargs
-    assert env["primary_evidence"] is None
+    # nexus-jypmj.1.9: the failure is on the envelope (error) and in the text, not a silent absence.
+    assert env["primary_evidence"]["error"] == "RuntimeError" and env["primary_evidence"]["items"] == []
+    assert "could not be read (RuntimeError)" in env["final_text"]
 
 
 # ── the manifest read is capped before the selection is consumed (nexus-jypmj.1.17 note) ──────

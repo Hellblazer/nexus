@@ -9,6 +9,7 @@ is the golden fixture (``tests/test_rdr232_golden_fixture.py``). Each test names
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -486,8 +487,133 @@ def test_scope_not_applicable_without_a_scope_and_not_evaluated_for_a_subtree() 
 
 
 def test_unattributed_reducer_items_are_counted_and_flagged_not_assumed_inside() -> None:
+    """An item the check cannot attribute may be a leak: the state is not_evaluated, never satisfied
+    (critique S-B, code review F5)."""
     sc = _scope_check("rdr", [_search_out(["a"], [RDR_COLL])], ["search"], recorder=_recorder(["a", "mystery"]))
-    assert sc["state"] == "satisfied" and sc["reducer_unattributed"] == 1
+    assert sc["state"] == "not_evaluated" and sc["reducer_unattributed"] == 1
+    assert "unattributed" in sc["detail"]
+
+
+# ── 7a. review fixes: the scope check says "not evaluated" where it cannot know ──────────────────────────────
+
+
+_TRAVERSAL_CONFLICT = {"caller_scope": "rdr", "scope_kind": "corpus_prefix", "link_role": "implementation",
+                       "dropped_by_corpus": {"code": 4}}
+
+
+def test_a_traversal_scope_conflict_reaches_the_summary_and_makes_the_scope_check_a_conflict() -> None:
+    """critique S-A: traverse reports a find-implementations step emptied by the caller's scope; the
+    envelope used to drop it and read satisfied."""
+    out = _traverse_out(["g"], [RDR_COLL], scope_conflict=dict(_TRAVERSAL_CONFLICT))
+    d = _build(steps=[out], tools=["traverse"], scope=ScopeConstraint.parse("rdr"), recorder=_recorder(["g"]))
+    assert d["traversals"][0]["scope_conflict"] == _TRAVERSAL_CONFLICT
+    sc = d["scope_check"]
+    assert sc["state"] == "conflict"
+    assert sc["conflict_traversals"] == [{"step_index": 0, **_TRAVERSAL_CONFLICT}]
+    json.dumps(d)
+
+
+def test_a_traversal_without_a_conflict_reports_none_and_stays_satisfied() -> None:
+    d = _build(steps=[_traverse_out(["g"], [RDR_COLL], scope_conflict=None)], tools=["traverse"],
+               scope=ScopeConstraint.parse("rdr"), recorder=_recorder(["g"]))
+    assert d["traversals"][0]["scope_conflict"] is None
+    assert d["scope_check"]["state"] == "satisfied" and d["scope_check"]["conflict_traversals"] == []
+
+
+def test_scope_not_evaluated_when_nothing_was_examined() -> None:
+    """A scope with no stream reference and no reducer item is a check over nothing, not a pass."""
+    sc = _scope_check("rdr", [], [], recorder=_recorder([]))
+    assert sc["state"] == "not_evaluated" and "no item" in sc["detail"]
+    assert _scope_check("rdr", [], [])["state"] == "not_evaluated"
+
+
+def test_scope_not_evaluated_when_no_reducer_input_was_recorded() -> None:
+    sc = _scope_check("rdr", [_search_out(["a"], [RDR_COLL])], ["search"])
+    assert sc["state"] == "not_evaluated" and "reducer" in sc["detail"]
+
+
+def test_a_run_without_a_reducer_judges_its_streams_alone() -> None:
+    """The single_query fast path has no operator step: its vector stream is the whole evidence."""
+    d = _build(steps=[_search_out(["a"], [RDR_COLL])], tools=["query"], scope=ScopeConstraint.parse("rdr"),
+               reducer_expected=False)
+    assert d["scope_check"]["state"] == "satisfied"
+    leak = _build(steps=[_search_out(["a", "x"], [RDR_COLL, CODE_COLL])], tools=["query"],
+                  scope=ScopeConstraint.parse("rdr"), reducer_expected=False)
+    assert leak["scope_check"]["state"] == "violated"
+
+
+def test_a_stream_reference_with_no_collection_makes_the_scope_not_evaluated_and_counts_in_the_reducer() -> None:
+    """Two candidate collections and no per-chunk alignment: the reducer items attribute to the vector stream
+    with collection "", which is unattributed (counted), never inside."""
+    out = {"ids": [_h("a"), _h("b")], "collections": [RDR_COLL, CODE_COLL]}
+    d = _build(steps=[out], tools=["search"], scope=ScopeConstraint.parse("rdr"), recorder=_recorder(["a", "b"]))
+    assert d["reducer_input"]["unattributed"] == 2 and d["reducer_input"]["by_stream"] == {"vector": 2}
+    assert d["scope_check"]["state"] == "not_evaluated" and d["scope_check"]["reducer_unattributed"] == 2
+
+
+def test_a_violation_outranks_not_evaluated() -> None:
+    sc = _scope_check("rdr", [_search_out(["a", "leak"], [RDR_COLL, CODE_COLL])], ["search"],
+                      recorder=_recorder(["a", "leak", "mystery"]))
+    assert sc["state"] == "violated"
+
+
+def test_stream_counts_are_not_judged_for_no_scope_a_subtree_or_all() -> None:
+    """Kills the ``_scope_counts`` early return: without it every collection reads as inside."""
+    out = _search_out(["a", "b"], [RDR_COLL, CODE_COLL])
+    for scope in ("", "1.2", "all"):
+        d = _build(steps=[out], tools=["search"], scope=ScopeConstraint.parse(scope), recorder=_recorder(["a", "b"]))
+        v = d["streams"]["vector"]
+        assert (v["in_scope"], v["out_of_scope"]) == (None, None), scope
+        assert (d["reducer_input"]["in_scope"], d["reducer_input"]["out_of_scope"]) == (None, None), scope
+    d = _build(steps=[out], tools=["search"], scope=ScopeConstraint.parse("rdr"))
+    assert (d["streams"]["vector"]["in_scope"], d["streams"]["vector"]["out_of_scope"]) == (1, 1), "control: a prefix is judged"
+
+
+# ── 7b. review fixes: the source check sees what an intermediate operator dropped ─────────────────────────────
+
+
+def _after_a_rank_that_dropped(stream: ReservedStream, keep: int) -> None:
+    """Drive the stream's own observer as the runner does: the terminal operator is handed the output of a
+    rank that kept the first *keep* reserved items."""
+    stream.current_step, stream.current_producers = 5, ("operator_rank",)
+    stream.observe({"content": " ".join(i.token for i in stream.items[:keep]) + " plus secondary"})
+
+
+def test_source_partial_when_a_rank_dropped_some_of_its_reserved_chunks_before_the_terminal_operator() -> None:
+    p = _primary(4)
+    stream, rec = _reached(p, 4)
+    _after_a_rank_that_dropped(stream, keep=2)
+    sc = _source_state(primary=p, stream=stream, recorder=rec)
+    (s,) = sc["sources"]
+    assert (sc["state"], s["state"], s["reached_reducer"]) == ("partial", "partial", 4), "it reached the first reducer"
+    assert s["dropped_before_terminal"] == 2 and "dropped" in s["detail"]
+
+
+def test_source_missing_when_every_reserved_chunk_was_dropped_before_the_terminal_operator() -> None:
+    p = _primary(3)
+    stream, rec = _reached(p, 3)
+    _after_a_rank_that_dropped(stream, keep=0)
+    sc = _source_state(primary=p, stream=stream, recorder=rec)
+    assert sc["state"] == "missing" and sc["sources"][0]["dropped_before_terminal"] == 3
+
+
+def test_source_stays_covered_when_nothing_was_dropped() -> None:
+    p = _primary(3)
+    stream, rec = _reached(p, 3)
+    _after_a_rank_that_dropped(stream, keep=3)
+    sc = _source_state(primary=p, stream=stream, recorder=rec)
+    assert sc["state"] == "covered" and sc["sources"][0]["dropped_before_terminal"] == 0
+
+
+def test_a_dropped_lifecycle_record_makes_the_lifecycle_facet_partial() -> None:
+    p = _primary(2)
+    stream = ReservedStream.from_evidence(p, extra=_lifecycle("read", records=2).reserved_items())
+    rec = _recorder([i.text for i in stream.items])
+    _after_a_rank_that_dropped(stream, keep=1)  # the two t2 records lead the share: one survives
+    sc = _source_state(primary=p, stream=stream, recorder=rec, lifecycle=_lifecycle("read", records=2))
+    lc = sc["sources"][0]["lifecycle"]
+    assert lc["state"] == "partial" and "dropped" in lc["detail"]
+    assert sc["unresolved"] == [{"source": "RDR-084", "facet": "lifecycle", "status": "read"}]
 
 
 # ── 8. skipped steps, traversals, capped traversals ────────────────────────────────────────────────────────
@@ -561,7 +687,8 @@ def test_the_plan_path_envelope_carries_evidence_diagnostics() -> None:
     env, _ = _drive_nx_answer(_MULTI_PLAN, scope="rdr", structured=True, plan_run_result=_plan_run_result(steps, []))
     d = env["evidence_diagnostics"]
     assert d["streams"]["vector"]["references"] == 3 and d["streams"]["vector"]["by_collection"] == {RDR_COLL: 3}
-    assert d["scope_check"]["state"] == "satisfied" and d["source_check"]["state"] == "not_applicable"
+    assert d["scope_check"]["state"] == "not_evaluated", "the reducer input was never recorded: nothing says it stayed inside"
+    assert d["source_check"]["state"] == "not_applicable"
     assert d["reducer_input"] is None
     json.dumps(env["evidence_diagnostics"])
 
@@ -581,6 +708,7 @@ def test_a_skipped_step_has_no_step_record_and_the_diagnostics_count_it() -> Non
     d = env["evidence_diagnostics"]
     assert [s["step_index"] for s in d["skipped_steps"]] == [0]
     assert env["steps"] == [], "no StepRecord was synthesised for the skipped step"
+    assert env["step_count"] == 3, "step_count is len(result.steps): it counts the skipped step's marker output"
     assert d["scope_check"]["state"] == "conflict"
 
 
@@ -597,6 +725,69 @@ def test_the_fast_path_conflict_reports_a_conflict_and_no_references() -> None:
     d = env["evidence_diagnostics"]
     assert d["scope_check"]["state"] == "conflict" and d["streams"]["vector"]["references"] == 0
     assert [s["step_index"] for s in d["skipped_steps"]] == [0]
+
+
+def _diagnostics_events(lg) -> list:
+    return [c for c in lg.info.call_args_list if c.args and c.args[0] == "nx_answer_evidence_diagnostics"]
+
+
+def test_a_default_text_mode_plan_run_logs_one_diagnostics_event_with_ids_and_counts_only() -> None:
+    """Code review F1: the log event was built only for the structured envelope, so the default MCP call (text)
+    emitted none. Text mode returns no object; only the event carries the counts."""
+    steps = [_search_out(["a", "b"], [RDR_COLL, CODE_COLL]), {"text": "The decision is X [1]. It was accepted on 2026-10-01 after review."}]
+    with patch("nexus.plans.evidence_diagnostics._log") as lg:
+        out, _ = _drive_nx_answer(_MULTI_PLAN, scope="rdr", structured=False, plan_run_result=_plan_run_result(steps, []))
+    assert isinstance(out, str) and "evidence_diagnostics" not in out
+    (event,) = _diagnostics_events(lg)
+    kw = event.kwargs
+    assert kw["vector_refs"] == 2 and kw["scope_state"] == "violated" and kw["plan_id"] == 7
+    blob = json.dumps(kw, default=str)
+    for leak in ("widgets", "The decision is X", "which documents"):
+        assert leak not in blob, f"{leak!r} leaked into the log event"
+    assert all(isinstance(v, (int, str, bool, dict, type(None))) for v in kw.values())
+
+
+def test_a_text_mode_fast_path_conflict_logs_one_event_and_a_clean_run_logs_none() -> None:
+    """A text-mode fast path runs query() without its structured output, so its references are unobserved: it
+    logs no event rather than one claiming zero references. A scope conflict is known without a query."""
+    with patch("nexus.plans.evidence_diagnostics._log") as lg:
+        _drive_nx_answer(_single_query_match("code"), scope="rdr", structured=False)
+    (event,) = _diagnostics_events(lg)
+    assert event.kwargs["scope_state"] == "conflict" and event.kwargs["vector_refs"] == 0
+    with patch("nexus.plans.evidence_diagnostics._log") as lg:
+        _drive_nx_answer(_single_query_match("knowledge,code,docs,rdr"), scope="rdr", structured=False)
+    assert _diagnostics_events(lg) == []
+
+
+def test_a_structured_run_still_logs_exactly_one_event() -> None:
+    steps = [_search_out(["a"], [RDR_COLL]), {"text": "The decision is X [1]. It was accepted on 2026-10-01 after review."}]
+    with patch("nexus.plans.evidence_diagnostics._log") as lg:
+        env, _ = _drive_nx_answer(_MULTI_PLAN, scope="rdr", structured=True, plan_run_result=_plan_run_result(steps, []))
+    assert env["evidence_diagnostics"] is not None and len(_diagnostics_events(lg)) == 1
+
+
+_ANSWER = {"text": "The decision is X [1]. It was accepted on 2026-10-01 after review of the evidence."}
+
+
+def test_a_comma_list_scope_is_disclosed_in_the_text_and_the_envelope_never_widened_silently() -> None:
+    """Code review F6 (nexus-n1908): the scope became "" with a log-only warning."""
+    steps = [_search_out(["a"], [RDR_COLL]), dict(_ANSWER)]
+    env, _ = _drive_nx_answer(_MULTI_PLAN, scope=" rdr,code ", structured=True, plan_run_result=_plan_run_result(steps, []))
+    assert env["scope_normalized"]["given"] == "rdr,code" and env["scope_normalized"]["applied"] == ""
+    assert "comma-list" in env["scope_normalized"]["reason"]
+    assert "'rdr,code' is a comma-list" in env["final_text"] and "NOT scoped" in env["final_text"]
+    sc = env["evidence_diagnostics"]["scope_check"]
+    assert sc["state"] == "not_evaluated" and "rdr,code" in sc["detail"], "no scope in force is not 'not applicable'"
+    text, _ = _drive_nx_answer(_MULTI_PLAN, scope="rdr,code", structured=False, plan_run_result=_plan_run_result(steps, []))
+    assert "'rdr,code' is a comma-list" in text
+
+
+def test_a_single_scope_token_has_no_normalization_notice() -> None:
+    steps = [_search_out(["a"], [RDR_COLL]), dict(_ANSWER)]
+    env, _ = _drive_nx_answer(_MULTI_PLAN, scope="rdr", structured=True, plan_run_result=_plan_run_result(steps, []))
+    assert env["scope_normalized"] is None and "comma-list" not in env["final_text"]
+    plain, _ = _drive_nx_answer(_MULTI_PLAN, scope="", structured=True, plan_run_result=_plan_run_result(steps, []))
+    assert plain["scope_normalized"] is None and plain["evidence_diagnostics"]["scope_check"]["state"] == "not_applicable"
 
 
 def _drive_with_run(run, *, question: str = "which documents discuss widgets", trace: bool = True, bindings=None):
@@ -715,6 +906,64 @@ def test_a_primary_only_run_keeps_its_answer_instead_of_the_no_match_notice() ->
     assert "The decision is X" in env["final_text"]
 
 
+def _drive_planner_made(steps: list[dict]):
+    """nx_answer on a plan-miss: an inline-planner (plan_id 0) plan, a merged reserved stream, the given step
+    outputs. Returns ``(envelope, the plans.save_plan mock)``."""
+    from tests.test_nx_answer import _ad_hoc_match_for_grow
+    from tests.test_rdr232_reserved_merge import _resolution_for_rdr084
+
+    match = _ad_hoc_match_for_grow([
+        {"tool": "search", "args": {"query": "$intent"}},
+        {"tool": "summarize", "args": {"inputs": "$step1.ids"}},
+    ])
+    save = MagicMock(return_value=999)
+    db_stub = MagicMock()
+    db_stub.plans.save_plan = save
+    db_stub.plans.get_plan = MagicMock(return_value={"id": 999})
+    db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+    db_stub.conn = MagicMock()
+
+    async def run(match, bindings, **kwargs):  # noqa: ARG001
+        stream = kwargs.get("reserved_stream")
+        if stream is not None:
+            stream.mark_merged()
+        return _plan_run_result([dict(x) for x in steps], [])
+
+    evidence = PrimaryEvidence(items=(_chunk(0),), documents=(_coverage(rows=1, selected=1),))
+    import nexus.mcp.core as core
+
+    with patch("nexus.mcp.core._nx_answer_named_sources", return_value=_resolution_for_rdr084()), \
+         patch("nexus.plans.matcher.plan_match", return_value=[]), \
+         patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+         patch("nexus.mcp.core._get_catalog", return_value=None), \
+         patch("nexus.plans.runner.plan_run", AsyncMock(side_effect=run)), \
+         patch("nexus.plans.primary_evidence.select_primary_evidence", MagicMock(return_value=evidence)), \
+         patch("nexus.plans.primary_evidence.t3_chunk_fetcher", return_value=lambda c, h: {}), \
+         patch("nexus.mcp.core._get_t3", return_value=MagicMock()), \
+         patch("nexus.mcp.core._t2_ctx") as ctx, \
+         patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+         patch("nexus.mcp.core.scratch", return_value="ok"), \
+         patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+        ctx.return_value.__enter__.return_value = db_stub
+        env = asyncio.run(core.nx_answer(question="what is the meaning of life", structured=True,
+                                         bindings={"source": "RDR-084"}))
+    return env, save
+
+
+def test_a_planner_made_plan_whose_own_retrieval_was_empty_keeps_its_answer_and_is_not_grown() -> None:
+    """The reserved stream fed the reducer, so the answer stands; the plan itself found nothing, so the
+    yg49g rule (never grow a no-evidence plan) still holds."""
+    env, save = _drive_planner_made([{"ids": [], "tumblers": [], "collections": []}, dict(_ANSWER)])
+    assert env["answer_shape"] == "answered" and "The decision is X" in env["final_text"]
+    assert not save.called, "a plan whose own retrieval found nothing must not enter the library"
+
+
+def test_a_planner_made_plan_that_retrieved_its_own_evidence_still_grows() -> None:
+    """Control: the same run with a non-empty retrieval grows, so the test above is not vacuous."""
+    env, save = _drive_planner_made([_search_out(["a"], [RDR_COLL]), dict(_ANSWER)])
+    assert env["answer_shape"] == "answered" and save.called
+
+
 def test_an_unmerged_reserved_stream_is_not_evidence_the_reducer_saw() -> None:
     env, stream = _drive_with_stream(merged=False)
     assert stream is not None and not stream.merged
@@ -738,6 +987,9 @@ def test_the_continuation_handoff_guard_counts_the_active_reserved_stream_too() 
     assert _prefix_produced_zero_evidence(steps, 1) == "no_items"
     stream = ReservedStream.from_evidence(PrimaryEvidence(items=(_chunk(0),)))
     with reserved_scope(stream):
+        assert _prefix_produced_zero_evidence(steps, 1) == "no_items", (
+            "a stream no operator consumed is not evidence the reducer saw (the predicate nx_answer's guard uses)")
+        stream.mark_merged()
         assert _prefix_produced_zero_evidence(steps, 1) is None, "primary evidence is evidence"
         assert _prefix_produced_zero_evidence(steps, 1, [("summarize", {"content": ""})]) == "items_present_all_empty", (
             "the payload check still catches an operator that was handed nothing")

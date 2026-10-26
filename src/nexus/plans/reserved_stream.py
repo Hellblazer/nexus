@@ -48,6 +48,7 @@ __all__ = [
     "ReservedStream",
     "active_reserved_stream",
     "reserved_scope",
+    "reserved_stream_is_evidence",
     "set_reserved_step",
     "strip_source_note",
 ]
@@ -139,6 +140,9 @@ class ReservedStream:
     #: ``{"step", "missing", "of"}`` for the most recent later operator (the terminal one at
     #: the end of the run); ``None`` until a later operator is observed.
     last_observed: dict[str, int] | None = None
+    #: Tokens of the reserved items the most recent observed operator's input no longer held (the
+    #: per-item detail behind ``last_observed["missing"]``; the diagnostics attribute them to sources).
+    last_missing_tokens: tuple[str, ...] = ()
     _raw: frozenset[str] = field(default_factory=frozenset, repr=False)
     _chashes: frozenset[str] = field(default_factory=frozenset, repr=False)
 
@@ -204,6 +208,7 @@ class ReservedStream:
         self.merged, self.merged_step, self.current_step = False, None, None
         self.deduped_secondary, self.secondary_cut, self.capped = 0, 0, False
         self.last_observed = None
+        self.last_missing_tokens = ()
 
     # ── observe a later operator ─────────────────────────────────────────────
 
@@ -222,7 +227,9 @@ class ReservedStream:
         if any(_holds_deferred_ref(args[k]) for k in EVIDENCE_KEYS if k in args):
             return
         blob = " ".join(str(args[k]) for k in EVIDENCE_KEYS if k in args)
-        missing = sum(1 for i in self.items if i.token not in blob)
+        gone = tuple(i.token for i in self.items if i.token not in blob)
+        missing = len(gone)
+        self.last_missing_tokens = gone
         self.last_observed = {"step": -1 if self.current_step is None else self.current_step,
                               "missing": missing, "of": len(self.items)}
 
@@ -272,6 +279,16 @@ def _holds_deferred_ref(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_holds_deferred_ref(v) for v in value)
     return False
+
+
+def reserved_stream_is_evidence(stream: ReservedStream | None) -> bool:
+    """Whether the runner merged a reserved stream into a reduction and it holds items.
+
+    The one predicate behind both zero-evidence guards (``nx_answer``'s empty-retrieval guard and the
+    continuation handoff's ``_prefix_produced_zero_evidence``): a stream no operator consumed
+    (``merged`` false) reached no reducer and is not evidence the reducer saw.
+    """
+    return stream is not None and stream.merged and bool(stream.items)
 
 
 _ACTIVE: ContextVar[ReservedStream | None] = ContextVar("nexus_reserved_stream", default=None)

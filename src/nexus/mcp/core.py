@@ -8902,7 +8902,11 @@ def traverse(
         ),
     )] = None,
 ) -> dict:
-    """Walk the catalog link graph from seed tumblers, unranked (RDR-078 P3).
+    """Walk the catalog link graph from seed tumblers (RDR-078 P3).
+
+    The walk is unranked: without a `policy` the documents and chunk ids come
+    back in graph order. With a `policy` (below) they are ranked by link role
+    and distance, and the chunk budget is shared per document.
 
     Use `search_graph_hop` instead when the reachable set should also be
     vector-ranked in one call. Accepts either `link_types` or `purpose`,
@@ -9402,7 +9406,9 @@ def _nx_answer_reserved_stream_is_evidence(stream: "ReservedStream | None") -> b
     records, so a merged, non-empty reserved stream is evidence and the reducer's answer stands. A
     stream no operator consumed (``merged`` false) reached no reducer and is not.
     """
-    return stream is not None and stream.merged and bool(stream.items)
+    from nexus.plans.reserved_stream import reserved_stream_is_evidence  # noqa: PLC0415 — deferred; matches this module's convention
+
+    return reserved_stream_is_evidence(stream)
 
 
 def _nx_answer_scope_conflict_sentence(diagnostics: Any) -> str:
@@ -10011,10 +10017,18 @@ def _nx_answer_caller_bindings(
     return run, frozenset(run)
 
 
-def _nx_answer_evidence_request(
+def _nx_answer_seconds_left(ceiling: float, deadline: float | None) -> float:
+    """Seconds an evidence step may take: its fixed *ceiling*, or what is left of ``nx_answer``'s own
+    absolute ``time.monotonic()`` *deadline* if that is shorter (never negative)."""
+    left = ceiling if deadline is None else min(ceiling, deadline - time.monotonic())
+    return max(left, 0.0)
+
+
+async def _nx_answer_evidence_request(
     *,
     bindings: dict[str, Any] | None,
     scope: str,
+    deadline: float | None = None,
 ) -> EvidenceRequest:
     """Read the caller's evidence request from the reserved bindings and scope.
 
@@ -10022,20 +10036,56 @@ def _nx_answer_evidence_request(
     ``owner`` or ``project`` is a name rather than a tumbler; the lookup is
     the same owner-name resolution ``scope`` uses. Never raises: a failure
     is carried in the returned request and disclosed in the envelope.
+
+    The lookup is blocking catalog I/O, so a request that names an owner or project runs in a worker thread
+    (a call with no reserved binding touches neither the catalog nor a thread). It is bounded by
+    ``PrimaryEvidenceCaps.max_seconds`` and *deadline* (``nx_answer``'s own, absolute ``time.monotonic()``):
+    no lookup starts past it, and a lookup that has not returned by then makes the qualifier ``unresolved``
+    with the deadline as the reason, never a guess (nexus-jypmj.1.9 code review F2).
     """
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
     from nexus.plans.evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+        OwnerNameError,
         build_evidence_request,
         catalog_name_lookup,
+        split_reserved,
+    )
+    from nexus.plans.primary_evidence import DEFAULT_CAPS  # noqa: PLC0415 — deferred; matches this module's convention
+
+    _, reserved = split_reserved(bindings)
+    if not reserved:
+        def _none_named(name: str) -> str:
+            raise OwnerNameError("no owner or project was named")  # unreachable: no reserved binding, no lookup
+
+        return build_evidence_request(bindings, scope=scope, name_lookup=_none_named)
+    ceiling = DEFAULT_CAPS.max_seconds
+    end = time.monotonic() + _nx_answer_seconds_left(ceiling, deadline)
+    stopped = (
+        f"the owner lookup stopped at the deadline (at most {ceiling:g} s, or the answer's own budget if that "
+        "was shorter)"
     )
 
     def _lookup(name: str) -> str:
-        # Lazy: a tumbler-shaped owner needs no catalog at all.
+        # Lazy: a tumbler-shaped owner needs no catalog at all. No lookup starts past the deadline.
+        if time.monotonic() >= end:
+            raise OwnerNameError(stopped)
         return catalog_name_lookup(_get_catalog())(name)
 
-    return build_evidence_request(bindings, scope=scope, name_lookup=_lookup)
+    def _build() -> EvidenceRequest:
+        return build_evidence_request(bindings, scope=scope, name_lookup=_lookup)
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_build), timeout=max(end - time.monotonic(), 0.0))
+    except asyncio.TimeoutError:
+        def _hung(name: str) -> str:  # noqa: ARG001
+            raise OwnerNameError(stopped)
+
+        return build_evidence_request(bindings, scope=scope, name_lookup=_hung)
 
 
-def _nx_answer_named_sources(request: EvidenceRequest) -> NamedSourceResolution | None:
+async def _nx_answer_named_sources(
+    request: EvidenceRequest, *, deadline: float | None = None,
+) -> NamedSourceResolution | None:
     """Resolve the request's named sources (RDR-232 Phase 1, nexus-jypmj.1.4).
 
     ``None`` when no source was named, with no catalog call. The resolution is
@@ -10043,17 +10093,33 @@ def _nx_answer_named_sources(request: EvidenceRequest) -> NamedSourceResolution 
     resolve is disclosed in the envelope and the text. Reading the resolved
     document's chunks happens where the primary stream is merged (nexus-jypmj.1.6),
     not here, so a call that never reaches a reduction pays for the lookup only.
+
+    The up-to-13 catalog calls are blocking, so they run in a worker thread, bounded by
+    ``PrimaryEvidenceCaps.max_seconds`` and *deadline* (``nx_answer``'s own, absolute ``time.monotonic()``):
+    the resolution starts no call past it, and one that has not returned by then is abandoned (a thread
+    cannot be cancelled; it ends after its current call) and every source is ``unresolved`` with the
+    deadline as the reason (nexus-jypmj.1.9 code review F2).
     """
     if not request.sources:
         return None
-    from nexus.plans.primary_evidence import resolve_named_sources  # noqa: PLC0415 — deferred; matches this module's convention
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.primary_evidence import DEFAULT_CAPS, NamedSourceResolution, resolve_named_sources  # noqa: PLC0415 — deferred; matches this module's convention
+
+    def _resolve() -> NamedSourceResolution:
+        try:
+            cat = _get_catalog()
+        except Exception as exc:  # noqa: BLE001 — a missing catalog is disclosed as an unresolved source
+            _log.warning("nx_answer_named_sources_catalog_unavailable", error=str(exc))
+            cat = None
+        return resolve_named_sources(request.sources, request.owner, cat=cat, deadline=deadline)
 
     try:
-        cat = _get_catalog()
-    except Exception as exc:  # noqa: BLE001 — a missing catalog is disclosed as an unresolved source
-        _log.warning("nx_answer_named_sources_catalog_unavailable", error=str(exc))
-        cat = None
-    return resolve_named_sources(request.sources, request.owner, cat=cat)
+        return await asyncio.wait_for(
+            asyncio.to_thread(_resolve), timeout=_nx_answer_seconds_left(DEFAULT_CAPS.max_seconds, deadline),
+        )
+    except asyncio.TimeoutError:
+        _log.warning("nx_answer_named_sources_deadline", sources=len(request.sources))
+        return NamedSourceResolution.deadline_hit(request.sources)
 
 
 async def _nx_answer_lifecycle_stream(
@@ -10103,6 +10169,8 @@ async def _nx_answer_lifecycle_stream(
 async def _nx_answer_primary_stream(
     resolution: NamedSourceResolution | None,
     lifecycle: "LifecycleStream | None" = None,
+    *,
+    deadline: float | None = None,
 ) -> "tuple[PrimaryEvidence | None, ReservedStream | None]":
     """Read the resolved named sources and build the reserved stream (RDR-232, nexus-jypmj.1.6).
 
@@ -10110,7 +10178,12 @@ async def _nx_answer_primary_stream(
     ``gather_primary_evidence``, so no source is resolved twice). ``(None, None)`` when no source
     resolved, so a run without one is byte-identical to before. The read is blocking catalog and
     T3 I/O, so it runs in a worker thread; it never raises, and a failure is disclosed as an
-    unread source, not a failed answer.
+    unread source (``PrimaryEvidence.error``), not a failed answer.
+
+    The read is bounded by ``PrimaryEvidenceCaps.max_seconds`` and *deadline* (``nx_answer``'s own, absolute
+    ``time.monotonic()``): it starts no fetch past it, and a read that has not returned by then is abandoned (a
+    thread cannot be cancelled) with ``deadline`` on ``caps_hit``; the answer proceeds without the chunks
+    (nexus-jypmj.1.9 code review F2).
 
     *lifecycle* (nexus-jypmj.1.7) supplies the T2 records of a resolved RDR; they lead the reserved
     share, ahead of the chunks, and do not depend on the T3 read: a failed chunk read still yields a
@@ -10119,19 +10192,23 @@ async def _nx_answer_primary_stream(
     if resolution is None or not resolution.resolved():
         return None, None
     import asyncio  # noqa: PLC0415 — stdlib, branch-local
-    from nexus.plans.primary_evidence import select_primary_evidence, t3_chunk_fetcher  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.primary_evidence import PrimaryEvidence, select_primary_evidence, t3_chunk_fetcher  # noqa: PLC0415 — deferred; matches this module's convention
     from nexus.plans.reserved_stream import ReservedStream  # noqa: PLC0415 — deferred; matches this module's convention
 
     records = lifecycle.reserved_items() if lifecycle is not None else ()
     try:
         cat = _get_catalog()
         fetch = t3_chunk_fetcher(_get_t3())
-        evidence = await asyncio.to_thread(
-            select_primary_evidence, resolution, cat=cat, fetch_chunks=fetch,
+        evidence = await asyncio.wait_for(
+            asyncio.to_thread(select_primary_evidence, resolution, cat=cat, fetch_chunks=fetch, deadline=deadline),
+            timeout=_nx_answer_seconds_left(resolution.caps.max_seconds, deadline),
         )
+    except asyncio.TimeoutError:
+        _log.warning("nx_answer_primary_evidence_deadline")
+        evidence = PrimaryEvidence(caps_hit=("deadline",), caps=resolution.caps)
     except Exception as exc:  # noqa: BLE001 — an unreadable source is disclosed, never a failed answer
         _log.warning("nx_answer_primary_evidence_failed", error=str(exc))
-        return None, ReservedStream.from_evidence(None, extra=records)
+        evidence = PrimaryEvidence(error=type(exc).__name__, caps=resolution.caps)
     return evidence, ReservedStream.from_evidence(evidence, extra=records)
 
 
@@ -11216,9 +11293,15 @@ async def nx_answer(
     # retrieval to nothing and trigger the ambient-context synthesis
     # failure. Done before any scope use (plan_match scope_preference,
     # plan-miss planner, grown-plan scope_tags).
+    _scope_given = scope
     scope, _scope_warning = _nx_answer_normalize_scope(scope)
     if _scope_warning:
         _log.warning("nx_answer_scope_normalized", detail=_scope_warning)
+    # nexus-jypmj.1.8 (code review F6, nexus-n1908): the caller asked for a scope and the run is NOT scoped.
+    # The log line alone was silent to the caller; the text and the envelope say it too.
+    _scope_normalized: "dict[str, str] | None" = (
+        {"given": _scope_given.strip(), "applied": scope, "reason": _scope_warning} if _scope_warning else None
+    )
 
     # nexus-0yrjr: derive the run bindings and the availability set
     # together, AFTER scope normalization so ``_nx_scope`` carries the
@@ -11232,13 +11315,13 @@ async def nx_answer(
     # RDR-232 Phase 1 (nexus-jypmj.1.2): the reserved bindings source,
     # owner and project were removed from the run above; read them here as
     # the caller's evidence request. Disclosed in the envelope.
-    _evidence_request = _nx_answer_evidence_request(
-        bindings=bindings, scope=scope,
+    _evidence_request = await _nx_answer_evidence_request(
+        bindings=bindings, scope=scope, deadline=deadline,
     )
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
     # resolved documents is merged at the runner (nexus-jypmj.1.6).
-    _named_sources = _nx_answer_named_sources(_evidence_request)
+    _named_sources = await _nx_answer_named_sources(_evidence_request, deadline=deadline)
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.
     _single_query_fast_path = False
@@ -11256,7 +11339,7 @@ async def nx_answer(
     _diag_inputs: "dict[str, Any]" = {}
     _diag_cache: "list[dict[str, Any] | None]" = []
 
-    def _set_evidence_inputs(plan_result: Any, plan_json: Any, plan_id: int) -> None:
+    def _set_evidence_inputs(plan_result: Any, plan_json: Any, plan_id: int, *, reducer_expected: bool = True) -> None:
         # Defensive isinstance, same landmine as _set_scope_diagnostics: a MagicMock result's
         # unconfigured attribute is a truthy non-list.
         steps = getattr(plan_result, "steps", None)
@@ -11265,6 +11348,7 @@ async def nx_answer(
         _diag_inputs.update(
             steps=list(steps) if isinstance(steps, list) else [], plan_json=plan_json, plan_id=plan_id,
             resolved_args=list(resolved) if isinstance(resolved, list) else [],
+            reducer_expected=reducer_expected,
         )
         _diag_cache.clear()
 
@@ -11287,7 +11371,8 @@ async def nx_answer(
                 scope=ScopeConstraint.parse(scope), scope_diagnostics=_scope_diagnostics,
                 resolved_args=_diag_inputs["resolved_args"], recorder=_reducer_recorder,
                 reserved=_reserved_stream, primary=_primary_evidence, lifecycle=_lifecycle,
-                named_sources=_named_sources,
+                named_sources=_named_sources, reducer_expected=_diag_inputs["reducer_expected"],
+                dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
             )
             log_evidence_diagnostics(diag, plan_id=_diag_inputs["plan_id"])
         except Exception as exc:  # noqa: BLE001 — diagnostics never fail an answer
@@ -11378,9 +11463,14 @@ async def nx_answer(
             None if all(c in text for c in _scope_clauses)
             else scope_conflict_notice(_scope_diagnostics)
         )
+        _scope_normalized_text = (
+            f"[scope: {_scope_normalized['given']!r} is a comma-list; scope takes one corpus prefix or catalog "
+            "subtree, so this run was NOT scoped (broad search). Pass one scope token to filter.]"
+            if _scope_normalized else None
+        )
         _extra_lines = [
             line for line in (
-                _budget_warning_text, _dropped_reduce_text, _scope_notice,
+                _budget_warning_text, _dropped_reduce_text, _scope_normalized_text, _scope_notice,
                 *_evidence_request.disclosures(),
                 *(_primary_evidence.disclosures() if _primary_evidence else ()),
                 *(_reserved_stream.disclosures() if _reserved_stream else ()),
@@ -11407,6 +11497,10 @@ async def nx_answer(
             _text = f"{text}\n{_extra_text}"
         else:
             _text = f"{_extra_text}\n{text}"
+        # nexus-jypmj.1.8 (code review F1): the diagnostics are built and logged in BOTH modes, before the
+        # text return, so the default (text) call emits the nx_answer_evidence_diagnostics event too. Only the
+        # structured envelope carries the object.
+        _diagnostics = _evidence_diagnostics_now()
         if not structured:
             return _text
         # RDR-196 .p1e (nexus-nyry9.11): per-step breakdown in the
@@ -11530,11 +11624,14 @@ async def nx_answer(
             # PlanResult.scope_diagnostics. Always present, [] when the caller
             # gave no scope or the call never reached a retrieval step.
             "scope_diagnostics": [dict(d) for d in _scope_diagnostics],
+            # nexus-jypmj.1.8 (code review F6): {given, applied, reason} when the caller's scope was a comma-list
+            # and the run went unscoped (nexus-n1908); None otherwise. Always present.
+            "scope_normalized": dict(_scope_normalized) if _scope_normalized else None,
             # RDR-232 Phase 1 (nexus-jypmj.1.8): per-stream corpus counts, the reducer input by stream
             # and collection, and the deterministic source and scope checks. Envelope and logs only
             # until Phase 3 persists a run summary. Always present; None when no retrieval ran
-            # (an error before the plan, a plan-miss refusal) or the single_query fast path was text mode.
-            "evidence_diagnostics": _evidence_diagnostics_now(),
+            # (an error before the plan, a plan-miss refusal).
+            "evidence_diagnostics": _diagnostics,
         }
 
     # nexus-f9kxd: single emitter for every error return. The tool contract
@@ -12442,8 +12539,10 @@ async def nx_answer(
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            if structured:
-                # nexus-jypmj.1.8: the fast path's one query is the vector stream; it has no reducer.
+            if structured or _fast_conflict:
+                # nexus-jypmj.1.8: the fast path's one query is the vector stream; it has no reducer. A text-mode
+                # call ran query() without its structured output, so its references are unobserved and no event
+                # is logged for it (a conflict needs none: nothing ran, and the log carries it).
                 _set_evidence_inputs(
                     SimpleNamespace(
                         steps=[
@@ -12458,7 +12557,7 @@ async def nx_answer(
                         ],
                         resolved_step_args=[],
                     ),
-                    best.plan_json, best.plan_id,
+                    best.plan_json, best.plan_id, reducer_expected=False,
                 )
             if _fast_conflict:
                 return _error_result(
@@ -12578,7 +12677,7 @@ async def nx_answer(
     # resolved and yielded evidence (the same "only pass when set" rule as the kwargs below).
     # nexus-jypmj.1.7: the resolved RDR's T2 lifecycle records ride the same stream, ahead of the chunks.
     _lifecycle = await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
-    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle)
+    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle, deadline=deadline)
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream
     if deadline is not None:
@@ -13192,7 +13291,10 @@ async def nx_answer(
     # the return; it stays 0 (the envelope's "no library row" sentinel) when
     # nothing was saved (ttl 0, a save failure, a library-matched run).
     _saved_grown_plan_id = 0
-    if best.plan_id == 0:
+    # RDR-232 (nexus-jypmj.1.8): a reserved stream can carry an answer past the empty-retrieval guard above, but
+    # that is the caller's evidence, not the plan's. A plan whose own retrieval steps found nothing is still
+    # never grown (nexus-yg49g).
+    if best.plan_id == 0 and not _nx_answer_is_empty_retrieval(result.steps):
         ttl_days = _load_ad_hoc_ttl()
         if ttl_days > 0:
             try:

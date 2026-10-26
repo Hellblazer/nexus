@@ -12,10 +12,14 @@ adds the run summary. The object answers four questions without a model call:
   ``t2``: its lifecycle records);
 * **reducer_input**: what the first evidence-consuming operator was actually handed, by stream and
   collection (:class:`ReducerInputRecorder`, fed by the runner's operator hydration);
-* **source_check**: did the named primary document reach the reducer input (``covered``, ``partial``
-  or ``missing``), and is its lifecycle facet resolved;
-* **scope_check**: do the observed collections stay inside the caller's explicit scope
-  (``satisfied``, ``widened``, ``conflict`` or ``violated``).
+* **source_check**: did the named primary document reach the reducer input and survive to the final
+  reduction (``covered``, ``partial`` or ``missing``), and is its lifecycle facet resolved;
+* **scope_check**: do the observed collections stay inside the caller's explicit scope. ``satisfied``
+  means every item the run examined was attributed to a collection and none is outside; ``violated``,
+  ``conflict`` (a step or traversal the scope emptied) and ``widened`` (a named source outside the scope,
+  by request) are findings; ``not_evaluated`` means the check cannot say (a catalog subtree, no item
+  examined, an item or stream reference with no collection, or no reducer input recorded); and
+  ``not_applicable`` means no explicit scope was given.
 
 Provenance of a reducer item. A reserved item (primary chunk, T2 record) carries its stream and
 collection on :class:`~nexus.plans.reserved_stream.ReservedItem`. Any other item is attributed by
@@ -201,7 +205,7 @@ def _scope_counts(scope: ScopeConstraint, by_collection: Mapping[str, int]) -> t
 
 def _traversal_summary(index: int, report: Mapping[str, Any]) -> dict[str, Any]:
     keys = ("policy_applied", "policy_failed", "possibly_truncated", "contained", "nodes_walked", "nodes_retained",
-            "dropped_out_of_scope", "dropped_role", "dropped_cap")
+            "dropped_out_of_scope", "dropped_role", "dropped_cap", "scope_conflict")
     return {"step_index": index, **{k: report.get(k) for k in keys}, "widened": report.get("widened") is not None}
 
 
@@ -247,6 +251,8 @@ def build_evidence_diagnostics(
     primary: Any = None,
     lifecycle: Any = None,
     named_sources: Any = None,
+    reducer_expected: bool = True,
+    dropped_scope: str = "",
 ) -> dict[str, Any]:
     """The ``evidence_diagnostics`` object for one run (see the module docstring).
 
@@ -254,13 +260,17 @@ def build_evidence_diagnostics(
     unknown or missing name leaves a step outside the streams unless it is a traverse output).
     *primary*, *lifecycle* and *named_sources* are the :class:`PrimaryEvidence`,
     :class:`LifecycleStream` and :class:`NamedSourceResolution` the call read, or ``None``.
+    *reducer_expected* is ``False`` for a run that has no operator step by design (the single_query fast
+    path): its streams are the whole evidence, so a missing reducer input is not a gap in the scope check.
+    *dropped_scope* is a scope the caller gave that ``nx_answer`` did not apply (a comma-list, nexus-n1908):
+    with no scope in force the check says ``not_evaluated`` and names it, never ``not_applicable``.
     """
     corpus_of_step = {int(a["step_index"]): a.get("corpus", "") for a in resolved_args if "step_index" in a}
     streams: dict[str, _Stream] = {"vector": _Stream({}, []), "graph": _Stream({}, [])}
     index: dict[str, tuple[str, str]] = {}
     skipped: list[dict[str, Any]] = []
     traversals: list[dict[str, Any]] = []
-    traverse_outputs: list[Mapping[str, Any]] = []
+    traverse_reports: list[tuple[int, Mapping[str, Any]]] = []
     for i, out in enumerate(steps):
         if not isinstance(out, Mapping):
             continue
@@ -286,10 +296,9 @@ def build_evidence_diagnostics(
             for h, col in zip(hashes, cols, strict=True):
                 index.setdefault(str(h).lower(), (stream, col))
         s.steps.append({"step_index": i, "tool": tool, "corpus": corpus_of_step.get(i)})
-        if stream == "graph":
-            traverse_outputs.append(out)
-            if isinstance(out.get("traversal"), Mapping):
-                traversals.append(_traversal_summary(i, out["traversal"]))
+        if stream == "graph" and isinstance(out.get("traversal"), Mapping):
+            traverse_reports.append((i, out["traversal"]))
+            traversals.append(_traversal_summary(i, out["traversal"]))
 
     stream_wire: dict[str, Any] = {}
     for name, s in streams.items():
@@ -324,9 +333,10 @@ def build_evidence_diagnostics(
     return {
         "streams": stream_wire,
         "reducer_input": reducer_wire,
-        "source_check": _source_check(named_sources, primary, lifecycle, attributions),
+        "source_check": _source_check(named_sources, primary, lifecycle, attributions, reserved),
         "scope_check": _scope_check(
-            scope, streams, stream_wire, attributions, scope_diagnostics, traverse_outputs, p_cols,
+            scope, streams, attributions, scope_diagnostics, traverse_reports, p_cols,
+            reducer_expected=reducer_expected, dropped_scope=dropped_scope,
         ),
         "skipped_steps": skipped,
         "traversals": traversals,
@@ -346,7 +356,8 @@ def _reducer_wire(rec: ReducerInputRecorder, att: Sequence[_Attribution], scope:
         by_stream_collection.setdefault(a.stream, {})
         by_stream_collection[a.stream][a.collection] = by_stream_collection[a.stream].get(a.collection, 0) + 1
         by_collection[a.collection] = by_collection.get(a.collection, 0) + 1
-    unattributed = by_stream.get("unattributed", 0)
+    # An item is unattributed when no stream produced it, or when its stream is known but not its collection.
+    unattributed = sum(1 for a in att if a.stream != "t2" and (a.stream == "unattributed" or a.collection == UNATTRIBUTED))
     attributed = {c: n for c, n in by_collection.items()}
     inside, outside = _scope_counts(scope, attributed)
     return {
@@ -380,8 +391,13 @@ _LIFECYCLE_UNRESOLVED = frozenset({"no_records", "project_undetermined", "read_c
 _LIFECYCLE_NOT_APPLICABLE = frozenset({"not_rdr", "duplicate", "not_resolved"})
 
 
+def _dropped_tokens(reserved: ReservedStream | None) -> frozenset[str]:
+    """Tokens of the reserved items an unbundled rank or filter dropped before the terminal operator."""
+    return frozenset(reserved.last_missing_tokens) if reserved is not None else frozenset()
+
+
 def _lifecycle_state(
-    ref: str, lifecycle: Any, att: Sequence[_Attribution] | None,
+    ref: str, lifecycle: Any, att: Sequence[_Attribution] | None, dropped: int = 0,
 ) -> dict[str, Any] | None:
     if lifecycle is None:
         return None
@@ -391,32 +407,39 @@ def _lifecycle_state(
     delivered = sum(1 for r in lifecycle.records if r.source == ref)
     reached = sum(1 for a in att if a.stream == "t2" and a.source == ref) if att is not None else None
     status = entry.status
+    detail = entry.detail
     if status in _LIFECYCLE_UNRESOLVED:
         state = "unresolved"
     elif status in _LIFECYCLE_NOT_APPLICABLE:
         state = "not_applicable"
-    elif entry.detail or delivered < 2 or (reached is not None and reached < delivered):
-        state = "partial"  # at least one of the two records is absent, or lost before the reducer
+    elif entry.detail or delivered < 2 or (reached is not None and reached < delivered) or dropped:
+        state = "partial"  # at least one of the two records is absent, or lost before the final reduction
+        if dropped:
+            note = f"{dropped} lifecycle record(s) were dropped before the final reduction"
+            detail = f"{detail}; {note}" if detail else note
     else:
         state = "resolved"
-    return {"state": state, "status": status, "detail": entry.detail, "delivered": delivered,
+    return {"state": state, "status": status, "detail": detail, "delivered": delivered,
             "reached_reducer": reached if reached is not None else 0}
 
 
 def _source_check(
     named: Any, primary: Any, lifecycle: Any, att: Sequence[_Attribution] | None,
+    reserved: ReservedStream | None = None,
 ) -> dict[str, Any]:
     sources = tuple(getattr(named, "sources", ()) or ())
     recorded = att is not None
     if not sources:
         return {"state": "not_applicable", "sources": [], "reducer_input_recorded": recorded, "unresolved": []}
+    gone = _dropped_tokens(reserved)
+    held = tuple(reserved.items) if reserved is not None else ()
     rows: list[dict[str, Any]] = []
     unresolved: list[dict[str, str]] = []
     for s in sources:
         ref = s.ref.value
         row: dict[str, Any] = {
             "source": ref, "tumbler": s.tumbler, "selected": 0, "reached_reducer": 0, "manifest_rows": 0,
-            "lifecycle": None,
+            "dropped_before_terminal": 0, "lifecycle": None,
         }
         coverage = next((d for d in getattr(primary, "documents", ()) if d.doc_id == s.tumbler), None) if s.tumbler else None
         if s.status != "resolved":
@@ -431,10 +454,21 @@ def _source_check(
                 sum(1 for a in att if a.stream == "primary" and a.doc_id == s.tumbler) if att is not None else 0
             )
             row["reached_reducer"] = reached
+            mine = [i for i in held if i.stream == "primary" and i.doc_id == s.tumbler]
+            dropped = sum(1 for i in mine if i.token in gone)
+            row["dropped_before_terminal"] = dropped
             if att is None or reached == 0:
                 row.update(state="missing", detail=(
                     "no reduction was handed the primary evidence" if att is None
                     else "none of its selected chunks reached the reducer input"))
+            elif dropped and dropped >= len(mine):
+                row.update(state="missing", detail=(
+                    f"all {dropped} reserved chunks reached the reducer input but an intermediate operator "
+                    "dropped them before the final reduction"))
+            elif dropped:
+                row.update(state="partial", detail=(
+                    f"{dropped} of {len(mine)} reserved chunks were dropped by an intermediate operator "
+                    "before the final reduction"))
             elif reached < selected or coverage.partial:
                 row.update(state="partial", detail=(
                     f"{reached} of {coverage.manifest_rows} chunks reached the reducer"
@@ -442,7 +476,8 @@ def _source_check(
             else:
                 row.update(state="covered", detail="")
         if s.status == "resolved":
-            row["lifecycle"] = _lifecycle_state(ref, lifecycle, att)
+            lc_dropped = sum(1 for i in held if i.stream == "t2" and i.source == ref and i.token in gone)
+            row["lifecycle"] = _lifecycle_state(ref, lifecycle, att, lc_dropped)
             lc = row["lifecycle"]
             if lc is not None and lc["state"] in ("unresolved", "partial"):
                 unresolved.append({"source": ref, "facet": "lifecycle", "status": lc["status"]})
@@ -457,25 +492,38 @@ def _source_check(
 def _scope_check(
     scope: ScopeConstraint,
     streams: Mapping[str, _Stream],
-    stream_wire: Mapping[str, Any],
     att: Sequence[_Attribution] | None,
     scope_diagnostics: Sequence[Mapping[str, Any]],
-    traverse_outputs: Sequence[Mapping[str, Any]],
+    traverse_reports: Sequence[tuple[int, Mapping[str, Any]]],
     primary_collections: Mapping[str, int],
+    *,
+    reducer_expected: bool = True,
+    dropped_scope: str = "",
 ) -> dict[str, Any]:
     reasons: list[dict[str, Any]] = []
-    for out in traverse_outputs:
-        widened = (out.get("traversal") or {}).get("widened") if isinstance(out.get("traversal"), Mapping) else None
+    conflict_traversals: list[dict[str, Any]] = []
+    for index, report in traverse_reports:
+        widened = report.get("widened")
         if widened:
             reasons.append({"stream": "graph", "reason": "traversal_widened", "detail": widened.get("reason", "")})
+        conflict = report.get("scope_conflict")
+        if isinstance(conflict, Mapping) and conflict:
+            conflict_traversals.append({"step_index": index, **conflict})
     conflict_steps = [int(d["step_index"]) for d in scope_diagnostics if d.get("outcome") == "conflict"]
     base: dict[str, Any] = {
         "scope": scope.value, "scope_kind": scope.kind, "conflict_steps": conflict_steps,
+        "conflict_traversals": conflict_traversals,
         "recorded_reasons": reasons, "violations": [], "streams_out_of_scope": {}, "out_of_scope": 0,
-        "reducer_out_of_scope": 0, "reducer_unattributed": 0, "detail": "",
+        "reducer_out_of_scope": 0, "reducer_unattributed": 0, "unattributed_refs": 0, "examined": 0, "detail": "",
     }
     if att is not None:
-        base["reducer_unattributed"] = sum(1 for a in att if a.stream == "unattributed")
+        base["reducer_unattributed"] = sum(
+            1 for a in att if a.stream != "t2" and (a.stream == "unattributed" or a.collection == UNATTRIBUTED)
+        )
+    if scope.kind == "none" and dropped_scope:
+        return {**base, "state": "not_evaluated", "detail": (
+            f"the caller's scope {dropped_scope!r} was not applied (a comma-list), so the run was unscoped "
+            "and nothing was checked against it")}
     if scope.kind == "none" or scope.value == "all":
         return {**base, "state": "not_applicable"}
     if scope.kind == "subtree":
@@ -485,11 +533,17 @@ def _scope_check(
 
     out_by_stream: dict[str, int] = {}
     violations: dict[tuple[str, str], int] = {}
+    unattributed_refs = 0
+    examined = sum(len(streams[name].refs) for name in ("vector", "graph")) + sum(primary_collections.values())
+    examined += len(att or ())
     for name in ("vector", "graph"):
         for col in streams[name].refs.values():
-            if col != UNATTRIBUTED and not scope.admits(col):
+            if col == UNATTRIBUTED:
+                unattributed_refs += 1
+            elif not scope.admits(col):
                 out_by_stream[name] = out_by_stream.get(name, 0) + 1
                 violations.setdefault((name, col), 0)
+    unattributed_refs += primary_collections.get(UNATTRIBUTED, 0)
     reducer_out = 0
     for a in att or ():
         if a.stream in ("t2", "unattributed") or a.collection == UNATTRIBUTED or scope.admits(a.collection):
@@ -500,18 +554,30 @@ def _scope_check(
     for col, n in primary_collections.items():
         if col != UNATTRIBUTED and not scope.admits(col):
             reasons.append({"stream": "primary", "reason": "named_source", "collection": col, "count": n})
+    cannot_say: list[str] = []
+    if examined == 0:
+        cannot_say.append("no item was examined (no stream reference and no reducer item)")
+    if unattributed_refs or base["reducer_unattributed"]:
+        cannot_say.append(
+            f"{unattributed_refs} stream reference(s) and {base['reducer_unattributed']} reducer item(s) "
+            "are unattributed to a collection, so they may lie outside the scope")
+    if att is None and reducer_expected:
+        cannot_say.append("no reducer input was recorded, so what the operator was handed is unknown")
     state = "satisfied"
     if any(reason.get("reason") == "named_source" for reason in reasons):
         state = "widened"
-    if conflict_steps:
+    if cannot_say:
+        state = "not_evaluated"
+    if conflict_steps or conflict_traversals:
         state = "conflict"
     if violations:
         state = "violated"
     return {
         **base, "state": state, "streams_out_of_scope": out_by_stream,
         "out_of_scope": sum(out_by_stream.values()), "reducer_out_of_scope": reducer_out,
+        "unattributed_refs": unattributed_refs, "examined": examined,
         "violations": [{"stream": s, "collection": c, "in_reducer": n} for (s, c), n in sorted(violations.items())],
-        "detail": "",
+        "detail": "; ".join(cannot_say) if state == "not_evaluated" else "",
     }
 
 

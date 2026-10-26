@@ -500,7 +500,9 @@ def test_the_runner_policy_without_a_scope_has_no_binding_document_cap() -> None
 def test_an_unscoped_runner_traverse_does_not_drop_documents_to_a_cap() -> None:
     """120 linked documents, no caller scope: all of them survive the policy (the engine's own
     500-node cap is the only bound). An uncalibrated 50-document cut would silently change
-    what every unscoped traverse builtin returns (RDR-232 2a: unscoped is unchanged)."""
+    what every unscoped traverse builtin returns. (The document cap does not bind; the other unscoped
+    changes are real and pinned by ``test_the_unscoped_policy_output_differs_from_the_legacy_one_in_the_
+    documented_ways``.)"""
     nodes, edges = _owned("1.2.50", 120, RDR, link="relates")
     nodes = [_node(SEED, RDR)] + nodes
     seen = _drive(_plan_with_traverse(purpose="factual-evidence"), {})
@@ -508,6 +510,58 @@ def test_an_unscoped_runner_traverse_does_not_drop_documents_to_a_cap() -> None:
     out = _run(_fake_catalog(nodes, edges), seeds=[SEED], link_types=["relates"], policy=policy)
     assert len(out["tumblers"]) == 121
     assert out["traversal"]["dropped_cap"] == 0 and out["traversal"]["nodes_retained"] == 121
+
+
+def test_the_unscoped_policy_output_differs_from_the_legacy_one_in_the_documented_ways() -> None:
+    """RDR-232 section 3: ``nx_answer`` always supplies the policy, so an unscoped traverse inside it is NOT
+    the legacy result. Pinned here so the changelog and docs claim exactly this and no more: (1) documents come
+    back ranked by link role then distance, not in graph order; (2) the chunk budget is spent with a reserved
+    share per document, not as ``chunk_ids[:300]`` in graph order; (3) the output adds ``chunk_collections`` and
+    ``traversal``; (4) the document cap (500) does not bind; (5) a step whose link types are one role admits only
+    that role."""
+    from nexus.plans.traversal_policy import MAX_GRAPH_NODES, derive_policy
+
+    nodes = [_node(t, RDR) for t in (SEED, "1.2.4", "1.2.9")]
+    edges = [_edge("1.2.4", SEED, "relates"), _edge("1.2.9", SEED, "cites")]
+    unscoped = derive_policy({"link_types": ["cites", "relates"]}, None)
+    assert unscoped["max_documents"] == MAX_GRAPH_NODES and unscoped["allowed_collections"] == ""
+    legacy = _run(_fake_catalog(nodes, edges), seeds=[SEED], link_types=["cites", "relates"])
+    ranked = _run(_fake_catalog(nodes, edges), seeds=[SEED], link_types=["cites", "relates"], policy=unscoped)
+    assert set(legacy) == {"tumblers", "ids", "collections"}
+    assert set(ranked) == {"tumblers", "ids", "collections", "chunk_collections", "traversal"}
+    assert legacy["tumblers"] == [SEED, "1.2.4", "1.2.9"] and ranked["tumblers"] == [SEED, "1.2.9", "1.2.4"]
+    assert sorted(legacy["ids"]) == sorted(ranked["ids"]), "the same chunks come back, in another order"
+    assert len(ranked["chunk_collections"]) == len(ranked["ids"])
+
+    # (2) a walk over the 300-chunk budget: the legacy cut is the graph-order prefix, the policy's is per document
+    docs = [_node(t, RDR) for t in (SEED, "1.2.4", "1.2.5", "1.2.6")]
+    links = [_edge(t, SEED, "relates") for t in ("1.2.4", "1.2.5", "1.2.6")]
+    per_doc = {t: 120 for t in (SEED, "1.2.4", "1.2.5", "1.2.6")}
+    related = derive_policy({"link_types": ["relates"]}, None)
+    old = _run(_fake_catalog(docs, links, per_doc), seeds=[SEED], link_types=["relates"])
+    new = _run(_fake_catalog(docs, links, per_doc), seeds=[SEED], link_types=["relates"], policy=related)
+
+    def per_document(out: dict) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for c in out["ids"]:
+            counts[_OWNER[c]] = counts.get(_OWNER[c], 0) + 1
+        return counts
+
+    assert len(old["ids"]) == len(new["ids"]) == 300 and old["ids_truncated"] == new["ids_truncated"]
+    assert per_document(old) == {SEED: 120, "1.2.4": 120, "1.2.5": 60}, "legacy: the later document gets nothing"
+    assert set(per_document(new)) == {SEED, "1.2.4", "1.2.5", "1.2.6"} and min(per_document(new).values()) >= 75
+
+    # (4) 120 linked documents: the document cap does not bind (the engine's 500-node cap is the only bound)
+    many, many_edges = _owned("1.2.50", 120, RDR, link="relates")
+    out = _run(_fake_catalog([_node(SEED, RDR)] + many, many_edges), seeds=[SEED], link_types=["relates"], policy=related)
+    assert len(out["tumblers"]) == 121 and out["traversal"]["dropped_cap"] == 0
+
+    # (5) role admission: an implementation-only step drops a document reached only by a citation
+    impl = derive_policy({"link_types": ["implements"]}, None)
+    two = [_node(SEED, RDR), _node("1.2.7", CODE), _node("1.2.8", RDR)]
+    mixed = [_edge("1.2.7", SEED, "implements"), _edge("1.2.8", SEED, "cites")]
+    kept = _run(_fake_catalog(two, mixed), seeds=[SEED], link_types=["implements", "cites"], policy=impl)
+    assert kept["tumblers"] == [SEED, "1.2.7"] and kept["traversal"]["dropped_role"] == 1
 
 
 def test_an_unscoped_runner_traverse_still_ranks_by_role() -> None:

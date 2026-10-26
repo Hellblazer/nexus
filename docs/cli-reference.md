@@ -5396,10 +5396,17 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has seven RDR-232 keys, all always present (`scope_diagnostics`,
-`evidence_request`, `named_sources`, `primary_evidence`, `reserved_stream`,
-`lifecycle_stream` and `evidence_diagnostics`; the first is `[]` and the other six
-`null` when they have nothing to report):
+The envelope has eight RDR-232 keys, all always present (`scope_diagnostics`,
+`scope_normalized`, `evidence_request`, `named_sources`, `primary_evidence`,
+`reserved_stream`, `lifecycle_stream` and `evidence_diagnostics`; the first is `[]`
+and the other seven `null` when they have nothing to report):
+
+- `scope_normalized` (nexus-jypmj.1.8, nexus-n1908): `{given, applied, reason}`
+  when the caller's `scope` was a comma-list. `scope` takes one corpus prefix or
+  catalog subtree; a list cannot be applied, so the run is unscoped (a broad
+  search). The text says so in a `[scope: ... NOT scoped ...]` line and
+  `evidence_diagnostics.scope_check` is `not_evaluated`, never `not_applicable`.
+  `null` otherwise.
 
 - `scope_diagnostics` (nexus-jypmj.1.3): a list with one entry per
   corpus-taking retrieval step the caller's `scope` reached,
@@ -5429,12 +5436,24 @@ The envelope has seven RDR-232 keys, all always present (`scope_diagnostics`,
   `[evidence request: ...]` line per ambiguous, unresolved or
   not-owner-qualified source, and states a failed owner qualifier once. On
   the single-step fast path the notice says the plan has no primary evidence
-  stream, so a resolved document is not read as evidence there.
+  stream, so a resolved document is not read as evidence there. The owner-name
+  lookup and the resolution (up to about 13 catalog calls) run in a worker
+  thread, not on the event loop, and are bounded by `max_seconds` (20 s) and the
+  call's own `budget_seconds`, whichever is shorter: no call starts past it, and
+  a call that has not returned by then is abandoned. Every source not resolved
+  by then is `unresolved` with "stopped at the deadline" as its reason (an owner
+  lookup that did not return makes the qualifier `unresolved`, never a guess),
+  and the answer proceeds without the stream.
 - `primary_evidence` (nexus-jypmj.1.6): what was read from the resolved
   sources, `{selected_items, selected_chars, manifest_rows_hydrated,
-  fetched_chars, fetch_errors, partial, caps_hit, caps, documents, items}`;
-  `items` carry positions, labels and chashes, not bodies. `None` when no
-  source resolved, the read failed, or the plan took the single-step fast path.
+  fetched_chars, fetch_errors, error, partial, caps_hit, caps, documents, items}`;
+  `items` carry positions, labels and chashes, not bodies. `error` is the
+  exception type name when the whole read failed (empty otherwise); the text
+  says the primary evidence could not be read. The read runs in a worker thread
+  bounded by `caps.max_seconds` (20 s) and the call's `budget_seconds`: no fetch
+  starts past it, a read that has not returned is abandoned, and `deadline` is
+  on `caps_hit` with a text line. `None` when no source resolved or the plan took
+  the single-step fast path.
 - `reserved_stream` (nexus-jypmj.1.6): what the runner did with it, `{reserved_items,
   reserved_chars, merged, merged_at_step, over_share_dropped, deduped_secondary,
   secondary_cut, capped, dropped_before_terminal}`. The reserved items are
@@ -5484,9 +5503,12 @@ The envelope has seven RDR-232 keys, all always present (`scope_diagnostics`,
   outputs and what the runner handed the first evidence-consuming operator. The
   same counts go to one structured log event, `nx_answer_evidence_diagnostics`,
   which carries ids and counts only (no question, source label, title or text,
-  whatever `trace` is). Not persisted before RDR-232 Phase 3. `null` when no
-  retrieval ran (an error before the plan, a plan-miss refusal) or the
-  single-query fast path ran in text mode. Shape:
+  whatever `trace` is). The event is written for every plan run, whether or not
+  `structured` is set; only the structured envelope carries the object. A
+  single-query fast path run in text mode has no per-chunk output, so it logs
+  no event (a scope conflict on it does). Not persisted before RDR-232 Phase 3.
+  `null` when no retrieval ran (an error before the plan, a plan-miss refusal)
+  or the single-query fast path ran in text mode. Shape:
   - `streams`: `vector` (the search family), `graph` (`traverse`) and `primary`
     (the named source's chunks) each `{references, by_collection, in_scope,
     out_of_scope}` (`vector` and `graph` add `steps: [{step_index, tool,
@@ -5504,42 +5526,55 @@ The envelope has seven RDR-232 keys, all always present (`scope_diagnostics`,
     item is attributed by the hash of its text (with the `[source: ...]` line
     removed) against the ids the retrieval steps returned, the stream that
     produced it first winning; an item that hashes to nothing retrieved (a
-    manifest-joined document) is `unattributed`, counted and never assumed in
-    scope. `null` when no operator consumed retrieved evidence (a handoff cut
-    before it, a fast-path query, an error).
+    manifest-joined document), or whose stream is known but whose collection is
+    not (`""`), is counted in `unattributed` and never assumed in scope. `null`
+    when no operator consumed retrieved evidence (a handoff cut before it, a
+    fast-path query, an error).
   - `source_check`: `{state, sources, reducer_input_recorded, unresolved}`.
     `state` is the worst source's: `missing` (not resolved, ambiguous, nothing
-    read, no reduction handed it, or none of its chunks reached the reducer),
-    `partial` (the document is over the primary budget, or some selected chunks
-    did not reach the reducer) or `covered`; `not_applicable` when no source was
-    named. Each source row is `{source, tumbler, state, detail, selected,
-    reached_reducer, manifest_rows, lifecycle}`; `lifecycle` is `{state,
+    read, no reduction handed it, none of its chunks reached the reducer, or
+    every reserved chunk was dropped by an intermediate `rank` or `filter`
+    before the final reduction), `partial` (the document is over the primary
+    budget, some selected chunks did not reach the reducer, or some reserved
+    chunks were dropped before the final reduction) or `covered`;
+    `not_applicable` when no source was named. Each source row is `{source,
+    tumbler, state, detail, selected, reached_reducer, manifest_rows,
+    dropped_before_terminal, lifecycle}`; `lifecycle` is `{state,
     status, detail, delivered, reached_reducer}` with `state` `resolved`,
-    `partial` (one of the two records absent or lost before the reducer),
+    `partial` (one of the two records absent, lost before the reducer, or
+    dropped before the final reduction),
     `unresolved` (`no_records`, `project_undetermined`, `read_capped`,
     `read_failed` or `over_cap`: the records may exist, so this is a facet
     unresolved, not silence), `not_applicable` (`not_rdr`, `duplicate`,
     `not_resolved`) or `null` when no T2 stream ran. `unresolved` lists the
     `{source, facet: "lifecycle", status}` entries that are `unresolved` or
     `partial`.
-  - `scope_check`: `{state, scope, scope_kind, conflict_steps, recorded_reasons,
-    violations, streams_out_of_scope, out_of_scope, reducer_out_of_scope,
-    reducer_unattributed, detail}`. `state`: `violated` (a collection outside the
-    scope reached a retrieval stream with no recorded reason; `violations` names
+  - `scope_check`: `{state, scope, scope_kind, conflict_steps,
+    conflict_traversals, recorded_reasons, violations, streams_out_of_scope,
+    out_of_scope, reducer_out_of_scope, reducer_unattributed, unattributed_refs,
+    examined, detail}`. `state`: `violated` (a collection outside the scope
+    reached a retrieval stream with no recorded reason; `violations` names
     stream, collection and how many are in the reducer input), `conflict` (a step
-    was skipped for the scope; `conflict_steps`), `widened` (a named source sits
-    outside the scope by request; `recorded_reasons`), `satisfied`,
-    `not_applicable` (no scope or `all`) or `not_evaluated` (a catalog subtree,
-    which a multi-step plan does not intersect with its corpora). Violated wins
-    over conflict, conflict over widened.
+    was skipped for the scope, `conflict_steps`, or a `traverse` step's scope
+    emptied an implementation expansion, `conflict_traversals`), `not_evaluated`
+    (the check cannot say, and `detail` names why: a catalog subtree, which a
+    multi-step plan does not intersect with its corpora; no item examined; a
+    stream reference or reducer item with no collection, which may lie outside
+    the scope; no reducer input recorded; or a comma-list scope that was not
+    applied), `widened` (a named source sits outside the scope by request;
+    `recorded_reasons`), `satisfied` (every examined item was attributed and
+    none is outside the scope) or `not_applicable` (no scope or `all`). The
+    single-query fast path has no reducer by design, so its streams alone are
+    judged. Precedence: violated, conflict, not_evaluated, widened, satisfied.
   - `skipped_steps`: `[{step_index, tool, reason: "scope_conflict", plan_corpus,
     caller_scope}]`. A skipped step dispatched nothing, so it has no `steps`
-    record and no telemetry row; `step_count` and `steps` count executed steps
-    and `skipped_steps` the rest.
+    record and no telemetry row. `steps` holds the executed steps and
+    `step_count` is the length of the run's step outputs, which includes a
+    skipped step's marker output; `skipped_steps` names those.
   - `traversals`: one summary per `traverse` step (`policy_applied`,
     `policy_failed`, `possibly_truncated`, `contained`, `nodes_walked`,
     `nodes_retained`, `dropped_out_of_scope`, `dropped_role`, `dropped_cap`,
-    `widened`); `capped_traversals`: how many came back at the engine's 500-node
+    `scope_conflict`, `widened`); `capped_traversals`: how many came back at the engine's 500-node
     cap (the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13).
   - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
     secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
@@ -5547,7 +5582,18 @@ The envelope has seven RDR-232 keys, all always present (`scope_diagnostics`,
   An empty set of retrieval ids no longer turns an answer into the no-match
   notice when the reserved stream was merged into the reduction (a resolved
   source with no vector or graph hits is answered from its primary chunks and T2
-  records); a stream no operator consumed does not count.
+  records); a stream no operator consumed does not count (the continuation
+  handoff's empty-evidence check uses the same predicate). A planner-made plan
+  whose own retrieval steps found nothing keeps that answer but is not grown
+  into the plan library.
+- `traverse` under `nx_answer` (nexus-jypmj.1.5): `nx_answer` always supplies the
+  traversal policy, so an unscoped call is not the legacy `traverse`. The
+  document cap (500, the engine's node cap) does not bind with no scope, but
+  documents are ranked by link role then distance instead of graph order, the
+  300-chunk budget is spent with a reserved share per document instead of the
+  graph-order prefix, a step whose link types are one role admits only that
+  role, and the result adds `chunk_collections` and `traversal`. A `traverse`
+  call with no `policy` argument is unchanged.
 
 ### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
 

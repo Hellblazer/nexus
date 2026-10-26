@@ -665,7 +665,9 @@ async def test_the_primary_stream_puts_the_records_first_and_survives_a_failed_c
          patch.object(mcp_core, "_get_t3", return_value=MagicMock()), \
          patch.object(mcp_core, "_get_catalog", return_value=None):
         ev, stream = await mcp_core._nx_answer_primary_stream(resolution, life)
-    assert ev is None and stream is not None and len(stream.items) == 2, "the T2 records do not depend on T3"
+    # nexus-jypmj.1.9: a failed read is disclosed on the evidence (error), not returned as "no evidence".
+    assert ev is not None and ev.error == "RuntimeError" and ev.items == ()
+    assert stream is not None and len(stream.items) == 2, "the T2 records do not depend on T3"
 
 
 def test_without_lifecycle_the_primary_stream_call_is_unchanged() -> None:

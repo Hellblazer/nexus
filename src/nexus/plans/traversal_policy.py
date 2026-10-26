@@ -50,8 +50,13 @@ MAX_GRAPH_NODES: int = 500
 #: Secondary (non-seed) documents a policy keeps when the caller gave a scope. NOT calibrated: no
 #: measurement of real ``nx_answer`` traversals exists yet (nexus-jypmj.1.12 records the first).
 #: With no caller scope the runner derives :data:`MAX_GRAPH_NODES` instead, which binds nothing
-#: (the engine never returns more nodes), so an uncalibrated cut does not change what an unscoped
-#: traverse returns until nexus-jypmj.1.12 has measured one.
+#: (the engine never returns more nodes), so an uncalibrated DOCUMENT cut does not bind an unscoped
+#: traverse until nexus-jypmj.1.12 has measured one. That is the only thing "unscoped" leaves alone:
+#: ``nx_answer`` always supplies the policy (RDR-232 section 3), so an unscoped traverse is still ranked
+#: by link role then distance, spends its chunk budget with a per-document share instead of the
+#: graph-order prefix, and carries ``chunk_collections`` and ``traversal``; a one-role step drops the
+#: other roles. ``test_the_unscoped_policy_output_differs_from_the_legacy_one_in_the_documented_ways``
+#: pins exactly this.
 DEFAULT_MAX_DOCUMENTS: int = 50
 
 #: The secondary chunk budget; the same bound ``traverse`` has always put on ``ids``.
@@ -192,8 +197,9 @@ def derive_policy(step_args: Mapping[str, Any], caller_scope: object) -> dict[st
     The scope is the caller's (an empty one allows everything); the link role is read from the
     step's own link types, so a ``find-implementations`` step asks for ``implementation`` and a
     ``factual-evidence`` one for ``factual``. With no caller scope (none, or ``all``) the document
-    cap is :data:`MAX_GRAPH_NODES`, which binds nothing, until nexus-jypmj.1.12 calibrates one; a
-    scoped run keeps :data:`DEFAULT_MAX_DOCUMENTS`. A policy the plan declared is not used as given:
+    cap is :data:`MAX_GRAPH_NODES`, which binds nothing, until nexus-jypmj.1.12 calibrates one (the
+    policy still ranks, allocates chunks per document and annotates the output); a scoped run keeps
+    :data:`DEFAULT_MAX_DOCUMENTS`. A policy the plan declared is not used as given:
     only the fields that tighten the derived policy are merged (:func:`_tightened`).
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred: reads a YAML registry on first use
