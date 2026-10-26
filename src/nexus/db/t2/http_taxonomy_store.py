@@ -1246,16 +1246,34 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     def persist_assignments(self, assignments: list[dict[str, Any]]) -> int:
         """Persist pre-computed assignments (mirrors CatalogTaxonomy.persist_assignments).
 
+        Returns the number of rows the engine WROTE. See
+        :meth:`persist_assignments_counted` for the full contract and for the
+        number it skipped.
+        """
+        return self.persist_assignments_counted(assignments)[0]
+
+    def persist_assignments_counted(self, assignments: list[dict[str, Any]]) -> tuple[int, int]:
+        """Persist pre-computed assignments; return ``(written, skipped_superseded)``.
+
         nexus-71988: one ``/assignments/assign_many`` POST per <=1000 rows —
         the per-row ``assign_topic`` loop cost ~29s per 300-chunk flush batch
         (up to ~600 sequential POSTs, 2026-07-04 attrib run). The engine
         endpoint (v0.1.24+) preserves the per-row semantics verbatim
         (projection GREATEST/CASE upsert, centroid DO NOTHING,
         trigger-maintained doc_count). A 404 (older engine) falls back to
-        the legacy per-row loop. Returns the number persisted.
+        the legacy per-row loop.
+
+        nexus-h2v0l: the engine (vectors-038, engine-service-v0.1.165) skips a
+        projection row whose topic belongs to a superseded collection and
+        answers ``{"persisted": N written, "skipped_superseded": M}``; the two
+        counts are summed over the pages. An engine without the field
+        (0.1.164) answers ``{"persisted": N}`` and never skips, so a page
+        whose answer lacks ``persisted`` counts as written in full and one
+        lacking ``skipped_superseded`` as skipped 0. The per-row fallback
+        counts every row written.
         """
         if not assignments:
-            return 0
+            return 0, 0
         # RDR-204 Phase 1 (nexus-f5wwx): pre-register every DISTINCT
         # source_collection the batch references — see assign_topic's
         # identical rationale. Cheap after the first call per name
@@ -1271,10 +1289,23 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             ensure_collection_registered(source_collection, registrar=self._catalog_registrar)
         _PAGE = 1000  # engine cap (MAX_BATCH parity)
 
+        written = 0
+        skipped = 0
+
         def _post_pages() -> None:
+            # Reset per attempt: write_with_registration_retry re-runs the
+            # whole page loop, and the pages a failed attempt already wrote
+            # are re-posted (idempotent upsert), so they count once.
+            nonlocal written, skipped
+            written = skipped = 0
             for start in range(0, len(assignments), _PAGE):
                 batch = assignments[start : start + _PAGE]
-                self._post("/assignments/assign_many", {"assignments": batch})
+                answer = self._post("/assignments/assign_many", {"assignments": batch})
+                answer = answer if isinstance(answer, dict) else {}
+                page_written = answer.get("persisted")
+                written += page_written if isinstance(page_written, int) else len(batch)
+                page_skipped = answer.get("skipped_superseded")
+                skipped += page_skipped if isinstance(page_skipped, int) else 0
 
         try:
             # RDR-204 Phase 1 follow-up (nexus-f5wwx, code review [24995]
@@ -1301,7 +1332,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 write_with_registration_retry(next(iter(source_collections)), _post_pages, registrar=self._catalog_registrar)
             else:
                 _post_pages()
-            return len(assignments)
+            return written, skipped
         except Exception as exc:  # noqa: BLE001 — 404-classify only; anything else re-raises below
             status = getattr(
                 getattr(exc, "response", None), "status_code", None
@@ -1318,7 +1349,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 a.get("source_collection"),
                 a.get("assigned_at"),
             )
-        return len(assignments)
+        return len(assignments), 0
 
     def persist_cross_links(self, pairs: list[tuple[int, int]]) -> int:
         """Persist projection topic_links (mirrors CatalogTaxonomy.persist_cross_links).

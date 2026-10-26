@@ -207,6 +207,11 @@ def _run_discover_projection(
     """
     try:
         proj_count = 0
+        proj_skipped = 0
+        # nexus-h2v0l: a superseded collection keeps its topics, so a kept
+        # tombstone could win a chunk's single best pick and the live
+        # runner-up would be lost. Same cut as ``project`` and ``--backfill``.
+        targets = _without_superseded(targets)
         for col_name in targets:
             others = [c for c in targets if c != col_name]
             if others:
@@ -228,12 +233,17 @@ def _run_discover_projection(
                     )
                 assignments = result.get("chunk_assignments", [])
                 if assignments:
-                    _persist_assignments(
+                    written, skipped = _persist_assignments_counted(
                         assignments, col_name, quiet=True,
                     )
-                    proj_count += len(assignments)
+                    proj_count += written
+                    proj_skipped += skipped
+        if proj_count or proj_skipped:
+            click.echo(
+                f"  Projection: {proj_count} cross-collection assignments"
+                + (f", {proj_skipped} skipped (superseded targets)" if proj_skipped else "")
+            )
         if proj_count:
-            click.echo(f"  Projection: {proj_count} cross-collection assignments")
             # Co-occurrence topic links (SC-5, SC-7)
             # RDR-151 Phase 3: route via daemon.
             from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
@@ -2879,14 +2889,31 @@ def _persist_assignments(
     *,
     quiet: bool = False,
 ) -> int:
+    """Write per-chunk projection assignments; return the number the engine WROTE.
+
+    See :func:`_persist_assignments_counted` for the contract and for the
+    number it skipped.
+    """
+    return _persist_assignments_counted(chunk_assignments, source_collection, quiet=quiet)[0]
+
+
+def _persist_assignments_counted(
+    chunk_assignments: list[tuple[str, int, float]],
+    source_collection: str,
+    *,
+    quiet: bool = False,
+) -> tuple[int, int]:
     """Write per-chunk projection assignments from ``project_against`` results.
 
     Each tuple is ``(doc_id, topic_id, raw_cosine_similarity)`` per RDR-077
     RF-3. *source_collection* identifies the origin of these chunks (used
     later for ICF hub detection).
 
-    Returns the number of assignments written. Set *quiet* to suppress CLI
-    output (used when called from pipeline context).
+    Returns ``(written, skipped_superseded)``: the rows the engine wrote and
+    the rows it skipped because their topic belongs to a superseded
+    collection (nexus-h2v0l; an engine that reports no skip count yields 0).
+    Set *quiet* to suppress CLI output (used when called from pipeline
+    context).
 
     RDR-151 Phase 3 (nexus-uzay8): all T2 writes routed via t2_index_write.
     The assign_topic calls are batched as a single persist_assignments call
@@ -2905,8 +2932,11 @@ def _persist_assignments(
         }
         for doc_id, topic_id, similarity in chunk_assignments
     ]
+    written, skipped = 0, 0
     if assignment_dicts:
-        t2_index_write(lambda db: db.taxonomy.persist_assignments(assignment_dicts))
+        written, skipped = t2_index_write(
+            lambda db: db.taxonomy.persist_assignments_counted(assignment_dicts)
+        )
     # GitHub #240 + bead nexus-gwhy: rebuild projection entries in
     # topic_links so ``nx taxonomy links`` reflects the new assignments.
     # Without this refresh, ``links`` stayed at the centroid-similarity
@@ -2914,8 +2944,11 @@ def _persist_assignments(
     # ahead. Cost is one aggregate + upsert per persist call.
     t2_index_write(lambda db: db.taxonomy.refresh_projection_links())
     if not quiet:
-        click.echo(f"Persisted {len(chunk_assignments)} projection assignment(s).")
-    return len(chunk_assignments)
+        click.echo(
+            f"Persisted {written} projection assignment(s)"
+            + (f", skipped {skipped} (superseded targets)." if skipped else ".")
+        )
+    return written, skipped
 
 
 def _without_superseded(collections: list[str]) -> list[str]:
@@ -2923,9 +2956,10 @@ def _without_superseded(collections: list[str]) -> list[str]:
 
     A supersede tombstone keeps its topics, so ``get_distinct_collections`` lists it, and a projection
     that names one of its topics would attach live chunks to a retired collection (nexus-2k8wi). The engine
-    refuses that write on its own (``assign``/``assign_many`` skip a projection row whose topic belongs to a
-    superseded collection), so this is the cheap early cut that keeps the run from reading the tombstone's
-    centroids and sending rows that are then dropped; the guard does not depend on it. One
+    skips that write on its own (``assign``/``assign_many`` skip a projection row whose topic belongs to a
+    superseded collection and report the count as ``skipped_superseded``), so this is the cheap early cut
+    that keeps the run from reading the tombstone's centroids and sending rows that are then dropped; the
+    guard does not depend on it. One
     ``/catalog/collections/list`` read, answered by every engine. A read that fails leaves *collections*
     as given and says so: the engine's guard still holds.
     """
@@ -3013,8 +3047,7 @@ def _run_backfill(
             total_novel += novel
 
             if persist and result.get("chunk_assignments"):
-                _persist_assignments(result["chunk_assignments"], src)
-                total_assigned += len(result["chunk_assignments"])
+                total_assigned += _persist_assignments(result["chunk_assignments"], src)
         except Exception as e:  # noqa: BLE001 - per-item skip surfaced to user via click.echo
             click.echo(f"    Skipped: {e}")
 

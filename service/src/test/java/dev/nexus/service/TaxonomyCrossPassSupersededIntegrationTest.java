@@ -247,10 +247,27 @@ class TaxonomyCrossPassSupersededIntegrationTest {
         Fixture f = fixture("pother");
         supersede(f.tenant, f.retired, f.live);
 
-        assertThat(repo.assignManyCounted(f.tenant, List.of(Map.of(
-            "doc_id", f.chash, "topic_id", f.retiredTopic, "assigned_by", "manual",
-            "source_collection", f.source)))).isEqualTo(new TaxonomyRepository.AssignManyResult(1, 0));
-        assertThat(docCount(f.tenant, f.retiredTopic)).isEqualTo(1);
+        // nexus-h2v0l: pin BOTH non-projection kinds, batch and single, so nothing widens the guard to
+        // "any row onto a retired topic" (mergeTopics into a retired topic carries projection rows across,
+        // nexus-14lgk; the guard stays at the projection write).
+        String centroidChash = hexChash("x2k8wi-chash-pother-centroid");
+        String singleChash = hexChash("x2k8wi-chash-pother-single");
+        seedChunk(f.tenant, f.source, centroidChash, unit(1.0f, 0.0f));
+        seedChunk(f.tenant, f.source, singleChash, unit(1.0f, 0.0f));
+
+        assertThat(repo.assignManyCounted(f.tenant, List.of(
+            Map.of("doc_id", f.chash, "topic_id", f.retiredTopic, "assigned_by", "manual",
+                "source_collection", f.source),
+            Map.of("doc_id", centroidChash, "topic_id", f.retiredTopic, "assigned_by", "centroid",
+                "source_collection", f.source))))
+            .isEqualTo(new TaxonomyRepository.AssignManyResult(2, 0));
+        assertThat(docCount(f.tenant, f.retiredTopic)).isEqualTo(2);
+
+        assertThat(repo.assignTopic(f.tenant, singleChash, f.retiredTopic, "centroid", null, f.source, null))
+            .as("a single centroid row onto the retired topic lands").isTrue();
+        assertThat(docCount(f.tenant, f.retiredTopic)).isEqualTo(3);
+        assertThat(repo.getAssignmentDetails(f.tenant, List.of(f.chash, centroidChash, singleChash)))
+            .hasSize(3);
     }
 
     // ── a rename tombstone holds no centroids: the re-homed ones stay candidates ─────────────────────

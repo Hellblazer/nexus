@@ -813,6 +813,7 @@ def test_catalog_construction_allowlist_includes_catalog_module():
 _TAXONOMY_WRITE_METHODS: frozenset[str] = frozenset({
     "assign_topic",
     "persist_assignments",
+    "persist_assignments_counted",
     "persist_discovered_topics",
     "persist_rebuild_topics",
     "persist_cross_links",

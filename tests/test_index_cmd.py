@@ -1954,12 +1954,12 @@ def test_project_cross_collections_passes_source_collection(monkeypatch) -> None
             # One assignment per projection call.
             return {"chunk_assignments": [("doc-1", 7, 0.9)]}
 
-        def persist_assignments(self, assignments):
+        def persist_assignments_counted(self, assignments):
             for a in assignments:
                 recorded.append(
                     (a["doc_id"], a["topic_id"], a["source_collection"])
                 )
-            return len(assignments)
+            return len(assignments), 0
 
         def refresh_projection_links(self):
             pass
@@ -1972,13 +1972,21 @@ def test_project_cross_collections_passes_source_collection(monkeypatch) -> None
     import nexus.mcp_infra as _mi
     monkeypatch.setattr(_mi, "t2_index_write", lambda fn: fn(_FakeDb()))
 
-    total, incomplete, nonfinite = _project_cross_collections(
+    class _NoneSuperseded:
+        def list_collections(self):
+            return []
+
+    # nexus-h2v0l: the pass reads the collection registry to drop superseded collections.
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _NoneSuperseded())
+
+    total, incomplete, nonfinite, skipped = _project_cross_collections(
         fake, ["code__a", "code__b"], chroma_client=None,
     )
     # a-vs-b and b-vs-a each persist one assignment.
     assert total == 2
     assert incomplete == 0
     assert nonfinite == 0
+    assert skipped == 0
     # Each persisted assignment is stamped with its own source collection.
     assert {r[2] for r in recorded} == {"code__a", "code__b"}
 
@@ -1991,7 +1999,7 @@ def test_project_cross_collections_single_collection_noop() -> None:
         def project_against(self, *a, **k):  # pragma: no cover - must not be called
             raise AssertionError("project_against should not run with no others")
 
-    assert _project_cross_collections(_FakeTaxonomy(), ["only__one"], None) == (0, 0, 0)
+    assert _project_cross_collections(_FakeTaxonomy(), ["only__one"], None) == (0, 0, 0, 0)
 
 
 # ── nx index repo: per-run log file (nexus-mjc9l) ───────────────────────────
