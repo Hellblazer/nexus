@@ -602,10 +602,18 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
 
 def resolve_knowledge_doc_for_chash(
     reader, chash: str, *, log_event: str, collection: str | None = None,
-    owner_collection: str | None = None,
+    owner_collection: str | None = None, title: str | None = None,
 ):
     """Resolve *chash* to the single store_put-origin catalog document it
     identifies, or ``None`` if there is no match or the match is ambiguous.
+
+    *title*, when given (``""`` included), restricts candidates to documents
+    whose ``title`` equals it, BEFORE the ambiguity count (nexus-6pfgb.31).
+    The put path passes it: a note's identity is (collection, title), so a put
+    reconciles only onto the note it names, and an untitled put only onto an
+    untitled one. Without it a put adopted whatever note held the text, retitled
+    it and stamped its own ``ttl_days`` on it; with the filter after the count,
+    a titled note sharing the text would hide the put's own note as ambiguous.
 
     *collection*, when given, additionally restricts candidates to
     entries whose ``physical_collection`` equals it (nexus-bb6n2 round 2).
@@ -685,6 +693,7 @@ def resolve_knowledge_doc_for_chash(
             entry is not None
             and entry.content_type == "knowledge"
             and not entry.file_path
+            and (title is None or entry.title == title)
             and (collection is None or entry.physical_collection == collection)
             and (
                 owner_collection is None
@@ -846,6 +855,11 @@ def catalog_store_hook_tracked(
     catalog — the Java service owns it; nexus-f1itv) — the schema
     funnel drops empty ``doc_id`` at the boundary.
 
+    A put never adopts, retitles or re-keys another note (nexus-6pfgb.31): the
+    chash dedup considers only a document with this put's own *title* (an
+    untitled put: only an untitled one), and every other holder of the text
+    stays as it was while the put mints a second document sharing the chunk.
+
     ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6;
     the FULL ``sha256(content)`` hex per RDR-180). It is consulted for legacy
     ``meta.doc_id`` dedup via :func:`resolve_knowledge_doc_for_chash`
@@ -993,16 +1007,25 @@ def catalog_store_hook_tracked(
         # code path, no structural difference between "split" and
         # "unsplit" here. Docstring contract is (collection, title); a
         # cross-collection chash coincidence must never satisfy it.
+        #
+        # nexus-6pfgb.31: only a document with THIS put's title is a candidate
+        # (an untitled put: only an untitled one). The source_uri check below
+        # cannot say it for an untitled put (no source_uri of its own to compare)
+        # or for a legacy row (empty source_uri): such a put adopted a titled
+        # note, blanked or rewrote its source_uri and stamped its own ttl_days
+        # on it, and ``nx store expire`` retired a note its owner had made
+        # permanent. An untitled put of text a titled note holds mints an
+        # untitled document of its own sharing the chunk (RDR-108).
         existing = resolve_knowledge_doc_for_chash(
             reader, doc_id, log_event="catalog_store_hook_dedup",
-            collection=collection_name,
+            collection=collection_name, title=title,
         )
         # nexus-enej7: the same content under a DIFFERENT title is a second
         # document sharing the chunk (RDR-108), not a re-put of this one.
         # Reconciling onto it rewrote the first document's source_uri to the
         # new title and never registered the new one (shakeout 7.64.1 F1).
-        # Only a row with the same identity, or a legacy row with no
-        # source_uri to compare, reconciles here.
+        # The title filter above already holds that; this stays for the
+        # same-title row whose source_uri names another identity.
         if (
             existing is not None
             and source_uri is not None

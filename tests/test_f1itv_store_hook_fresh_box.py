@@ -191,6 +191,8 @@ def test_fresh_box_service_mode_dedups_by_doc_id(fake_client, monkeypatch):
         content_type = "knowledge"
         file_path = ""
         physical_collection = _COLLECTION
+        # nexus-6pfgb.31: the dedup reconciles only onto a document with the put's own title.
+        title = "fresh-box-note"
 
     monkeypatch.setattr(
         _FakeHttpCatalogClient, "docs_for_chashes",
