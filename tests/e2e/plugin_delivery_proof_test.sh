@@ -361,7 +361,7 @@ expect_has "usage: exit 64" "$out" "rc=64"
 echo "Test e: the real HOME is neither read nor written; claude sees only the scrubbed one"
 CANARY="$WORKDIR/realhome"; mkdir -p "$CANARY/.claude/plugins"
 echo "do-not-touch" >"$CANARY/.claude/plugins/installed_plugins.json"
-echo "secret-shaped" >"$CANARY/.claude/.credentials.json"
+echo "do-not-touch" >"$CANARY/.claude/settings.json"
 before="$(cd "$CANARY" && find . -type f -exec cksum {} + | sort)"
 before_tree="$(cd "$CANARY" && find . | sort)"
 # Poisoned canaries: each would break the run if the script let it in. A real HOME's git config

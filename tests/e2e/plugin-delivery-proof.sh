@@ -81,6 +81,8 @@ case "$PREV$NEW" in *[!0-9A-Za-z.+-]*) usage ;; esac
 TAG_PREV="v$PREV"; TAG_NEW="v$NEW"
 
 TAB="$(printf '\t')"
+NL='
+'
 SCRATCH=""; GATE_HOME=""; LIVE_HOME=""
 # shellcheck disable=SC2329  # invoked through the EXIT trap
 cleanup() {
@@ -337,8 +339,10 @@ EOF
     LIVE_NAMES="$(printf '%s\n' "$LIVE_LIST" | cut -f1)"
     while IFS= read -r want; do
         [ -n "$want" ] || continue
-        printf '%s\n' "$LIVE_NAMES" | grep -qxF "$want" \
-            || problem "GitHub marketplace: $want ships in $TAG_NEW but is not listed"
+        case "$NL$LIVE_NAMES$NL" in
+            *"$NL$want$NL"*) ;;
+            *) problem "GitHub marketplace: $want ships in $TAG_NEW but is not listed" ;;
+        esac
     done <<EOF
 $ALL_NAMES
 EOF
