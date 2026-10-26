@@ -39,11 +39,17 @@ import structlog
 from nexus.embed_window import window_for_collection
 from nexus.errors import UploadStalledError
 from nexus.pdf_chunker import PDFChunker
-from nexus.pdf_extractor import ExtractionResult, PDFExtractor
+from nexus.pdf_extractor import ExtractionResult, PDFExtractor, bind_run_cancel, stop_mineru_workers
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.retry import _vector_with_retry
+from nexus.util.termination import TerminationRequested, sigterm_raises
 
 _log = structlog.get_logger(__name__)
+
+#: The orchestrator waits on its stages in slices this long, so a pending signal handler runs
+#: within one slice: CPython runs Python signal handlers on the main thread only, and an untimed
+#: wait there need not wake when the OS delivered the signal to a stage thread.
+_STAGE_WAIT_SLICE_S = 1.0
 
 _UPLOAD_BATCH_SIZE = 128  # Conservative vs ChromaDB's 300 limit — matches _INCREMENTAL_BATCH_SIZE in doc_indexer
 _EMBED_BATCH_SIZE = 32  # Smaller than batch path (128) — favours heartbeat freshness in streaming
@@ -864,6 +870,11 @@ def uploader_loop(
             # The chunker is done and nothing new is readable: the writer's last request, the
             # sweep, and (for a direct caller) the stamp.
             _land_held()
+            if cancel.is_set():
+                # nexus-4vx0a review: the run was interrupted while the last request landed and
+                # its row was given back as failed; marking it completed now would make the next
+                # create wipe the buffer instead of resuming it.
+                return
             state = db.get_pipeline_state(content_hash)
             if state and state["chunks_created"] is not None and state["chunks_uploaded"] >= state["chunks_created"]:
                 db.mark_completed(content_hash)
@@ -1328,6 +1339,65 @@ def _reconcile_resumed_run(db: HttpPipelineDB, doc_id: str, content_hash: str) -
     return "reset"
 
 
+def _release_interrupted_run(
+    db: HttpPipelineDB, content_hash: str, interrupt: BaseException, stage_error: BaseException | None = None,
+) -> bool:
+    """Give the pipeline row back after a SIGTERM or Ctrl-C (nexus-4vx0a).
+
+    The row moves to ``failed``, so the next run of the document is answered
+    ``resuming`` at once instead of ``PipelineConflictRunning`` until the
+    heartbeat is five minutes old. The buffer is KEPT, as a crash keeps it: the
+    interrupt says nothing about the document, so the next run resumes from the
+    pages already extracted, and a stage still running when this is called can
+    only add pages to the buffer, never leave a wiped WAL under a counter that
+    would skip pages on resume. *stage_error*, when a stage had failed before the
+    interrupt, is recorded too (the release then stands in for that failure's
+    WAL wipe, which is unsafe while a stage still runs). Never raises. Returns
+    True when the engine fenced the write (a newer run owns the row and nothing
+    of it is this run's to touch), False otherwise."""
+    reason = "interrupted by SIGTERM" if isinstance(interrupt, TerminationRequested) else "interrupted"
+    if stage_error is not None:
+        reason = f"{reason} after a stage failed ({stage_error})"
+    try:
+        db.mark_failed(content_hash, error=f"{reason}; the buffer is kept and the next run resumes it")
+    except PipelineRunFenced as fenced:
+        _log.warning(
+            "pipeline_run_fenced_at_interrupt",
+            content_hash=content_hash, pipeline_id=fenced.pipeline_id,
+            run_epoch=fenced.run_epoch, current_epoch=fenced.current_epoch,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — boundary catch: the interrupt must propagate, not a /fail transport error
+        _log.warning("pipeline_interrupt_release_failed", content_hash=content_hash, exc_info=True)
+        return False
+    _log.info("pipeline_run_released_on_interrupt", content_hash=content_hash, reason=reason)
+    return False
+
+
+def _extractor_loop_bound_to_cancel(
+    pdf_path: Path, content_hash: str, db: HttpPipelineDB, cancel: threading.Event, **kwargs: Any,
+) -> ExtractionResult:
+    """:func:`extractor_loop` with this run's *cancel* bound to the thread's MinerU workers
+    (nexus-4vx0a): a worker started after the run was interrupted is killed as it registers."""
+    bind_run_cancel(cancel)
+    try:
+        return extractor_loop(pdf_path, content_hash, db, cancel, **kwargs)
+    finally:
+        bind_run_cancel(None)
+
+
+def _interrupt_after_create(db: HttpPipelineDB, content_hash: str, step: Callable[[], Any]) -> Any:
+    """Run *step* between ``create_pipeline`` and the stage block, releasing the row on an interrupt.
+
+    The row is ``running`` from the create on; a Ctrl-C or SIGTERM in this stretch would otherwise
+    leave it so for the stale window, the bug nexus-4vx0a fixes for the stages."""
+    try:
+        return step()
+    except (KeyboardInterrupt, TerminationRequested) as exc:
+        _release_interrupted_run(db, content_hash, exc)
+        raise
+
+
 def _rearm_failed(db: HttpPipelineDB, content_hash: str, reason: str) -> None:
     """Move the pipeline row to ``failed`` so the next run RESUMES it (``create`` answers
     ``resuming``) instead of finding a leftover and wiping it. Best effort: it keeps the buffer, so
@@ -1339,6 +1409,7 @@ def _rearm_failed(db: HttpPipelineDB, content_hash: str, reason: str) -> None:
         _log.warning("pipeline_terminal_mark_failed", content_hash=content_hash, reason=reason, exc_info=True)
 
 
+@sigterm_raises()
 def pipeline_index_pdf(
     pdf_path: Path,
     content_hash: str,
@@ -1456,6 +1527,16 @@ def pipeline_index_pdf(
     of the completion stamp after the last chunk landed is one such failure: it propagates, and the
     document's fence stays ``indexing``.
 
+    An interrupt after the row is created (nexus-4vx0a: Ctrl-C, or SIGTERM,
+    which :func:`~nexus.util.termination.sigterm_raises` turns into an exception
+    on the main thread for the length of this call) hands the pipeline row back
+    as ``failed`` with its buffer kept, at once, so an immediate rerun resumes
+    instead of meeting ``PipelineConflictRunning``. It also kills this process's
+    MinerU workers and stops the stages without waiting for them. If a stage
+    had already failed, that failure's own bookkeeping runs instead. The
+    interrupt is what propagates, and a SIGTERM is delivered again on the way
+    out, so the process still ends as it would have.
+
     Returns total chunks indexed.
     """
     if dry_run:
@@ -1548,9 +1629,11 @@ def pipeline_index_pdf(
         )
 
     # Resolve embed_fn from credentials when not provided (matches batch path).
+    # nexus-4vx0a: the row is 'running' from here; an interrupt before the stage block takes over
+    # gives it back (_interrupt_after_create), as the stage block does for one during the stages.
     if embed_fn is None:
         from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
-        if is_vector_service_mode():
+        if _interrupt_after_create(db, content_hash, is_vector_service_mode):
             # nexus-9n1u3 / RDR-152 Seam B: leave embed_fn=None — the service
             # embeds server-side at upload time. The embed stage writes a
             # non-NULL empty-blob sentinel and the uploader's write ignores
@@ -1593,73 +1676,98 @@ def pipeline_index_pdf(
     # RDR-223: the index-run fence begins inside the writer, as its first request, so no chunk
     # lands before it (the old explicit begin sat here). The writer stays open until the tail
     # stamps it complete, after the post-passes.
-    run = UploadRun(on_request=on_write_started)
+    run = _interrupt_after_create(db, content_hash, lambda: UploadRun(on_request=on_write_started))
     try:
         cancel = threading.Event()
         extraction_done = threading.Event()
         chunking_done = threading.Event()
         first_exc: BaseException | None = None
+        interrupt: BaseException | None = None
+        released_fenced = False
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            extract_future = pool.submit(
-                extractor_loop, pdf_path, content_hash, db, cancel,
-                extractor=extractor, on_formula_oom=on_formula_oom,
-                extraction_done=extraction_done,
-                allow_degraded_extraction=allow_degraded_extraction,
-            )
-            chunk_future = pool.submit(
-                chunker_loop, content_hash, db, cancel, embed_fn,
-                extraction_done=extraction_done, chunking_done=chunking_done,
-                pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
-                git_meta=git_meta, doc_id=doc_id,
-            )
-            if hooks is None:
-                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
-                hooks = HookRegistry()
-                install_default_hooks(hooks)
-            upload_future = pool.submit(
-                uploader_loop, content_hash, db, t3, collection, cancel,
-                chunking_done,
-                catalog_doc_id=doc_id,
-                hooks=hooks,
-                dry_run=dry_run,
-                force_re_embed=force_re_embed,
-                run=run,
-            )
-
-            all_futures: set[Future] = {extract_future, chunk_future, upload_future}
-
+        # Not a `with` block: its exit is shutdown(wait=True), which an interrupted run must not
+        # take, since a stage inside an uninterruptible call would hold the exit for minutes.
+        # The handler below covers the submissions too: a fast first stage can make the run
+        # worth interrupting before the last stage is even submitted (nexus-4vx0a).
+        pool = ThreadPoolExecutor(max_workers=3)
+        all_futures: set[Future] = set()
+        try:
             try:
-                done, not_done = wait(all_futures, return_when=FIRST_EXCEPTION)
+                extract_future = pool.submit(
+                    _extractor_loop_bound_to_cancel, pdf_path, content_hash, db, cancel,
+                    extractor=extractor, on_formula_oom=on_formula_oom,
+                    extraction_done=extraction_done,
+                    allow_degraded_extraction=allow_degraded_extraction,
+                )
+                all_futures.add(extract_future)
+                chunk_future = pool.submit(
+                    chunker_loop, content_hash, db, cancel, embed_fn,
+                    extraction_done=extraction_done, chunking_done=chunking_done,
+                    pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
+                    git_meta=git_meta, doc_id=doc_id,
+                )
+                all_futures.add(chunk_future)
+                if hooks is None:
+                    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 - deferred to avoid circular import at module load
+                    hooks = HookRegistry()
+                    install_default_hooks(hooks)
+                upload_future = pool.submit(
+                    uploader_loop, content_hash, db, t3, collection, cancel,
+                    chunking_done,
+                    catalog_doc_id=doc_id,
+                    hooks=hooks,
+                    dry_run=dry_run,
+                    force_re_embed=force_re_embed,
+                    run=run,
+                )
+                all_futures.add(upload_future)
+
+                while True:
+                    done, not_done = wait(all_futures, timeout=_STAGE_WAIT_SLICE_S, return_when=FIRST_EXCEPTION)
+                    if not not_done or any(f.exception() is not None for f in done):
+                        break
                 for f in done:
                     exc = f.exception()
                     if exc is not None:
                         first_exc = exc
                         cancel.set()
                         break
-                if not_done:
-                    wait(not_done, return_when=ALL_COMPLETED)
-            except BaseException as exc:  # noqa: BLE001 — nexus-6m9zy.3 (#4): see below
-                # A KeyboardInterrupt (Ctrl-C) delivered to THIS thread lands
-                # here, inside the blocking wait() call, NOT inside any stage
-                # future -- the `for f in done` loop above never runs, so
-                # cancel was never set. Left uncaught, this exception would
-                # propagate straight out of the `with` block; ThreadPoolExecutor
-                # .__exit__ still calls shutdown(wait=True) first, which blocks
-                # until all three stages run to NATURAL completion (nothing
-                # ever told them to stop), and the uploader's own
-                # resume-completion check marks the row 'completed' out from
-                # under the interrupted caller -- every later run then hits
-                # create_pipeline's 'completed' -> skip path and reports 0
-                # chunks until --force. Setting cancel here makes the stages
-                # stop promptly (each polls cancel.is_set() at least once per
-                # poll interval / per page), and falling through to the SAME
-                # first_exc handling below as any other caught stage
-                # exception marks the row 'failed' + clears the orphan WAL,
-                # so a retry resumes instead of silently skipping.
+                while not_done:
+                    _, not_done = wait(not_done, timeout=_STAGE_WAIT_SLICE_S, return_when=ALL_COMPLETED)
+            except BaseException as exc:  # noqa: BLE001 — nexus-6m9zy.3 (#4), nexus-4vx0a: see below
+                # A KeyboardInterrupt (Ctrl-C), or a SIGTERM that sigterm_raises turned into
+                # TerminationRequested, lands here on the main thread, inside wait() or a submit,
+                # never inside a stage. Setting cancel makes the stages stop at their next check
+                # (nexus-6m9zy.3: left running, the uploader once marked the interrupted row
+                # 'completed'), and the pool is shut down without waiting below.
+                #
+                # nexus-4vx0a: when the interrupt is the FIRST failure, the row is given back at
+                # once, buffer kept (_release_interrupted_run), before anything that could take
+                # time, so a SIGKILL that follows the SIGTERM finds it released. When a stage had
+                # already failed, the stage failure owns the bookkeeping (mark failed, WAL wiped,
+                # its error recorded) exactly as without the interrupt; cancel has been set since
+                # that failure. Either way the interrupt is what propagates, so a SIGTERM still
+                # ends the process and a Ctrl-C still reads as one. Any other exception here (a
+                # submit that failed) is a failure like a stage's.
                 cancel.set()
-                if first_exc is None:
+                if isinstance(exc, (KeyboardInterrupt, TerminationRequested)):
+                    interrupt = exc
+                    stop_mineru_workers()
+                    if first_exc is None:
+                        released_fenced = _release_interrupted_run(db, content_hash, exc)
+                elif first_exc is None:
                     first_exc = exc
+        finally:
+            pool.shutdown(wait=interrupt is None, cancel_futures=interrupt is not None)
+
+        if interrupt is not None and first_exc is None:
+            if doc_id and not dry_run and not released_fenced:
+                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+                _fence_fail(doc_id, str(interrupt) or type(interrupt).__name__)
+            elif doc_id and released_fenced:
+                from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 - deferred to avoid circular import at module load
+                discard_deferred_superseded_vectors(doc_id)
+            raise interrupt
 
         if first_exc is None:
             for f in all_futures:
@@ -1706,6 +1814,13 @@ def pipeline_index_pdf(
                     run_epoch=first_exc.run_epoch,
                     current_epoch=first_exc.current_epoch,
                 )
+            elif interrupt is not None and not all(f.done() for f in all_futures):
+                # nexus-4vx0a review: the interrupt cut the drain short and a stage is still
+                # running. Its next write could land after a WAL wipe and leave a page counter that
+                # skips pages on resume, so the row is released with its buffer kept instead; a
+                # deterministic failure is wiped by the next run, which fails the same way with
+                # every stage stopped.
+                fenced = _release_interrupted_run(db, content_hash, interrupt, stage_error=first_exc)
             else:
                 fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)
             # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
@@ -1723,6 +1838,8 @@ def pipeline_index_pdf(
                 # so its held candidates must never be swept.
                 from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 - deferred to avoid circular import at module load
                 discard_deferred_superseded_vectors(doc_id)
+            if interrupt is not None:
+                raise interrupt from first_exc
             raise first_exc
 
         # ── Post-passes (after all three stages complete) ────────────────────────
