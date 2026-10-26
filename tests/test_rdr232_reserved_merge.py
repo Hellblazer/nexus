@@ -34,9 +34,12 @@ def _stream(n: int = 5) -> ReservedStream:
     return stream
 
 
-def _hydrate(tool: str, args: dict, stream: ReservedStream | None, step: int | None = 0):
+def _hydrate(
+    tool: str, args: dict, stream: ReservedStream | None, step: int | None = 0, feeds_from: tuple[str, ...] = (),
+):
+    """``feeds_from`` names the tools that produced the step's evidence args (``$stepN`` producers)."""
     with reserved_scope(stream):
-        set_reserved_step(step)
+        set_reserved_step(step, feeds_from=feeds_from)
         return _hydrate_operator_args(tool, args)
 
 
@@ -146,7 +149,7 @@ def test_dropped_reserved_items_are_counted_at_the_terminal_reduction() -> None:
     _, first = _hydrate("rank", {"inputs": ["s"], "criterion": "c"}, stream, step=2)
     ranked = json.loads(first["items"])
     survivors = ranked[:2]  # the rank kept two reserved items and dropped two
-    _hydrate("generate", {"context": survivors, "instruction": "i"}, stream, step=3)
+    _hydrate("generate", {"context": survivors, "instruction": "i"}, stream, step=3, feeds_from=("rank",))
     report = stream.report()
     assert report["dropped_before_terminal"] == {"step": 3, "missing": 2, "of": 4}
     assert any("2 of 4 reserved primary items did not reach the final reduction" in d for d in stream.disclosures())
@@ -155,7 +158,49 @@ def test_dropped_reserved_items_are_counted_at_the_terminal_reduction() -> None:
 def test_nothing_dropped_reports_none() -> None:
     stream = _stream(2)
     _, first = _hydrate("rank", {"inputs": ["s"], "criterion": "c"}, stream, step=0)
-    _hydrate("generate", {"context": json.loads(first["items"])}, stream, step=1)
+    _hydrate("generate", {"context": json.loads(first["items"])}, stream, step=1, feeds_from=("rank",))
+    assert stream.report()["dropped_before_terminal"] is None
+    assert stream.disclosures() == []
+
+
+def test_a_reducing_producer_is_not_a_drop() -> None:
+    """A summarize or generate that condenses the reserved items is a reduction, not a loss: the
+    next operator's input is the prose, which holds no item tokens. Only rank and filter, which
+    keep or reorder items, can drop one."""
+    for reducer in ("summarize", "generate", "extract", "operator_summarize"):
+        stream = _stream(3)
+        _hydrate("rank", {"inputs": ["s"], "criterion": "c"}, stream, step=0)
+        _hydrate("generate", {"context": "a condensed paragraph", "instruction": "i"}, stream, step=1,
+                 feeds_from=(reducer,))
+        assert stream.report()["dropped_before_terminal"] is None, reducer
+        assert stream.disclosures() == [], reducer
+
+
+def test_a_filter_producer_that_loses_items_is_a_drop() -> None:
+    stream = _stream(3)
+    _hydrate("rank", {"inputs": ["s"], "criterion": "c"}, stream, step=0)
+    _hydrate("generate", {"context": [stream.items[0].text], "instruction": "i"}, stream, step=1,
+             feeds_from=("operator_filter",))
+    assert stream.report()["dropped_before_terminal"] == {"step": 1, "missing": 2, "of": 3}
+
+
+def test_an_unknown_or_mixed_producer_makes_no_drop_claim() -> None:
+    for feeds in ((), ("store_get_many",), ("rank", "summarize")):
+        stream = _stream(3)
+        _hydrate("rank", {"inputs": ["s"], "criterion": "c"}, stream, step=0)
+        _hydrate("generate", {"context": ["x"], "instruction": "i"}, stream, step=1, feeds_from=feeds)
+        assert stream.report()["dropped_before_terminal"] is None, feeds
+
+
+def test_a_deferred_ref_argument_is_not_observed() -> None:
+    """In a bundle the later step's evidence arg is a ``$stepN`` sentinel, not the evidence."""
+    from nexus.plans.bundle import DEFERRED_REF_KEY
+
+    stream = _stream(3)
+    _hydrate("rank", {"inputs": ["s"], "criterion": "c"}, stream, step=0)
+    sentinel = {DEFERRED_REF_KEY: True, "step_index": 0, "field": "items"}
+    _hydrate("generate", {"context": sentinel, "instruction": "i"}, stream, step=1, feeds_from=("rank",))
+    _hydrate("compare", {"inputs": [sentinel]}, stream, step=2, feeds_from=("rank",))
     assert stream.report()["dropped_before_terminal"] is None
     assert stream.disclosures() == []
 
@@ -272,6 +317,226 @@ async def test_bundle_and_continuation_composers_see_the_same_evidence() -> None
         _, _, bundle_steps = _compose_shape_a(cut, steps, {}, [])
     assert json.loads(bundle_steps[0].args["items"]) == json.loads(bundle_inputs)
     assert other.report()["merged_at_step"] == 0
+
+
+# ── nothing dropped is never reported as dropped: the bundle routes hold deferred refs ────────
+
+
+def _bundled_rank_generate_plan() -> dict:
+    return {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "rdr"}},
+        {"tool": "rank", "args": {"criterion": "c", "inputs": "$step2.contents"}},
+        {"tool": "generate", "args": {"instruction": "i", "context": "$step3.items"}},
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_plan_run_bundled_rank_then_generate_reports_no_drop() -> None:
+    """Default path: rank and generate bundle, so generate's context is a deferred ``$step3``
+    sentinel. Nothing was dropped, so nothing may be reported dropped and no line may reach the
+    answer."""
+    from unittest.mock import AsyncMock
+
+    from nexus.mcp import core as mcp_core
+    from nexus.plans.runner import plan_run
+
+    stream = _stream(4)
+    captured: list = []
+
+    async def stub_search(**kwargs):  # noqa: ARG001
+        return {"ids": _secondary_ids(3), "tumblers": [], "distances": [], "collections": []}
+
+    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+        return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
+
+    async def fake_bundle(bundle, **kwargs):  # noqa: ARG001
+        captured.append(bundle)
+        return {"text": "ok"}
+
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "store_get_many", stub_get_many), \
+         patch("nexus.plans.bundle.dispatch_bundle", AsyncMock(side_effect=fake_bundle)), \
+         patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
+        result = await plan_run(_match(_bundled_rank_generate_plan()), reserved_stream=stream)
+
+    assert len(captured) == 1, "rank and generate ran as one bundle"
+    assert json.loads(captured[0].steps[0].args["items"])[:4] == [r.text for r in stream.items]
+    report = result.reserved_report
+    assert report is not None and report["merged_at_step"] == 2
+    assert report["dropped_before_terminal"] is None
+    assert stream.disclosures() == []
+
+
+@pytest.mark.asyncio
+async def test_each_bundle_step_hydrates_under_its_own_index() -> None:
+    """The reserved stream merges at ONE plan step. If a bundle left the current step at the
+    bundle's first index, every later bundle step would also look like the merge step and merge
+    the stream a second time."""
+    from unittest.mock import AsyncMock
+
+    from nexus.plans.runner import plan_run
+
+    stream = _stream(3)
+    captured: list = []
+
+    async def fake_bundle(bundle, **kwargs):  # noqa: ARG001
+        captured.append(bundle)
+        return {"text": "ok"}
+
+    steps = [
+        {"tool": "rank", "args": {"criterion": "c", "inputs": ["s1", "s2"]}},
+        {"tool": "compare", "args": {"focus": "f", "inputs": ["t1", "t2"]}},
+    ]
+    with patch("nexus.plans.bundle.dispatch_bundle", AsyncMock(side_effect=fake_bundle)):
+        await plan_run(_match({"steps": steps}), reserved_stream=stream)
+    (bundle,) = captured
+    first, second = (json.loads(st.args["items"]) for st in bundle.steps)
+    assert first[:3] == [r.text for r in stream.items]
+    assert second == ["t1", "t2"], "the second bundle step is not the merge step"
+    assert stream.report()["merged_at_step"] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_bundle_falls_back_per_step_with_each_step_under_its_own_index() -> None:
+    """The per-step fallback of a bundle too large for one prompt dispatches each step through
+    the default dispatcher; the stream merges at the first step only."""
+    from nexus.mcp import core as mcp_core
+    from nexus.plans.runner import plan_run
+
+    stream = _stream(3)
+    seen: dict[str, list] = {}
+
+    async def stub_rank(**kwargs):
+        seen["rank"] = json.loads(kwargs["items"])
+        return {"items": seen["rank"]}
+
+    async def stub_compare(**kwargs):
+        seen["compare"] = json.loads(kwargs["items"])
+        return {"text": "ok"}
+
+    steps = [
+        {"tool": "rank", "args": {"criterion": "c", "inputs": ["s1", "s2"]}},
+        {"tool": "compare", "args": {"focus": "f", "inputs": ["t1", "t2"]}},
+    ]
+    with patch("nexus.plans.bundle.MAX_BUNDLE_PROMPT_CHARS", 1), \
+         patch.object(mcp_core, "operator_rank", stub_rank), \
+         patch.object(mcp_core, "operator_compare", stub_compare):
+        result = await plan_run(_match({"steps": steps}), reserved_stream=stream)
+    assert seen["rank"][:3] == [r.text for r in stream.items]
+    assert seen["compare"] == ["t1", "t2"], "the second step of the fallback is not the merge step"
+    assert result.reserved_report["merged_at_step"] == 0
+
+
+def test_continuation_shape_a_reports_no_drop_when_nothing_was_dropped() -> None:
+    from nexus.plans.continuation import classify_continuation_cut
+    from nexus.plans.continuation_envelope import _compose_shape_a
+
+    steps = [
+        {"tool": "rank", "args": {"criterion": "c", "inputs": ["s1", "s2"]}},
+        {"tool": "summarize", "args": {"content": "$step1.items"}},
+    ]
+    stream = _stream(3)
+    cut = classify_continuation_cut(steps)
+    with reserved_scope(stream):
+        _compose_shape_a(cut, steps, {}, [])
+    assert stream.report()["merged_at_step"] == 0
+    assert stream.report()["dropped_before_terminal"] is None
+    assert stream.disclosures() == []
+
+
+def test_continuation_shape_b_still_counts_a_real_drop_by_the_prefix_rank() -> None:
+    """The cut step reads a ``$step1`` output the prefix already produced: a materialised list,
+    so a rank that kept two of four reserved items is a real, observable drop."""
+    from nexus.plans.continuation import ContinuationCut, CutShape
+    from nexus.plans.continuation_envelope import _compose_shape_b
+
+    steps = [
+        {"tool": "rank", "args": {"criterion": "c", "inputs": ["s1"]}},
+        {"tool": "summarize", "args": {"content": "$step1.items"}},
+    ]
+    stream = _stream(4)
+    _, first = _hydrate("rank", steps[0]["args"], stream, step=0)
+    survivors = json.loads(first["items"])[:2]
+    cut = ContinuationCut(shape=CutShape.SHAPE_B, cut_at_step=1, plan_indices=(1,), operators=("summarize",))
+    with reserved_scope(stream):
+        _compose_shape_b(cut, steps, {}, [{"items": survivors}])
+    assert stream.report()["dropped_before_terminal"] == {"step": 1, "missing": 2, "of": 4}
+
+
+# ── the review-default shape: extract and compare both read the retrieved contents ─────────────
+
+
+def test_extract_with_explicit_inputs_receives_the_reserved_stream() -> None:
+    """``review-default`` runs extract on ``$step3.contents`` before compare. The merge belongs at
+    the first operator that consumes retrieved evidence, and that is extract: it must carry the
+    reserved items ahead of the plan's inputs, and compare must not merge them a second time."""
+    stream = _stream(3)
+    inputs = [f"secondary {k}" for k in range(4)]
+    _, extract_args = _hydrate("extract", {"inputs": inputs, "fields": "decision"}, stream, step=3)
+    assert extract_args["inputs"][:3] == [r.text for r in stream.items]
+    assert extract_args["inputs"][3:] == inputs
+    _, compare_args = _hydrate("compare", {"inputs": inputs, "focus": "f"}, stream, step=4)
+    assert json.loads(compare_args["items"]) == inputs, "compare is not the merge step"
+    assert stream.report()["merged_at_step"] == 3
+
+
+def test_extract_explicit_inputs_cap_cuts_only_secondary_items() -> None:
+    stream = _stream(5)
+    inputs = [f"secondary {k}" for k in range(120)]
+    _, args = _hydrate("extract", {"inputs": inputs, "fields": "f"}, stream, step=0)
+    assert len(args["inputs"]) == _OPERATOR_MAX_INPUTS
+    assert args["inputs"][:5] == [r.text for r in stream.items]
+    assert args["_truncation_metadata"]["original_count"] == 125
+
+
+def test_extract_explicit_inputs_without_a_stream_are_untouched() -> None:
+    inputs = [f"secondary {k}" for k in range(120)]
+    _, args = _hydrate("extract", {"inputs": inputs, "fields": "f"}, None, step=0)
+    assert args["inputs"] == inputs and "_truncation_metadata" not in args
+
+
+@pytest.mark.asyncio
+async def test_plan_run_review_default_shape_merges_at_extract_not_compare() -> None:
+    from nexus.mcp import core as mcp_core
+    from nexus.plans.runner import plan_run
+
+    stream = _stream(3)
+    seen: dict[str, object] = {}
+
+    async def stub_search(**kwargs):  # noqa: ARG001
+        return {"ids": _secondary_ids(2), "tumblers": [], "distances": [], "collections": []}
+
+    def stub_get_many(ids, collections=None, structured=False):  # noqa: ARG001
+        return {"contents": [f"secondary {k}" for k, _ in enumerate(ids)]}
+
+    async def stub_extract(**kwargs):
+        seen["extract"] = kwargs["inputs"]
+        return {"extractions": []}
+
+    async def stub_compare(**kwargs):
+        seen["compare"] = json.loads(kwargs["items"])
+        return {"text": "ok"}
+
+    plan = {"steps": [
+        {"tool": "search", "args": {"query": "q", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "rdr"}},
+        {"tool": "extract", "args": {"inputs": "$step2.contents", "fields": "decision"}},
+        {"tool": "compare", "args": {"focus": "f", "inputs": "$step2.contents"}},
+    ]}
+    with patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "store_get_many", stub_get_many), \
+         patch.object(mcp_core, "operator_extract", stub_extract), \
+         patch.object(mcp_core, "operator_compare", stub_compare), \
+         patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
+        result = await plan_run(_match(plan), bundle_operators=False, reserved_stream=stream)
+
+    extract_in = seen["extract"]
+    texts = extract_in if isinstance(extract_in, list) else json.loads(extract_in)
+    assert texts[:3] == [r.text for r in stream.items]
+    assert seen["compare"] == ["secondary 0", "secondary 1"]
+    assert result.reserved_report["merged_at_step"] == 2
+    assert result.reserved_report["dropped_before_terminal"] is None, "compare reads retrieval output, not an operator's"
 
 
 # ── nx_answer wiring: who gets a stream ───────────────────────────────────────────────────────

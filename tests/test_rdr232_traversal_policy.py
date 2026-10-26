@@ -238,6 +238,29 @@ def test_the_cap_is_logged_as_an_event_the_window_count_can_read() -> None:
     assert "traverse_graph_node_cap" in events
 
 
+def test_a_dead_seed_after_the_engine_cut_still_reads_as_possibly_truncated() -> None:
+    """The engine slices to 500 nodes, then drops tombstoned seeds. A reply of 499 live nodes plus
+    one seed that is missing could have been a 500-node walk: every non-seed node in a reply is
+    live, so only a missing seed can hide a cut."""
+    dead = "1.2.2"
+    nodes = [_node(SEED, RDR)] + [_node(f"1.2.{i + 10}", RDR) for i in range(498)]
+    edges = [_edge(n.tumbler, SEED, "relates") for n in nodes[1:]]
+    out = _run(_fake_catalog(nodes, edges), seeds=[SEED, dead], link_types=["relates"], policy=_policy("rdr"))
+    rep = out["traversal"]
+    assert rep["nodes_walked"] == 499
+    assert rep["possibly_truncated"] is True and rep["contained"] is False
+    # the same reply without the missing seed is a complete walk
+    again = _run(_fake_catalog(nodes, edges), seeds=[SEED], link_types=["relates"], policy=_policy("rdr"))
+    assert again["traversal"]["possibly_truncated"] is False
+
+
+def test_two_dead_seeds_and_a_short_reply_stay_contained_below_the_cap() -> None:
+    nodes = [_node(SEED, RDR)] + [_node(f"1.2.{i + 10}", RDR) for i in range(10)]
+    edges = [_edge(n.tumbler, SEED, "relates") for n in nodes[1:]]
+    out = _run(_fake_catalog(nodes, edges), seeds=[SEED, "1.2.2", "1.2.3"], link_types=["relates"], policy=_policy("rdr"))
+    assert out["traversal"]["possibly_truncated"] is False
+
+
 # ── scenario 3: a named RDR under scope=rdr admits no code ──────────────────
 
 
@@ -362,6 +385,42 @@ def test_an_unscoped_expansion_that_stays_in_the_seed_corpus_is_not_widened() ->
     assert out["traversal"]["widened"] is None
 
 
+def test_require_link_role_admits_only_documents_reached_by_that_role() -> None:
+    nodes = [_node(SEED, RDR), _node("1.2.2", RDR), _node("1.2.3", RDR), _node("1.2.4", RDR)]
+    edges = [_edge("1.2.2", SEED, "cites"), _edge("1.2.3", SEED, "relates"), _edge("1.2.4", SEED, "implements")]
+    cat = lambda: _fake_catalog(nodes, edges)  # noqa: E731
+    cites = _run(cat(), seeds=[SEED], link_types=["cites", "relates", "implements"],
+                 policy=_policy("", require_link_role="citation"))
+    assert cites["tumblers"] == [SEED, "1.2.2"] and cites["traversal"]["dropped_role"] == 2
+    anything = _run(cat(), seeds=[SEED], link_types=["cites", "relates", "implements"], policy=_policy(""))
+    assert anything["tumblers"] == [SEED, "1.2.2", "1.2.4", "1.2.3"] and anything["traversal"]["dropped_role"] == 0
+    related = _run(cat(), seeds=[SEED], link_types=["cites", "relates", "implements"],
+                   policy=_policy("", require_link_role="related"))
+    assert related["tumblers"] == [SEED, "1.2.3"]
+
+
+def test_a_scoped_expansion_is_never_recorded_as_widened() -> None:
+    """A catalog-subtree scope admits a different content type than the seeds' (code under 1.2),
+    but the caller gave a scope, so nothing was widened by the policy."""
+    code_nodes, code_edges = _owned("1.2.50", 3, CODE)
+    nodes = [_node(SEED, RDR)] + code_nodes
+    out = _run(_fake_catalog(nodes, code_edges), seeds=[SEED], link_types=["implements"], policy=_policy("1.2"))
+    assert len(out["tumblers"]) == 4, "the subtree scope admits the code documents"
+    assert out["traversal"]["widened"] is None
+    unscoped = _run(_fake_catalog(nodes, code_edges), seeds=[SEED], link_types=["implements"], policy=_policy(""))
+    assert unscoped["traversal"]["widened"] is not None
+
+
+@pytest.mark.parametrize("role", ["factual", "citation", "related"])
+def test_a_scope_conflict_is_only_for_an_implementation_role_step(role: str) -> None:
+    code_nodes, code_edges = _owned("1.2.50", 4, CODE, link="cites")
+    nodes = [_node(SEED, RDR)] + code_nodes
+    out = _run(_fake_catalog(nodes, code_edges), seeds=[SEED], link_types=["cites"],
+               policy=_policy("rdr", require_link_role=role))
+    assert out["traversal"]["dropped_out_of_scope"] == 4
+    assert out["traversal"]["scope_conflict"] is None
+
+
 # ── a policy failure keeps the rest and omits the graph stream ──────────────
 
 
@@ -427,11 +486,45 @@ def test_the_runner_gives_every_traverse_step_a_policy_from_the_caller_scope() -
     assert policy["preserve_seed_documents"] is True
 
 
-def test_the_runner_policy_without_a_scope_constrains_nothing_but_still_ranks_and_caps() -> None:
+def test_the_runner_policy_without_a_scope_has_no_binding_document_cap() -> None:
+    from nexus.plans.traversal_policy import DEFAULT_MAX_DOCUMENTS, MAX_GRAPH_NODES
+
+    for bindings in ({}, {"_nx_scope": "all"}, {"_nx_scope": ""}):
+        seen = _drive(_plan_with_traverse(purpose="factual-evidence"), bindings)
+        (policy,) = [a["policy"] for t, a in seen if t == "traverse"]
+        assert policy["allowed_collections"] in ("", "all")
+        assert policy["max_documents"] >= MAX_GRAPH_NODES > DEFAULT_MAX_DOCUMENTS, bindings
+        assert policy["max_chunks"] > 0
+
+
+def test_an_unscoped_runner_traverse_does_not_drop_documents_to_a_cap() -> None:
+    """120 linked documents, no caller scope: all of them survive the policy (the engine's own
+    500-node cap is the only bound). An uncalibrated 50-document cut would silently change
+    what every unscoped traverse builtin returns (RDR-232 2a: unscoped is unchanged)."""
+    nodes, edges = _owned("1.2.50", 120, RDR, link="relates")
+    nodes = [_node(SEED, RDR)] + nodes
     seen = _drive(_plan_with_traverse(purpose="factual-evidence"), {})
     (policy,) = [a["policy"] for t, a in seen if t == "traverse"]
-    assert policy["allowed_collections"] == ""
-    assert policy["max_documents"] > 0 and policy["max_chunks"] > 0
+    out = _run(_fake_catalog(nodes, edges), seeds=[SEED], link_types=["relates"], policy=policy)
+    assert len(out["tumblers"]) == 121
+    assert out["traversal"]["dropped_cap"] == 0 and out["traversal"]["nodes_retained"] == 121
+
+
+def test_an_unscoped_runner_traverse_still_ranks_by_role() -> None:
+    nodes = [_node(t, RDR) for t in (SEED, "1.2.4", "1.2.9")]
+    edges = [_edge("1.2.4", SEED, "relates"), _edge("1.2.9", SEED, "cites")]
+    seen = _drive(_plan_with_traverse(purpose="factual-evidence"), {})
+    (policy,) = [a["policy"] for t, a in seen if t == "traverse"]
+    out = _run(_fake_catalog(nodes, edges), seeds=[SEED], link_types=["cites", "relates"], policy=policy)
+    assert out["tumblers"] == [SEED, "1.2.9", "1.2.4"], "citation outranks related despite the later tumbler"
+
+
+def test_a_scoped_runner_traverse_keeps_the_default_document_cap() -> None:
+    from nexus.plans.traversal_policy import DEFAULT_MAX_DOCUMENTS
+
+    seen = _drive(_plan_with_traverse(purpose="factual-evidence"), {"_nx_scope": "rdr"})
+    (policy,) = [a["policy"] for t, a in seen if t == "traverse"]
+    assert policy["max_documents"] == DEFAULT_MAX_DOCUMENTS
 
 
 def test_the_runner_names_the_implementation_role_for_an_implementation_only_step() -> None:
@@ -445,6 +538,64 @@ def test_a_plan_declared_policy_is_not_trusted_over_the_callers_scope() -> None:
     seen = _drive(_plan_with_traverse(purpose="factual-evidence", policy=loose), {"_nx_scope": "rdr"})
     (policy,) = [a["policy"] for t, a in seen if t == "traverse"]
     assert policy["allowed_collections"] == "rdr" and policy["max_documents"] < 9999
+
+
+def test_a_plan_declared_policy_may_tighten_never_widen() -> None:
+    from nexus.plans.traversal_policy import DEFAULT_MAX_DOCUMENTS, derive_policy
+
+    step = {"purpose": "factual-evidence"}
+    base = derive_policy(step, "rdr")
+    assert base["max_documents"] == DEFAULT_MAX_DOCUMENTS and base["require_link_role"] == "factual"
+
+    tight = derive_policy({**step, "policy": {"max_documents": 5, "max_chunks": 40, "require_link_role": "citation"}}, "rdr")
+    assert (tight["max_documents"], tight["max_chunks"], tight["require_link_role"]) == (5, 40, "citation")
+    assert tight["allowed_collections"] == "rdr", "the scope is never the plan's to change"
+
+    wide = derive_policy({**step, "policy": {"max_documents": 9999, "max_chunks": 99999, "allowed_collections": "all"}}, "rdr")
+    assert wide == base
+
+    # the derived role is already specific: a different declared role cannot widen or swap it
+    impl = derive_policy({"purpose": "find-implementations", "policy": {"require_link_role": "citation"}}, "rdr")
+    assert impl["require_link_role"] == "implementation"
+    # junk is ignored, never raised and never loosening
+    junk = derive_policy({**step, "policy": {"max_documents": True, "max_chunks": -3, "require_link_role": "gossip"}}, "rdr")
+    assert junk == base
+    assert derive_policy({**step, "policy": "all"}, "rdr") == base
+
+
+def test_a_plan_declared_cap_tightens_an_unscoped_run_too() -> None:
+    from nexus.plans.traversal_policy import derive_policy
+
+    out = derive_policy({"purpose": "factual-evidence", "policy": {"max_documents": 7}}, None)
+    assert out["max_documents"] == 7 and out["allowed_collections"] == ""
+
+
+# ── derive_policy input shapes ──────────────────────────────────────────────
+
+
+def test_derive_policy_does_not_split_a_bare_string_link_type_into_characters() -> None:
+    from nexus.plans.traversal_policy import derive_policy
+
+    assert derive_policy({"link_types": "implements"}, "rdr")["require_link_role"] == "implementation"
+    assert derive_policy({"link_types": ["cites"]}, "rdr")["require_link_role"] == "citation"
+    assert derive_policy({"link_types": ("implements",)}, "rdr")["require_link_role"] == "implementation"
+
+
+def test_a_list_scope_is_never_stringified_into_a_prefix_that_admits_nothing() -> None:
+    from nexus.plans.traversal_policy import TraversalPolicy, TraversalPolicyError, derive_policy
+
+    assert derive_policy({"purpose": "factual-evidence"}, ["rdr"])["allowed_collections"] == "rdr"
+    assert derive_policy({"purpose": "factual-evidence"}, [])["allowed_collections"] == ""
+    many = derive_policy({"purpose": "factual-evidence"}, ["rdr", "docs"])
+    assert many["allowed_collections"] == ["rdr", "docs"], "kept as given, so the policy parse refuses it"
+    with pytest.raises(TraversalPolicyError):
+        TraversalPolicy.from_wire(many)
+    with pytest.raises(TraversalPolicyError):
+        TraversalPolicy.from_wire({"allowed_collections": ["rdr"]})
+    # a scope the policy cannot express omits the graph stream with a warning, as any policy failure does
+    cat = _fake_catalog([_node(SEED, RDR), _node("1.2.2", RDR)], [_edge("1.2.2", SEED, "relates")])
+    out = _run(cat, seeds=[SEED], link_types=["relates"], policy=many)
+    assert out["tumblers"] == [] and out["traversal"]["policy_failed"] is True
 
 
 def test_other_tools_are_untouched_by_the_policy_hook() -> None:

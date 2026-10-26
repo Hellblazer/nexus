@@ -15,9 +15,11 @@ at the first operator that consumes retrieved evidence, in both shapes an operat
 
 The merge happens once per run, at one plan step (``merged_step``). A re-hydration of that same
 step (the oversized-bundle per-step fallback, the continuation envelope) merges again, so every
-reduction route sees the same evidence. Later operators are only observed: the stream counts how
-many reserved items are missing from their input, so a drop by an intermediate operator (an
-unbundled rank) is reported rather than silent (critique observation 13).
+reduction route sees the same evidence. Later operators are only observed: where an operator's
+input is the materialised output of a rank or filter, the stream counts the reserved items missing
+from it, so a drop by an unbundled rank is reported rather than silent (critique observation 13).
+No claim is made inside a bundle (the later step holds a deferred ``$stepN`` ref, not the items) or
+after a summarize/generate/extract (a reduction is not a drop).
 
 The reserved share stays below ``runner._OPERATOR_MAX_INPUTS`` (:data:`RESERVED_SHARE_MAX`), and
 every merged item counts against the bundle prompt limit through the runner's existing
@@ -36,9 +38,11 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
+from nexus.plans.bundle import DEFERRED_REF_KEY
 from nexus.plans.primary_evidence import PrimaryEvidence, SelectedChunk
 
 __all__ = [
+    "EVIDENCE_KEYS",
     "RESERVED_SHARE_MAX",
     "ReservedItem",
     "ReservedStream",
@@ -52,7 +56,12 @@ __all__ = [
 RESERVED_SHARE_MAX: int = 50
 
 #: Operator args that carry the evidence a later operator reduces.
-_EVIDENCE_KEYS: tuple[str, ...] = ("items", "inputs", "content", "context", "groups")
+EVIDENCE_KEYS: tuple[str, ...] = ("items", "inputs", "content", "context", "groups")
+
+#: Operators that only keep or reorder the items they are given. A reserved item missing from the
+#: input of the step after one of these was dropped by it; after any other operator (summarize,
+#: generate, extract, compare: they reduce or rewrite) its absence is the reduction itself.
+_DROPPING_OPERATORS: frozenset[str] = frozenset({"rank", "filter"})
 
 _SOURCE_MARKER = "[source: "
 
@@ -100,6 +109,7 @@ class ReservedStream:
     merged: bool = False
     merged_step: int | None = None
     current_step: int | None = None
+    current_producers: tuple[str, ...] = ()
     deduped_secondary: int = 0
     secondary_cut: int = 0
     capped: bool = False
@@ -175,7 +185,20 @@ class ReservedStream:
     # ── observe a later operator ─────────────────────────────────────────────
 
     def observe(self, args: dict[str, Any]) -> None:
-        blob = " ".join(str(args[k]) for k in _EVIDENCE_KEYS if k in args)
+        """Count the reserved items a later operator's input no longer holds.
+
+        The claim is made only where it is true. The input must be materialised: inside a bundle
+        (and in the continuation's Shape A) a later step's evidence arg is a deferred ``$stepN``
+        sentinel, and the earlier step has not run yet. Every producer of that input must be a
+        rank or filter: an input condensed by a summarize or generate holds no item tokens by
+        design, and an input with no ``$stepN`` producer is not an operator's output at all.
+        """
+        feeders = {p.removeprefix("operator_") for p in self.current_producers}
+        if not feeders or not feeders <= _DROPPING_OPERATORS:
+            return
+        if any(_holds_deferred_ref(args[k]) for k in EVIDENCE_KEYS if k in args):
+            return
+        blob = " ".join(str(args[k]) for k in EVIDENCE_KEYS if k in args)
         missing = sum(1 for i in self.items if i.token not in blob)
         self.last_observed = {"step": -1 if self.current_step is None else self.current_step,
                               "missing": missing, "of": len(self.items)}
@@ -218,6 +241,16 @@ class ReservedStream:
         return lines
 
 
+def _holds_deferred_ref(value: Any) -> bool:
+    if isinstance(value, str):  # a list of refs is JSON-serialised before the operator sees it
+        return DEFERRED_REF_KEY in value
+    if isinstance(value, dict):
+        return bool(value.get(DEFERRED_REF_KEY)) or any(_holds_deferred_ref(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_deferred_ref(v) for v in value)
+    return False
+
+
 _ACTIVE: ContextVar[ReservedStream | None] = ContextVar("nexus_reserved_stream", default=None)
 
 
@@ -235,8 +268,14 @@ def reserved_scope(stream: ReservedStream | None) -> Iterator[None]:
         _ACTIVE.reset(token)
 
 
-def set_reserved_step(index: int | None) -> None:
-    """Tell the active stream which plan step is about to hydrate (no-op without a stream)."""
+def set_reserved_step(index: int | None, *, feeds_from: Sequence[str] = ()) -> None:
+    """Tell the active stream which plan step is about to hydrate (no-op without a stream).
+
+    *feeds_from* names the tools that produced the step's evidence args (the ``$stepN`` refs in
+    its raw args). Only a producer that keeps or reorders items (rank, filter) lets the stream
+    call a missing reserved item "dropped".
+    """
     stream = _ACTIVE.get()
     if stream is not None:
         stream.current_step = index
+        stream.current_producers = tuple(feeds_from)

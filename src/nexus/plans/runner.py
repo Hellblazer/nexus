@@ -661,9 +661,10 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 #: carries the chain internally. The KEY string lives in
 #: :mod:`nexus.plans.bundle` (``DEFERRED_REF_KEY``) so a rename or typo
 #: on either side can't silently drop the sentinel (substantive-critic C2).
-from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY  # noqa: E402
+from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY, _extract_tool_name  # noqa: E402
 import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
 from nexus.plans.reserved_stream import (  # noqa: E402
+    EVIDENCE_KEYS as _RESERVED_EVIDENCE_KEYS,
     ReservedStream,
     active_reserved_stream,
     reserved_scope,
@@ -1249,6 +1250,29 @@ def _apply_traversal_policy_to_args(
     from nexus.plans.traversal_policy import derive_policy  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
 
     return {**args, "policy": derive_policy(args, bindings.get(_CALLER_SCOPE_BINDING))}
+
+
+def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
+    """Tell the reserved stream which plan step is about to hydrate, and which tools produced its
+    evidence args (the ``$stepN`` refs in the step's raw args), so only a producer that keeps or
+    reorders items can be blamed for a missing reserved item. No-op without a stream."""
+    if active_reserved_stream() is None:
+        return
+    producers: list[str] = []
+
+    def _walk(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                _walk(item)
+        elif isinstance(value, str) and (m := _STEPREF_RE.match(value)):
+            ref = int(m.group(1)) - 1
+            if 0 <= ref < len(steps):
+                producers.append(_extract_tool_name(steps[ref]))
+
+    raw = steps[index].get("args", {}) or {}
+    for key in _RESERVED_EVIDENCE_KEYS:
+        _walk(raw.get(key))
+    set_reserved_step(index, feeds_from=producers)
 
 
 def _scope_conflict_output(
@@ -1926,6 +1950,34 @@ def _drop_intent_from_list_args(
     return out
 
 
+def _merge_reserved_explicit_inputs(
+    value: list[Any], args: dict[str, Any], tool: str, resolved_tool: str,
+) -> list[Any]:
+    """Merge the reserved stream ahead of an operator's explicit ``inputs`` list and cap the merged
+    list the way the ``ids`` branch does (RDR-232, nexus-jypmj.1.6).
+
+    The cap runs ONLY when a stream merges (S4): a run without one keeps today's uncapped inputs.
+    A cap that fires sets ``args["_truncation_metadata"]``. Returns *value* unchanged when there
+    is no stream or it has already merged at an earlier step.
+    """
+    rs = active_reserved_stream()
+    if rs is None or not rs.should_merge():
+        return value
+    value = rs.merge(value)
+    if len(value) > _OPERATOR_MAX_INPUTS:
+        rs.note_cap(len(value), _OPERATOR_MAX_INPUTS)
+        _log.warning(
+            "explicit_inputs_overflow_with_reserved_stream",
+            tool=tool, resolved_tool=resolved_tool,
+            input_count=len(value), max_inputs=_OPERATOR_MAX_INPUTS,
+        )
+        args["_truncation_metadata"] = {
+            "truncated": True, "original_count": len(value), "kept_count": _OPERATOR_MAX_INPUTS,
+        }
+        value = value[:_OPERATOR_MAX_INPUTS]
+    return value
+
+
 def _hydrate_operator_args(
     tool: str, args: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
@@ -2126,6 +2178,16 @@ def _hydrate_operator_args(
     # Without this, isolated dispatch of summarize / rank / compare /
     # generate fires with no positional arg and raises TypeError
     # (plan 57 ``find-by-author`` is the canonical repro).
+    # RDR-232 (nexus-jypmj.1.6): ``operator_extract`` takes ``inputs`` as it is, so it is not in
+    # ``_INPUTS_TARGET``; when the plan passed it a list it is still the first evidence-consuming
+    # operator in the ``review-default`` shape (extract, then compare), and merges the stream here.
+    if resolved_tool == "operator_extract" and isinstance(args.get("inputs"), list):
+        _rs = active_reserved_stream()
+        if _rs is not None and _rs.should_merge():
+            args["inputs"] = _merge_reserved_explicit_inputs(
+                [v for v in args["inputs"] if v], args, tool, resolved_tool,
+            )
+
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
         value = args.pop("inputs")
@@ -2147,24 +2209,7 @@ def _hydrate_operator_args(
                     tool=tool, resolved_tool=resolved_tool,
                     original_count=original_count, kept_count=len(value),
                 )
-            # RDR-232 (nexus-jypmj.1.6): merge the reserved stream ahead of the plan's inputs and
-            # cap the merged list the same way the ids branch does. The cap runs ONLY here, when a
-            # stream was merged (S4): a run without one keeps today's uncapped inputs.
-            _rs = active_reserved_stream()
-            if _rs is not None and _rs.should_merge():
-                value = _rs.merge(value)
-                if len(value) > _OPERATOR_MAX_INPUTS:
-                    _rs.note_cap(len(value), _OPERATOR_MAX_INPUTS)
-                    _log.warning(
-                        "explicit_inputs_overflow_with_reserved_stream",
-                        tool=tool, resolved_tool=resolved_tool,
-                        input_count=len(value), max_inputs=_OPERATOR_MAX_INPUTS,
-                    )
-                    args["_truncation_metadata"] = {
-                        "truncated": True, "original_count": len(value),
-                        "kept_count": _OPERATOR_MAX_INPUTS,
-                    }
-                    value = value[:_OPERATOR_MAX_INPUTS]
+            value = _merge_reserved_explicit_inputs(value, args, tool, resolved_tool)
             if target_key == "items":
                 value = json.dumps(value)
         args[target_key] = value
@@ -2926,7 +2971,7 @@ async def _plan_run_impl(
             )
             # RDR-232 (nexus-jypmj.1.6): the reserved stream merges at one plan step; tell it
             # which one this segment hydrates (the bundle loops below refine it per step).
-            set_reserved_step(_seg_indices[0])
+            _mark_reserved_step(_seg_indices[0], steps)
 
             if isinstance(seg, OperatorBundleSlice):
                 # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
@@ -2954,7 +2999,7 @@ async def _plan_run_impl(
                     )
                     # Operators skip _check_embedding_domain / scope / caller-
                     # scope injection — those are retrieval-tool concerns.
-                    set_reserved_step(bi)
+                    _mark_reserved_step(bi, steps)
                     _, b_prepared = _hydrate_operator_args(btool, b_resolved)
                     # RDR-093 S-1: strip the runner-internal truncation
                     # marker so it never leaks into the bundled prompt.
@@ -3003,7 +3048,7 @@ async def _plan_run_impl(
                         bundle_plan_indices=list(seg.plan_indices),
                     )
                     for bi in seg.plan_indices:
-                        set_reserved_step(bi)
+                        _mark_reserved_step(bi, steps)
                         bstep = steps[bi]
                         btool = _extract_tool(bstep)
                         b_raw_args = bstep.get("args", {}) or {}

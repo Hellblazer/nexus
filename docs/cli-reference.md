@@ -5436,12 +5436,15 @@ The envelope has five RDR-232 keys, all always present:
   reserved_chars, merged, merged_at_step, over_share_dropped, deduped_secondary,
   secondary_cut, capped, dropped_before_terminal}`. The reserved items are
   merged ahead of the plan's inputs at the first operator that consumes retrieved
-  evidence, so the operator input cap cuts only the plan's own items; an
-  explicit-`inputs` operator is capped at that point only when a stream was
+  evidence, whether it receives them by `ids` or as an explicit `inputs` list
+  (`extract` included), so the operator input cap cuts only the plan's own items;
+  an explicit-`inputs` operator is capped at that point only when a stream was
   merged. `dropped_before_terminal` (`{step, missing, of}`) counts reserved
-  items a later operator's input no longer held, for example after an
-  unbundled `rank`. Text mode adds a `[evidence request: ...]` line when a
-  read stream was never merged or items were dropped. `None` when no stream
+  items that a later operator's input no longer held after a `rank` or `filter`
+  that ran as its own step. It is `None` inside a bundle and after a `summarize`,
+  `generate` or `extract`, where the later step holds a deferred ref or a
+  reduction, not the items. Text mode adds a `[evidence request: ...]` line when
+  a read stream was never merged or items were dropped. `None` when no stream
   was built. A document with more than `max_manifest_rows_read` (3000)
   manifest rows is spread-sampled after the catalog reply; the reply itself
   is not yet limited by the service.

@@ -20,12 +20,13 @@ applies to them, because an explicit scope wins). With ``preserve_seed_documents
 ordinary candidate that ranks first (distance zero) and counts against the cap.
 
 The engine caps its own walk at :data:`MAX_GRAPH_NODES` nodes, ordered by ``(min_depth, tumbler)``,
-before any client sees them. A response with that many nodes is reported as possibly truncated and
+before any client sees them. A response that may have been cut is reported as possibly truncated and
 never as contained (the report carries ``possibly_truncated``; :func:`capped_traversal_count` is
-the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13). The detector counts nodes in the reply, so
-a capped walk whose tombstoned nodes the engine dropped afterwards is NOT detected (critique of
-2026-10-25, observation 6); the complete fix is the engine's scoped-result marker
-(nexus-jypmj.1.13), not a better client guess.
+the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13). The detector counts the nodes in the reply
+plus the seeds that are missing from it: ``CatalogRepository.graphBFS`` joins every non-seed node to
+a live document, so after the cut only a dead or missing seed can disappear, and a reply of 499
+nodes with one missing seed may have been a 500-node walk. It is a detector, not a bound: the
+engine's scoped-result marker (nexus-jypmj.1.13) is what stops the cut from reaching the client.
 
 A policy that cannot be applied omits the graph stream with a warning. It never falls back to an
 unrestricted walk.
@@ -46,8 +47,11 @@ from nexus.plans.evidence import ScopeConstraint
 #: and fails if the two drift.
 MAX_GRAPH_NODES: int = 500
 
-#: Secondary (non-seed) documents a policy keeps. NOT calibrated: no measurement of real
-#: ``nx_answer`` traversals exists yet (nexus-jypmj.1.12 records the first).
+#: Secondary (non-seed) documents a policy keeps when the caller gave a scope. NOT calibrated: no
+#: measurement of real ``nx_answer`` traversals exists yet (nexus-jypmj.1.12 records the first).
+#: With no caller scope the runner derives :data:`MAX_GRAPH_NODES` instead, which binds nothing
+#: (the engine never returns more nodes), so an uncalibrated cut does not change what an unscoped
+#: traverse returns until nexus-jypmj.1.12 has measured one.
 DEFAULT_MAX_DOCUMENTS: int = 50
 
 #: The secondary chunk budget; the same bound ``traverse`` has always put on ``ids``.
@@ -110,6 +114,11 @@ class TraversalPolicy:
             raise TraversalPolicyError(f"unknown policy keys {unknown}")
         if "allowed_collections" not in wire:
             raise TraversalPolicyError("policy needs allowed_collections (an empty string allows all)")
+        scope = wire["allowed_collections"]
+        if scope is not None and not isinstance(scope, str):
+            raise TraversalPolicyError(
+                f"allowed_collections must be a string (one corpus prefix, collection or catalog subtree), got {scope!r}"
+            )
         preserve = wire.get("preserve_seed_documents", True)
         if not isinstance(preserve, bool):
             raise TraversalPolicyError(f"preserve_seed_documents must be a boolean, got {preserve!r}")
@@ -117,7 +126,7 @@ class TraversalPolicy:
         if role not in LINK_ROLES:
             raise TraversalPolicyError(f"require_link_role must be one of {list(LINK_ROLES)}, got {role!r}")
         return cls(
-            allowed_collections=ScopeConstraint.parse(wire["allowed_collections"]),
+            allowed_collections=ScopeConstraint.parse(scope),
             preserve_seed_documents=preserve,
             max_documents=_positive_int(wire, "max_documents", DEFAULT_MAX_DOCUMENTS),
             max_chunks=min(_positive_int(wire, "max_chunks", DEFAULT_MAX_CHUNKS), DEFAULT_MAX_CHUNKS),
@@ -137,25 +146,74 @@ class TraversalPolicy:
         return self.require_link_role == "factual" or role == self.require_link_role
 
 
+def _as_list(value: object) -> list[str]:
+    """A link-type value as a list: a bare string is one type, never its characters."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(v) for v in value] if isinstance(value, (list, tuple, set, frozenset)) else [str(value)]
+
+
+def _caller_scope(scope: object) -> object:
+    """The caller's scope as the one string a policy can hold. A list of one is that one, an empty
+    list is no scope; several are returned as given so :meth:`TraversalPolicy.from_wire` refuses
+    them (the graph stream is omitted with a warning) instead of stringifying them into a prefix
+    that admits nothing."""
+    if isinstance(scope, (list, tuple)):
+        parts = [str(p).strip() for p in scope if str(p).strip()]
+        if not parts:
+            return ""
+        return parts[0] if len(parts) == 1 else list(parts)
+    return scope
+
+
+def _tightened(derived: dict[str, Any], declared: object) -> dict[str, Any]:
+    """*derived* with the tightening-only fields a plan declared: a lower ``max_documents`` or
+    ``max_chunks``, and a ``require_link_role`` that narrows ``factual``. Nothing else is read, and
+    a malformed value is ignored, so a plan can never loosen the caller's containment."""
+    if not isinstance(declared, Mapping):
+        return derived
+    out = dict(derived)
+    for key in ("max_documents", "max_chunks"):
+        value = declared.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and 1 <= value < out[key]:
+            out[key] = value
+    role = declared.get("require_link_role")
+    if out["require_link_role"] == "factual" and role in LINK_ROLES:
+        out["require_link_role"] = role
+    return out
+
+
 def derive_policy(step_args: Mapping[str, Any], caller_scope: object) -> dict[str, Any]:
     """The wire policy the runner gives a ``traverse`` step (RDR-232 section 3, "nx_answer always
     supplies the policy derived from request and plan").
 
     The scope is the caller's (an empty one allows everything); the link role is read from the
     step's own link types, so a ``find-implementations`` step asks for ``implementation`` and a
-    ``factual-evidence`` one for ``factual``. A policy the plan declared is replaced: the plan
-    does not get to loosen the caller's containment.
+    ``factual-evidence`` one for ``factual``. With no caller scope (none, or ``all``) the document
+    cap is :data:`MAX_GRAPH_NODES`, which binds nothing, until nexus-jypmj.1.12 calibrates one; a
+    scoped run keeps :data:`DEFAULT_MAX_DOCUMENTS`. A policy the plan declared is not used as given:
+    only the fields that tighten the derived policy are merged (:func:`_tightened`).
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred: reads a YAML registry on first use
 
-    link_types = list(step_args.get("link_types") or [])
+    link_types = _as_list(step_args.get("link_types"))
     if not link_types and step_args.get("purpose"):
         link_types = resolve_purpose(str(step_args["purpose"]))
     roles = {link_role(t) for t in link_types}
     role = next(iter(roles)) if len(roles) == 1 else "factual"
-    return TraversalPolicy(
-        allowed_collections=ScopeConstraint.parse(caller_scope), require_link_role=role,
+    scope = _caller_scope(caller_scope)
+    constraint = ScopeConstraint.parse(scope) if not isinstance(scope, list) else None
+    unscoped = constraint is not None and (constraint.kind == "none" or constraint.value == "all")
+    wire = TraversalPolicy(
+        allowed_collections=constraint if constraint is not None else ScopeConstraint.parse(""),
+        require_link_role=role,
+        max_documents=MAX_GRAPH_NODES if unscoped else DEFAULT_MAX_DOCUMENTS,
     ).to_wire()
+    if constraint is None:
+        wire["allowed_collections"] = scope  # a scope the policy cannot hold: from_wire refuses it
+    return _tightened(wire, step_args.get("policy"))
 
 
 # ── selection ──────────────────────────────────────────────────────────────
@@ -274,11 +332,11 @@ def select_documents(
             "caller_scope": scope.value, "scope_kind": scope.kind,
             "link_role": policy.require_link_role, "dropped_by_corpus": dict(dropped_by_corpus),
         }
-    # Counts the nodes in the reply. The engine truncates to MAX_GRAPH_NODES first and drops
-    # tombstoned seeds after, so a capped walk can arrive with fewer than the cap and read as
-    # contained here. Known gap (RDR-232 gate critique r2, observation 6); the engine's
-    # scoped-result marker (nexus-jypmj.1.13) is the complete fix, not a wider client guess.
-    capped = len(nodes) >= MAX_GRAPH_NODES
+    # The engine slices the walk to MAX_GRAPH_NODES, then drops dead seeds (graphBFS joins every
+    # other node to a live document), so a missing seed is the one thing a cut can hide. A reply
+    # short of the cap by no more than its missing seeds may have been cut.
+    missing_seeds = len({str(t) for t in seeds} - set(collection_of))
+    capped = len(nodes) + missing_seeds >= MAX_GRAPH_NODES
     report = {
         "policy_applied": True,
         "policy_failed": False,
