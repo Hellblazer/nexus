@@ -5412,10 +5412,11 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has eight RDR-232 keys, all always present (`scope_diagnostics`,
+The envelope has nine RDR-232 keys, all always present (`scope_diagnostics`,
 `scope_normalized`, `evidence_request`, `named_sources`, `primary_evidence`,
-`reserved_stream`, `lifecycle_stream` and `evidence_diagnostics`; the first is `[]`
-and the other seven `null` when they have nothing to report):
+`reserved_stream`, `lifecycle_stream`, `evidence_diagnostics` and `request_coverage`;
+`scope_diagnostics` is `[]` when it has nothing to report, `request_coverage` is always
+an object, and the other seven are `null` when they have nothing to report):
 
 - `scope_normalized` (nexus-jypmj.1.8, nexus-n1908): `{given, applied, reason}`
   when the caller's `scope` was a comma-list. `scope` takes one corpus prefix or
@@ -5591,7 +5592,40 @@ and the other seven `null` when they have nothing to report):
   records, an over-cap or cut-short source, a cut record, and every cap in
   `caps_hit`. `named_sources[].rdr_number`
   is the RDR number the resolved document's path carries (`null` when it is
-  not an RDR file).
+  not an RDR file). The stream is read only when the request has a
+  gate, lifecycle or status facet (see `request_coverage`), or when the clause
+  structure is uncertain and the caller bound an RDR source (it fails open);
+  a request about something else leaves it `null` even for a named RDR.
+- `request_coverage` (nexus-jypmj.2.2, RDR-232 Phase 2, shadow mode): what the
+  request asks for, derived before plan matching without a model call. It is
+  reported and does not choose a plan; the one plan-visible use is the
+  lifecycle-stream gate above. `{answer_kind, kind_decision, facets,
+  constraints, named_sources, named_source_count, source_origin, source_hints,
+  source_hint_count, subject, explicit_scope, current_code_requested,
+  ambiguities, wants_lifecycle_stream, facets_certain, active_project_tier,
+  active_project, extraction, derive_ms}`. `answer_kind` is `lookup`,
+  `synthesis`, `discovery/listing`, `comparison`, `audit`, `debug` or
+  `unknown` (the plan-side `PlanAnswerKind` vocabulary); `kind_decision` is
+  `explicit` (a `dimensions["answer_kind"]` hint, which `nx_answer` removes
+  before plan matching), `heuristic`, `model-assisted` or `unknown`. A bare
+  question word is `lookup` only for a single-facet question. `facets` are the
+  topics that need evidence (`{id, origin, topics, text, source_hints}`;
+  `origin` `clause` or `whole_question`) and `constraints` the treatment
+  instructions (`{id, kind, text}`; cite sources, distinguish dates, do not
+  infer, format) that trigger no retrieval. When the clause structure cannot
+  be read, the question is longer than 8000 characters or the constraints
+  pass 8, `facets_certain` is `false` and one `whole_question` facet carries
+  the full question. `ambiguities` discloses what the request left open: an
+  RDR named without an owner, project or catalog-subtree scope
+  (`source_unqualified`, withdrawn once the resolver resolved it to one
+  document), a conflicting or unresolved qualifier, a project named only in
+  the text. `extraction` is `{outcome, calls, timeout_s, latency_ms,
+  cost_usd}` for the optional structured call (`NX_ANSWER_STRUCTURED_EXTRACT`;
+  `outcome` `disabled`, `not_needed`, `skipped_deadline`, `ok`, `unchanged`,
+  `timeout`, `error` or `invalid`; at most one call). With `trace=False` the
+  log event carries counts only. The first-pass patterns were written with
+  the 24 golden requests in view, so any agreement figure measured on them is
+  in-sample.
 - `evidence_diagnostics` (nexus-jypmj.1.8): per-stream counts, the reducer input,
   and two deterministic checks, built without a model call from the run's step
   outputs and what the runner handed the first evidence-consuming operator
@@ -5687,6 +5721,10 @@ and the other seven `null` when they have nothing to report):
   - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
     secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
     report in brief; `null` when no stream was built.
+  - `request_coverage` (nexus-jypmj.2.2): the counts and closed names of the
+    `request_coverage` key (kind, `kind_decision`, facet and constraint counts,
+    constraint kinds, ambiguity codes, `wants_lifecycle_stream`, the extraction
+    outcome); no facet text and no source hint.
   An empty set of retrieval ids no longer turns an answer into the no-match
   notice when the reserved stream was merged into the reduction (a resolved
   source with no vector or graph hits is answered from its primary chunks and T2

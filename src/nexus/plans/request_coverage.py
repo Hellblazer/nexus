@@ -10,26 +10,48 @@ reports it in the envelope and in ``evidence_diagnostics``. **It does not gate a
 filtering is nexus-jypmj.2.3. The one plan-visible use today is :attr:`RequestCoverage.wants_lifecycle_stream`,
 which decides whether the T2 lifecycle stream (nexus-jypmj.1.7) is read.
 
+**The measured numbers are in-sample.** The first-pass patterns were written with the 24 golden requests
+(``bench/queries/golden_v1.yaml``) in view. The kind agreement on that set, its unknown rate and the lists of
+golden requests that keep or lose the lifecycle stream are therefore in-sample: they show that the patterns
+still fit the requests they were fitted to, and are not a rate on requests the author has not seen. On 30
+fresh single-author questions the first version read 21 exactly, 6 as unknown and 3 as another kind (all
+three as ``lookup``); the weak-lookup rule below was tightened for that. A held-out set is nexus-jypmj.2.8's
+job, and nothing may read the golden numbers as the classifier's accuracy.
+
 The first pass is deterministic and costs no model call. It follows the extraction table in the RDR:
 
 * **Kind.** An explicit caller hint first; then conservative patterns, ordered by strength. Two different
   strong signals, or none, give ``unknown`` (never a guess); the verb the plan matcher infers from the
   question is deliberately not consulted, because that verb is a retrieval category and not an answer
-  shape.
+  shape. A bare question word ("what ...", "which ...") is ``lookup`` only for a question with at most one
+  facet; with more it is ``unknown``. The kinds are :class:`~nexus.plans.answer_kind.PlanAnswerKind`'s
+  values and ``kind_decision`` uses ``answer_kind.ROUTE_SOURCES``' spellings (``model-assisted``), so the
+  eligibility step (nexus-jypmj.2.3) and the grown-plan stamp read the same words.
 * **Facets and constraints.** Sentences and comma clauses are separated; a clause that opens with a
-  constraint verb (cite, distinguish, do not infer, be brief) is a constraint, and every other clause of
-  an enumerated request is a facet with a positional id (``f1``, ``f2``). Constraints get ``c1``, ``c2``.
-  Text is kept verbatim: a clause that cannot be classified stays in a facet and the whole question
-  becomes one ``whole_question`` facet whenever the clause structure is not clear. No clause is dropped.
+  constraint verb (cite, ``distinguish ... from ...`` with a date, acceptance or record cue, do not infer, be
+  brief) is a constraint, and every other clause of an enumerated request is a facet with a positional id
+  (``f1``, ``f2``). Constraints get ``c1``, ``c2``. What the code guarantees about words: every word of the
+  question is in a facet, a constraint or the subject except the joiners the structure splits on (``and``,
+  ``also``, ``then``, ``plus``, ``but``, ``please`` at the head of a clause or between two noun items) and
+  the listing verb at the head of a clause (``State the ...``). Where it cannot promise that (the question
+  is longer than the first-pass cap, there are more constraints or facets than the caps, or the clause
+  structure is not clear) ``facets_certain`` is ``False`` and the ``whole_question`` facet carries the full,
+  uncut text; the part past the cap is still scanned for lifecycle topics and RDR ids.
 * **Named sources.** The caller's ``source`` binding outranks anything read from the question text; an RDR
   id in the text is used only when no binding names a source.
-* **Current code.** Only explicit current-code or implementation wording sets it; a prohibition ("do not
-  infer current code") and an RDR implementation-status facet never do.
+* **Current code.** Only explicit wording sets it (source code, the code, the codebase, the current or
+  actual implementation, "against its implementation"); a prohibition ("do not infer current code"), the
+  word "source" in another sense ("the source RDR") and an RDR implementation-status facet never do.
+* **Lifecycle stream.** :attr:`RequestCoverage.wants_lifecycle_stream` is true for a facet that touches
+  gate, lifecycle or status vocabulary. The RDR states and events come from ``rdr-lifecycle.toml``. It also
+  fails open: with uncertain facets and an RDR source the caller bound, the stream is read.
 
 An optional second step (:func:`structured_extract`) makes at most one direct, schema-closed model call
 when the first pass could not establish the kind or the clause structure. It is off unless the caller
 enables it, has its own timeout, and its latency and cost are reported separately from plan-match latency
-(:class:`ExtractionReport`). A failure leaves the first-pass result as it was.
+(:class:`ExtractionReport`). A failure leaves the first-pass result as it was. Model facets replace the
+first pass's only when they cover every content word of the question; otherwise the ``whole_question``
+facet stays beside them.
 
 Redaction. Facet text, constraint text and source hints are the caller's wording. :func:`log_fields`
 returns counts and closed-vocabulary names only; the texts are added only when the caller kept ``trace``
@@ -42,12 +64,13 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import structlog
 
+from nexus.plans.answer_kind import GOLDEN_LABEL_TO_KIND, PlanAnswerKind
 from nexus.plans.evidence import EvidenceRequest, OwnerResolution, ScopeConstraint, SourceRef
 
 _log = structlog.get_logger(__name__)
@@ -58,6 +81,7 @@ __all__ = [
     "Constraint",
     "ExtractionReport",
     "Facet",
+    "KIND_DECISIONS",
     "REQUEST_KINDS",
     "RequestCoverage",
     "SourceHint",
@@ -70,17 +94,14 @@ __all__ = [
 
 RequestKind = Literal["lookup", "synthesis", "discovery/listing", "comparison", "audit", "debug", "unknown"]
 
-#: The RDR-232 section 1 vocabulary, spelled exactly as the RDR's table spells it. Phase 2 step 3
-#: (nexus-jypmj.2.3) defines the plan-side ``PlanAnswerKind`` and unifies the two; until then this tuple is
-#: the request side's own.
-REQUEST_KINDS: tuple[str, ...] = (
-    "lookup", "synthesis", "discovery/listing", "comparison", "audit", "debug", "unknown",
-)
+#: The request kinds are the plan side's :class:`~nexus.plans.answer_kind.PlanAnswerKind` values, in its order
+#: (RDR-232 section 1), so a request kind and a plan's declared kind are compared as the same words.
+REQUEST_KINDS: tuple[str, ...] = tuple(kind.value for kind in PlanAnswerKind)
 
-#: Spellings a caller or the golden set may use for a kind.
-_KIND_ALIASES: dict[str, str] = {"discovery": "discovery/listing", "listing": "discovery/listing"}
-
-KindDecision = Literal["explicit", "heuristic", "model_assisted", "unknown"]
+#: How the kind was decided. The three route words are ``answer_kind.ROUTE_SOURCES`` exactly (hyphen and all):
+#: a grown plan records the route that produced it, and a different spelling would be dropped to ``unknown``.
+KIND_DECISIONS: tuple[str, ...] = ("explicit", "heuristic", "model-assisted", "unknown")
+KindDecision = Literal["explicit", "heuristic", "model-assisted", "unknown"]
 ConstraintKind = Literal["temporal_qualification", "citation", "no_current_code", "prohibition", "format"]
 FacetOrigin = Literal["clause", "whole_question"]
 
@@ -91,20 +112,25 @@ LIFECYCLE_TOPICS: tuple[str, ...] = ("gate", "lifecycle", "status")
 #: the tier is not wired; it never calls it.
 ACTIVE_PROJECT_TIER = "not_wired"
 
-#: Longest question the first pass reads, and the most facets and constraints it returns. A longer text is
-#: cut for the structural read only (the whole_question facet keeps the question as given).
+#: Longest question the first pass reads for structure, and the most facets and constraints it returns. A
+#: longer question is cut for the structural read only: the result is then uncertain (``facets_certain`` is
+#: False) and its ``whole_question`` facet holds the full, uncut text, whose tail is still scanned for
+#: lifecycle topics and RDR ids. The same holds when the constraints exceed the cap.
 _MAX_QUESTION_CHARS = 8_000
 _MAX_FACETS = 12
 _MAX_CONSTRAINTS = 8
 
 
 def normalize_kind(raw: object) -> str | None:
-    """*raw* as a member of :data:`REQUEST_KINDS` (``discovery`` accepted), or ``None``."""
+    """*raw* as a member of :data:`REQUEST_KINDS`, or ``None``. A golden-set label (``discovery``) is read
+    through ``answer_kind.GOLDEN_LABEL_TO_KIND``, the one table that maps those labels."""
     if not isinstance(raw, str):
         return None
     text = raw.strip().lower()
-    text = _KIND_ALIASES.get(text, text)
-    return text if text in REQUEST_KINDS else None
+    if text in REQUEST_KINDS:
+        return text
+    mapped = GOLDEN_LABEL_TO_KIND.get(text)
+    return mapped.value if mapped is not None else None
 
 
 # ── value types ──────────────────────────────────────────────────────────────────────────────────────────
@@ -186,12 +212,15 @@ class ExtractionReport:
     """The optional structured extraction step, reported apart from plan-match latency.
 
     ``outcome``: ``disabled`` (the setting is off), ``not_needed`` (the first pass established the shape),
-    ``ok`` (the result was used), ``timeout``, ``error`` (the call raised), ``invalid`` (the answer did not
-    fit the closed schema) or ``unchanged`` (valid, but it added nothing the first pass lacked).
-    ``calls`` is 0 or 1 and never more.
+    ``skipped_deadline`` (less than a second of the answer's budget was left, so no call was made), ``ok``
+    (the result was used), ``timeout`` (the wait ran out or dispatch raised its own timeout), ``error`` (the
+    call raised), ``invalid`` (the answer did not fit the closed schema) or ``unchanged`` (valid, but it
+    added nothing the first pass lacked). ``calls`` is 0 or 1 and never more.
     """
 
-    outcome: Literal["disabled", "not_needed", "ok", "timeout", "error", "invalid", "unchanged"] = "disabled"
+    outcome: Literal[
+        "disabled", "not_needed", "skipped_deadline", "ok", "timeout", "error", "invalid", "unchanged",
+    ] = "disabled"
     calls: int = 0
     timeout_s: float | None = None
     latency_ms: int | None = None
@@ -232,8 +261,21 @@ class RequestCoverage:
 
     @property
     def wants_lifecycle_stream(self) -> bool:
-        """Whether the request has a gate, lifecycle or status facet (RDR-232 Phase 2 step 8)."""
-        return any(t in LIFECYCLE_TOPICS for f in self.facets for t in f.topics)
+        """Whether the T2 lifecycle stream is read (RDR-232 Phase 2 step 8): the request has a gate, lifecycle
+        or status facet. It also FAILS OPEN: with uncertain facets (the clause structure could not be read,
+        the question ran past a cap, or the derivation failed) and an RDR source the caller bound, a topic
+        may sit where nothing looked, so the stream is read."""
+        if any(t in LIFECYCLE_TOPICS for f in self.facets for t in f.topics):
+            return True
+        return (not self.facets_certain and self.source_origin == "explicit"
+                and any(s.kind == "rdr" for s in self.named_sources))
+
+    def without_unqualified_for(self, resolved: Iterable[str]) -> RequestCoverage:
+        """This coverage without the ``source_unqualified`` ambiguity of any source in *resolved* (the values
+        the named-source resolver resolved to exactly one document: nothing is left to tell apart)."""
+        done = set(resolved)
+        kept = tuple(a for a in self.ambiguities if not (a.code == "source_unqualified" and a.subject in done))
+        return self if kept == self.ambiguities else replace(self, ambiguities=kept)
 
     def to_wire(self, *, redact: bool = False) -> dict[str, Any]:
         """The envelope form. *redact* drops every text and source hint (counts and closed names remain)."""
@@ -300,7 +342,7 @@ def log_fields(coverage: RequestCoverage, *, trace: bool) -> dict[str, Any]:
 _WS = re.compile(r"\s+")
 _ABBREV = ("e.g.", "i.e.", "vs.", "etc.", "cf.", "approx.", "no.", "fig.")
 _SENT_END = re.compile(r"(?<=[.?!])\s+(?=[A-Z\"'(])")
-_PROTECT = "\u0001"
+_PROTECT_CANDIDATES = tuple(chr(c) for c in range(0xE000, 0xE010))
 
 
 def _squash(text: str) -> str:
@@ -308,11 +350,16 @@ def _squash(text: str) -> str:
 
 
 def _sentences(text: str) -> list[str]:
+    # The abbreviation dots are hidden behind a private-use character the text does not itself contain, so a
+    # literal control or private-use character in the question is never turned into a ".".
+    mark = next((c for c in _PROTECT_CANDIDATES if c not in text), None)
+    if mark is None:
+        return [_squash(text)] if text.strip() else []
     protected = text
     for abbrev in _ABBREV:
-        protected = re.sub(re.escape(abbrev), abbrev.replace(".", _PROTECT), protected, flags=re.IGNORECASE)
+        protected = re.sub(re.escape(abbrev), abbrev.replace(".", mark), protected, flags=re.IGNORECASE)
     parts = _SENT_END.split(protected)
-    return [_squash(p.replace(_PROTECT, ".")) for p in parts if p.strip()]
+    return [_squash(p.replace(mark, ".")) for p in parts if p.strip()]
 
 
 def _split_top_level(text: str, seps: Sequence[str]) -> list[str]:
@@ -368,17 +415,18 @@ _CITE = re.compile(
     r"references|links)|link (?:to )?(?:the )?sources?|show (?:your )?sources?|give (?:citations|sources|references))\b",
     re.IGNORECASE,
 )
-_TEMPORAL_LEAD = re.compile(r"^(?:distinguish|separate|differentiate|contrast)\b", re.IGNORECASE)
+#: A temporal constraint is "distinguish/separate X from Y" with an explicit date, acceptance or record cue.
+#: ``contrast`` and ``differentiate`` are requests for content (a facet), never constraints.
+_TEMPORAL_LEAD = re.compile(r"^(?:distinguish|separate)\b[^.]*?\bfrom\b", re.IGNORECASE)
 _TEMPORAL_BODY = re.compile(
-    r"\b(?:accept\w*|later|earlier|before|after|since|as of|at the time|then|dated?|\d{4}-\d{2}-\d{2}|current|prior|"
-    r"original|now)\b",
-    re.IGNORECASE,
+    r"\b(?:accept\w*|dated?|as of|at the time of|records?|\d{4}-\d{2}-\d{2})\b", re.IGNORECASE,
 )
 _PROHIBIT = re.compile(r"^(?:do not|don't|never|avoid|must not|should not|without)\b", re.IGNORECASE)
 _CODE_WORD = re.compile(r"\b(?:code|codebase|implementation|source)\b", re.IGNORECASE)
+#: The gaps are bounded (``{0,80}``): an unbounded ``.*`` pair backtracks quadratically on "Answer in in in ...".
 _FORMAT = re.compile(
-    r"^(?:(?:be )?(?:brief|concise|terse)\b|(?:answer|respond|reply|write)\b.*\b(?:in|as|using)\b.*\b(?:sentences?|"
-    r"words?|paragraphs?|bullets?|table|json|markdown|list)\b|limit\b.*\b(?:words|sentences)\b)",
+    r"^(?:(?:be )?(?:brief|concise|terse)\b|(?:answer|respond|reply|write)\b[^.]{0,80}?\b(?:in|as|using)\b[^.]{0,80}?"
+    r"\b(?:sentences?|words?|paragraphs?|bullets?|table|json|markdown|list)\b|limit\b[^.]{0,80}?\b(?:words|sentences)\b)",
     re.IGNORECASE,
 )
 
@@ -414,18 +462,80 @@ _ITEM_START = re.compile(
     r"whose|no|any)\b",
     re.IGNORECASE,
 )
+# A clause that opens with a verb (Compare how ART and Nexus handle X) is a request, never a noun pair.
+_VERB_START = re.compile(
+    r"^(?:compare|contrast|differentiate|distinguish|separate|trace|review|analy[sz]e|check|audit|synthesi[sz]e|"
+    r"summari[sz]e|state|list|describe|explain|identify|cover|include|provide|name|outline|give|tell|walk|show|find)\b",
+    re.IGNORECASE,
+)
 _WH_START = re.compile(r"^(?:what|how|which|where|when|why|who|whether|whose)\b", re.IGNORECASE)
 _DETERMINER = re.compile(r"^(?:the|a|an|its|their|each|every|any|all|both|some)\s+", re.IGNORECASE)
 
-# Lifecycle topics, read from a facet's own text (never from a constraint).
+# Lifecycle topics, read from a facet's own text (never from a constraint). The RDR states and events are the
+# ones in src/nexus/tables/rdr-lifecycle.toml (the table `nx rdr set-status` checks), read once at import; the
+# words around them (status, progress, phase, done, "where ... stand", supersedes, rejected) are fixed here.
+
+#: Used only when the packaged table cannot be read. A test pins it to the table, so it cannot drift silently.
+_FALLBACK_LIFECYCLE: tuple[tuple[str, ...], tuple[str, ...]] = (
+    ("draft", "accepted", "deferred", "closed", "superseded", "abandoned"),
+    ("accept", "close", "close-unaccepted", "supersede", "abandon", "defer", "resume"),
+)
+
+#: An event verb that is also an everyday word is matched only inflected ("closes", "resumed"), not bare.
+_BARE_AMBIGUOUS = frozenset({"close", "resume", "defer"})
+
+
+def _read_lifecycle_vocabulary() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    try:
+        from nexus.tables.load import load_packaged_table  # noqa: PLC0415 — deferred; the table loader is not needed to import this module
+
+        table = load_packaged_table("rdr-lifecycle.toml")
+        states = tuple(table.dimensions["status"].domain)
+        events = tuple(table.dimensions["event"].domain)
+        if states and events:
+            return states, events
+    except Exception as exc:  # noqa: BLE001 — an unreadable table degrades to the pinned copy, never fails an import
+        _log.warning("request_coverage_lifecycle_table_unreadable", error=type(exc).__name__)
+    return _FALLBACK_LIFECYCLE
+
+
+LIFECYCLE_STATES, LIFECYCLE_EVENTS = _read_lifecycle_vocabulary()
+
+
+def _lifecycle_pattern(states: Sequence[str], events: Sequence[str]) -> re.Pattern[str]:
+    """The regex over an RDR's lifecycle words: each state as written (a noun state also in the plural), each
+    event verb inflected (``accepts``, ``deferred``, ``abandonment``, ``closure``) and, unless it is an
+    everyday word, bare."""
+    alternatives: list[str] = [re.escape(st) + ("" if st.endswith("ed") else "s?") for st in states]
+    for event in events:
+        if not event.isalpha():
+            continue  # a compound event (close-unaccepted) is made of words already listed
+        tail = "e" if event.endswith("e") else ""
+        stem = event[: len(event) - len(tail)]
+        endings = {"es" if tail else "s", "ed", "ing", "red", "ring", "ral", "ance", "ment", "ure"}
+        if event not in _BARE_AMBIGUOUS:
+            endings.add(tail)
+        alternatives.append(re.escape(stem) + "(?:" + "|".join(sorted(endings)) + ")")
+    return re.compile(r"\b(?:" + "|".join(alternatives) + r")\b", re.IGNORECASE)
+
+
+_LIFECYCLE_WORDS = re.compile(r"\b(?:lifecycle|post-?mortem|reject\w*|supersed\w*|supersession)\b", re.IGNORECASE)
+_STATE_NOUN = re.compile(
+    r"\b(?:(?:the|its|their|current|what|which|in|of)\s+state|states|state\s+of)\b(?!\s+(?:machine|management|transition))",
+    re.IGNORECASE,
+)
+_WHERE_STAND = re.compile(r"\bwhere\b[^.?!]{0,60}?\bstands?\b", re.IGNORECASE)
+_REVIEW_WORDS = re.compile(r"\b(?:review\w*|critiqu\w*)\b", re.IGNORECASE)
+
 _TOPIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("gate", re.compile(r"\bgat(?:e|es|ed|ing)\b", re.IGNORECASE)),
-    ("lifecycle", re.compile(
-        r"\b(?:lifecycle|accepted|acceptance|accepts|superseded|supersede|closed|closing|post-?mortem)\b",
-        re.IGNORECASE)),
+    ("lifecycle", _lifecycle_pattern(LIFECYCLE_STATES, LIFECYCLE_EVENTS)),
+    ("lifecycle", _LIFECYCLE_WORDS),
     ("status", re.compile(
-        r"\b(?:status|statuses|implementation (?:work|state|status)|implemented|unimplemented|complete[d]?|"
-        r"pending|still open)\b", re.IGNORECASE)),
+        r"\b(?:status|statuses|progress|done|phases?|implementation (?:work|state|status)|implemented|unimplemented|"
+        r"complete[d]?|pending|still open)\b", re.IGNORECASE)),
+    ("status", _STATE_NOUN),
+    ("status", _WHERE_STAND),
 )
 
 _ADJECTIVE_SUFFIX = re.compile(r"(?:al|ic|ive|ous|ful|ary|ent|ant|ible|able|ish|less)$", re.IGNORECASE)
@@ -436,7 +546,10 @@ _ADJECTIVES = frozenset({
 
 
 def _topics(text: str) -> tuple[str, ...]:
-    return tuple(name for name, rx in _TOPIC_PATTERNS if rx.search(text))
+    found = [name for name, rx in _TOPIC_PATTERNS if rx.search(text)]
+    if _RDR_REF.search(text) and _REVIEW_WORDS.search(text):
+        found.append("gate")  # a review or critique of an RDR is its gate record
+    return tuple(name for name in dict.fromkeys(found))
 
 
 def _content_words(text: str) -> list[str]:
@@ -449,7 +562,7 @@ def _split_conjoined(item: str) -> list[str]:
     Conservative on purpose: a split that is not clearly right leaves the item whole (a coarser facet), and
     a wh-clause is never split.
     """
-    if _WH_START.match(item) or len(item.split()) > 10:
+    if _WH_START.match(item) or _VERB_START.match(item) or len(item.split()) > 10:
         return [item]
     parts = _split_top_level(item, (" and ",))
     if len(parts) != 2:
@@ -632,8 +745,12 @@ def _strong_signals(text: str, facet_count: int, listed: bool) -> set[str]:
         found.add("audit")
     if (re.match(r"^why (?:does|do|is|are|did|was|were)\b", lead, re.IGNORECASE) and _FAILURE_WORDS.search(lead)):
         found.add("debug")
-    if re.match(r"^what causes\b", lead, re.IGNORECASE) and _FAILURE_WORDS.search(lead):
+    if re.match(r"^what (?:causes|is causing|are causing|caused|'s causing)\b", lead, re.IGNORECASE) \
+            and _FAILURE_WORDS.search(lead):
         found.add("debug")
+    if re.match(r"^(?:which|what) (?:is|are|was|were) (?:\w+er|more \w+|less \w+|better|worse)\b[^?]*\bor\b", lead,
+                re.IGNORECASE):
+        found.add("comparison")
     if re.search(r"\broot cause\b|\bstack ?trace\b|\btraceback\b", lead, re.IGNORECASE):
         found.add("debug")
     if (re.match(r"^(?:list|enumerate)\b", lead, re.IGNORECASE)
@@ -645,35 +762,43 @@ def _strong_signals(text: str, facet_count: int, listed: bool) -> set[str]:
     return found
 
 
-def _weak_lookup(text: str) -> bool:
+def _weak_lookup(text: str, facet_count: int, certain: bool) -> bool:
+    """A bare question word opening, with nothing stronger: ``lookup`` only for a question that asks ONE thing
+    (at most one facet, and a clause structure that was read). A question with more facets than one is a
+    request for several things, not a lookup, so a lookup plan must not be made eligible for it."""
+    if facet_count > 1 or not certain:
+        return False
     lead = text.strip()
     if re.match(r"^(?:which|what|who|when|where)\b", lead, re.IGNORECASE) and not re.match(
-        r"^what causes\b", lead, re.IGNORECASE
+        r"^what (?:causes|is causing|are causing|caused)\b", lead, re.IGNORECASE
     ):
         return not _plural_head(lead)
     return bool(re.match(r"^how (?:many|much|long|often)\b", lead, re.IGNORECASE))
 
 
-def _infer_kind(text: str, facet_count: int, listed: bool) -> tuple[str, bool]:
+def _infer_kind(text: str, facet_count: int, listed: bool, certain: bool = True) -> tuple[str, bool]:
     """``(kind, ambiguous)``: a single strong signal wins; two different ones are ambiguous; with none, a
-    lone interrogative lookup opening gives ``lookup``; anything else is ``unknown``."""
+    lone single-facet interrogative opening gives ``lookup``; anything else is ``unknown``."""
     strong = _strong_signals(text, facet_count, listed)
     if len(strong) == 1:
         return next(iter(strong)), False
     if len(strong) > 1:
         return "unknown", True
-    if _weak_lookup(text):
+    if _weak_lookup(text, facet_count, certain):
         return "lookup", False
     return "unknown", False
 
 
 # ── current code ─────────────────────────────────────────────────────────────────────────────────────────
 
+_CODE_NOUN = r"(?:code|codebase|source code|implementation)"
+#: Explicit wording only. "source" alone is not enough ("the source RDR", "the source document").
 _CURRENT_CODE = re.compile(
-    r"\bcurrent (?:code|implementation|source)\b|\bactual (?:code|implementation)\b|\bagainst (?:its|the|their) "
-    r"(?:current |actual )?(?:code|implementation|source)\b|\b(?:in|from|read|inspect|check|search) the "
-    r"(?:code|codebase|source)\b|\bsource code\b|\bhow (?:is|are|does|do) [^.?!]{0,60}?\bimplemented\b|\bwhere is "
-    r"[^.?!]{0,40}?\bimplemented\b|\b(?:up[- ]to[- ]date|consistent|in sync) with the (?:code|implementation)\b",
+    r"\bcurrent (?:code|codebase|implementation|source code)\b|\bactual (?:code|codebase|implementation|source code)\b|"
+    rf"\bagainst (?:its|the|their) (?:current |actual )?{_CODE_NOUN}\b|"
+    r"\b(?:in|from|read|inspect|check|search|against) the (?:code|codebase|source code)\b|\bsource code\b|"
+    r"\bhow (?:is|are|does|do) [^.?!]{0,60}?\bimplemented\b|\bwhere is [^.?!]{0,40}?\bimplemented\b|"
+    r"\b(?:up[- ]to[- ]date|consistent|in sync) with the (?:code|implementation)\b",
     re.IGNORECASE,
 )
 
@@ -754,16 +879,27 @@ def derive_request_coverage(
     *evidence_request* carries the caller's ``source``/``owner``/``project`` bindings after
     :func:`~nexus.plans.evidence.build_evidence_request`; they outrank anything read from *question*.
     *explicit_kind* is a caller hint (``dimensions["answer_kind"]``); an invalid value is ignored.
-    *active_project* is the seam for the active-project tier (nexus-jypmj.2.4): it is recorded, never used to
-    qualify a source in this bead. Never raises.
+
+    *active_project* is a seam for the active-project tier of source resolution (nexus-jypmj.2.4). It is
+    recorded and never used here, and it returns a project name, not a tumbler or an owner. Because it runs
+    after the evidence request is built it cannot qualify a source. nexus-jypmj.2.4 should extend
+    ``OwnerResolution`` (``nexus.plans.evidence``) with an ``inferred`` status instead, so the owner the
+    active project names enters the same resolution as an explicit ``owner`` or ``project`` binding, and
+    is reported as inferred.
+
+    Never raises: a failure degrades to one ``whole_question`` facet that is uncertain, keeps the caller's
+    bound sources, and so fails open on the lifecycle stream.
     """
     try:
         return _derive(question, scope, evidence_request, explicit_kind, active_project)
     except Exception as exc:  # noqa: BLE001 — the derivation stage must never fail an answer; it degrades to the whole question
         _log.warning("request_coverage_derive_failed", error=type(exc).__name__)
         text = _squash(question or "")
+        bound = tuple(evidence_request.sources) if evidence_request is not None and evidence_request.sources else ()
         return RequestCoverage(
             facets=(Facet("f1", text, "whole_question"),) if text else (),
+            named_sources=bound,
+            source_origin="explicit" if bound else "none",
             explicit_scope=ScopeConstraint.parse(scope),
             facets_certain=False,
         )
@@ -776,12 +912,18 @@ def _derive(
     explicit_kind: object,
     active_project: Callable[[], str | None] | None,
 ) -> RequestCoverage:
-    text = _squash(question or "")[:_MAX_QUESTION_CHARS]
+    full = _squash(question or "")
+    # Past the cap the structure is read from the head only (cut at a word); the tail is not parsed.
+    over_cap = len(full) > _MAX_QUESTION_CHARS
+    cut = (full.rfind(" ", 0, _MAX_QUESTION_CHARS) if over_cap else len(full))
+    cut = cut if cut > 0 else _MAX_QUESTION_CHARS
+    text, tail = full[:cut], full[cut:]
     parsed = _parse(text)
 
     constraints = tuple(
         Constraint(f"c{i}", ctext, ckind) for i, (ctext, ckind) in enumerate(parsed.constraints[:_MAX_CONSTRAINTS], 1)
     )
+    constraint_overflow = len(parsed.constraints) > _MAX_CONSTRAINTS
     # The question without its constraint clauses: kind, topics and current-code wording are read from this, so
     # a prohibition ("do not infer current code") never counts as a request.
     stripped = text
@@ -791,12 +933,18 @@ def _derive(
     items = [i for i in (_strip_end(x) for x in parsed.items) if i]
 
     facets_certain = True
-    if not items or _is_whole(items, stripped) or len(items) > _MAX_FACETS:
+    if over_cap or constraint_overflow or not items or _is_whole(items, stripped) or len(items) > _MAX_FACETS:
         content_sentences = [s for s in _sentences(stripped) if _strip_end(s)]
-        facets_certain = not (len(content_sentences) >= 2 or stripped.count(",") >= 2 or len(items) > _MAX_FACETS)
+        facets_certain = not (
+            over_cap or constraint_overflow or len(content_sentences) >= 2 or stripped.count(",") >= 2
+            or len(items) > _MAX_FACETS
+        )
+        # The one facet holds the full question, uncut. Its topics come from the parsed head without its
+        # constraint clauses, plus the unparsed tail (a gate or status clause past the cap still counts).
+        topics = tuple(dict.fromkeys(_topics(stripped) + (_topics(tail) if tail else ())))
         facets = (
-            Facet("f1", text, "whole_question", _topics(stripped), tuple(s.value for s in _rdr_sources(text))),
-        ) if text else ()
+            Facet("f1", full, "whole_question", topics, tuple(s.value for s in _rdr_sources(full))),
+        ) if full else ()
     else:
         facets = tuple(
             Facet(f"f{i}", item, "clause", _topics(item), tuple(s.value for s in _rdr_sources(item)))
@@ -809,7 +957,7 @@ def _derive(
     if hint is not None and hint != "unknown":
         kind, decision = hint, "explicit"
     else:
-        kind, ambiguous = _infer_kind(stripped, len(items), parsed.listed)
+        kind, ambiguous = _infer_kind(stripped, len(items), parsed.listed, facets_certain)
         decision = "heuristic" if kind != "unknown" else "unknown"
         if ambiguous:
             ambiguities.append(Ambiguity(
@@ -820,7 +968,7 @@ def _derive(
     current_code = bool(_CURRENT_CODE.search(stripped))
 
     # named sources: bindings outrank the text
-    from_text = _rdr_sources(text)
+    from_text = _rdr_sources(full)
     if request is not None and request.sources:
         sources, origin = tuple(request.sources), "explicit"
     elif from_text:
@@ -828,7 +976,7 @@ def _derive(
     else:
         sources, origin = (), "none"
 
-    hints = _title_hints(parsed.topics) + _project_hints(text)
+    hints = _title_hints(parsed.topics) + _project_hints(full)
     ambiguities.extend(_source_ambiguities(sources, hints, request))
     qualifier = None
     if active_project is not None:
@@ -959,6 +1107,44 @@ _EXTRACT_PROMPT = (
 #: ``(prompt, schema, *, timeout, usage_sink) -> dict`` : the shape of ``claude_dispatch``.
 Dispatch = Callable[..., Awaitable[dict[str, Any]]]
 
+#: Less than this much budget left and the call is not made (``skipped_deadline``): a model round trip does
+#: not fit, and a call that cannot finish would only spend the answer's remaining time.
+MIN_EXTRACT_SECONDS = 1.0
+
+#: Seconds the outer wait allows past the timeout handed to dispatch: dispatch's own kill-and-reap grace
+#: (``dispatch._TIMEOUT_CLEANUP_GRACE_SECONDS``, 5 s; a test pins this to it) plus one second. An outer wait
+#: that fired at the timeout would cancel dispatch before its own kill path ran and orphan the claude -p tree.
+DEFAULT_CLEANUP_GRACE_S = 6.0
+
+# Words that carry no request (articles, prepositions, pronouns, cue verbs): a model reading is judged on the
+# rest of the question's words.
+_STOP = frozenset((
+    "a an the of in on at to for from by with without as about across into onto over under between among "
+    "and or but nor so also then than that this these those it its their there here is are was were be been "
+    "being do does did has have had can could should would will may might must not no any all each both "
+    "some what which who whom whose when where why how whether if i me my we us our you your tell give show "
+    "explain describe state list name outline summarize summarise identify cover include provide trace "
+    "walk please".split()
+))
+
+
+def _word_keys(text: str) -> set[str]:
+    keys = set()
+    for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9_'’-]*", text.lower()):
+        if word in _STOP:
+            continue
+        keys.add(word[:-1] if len(word) > 3 and word.endswith("s") else word)
+    return keys
+
+
+def uncovered_words(question: str, covering: Iterable[str]) -> list[str]:
+    """The content words of *question* that no text in *covering* contains (case, a trailing plural ``s`` and
+    function words ignored). Empty means the covering texts account for the question."""
+    have: set[str] = set()
+    for text in covering:
+        have |= _word_keys(text)
+    return sorted(_word_keys(question) - have)
+
 
 def needs_structured_extract(coverage: RequestCoverage) -> bool:
     """Whether the first pass left the kind or the clause structure open."""
@@ -998,20 +1184,30 @@ async def structured_extract(
     enabled: bool,
     usage_sink: list[Any] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    seconds_left: float | None = None,
+    cleanup_grace: float = DEFAULT_CLEANUP_GRACE_S,
 ) -> RequestCoverage:
     """At most one direct, schema-closed extraction call, when the first pass left the shape open.
 
     Returns *coverage* unchanged, with an :class:`ExtractionReport`, when the step is disabled, not needed,
-    times out, raises or answers outside the schema. On success only what the first pass lacked is taken:
-    the kind when it was ``unknown``, the facets when the clause structure was uncertain. First-pass
+    skipped for want of budget (*seconds_left* under :data:`MIN_EXTRACT_SECONDS`), times out, raises or
+    answers outside the schema. On success only what the first pass lacked is taken: the kind when it was
+    ``unknown`` and the facets when the clause structure was uncertain. The model's facets replace the first
+    pass's only when together with the constraints and subject they cover every content word of the question;
+    otherwise the ``whole_question`` facet stays beside them and the structure stays uncertain. First-pass
     constraints and the caller's explicit bindings are never replaced. *usage_sink* is where the dispatch
     reports its cost; the report carries the sum. The call is never recursive ``nx_answer`` and never
     retried.
+
+    The wait is bounded at *timeout* plus *cleanup_grace*, not at *timeout*: *dispatch* enforces *timeout*
+    itself and kills its process tree on expiry, and an earlier outer cancel would pre-empt that.
     """
     if not enabled:
         return replace(coverage, extraction=ExtractionReport("disabled"))
     if not needs_structured_extract(coverage):
         return replace(coverage, extraction=ExtractionReport("not_needed", timeout_s=timeout))
+    if seconds_left is not None and seconds_left < MIN_EXTRACT_SECONDS:
+        return replace(coverage, extraction=ExtractionReport("skipped_deadline", calls=0, timeout_s=timeout))
     sink: list[Any] = usage_sink if usage_sink is not None else []
     started = clock()
 
@@ -1023,12 +1219,14 @@ async def structured_extract(
             cost_usd=round(sum(cost), 6) if cost else None,
         )
 
+    from nexus.operators.llm_types import OperatorTimeoutError  # noqa: PLC0415 — deferred; imports nothing from nexus
+
     try:
         raw = await asyncio.wait_for(
-            dispatch(_EXTRACT_PROMPT + question, EXTRACT_SCHEMA, timeout=timeout, usage_sink=sink),
-            timeout=timeout,
+            dispatch(_EXTRACT_PROMPT + question[:_MAX_QUESTION_CHARS], EXTRACT_SCHEMA, timeout=timeout, usage_sink=sink),
+            timeout=timeout + max(cleanup_grace, 0.0),
         )
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, OperatorTimeoutError):
         return replace(coverage, extraction=report("timeout"))
     except Exception as exc:  # noqa: BLE001 — a failed extraction leaves the first-pass result, never a failed answer
         _log.warning("request_coverage_extract_failed", error=type(exc).__name__)
@@ -1041,15 +1239,26 @@ async def structured_extract(
     changed = False
     new_kind, decision = coverage.answer_kind, coverage.kind_decision
     if coverage.answer_kind == "unknown" and kind != "unknown" and coverage.kind_decision != "explicit":
-        new_kind, decision, changed = kind, "model_assisted", True
+        new_kind, decision, changed = kind, "model-assisted", True
     facets = coverage.facets
     certain = coverage.facets_certain
     if not coverage.facets_certain and facet_texts:
-        facets = tuple(
+        model_facets = [
             Facet(f"f{i}", t, "clause", _topics(t), tuple(s.value for s in _rdr_sources(t)))
             for i, t in enumerate(facet_texts, 1)
+        ]
+        covering = (
+            list(facet_texts) + [c.text for c in coverage.constraints] + list(coverage.subject)
         )
-        certain, changed = True, True
+        if not uncovered_words(question[:_MAX_QUESTION_CHARS], covering):
+            facets, certain = tuple(model_facets), True
+        else:
+            # The model's reading missed part of the question: keep the whole question beside it.
+            whole = next((f for f in coverage.facets if f.origin == "whole_question"), None)
+            facets = tuple(model_facets) + (
+                (replace(whole, id=f"f{len(model_facets) + 1}"),) if whole is not None else ()
+            )
+        changed = True
     return replace(
         coverage, answer_kind=new_kind, kind_decision=decision, facets=facets, facets_certain=certain,  # type: ignore[arg-type]
         extraction=report("ok" if changed else "unchanged"),

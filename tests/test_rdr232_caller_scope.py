@@ -401,7 +401,7 @@ def _single_query_match(corpus: str | None, *, default_corpus: bool = True) -> M
 
 def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan_run_result=None,
                      db=None, bindings=None, question: str = "which documents discuss widgets",
-                     dimensions=None, trace: bool = True, plan_match=None):
+                     dimensions=None, trace: bool = True, plan_match=None, budget_seconds=None):
     """Call ``nx_answer`` with the matcher, the plan runner, T2 and the catalog patched away.
 
     *db* is the T2 stub (a ``MagicMock``) the run records into, for a test that reads the outcome
@@ -438,7 +438,8 @@ def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan
         mocks = [stack.enter_context(p) for p in patches]
         mocks[2].return_value.__enter__.return_value = db_stub
         out = asyncio.run(core.nx_answer(question=question, scope=scope, structured=structured,
-                                         bindings=bindings, dimensions=dimensions, trace=trace))
+                                         bindings=bindings, dimensions=dimensions, trace=trace,
+                                         budget_seconds=budget_seconds))
     return out, query_calls
 
 

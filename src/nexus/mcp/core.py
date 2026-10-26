@@ -10283,19 +10283,27 @@ async def _nx_answer_request_coverage(
     )
     coverage = replace(coverage, derive_ms=int((time.monotonic() - started) * 1000))
     if extraction_enabled(_os.environ):
-        timeout = min(extraction_timeout(_os.environ), _nx_answer_seconds_left(float("inf"), deadline))
+        left = _nx_answer_seconds_left(float("inf"), deadline)
+        timeout = min(extraction_timeout(_os.environ), left)
         sink: list = []
 
         async def _dispatch(prompt: str, schema: dict, *, timeout: float, usage_sink: list) -> dict:
             from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — deferred; operator dispatch is a call-time import here
 
+            # dispatch spends its timeout once per phase (first byte, then the rest), so twice the setting in
+            # the worst case; an absolute deadline at now + timeout (or the answer's own, if sooner) holds the
+            # whole call to the timeout and lets dispatch's own kill path end the claude -p tree.
+            own = time.monotonic() + timeout
             return await claude_dispatch(
                 prompt, schema, timeout=timeout, usage_sink=usage_sink, model=_pin_default_model(None),
-                operator="request_coverage_extract", deadline=deadline,
+                operator="request_coverage_extract", deadline=own if deadline is None else min(own, deadline),
             )
+
+        from nexus.operators.dispatch import _TIMEOUT_CLEANUP_GRACE_SECONDS  # noqa: PLC0415 — deferred, as above
 
         coverage = await structured_extract(
             coverage, question, dispatch=_dispatch, timeout=timeout, enabled=True, usage_sink=sink,
+            seconds_left=left, cleanup_grace=_TIMEOUT_CLEANUP_GRACE_SECONDS + 1.0,
         )
     else:
         coverage = replace(coverage, extraction=ExtractionReport("disabled"))
@@ -11664,6 +11672,12 @@ async def nx_answer(
     # (bounded; nothing is guessed). The primary stream that reads the
     # resolved documents is merged at the runner (nexus-jypmj.1.6).
     _named_sources = await _nx_answer_named_sources(_evidence_request, deadline=deadline)
+    # A source the resolver resolved to exactly one document has nothing left to tell apart, so its
+    # "no project qualifier" ambiguity (derived before resolution) is withdrawn.
+    if _named_sources is not None:
+        _request_coverage = _request_coverage.without_unqualified_for(
+            s.ref.value for s in _named_sources.resolved()
+        )
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.
     _single_query_fast_path = False

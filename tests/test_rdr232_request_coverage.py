@@ -102,9 +102,13 @@ def test_two_different_strong_signals_are_ambiguous_and_say_so() -> None:
     assert [a.code for a in cov.ambiguities if a.code == "kind_ambiguous"] == ["kind_ambiguous"]
 
 
-def test_golden_kinds_are_never_contradicted() -> None:
-    """Measured against the hand labels: a kind is right or unknown, never another kind. At least 20 of 24
-    agree outright (a non-vacuity floor, not a target)."""
+def test_golden_kind_regression_floor() -> None:
+    """A regression floor over the hand labels, NOT a measure of the classifier. The patterns in
+    ``request_coverage.py`` were written with these 24 golden requests in view, so the kind agreement printed
+    below, the unknown rate, and the keep/lose lists of the lifecycle test are IN-SAMPLE: they say the
+    patterns still fit the requests they were fitted to, and must not be read as a rate on requests the
+    author has not seen. A held-out set is nexus-jypmj.2.8's job. The floor is low on purpose: it trips on a
+    change that makes a golden request read as another kind, or that loses most of the agreement."""
     exact = wrong = 0
     unknowns: list[str] = []
     for qid, q in _golden().items():
@@ -117,9 +121,9 @@ def test_golden_kinds_are_never_contradicted() -> None:
         else:
             wrong += 1
             print(f"WRONG {qid}: label {label} got {got}")
-    print(f"RDR232-COVERAGE-KIND golden={len(_golden())} exact={exact} unknown_instead={unknowns} wrong={wrong}")
+    print(f"RDR232-COVERAGE-KIND in-sample golden={len(_golden())} exact={exact} unknown_instead={unknowns} wrong={wrong}")
     assert wrong == 0
-    assert exact >= 20
+    assert exact >= 16
 
 
 # ── 3. extraction failure: unknown plus one whole_question facet, nothing dropped ─────────────────────────
@@ -150,7 +154,8 @@ def test_a_failed_structured_extraction_leaves_unknown_and_whole_question(failur
         return {"answer_kind": "not-a-kind", "facets": "nope", "constraints": []}
 
     before = _uncertain()
-    after = asyncio.run(structured_extract(before, _TWO_SENTENCE, dispatch=dispatch, timeout=0.05, enabled=True))
+    after = asyncio.run(structured_extract(
+        before, _TWO_SENTENCE, dispatch=dispatch, timeout=0.05, enabled=True, cleanup_grace=0.05))
     assert after.extraction.outcome == failure and after.extraction.calls == 1
     assert (after.answer_kind, after.kind_decision) == ("unknown", "unknown")
     assert after.facets == before.facets and after.constraints == before.constraints, "no clause was dropped"
@@ -164,6 +169,7 @@ class _Dispatch:
     def __init__(self, result: dict | None = None, *, cost: float | None = 0.0123) -> None:
         self.calls: list[tuple[str, dict, float]] = []
         self.extra: list[dict] = []
+        self.raw: list[tuple[tuple, dict]] = []
         self.result = result if result is not None else {
             "answer_kind": "synthesis",
             "facets": ["how plan matching works", "what the cache does", "what the matcher costs"],
@@ -174,6 +180,7 @@ class _Dispatch:
     async def __call__(self, prompt, schema, *, timeout, usage_sink, **extra):
         self.calls.append((prompt, schema, timeout))
         self.extra.append(extra)
+        self.raw.append(((prompt, schema), {"timeout": timeout, "usage_sink": usage_sink, **extra}))
         if self.cost is not None:
             usage_sink.append(SimpleNamespace(cost_usd=self.cost))
         return self.result
@@ -188,7 +195,7 @@ def test_the_structured_call_runs_at_most_once_and_is_reported_on_its_own() -> N
     assert len(fake.calls) == 1, "one direct call, never a retry or a second"
     assert _TWO_SENTENCE in fake.calls[0][0] and fake.calls[0][1] is rc.EXTRACT_SCHEMA
     assert after.extraction == ExtractionReport("ok", calls=1, timeout_s=7.0, latency_ms=250, cost_usd=0.0123)
-    assert (after.answer_kind, after.kind_decision) == ("synthesis", "model_assisted")
+    assert (after.answer_kind, after.kind_decision) == ("synthesis", "model-assisted")
     assert [f.text for f in after.facets] == ["how plan matching works", "what the cache does", "what the matcher costs"]
     assert [c.kind for c in after.constraints] == ["citation"], "first-pass constraints are never replaced"
     assert after.derive_ms == before.derive_ms, "the first pass's own time is not mixed into the model call's"
@@ -295,7 +302,12 @@ def test_the_lifecycle_stream_is_wanted_only_for_a_gate_lifecycle_or_status_face
 
 def test_golden_requests_that_keep_and_lose_the_lifecycle_stream() -> None:
     """The change this bead makes to plan-visible behaviour, over the golden set: of the requests that name an
-    RDR source, only those with a gate, lifecycle or status facet still get the T2 stream."""
+    RDR source, only those with a gate, lifecycle or status facet still get the T2 stream. IN-SAMPLE (the
+    patterns were written with these requests in view; see the kind test above). Of the "lose" list, G01-G04 never had the stream:
+    their ``required_sources`` are the RDRs the answer must find, the question names none, and the stream
+    follows the named-source resolver, which reads the caller's bindings only. For them the list shows what
+    the facet gate decides, not a behaviour that changed; the others (G07, G09, G13, G15) name their RDRs in
+    the text and lose the stream only for a caller that binds the source."""
     keep, lose = [], []
     for qid, q in _golden().items():
         if not any(str(s).startswith("RDR-") for s in q["required_sources"]):
@@ -531,4 +543,516 @@ def test_nx_answer_makes_the_structured_call_only_when_the_setting_is_on(monkeyp
     assert fake.extra[0]["operator"] == "request_coverage_extract"
     assert on["extraction"]["outcome"] == "ok" and on["extraction"]["calls"] == 1
     assert on["extraction"]["latency_ms"] is not None and on["extraction"]["timeout_s"] is not None
-    assert on["answer_kind"] == "synthesis" and on["kind_decision"] == "model_assisted"
+    assert on["answer_kind"] == "synthesis" and on["kind_decision"] == "model-assisted"
+
+
+# ═══ nexus-jypmj.2.2 fix round ═════════════════════════════════════════════════════════════════════════════
+#
+# Every pin below was shown failing with its change removed (mutation record: the hand-back of the fix round).
+
+
+# ── F0. the in-sample limit travels with the numbers ──────────────────────────────────────────────────────
+
+
+def test_the_in_sample_limit_is_stated_in_the_module_docstring_and_the_changelog() -> None:
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    entry = next(line for line in changelog.splitlines() if "derives a `RequestCoverage` before plan matching" in line)
+    for where, text in (("module docstring", rc.__doc__ or ""), ("CHANGELOG entry", entry)):
+        assert "in-sample" in text.lower() and "24 golden" in text, f"the {where} must say the patterns were written with the 24 golden requests in view"
+    assert "in-sample" in (test_golden_kind_regression_floor.__doc__ or "").lower(), "the golden-kind test must say its figures are in-sample"
+
+
+# ── F1 (S1). a weak "what/which" opening is lookup only for a single-facet question ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What are the locked architecture, the numerical conventions, the gate history and the open items of RDR-084?",
+        "What did RDR-155 remove, what is the migration path, and what remains open?",
+        "Which paper reported the context-precision tradeoff for per-source caps in hybrid retrieval, and what split did it recommend?",
+    ],
+)
+def test_a_multi_facet_question_is_never_typed_lookup(question: str) -> None:
+    cov = derive_request_coverage(question)
+    assert len(cov.facets) > 1 or not cov.facets_certain
+    assert (cov.answer_kind, cov.kind_decision) == ("unknown", "unknown")
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is causing the timeout in the catalog sync?",
+        "Which is faster, hybrid search or plain vector search?",
+    ],
+)
+def test_a_cause_or_a_comparative_question_is_not_lookup(question: str) -> None:
+    assert derive_request_coverage(question).answer_kind != "lookup"
+
+
+def test_a_single_facet_which_question_is_still_lookup() -> None:
+    cov = derive_request_coverage("Which RDR introduced catalog tumblers as hierarchical document addresses?")
+    assert (cov.answer_kind, cov.kind_decision) == ("lookup", "heuristic")
+
+
+# ── F2 (S2, Important 3). no clause is dropped silently ───────────────────────────────────────────────────
+
+_FILLER = "The plan matcher cache keeps entries by canonical dimensions and counts hits and misses per plan. "
+
+
+def _long_question(tail: str) -> str:
+    return "Describe how the plan matcher cache works. " + _FILLER * 90 + tail
+
+
+def test_a_question_over_the_cap_keeps_its_full_text_is_uncertain_and_its_tail_is_scanned() -> None:
+    tail = "What is the acceptance status of RDR-090 and how did its gate end?"
+    question = _long_question(tail)
+    assert len(question) > rc._MAX_QUESTION_CHARS
+    cov = derive_request_coverage(question)
+    assert cov.facets_certain is False
+    (facet,) = cov.facets
+    assert facet.origin == "whole_question" and facet.text == " ".join(question.split()), "the full text, uncut"
+    assert tail in facet.text and "RDR-090" in facet.source_hints
+    assert cov.wants_lifecycle_stream is True, "a gate/status clause past the cap still asks for the T2 stream"
+    assert [s.value for s in cov.named_sources] == ["RDR-090"], "an RDR named past the cap is still named"
+
+
+def test_more_constraints_than_the_cap_keep_every_clause_in_the_whole_question_facet() -> None:
+    clauses = [f"Cite source number {i}" for i in range(1, 11)]
+    question = "Describe the plan matcher cache. " + ". ".join(clauses) + "."
+    cov = derive_request_coverage(question)
+    assert len(cov.constraints) == rc._MAX_CONSTRAINTS and cov.facets_certain is False
+    (facet,) = cov.facets
+    assert facet.origin == "whole_question"
+    assert "Cite source number 9" in facet.text and "Cite source number 10" in facet.text
+
+
+def test_one_long_sentence_over_the_cap_is_uncertain_on_length_alone() -> None:
+    question = "Describe the " + "plan matcher cache " * 600
+    assert len(question) > rc._MAX_QUESTION_CHARS and "," not in question and "." not in question
+    cov = derive_request_coverage(question)
+    assert cov.facets_certain is False and cov.facets[0].text == question.strip()
+
+
+_ADVERSARIAL = [
+    _long_question("Also list the closed RDRs, and state the gate history."),
+    "Describe the cache. " + " ".join(f"Cite source number {i}." for i in range(1, 11)),
+    "List the cache, list the queue, list the planner; describe the matcher and the runner, state the budget.",
+    "State the locked architecture, and also the numerical conventions, plus the gate history, but not the rest.",
+    "Explain: the first tier, the second tier, the third tier, the fourth tier, the fifth tier, the sixth tier, "
+    "the seventh tier, the eighth tier, the ninth tier, the tenth tier, the eleventh tier, the twelfth tier, "
+    "the thirteenth tier, the fourteenth tier.",
+    "Compare how ART and Nexus handle RDR-084, then contrast their current and original designs.",
+    "Differentiate the T1 and T2 tiers, and describe each tier now.",
+    "Do not infer current code. Cite sources. Be brief. Answer in two sentences. Distinguish acceptance from later records.",
+]
+
+_JOINERS = {"and", "also", "then", "plus", "but", "please"}
+_LIST_VERBS = {"state", "list", "describe", "explain", "identify", "summarize", "summarise", "cover", "include",
+               "provide", "name", "outline", "trace"}
+
+
+def _tokens(text: str) -> list[str]:
+    import re
+
+    return [t.lower() for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9_'’-]*", text)]
+
+
+def _lost_tokens(question: str, cov: RequestCoverage) -> list[str]:
+    from collections import Counter
+
+    kept = Counter(
+        t for text in [f.text for f in cov.facets] + [c.text for c in cov.constraints] + list(cov.subject)
+        for t in _tokens(text)
+    )
+    lost = Counter(_tokens(question)) - kept
+    return sorted(lost.elements())
+
+
+@pytest.mark.parametrize("question", [q["text"] for q in _golden().values()] + _ADVERSARIAL)
+def test_every_word_of_the_question_is_in_a_facet_a_constraint_or_the_subject(question: str) -> None:
+    """The only words the structure reading may drop are the joiners it splits on (and, also, then, plus,
+    but, please) and the leading listing verb of a clause (State the ..., List the ...); anything else
+    missing from every facet, constraint and subject text is a dropped clause."""
+    cov = derive_request_coverage(question)
+    stray = [t for t in _lost_tokens(question, cov) if t not in _JOINERS and t not in _LIST_VERBS]
+    assert stray == [], f"dropped from the structure: {stray}"
+
+
+def test_a_listing_verb_is_dropped_only_at_the_head_of_a_clause() -> None:
+    q = "State the budget. Describe how the matcher works, and explain why it is slow."
+    cov = derive_request_coverage(q)
+    lost = _lost_tokens(q, cov)
+    assert all(t in _LIST_VERBS or t in _JOINERS for t in lost) and len(lost) <= 3
+
+
+# ── F3 (S3). a requested clause is not demoted to a constraint ────────────────────────────────────────────
+
+
+def test_contrast_and_differentiate_clauses_are_facets_not_temporal_constraints() -> None:
+    cov = derive_request_coverage("Compare how ART and Nexus handle RDR-084, then contrast their current and original designs.")
+    assert cov.constraints == ()
+    joined = " | ".join(f.text for f in cov.facets)
+    assert "Compare how ART and Nexus handle RDR-084" in joined, "the ' and ' inside a clause is not a facet boundary"
+    assert "contrast their current and original designs" in joined
+    cov2 = derive_request_coverage("Differentiate the T1 and T2 tiers, and describe each tier now.")
+    assert cov2.constraints == ()
+    assert "describe each tier now" in " | ".join(f.text for f in cov2.facets)
+
+
+def test_a_verb_led_clause_with_an_and_inside_it_is_not_split_into_noun_items() -> None:
+    cov = derive_request_coverage("Compare how ART and Nexus handle RDR-084, and cite the sources.")
+    assert [c.kind for c in cov.constraints] == ["citation"]
+    assert [f.text for f in cov.facets] == ["Compare how ART and Nexus handle RDR-084"]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Contrast the design at acceptance with the later records of RDR-084.",
+        "Explain RDR-084, differentiate the accepted design from later records.",
+    ],
+)
+def test_contrast_or_differentiate_stays_a_facet_even_with_an_acceptance_cue(question: str) -> None:
+    assert [c for c in derive_request_coverage(question).constraints if c.kind == "temporal_qualification"] == []
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "distinguish acceptance-date facts from later records",
+        "Distinguish facts at the RDR's 2026-07-30 acceptance from later records",
+        "separate what the RDR decided at acceptance from what was recorded since",
+    ],
+)
+def test_a_distinguish_from_clause_with_a_date_or_acceptance_cue_is_a_temporal_constraint(clause: str) -> None:
+    cov = derive_request_coverage(f"Explain the cache design of RDR-084, {clause}.")
+    assert [c.kind for c in cov.constraints] == ["temporal_qualification"]
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "distinguish the current T1 design from the T2 design",
+        "separate what the cache does now from what the matcher does then",
+    ],
+)
+def test_a_distinguish_from_clause_without_a_date_acceptance_or_record_cue_is_a_facet(clause: str) -> None:
+    cov = derive_request_coverage(f"Explain the cache design of RDR-084, {clause}.")
+    assert [c for c in cov.constraints if c.kind == "temporal_qualification"] == []
+    assert any(clause in f.text for f in cov.facets) or any(clause in f.text for f in cov.facets if f.origin == "whole_question")
+
+
+# ── F4 (S4). current code needs explicit wording ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Describe the findings from the source RDR and their status.",
+        "Summarize the source document for RDR-084.",
+        "What is the source of the claim in RDR-084?",
+        "Explain the findings in the source RDR.",
+    ],
+)
+def test_source_in_another_sense_is_not_a_current_code_request(question: str) -> None:
+    assert derive_request_coverage(question).current_code_requested is False
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Does the source code match the RDR?",
+        "Read the codebase and list the retry limit.",
+        "Check the current implementation of the plan matcher.",
+    ],
+)
+def test_explicit_code_wording_is_a_current_code_request(question: str) -> None:
+    assert derive_request_coverage(question).current_code_requested is True
+
+
+# ── F5 (S5, Important 4). the lifecycle vocabulary is the lifecycle table's ───────────────────────────────
+
+
+def _table():
+    from nexus.tables.load import load_packaged_table
+
+    return load_packaged_table("rdr-lifecycle.toml")
+
+
+def test_the_lifecycle_vocabulary_is_read_from_rdr_lifecycle_toml() -> None:
+    table = _table()
+    assert rc.LIFECYCLE_STATES == tuple(table.dimensions["status"].domain)
+    assert rc.LIFECYCLE_EVENTS == tuple(table.dimensions["event"].domain)
+    for state in rc.LIFECYCLE_STATES:
+        assert "lifecycle" in rc._topics(f"Is RDR-155 {state}?"), state
+    for event in rc.LIFECYCLE_EVENTS:
+        if "-" not in event:
+            assert "lifecycle" in rc._topics(f"Which RDR {event}s RDR-040?"), event
+
+
+def test_a_state_added_to_the_table_becomes_vocabulary_without_a_code_edit() -> None:
+    rx = rc._lifecycle_pattern(rc.LIFECYCLE_STATES + ("parked",), rc.LIFECYCLE_EVENTS)
+    assert rx.search("Is RDR-155 parked?") and not rc._lifecycle_pattern(rc.LIFECYCLE_STATES, rc.LIFECYCLE_EVENTS).search("Is RDR-155 parked?")
+
+
+def test_the_fallback_vocabulary_for_an_unreadable_table_matches_the_table() -> None:
+    table = _table()
+    assert rc._FALLBACK_LIFECYCLE == (tuple(table.dimensions["status"].domain), tuple(table.dimensions["event"].domain))
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Is RDR-155 still a draft?",
+        "Which RDR supersedes RDR-040?",
+        "What state is RDR-210 in?",
+        "Was RDR-088 rejected?",
+        "Was RDR-196 deferred or abandoned?",
+        "What is done in RDR-232?",
+        "What phase is RDR-232 in?",
+        "Where does RDR-084 stand?",
+        "What progress has RDR-210 made?",
+        "What did the critique of RDR-155 find?",
+        "Has RDR-155 been accepted?",
+        "Is RDR-210 closed?",
+        "What is the status of RDR-084?",
+    ],
+)
+def test_a_state_question_about_an_rdr_reads_the_lifecycle_stream(question: str) -> None:
+    assert derive_request_coverage(question).wants_lifecycle_stream is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Which RDR introduced catalog tumblers as hierarchical document addresses?",
+        "State what RDR-084 decided about list parsing.",
+        "Review the chunking pipeline design.",
+        "How does the state machine checker prove coverage?",
+        "Explain the retry limit in the plan matcher.",
+    ],
+)
+def test_a_question_about_something_else_does_not(question: str) -> None:
+    assert derive_request_coverage(question).wants_lifecycle_stream is False
+
+
+def test_an_uncertain_clause_structure_with_a_bound_rdr_source_reads_the_stream() -> None:
+    q = "Tell me about plan matching, the cache, and the matcher cost. Cite your sources."
+    bound = derive_request_coverage(q, evidence_request=_request({"source": "RDR-084", "project": "ART"}))
+    assert bound.facets_certain is False and bound.wants_lifecycle_stream is True
+    assert derive_request_coverage(q).wants_lifecycle_stream is False, "no bound source: nothing to read"
+    sure = derive_request_coverage("Which RDR introduced catalog tumblers?", evidence_request=_request({"source": "RDR-084", "project": "ART"}))
+    assert sure.facets_certain is True and sure.wants_lifecycle_stream is False
+
+
+def test_a_failed_derivation_with_a_bound_rdr_source_reads_the_stream() -> None:
+    with patch.object(rc, "_derive", side_effect=RuntimeError("boom")):
+        bound = derive_request_coverage("anything", evidence_request=_request({"source": "RDR-084", "project": "ART"}))
+        unbound = derive_request_coverage("anything")
+    assert bound.facets_certain is False and bound.wants_lifecycle_stream is True
+    assert [s.value for s in bound.named_sources] == ["RDR-084"]
+    assert unbound.wants_lifecycle_stream is False
+
+
+# ── F6 (S6, Important 1 and 2). the structured call ───────────────────────────────────────────────────────
+
+
+def test_the_outer_wait_leaves_dispatch_its_own_kill_path() -> None:
+    """Dispatch kills its claude -p tree in its own timeout path. An outer wait_for that fires first cancels
+    dispatch before that path runs and orphans the child, so the outer bound is dispatch's timeout plus its
+    cleanup grace. A dispatch that is still inside its grace when the nominal timeout passes is not cancelled."""
+    async def slow_but_inside_grace(prompt, schema, *, timeout, usage_sink):  # noqa: ARG001
+        await asyncio.sleep(0.3)
+        return {"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []}
+
+    after = asyncio.run(structured_extract(
+        _uncertain(), _TWO_SENTENCE, dispatch=slow_but_inside_grace, timeout=0.05, enabled=True, cleanup_grace=1.0))
+    assert after.extraction.outcome != "timeout" and after.extraction.calls == 1
+
+
+def test_a_dispatch_that_outlives_timeout_plus_grace_is_a_timeout() -> None:
+    async def hung(prompt, schema, *, timeout, usage_sink):  # noqa: ARG001
+        await asyncio.sleep(5)
+
+    after = asyncio.run(structured_extract(
+        _uncertain(), _TWO_SENTENCE, dispatch=hung, timeout=0.05, enabled=True, cleanup_grace=0.05))
+    assert after.extraction.outcome == "timeout"
+
+
+def test_the_default_grace_covers_dispatchs_cleanup_grace_plus_one_second() -> None:
+    from nexus.operators import dispatch as d
+
+    assert rc.DEFAULT_CLEANUP_GRACE_S >= d._TIMEOUT_CLEANUP_GRACE_SECONDS + 1.0
+
+
+def test_dispatchs_own_timeout_error_is_the_timeout_outcome() -> None:
+    from nexus.operators.llm_types import OperatorTimeoutError
+
+    async def killed(prompt, schema, *, timeout, usage_sink):  # noqa: ARG001
+        raise OperatorTimeoutError("claude -p timed out after 20s")
+
+    after = asyncio.run(structured_extract(_uncertain(), _TWO_SENTENCE, dispatch=killed, timeout=5, enabled=True))
+    assert (after.extraction.outcome, after.extraction.calls) == ("timeout", 1)
+
+
+def test_less_than_a_second_of_deadline_skips_the_call() -> None:
+    fake = _Dispatch()
+    after = asyncio.run(structured_extract(
+        _uncertain(), _TWO_SENTENCE, dispatch=fake, timeout=0.4, enabled=True, seconds_left=0.4))
+    assert fake.calls == [] and after.extraction.outcome == "skipped_deadline" and after.extraction.calls == 0
+    ok = asyncio.run(structured_extract(
+        _uncertain(), _TWO_SENTENCE, dispatch=fake, timeout=5, enabled=True, seconds_left=5.0))
+    assert len(fake.calls) == 1 and ok.extraction.calls == 1
+
+
+def _extract_env(monkeypatch, fake) -> None:
+    monkeypatch.setenv(rc.EXTRACT_ENV, "1")
+    monkeypatch.setattr("nexus.operators.dispatch.claude_dispatch", fake)
+
+
+def test_nx_answer_clamps_the_call_to_the_real_budget_and_skips_it_when_the_budget_is_spent(monkeypatch) -> None:
+    fake = _Dispatch({"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []})
+    _extract_env(monkeypatch, fake)
+    env, _ = _drive("Tell me about plan matching.", budget_seconds=8.0)
+    ext = env["request_coverage"]["extraction"]
+    assert ext["calls"] == 1 and 1.0 < ext["timeout_s"] <= 8.0, "the 20 s default is clamped to the budget that is left"
+    fake.calls.clear()
+    env, _ = _drive("Tell me about plan matching.", budget_seconds=0.5)
+    ext = env["request_coverage"]["extraction"]
+    assert fake.calls == [] and ext["outcome"] == "skipped_deadline" and ext["calls"] == 0
+
+
+def test_nx_answer_gives_dispatch_a_deadline_inside_its_own_timeout(monkeypatch) -> None:
+    """Two phases of the dispatch timeout would let the call run for twice the setting; the deadline it is
+    handed caps the whole call at the timeout."""
+    import time
+
+    fake = _Dispatch({"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []})
+    _extract_env(monkeypatch, fake)
+    monkeypatch.setenv(rc.EXTRACT_TIMEOUT_ENV, "3")
+    before = time.monotonic()
+    env, _ = _drive("Tell me about plan matching.", budget_seconds=600.0)
+    deadline = fake.extra[0]["deadline"]
+    assert deadline is not None and deadline <= before + 3.0 + 5.0
+    assert deadline <= before + 20, "never past the call's own timeout, even with a long budget"
+    assert env["request_coverage"]["extraction"]["timeout_s"] == 3.0
+
+
+def test_the_real_dispatch_signature_accepts_the_call_nx_answer_makes(monkeypatch) -> None:
+    from nexus.operators.dispatch import claude_dispatch
+
+    fake = _Dispatch({"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []})
+    _extract_env(monkeypatch, fake)
+    _drive("Tell me about plan matching.")
+    (args, kwargs), = fake.raw
+    inspect.signature(claude_dispatch).bind(*args, **kwargs)
+
+
+def test_model_facets_that_miss_a_clause_do_not_replace_the_whole_question() -> None:
+    fake = _Dispatch({"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []})
+    before = _uncertain()
+    after = asyncio.run(structured_extract(before, _TWO_SENTENCE, dispatch=fake, timeout=5, enabled=True))
+    origins = [f.origin for f in after.facets]
+    assert "whole_question" in origins and "clause" in origins
+    assert next(f for f in after.facets if f.origin == "whole_question").text == _TWO_SENTENCE
+    assert after.facets_certain is False, "the model's reading did not cover the question"
+
+
+def test_model_facets_that_cover_the_question_replace_the_whole_question() -> None:
+    fake = _Dispatch()
+    after = asyncio.run(structured_extract(_uncertain(), _TWO_SENTENCE, dispatch=fake, timeout=5, enabled=True))
+    assert [f.origin for f in after.facets] == ["clause"] * 3 and after.facets_certain is True
+
+
+def test_the_prompt_text_is_capped_at_the_question_cap() -> None:
+    fake = _Dispatch({"answer_kind": "synthesis", "facets": ["x"], "constraints": []})
+    question = "Tell me about plan matching. " * 2000
+    asyncio.run(structured_extract(derive_request_coverage(question), question, dispatch=fake, timeout=5, enabled=True))
+    assert len(fake.calls[0][0]) <= len(rc._EXTRACT_PROMPT) + rc._MAX_QUESTION_CHARS
+
+
+# ── F7 (S7). the vocabulary is answer_kind.py's ──────────────────────────────────────────────────────────
+
+
+def test_request_kinds_are_the_plan_answer_kinds() -> None:
+    from nexus.plans.answer_kind import PlanAnswerKind
+
+    assert set(REQUEST_KINDS) == {k.value for k in PlanAnswerKind}
+    assert set(rc.EXTRACT_SCHEMA["properties"]["answer_kind"]["enum"]) == set(REQUEST_KINDS)
+
+
+def test_kind_decisions_are_spelled_as_the_route_sources() -> None:
+    from nexus.plans.answer_kind import ROUTE_SOURCES
+
+    assert set(rc.KIND_DECISIONS) - {"unknown"} == set(ROUTE_SOURCES)
+    for q, hint in (("Which RDR introduced tumblers?", None), ("anything", "synthesis")):
+        assert derive_request_coverage(q, explicit_kind=hint).kind_decision in rc.KIND_DECISIONS
+
+
+def test_normalize_kind_is_the_golden_label_map() -> None:
+    from nexus.plans.answer_kind import GOLDEN_LABEL_TO_KIND, PlanAnswerKind
+
+    for label, kind in GOLDEN_LABEL_TO_KIND.items():
+        assert rc.normalize_kind(label) == kind.value
+    assert all(rc.normalize_kind(k.value) == k.value for k in PlanAnswerKind)
+    assert rc.normalize_kind("nonsense") is None and rc.normalize_kind(7) is None
+
+
+def test_the_active_project_seam_says_what_2_4_should_extend() -> None:
+    doc = derive_request_coverage.__doc__ or ""
+    assert "OwnerResolution" in doc and "inferred" in doc and "name, not a tumbler" in doc
+
+
+# ── F8. smaller items ─────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_the_format_constraint_pattern_is_not_quadratic() -> None:
+    import time
+
+    text = "Answer " + "in " * 2600
+    started = time.perf_counter()
+    rc._constraint_kind(text)
+    derive_request_coverage(text)
+    assert time.perf_counter() - started < 0.25
+
+
+def test_a_format_constraint_still_reads_as_one() -> None:
+    cov = derive_request_coverage("Explain the cache. Answer concisely in about three short sentences.")
+    assert [c.kind for c in cov.constraints] == ["format"]
+
+
+def test_a_literal_control_character_in_the_question_survives_the_sentence_split() -> None:
+    parts = rc._sentences("Handle the \u0001 marker. Then explain e.g. the cache.")
+    assert parts[0] == "Handle the \u0001 marker." and "." not in parts[0].replace("marker.", "")
+    assert any("e.g." in p for p in parts)
+
+
+def _resolved(status: str):
+    from tests.test_rdr232_lifecycle_stream import _resolution, _src
+
+    return _resolution(_src(status=status))
+
+
+def _unqualified_codes(status: str) -> list[str]:
+    with patch("nexus.mcp.core._nx_answer_named_sources", AsyncMock(return_value=_resolved(status))), \
+         patch("nexus.mcp.core._nx_answer_lifecycle_stream", AsyncMock(return_value=None)), \
+         patch("nexus.mcp.core._nx_answer_primary_stream", AsyncMock(return_value=(None, None))):
+        env, _ = _drive("State the gate history of RDR-084.", bindings={"source": "RDR-084"})
+    return [a["code"] for a in env["request_coverage"]["ambiguities"]]
+
+
+def test_a_uniquely_resolved_source_is_not_reported_unqualified() -> None:
+    assert "source_unqualified" not in _unqualified_codes("resolved")
+
+
+def test_an_unresolved_or_ambiguous_source_stays_reported_unqualified() -> None:
+    assert "source_unqualified" in _unqualified_codes("candidates")
+
+
+def test_the_cli_reference_documents_the_request_coverage_key() -> None:
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "cli-reference.md").read_text(encoding="utf-8")
+    assert "nine RDR-232 keys" in docs and "eight RDR-232 keys" not in docs
+    assert "- `request_coverage` (nexus-jypmj.2.2" in docs
+    life = docs[docs.index("- `lifecycle_stream` (nexus-jypmj.1.7)"):]
+    assert "gate, lifecycle or status facet" in life[: life.index("\n- `", 10)]
