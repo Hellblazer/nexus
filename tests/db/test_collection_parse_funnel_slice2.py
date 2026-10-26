@@ -215,6 +215,11 @@ class TestHttpVectorClientExpireCollectionFilter:
             return {"ids": [], "metadatas": []}
 
         monkeypatch.setattr(hvc, "_post", fake_post)
+        # Since nexus-6pfgb.15 the sweep opens a catalog reader for each
+        # knowledge collection to judge notes by their own catalog TTL.
+        # None is expire()'s "no catalog" branch: no per-note pass, so the
+        # test stays off storage and isolates the filter decision.
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: None)
         # No collection actually has expired chunks in this fixture, so
         # batch_delete / reap_catalog_manifest_for_chashes never fire --
         # isolating exactly the filter decision under test.
