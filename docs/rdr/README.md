@@ -248,7 +248,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-228](rdr-228-plugin-installs-the-cli.md) | The Plugin Installs the CLI | Feature | Closed | 2026-10-12 |
 | [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Draft | 2026-10-17 |
 | [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Draft | 2026-10-18 |
-| [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Draft | 2026-10-23 |
+| [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Accepted | 2026-10-23 |
 | [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Accepted | 2026-10-23 |
 | [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Draft | 2026-10-26 |
 
