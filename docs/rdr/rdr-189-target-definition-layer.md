@@ -20,7 +20,7 @@ related: [RDR-078, RDR-079, RDR-080, RDR-084, RDR-088, RDR-089, RDR-090, RDR-093
 **Status note**: D1=(a), the full target-definition layer, was adopted by Sam
 on 2026-10-24 after the formal gate passed. D2(b) remains the governance:
 observed candidates, human-authored obligations, and human promotion. The
-shared contract with RDR-232 is design direction under review, not acceptance.
+shared contract with RDR-232 is accepted: RDR-232 was accepted on 2026-10-25.
 RDR-232's research is partial prototype evidence, not production or live-model
 proof. P1 is unblocked; P5 first requires recovering or re-registering the
 ghost roadmap source described below.
@@ -181,7 +181,7 @@ of putting answer shape into identity-bearing plan dimensions.
 | Witness normalization | **RDR-189 P1** | `check`/`verify` return local ids that the host binds to typed `(tumbler, chash, collection)` evidence. Models never invent durable anchors. |
 | Evidence-sufficiency assessment | **RDR-232 Phase 3** | Its live pre-reduction coverage ledger is input to **RDR-189 P4**, not proof that final answer obligations survived. |
 | Preservation-trace semantics and family adequacy | **RDR-189 P4/P6** | Evaluates final answers against all declared obligations after generation/repair, including RDR-232's source/scope/facet coverage. |
-| Evidence containment and bounded repair | **RDR-232** | Applies scope before graph and manifest caps, reserves primary evidence, and performs at most one targeted retrieval repair. |
+| Evidence containment and bounded repair | **RDR-232** | Applies scope before manifest caps on the client, reserves primary evidence, and performs at most one targeted retrieval repair. Scope before the engine's 500-node graph cap is a gated RDR-232 Phase 1 step (step 6), taken only if capped traversals are observed. |
 
 A **facet** is a topic requiring evidence. A **constraint** governs how that
 evidence must be treated: temporal qualification, citation requirements, or a
@@ -601,13 +601,16 @@ Only `aspect_validation_failures.jsonl` exists. Successful validation drops
 its reason/citations, and errored cases are not persisted. The run parent,
 step children, and result envelope have no coverage or preservation member.
 The engine persists plans and telemetry but does not execute target contracts.
-RDR-232's coverage ledger, run summary, and graph-scope filtering remain
-proposals. Current `AnswerShape`/`NON_ANSWER_SHAPES` rejects raw retrieval,
+RDR-232's coverage ledger, run summary, and graph-scope filtering are accepted
+design with no code yet; the graph-scope filter is a gated Phase 1 step. Current `AnswerShape`/`NON_ANSWER_SHAPES` rejects raw retrieval,
 hydration, extraction, rank, other operator payloads, listings, empty output,
 and errors; the write side records these as failure and excludes them from
 growth. This is terminal structural classification, not requested-family or
 final-obligation assessment, and its extra-top-level-key limitation remains.
-RDR-232's separate `INSUFFICIENT_EVIDENCE` extension does not replace it.
+RDR-232's `INSUFFICIENT_EVIDENCE` shape does not replace it: it is added to
+`AnswerShape` but not to `NON_ANSWER_SHAPES`, carries prose behind a
+disclosed-gaps notice, records success, and blocks plan growth with its own
+flag.
 *Source: `enrich.py:1072-1075,1950-2025`, telemetry Liquibase and handlers,
 PlanHandler/PlanRepository, `plans/answer_shape.py:1-112`,
 `core.py:12436-12454`, and research 14 and 19.*
@@ -866,7 +869,8 @@ changing plan identity.
 | Multiple compatible families | Stop family-specific realization and return candidate ids with an ambiguity diagnostic | No first-match choice; a valid `bindings.target_family_id` plus `target_family_version` pin resolves the ambiguity. |
 | Old family or contract version | For new execution, use generic realization and `requiresReview`; do not evaluate under retired obligations | For historical runs, interpret evidence under the immutable source-controlled original family/contract declaration; preserve all version fields in the summary and never reroute the old request. |
 | Missing required environment capability | Keep primary/direct evidence; omit dependent secondary behavior; unresolved target or `requiresReview` as appropriate | Mark the capability missing; never infer support from an ignored parameter or HTTP 200. |
-| RDR-232 required coverage incomplete after its one repair | RDR-232 returns `INSUFFICIENT_EVIDENCE`, its notice/chunk references, and the coverage ledger; no normal partial-prose answer | Increment `failure_count`, suppress plan growth, and mark affected P4 obligations `unavailable` or `requiresReview`; do not return or assess partial prose as `preserved`. |
+| RDR-232 required coverage `partial` after its one repair | RDR-232 returns `answer_shape=insufficient_evidence`: the prose behind a notice opening `[insufficient-evidence: <n> unresolved]` that names each unresolved facet, plus the coverage ledger | Count as success (`success_count`; outside `NON_ANSWER_SHAPES`), block plan growth with RDR-232's own no-grow flag, and mark affected P4 obligations `unavailable` or `requiresReview`; never assess the partial prose as `preserved`. |
+| RDR-232 required coverage `unavailable` (no usable answer) | RDR-232 returns an existing non-answer shape with its notice and chunk references, plus the coverage ledger | Increment `failure_count`, suppress plan growth, and mark affected P4 obligations `unavailable`. |
 | Old client/envelope without target fields | Preserve legacy answer behavior and structural classification | Do not fabricate a target or trace; mark `target=unavailable` in new responses that can represent it. |
 | Run-summary persistence unsupported or readback dropped | Return the live target/coverage/preservation result without claiming storage | `persistence=unsupported` or `dropped`; no second write, no silent success. |
 | `trace=False` | Authorized handoff/report protocol retains the question, facets, source hints, evidence text, exact final output, and typed ids needed for reduction and host assessment | Logs, telemetry, validation files, and other persisted artifacts keep only permitted ids, states, counts, and capability outcomes; redact question/facet text, source hints, quotes, and other free text. Exact-output persistence requires an explicit bounded retention policy, not blanket persistence. |
@@ -1040,8 +1044,10 @@ capability rules; no unsupported persistence is reported as successful.
 
 Unknown or ambiguous family binding returns the explicit fallback rather than
 choosing the first candidate. Missing capabilities omit dependent behavior and
-retain direct evidence. Incomplete required evidence after RDR-232's repair
-returns its insufficiency notice, not a normal partial answer. A model or
+retain direct evidence. Partial required evidence after RDR-232's repair
+returns the prose behind RDR-232's disclosed-gaps notice, and P4 never marks
+that prose `preserved`; no usable answer returns RDR-232's non-answer notice.
+A model or
 hydration failure marks affected obligations `unavailable` or `failed`; it does
 not mark them preserved. An old envelope keeps legacy behavior and carries no
 fabricated trace. A continuation without a final report stays `pending`; a
@@ -1091,10 +1097,13 @@ under the fallback matrix.
 - **Scenario**: a required environment capability is absent or an engine ignores
   a new field — **Verify**: missing capability is disclosed; no HTTP 200 or
   cached capability is treated as proof; unsupported persistence is not success.
-- **Scenario**: RDR-232 still lacks required evidence after one repair —
-  **Verify**: the standard insufficient-evidence notice and chunk references
-  replace normal prose, `failure_count` increments, growth is suppressed, and
-  P4 does not claim preservation for partial prose.
+- **Scenario**: RDR-232 coverage is `partial` after one repair —
+  **Verify**: the prose is returned behind the `[insufficient-evidence: <n>
+  unresolved]` notice, the run counts as success, growth is blocked by
+  RDR-232's no-grow flag, the shape stays outside `NON_ANSWER_SHAPES`, and P4
+  does not claim preservation for the partial prose. When coverage is
+  `unavailable`, the non-answer notice and chunk references replace prose and
+  `failure_count` increments.
 - **Scenario**: initial evidence covers a facet but terminal prose drops its
   constraint or witness — **Verify**: pre-reduction coverage remains an input;
   the post-realization trace marks the obligation `weakened` or
@@ -1201,7 +1210,7 @@ The research closes the source, census, governance, and deployment-version
 questions recorded in T2. It does not claim that unimplemented target binding,
 witness normalization, preservation assessment, or live-model assessment
 already works. Each phase's Critical Assumptions names the implementation proof
-required before that phase ships. RDR-232 remains a draft dependency for
+required before that phase ships. RDR-232 is an accepted dependency for
 P3/P4; its production integration and live-model verification remain its own
 work, not evidence borrowed by this RDR.
 
@@ -1403,3 +1412,9 @@ RDR-232 safeguards remain.
   fields explicit; separated old-request routing from historical interpretation;
   added pending, quote/span fidelity, and negative tests; corrected the P4/P6
   keep/stop ordering. This records design repair, not runtime verification.
+- 2026-10-25: Amended to match accepted RDR-232 (nexus-f1evv, Sam's
+  decision): the shared contract is accepted; scope before the engine graph
+  cap is a gated RDR-232 Phase 1 step; partial coverage returns prose behind
+  the disclosed-gaps notice, counts as success, blocks growth with its own
+  flag and stays outside `NON_ANSWER_SHAPES`; only `unavailable` is a failure.
+  Status unchanged.

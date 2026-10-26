@@ -19,7 +19,7 @@
 !service/src
 !service/target/nexus-service-1.0-SNAPSHOT.jar
 # .github (304K): conftest.py itself reads it, plus the release-drift,
-# eval-corpus, mode-declaration and cut-plugin-release lints. Omitting it
+# eval-corpus and mode-declaration lints. Omitting it
 # errored those at setup with FileNotFoundError on /work/.github/workflows.
 !.github
 # Re-excludes (must come after the ! lines):

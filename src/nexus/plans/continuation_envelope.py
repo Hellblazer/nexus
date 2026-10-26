@@ -78,12 +78,14 @@ from nexus.plans.bundle import (
     compose_bundle_prompt,
 )
 from nexus.plans.continuation import CutShape
+from nexus.plans.reserved_stream import active_reserved_stream, reserved_stream_is_evidence
 from nexus.plans.runner import (
     _apply_caller_scope_to_args,
     _apply_mode_to_args,
     _apply_scope_to_args,
     _check_embedding_domain,
     _hydrate_operator_args,
+    _mark_reserved_step,
     _resolve_args,
 )
 
@@ -181,11 +183,13 @@ def _compose_shape_a(
         raw_args = step.get("args", {}) or {}
         resolved = _resolve_args(
             raw_args, bindings=bindings, step_outputs=step_outputs,
-            deferred_step_indices=deferred_indices,
+            deferred_step_indices=deferred_indices, step_index=bi,
         )
         source_collections = (
             resolved.get("collections") if "ids" in resolved else None
         )
+        # RDR-232 (nexus-jypmj.1.6): the same reserved-stream merge plan_run's bundle path applies.
+        _mark_reserved_step(bi, steps)
         _, prepared = _hydrate_operator_args(tool, resolved)
         prepared.pop("_truncation_metadata", None)
         bundle_steps.append(OperatorBundleStep(
@@ -299,13 +303,17 @@ def _compose_shape_b(
     tool = _extract_tool_name(step)
     raw_args = step.get("args", {}) or {}
     scope = step.get("scope")
-    resolved = _resolve_args(raw_args, bindings=bindings, step_outputs=step_outputs)
+    resolved = _resolve_args(raw_args, bindings=bindings, step_outputs=step_outputs, step_index=bi)
     _check_embedding_domain(bi, tool, scope, resolved)
     resolved = _apply_scope_to_args(
         tool, scope, resolved, bindings=bindings, step_outputs=step_outputs,
     )
-    resolved = _apply_caller_scope_to_args(tool, resolved, bindings=bindings)
+    # RDR-232 (nexus-jypmj.1.3): the same helper the runner uses. It only acts on a corpus-taking
+    # retrieval tool, and Shape B composes an operator step, so the narrowing is None here; a
+    # retrieval prefix step was already narrowed (or skipped) by ``plan_run`` before the cut.
+    resolved, _narrowing = _apply_caller_scope_to_args(tool, resolved, bindings=bindings)
     resolved = _apply_mode_to_args(tool, resolved)
+    _mark_reserved_step(bi, steps)  # RDR-232 (nexus-jypmj.1.6): see _compose_shape_a
     resolved_tool, prepared = _hydrate_operator_args(tool, resolved)
     prepared.pop("_truncation_metadata", None)
     verb = _bare(resolved_tool)
@@ -564,7 +572,11 @@ def _prefix_produced_zero_evidence(
             had_retrieval = True
             total_evidence += len(tumblers)
 
-    if had_retrieval and total_evidence == 0:
+    # RDR-232 (nexus-jypmj.1.8): a reserved primary stream that was merged into a reduction is evidence the
+    # retrieval steps do not show; the predicate is the one nx_answer's own guard uses. The cut step's
+    # hydration (which merges it) has run by the time this check does; the payload check below still catches
+    # an operator that was handed nothing.
+    if had_retrieval and total_evidence == 0 and not reserved_stream_is_evidence(active_reserved_stream()):
         return "no_items"
 
     if cut_step_payloads and not _cut_payload_has_evidence(cut_step_payloads):

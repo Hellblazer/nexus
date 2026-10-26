@@ -307,6 +307,10 @@ _ALLOWED = {
     ("commands/search_cmd.py", "db.list_collections(routing=True) if isinstance(db, HttpVectorClient)"),
     ("commands/search_cmd.py", "else db.list_collections()"),
     ("commands/taxonomy_cmd.py", "for c in t3._client.list_collections():"),
+    # nexus-2k8wi: _without_superseded reads the FULL registry because the rows it needs are the
+    # supersede tombstones (superseded_by set), which every live listing leaves out by design; it
+    # removes collections from a projection's targets and never routes a read to one.
+    ("commands/taxonomy_cmd.py", "rows = make_catalog_reader().list_collections()"),
     # (the MCP collection_list TOOL is the inventory surface, twin of `nx collection list`, not a
     # routing read. It lists through mcp_infra.list_collections_or_not_ready since nexus-5rs3i,
     # which is not a bare call by name, so it needs no exemption here.)

@@ -259,11 +259,14 @@ class TestIndexDocumentSourceKey:
     """_index_document uses source_key for staleness check and pruning."""
 
     @pytest.mark.t2_tenant
-    def test_staleness_check_uses_content_hash_when_catalog_absent(self, tmp_path: Path, monkeypatch) -> None:
-        """RDR-101 Phase 5c: source_path is gone from chunk metadata.
-        When no catalog is initialised (no doc_id), the staleness check
-        falls back to content_hash — which uniquely identifies an
-        unchanged file just as well as the legacy source_path key."""
+    def test_staleness_check_reads_the_catalog_document_not_a_content_hash_where(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """nexus-3ajpd (was ..._uses_content_hash_when_catalog_absent, RDR-101
+        Phase 5c). The skip is decided from the catalog document: a
+        'complete' fence at the file's hash, then one chunk of the document's
+        own manifest. T3 is never asked for "a row whose content_hash is
+        h": a chunk row is shared and carries its last writer's file hash."""
         from unittest.mock import MagicMock
 
         from tests.conftest import set_credentials
@@ -278,10 +281,18 @@ class TestIndexDocumentSourceKey:
         mock_col = MagicMock()
         mock_col.get.return_value = {
             "ids": ["existing"],
-            "metadatas": [{"content_hash": expected_hash, "embedding_model": "voyage-context-3"}],
+            "metadatas": [{"content_hash": "another-docs-hash", "embedding_model": "voyage-context-3"}],
         }
         mock_t3 = MagicMock()
         mock_t3.get_or_create_collection.return_value = mock_col
+        monkeypatch.setattr("nexus.doc_indexer._doc_id_for_path", lambda p: "1.1.1")
+        monkeypatch.setattr(
+            "nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", expected_hash),
+        )
+        monkeypatch.setattr(
+            "nexus.doc_indexer._own_chunk_metadata",
+            lambda col, doc_id: col.get(ids=["existing"], include=["metadatas"])["metadatas"][0],
+        )
 
         def dummy_chunk_fn(file_path, content_hash, target_model, now_iso, corpus):
             return [("id1", "text", {})]
@@ -289,6 +300,6 @@ class TestIndexDocumentSourceKey:
         with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
             result = _index_document(md, "corp", dummy_chunk_fn, t3=mock_t3, source_key="relative/doc.md")
 
-        staleness_call = mock_col.get.call_args
-        assert staleness_call.kwargs["where"] == {"content_hash": expected_hash}
+        for call in mock_col.get.call_args_list:
+            assert "where" not in call.kwargs, call
         assert result == 0

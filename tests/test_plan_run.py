@@ -811,24 +811,24 @@ async def test_run_caller_scope_fills_unset_corpus_on_query() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_caller_scope_does_not_override_plan_pinned_corpus() -> None:
-    """When the plan step already pins ``corpus``, caller scope does NOT
-    override. Plan authors win."""
+async def test_run_caller_scope_narrows_plan_pinned_corpus() -> None:
+    """RDR-232 section 2a (nexus-jypmj.1.3), reversing the nexus-zs1d rule that a plan-pinned
+    corpus beats the caller's scope: the scope NARROWS the pin, and a pin with nothing under
+    the scope is a conflict whose step is skipped (never run unscoped)."""
     from nexus.plans.runner import plan_run
 
     plan = {
         "steps": [
+            {"tool": "search", "args": {"query": "x", "corpus": "rdr"}},
             {"tool": "search", "args": {"query": "x", "corpus": "code__delos"}},
         ],
     }
     disp = _FakeDispatcher([{"text": "ok", "ids": []}])
-    await plan_run(
-        _match(plan),
-        {"_nx_scope": "rdr__arcaneum"},
-        dispatcher=disp,
+    result = await plan_run(_match(plan), {"_nx_scope": "rdr__arcaneum"}, dispatcher=disp)
+    assert [a["corpus"] for _t, a in disp.calls] == ["rdr__arcaneum"], (
+        "the rdr pin narrows to the scope; the code__delos pin conflicts and is not dispatched"
     )
-    _tool, args = disp.calls[0]
-    assert args["corpus"] == "code__delos"
+    assert result.steps[1]["scope_conflict"]["plan_corpus"] == "code__delos"
 
 
 @pytest.mark.asyncio
@@ -857,29 +857,22 @@ async def test_run_caller_scope_does_not_override_plan_collection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_caller_scope_does_not_override_plan_taxonomy_domain() -> None:
-    """When the plan step declares ``scope.taxonomy_domain``, that populates
-    corpus first; caller scope does not clobber it."""
+async def test_run_caller_scope_narrows_the_taxonomy_domain_corpus() -> None:
+    """``scope.taxonomy_domain`` still populates corpus first (RDR-078); the caller's scope then
+    narrows that domain corpus (RDR-232 section 2a): prose (knowledge,docs,rdr,paper) holds the
+    scope, code does not, so the code step conflicts and is skipped."""
     from nexus.plans.runner import plan_run
 
     plan = {
         "steps": [
-            {
-                "tool": "search",
-                "args": {"query": "x"},
-                "scope": {"taxonomy_domain": "code"},
-            },
+            {"tool": "search", "args": {"query": "x"}, "scope": {"taxonomy_domain": "prose"}},
+            {"tool": "search", "args": {"query": "x"}, "scope": {"taxonomy_domain": "code"}},
         ],
     }
     disp = _FakeDispatcher([{"text": "ok", "ids": []}])
-    await plan_run(
-        _match(plan),
-        {"_nx_scope": "rdr__arcaneum"},
-        dispatcher=disp,
-    )
-    _tool, args = disp.calls[0]
-    # taxonomy_domain=code → "code" corpus prefix (from _DOMAIN_TO_CORPUS)
-    assert args["corpus"] == "code"
+    result = await plan_run(_match(plan), {"_nx_scope": "rdr__arcaneum"}, dispatcher=disp)
+    assert [a["corpus"] for _t, a in disp.calls] == ["rdr__arcaneum"]
+    assert result.steps[1]["scope_conflict"]["plan_corpus"] == "code"
 
 
 @pytest.mark.asyncio
@@ -2584,7 +2577,11 @@ class TestNonEvidentiaryStamp:
         # dropped before its chash was even collected.
         call_kwargs = mock_hydrate.call_args.kwargs
         assert call_kwargs["ids"] == ["b" * 64]
-        assert json.loads(args["items"]) == ["def real_function(): pass"]
+        # The resolved entry states no title or dates (nexus-6pfgb.11: the note speaks only
+        # for what the document's own catalog entry says), so the note names the collection.
+        assert json.loads(args["items"]) == [
+            "[source: code__x__model-code__v1]\ndef real_function(): pass",
+        ]
 
     def test_tumbler_resolve_many_failure_degrades_to_leave_every_candidate_in(
         self,
@@ -3012,6 +3009,94 @@ class TestImportOnlySectionTypeExclusion:
             result = _hydrate_tumbler_ids(["1.1.5"])
         assert result["contents"] == ["some content"]
         assert result["missing"] == []
+
+    def test_tumbler_hydration_reads_the_documents_own_manifest_label_not_the_chunk_rows(
+        self,
+    ) -> None:
+        """nexus-tko2w: the chunk row's section_type is the last writer's. This path holds the
+        document, so the manifest row's label decides: a chunk this document labels ``method``
+        is kept although the shared chunk row (another document's header) says ``imports``,
+        and one this document labels ``imports`` is dropped although the chunk row says
+        ``method``."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        coll = "code__x__model-code__v1"
+        manifests = {
+            "1.1.5": [
+                ManifestRow(position=0, chash="a" * 64, collection=coll, section_type="method",
+                            labels_written=True),
+                ManifestRow(position=1, chash="b" * 64, collection=coll, section_type="imports",
+                            labels_written=True),
+            ],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {
+            "contents": ["shared body", "header body"],
+            "missing": [],
+            "section_types": ["imports", "method"],
+        }
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == ["shared body"]
+
+    def test_tumbler_hydration_trusts_a_written_empty_label_over_the_chunk_rows_foreign_one(
+        self,
+    ) -> None:
+        """nexus-tko2w: a manifest row the engine marked ``labels_written`` is authoritative even
+        when its section_type is empty. The shared chunk row says ``imports`` (another document's
+        header position); this document wrote no label for the chunk, so the chunk stays in. A
+        fallback on "empty" would drop it, the contamination the manifest labels exist to end."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        manifests = {
+            "1.1.5": [ManifestRow(position=0, chash="a" * 64, collection="code__x__model-code__v1",
+                                  section_type="", labels_written=True)],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["real body"], "missing": [], "section_types": ["imports"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == ["real body"]
+
+    def test_tumbler_hydration_falls_back_to_the_hydrated_type_for_an_unlabelled_manifest_row(
+        self,
+    ) -> None:
+        """A manifest written before the labels existed has none; the hydrated value decides, as
+        it always did."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from nexus.catalog.types import ManifestRow
+        from nexus.plans.runner import _hydrate_tumbler_ids
+
+        manifests = {
+            "1.1.5": [ManifestRow(position=0, chash="a" * 64, collection="code__x__model-code__v1")],
+        }
+        fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
+        fake_hydrated = {"contents": ["imports only"], "missing": [], "section_types": ["imports"]}
+        with patch(
+            "nexus.mcp_infra.get_catalog", return_value=fake_catalog,
+        ), patch(
+            "nexus.mcp.core.store_get_many", return_value=fake_hydrated,
+        ):
+            result = _hydrate_tumbler_ids(["1.1.5"])
+        assert result["contents"] == [""]
 
 
 @pytest.mark.asyncio

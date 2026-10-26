@@ -87,6 +87,87 @@ class TestPersistAssignmentsBatch:
         assert store.persist_assignments([]) == 0
 
 
+class TestPersistAssignmentsCountsWhatTheEngineWrote:
+    """nexus-h2v0l: the engine (vectors-038, engine-service-v0.1.165) skips a
+    projection row onto a superseded collection's topic and answers
+    ``{"persisted": N written, "skipped_superseded": M}``. The client sums those
+    per page instead of reporting how many rows it submitted. An engine without
+    the field (0.1.164) answers ``{"persisted": N}`` and the counts stay as they were."""
+
+    def _store(self, monkeypatch, answers: list[dict]):
+        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+        pages = iter(answers)
+        monkeypatch.setattr(store, "_post", lambda path, body: next(pages), raising=False)
+        return store
+
+    def test_sums_written_and_skipped_across_pages(self, monkeypatch) -> None:
+        store = self._store(monkeypatch, [
+            {"persisted": 990, "skipped_superseded": 10},
+            {"persisted": 1000, "skipped_superseded": 0},
+            {"persisted": 250, "skipped_superseded": 50},
+        ])
+        assert store.persist_assignments_counted(_rows(2300, by="projection")) == (2240, 60)
+
+    def test_persist_assignments_returns_rows_written_not_submitted(self, monkeypatch) -> None:
+        store = self._store(monkeypatch, [{"persisted": 3, "skipped_superseded": 2}])
+        assert store.persist_assignments(_rows(5, by="projection")) == 3
+
+    def test_engine_without_the_field_counts_as_before(self, monkeypatch) -> None:
+        # 0.1.164 answers {"persisted": N} and never skips.
+        store = self._store(monkeypatch, [{"persisted": 5}])
+        assert store.persist_assignments_counted(_rows(5)) == (5, 0)
+
+    def test_engine_answer_without_persisted_falls_back_to_the_page_size(self, monkeypatch) -> None:
+        store = self._store(monkeypatch, [{}, None])
+        assert store.persist_assignments_counted(_rows(1500)) == (1500, 0)
+
+    def test_404_per_row_fallback_keeps_len(self, monkeypatch) -> None:
+        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+
+        def post_404(path, body):
+            err = RuntimeError("HTTP 404: not found")
+            err.code = 404
+            raise err
+
+        monkeypatch.setattr(store, "_post", post_404, raising=False)
+        monkeypatch.setattr(store, "assign_topic", lambda *a, **k: None, raising=False)
+        assert store.persist_assignments_counted(_rows(3)) == (3, 0)
+
+    def test_empty_counts_zero_without_posting(self, monkeypatch) -> None:
+        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+        monkeypatch.setattr(store, "_post", lambda *a: pytest.fail("no post"), raising=False)
+        assert store.persist_assignments_counted([]) == (0, 0)
+
+    def test_a_retried_attempt_counts_each_page_once(self, monkeypatch) -> None:
+        # The registration retry re-runs the whole page loop; the page the failed
+        # attempt already wrote must not be summed twice. Registration and the retry
+        # wrapper are stubbed, so no tenant is provisioned (the CI tenant ceiling).
+        monkeypatch.setattr(corpus, "ensure_collection_registered", lambda *a, **k: None)
+
+        def retry_once(collection, fn, **_kw):
+            try:
+                return fn()
+            except httpx.HTTPStatusError:
+                return fn()
+
+        monkeypatch.setattr(corpus, "write_with_registration_retry", retry_once)
+        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+        calls = {"n": 0}
+
+        def post(path, body):
+            calls["n"] += 1
+            if calls["n"] == 2:  # page 2 of attempt 1: the stale-registration 422
+                raise _http_422("collection 'code__h2v0l-retry' is not registered for tenant 'nexus'")
+            return {"persisted": len(body["assignments"]) - 1, "skipped_superseded": 1}
+
+        monkeypatch.setattr(store, "_post", post, raising=False)
+        counted = store.persist_assignments_counted(
+            _rows_with_collection(1200, "code__h2v0l-retry", by="projection"),
+        )
+        assert counted == (1198, 2)  # one 1000-row page + one 200-row page, once each
+        assert calls["n"] == 4
+
+
 @pytest.mark.t2_tenant
 class TestPersistAssignmentsBatchSelfHeals:
     """RDR-204 Phase 1 follow-up (nexus-f5wwx, code review [24995]

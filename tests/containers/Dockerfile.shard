@@ -147,7 +147,7 @@ COPY --chown=nexus:nexus dt ./dt
 COPY --chown=nexus:nexus sn ./sn
 COPY --chown=nexus:nexus .claude-plugin ./.claude-plugin
 # .github (304K): conftest.py itself reads it, plus the release-drift,
-# eval-corpus, mode-declaration and cut-plugin-release lints. The
+# eval-corpus and mode-declaration lints. The
 # dockerignore allowlist alone is NOT enough -- it governs what is
 # AVAILABLE in the build context; this COPY list is what actually lands
 # in the image, and omitting it errored those tests at setup with

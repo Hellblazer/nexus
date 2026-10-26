@@ -215,7 +215,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-194](rdr-194-fk-census-structural-schema-warts.md) | Post-RDR-187 FK Census and Structural Wart Retirement: One chash Encoding, One doc_id Meaning, Tenant-Keyed Uniqueness Everywhere, One TTL Semantics, and Every Enforceable Relationship Enforced | Architecture | Closed | 2026-08-15 |
 | [RDR-195](rdr-195-voyage-batch-token-limit.md) | Token-Aware Voyage Batch Splitting: Make the 120K-Tokens-Per-Request Ceiling a Planned Bound Instead of an Opaque 500 | Bug Fix | Closed | 2026-08-19 |
 | [RDR-196](rdr-196-cost-aware-nx-answer.md) | Cost-Aware nx_answer: Per-Step Cost/Quality Telemetry, Per-Operator Model Routing, and Cost-Ranked Plan Choice — Closing the NOMA §5.1–5.3 Gap | Architecture | Closed | 2026-08-19 |
-| [RDR-197](rdr-197-plugin-only-release-channel.md) | Independent Plugin Release Channel (plugin-vX.Y.Z-n) | Architecture | Closed | 2026-08-22 |
+| [RDR-197](rdr-197-plugin-only-release-channel.md) | Independent Plugin Release Channel (plugin-vX.Y.Z-n) | Architecture | Superseded by T2 nexus/design-plugin-only-fast-lane.md, the plugin-only fast lane on the client release (nexus-rbmja; Sam, 2026-10-26) | 2026-08-22 |
 | [RDR-198](rdr-198-collapse-duplicated-client-transport.md) | Collapse the Duplicated Client Transport: One Pooled Connection to One Engine | Architecture | Closed | 2026-08-23 |
 | [RDR-199](rdr-199-indexing-lifecycle-ref-identity.md) | Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In | Architecture | Draft | 2026-08-23 |
 | [RDR-200](rdr-200-nx-answer-continuation-mode.md) | nx_answer Continuation Mode and the Composed-Retrieval Bridge Route | Architecture | Closed | 2026-09-01 |
@@ -228,7 +228,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-207](rdr-207-summarization-at-the-t2-expiry-boundary.md) | Summarization at the T2 Expiry Boundary — the Manage Phase RDR-057 Cut | Feature | Closed | 2026-09-12 |
 | [RDR-208](rdr-208-session-id-mail-addressing.md) | Session-Id Mail Addressing: One Mailbox per Session, Names Resolved at Send Time | Architecture | Closed | 2026-09-14 |
 | [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Draft | 2026-09-14 |
-| [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Accepted | 2026-09-15 |
+| [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Closed | 2026-09-15 |
 | [RDR-211](rdr-211-board-queue-and-lock-tuple-templates.md) | Broadcast Board, Work Queue, and Lock as Tuple-Space Templates | Feature | Closed | 2026-09-15 |
 | [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Draft | 2026-09-16 |
 | [RDR-213](rdr-213-channel-delivery-without-a-proof-gate.md) | Channel Delivery Without a Proof Gate: Notify a Reference, Let the Session Claim | Architecture | Closed | 2026-09-17 |
@@ -249,7 +249,8 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Draft | 2026-10-17 |
 | [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Draft | 2026-10-18 |
 | [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Draft | 2026-10-23 |
-| [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Draft | 2026-10-23 |
+| [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Accepted | 2026-10-23 |
+| [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Draft | 2026-10-26 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

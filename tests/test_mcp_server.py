@@ -730,6 +730,36 @@ def test_cluster_by_semantic_discards_the_boosted_order():
     assert "hybrid_score" not in out
 
 
+def test_cluster_by_keeps_every_per_document_row_of_a_shared_chunk():
+    """nexus-tko2w: a ``section_type`` where on a chunk several documents hold returns it once per
+    document, so one chunk id arrives twice, each row carrying its own ``doc_id``. The cluster-order
+    restore keyed the rows by id, which kept the last of the two and returned it twice (the other
+    document's row vanished). It restores by row, so both survive, in the cluster order."""
+    _mock_t3([{"name": "code__test", "count": 3}])
+    shared, other = "a" * 64, "b" * 64
+
+    def fake(*_a, **_kw):
+        return [
+            SearchResult(id=shared, content="x", distance=0.10, collection="code__test",
+                         metadata={"doc_id": "1.1.1", "section_type": "references", "frecency_score": 0.0}),
+            SearchResult(id=shared, content="x", distance=0.10, collection="code__test",
+                         metadata={"doc_id": "1.1.2", "section_type": "", "frecency_score": 100.0}),
+            SearchResult(id=other, content="y", distance=0.30, collection="code__test",
+                         metadata={"doc_id": "1.1.2", "section_type": "body", "frecency_score": 0.0}),
+        ]
+
+    # No T1 session: the search trace it would record is best-effort, and skipping it keeps the
+    # test off storage, so it needs no tenant (the storage-touch ratchet).
+    with patch("nexus.search_engine.search_cross_corpus", fake), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG), \
+         patch("nexus.mcp.core._get_t1", side_effect=RuntimeError("no T1 in this test")):
+        out = _search_render(query="cluster duplicate ids", corpus="code__test",
+                             cluster_by="semantic", structured=True)
+
+    assert out["ids"] == [shared, shared, other]
+    assert out["tumblers"] == ["1.1.1", "1.1.2", "1.1.2"]
+
+
 # ── File diversity cap (RDR-006 supersession, nexus-0bmhd) ──────────────────
 #
 # RDR-006's chunk-count scoring penalty is removed from scoring entirely
@@ -2936,7 +2966,34 @@ def test_search_render_leads_with_the_reader_instruction_and_annotates_age(t3):
     t3.put(collection=coll, content="a note about annotated retrieval context", title="ctxnote")
     out = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0)
     assert out.startswith(READER_INSTRUCTION), out[:120]
-    assert "indexed 20" in out and "d ago)" in out, out
+    # nexus-6pfgb.11: the age line is the OWNING document's, read from the catalog; the chunk
+    # row's own indexed_at is the last writer's and is not read. This note has no catalog
+    # document (t3.put registers none), so its hit prints no age line ...
+    assert "indexed 20" not in out and "d ago)" not in out, out
+    # ... and the same hit with a catalog owner prints that owner's.
+    from types import SimpleNamespace
+
+    from nexus.catalog.tumbler import Tumbler
+    from nexus.catalog.types import CatalogEntry
+
+    chash = _search_render(
+        query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True,
+    )["chunk_text_hash"][0]
+    owner = CatalogEntry(
+        tumbler=Tumbler.parse("1.1.1"), title="ctxnote", author="", year=0, content_type="knowledge",
+        file_path="", corpus="", physical_collection=coll, chunk_count=1, head_hash="",
+        indexed_at="2026-09-01T00:00:00+00:00",
+    )
+    catalog = SimpleNamespace(
+        chash_positions=lambda chashes: [
+            {"chash": chash, "doc_id": "1.1.1", "position": 0, "chunk_count": 1, "collection": coll},
+        ],
+        resolve_many=lambda doc_ids: {"1.1.1": owner},
+    )
+    with patch("nexus.mcp.core._get_catalog", return_value=catalog):
+        # A new query string: the first query's result list is cached with its (owner-less) metadata.
+        owned = _search_render(query="a note about annotated retrieval context", corpus=coll, limit=5, offset=0)
+    assert "indexed 2026-09-01" in owned and "d ago)" in owned, owned
     # structured output is untouched by the annotation
     structured = _search_render(query="annotated retrieval context", corpus=coll, limit=5, offset=0, structured=True)
     assert set(structured) == {

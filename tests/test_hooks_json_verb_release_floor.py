@@ -84,9 +84,10 @@ HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 ENTRY_PY_RELPATH = "src/nexus/_hook_runtime/entry.py"
 
-#: Exact three-part release tags only -- never ``plugin-vX.Y.Z-N`` or
-#: ``engine-service-vX.Y.Z``, both of which this pattern's anchors exclude
-#: by construction (extra non-digit text after the patch number).
+#: Exact three-part release tags only -- never the retired ``plugin-vX.Y.Z-N``
+#: tags (RDR-197, nexus-rbmja.8; they stay in the tag list) or
+#: ``engine-service-vX.Y.Z``, both of which this pattern's anchors exclude by
+#: construction (extra non-digit text after the patch number).
 _TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 Version = tuple[int, int, int]

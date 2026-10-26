@@ -4,14 +4,20 @@
 The thing under test is mutual exclusion, so these tests take and release a
 lease in a tmp root rather than asserting on code shape. The end-to-end leg
 drives a real child pytest, because the property that matters is "a second
-run refuses", and only a second run can show that.
+run queues, or refuses under NX_SUITE_LEASE_WAIT=0", and only a second run can
+show that.
 """
 from __future__ import annotations
 
 import os
 import re
+import queue
+import shutil
 import subprocess
 import sys
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -23,6 +29,46 @@ from tests._module_seam import module_time, setattr_in
 @pytest.fixture
 def lease_root(tmp_path: Path) -> Path:
     return tmp_path / "leases"
+
+
+def _virtual_time(monkeypatch: pytest.MonkeyPatch, on_sleep: Callable[[float], None] | None = None) -> dict[str, float]:
+    """``_suite_lease``'s own clock and sleep, so a 30-minute wait takes no real time.
+
+    ``sleep`` advances the virtual monotonic clock; *on_sleep* sees the new time (a
+    test uses it to make the holder exit). Only this module's ``time`` is faked.
+    """
+    clock = {"t": 0.0}
+
+    def fake_sleep(seconds: float) -> None:
+        clock["t"] += seconds
+        if on_sleep is not None:
+            on_sleep(clock["t"])
+
+    fake = module_time(monkeypatch, _suite_lease)
+    fake.sleep = fake_sleep
+    fake.monotonic = lambda: clock["t"]
+    return clock
+
+
+def _take_expecting_to_run(gate) -> None:
+    """``_take_suite_lease`` where the run is meant to go ahead: a refusal is a test FAILURE, not a session exit.
+
+    ``pytest.exit`` is a BaseException that ends the whole outer session, so an unguarded call whose
+    refusal came back would abort the run with the gate's message and no failing test to name.
+    """
+    try:
+        gate._take_suite_lease()
+    except pytest.exit.Exception as refused:
+        pytest.fail(f"the gate refused a run that should have gone ahead: {refused.msg[:300]}")
+
+
+def _live_holder(lease_root: Path, label: str = "peer-run") -> Path:
+    """A lease held by THIS (live) process, as a peer run would hold it."""
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{os.getpid()}\n")
+    (lease / "label").write_text(f"{label}\n")
+    return lease
 
 
 def test_a_free_resource_has_no_holder(lease_root: Path) -> None:
@@ -109,13 +155,15 @@ def test_a_second_pytest_run_refuses_while_one_holds_the_lease(
         probe = "tests/test_suite_lease.py::test_a_free_resource_has_no_holder"
         env = dict(os.environ)
         env["NX_BUILD_LEASE_ROOT"] = str(root)
-        env.pop("NX_SUITE_LEASE_WAIT", None)
+        env["NX_SUITE_LEASE_WAIT"] = "0"  # queueing is the default (nexus-tvt6u); =0 is the immediate refusal under test
         env.pop("NX_TEST_T2_SUBSTRATE", None)
         # An INDEPENDENT run, so scrub the descendant marker this process set
         # when it took the lease above. Leaving it in would exempt the child
         # and this test would assert nothing -- which is the difference
         # between this test and test_a_nested_pytest_run_is_not_refused.
         env.pop(_suite_lease.HELD_BY_ENV, None)
+        for name in ("LAB_CPUS", "LAB_MEM_MB"):  # a grant makes the child's lease step aside
+            env.pop(name, None)
         out = subprocess.run(
             [sys.executable, "-m", "pytest", probe, "-q", "-o", "addopts="],
             capture_output=True, text=True, env=env,
@@ -273,6 +321,8 @@ def conftest_gate(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(_suite_lease, "acquire", lambda *a, **k: None)
     monkeypatch.delenv(gate._SUITE_LEASE_UNGUARDED_ENV, raising=False)
     monkeypatch.delenv("NX_SUITE_LEASE_WAIT", raising=False)
+    for name in ("LAB_CPUS", "LAB_MEM_MB"):  # inside a lab-run grant the lease steps aside
+        monkeypatch.delenv(name, raising=False)
     return gate
 
 
@@ -458,6 +508,7 @@ def test_a_lease_that_cannot_be_taken_because_it_is_unreadable_exits_75_naming_t
         live_holder_with_unreadable_pid: Path) -> None:
     monkeypatch.setattr(_suite_lease, "_lease_root", lambda: lease_root)
     monkeypatch.setattr(_suite_lease, "acquire", _real_acquire)
+    _virtual_time(monkeypatch)  # the default wait runs out in virtual time, not 30 real minutes
     with pytest.raises(pytest.exit.Exception) as err:
         conftest_gate._take_suite_lease()
     assert err.value.returncode == 75
@@ -574,7 +625,7 @@ def test_the_exit_75_messages_name_the_lease_path_and_the_recovery_command(
     with pytest.raises(pytest.exit.Exception) as lost_race:
         conftest_gate._take_suite_lease()
     # no wait requested and a live holder: the first refusal branch
-    monkeypatch.delenv("NX_SUITE_LEASE_WAIT")
+    monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "0")
     monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: "pid 4242 (peer-run)")
     with pytest.raises(pytest.exit.Exception) as no_wait:
         conftest_gate._take_suite_lease()
@@ -614,12 +665,14 @@ def test_a_non_one_value_does_not_lift_the_refusal(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(_suite_lease, "inside_a_holder", lambda: False)
     monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: "pid 4242 (peer-run)")
     monkeypatch.setattr(_suite_lease, "acquire", lambda *a, **k: None)
-    monkeypatch.delenv("NX_SUITE_LEASE_WAIT", raising=False)
+    monkeypatch.delenv("LAB_CPUS", raising=False)
+    monkeypatch.delenv("LAB_MEM_MB", raising=False)
+    monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "0")  # the immediate-refusal branch (queueing is the default)
     monkeypatch.setenv(gate._SUITE_LEASE_UNGUARDED_ENV, "off")
     with pytest.raises(pytest.exit.Exception) as err:
         gate._take_suite_lease()
     assert err.value.returncode == 75
-    assert re.search(r"suite lease: refusing", err.value.msg)
+    assert re.search(r"suite lease: refusing to start", err.value.msg)
 
 
 # nexus-3tx9c: a reclaimed lease was renamed to suite.stale.<pid>.<ns> and never
@@ -877,7 +930,8 @@ def test_a_pidless_reclaim_logs_stale_reclaimed_without_a_holder_pid(lease_root:
 
 def test_the_early_refusal_in_the_conftest_gate_logs_a_refused_line(
         conftest_gate, lease_root: Path, events_log: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With no wait requested the gate exits 75 before it ever calls acquire: it logs the refusal itself."""
+    """With NX_SUITE_LEASE_WAIT=0 the gate exits 75 before it ever calls acquire: it logs the refusal itself."""
+    monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "0")
     monkeypatch.setattr(_suite_lease, "_lease_root", lambda: lease_root)
     lease = lease_root / _suite_lease.RESOURCE  # by hand: the fixture's acquire always loses
     lease.mkdir(parents=True)
@@ -1103,3 +1157,201 @@ def test_concurrent_writers_never_interleave_a_line(events_log: Path) -> None:
     events = _events(events_log)
     assert len(events) == 40
     assert {m["rest"] for m in events} == {f' holder_pid={i} holder_label="label {i}"' for i in range(40)}
+
+
+# -- a second run QUEUES by default (nexus-tvt6u) ---------------------------------------
+#
+# Several sessions share one box, so a second substrate-heavy run is ordinary, not an
+# error. It waits for the holder (DEFAULT_WAIT_SECONDS), says who it waits for, and runs
+# once the holder exits. NX_SUITE_LEASE_WAIT=0 keeps the immediate exit 75.
+
+
+@pytest.fixture
+def queueing_gate(monkeypatch: pytest.MonkeyPatch, lease_root: Path):
+    """The real ``_take_suite_lease`` and the real ``acquire`` over a tmp lease root."""
+    gate = sys.modules["tests.conftest"]
+    monkeypatch.setattr(gate, "_selected_t2_substrate_boots_engine", lambda: True)
+    monkeypatch.setattr(gate, "_suite_lease_release", None)
+    monkeypatch.setattr(_suite_lease, "inside_a_holder", lambda: False)
+    monkeypatch.setattr(_suite_lease, "_lease_root", lambda: lease_root)
+    monkeypatch.delenv(gate._SUITE_LEASE_UNGUARDED_ENV, raising=False)
+    monkeypatch.delenv("NX_SUITE_LEASE_WAIT", raising=False)
+    monkeypatch.delenv(_suite_lease.HELD_BY_ENV, raising=False)  # acquire sets it; the monkeypatch restores it
+    for name in ("LAB_CPUS", "LAB_MEM_MB"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(_suite_lease.EVENTS_LOG_ENV, str(lease_root.parent / "events.log"))
+    return gate
+
+
+def test_by_default_a_second_run_waits_for_the_holder_and_then_runs(
+        queueing_gate, lease_root: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    holder_dir = _live_holder(lease_root)
+    clock = _virtual_time(monkeypatch, on_sleep=lambda t: shutil.rmtree(holder_dir, ignore_errors=True) if t >= 3 else None)
+    _take_expecting_to_run(queueing_gate)  # NX_SUITE_LEASE_WAIT unset: must not refuse
+    try:
+        assert queueing_gate._suite_lease_release is not None, "the run must hold the lease once the holder exits"
+        assert clock["t"] >= 3, "it must have waited for the holder, not walked in"
+        assert (lease_root / _suite_lease.RESOURCE / "pid").read_text().strip() == str(os.getpid())
+    finally:
+        queueing_gate._release_suite_lease()
+    assert "suite lease: waiting for pid" in capsys.readouterr().err
+
+
+def test_wait_zero_refuses_at_once_without_queueing(
+        queueing_gate, lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _live_holder(lease_root)
+    clock = _virtual_time(monkeypatch)
+    monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "0")
+    with pytest.raises(pytest.exit.Exception) as err:
+        queueing_gate._take_suite_lease()
+    assert err.value.returncode == 75
+    assert "suite lease: refusing to start" in err.value.msg and "peer-run" in err.value.msg
+    assert clock["t"] == 0, "NX_SUITE_LEASE_WAIT=0 must not sleep"
+
+
+def test_wait_one_still_queues_like_the_default(
+        queueing_gate, lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    holder_dir = _live_holder(lease_root)
+    _virtual_time(monkeypatch, on_sleep=lambda t: shutil.rmtree(holder_dir, ignore_errors=True) if t >= 2 else None)
+    monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "1")
+    _take_expecting_to_run(queueing_gate)
+    try:
+        assert queueing_gate._suite_lease_release is not None
+    finally:
+        queueing_gate._release_suite_lease()
+
+
+def test_a_run_that_waits_out_the_budget_exits_75_naming_the_holder(
+        queueing_gate, lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _live_holder(lease_root, "the-long-run")
+    clock = _virtual_time(monkeypatch)
+    with pytest.raises(pytest.exit.Exception) as err:
+        queueing_gate._take_suite_lease()
+    assert err.value.returncode == 75
+    assert "suite lease: refusing to run" in err.value.msg
+    assert "the-long-run" in err.value.msg, "the give-up must name the holder"
+    assert clock["t"] >= _suite_lease.DEFAULT_WAIT_SECONDS, "it must have spent the whole wait first"
+
+
+def test_the_wait_the_gate_asks_for(conftest_gate, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset and =1 queue for DEFAULT_WAIT_SECONDS; =0 does not; the unguarded escape means "run now" unless a wait is named."""
+    asked: list[int] = []
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: None)
+    monkeypatch.setattr(_suite_lease, "acquire", lambda *a, **k: asked.append(k["wait_seconds"]) or (lambda: None))
+
+    def wait_for(wait: str | None, unguarded: str | None) -> int:
+        for name, value in (("NX_SUITE_LEASE_WAIT", wait), (conftest_gate._SUITE_LEASE_UNGUARDED_ENV, unguarded)):
+            monkeypatch.delenv(name, raising=False)
+            if value is not None:
+                monkeypatch.setenv(name, value)
+        asked.clear()
+        _take_expecting_to_run(conftest_gate)
+        return asked[0]
+
+    full = _suite_lease.DEFAULT_WAIT_SECONDS
+    assert wait_for(None, None) == full
+    assert wait_for("1", None) == full
+    assert wait_for("0", None) == 0
+    assert wait_for(None, "1") == 0
+    assert wait_for("1", "1") == full
+
+
+def test_a_waiting_acquire_reports_the_holder_at_once_then_every_minute(
+        lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    holder_dir = _live_holder(lease_root, "peer-run")
+    _virtual_time(monkeypatch, on_sleep=lambda t: shutil.rmtree(holder_dir, ignore_errors=True) if t >= 150 else None)
+    seen: list[tuple[str, float]] = []
+    release = _suite_lease.acquire("waiter", wait_seconds=1800, lease_root=lease_root,
+                                   on_wait=lambda who, waited: seen.append((who, waited)))
+    assert release is not None
+    release()
+    assert [int(w) for _, w in seen] == [0, 60, 120], seen
+    assert all(f"pid {os.getpid()} (peer-run)" == who for who, _ in seen), seen
+
+
+def test_a_progress_callback_that_raises_does_not_change_the_outcome(
+        lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    holder_dir = _live_holder(lease_root)
+    _virtual_time(monkeypatch, on_sleep=lambda t: shutil.rmtree(holder_dir, ignore_errors=True) if t >= 2 else None)
+
+    def boom(_who: str, _waited: float) -> None:
+        raise RuntimeError("closed stderr")
+
+    release = _suite_lease.acquire("waiter", wait_seconds=60, lease_root=lease_root, on_wait=boom)
+    assert release is not None
+    release()
+
+
+def test_no_progress_is_reported_without_contention(lease_root: Path) -> None:
+    seen: list[object] = []
+    release = _suite_lease.acquire("alone", lease_root=lease_root, wait_seconds=60,
+                                   on_wait=lambda *a: seen.append(a))
+    assert release is not None
+    release()
+    assert seen == []
+
+
+def test_a_real_second_pytest_run_queues_prints_who_it_waits_for_and_then_takes_the_lease(
+        tmp_path: Path) -> None:
+    """End-to-end: a child pytest started under a held lease says it is waiting (not refusing), and takes the lease once the holder lets go."""
+    root = tmp_path / "leases"
+    log = tmp_path / "events.log"
+    holder_release = _suite_lease.acquire("the-holding-run", lease_root=root)
+    assert holder_release is not None
+    env = dict(os.environ)
+    env.update(NX_BUILD_LEASE_ROOT=str(root), NX_LEASE_EVENTS_LOG=str(log), PYTEST_ADDOPTS="")
+    for name in ("NX_SUITE_LEASE_WAIT", "NX_TEST_T2_SUBSTRATE", _suite_lease.HELD_BY_ENV, "LAB_CPUS", "LAB_MEM_MB"):
+        env.pop(name, None)
+    child = subprocess.Popen(
+        [sys.executable, "-m", "pytest", "tests/test_suite_lease.py::test_a_free_resource_has_no_holder",
+         "-q", "-o", "addopts=", "-p", "no:cacheprovider"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    # Read on a thread with a deadline: a child that queues silently (no progress line) or
+    # never starts would otherwise block this test for the whole 30-minute wait.
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def pump() -> None:
+        assert child.stdout is not None
+        for text in child.stdout:
+            lines.put(text)
+        lines.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    seen: list[str] = []
+    deadline = time.monotonic() + 120
+    try:
+        while time.monotonic() < deadline:
+            try:
+                text = lines.get(timeout=1)
+            except queue.Empty:
+                continue
+            if text is None:
+                break
+            seen.append(text)
+            if "suite lease: waiting for" in text:
+                holder_release()  # the holder exits; the queued child may now take the lease
+                holder_release = None
+                break
+        if holder_release is None:
+            end = time.monotonic() + 120
+            while time.monotonic() < end:
+                try:
+                    text = lines.get(timeout=1)
+                except queue.Empty:
+                    continue
+                if text is None:
+                    break
+                seen.append(text)
+    finally:
+        if holder_release is not None:
+            holder_release()
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+    out = "".join(seen)
+    assert "suite lease: waiting for pid" in out and "the-holding-run" in out, out
+    assert "suite lease: refusing" not in out, out
+    assert "outcome=acquired_after_wait" in log.read_text(), out

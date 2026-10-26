@@ -67,8 +67,9 @@ main between the client tag and the cut (a test or cut-script fix, which
 is exactly what the first real cut needed) cannot ship anything. The
 RDR's literal "only channel-allowlisted paths" would have made the
 channel's own repair its own offender; the guarantee the proof carries,
-"no wheel content ships", is unchanged. Same carve-out the straddle
-predicate recorded at R2 (``cut_plugin_release._SHIPPED_SURFACE_PREFIXES``).
+"no wheel content ships", is unchanged. The plugin-only
+fast lane's eligibility gate (``check_plugin_only_eligibility.py``) reuses
+this carve-out.
 
 This module lives under ``scripts/`` deliberately: pyproject's pytest
 ``pythonpath = ["scripts"]`` makes it importable from tests with no

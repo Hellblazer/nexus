@@ -64,7 +64,16 @@ If `$RDR_DIR/REGISTER.md` does not exist, copy it from `$CLAUDE_PLUGIN_ROOT/reso
 ### Step 2: Assign ID
 
 Run `nx rdr preamble rdr-create`. Take the `Next ID:` it prints; it also prints
-`ID style detected:` for the repo's filename convention.
+`ID style detected:` for the repo's filename convention. It skips numbers held by
+any branch, another worktree or a T2 record and lists them; if it says the holder
+scan is incomplete, check those sources yourself before trusting the number.
+
+Before Step 3, confirm the number is free in T2: `memory_put` upserts by (project,
+title), so writing a held number's record silently replaces it (nexus-3piej). Call
+`mcp__plugin_conexus_nexus__memory_get(project="{repo}_rdr", title="{NNN}")`. Only a
+"not found" answer means free. Any record, and an "Ambiguous title prefix" answer
+(rows such as `{NNN}-research-1` exist), means another RDR holds the number: re-run
+the preamble and take a higher number, then check again.
 
 Never hand-scan with a fixed glob. `[0-9][0-9][0-9]-*.md` requires a filename to
 begin with three digits and matches none of nexus's 217 `rdr-NNN-*.md` files, so
@@ -94,6 +103,8 @@ Create `$RDR_DIR/NNN-kebab-case-title.md` from the template with these metadata 
 Replace `[NUMBER]` with the assigned ID and `[TITLE]` with the user's title.
 
 ### Step 4: Write T2 record
+
+Only for a number Step 2 confirmed free in T2:
 
 mcp__plugin_conexus_nexus__memory_put(content="id: NNN\nprefix: PREFIX\ntitle: User's Title\nstatus: draft\ntype: Feature\npriority: Medium\ncreated: YYYY-MM-DD\ngated: \nclosed: \nclose_reason: \nsuperseded_by: \nsupersedes: \nepic_bead: \narchived: false\nfile_path: $RDR_DIR/NNN-kebab-title.md", project="{repo}_rdr", title="{NNN}", tags="rdr,{type}"  # omit ttl (memory_put's ttl is int|None; permanent by omission)
 

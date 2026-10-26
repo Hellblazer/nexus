@@ -334,6 +334,18 @@ is currently known, not a completeness guarantee):
   literal text): ``eval $(printf '<base64 of "git checkout ...">' |
   base64 -d)`` and ``echo <base64> | base64 -d | sh`` both still allow.
 
+FROZEN, AND NOT COVERED (Sam's decision of 2026-10-25, nexus-i93tz): the
+report-only integrity check that backed this guard (a before/after snapshot
+of the shared checkout's config, hooks and refs) was removed after 188 runs
+with no change report, so this guard is the only line left, and it is frozen
+except for a real incident. These routes are not covered; they are known and
+accepted, and are NOT to be patched with more spellings: raw writes into
+``.git/config`` and ``.git/hooks``; index, ref and HEAD writers reached
+through plumbing; verbs held in ``$VAR`` (the first residual above);
+decode-then-exec (the second); and writing a script and then running it
+(``cat > x.sh`` then ``sh x.sh``, locally or over ssh). A fix for one of these
+that adds a spelling is the treadmill the round history above records.
+
 ACCEPTED FALSE POSITIVES (over-blocking, not under-blocking — a different
 class from KNOWN LIMITS above, listed separately so the two are never
 conflated): both adjacency branches scan the WHOLE raw command text with

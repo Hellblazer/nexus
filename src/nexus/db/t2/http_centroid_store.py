@@ -339,12 +339,19 @@ class HttpCentroidStore(RefreshableHttpStoreMixin):
         )
 
     def get_foreign(self, collection: str) -> dict[str, list[Any]]:
-        """All centroids in collections OTHER than ``collection`` (cross-collection
-        projection source set), in the same envelope shape as
-        :meth:`get_by_collection`.
+        """All centroids in collections OTHER than ``collection``, in the same
+        envelope shape as :meth:`get_by_collection`.
 
-        Serves ``compute_cross_links`` (``$ne`` directly) and ``project_against``
-        (``$in`` by filtering this foreign set to the target collections).
+        From the engine cut after v0.1.164 the set leaves out the centroids of
+        SUPERSEDED collections (nexus-2k8wi): the engine's cross pass skips them, and
+        the doctor's recompute and ``compute_cross_links`` must read the same set. An
+        older engine returns them. ``get_by_collection`` is unchanged and still serves
+        a tombstone's own centroids by name.
+
+        Serves ``compute_cross_links`` (``$ne`` directly), ``compute_assignments``
+        with ``cross_collection`` and the doctor's assignment check. ``project_against``
+        does NOT read this: it takes each target through :meth:`get_by_collection`, so
+        the projection write is guarded engine-side, in ``assign_many``.
 
         CACHED per store instance, keyed on ``(collection, "foreign")``
         (nexus-2mb6n) — see :meth:`get_by_collection`'s docstring for why.

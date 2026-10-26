@@ -104,13 +104,12 @@ presence (``git tag -l``, "shallow CI clone") rather than an
 tracing -- does not find a site there to allowlist. Named here so a reader
 does not mistake the absence for "this file has no debt."
 
-The remaining seven allowlist entries are PRE-EXISTING debt this lint
+The remaining six allowlist entries are PRE-EXISTING debt this lint
 inherits at birth (found on first live run against the real tree, not
-introduced by this change): five ``pytest.importorskip("yaml")`` /
+introduced by this change): four ``pytest.importorskip("yaml")`` /
 ``shutil.which`` / filesystem-existence-conditioned ``skipif`` sites in
 genuinely gate-like files (``test_plan_template_inline_var_lint.py``,
-``test_plugin_release_drift_ledger.py``, ``test_plugin_release_workflow.py``
-x2, ``test_plugin_structure.py``,
+``test_plugin_release_drift_ledger.py``, ``test_plugin_structure.py``,
 ``test_rehearsal_container_guard_lint.py``) that have no non-vacuity budget
 of their own. Each is allowlisted with its own reason at the entry, per the
 shrink-only rule below -- do not widen the allowlist for a NEW site; a new
@@ -260,10 +259,6 @@ GATE_LIKE_SKIP_ALLOWLIST: dict[str, int] = {
     # (_require_or_skip -- a live `git ls-remote` network call, not a
     # deterministic local fact).
     "tests/test_plugin_release_drift_ledger.py": 2,
-    # Two pytest.importorskip("yaml") sites reading .github/workflows/*.yml
-    # for the plugin-release and release workflow pins; same PyYAML
-    # dependency as above.
-    "tests/test_plugin_release_workflow.py": 2,
     # shutil.which("bash") gating a bash-syntax check over every command doc
     # (bash is assumed present on every dev/CI box this suite runs on), plus
     # a sibling "no ```! bash block found" content skip in the same test

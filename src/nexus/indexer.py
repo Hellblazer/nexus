@@ -1233,9 +1233,10 @@ def _catalog_hook(
     ``stale_fence_doc_ids``: every EXISTING document whose reported
     ``index_state`` is ``'complete'`` has ``tumbler -> index_content_hash``
     added in place, from the same owner-scoped fetch. The orchestrator
-    overlays it onto the staleness caches, which otherwise key a doc's
-    content hash off content-addressed chunk metadata that is never
-    refreshed (see ``indexer_utils.apply_catalog_content_hashes``).
+    overlays it onto the staleness caches, whose own entries carry no hash
+    (a chunk row's ``content_hash`` is the last writer's, not this
+    document's; see ``indexer_utils.apply_catalog_content_hashes``), so a
+    document absent from this map is stale.
 
     ``on_phase`` (nexus-jg3x5): the orchestrator's ``[post]`` phase channel.
     When supplied, each link generator that can do work for this batch
@@ -3661,15 +3662,9 @@ def _row_to_chunk_dict(row: object) -> dict:
     ``getattr`` throughout (rather than ``dataclasses.asdict``) so both the
     real dataclass and lightweight test fakes carrying only a subset of
     fields work identically."""
-    return {
-        "chash": getattr(row, "chash", "") or "",
-        "position": getattr(row, "position", None),
-        "chunk_index": getattr(row, "chunk_index", None),
-        "line_start": getattr(row, "line_start", None),
-        "line_end": getattr(row, "line_end", None),
-        "char_start": getattr(row, "char_start", None),
-        "char_end": getattr(row, "char_end", None),
-    }
+    from nexus.catalog.types import manifest_row_wire  # noqa: PLC0415 — deliberate function-scoped import (avoid a module-level catalog dep in the indexer)
+
+    return manifest_row_wire(row)
 
 
 def _prune_misclassified_in_collection(
@@ -5069,7 +5064,7 @@ def _run_index(
 
     Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
-    from nexus.classifier import ContentClass, classify_file, looks_like_binary_content  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.classifier import WHITESPACE_ONLY_MAX_BYTES, ContentClass, classify_file, is_whitespace_only_text, looks_like_binary_content  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.config import load_config  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.frecency import batch_frecency  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -5219,7 +5214,7 @@ def _run_index(
     # don't hit this because ``_git_ls_files``/rglob fallback both build
     # paths as ``repo / rel`` (unresolved) already.
     # nexus-rqsh1: files that would register a catalog document but never
-    # produce a chunk (zero-byte, or binary content misclassified as
+    # produce a chunk (zero-byte, whitespace-only, or binary content misclassified as
     # prose). Tracked separately from skipped_oversize/ContentClass.SKIP
     # for observability — see the per-skip debug logs below. Declared
     # here (round 2, substantive-critic Critical 2026-08-17) so the
@@ -5252,6 +5247,14 @@ def _run_index(
     # reclaim.
     rdr_excluded_present: set[str] = set()
 
+    # nexus-5j8fp: worktree-relative paths this run skipped as whitespace-only
+    # (RDR walk and the main walk). A file still on disk and positively
+    # whitespace-only has no rename ambiguity, so one that still has a stored
+    # document rides the same same-run tombstone as rdr_excluded_present
+    # instead of waiting two full housekeeping runs (which a --since-head
+    # hook never runs). Housekeeping stays the fallback.
+    whitespace_skipped_present: set[str] = set()
+
     rdr_md_paths: list[tuple[float, Path]] = []
     for rdr_rel in dict.fromkeys(rdr_paths):  # de-dupe while preserving order
         rdr_dir = repo / rdr_rel
@@ -5276,8 +5279,10 @@ def _run_index(
                     # candidate_files' arbitrary extensions), so a zero-byte
                     # check alone suffices here — no binary-content sniff
                     # needed.
+                    _md_size: int | None = None
                     try:
-                        if md_file.stat().st_size == 0:
+                        _md_size = md_file.stat().st_size
+                        if _md_size == 0:
                             skipped_unchunkable.append((md_file, "zero_byte"))
                             _log.debug(
                                 "unchunkable_zero_byte_rdr_skipped",
@@ -5286,6 +5291,19 @@ def _run_index(
                             continue
                     except OSError:
                         pass  # defer to per-file path
+                    # nexus-5j8fp: whitespace-only text chunks to nothing too.
+                    if (
+                        _md_size is not None
+                        and _md_size <= WHITESPACE_ONLY_MAX_BYTES
+                        and is_whitespace_only_text(md_file)
+                    ):
+                        skipped_unchunkable.append((md_file, "whitespace_only"))
+                        whitespace_skipped_present.add(str(md_file.relative_to(repo)))
+                        _log.debug(
+                            "unchunkable_whitespace_only_rdr_skipped",
+                            path=str(md_file),
+                        )
+                        continue
                     rdr_md_paths.append((frecency_map.get(md_file, 0.0), md_file))
     rdr_md_paths.sort(key=lambda x: x[0], reverse=True)
     have_rdr_files = bool(rdr_md_paths)
@@ -5382,7 +5400,15 @@ def _run_index(
 
         match classification:
             case ContentClass.CODE:
-                code_files.append((score, path))
+                # nexus-5j8fp: a 1-2 byte whitespace-only source file (serena's
+                # __init__.py) passes the zero-byte guard, chunk_file returns [],
+                # and the document registers but never completes its fence.
+                if file_size <= WHITESPACE_ONLY_MAX_BYTES and is_whitespace_only_text(path):
+                    skipped_unchunkable.append((path, "whitespace_only"))
+                    whitespace_skipped_present.add(str(rel))
+                    _log.debug("unchunkable_whitespace_only_skipped", path=str(path))
+                else:
+                    code_files.append((score, path))
             case ContentClass.PROSE:
                 # nexus-rqsh1: extensions unknown to classify_file's
                 # code/skip/binary-asset tables fall through to PROSE
@@ -5398,6 +5424,13 @@ def _run_index(
                         path=str(path),
                         ext=path.suffix.lower(),
                     )
+                elif file_size <= WHITESPACE_ONLY_MAX_BYTES and is_whitespace_only_text(path):
+                    # nexus-5j8fp: ghidra's 1-2 byte Module.manifest files fall
+                    # through to PROSE and fail every run with "all chunks empty
+                    # after whitespace filtering".
+                    skipped_unchunkable.append((path, "whitespace_only"))
+                    whitespace_skipped_present.add(str(rel))
+                    _log.debug("unchunkable_whitespace_only_skipped", path=str(path))
                 else:
                     prose_files.append((score, path))
             case ContentClass.PDF:
@@ -5414,6 +5447,16 @@ def _run_index(
                     path=str(path),
                     ext=path.suffix.lower(),
                 )
+
+    if whitespace_skipped_present:
+        # nexus-5j8fp: same-run retirement of a still-present whitespace-only
+        # file's existing document, through the nexus-d6qmz tombstone path
+        # (see rdr_excluded_present above). Filtered to paths with a live
+        # stored document so steady state leaves delta_deleted empty.
+        _ws_stored = _stored_paths_among(repo, whitespace_skipped_present)
+        if _ws_stored:
+            _ws_already = set(delta_deleted)
+            delta_deleted.extend(sorted(_ws_stored - _ws_already))
 
     # Sort all lists descending by frecency
     code_files.sort(key=lambda x: x[0], reverse=True)
@@ -5459,7 +5502,7 @@ def _run_index(
             )
 
     # nexus-rqsh1: summary log for the unchunkable-skip population (zero-
-    # byte files, binary content misclassified as prose). Info level, not
+    # byte files, binary content misclassified as prose, whitespace-only text). Info level, not
     # warning — this is the fix draining a known phantom class, not an
     # anomaly the operator needs to act on.
     if skipped_unchunkable:
@@ -5953,13 +5996,39 @@ def _run_index(
         return build_staleness_cache(col)
 
     if delta_changed is not None:
-        # nexus-fltb4: the delta files are known-changed; the caches exist to
-        # SKIP unchanged files, which the delta already excludes. Empty caches
-        # route the (small) delta set through the per-file staleness path,
-        # which still no-ops content-identical rewrites.
+        # nexus-fltb4: the delta names the files git says changed since the
+        # base, so the whole-collection sweep the full run pays would read
+        # every unchanged document for nothing. But the delta is not "files
+        # whose content differs from the last index": a base that did not
+        # advance, or a file that changed and changed back, offers a file the
+        # catalog already holds at its current hash. An empty StalenessCache
+        # (not None, so check_staleness takes its cached branch) would call
+        # every one a miss and re-index it (nexus-a3rl7). So the caches are
+        # built from the catalog for the delta's own documents only: the
+        # fence hash from the registration pass above (_complete_doc_hashes)
+        # and the model from one chunk of each document's own manifest, a few
+        # batched reads for the whole delta instead of a sweep. A document
+        # with no complete fence, no chunk in T3, or the wrong model gets no
+        # entry and is indexed; never_fresh still wins below.
+        from nexus.indexer_utils import seed_staleness_cache_from_catalog  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
+
+        def _delta_doc_ids(files: "list[tuple[float, Path]]") -> list[str]:
+            return [file_to_doc_id[f] for _, f in files if f in file_to_doc_id]
+
         code_staleness = StalenessCache()
         docs_staleness = StalenessCache()
         rdr_staleness = StalenessCache()
+        _delta_seeded = (
+            seed_staleness_cache_from_catalog(
+                code_staleness, code_col, _delta_doc_ids(code_files), _complete_doc_hashes)
+            + seed_staleness_cache_from_catalog(
+                docs_staleness, docs_col,
+                _delta_doc_ids(prose_files) + _delta_doc_ids(pdf_files), _complete_doc_hashes)
+            + seed_staleness_cache_from_catalog(
+                rdr_staleness, rdr_col, _delta_doc_ids(rdr_md_paths), _complete_doc_hashes)
+        )
+        _log.info("delta_staleness_caches_seeded", seeded=_delta_seeded,
+                  complete_fence_docs=len(_complete_doc_hashes))
     else:
         code_staleness = _build_with_marker("code", code_col)
         docs_staleness = _build_with_marker("docs", docs_col)

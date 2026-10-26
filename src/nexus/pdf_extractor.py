@@ -162,6 +162,56 @@ _SHARED_CONVERTERS: dict[tuple[Any, bool, str], Any] = {}
 _SHARED_CONVERTERS_LOCK = threading.Lock()
 
 
+class MineruWorkerStopped(BaseException):
+    """The MinerU worker was killed by :func:`stop_mineru_workers` (nexus-4vx0a).
+
+    The run was interrupted, so this is not a document failure: a
+    ``BaseException`` so the per-page OOM retry (``except RuntimeError``) and
+    the docling fallbacks never catch it and start more work."""
+
+
+class _LiveWorker:
+    """One running per-batch MinerU worker: how to kill its tree, and whether it was stopped."""
+
+    def __init__(self, kill: Callable[[], None]) -> None:
+        self.kill = kill
+        self.stopped = False
+
+
+_LIVE_MINERU_WORKERS: set[_LiveWorker] = set()
+_LIVE_MINERU_WORKERS_LOCK = threading.Lock()
+#: The cancel event of the indexing run the current thread extracts for, bound by
+#: :func:`bind_run_cancel`. A worker that registers after its run's event is set is killed on the
+#: spot: a stage thread can be between batches when the run is interrupted, and its next worker would
+#: otherwise run its whole page budget unseen (nexus-4vx0a review). Per thread and per run, so an
+#: interrupted run leaves nothing behind for the next run or the next test.
+_RUN_CANCEL = threading.local()
+
+
+def bind_run_cancel(cancel: threading.Event | None) -> None:
+    """Tie the per-batch MinerU workers this thread starts to *cancel* (``None`` unbinds)."""
+    _RUN_CANCEL.event = cancel
+
+
+def stop_mineru_workers() -> int:
+    """Kill the tree of every per-batch MinerU worker this process is waiting on.
+
+    Called when an indexing run is interrupted (SIGTERM, Ctrl-C): the stage
+    thread waiting on a worker then raises :class:`MineruWorkerStopped` at
+    once instead of waiting out the worker's page budget (180 s a page by
+    default). A worker its run starts after the interrupt is killed as it
+    registers (:func:`bind_run_cancel`). Workers of the shared MinerU server are not this process's and are left
+    alone. Returns the number of workers killed."""
+    with _LIVE_MINERU_WORKERS_LOCK:
+        workers = list(_LIVE_MINERU_WORKERS)
+    for worker in workers:
+        worker.stopped = True
+        worker.kill()
+    if workers:
+        _log.info("mineru_workers_stopped", count=len(workers))
+    return len(workers)
+
+
 class MineruMemoryError(RuntimeError):
     """A MinerU subprocess died from memory exhaustion (RDR-148 Gap 5).
 
@@ -2765,6 +2815,13 @@ class PDFExtractor:
                         proc.kill()
                 safe_killpg_group(worker_pgid)
 
+            live = _LiveWorker(_killpg_safe)
+            with _LIVE_MINERU_WORKERS_LOCK:
+                _LIVE_MINERU_WORKERS.add(live)
+            run_cancel = getattr(_RUN_CANCEL, "event", None)
+            if run_cancel is not None and run_cancel.is_set():
+                live.stopped = True
+                _killpg_safe()
             try:
                 returncode = proc.wait(timeout=timeout_s)
             except subprocess.TimeoutExpired:
@@ -2783,6 +2840,16 @@ class PDFExtractor:
                 # finally; this is that same guarantee for this site.
                 _killpg_safe()
                 raise
+            finally:
+                with _LIVE_MINERU_WORKERS_LOCK:
+                    _LIVE_MINERU_WORKERS.discard(live)
+            if live.stopped:
+                # nexus-4vx0a: killed by stop_mineru_workers, not by memory:
+                # the SIGKILL return code must not be read as an OOM.
+                _killpg_safe()
+                raise MineruWorkerStopped(
+                    f"MinerU worker stopped: the run was interrupted (pages {start}–{end}, path={pdf_path})"
+                )
             if returncode != 0:
                 # Clean up any orphaned children in the process group
                 _killpg_safe()

@@ -526,8 +526,10 @@ cmd_destroy() {
 }
 
 # Hold the suite lease for the whole life of a run. A suite started meanwhile
-# finds it held and exits 75 (tests/_suite_lease.py), and the runner overlap guard
-# waits. The lease is released only after the VM is gone.
+# finds it held and queues behind it for up to 30 minutes, then exits 75
+# (tests/_suite_lease.py; NX_SUITE_LEASE_WAIT=0 exits at once), also under a
+# lab-mac grant (admission only; tests/conftest.py _take_suite_lease skips the
+# lease for a grant only off macOS), and the runner overlap guard waits. The lease is released only after the VM is gone.
 #
 # Signals only set a flag: the loop notices it within 3 s and the cleanup runs in
 # the ordinary flow with the signals already ignored, and destroys the VM in a child

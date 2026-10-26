@@ -33,6 +33,7 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.manifest_heal import heal_manifest_gaps
 from nexus.cli import main
 from nexus.db import make_t3
+from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.repo_identity import _repo_identity
 from tests._chunk_seed import seed_chunks_direct
 from tests.conftest import fake_credentials
@@ -147,9 +148,8 @@ def test_a_shared_chunk_row_another_document_wrote_last_survives_and_the_documen
 
     rows = {r.chash: r for r in d.reader.get_manifest(d.a)}
     assert set(rows) == {d.ch["s"], d.ch["p"]}, "no row dropped, none added"
-    # 7.86.3 carries no tko2w (per-document labels ship with engine 0.1.165), so ManifestRow has
-    # no section_title / labels_written here; develop keeps those two assertions.
-    assert rows[d.ch["s"]].position == 0
+    assert rows[d.ch["s"]].position == 0 and rows[d.ch["s"]].section_title == "s-title"
+    assert rows[d.ch["s"]].labels_written is True
     assert d.entry().chunk_count == 3
     assert _state(d.reader, d.a) == "failed"
     assert [(str(r.entry.tumbler), r.manifest_rows, r.chunk_count) for r in result.reindex] == [(d.a, 2, 3)]
@@ -393,7 +393,7 @@ def test_the_next_index_run_re_indexes_a_marked_document(
     writer = make_catalog_writer()
     middle = rows[1]
     kept = [
-        _row(r.chash, r.position)
+        _row(r.chash, r.position, r.section_title or "")
         for r in rows if r.chash != middle.chash
     ]
     writer.atomic_manifest_replace(tumbler, kept, collection=doc.physical_collection)
@@ -442,3 +442,234 @@ def test_reconcile_names_the_real_route_and_dry_run_changes_nothing(
     assert "re-index the source" not in real.output
     assert _state(d.reader, d.a) == "failed"
     assert _positions(d.reader, d.a) == {d.ch["p"]: 0, d.ch["r"]: 2}
+
+
+# -- manifest-less documents the heal cannot rebuild (nexus-v9xwj) ---------------------------------
+
+
+def _fence_complete_over_no_rows(d: "_Doc", chunk_count: int) -> None:
+    """Leave A fenced ``complete`` at its file hash with no manifest rows and ``chunk_count``
+    chunks owed: the state a document is in when its rows were lost after a run finished. The
+    engine will not complete a fence over rows short of ``chunk_count``, so the fence is
+    completed at zero and the count put back."""
+    d.writer.begin_index_run(d.a, d.h_a, f"run-{d.a}", d.collection)
+    d.writer.complete_index_run(d.a, d.h_a, 0)
+    d.writer.update(d.a, chunk_count=chunk_count)
+    assert _state(d.reader, d.a) == "complete"
+    assert d.reader.get_manifest(d.a) == []
+    assert d.entry().chunk_count == chunk_count
+
+
+def test_a_lost_manifestless_document_is_marked_for_re_index() -> None:
+    """A holds no manifest rows and says it owes 2 chunks; T3 has one chunk, stamped by another
+    document (B) as the later writer, and none carrying A's hash. The heal finds nothing to
+    rebuild A from and books it LOST. It also fails A's fence, so a document that is not indexed
+    does not read 'complete'. The old heal only reported it."""
+    d = _Doc("v9xwj-lost", ["s"], {}, 2, other_hash=("s",))
+    _fence_complete_over_no_rows(d, 2)
+
+    result = _heal(d.reader, [d.entry()])
+
+    assert [str(e.tumbler) for e in result.lost] == [d.a]
+    assert _state(d.reader, d.a) == "failed"
+    assert [(str(r.entry.tumbler), r.manifest_rows, r.chunk_count) for r in result.reindex] == [(d.a, 0, 2)]
+    assert d.reader.get_manifest(d.a) == [], "nothing written into the document"
+    assert d.entry().chunk_count == 2
+
+
+def test_a_manifestless_document_in_a_collection_that_does_not_exist_is_marked() -> None:
+    d = _Doc("v9xwj-gone", ["s"], {}, 2, other_hash=("s",))
+    with HttpCatalogClient() as cat:
+        gone = str(cat.register(
+            cat.register_owner("v9xwj-gone-owner", "repo", repo_hash="v9xwj-gone-hash"),
+            "Doc in a missing collection", content_type="pdf",
+            physical_collection="docs__v9xwj-no-such-collection__bge-base-en-v15-768__v1",
+            chunk_count=2, meta={"content_hash": _chash("v9xwj-gone-file")},
+        ))
+    d.writer.begin_index_run(gone, _chash("v9xwj-gone-file"), "run-v9xwj-gone",
+                             "docs__v9xwj-no-such-collection__bge-base-en-v15-768__v1")
+    d.writer.complete_index_run(gone, _chash("v9xwj-gone-file"), 0)
+    d.writer.update(gone, chunk_count=2)
+    assert _state(d.reader, gone) == "complete"
+
+    result = _heal(d.reader, [_entry(d.reader, gone)])
+
+    assert [str(e.tumbler) for e in result.lost] == [gone]
+    assert _state(d.reader, gone) == "failed"
+    assert [str(r.entry.tumbler) for r in result.reindex] == [gone]
+
+
+def test_a_collection_the_service_could_not_be_asked_about_is_reported_not_marked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient evidence: the collection listing failed, which says nothing about the chunks.
+    The failure is injected where the real client fails (the stats call under ``list_collections``
+    answers a 503), and the heal runs through the real ``HttpVectorClient`` from ``make_t3``: the
+    client's default listing swallows that error and returns ``[]``, which used to raise
+    ``CollectionNotFoundError`` with no cause and read as an absent collection. The document is
+    listed LOST (as before) and its fence is left alone."""
+    d = _Doc("v9xwj-outage", ["s"], {}, 2, other_hash=("s",))
+    _fence_complete_over_no_rows(d, 2)
+
+    def _stats_down(self, *args, **kwargs):
+        raise VectorServiceError("service unavailable", code=503)
+
+    monkeypatch.setattr(HttpVectorClient, "collection_stats", _stats_down)
+    t3 = make_t3()
+    assert isinstance(t3, HttpVectorClient)
+
+    result = heal_manifest_gaps([d.entry()], d.reader, lambda: t3, make_catalog_writer)
+
+    assert [str(e.tumbler) for e in result.lost] == [d.a]
+    assert _state(d.reader, d.a) == "complete"
+    assert result.reindex == []
+    assert result.lost_unmarked_why == {
+        d.a: "the service could not be asked whether its collection exists"}
+
+
+def test_a_failed_t3_fetch_is_reported_not_marked(monkeypatch) -> None:
+    d = _Doc("v9xwj-fetch", ["s"], {}, 2, other_hash=("s",))
+    _fence_complete_over_no_rows(d, 2)
+
+    def _boom(*a, **k):
+        raise RuntimeError("t3 fetch failed")
+
+    monkeypatch.setattr("nexus.indexer._paginated_get", _boom)
+    result = _heal(d.reader, [d.entry()])
+
+    assert [str(e.tumbler) for e in result.lost] == [d.a]
+    assert _state(d.reader, d.a) == "complete"
+    assert result.reindex == []
+    assert result.lost_unmarked_why == {d.a: "the T3 fetch for its chunks failed"}
+
+
+def test_a_never_chunked_document_is_not_marked() -> None:
+    """chunk_count 0, no rows, nothing in T3 under its hash: expected, nothing to rebuild. Its
+    fence stays as it is."""
+    d = _Doc("v9xwj-empty", ["s"], {}, 0, other_hash=("s",))
+    d.writer.begin_index_run(d.a, d.h_a, "run-v9xwj-empty", d.collection)
+    d.writer.complete_index_run(d.a, d.h_a, 0)
+    assert _state(d.reader, d.a) == "complete"
+
+    result = _heal(d.reader, [d.entry()])
+
+    assert [str(e.tumbler) for e in result.never_chunked] == [d.a]
+    assert result.lost == [] and result.reindex == []
+    assert _state(d.reader, d.a) == "complete"
+
+
+def test_a_lost_document_whose_fence_is_indexing_is_skipped() -> None:
+    d = _Doc("v9xwj-busy", ["s"], {}, 2, other_hash=("s",))
+    d.writer.begin_index_run(d.a, d.h_a, "run-v9xwj-busy", d.collection)
+
+    result = _heal(d.reader, [d.entry()])
+
+    assert [str(e.tumbler) for e in result.lost] == [d.a]
+    assert _state(d.reader, d.a) == "indexing"
+    assert result.reindex == [] and len(result.skipped_indexing) == 1
+    assert result.lost_unmarked_why == {d.a: "an index run is in progress on it (fence 'indexing')"}
+
+
+def _first_manifest_read_sees_no_rows(d: "_Doc", monkeypatch) -> None:
+    """The pass reads every manifest once at its start (the snapshot); make that read answer
+    'no rows' and every later read (the re-read before a mark) answer for real."""
+    real = d.reader.get_manifests
+    reads: list[int] = []
+
+    def _snapshot_then_real(doc_ids):
+        reads.append(1)
+        if len(reads) == 1:
+            return {str(t): [] for t in doc_ids}
+        return real(doc_ids)
+
+    monkeypatch.setattr(d.reader, "get_manifests", _snapshot_then_real)
+
+
+def test_a_lost_document_that_a_run_gave_rows_since_the_snapshot_is_not_failed_as_lost(monkeypatch) -> None:
+    """The snapshot says no rows (and no chunk of A's hash is in T3, so A is LOST); a run landed
+    the rows before the heal reached the document. It is judged as a document with rows (here:
+    rows equal to its count, so not gapped, so untouched) and the report says why."""
+    d = _Doc("v9xwj-landed", ["s", "p"], {}, 2, other_hash=("s", "p"))
+    _fence_complete_over_no_rows(d, 2)
+    snapshot = d.entry()
+    d.writer.write_manifest(
+        d.a, [_row(d.ch["s"], 0), _row(d.ch["p"], 1)], collection=d.collection)
+    d.writer.update(d.a, chunk_count=2)
+    _first_manifest_read_sees_no_rows(d, monkeypatch)
+
+    result = _heal(d.reader, [snapshot])
+
+    assert [str(e.tumbler) for e in result.lost] == [d.a], "the snapshot made it a lost document"
+    assert _state(d.reader, d.a) == "complete", "rows landed since the snapshot: not a lost document"
+    assert result.reindex == []
+    assert result.lost_unmarked_why == {d.a: "a run landed its manifest rows since the pass began"}
+
+
+def test_a_lost_document_that_a_run_re_indexed_as_empty_since_the_snapshot_says_why() -> None:
+    """The snapshot owes 2 chunks; a run moved ``chunk_count`` to 0 before the heal reached the
+    document: it owes nothing, is not marked, and the report says so."""
+    d = _Doc("v9xwj-emptied", ["s"], {}, 2, other_hash=("s",))
+    _fence_complete_over_no_rows(d, 2)
+    snapshot = d.entry()
+    d.writer.update(d.a, chunk_count=0)
+
+    result = _heal(d.reader, [snapshot])
+
+    assert _state(d.reader, d.a) == "complete"
+    assert result.reindex == []
+    assert result.lost_unmarked_why == {d.a: "its chunk_count is now 0 (a run re-indexed it as empty)"}
+
+
+def test_dry_run_reports_a_lost_document_as_to_be_marked_and_fails_no_fence() -> None:
+    d = _Doc("v9xwj-dry", ["s"], {}, 2, other_hash=("s",))
+    _fence_complete_over_no_rows(d, 2)
+
+    dry = _heal(d.reader, [d.entry()], dry_run=True)
+
+    assert _state(d.reader, d.a) == "complete"
+    assert [str(r.entry.tumbler) for r in dry.reindex] == [d.a]
+    live = _heal(d.reader, [d.entry()])
+    assert [str(r.entry.tumbler) for r in live.reindex] == [str(r.entry.tumbler) for r in dry.reindex]
+    assert _state(d.reader, d.a) == "failed"
+
+
+def test_reconcile_lists_a_lost_document_and_says_it_was_marked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    d = _Doc("v9xwj-cli", ["s"], {}, 2, other_hash=("s",))
+    _fence_complete_over_no_rows(d, 2)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runner = CliRunner()
+
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        dry = runner.invoke(main, ["catalog", "reconcile", "--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert f"LOST {d.a}" in dry.output and "would be marked for re-index" in dry.output, dry.output
+    assert _state(d.reader, d.a) == "complete"
+
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        real = runner.invoke(main, ["catalog", "reconcile"])
+    assert real.exit_code == 0, real.output
+    lost_line = next(line for line in real.output.splitlines() if f"LOST {d.a}" in line)
+    assert "marked for re-index" in lost_line and "would be" not in lost_line, lost_line
+    assert "1 with chunks LOST (real gap)" in real.output, real.output
+    assert _state(d.reader, d.a) == "failed"
+
+
+def test_reconcile_says_why_a_lost_document_was_not_marked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost document the heal stands down on (an index run holds its fence) is listed LOST with
+    the reason, not a bare ``LOST``."""
+    d = _Doc("v9xwj-cli-busy", ["s"], {}, 2, other_hash=("s",))
+    d.writer.begin_index_run(d.a, d.h_a, "run-v9xwj-cli-busy", d.collection)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with patch("nexus.config.get_credential", side_effect=fake_credentials()):
+        real = CliRunner().invoke(main, ["catalog", "reconcile"])
+
+    assert real.exit_code == 0, real.output
+    lost_line = next(line for line in real.output.splitlines() if f"LOST {d.a}" in line)
+    assert "(not marked: an index run is in progress on it (fence 'indexing'))" in lost_line, lost_line
+    assert "marked for re-index" not in lost_line.replace("not marked", ""), lost_line
+    assert _state(d.reader, d.a) == "indexing"

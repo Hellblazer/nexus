@@ -557,7 +557,9 @@ def test_run_index_logs_skipped_binary_files(tmp_path):
 def test_run_index_logs_empty_chunks(tmp_path):
     from nexus.indexer import _run_index
     repo = tmp_path / "repo"; repo.mkdir()
-    (repo / "empty.py").write_text("   \n\n   \n")
+    # Real content with the chunker mocked to return []: a whitespace-only file
+    # no longer reaches the indexer (nexus-5j8fp skips it before registration).
+    (repo / "empty.py").write_text("x = 1\n")
     db, _ = _mock_db()
     with _patches(db, extra={"nexus.chunker.chunk_file": {"return_value": []}}):
         with patch("nexus.indexer._log") as l1, patch("nexus.code_indexer._log") as l2:
@@ -1938,17 +1940,25 @@ def test_run_index_code_upsert_timeout_deferred_not_aborted(tmp_path):
 
 # ── _index_*_file return type ───────────────────────────────────────────────
 
-def _run_code(tmp_path, chunks=None, col_meta=None):
+def _skip_kwargs(cache):
+    """nexus-3ajpd: the repo path decides currency from the staleness cache (the catalog
+    fence's hash overlaid), never from a chunk row's content_hash; a runner that wants the
+    skip hands the per-file helper a cache holding the document at its hash and model."""
+    if cache is None:
+        return {}
+    return {"doc_id_resolver": lambda p: "1.1.1", "staleness_cache": cache}
+
+def _run_code(tmp_path, chunks=None, cache=None):
     from nexus.indexer import _index_code_file
     repo = tmp_path / "repo"; repo.mkdir(); (repo / "main.py").write_text("x = 1\ny = 2\n")
     db, col = _mock_db()
-    if col_meta: col.get.return_value = col_meta
     ch = chunks or [_chunk()]; v = _voyage(len(ch))
     with patch("nexus.chunker.chunk_file", return_value=ch):
         return _index_code_file(repo/"main.py", repo, "code__repo", "voyage-code-3",
-                                col, db, v, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                                col, db, v, git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+                                **_skip_kwargs(cache))
 
-def _run_prose(tmp_path, content="Line one\nLine two\n", col_meta=None):
+def _run_prose(tmp_path, content="Line one\nLine two\n", cache=None):
     # nexus-sghyo (2026-08-06): no client-side embed function to mock —
     # the deleted _embed_with_fallback used to back the non-service path;
     # under the ambient service-mode default the indexer takes the
@@ -1956,16 +1966,15 @@ def _run_prose(tmp_path, content="Line one\nLine two\n", col_meta=None):
     from nexus.indexer import _index_prose_file
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / "notes.txt"; f.write_text(content)
     db, col = _mock_db()
-    if col_meta: col.get.return_value = col_meta
     return _index_prose_file(f, repo, "docs__repo", "voyage-context-3",
-                             col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0)
+                             col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
+                             **_skip_kwargs(cache))
 
-def _run_pdf(tmp_path, col_meta=None, n=1):
+def _run_pdf(tmp_path, cache=None, n=1):
     # nexus-sghyo: see _run_prose above — no client-side embed mock needed.
     from nexus.indexer import _index_pdf_file
     repo = tmp_path / "repo"; repo.mkdir(); f = repo / "paper.pdf"; f.write_bytes(b"%PDF-1.4 fake content")
     db, col = _mock_db()
-    if col_meta: col.get.return_value = col_meta
     prep = [(f"id{i}", f"Page {i}", {"source_title":"T","page_number":i,"source_path":str(f),
              "corpus":"docs__repo","embedding_model":"voyage-context-3","store_type":"prose",
              "source_agent":"nexus-indexer"}) for i in range(1, n+1)]
@@ -1984,7 +1993,8 @@ def _run_pdf(tmp_path, col_meta=None, n=1):
          patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
         return _index_pdf_file(f, repo, "docs__repo", "voyage-context-3",
                                col, db, "fake-key", git_meta={}, now_iso="2026-01-01T00:00:00", score=1.0,
-                               embed_fn=lambda texts: [[0.1] * 3 for _ in texts])
+                               embed_fn=lambda texts: [[0.1] * 3 for _ in texts],
+                               **_skip_kwargs(cache))
 
 def _assert_int(r): assert isinstance(r, int) and not isinstance(r, bool)
 
@@ -2030,11 +2040,9 @@ def test_index_file_returns_int_reflecting_skip_and_index_state(
     if signal == "int_not_bool":
         _assert_int(runner(root))
     elif signal == "zero_when_skipped":
+        from nexus.indexer_utils import StalenessCache
         h = hashlib.sha256(content_bytes).hexdigest()
-        r = runner(
-            root,
-            col_meta={"metadatas": [{"content_hash": h, "embedding_model": model}], "ids": []},
-        )
+        r = runner(root, cache=StalenessCache(by_doc_id={"1.1.1": (h, model)}))
         assert r == 0
         _assert_int(r)
     else:

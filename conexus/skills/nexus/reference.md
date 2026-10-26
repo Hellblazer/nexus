@@ -78,7 +78,7 @@ Plan-match-first analytical retrieval (RDR-080), reserved for answers that must 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `question` | str | required | Natural-language question |
-| `scope` | str | `""` | Catalog subtree (e.g. `"1.2"`) or corpus filter (e.g. `"knowledge"`) |
+| `scope` | str | `""` | Catalog subtree (e.g. `"1.2"`) or corpus filter (e.g. `"knowledge"`). A subtree is a filter, never a corpus: it filters every `query` and `search_metadata_scoped` step whatever its corpus. A `search`, `search_topic_scoped`, `search_graph_hop` or `search_aspect_scoped` step has no subtree filter, so it runs unscoped, and so does every step under a document-level address such as `"1.2.4686"`; the answer text names each such step (`[scope not applied: ...]`) and `scope_diagnostics` reports it as `subtree_not_applied` |
 | `context` | str | `""` | Supplementary caller-supplied context for the plan matcher |
 | `max_steps` | int | `6` | Cap on plan DAG size (applied to inline planner on miss) |
 | `budget_usd` | float \| None | `None` | Per-invocation cost cap; `None` = the derived default (`budget_default.DERIVED_BUDGET_USD`, unset until RDR-196 .p3a derives it); enforcement lands in .p3c |

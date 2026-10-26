@@ -72,7 +72,7 @@ nx index repo ./my-project
 | `md PATH` | Index a Markdown file into T3 `docs__CORPUS` |
 | `failures` | List durable per-file index-failure records (nexus-nukn3) |
 
-**Unchunkable sources (nexus-rqsh1, Hal directive 2026-08-15):** the indexer never registers a catalog document for a file it will not chunk. `repo` discovery silently skips zero-byte and binary-content files (counted in a `skipped_unchunkable` summary line — expected noise in an unbounded walk); the single-file forms (`md`, `pdf`, `rdr`) instead FAIL LOUD with a clean error naming the file (the operator named that exact file, so plain success with nothing registered would mislead), before any catalog write. In `rdr`'s batch walk an unchunkable file fails that file only, counted, never aborting the batch. `repo` staleness also now treats a doc whose catalog `index_state` is `indexing`/`failed` as stale regardless of content-hash match (nexus-cp46b) — a doc stranded by a failed upload drains on the next normal run, no `--force` needed.
+**Unchunkable sources (nexus-rqsh1, Hal directive 2026-08-15):** the indexer never registers a catalog document for a file it will not chunk. `repo` discovery silently skips zero-byte, binary-content and whitespace-only files (the last under nexus-5j8fp; counted in a `skipped_unchunkable` summary line — expected noise in an unbounded walk); the single-file forms (`md`, `pdf`, `rdr`) instead FAIL LOUD with a clean error naming the file (the operator named that exact file, so plain success with nothing registered would mislead), before any catalog write. In `rdr`'s batch walk an unchunkable file fails that file only, counted, never aborting the batch. `repo` staleness also now treats a doc whose catalog `index_state` is `indexing`/`failed` as stale regardless of content-hash match (nexus-cp46b) — a doc stranded by a failed upload drains on the next normal run, no `--force` needed.
 
 **Repo files register under the repo owner (nexus-3o4lt, 2026-09-04):** a Markdown or RDR file that lies inside a git checkout is a repo document whichever command indexes it. `rdr` and `md` (and `nx collection reindex`) register such a file under the repository's own owner, the identity `repo` mints, with a repo-relative path and content type `rdr` when it lies under one of the repo's configured `indexing.rdr_paths` (default `docs/rdr`); `--corpus` no longer selects the owner for a repo file (an info log names the divergence). Before this, those commands resolved a curator owner by corpus name and stored the absolute path, so an RDR indexed before `repo` had walked it was invisible to every owner-scoped reader (canonical RDR resolution, supersedes and related edges) and re-registered as "new" by every later `repo` run: 198 such rows on one install. PDFs keep the corpus identity: a paper filed in a repo is a curated corpus document. Files outside any git repo, and anything under nexus's own config directory (where `nx dt index` stages DEVONthink content), are unchanged. A file that exists only inside an agent worktree (`<primary>/.claude/worktrees/<agent>/`) has no durable identity and the command FAILS LOUD naming it, before any chunk or catalog write, the same rule as unchunkable content; a worktree file the primary also holds registers as the primary's file.
 
@@ -91,7 +91,7 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
-| `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`. The per-commit hook's fast path. The base is NOT advanced past a run that dropped a file for want of a catalog document (see the paragraph on files with no catalog document below), and a `since_head_base_not_advanced` WARNING says so; the next run re-offers the file |
+| `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes) are skipped. A file the delta names that the catalog already holds as indexed (fence `complete` at the file's current hash, a chunk of the document in T3 with the current model) is skipped, not re-indexed: the delta is the files that differ from the base commit, and a base that did not advance, or a file that changed and changed back, offers files an earlier run already indexed. The skip is decided from the catalog for the delta's own documents, with no sweep of the collection. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`. The per-commit hook's fast path. The base is NOT advanced past a run that dropped a file for want of a catalog document (see the paragraph on files with no catalog document below), and a `since_head_base_not_advanced` WARNING says so; the next run re-offers the file |
 | `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead. The opt-in is durable: it stamps a marker on the `knowledge__` collection's catalog row so a later, unrelated write (a T3 chunk write, a migration cascade) can never silently repoint prose back to `docs__` (GH #451; nexus-l52ms). **Repos that opted in before this marker existed:** re-run `nx index repo --corpus knowledge` once — the command always re-derives and re-registers the knowledge collection on every invocation, which backfills the marker on the existing row with no other action needed |
 | `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. |
 
@@ -1130,7 +1130,7 @@ Repairs `document_chunks` manifest gaps left by a persistently-failed manifest-w
 
 A gapped document with NO manifest rows is rebuilt from the T3 chunks in its `physical_collection`, matched by the whole-file `content_hash` recorded on both the document and every one of its chunks, ordered by character/line span, and written by appending; the append sets its `chunk_count` to the number of rows rebuilt. A gapped document that already has some rows is never written into and its `chunk_count` is never changed: a chunk shared with another document carries that document's hash, so the chunks found by hash cannot say which positions are missing. It is marked for re-index instead (its index fence is set to `failed`, listed as a `REINDEX` line), and re-indexing its source rewrites the manifest at the right positions without re-embedding unchanged text. The scope is the whole catalog, so the route depends on how the document was indexed: the next `nx index repo` for a repo file, `nx index pdf` / `md` / `rdr` for a document indexed that way, `nx store put` again under the same collection and title for a note (a note has no source file; it can be gapped with rows only if a producer left its rows short of its `chunk_count`, which the normal writers do not, and nothing else re-indexes it). A rebuilt document that comes out short of its `chunk_count` is written (its `chunk_count` becomes the rows written, so a later pass does not list it again) and marked the same way; one that comes out with more rows than its `chunk_count` is not written, keeps no rows and is listed again until re-indexed. A document whose fence is `indexing` is skipped. A marked document stays `failed` until its source is re-indexed (one outside a run's walk, such as an `--since-head` run or a deleted file, stays marked), and `nx t3 gc` refuses a collection that holds one unless `--allow-incomplete-index-state` is passed. The output lists the first 20 marked documents and a count of the rest. T3 fetches are batched per collection (a paged `$in` over content hashes), and the pass emits a scan header plus per-collection progress lines — on a 21k-document service-mode catalog a full pass takes minutes, not hours. `--dry-run` reports the same counts and lists and writes nothing, fence included.
 
-The summary splits unmatched documents into two classes so real regressions are never buried in expected noise: `N with chunks LOST (real gap)` (the document recorded chunks but T3 no longer has them — investigate) versus `M never-chunked (expected: nothing to rebuild)` (e.g. empty `__init__.py` files that legitimately produced no chunks).
+The summary splits unmatched documents into two classes so real regressions are never buried in expected noise: `N with chunks LOST (real gap)` (the document recorded chunks but T3 no longer has them — investigate) versus `M never-chunked (expected: nothing to rebuild)` (e.g. empty `__init__.py` files that legitimately produced no chunks). A LOST document (no manifest rows, so nothing to rebuild it from) is also marked for re-index, with the same `REINDEX` line and `failed` fence as a gapped document that has rows, and its `LOST` line says `(marked for re-index)` (`would be marked`, with `--dry-run`): no T3 chunk carries its content hash, or the T3 chunks carrying its content hash name no chunk hash, or no content hash or collection is recorded, or its collection does not exist (not in the service's live listing: a collection whose every document is trashed reads as absent). A document with no manifest rows is re-indexed by the next index run that walks its file whether or not it is marked, as long as none of its T3 chunks carries a `doc_id` metadata key (every chunk written since RDR-108 Phase 3); a pre-Phase-3 chunk that still carries one puts the document in the staleness cache, and then the mark is what makes the run re-index it. In every case the mark changes what the fence says, which `nx t3 gc` and the PDF early probe in `nx index repo` read. A LOST document the pass does not mark has `(not marked: <reason>)` on its `LOST` line: a T3 fetch that failed (`the T3 fetch for its chunks failed`), a service error while asking whether the collection exists (`the service could not be asked whether its collection exists`), or a re-read that showed it no longer owes the mark (`a run landed its manifest rows since the pass began`, `its chunk_count is now 0 (a run re-indexed it as empty)`, `an index run is in progress on it (fence 'indexing')`, or `the fence write failed (see the log)`). A never-chunked document is never marked.
 
 `nx index repo` also runs this heal automatically (owner-scoped) after per-file indexing and before orphan GC, so manifest gaps self-repair on the next index without re-embedding. The manual verb remains useful for catalog-wide passes.
 
@@ -1710,7 +1710,7 @@ Six mutation arms, each printing the classification report first, then its own t
 - **recount** — resync `chunk_count` for zero-count docs whose manifest is actually non-empty. Restores the COUNT, not verified content; re-run `nx catalog verify` afterward.
 - **tombstone-vanished** — delete zero-manifest docs in vanished collections. Non-empty-manifest vanished docs are NEVER touched by this arm (nexus-3ck2g).
 - **tombstone-orphaned** — delete zero-count docs whose confirmed on-disk location is gone (file missing, or the owner's repo_root/worktree itself deleted). Docs whose absence could not be CONFIRMED (no repo_root, malformed tumbler, a non-file source_uri, or no provenance at all) are never in this arm's target set — see `unresolvable_provenance` in the report. `store_put_origin` docs (see below) are also never in this arm's target set.
-- **tombstone-zero-content** (nexus-rqsh1) — delete docs classified `zero_content_by_design`: the source file verifiably CAN never chunk (zero bytes by `stat`, or binary content by the same `looks_like_binary_content` sniff the indexer's registration guard uses). These docs never drain via re-indexing (the producer no longer registers such files at all), so without this arm they reappear in every census forever. A source that is merely unreadable (permission error) or missing is NEVER classified into this bucket — absence of proof is not proof of zero content. The bucket also appears as its own count + sample listing in `nx catalog verify` and this census, and stays counted until actually tombstoned (an honest bucket, not a suppression).
+- **tombstone-zero-content** (nexus-rqsh1) — delete docs classified `zero_content_by_design`: the source file verifiably CAN never chunk (zero bytes by `stat`, binary content by the same `looks_like_binary_content` sniff the indexer's registration guard uses, or whitespace-only text by the same `is_whitespace_only_text` check, nexus-5j8fp). These docs never drain via re-indexing (the producer no longer registers such files at all), so without this arm they reappear in every census forever. A source that is merely unreadable (permission error) or missing is NEVER classified into this bucket — absence of proof is not proof of zero content. The bucket also appears as its own count + sample listing in `nx catalog verify` and this census, and stays counted until actually tombstoned (an honest bucket, not a suppression).
 - **tombstone-ghost-notes** (7.21.0, nexus-1uekf) — delete store_put-origin notes whose content is gone from T3. Candidates are every zero-count row that is *note-shaped* (no `file_path`, a recorded chash — the same predicate `nx catalog doctor --store-put-integrity` scans by), from any `zero_count_*` bucket and any collection; which collection a note was put in says nothing about whether its content survives. Each candidate is then re-proved **per row at execution time**: the manifest is still empty (the invariant re-check every tombstone arm runs) AND T3 has no chunk under the note's chash OR its title (`note_chunks_present`, the lookup `verify` and `--store-put-integrity` report by). A note whose chunks are present under either key is a manifest-only gap (a `nx t3 backfill-manifest` candidate) and is never tombstoned; a row whose T3 probe fails is skipped and named, never tombstoned. Reversible until `purge-trash`. First production run 2026-08-28: 226 + 2 tombstoned, one live note correctly skipped; `--store-put-integrity` went from 228 ghosts to 0.
 - **drop-orphan-collections** (7.22.0, nexus-8tnz2) — delete whole T3 collections that have chunks but ZERO catalog documents — live OR tombstoned — referencing them (benchmark/gate debris — the reverse direction of `tombstone-vanished`). Consumes the SAME classification `nx catalog doctor --t3-vs-catalog` reports as `t3_orphans` and `nx catalog verify` reports as `orphan_collections` (`classify_t3_orphan_collections` — one definition, three consumers). Only `class == "orphan"` (zero live AND zero tombstoned docs) is ever a delete target: a `class == "tombstoned-only"` collection (every referencing catalog document is soft-deleted, still restorable until `purge-trash`, RDR-156 D6) is listed distinctly with its `tombstoned_count` and NEVER dropped, and a collection whose chunk count OR tombstone count could not be read from T3 is never a delete target either — an unavailable tombstone-disambiguation read refuses the whole `--execute` as INCOMPLETE rather than guess. Drops go through the cascaded API delete path (`HttpCatalogClient.delete_collection`), never a raw vector-store delete, never `psql`. The tombstone/all-rows count requires an engine serving `GET /v1/catalog/docs/collection-counts-all` (nexus-8tnz2 fix-round-2 — a brand-new route, not a query param on the pre-existing `/docs/collection-counts`, so an older engine 404s cleanly instead of silently returning live-only data); on an older engine the arm reports INCOMPLETE and refuses `--execute`.
 
@@ -1885,7 +1885,7 @@ Subgroup that backfills catalog Documents for T3 chunks that have no catalog ent
 - `synthetic`: registers Documents with `nx-orphan-backfill://` URIs for chunks `dt-link` cannot claim, populating the manifest without claiming false provenance. Untitled chunks fall back to per-chash singleton Documents.
 - `dump-csv`: writes matched / low-confidence / unmatched title CSVs (default under `$NEXUS_CONFIG_DIR/backfill-queue/`) for operator triage; edit `operator_decision` / `operator_dt_uuid` columns.
 - `apply-csv`: reads the operator-curated CSV back and registers Documents with the verified UUIDs.
-- `link-existing`: links T3 chunks to EXISTING catalog Documents: `--by title` (MCP-style title metadata, e.g. `knowledge__knowledge`) or `--by content_hash` (PDF-shaped chunks matched to `documents.head_hash`). Writes `document_chunks` manifest rows only; `--also-synthetic` falls through to synthetic registration for what remains unlinked.
+- `link-existing`: links MANIFEST-LESS T3 chunks to EXISTING catalog Documents: `--by title` (MCP-style title metadata, e.g. `knowledge__knowledge`) or `--by content_hash` (PDF-shaped chunks matched to the Document's file-content hash, `index_content_hash` else `meta.content_hash`; never `head_hash`, and a hash two Documents share matches neither; a title two live Documents share matches neither either, and its group is counted and skipped). A chunk row is shared by every Document holding that text and its `title` and `content_hash` are the last writer's, so a match is only a candidate: a chunk some live Document's manifest in the collection already names is skipped, one the target Document holds (under any collection value of its rows) and one another live Document of the collection owns, and the counts are printed. A chunk whose only owner is a Document in the trash, or that an earlier version of the target left behind (nothing names it), counts as manifest-less and IS linked. The dry run (the default) walks the same chunks and prints `Would link N chunks across M existing Documents` with those counts, and writes nothing (link counts only: it stops before the `--also-synthetic` step and does not count the chunks that step would leave alone). Writes `document_chunks` manifest rows after the highest position the Document holds; `--also-synthetic` falls through to synthetic registration for the chunks of title groups with no matching Document, except those a live Document already owns (counted); the standalone `synthetic` verb is unchanged.
 
 Owner resolution: `--owner` overrides; otherwise the owner is looked up from the built-in per-collection default map and unknown collections error with instructions.
 
@@ -2114,6 +2114,16 @@ nx taxonomy backfill-source-collection                        # RETIRED: refuses
 nx taxonomy backfill-source-collection --apply                # RETIRED: refuses with guidance
 ```
 
+### `nx taxonomy project` and superseded collections
+
+A supersede tombstone (the retired source of a re-embed cutover) keeps its topics and centroids. `nx taxonomy project`
+(single source, and `--backfill`) leaves such collections out of its default targets, and `--backfill` out of its
+sources, using one `/catalog/collections/list` read. Naming one with `--against` is allowed, but from the next engine
+cut the engine skips every `assigned_by=projection` row whose topic belongs to a superseded collection
+(`assign_many` reports the count as `skipped_superseded`), so `--persist` never raises a retired topic's `doc_count`.
+The engine's server-side cross pass, `nx doctor --check-assignments`' recompute and the cross-link pass of
+`nx taxonomy discover` skip those collections too. Assignments written before the engine cut are not rewritten.
+
 ### `nx taxonomy show --assignments`
 
 `nx taxonomy show TOPIC_ID --assignments [-n/--limit N]` (nexus-92uh0) shows
@@ -2292,7 +2302,7 @@ taxonomy:
 | `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection; `--refresh` recomputes catalog-derived links first (requires catalog) |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
 | `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--top-k N` caps centroids considered per chunk (default: 3). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077); the corpus threshold always applies to the raw cosine and the ICF weight is clamped to 1, so it can only rank and suppress, never admit (GH #1528). `--persist` to write assignments. `--backfill` to project all collections against each other. `--prune-below-threshold` (recovery, GH #1528) deletes projection assignments whose stored raw cosine is below the corpus threshold: for the source collection given at its (or the explicit) threshold, or with `--backfill` for every corpus prefix at its default |
-| `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
+| `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose evidence predates the last rebuild (a contributing source collection's `last_discover_at` post-dates the hub's latest assignment, or a source was never discovered), `--explain` shows DF / ICF / matched stopword tokens per row. |
 | `audit --collection NAME` | Per-collection projection-quality report (RDR-077 Phase 6): total assignments, p10/p50/p90 of raw cosine, count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold F` overrides the per-corpus default; `--top-n N` caps the receiving-topic list. |
 | `backfill-source-collection` | **RETIRED.** Backfilled `topic_assignments.source_collection` for legacy hdbscan/centroid rows (RDR-087 Phase 4.1) via raw SQL over the LOCAL SQLite store, which was deleted in the RDR-158 P4 retirement; the engine exposes no equivalent read-then-update API. Raises `click.UsageError` unconditionally, with or without `--apply`. If a pre-migration install still holds legacy NULL `source_collection` rows, run the backfill on the last migration-capable 6.x release before migrating |
 
@@ -3474,7 +3484,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-wal-retention` | Sample retained WAL bytes (local service only) via `pg_ls_waldir()`, escalating a `nexus_svc` session to `pg_monitor` with `SET ROLE` first — unconditionally, since `nexus_svc` is `NOINHERIT` in every deployment posture, so `pg_monitor`'s privileges are never ambient without it. Purely informational (RDR-191 Phase 4 trough-window context, not a pass/fail gate): **always exits 0**. Reports UNMEASURED (never a false clean) when the sample can't be taken |
 | `--check-collection-shape` | Read-only shape audit of the collection set against [docs/collections.md](collections.md), the doctor surface of `nx collection shape`: one row per check with its finding count and an examined count so a clean tenant is never confused with an audit that saw nothing. Findings are curation input and never fail doctor; **exit 1 only when the tenant cannot be read** (nexus-ger23) |
 | `--check-embeddings` | Embedding drift probe (nexus-f9duo): samples chunks per collection, embeds their stored text again with the collection's registered model (`POST /v1/vectors/embed`, which stores nothing) and compares with the stored vector. A chunk below cosine 0.99 is named with its collection's median and minimum; healthy engine-written chunks measure 0.998 or above, and the nexus-tysei stale vectors sat at 0.25 to 0.87. `--embeddings-sample N` (default 20, max 300) sets chunks per collection, drawn from non-overlapping windows at random offsets in four equal strata (engine rows are ordered by chash, so a window is not one document or one indexing era); a sampled chunk with text but no stored vector at the collection's dim (a re-embed in progress) is counted and not compared, and a collection with nothing comparable is named NOT CHECKED; `--embeddings-collection NAME` (repeatable) narrows the scope from every collection holding chunks; `--embeddings-seed` repeats a sample (default: today's UTC date, printed in the result). **Exit 1** when any sampled chunk is below the floor, when any collection could not be probed, or when nothing was compared. Opt-in because it costs one embedding call per sampled chunk. Remedy: `nx collection re-embed <collection>`, a production write |
-| `--check-assignments` | Cross-collection ("projection") topic-assignment audit (nexus-v4pj4): since engine-service-v0.1.132 the projection pass of `assign_from_chashes_<dim>` picks each chunk's nearest FOREIGN-collection centroid via an HNSW `LATERAL` (approximate) instead of an exact join — measured equal to exact under production insertion order, but a wrong pick would be silent. Round 1 compared a STORED historical pick against today's live centroids and could false-alarm on healthy taxonomy growth; round 2 closes that structurally with a new read-only engine route, `POST /v1/taxonomy/assignments/cross-preview` (`nexus.cross_preview_<dim>`, taxonomy-021 — a read-only twin of `assign_from_chashes`'s cross branch: the byte-identical `batch`/`nearest` CTE under the identical HNSW/access-path settings, but no persisted INSERT, so it can never write to `topic_assignments`). For each sampled chunk this compares the engine's LIVE ANN pick (via that route, right now) against an exact Python recompute over the SAME live foreign-centroid snapshot fetched in the same run — never a stored row; a currently-persisted assignment, if any, is shown in a disagreement's report line as context only (`stored=N`), never consulted to decide pass or fail. Same tie-break as the engine's own `ORDER BY distance, topic_id`. At the default sample of 20, a systemic wrong-pick rate of 10% is caught with ~88% probability, 20% with ~99%; a rare, isolated bad pick under 1% of a collection's population may not land in any one run's sample. `--assignments-sample N` (default 20, max 300), `--assignments-collection NAME` (repeatable; default: every collection holding chunks), `--assignments-seed` (default: today's UTC date). Each sampled chunk's foreign-centroid snapshot is fetched twice per attempt — once immediately before the `cross-preview` call, once immediately after — and compared; a change (a topic added, removed, or revised in place mid-probe) means this collection's batch is not compared this run, retried once, and if it still changed, reported CHANGED DURING PROBE rather than risking a comparison against a snapshot the engine's own answer never actually saw. **Exit 1** when any sampled chunk disagrees beyond a float-noise tolerance, any collection could not be probed, or nothing was compared. A collection with no live foreign centroid to project onto is not applicable; a sample that turned up no comparable chunk is reported INCONCLUSIVE; an engine older than this route 404s on the first call and is reported not applicable, exit 0 — none of the four counts as a failure alone. No billed calls, but opt-in: real per-collection network work (up to `sample` route calls plus up to four foreign-centroid fetches per collection audited), and its false-positive behavior against a real corpus is not yet observed |
+| `--check-assignments` | Cross-collection ("projection") topic-assignment audit (nexus-v4pj4): since engine-service-v0.1.132 the projection pass of `assign_from_chashes_<dim>` picks each chunk's nearest FOREIGN-collection centroid via an HNSW `LATERAL` (approximate) instead of an exact join — measured equal to exact under production insertion order, but a wrong pick would be silent. Round 1 compared a STORED historical pick against today's live centroids and could false-alarm on healthy taxonomy growth; round 2 closes that structurally with a new read-only engine route, `POST /v1/taxonomy/assignments/cross-preview` (`nexus.cross_preview_<dim>`, taxonomy-021 — a read-only twin of `assign_from_chashes`'s cross branch: the byte-identical `batch`/`nearest` CTE under the identical HNSW/access-path settings, but no persisted INSERT, so it can never write to `topic_assignments`). For each sampled chunk this compares the engine's LIVE ANN pick (via that route, right now) against an exact Python recompute over the SAME live foreign-centroid snapshot fetched in the same run — never a stored row; a currently-persisted assignment, if any, is shown in a disagreement's report line as context only (`stored=N`), never consulted to decide pass or fail. Same tie-break as the engine's own `ORDER BY distance, topic_id`. From the next engine cut both the pick and the recompute leave out the centroids of superseded collections (nexus-2k8wi), which a supersede tombstone keeps. At the default sample of 20, a systemic wrong-pick rate of 10% is caught with ~88% probability, 20% with ~99%; a rare, isolated bad pick under 1% of a collection's population may not land in any one run's sample. `--assignments-sample N` (default 20, max 300), `--assignments-collection NAME` (repeatable; default: every collection holding chunks), `--assignments-seed` (default: today's UTC date). Each sampled chunk's foreign-centroid snapshot is fetched twice per attempt — once immediately before the `cross-preview` call, once immediately after — and compared; a change (a topic added, removed, or revised in place mid-probe) means this collection's batch is not compared this run, retried once, and if it still changed, reported CHANGED DURING PROBE rather than risking a comparison against a snapshot the engine's own answer never actually saw. **Exit 1** when any sampled chunk disagrees beyond a float-noise tolerance, any collection could not be probed, or nothing was compared. A collection with no live foreign centroid to project onto is not applicable; a sample that turned up no comparable chunk is reported INCONCLUSIVE; an engine older than this route 404s on the first call and is reported not applicable, exit 0 — none of the four counts as a failure alone. No billed calls, but opt-in: real per-collection network work (up to `sample` route calls plus up to four foreign-centroid fetches per collection audited), and its false-positive behavior against a real corpus is not yet observed |
 | `--check-references` | Reference-only staleness sweep (RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `chroma://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see `nx catalog register`/`update` below for how that ETag gets recorded) with up to 8 concurrent stats sharing one `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme and names the stale and dangling documents (capped). `--references-sample N` (default 10, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff, plus one confirming HEAD after an ETag mismatch — about 81.5s worst case per document, so `ceil(sample / min(8, sample)) * 81.5s` worst case for the whole run (~163 s at the default sample of 10 if every sampled document were `https://` and every one exhausted its retries); a run prints its own estimate for the `--references-sample` it was given as its first line. **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents. Remedy for a document stuck at `unknown` because it predates ETag capture: `nx catalog backfill-etags`. A host that mints a fresh `ETag` on every response (no stable validator, which `backfill-etags` cannot fix) reads `unknown`, not `stale`: an `https://` ETag mismatch is confirmed with one more HEAD, and an ETag that changes again while `Content-Length` holds (or is absent from both) and no `Last-Modified` is sent is reported as an unstable validator (nexus-ltrjf); a second ETag equal to the recorded one reads `fresh`. A mismatch the second HEAD repeats, or one where the length also moved, stays `stale`, so a fresh-ETag host whose length also varies still reads `stale`. A real change can read `unknown` this way (a same-length rewrite behind per-node ETags, or a page edited between the two HEADs) |
 | `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
@@ -3813,7 +3823,7 @@ nx plan disable PLAN_ID          # Soft-disable a plan without deleting it
 nx plan enable PLAN_ID           # Re-enable a previously disabled plan
 nx plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
 nx plan reseed [--force] [--insert-only]  # Re-run the builtin seed loader
-nx plan hygiene [--apply]        # Flag/disable bead-dumps, null-verb, always-failing plans
+nx plan hygiene [--apply]        # Flag/disable bead-dumps, embedded step refs, null-verb, always-failing plans
 ```
 
 Service mode is the only mode: all verbs (`list` / `show` / `delete` /
@@ -3831,12 +3841,15 @@ nx plan hygiene            # report-only scan
 nx plan hygiene --apply    # disable the flagged plans (reversible)
 ```
 
-Scans the plan library for three pollution classes and, with `--apply`,
+Scans the plan library for four pollution classes and, with `--apply`,
 DISABLES them (never deletes; reverse with `nx plan enable ID`):
 
 - plans whose `plan_json` is not an executable retrieval DAG (unparseable
   JSON, no/empty `steps`, steps without a `tool`) — the bead-dump class that
   can match a question and then crash the plan runner;
+- plans with a `$stepN.<field>` reference inside other text or an object in a
+  step arg, which the runner never substitutes and refuses before dispatch
+  (the plan matcher already skips them and logs the exclusion);
 - null-verb rows (legacy pollution predating the save-time verb requirement;
   unmatchable by verb-filtered `nx_answer`);
 - always-failing plans (zero recorded successes, 3+ failures) — the matcher
@@ -5332,7 +5345,12 @@ executed-failed with `--include-failed`; see above):
   disagrees with `sum(steps.cost_usd)` beyond a relative epsilon (0.5%,
   sub-cent absolute floor — a literal to-the-cent tolerance is too loose
   for typical $0.0001-$0.05 per-call costs). Both unknown (`None`) agrees
-  trivially; exactly one unknown never agrees.
+  trivially; exactly one unknown never agrees. A run that took the inline
+  planner (`plan_id` 0) also carries the planner dispatch's cost, which
+  belongs to no step (nexus-jypmj.1.20): for those rows a run cost at or above
+  the step sum agrees, and a known run cost agrees with no known step cost; a
+  run cost below its steps is still flagged. `by_plan` medians stay step sums,
+  so they remain comparable with the predicted cost.
 
 A step's `cost_usd` of `None` ("unknown", not a measured cost — see
 `StepRecord`'s own docstring, `plans/runner.py`) is excluded from every
@@ -5385,6 +5403,277 @@ offered only to an intent naming exactly the same set, so a question
 about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
+
+The envelope has eight RDR-232 keys, all always present (`scope_diagnostics`,
+`scope_normalized`, `evidence_request`, `named_sources`, `primary_evidence`,
+`reserved_stream`, `lifecycle_stream` and `evidence_diagnostics`; the first is `[]`
+and the other seven `null` when they have nothing to report):
+
+- `scope_normalized` (nexus-jypmj.1.8, nexus-n1908): `{given, applied, reason}`
+  when the caller's `scope` was a comma-list. `scope` takes one corpus prefix or
+  catalog subtree; a list cannot be applied, so the run is unscoped (a broad
+  search). The text says so in a `[scope: ... NOT scoped ...]` line and
+  `evidence_diagnostics.scope_check` is `not_evaluated`, never `not_applicable`.
+  `null` otherwise.
+
+- `scope_diagnostics` (nexus-jypmj.1.3): a list with one entry per
+  corpus-taking retrieval step the caller's `scope` reached,
+  `{step_index, tool, plan_corpus, caller_scope, scope_kind, outcome,
+  resolved_corpus}`; `[]` when the call had no scope or never reached a
+  retrieval step. A corpus scope narrows the corpus a plan declares
+  (`outcome: "narrowed"`, `"within_scope"`, `"scope_applied"`). A step whose
+  corpus has nothing under the scope is skipped (`outcome: "conflict"`,
+  `resolved_corpus: null`) and its text-mode notice is a
+  `[scope conflict: ...]` line after any leading `[non-answer: ...]` or
+  `[budget exhausted ...]` marker. A run in which every retrieval step
+  conflicted is recorded, but counts no success or failure for the plan: the
+  scope was the caller's. A catalog-subtree scope is a filter, never a corpus
+  (nexus-jypmj.1.16), and it does not depend on the step's corpus. On `query` and
+  `search_metadata_scoped` it becomes the step's own `subtree` argument whatever
+  the corpus is (none, `all` or a list): `outcome: "subtree_filtered"`, the
+  corpus left as it was, or the default (`knowledge,code,docs,rdr`) when the
+  step named none. The single-step fast path sends the same `subtree` to `query`
+  and reports the same outcome. The other retrieval tools (`search`,
+  `search_topic_scoped`, `search_graph_hop`, `search_aspect_scoped`) have no
+  subtree filter: the step runs exactly as it would with no scope and is
+  reported `outcome: "subtree_not_applied"` with a `detail` naming the tool. A
+  document-level address (three or more segments, such as `1.2.4686`) is not a
+  subtree filter and `query` rejects it, so it is passed to no step and every
+  retrieval step is `subtree_not_applied` (`detail`: "a document-level address
+  is not a subtree filter"); it still resolves a named source. A step that sets
+  its own `subtree` keeps it, also `subtree_not_applied`. Every
+  `subtree_not_applied` step is named in the text answer, in a
+  `[scope not applied: scope '1.2' could not filter step 1 (search): ...]` line,
+  so a caller without the structured envelope sees it. A step pinned through
+  `collection` or `collections` keeps its pin
+  (`outcome: "unscoped_collection_pin"`). A subtree never narrows by owner.
+  An explicit owner (nexus-jypmj.1.18: the `owner` or `project` binding; a
+  catalog-subtree `scope` is not one) adds one more entry per
+  corpus-taking step, `scope_kind: "owner"`, with `caller_scope` the owner
+  segment (`1-2`), `owners` the owner tumblers, `removed_collections`,
+  `unattributed` and `kept_collections`: the step's corpus is expanded to
+  collections and the `code`, `docs` and `rdr` ones of another owner are removed
+  (`knowledge` and other types pass; a project-owned collection whose owner id
+  is not tumbler-shaped, such as `docs__nexus-571b8edd`, is kept and listed in
+  `unattributed`), so `resolved_corpus` becomes the kept collection names
+  (`outcome: "narrowed"`; `"within_scope"` when nothing was removed). A step left
+  with no collection is skipped (`outcome: "conflict"`) exactly like a scope
+  conflict and never runs unscoped; a step pinned through `collection` or
+  `collections` keeps its pin (`unscoped_collection_pin`). An owner that
+  resolution did not take from the caller, or a qualifier that conflicted or did
+  not resolve, narrows nothing, and `scope_check.owner_narrowing.not_applied`
+  says so.
+- `evidence_request` (nexus-jypmj.1.2): the caller's reserved bindings
+  `source`, `owner` and `project`, plus a subtree `scope` as owner
+  qualifier: `{source, source_error, owner: {status, tumbler, ...},
+  sources}`. `owner.status` is `none`, `resolved`, `conflict` or
+  `unresolved`; a qualifier that failed picks nothing. `None` when no
+  reserved binding was passed.
+- `named_sources` (nexus-jypmj.1.4): how each named source resolved,
+  `{sources: [{source, status, tumbler, title, file_path, qualified,
+  candidates, candidates_truncated, detail}], dropped, catalog_calls}`.
+  `status` is `resolved`, `candidates` (several documents fit; nothing is
+  picked) or `unresolved`; `qualified` says an owner qualifier narrowed the
+  choice. `None` when no source was named. Text mode adds one
+  `[evidence request: ...]` line per ambiguous, unresolved or
+  not-owner-qualified source, and states a failed owner qualifier once. On
+  the single-step fast path the notice says the plan has no primary evidence
+  stream, so a resolved document is not read as evidence there. The owner-name
+  lookup and the resolution (up to about 13 catalog calls) run in a worker
+  thread, not on the event loop, and are bounded by `max_seconds` (20 s) and the
+  call's own `budget_seconds`, whichever is shorter: no call starts past it, and
+  a call that has not returned by then is abandoned. Every source not resolved
+  by then is `unresolved` with "stopped at the deadline" as its reason (an owner
+  lookup that did not return makes the qualifier `unresolved`, never a guess),
+  and the answer proceeds without the stream.
+- `primary_evidence` (nexus-jypmj.1.6): what was read from the resolved
+  sources, `{selected_items, selected_chars, manifest_rows_hydrated,
+  fetched_chars, fetch_errors, error, partial, caps_hit, caps, documents, items}`;
+  `items` carry positions, labels and chashes, not bodies. `error` is the
+  exception type name when the whole read failed (empty otherwise); the text
+  says the primary evidence could not be read. The read runs in a worker thread
+  bounded by `caps.max_seconds` (20 s) and the call's `budget_seconds`: no fetch
+  starts past it, a read that has not returned is abandoned, and `deadline` is
+  on `caps_hit` with a text line. `None` when no source resolved or the plan took
+  the single-step fast path.
+- `reserved_stream` (nexus-jypmj.1.6): what the runner did with it, `{reserved_items,
+  reserved_chars, merged, merged_at_step, over_share_dropped, deduped_secondary,
+  secondary_cut, capped, dropped_before_terminal}`. The reserved items are
+  merged ahead of the plan's inputs at the first operator that consumes retrieved
+  evidence, whether it receives them by `ids`, as an explicit `inputs` list
+  (`extract` included) or, as the planner's tool reference teaches, in the
+  operator's own evidence arg as a list of fetched texts
+  (`summarize(content=$stepN.contents)`, `generate(context=...)`,
+  `rank(items=...)`, nexus-jypmj.1.20), so the operator input cap cuts only the plan's own items;
+  an explicit-`inputs` operator is capped at that point only when a stream was
+  merged. `dropped_before_terminal` (`{step, missing, of}`) counts reserved
+  items that a later operator's input no longer held after a `rank` or `filter`
+  that ran as its own step. It is `None` inside a bundle and after a `summarize`,
+  `generate` or `extract`, where the later step holds a deferred ref or a
+  reduction, not the items. Text mode adds a `[evidence request: ...]` line when
+  a read stream was never merged or items were dropped. `None` when no stream
+  was built. A document with more than `max_manifest_rows_read` (3000)
+  manifest rows is spread-sampled after the catalog reply. The read itself is
+  capped on what it requests (nexus-jypmj.1.17): documents are read smallest
+  recorded chunk count first, in calls that fit the cap, and once the rows read
+  reach it no further manifest is requested (`status: "manifest_not_read"`,
+  `max_manifest_rows_read` in `caps_hit`). The cap is soft: a call that fit
+  when planned, or one document larger than what is left, takes the rows read
+  past it, so rows read can reach the cap plus one document (a single named
+  source larger than the cap is still read). The order and the grouping use the
+  chunk count the catalog records for a document; a count recorded as 0 or too
+  low reads that document early and can put it in one call with others, while
+  the stop uses the rows actually returned. A document never requested says why
+  in `not_read_reason` and in its `[evidence request: ...]` line:
+  `max_manifest_rows_read`, `deadline` (`caps_hit` has `deadline`), or
+  `earlier_request_failed: <ExceptionType>` (an earlier manifest call raised;
+  only the documents of that call are `manifest_error`). One document's own
+  reply is still whole, because the service has no row limit.
+- `lifecycle_stream` (nexus-jypmj.1.7): the T2 metadata record and latest gate
+  record of a resolved RDR source, `{sources: [{source, status, project,
+  rdr_number, detail}], records: [{source, project, title, kind, chars,
+  chars_full, kept, truncated}], reads, chars, caps_hit, caps}`. The records
+  lead the reserved share (their bodies are in the reduction's input, not in
+  this key). `status` is `read`, `no_records`, `not_rdr` (a resolved document
+  that is not an RDR file), `not_resolved` (ambiguous or unresolved; no
+  stream), `project_undetermined`, `read_failed`, `over_cap`, `read_capped`
+  (a cap cut the lookup before a record was found, so one may exist) or
+  `duplicate` (the same RDR and project as an earlier source; read once). The T2
+  project is `<owner name>_rdr` for the repo owner holding the resolved
+  document, never taken from the request; an owner that is not a repo owner,
+  has no name, or is not in the catalog leaves it undetermined and nothing is
+  read. Titles are tried as `84`, `084`, `RDR-84`, `RDR-084`, then
+  `<shape>-gate-latest`, with exact reads only, through the shared T2
+  transport. `caps` is `{max_records: 6, max_reads: 24, max_record_chars: 4000,
+  max_chars: 18000, max_seconds: 20.0, call_timeout_seconds: 5.0}`; each read
+  gets what is left of `max_seconds` or of the answer's own `budget_seconds`
+  (at most `call_timeout_seconds`) as its timeout, and none is retried at that
+  clamp. A cut or refused record is named in `kept`, `truncated` and
+  `caps_hit` (`max_records`, `max_reads`, `max_chars`, `deadline`). `None` when
+  no source was named or the run took the single-step fast path. Text mode adds
+  an `[evidence request: ...]` line for an undetermined project, a failed or
+  empty read, a source that is not an RDR, a source with only one of its two
+  records, an over-cap or cut-short source, a cut record, and every cap in
+  `caps_hit`. `named_sources[].rdr_number`
+  is the RDR number the resolved document's path carries (`null` when it is
+  not an RDR file).
+- `evidence_diagnostics` (nexus-jypmj.1.8): per-stream counts, the reducer input,
+  and two deterministic checks, built without a model call from the run's step
+  outputs and what the runner handed the first evidence-consuming operator
+  (including an operator whose evidence arg resolved to a list of fetched texts;
+  before nexus-jypmj.1.20 `reducer_input` stayed `null` on that shape, which is the
+  planner's documented Pattern A). The
+  same counts go to one structured log event, `nx_answer_evidence_diagnostics`,
+  which carries ids and counts only (no question, source label, title or text,
+  whatever `trace` is). The event is written for every plan run, whether or not
+  `structured` is set; only the structured envelope carries the object. A
+  single-query fast path run in text mode has no per-chunk output, so it logs
+  no event (a scope conflict on it does). Not persisted before RDR-232 Phase 3.
+  `null` when no retrieval ran (an error before the plan, a plan-miss refusal)
+  or the single-query fast path ran in text mode. Shape:
+  - `streams`: `vector` (the search family), `graph` (`traverse`) and `primary`
+    (the named source's chunks) each `{references, by_collection, in_scope,
+    out_of_scope}` (`vector` and `graph` add `steps: [{step_index, tool,
+    corpus}]`, the corpus the step resolved to; `primary` adds `by_source`);
+    `t2`: `{references, by_project}`. `by_collection` keys are collection names
+    (never parsed; an output with no per-chunk collections counts under `""`).
+    `in_scope` and `out_of_scope` are `null` without a corpus or collection
+    scope or when any reference is unattributed. A chunk in both retrieval
+    streams counts once in each stream.
+  - `reducer_input`: what the first operator that consumes retrieved evidence
+    received, after the reserved merge and the input cap: `{step, items, chars,
+    by_stream, by_stream_collection, by_collection, in_scope, out_of_scope,
+    unattributed}`. `by_stream` keys are `primary`, `t2`, `vector`, `graph` and
+    `unattributed`. A reserved item carries its stream and collection; any other
+    item is attributed by the hash of its text (with the `[source: ...]` line
+    removed) against the ids the retrieval steps returned, the stream that
+    produced it first winning; an item that hashes to nothing retrieved (a
+    manifest-joined document), or whose stream is known but whose collection is
+    not (`""`), is counted in `unattributed` and never assumed in scope. `null`
+    when no operator consumed retrieved evidence (a handoff cut before it, a
+    fast-path query, an error).
+  - `source_check`: `{state, sources, reducer_input_recorded, unresolved}`.
+    `state` is the worst source's: `missing` (not resolved, ambiguous, nothing
+    read, no reduction handed it, none of its chunks reached the reducer, or
+    every reserved chunk was dropped by an intermediate `rank` or `filter`
+    before the final reduction), `partial` (the document is over the primary
+    budget, some selected chunks did not reach the reducer, or some reserved
+    chunks were dropped before the final reduction) or `covered`;
+    `not_applicable` when no source was named. Each source row is `{source,
+    tumbler, state, detail, selected, reached_reducer, manifest_rows,
+    dropped_before_terminal, lifecycle}`; `lifecycle` is `{state,
+    status, detail, delivered, reached_reducer}` with `state` `resolved`,
+    `partial` (one of the two records absent, lost before the reducer, or
+    dropped before the final reduction),
+    `unresolved` (`no_records`, `project_undetermined`, `read_capped`,
+    `read_failed` or `over_cap`: the records may exist, so this is a facet
+    unresolved, not silence), `not_applicable` (`not_rdr`, `duplicate`,
+    `not_resolved`) or `null` when no T2 stream ran. `unresolved` lists the
+    `{source, facet: "lifecycle", status}` entries that are `unresolved` or
+    `partial`.
+  - `scope_check`: `{state, scope, scope_kind, conflict_steps,
+    conflict_traversals, recorded_reasons, violations, streams_out_of_scope,
+    out_of_scope, reducer_out_of_scope, reducer_unattributed, unattributed_refs,
+    examined, detail}`. `state`: `violated` (a collection outside the scope
+    reached a retrieval stream with no recorded reason; `violations` names
+    stream, collection and how many are in the reducer input), `conflict` (a step
+    was skipped for the scope, `conflict_steps`, or a `traverse` step's scope
+    emptied an implementation expansion, `conflict_traversals`), `not_evaluated`
+    (the check cannot say, and `detail` names why: a catalog subtree, which a
+    multi-step plan does not intersect with its corpora; no item examined; a
+    stream reference or reducer item with no collection, which may lie outside
+    the scope; no reducer input recorded; or a comma-list scope that was not
+    applied), `widened` (a named source sits outside the scope by request;
+    `recorded_reasons`), `satisfied` (every examined item was attributed and
+    none is outside the scope) or `not_applicable` (no scope or `all`). The
+    single-query fast path has no reducer by design, so its streams alone are
+    judged. Precedence: violated, conflict, not_evaluated, widened, satisfied.
+  - `scope_check.owner_narrowing` (nexus-jypmj.1.18): `{applied, not_applied,
+    owners, removed_total, steps: [{step_index, tool, outcome, kept, removed,
+    unattributed}], skipped_steps, unattributed}`, the owners applied and, per
+    step, the collections removed and the unattributable ones kept, and the
+    steps skipped. `applied` is true when an explicit owner or project resolved.
+    `not_applied` is `{reason: "unresolved" | "conflict", detail}` when the
+    caller named an owner or project that did not resolve or disagreed with
+    another qualifier: the run went on without owner narrowing (nothing was
+    guessed), and the detail says why. It is `null` otherwise. Empty when no
+    explicit owner narrowed. A step skipped by the owner is in
+    `conflict_steps` and `skipped_steps`.
+  - `skipped_steps`: `[{step_index, tool, reason: "scope_conflict", plan_corpus,
+    caller_scope}]`. A skipped step dispatched nothing, so it has no `steps`
+    record and no telemetry row. `steps` holds the executed steps and
+    `step_count` is the length of the run's step outputs, which includes a
+    skipped step's marker output; `skipped_steps` names those.
+  - `traversals`: one summary per `traverse` step (`policy_applied`,
+    `policy_failed`, `possibly_truncated`, `contained`, `nodes_walked`,
+    `nodes_retained`, `dropped_out_of_scope`, `dropped_out_of_owner`, `owners`,
+    `owner_unattributed`, `dropped_role`, `dropped_cap`, `scope_conflict`, `widened`); `capped_traversals`: how many came back at the engine's 500-node
+    cap (the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13).
+  - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
+    secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
+    report in brief; `null` when no stream was built.
+  An empty set of retrieval ids no longer turns an answer into the no-match
+  notice when the reserved stream was merged into the reduction (a resolved
+  source with no vector or graph hits is answered from its primary chunks and T2
+  records); a stream no operator consumed does not count (the continuation
+  handoff's empty-evidence check uses the same predicate). A planner-made plan
+  whose own retrieval steps found nothing keeps that answer but is not grown
+  into the plan library.
+- `traverse` under `nx_answer` (nexus-jypmj.1.5): `nx_answer` always supplies the
+  traversal policy, so an unscoped call is not the legacy `traverse`. The
+  document cap (500, the engine's node cap) does not bind with no scope, but
+  documents are ranked by link role then distance instead of graph order, the
+  300-chunk budget is spent with a reserved share per document instead of the
+  graph-order prefix, a step whose link types are one role admits only that
+  role, and the result adds `chunk_collections` and `traversal`. With an explicit
+  owner the policy also carries `allowed_owners` (owner tumblers such as `1.2`,
+  nexus-jypmj.1.18): a non-seed document of a project-owned collection (code,
+  docs, rdr) whose tumbler is not under one is dropped before the cap
+  (`dropped_out_of_owner`); a document in any other collection, or in a
+  collection whose owner cannot be read (`owner_unattributed`), is kept, as in
+  the vector stream. A seed document is kept, and a plan cannot remove the
+  owners from the policy. A `traverse` call with no
+  `policy` argument is unchanged.
 
 ### `--derive-budget` (RDR-196 .p3a, nexus-nyry9.19)
 

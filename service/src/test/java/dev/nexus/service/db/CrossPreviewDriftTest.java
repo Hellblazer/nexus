@@ -76,7 +76,8 @@ class CrossPreviewDriftTest {
      * {@code cross_preview_<dim>} carry verbatim (taxonomy-020/taxonomy-021's
      * own changelog SQL as redefined by vectors-030, which adds the chunk's
      * {@code embedding_model} to the batch for the persist, and by vectors-031, which names the model and tenant
-     * on both scans — see either file's header). Ends right at the
+     * on both scans, and by vectors-038, which leaves the centroids of superseded collections out of both
+     * cross scans (nexus-2k8wi) — see either file's header). Ends right at the
      * {@code nearest} CTE's own closing paren, deliberately BEFORE the comma
      * that (only in {@code assign_from_chashes_<dim>}) introduces the
      * {@code persisted} INSERT CTE — {@code cross_preview_<dim>} has no such
@@ -107,6 +108,10 @@ class CrossPreviewDriftTest {
             + "            WHERE ct.embedding_model = p_embedding_model"
             + "              AND ct.tenant_id = p_tenant"
             + "              AND ct.collection <> p_collection"
+            + "              AND ct.collection <> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc"
+            + "                   WHERE cc.tenant_id = p_tenant"
+            + "                     AND cc.embedding_model = p_embedding_model"
+            + "                     AND COALESCE(cc.superseded_by, '') <> ''))"
             + "              AND ct.embedding_" + dim + " IS NOT NULL"
             + "            ORDER BY ct.embedding_" + dim + " OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
             + "            LIMIT 1"
@@ -136,6 +141,46 @@ class CrossPreviewDriftTest {
     @Test
     void sharedNearestCte_isIdenticalBetweenAssignFromChashesAndCrossPreview_1024() throws Exception {
         assertSharedSpanPresentInBoth(1024);
+    }
+
+    /**
+     * nexus-2k8wi: ALL nine cross-pass functions exclude the centroids of superseded collections. The shared-CTE
+     * checks above cover assign_from_chashes and cross_preview at every dim, and the runtime tests cover the
+     * 1024 trio; this one closes the gap that left taxonomy_ann_query_384 and _768 with no test at all (deleting
+     * the filter from either body passed every other assertion). Two spellings, one per family (vectors-038 header,
+     * THE FORM): assign_from_chashes and cross_preview keep the ARRAY form their pinned HNSW plan rides on, and
+     * taxonomy_ann_query uses NOT EXISTS because the ARRAY form sends its unpinned cross branch to a Seq Scan. Each
+     * family is also checked against the OTHER family's spelling, so a body switched to the wrong form fails here
+     * (the plan test fails it too, for the ann family).
+     */
+    @Test
+    void allNineCrossPassFunctions_excludeSupersededCollections() throws Exception {
+        int checked = 0;
+        for (int dim : new int[] {384, 768, 1024}) {
+            for (String fn : new String[] {"assign_from_chashes_", "cross_preview_", "taxonomy_ann_query_"}) {
+                String src = normalizeWhitespace(prosrc(fn + dim));
+                boolean ann = fn.startsWith("taxonomy_ann_query");
+                if (ann) {
+                    assertThat(src)
+                        .as("%s%d must leave out the centroids of a collection whose registry row names a successor,"
+                            + " as a NOT EXISTS over catalog_collections (the ARRAY form loses the HNSW index scan)",
+                            fn, dim)
+                        .contains("AND NOT EXISTS ( SELECT 1 FROM nexus.catalog_collections cc")
+                        .contains("AND cc.name = nexus.taxonomy_centroids.collection")
+                        .contains("COALESCE(cc.superseded_by, '') <> '')")
+                        .doesNotContain("<> ALL (ARRAY(");
+                } else {
+                    assertThat(src)
+                        .as("%s%d must leave out the centroids of a collection whose registry row names a successor,"
+                            + " as the ARRAY form its pinned HNSW plan rides on", fn, dim)
+                        .contains("<> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc")
+                        .contains("COALESCE(cc.superseded_by, '') <> ''")
+                        .doesNotContain("NOT EXISTS ( SELECT 1 FROM nexus.catalog_collections cc");
+                }
+                checked++;
+            }
+        }
+        assertThat(checked).as("non-vacuity: three dims by three functions").isEqualTo(9);
     }
 
     private void assertSharedSpanPresentInBoth(int dim) throws Exception {

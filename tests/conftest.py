@@ -318,8 +318,93 @@ _suite_lease_release = None
 _SUITE_LEASE_UNGUARDED_ENV = "NX_SUITE_LEASE_UNGUARDED"
 
 
-def _take_suite_lease() -> None:
-    """Hold the box for THIS substrate-heavy run, and refuse a second one.
+#: Explicit opt-out of the laptop heavy-run guard, for a run that needs claude, bd or
+#: this machine's credentials and so cannot go through ``lab-remote``.
+_LOCAL_HEAVY_ENV = "NX_LOCAL_HEAVY"
+
+#: A ``lab-run`` grant exports these (``tests/_tmp_root.py`` reads LAB_CPUS the same
+#: way); ``lab-remote``'s host copy also sets LAB_REMOTE.
+_LAB_GRANT_ENV: tuple[str, ...] = ("LAB_CPUS", "LAB_MEM_MB")
+_LAB_REMOTE_ENV = "LAB_REMOTE"
+
+
+def _lab_run_grant_present(env) -> bool:
+    return any((env.get(name) or "").strip() for name in _LAB_GRANT_ENV)
+
+
+def _xdist_worker_count(config) -> int | None:
+    """Workers this run will spawn, after ``_clamp_xdist_workers``; ``None`` for no xdist.
+
+    An ``-n auto`` that xdist has not resolved to an integer (still a string here)
+    counts as more than one: only the clamp can bring it to 1, and the clamp
+    writes an integer.
+    """
+    raw = getattr(config.option, "numprocesses", None)
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        return 2
+    return None
+
+
+def _refuse_heavy_laptop_run(config, *, platform: str | None = None, env=None) -> None:
+    """Refuse an xdist run whose engine substrate can boot, on a Mac laptop outside a lab-run grant.
+
+    The global rule already says any ``-n`` run is heavy and belongs on ``lab-remote``;
+    several sessions share one laptop, and a parallel substrate run per session
+    starves all of them. This enforces it (nexus-tvt6u). It refuses only when ALL
+    hold: macOS, no lab-run grant (and not ``lab-remote``'s host copy), the run's
+    ``NX_TEST_T2_SUBSTRATE`` is not ``none`` (so the engine CAN boot: which tests
+    boot it is not known until they run), and xdist will run more than one worker. A scoped
+    serial run, ``NX_TEST_T2_SUBSTRATE=none`` and a nested pytest are never
+    refused. ``NX_LOCAL_HEAVY=1`` opts out for a run that needs claude, bd or the
+    laptop's credentials, and says so. Controller-only, like ``_take_suite_lease``.
+    """
+    import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+    platform = _sys.platform if platform is None else platform
+    env = os.environ if env is None else env
+    if platform != "darwin" or _lab_run_grant_present(env) or (env.get(_LAB_REMOTE_ENV) or "").strip():
+        return
+    if not _selected_t2_substrate_boots_engine():
+        return
+    try:
+        workers = _xdist_worker_count(config)
+        if workers is None or workers <= 1:
+            return
+        from tests import _suite_lease  # noqa: PLC0415 — deferred: test-support module
+
+        if _suite_lease.inside_a_holder():
+            return  # a nested pytest: its outer run passed this check
+        if (env.get(_LOCAL_HEAVY_ENV) or "").strip() == "1":
+            _sys.stderr.write(
+                f"laptop heavy run: {_LOCAL_HEAVY_ENV}=1 set; running {workers} xdist workers "
+                "against the engine substrate on this machine, outside a lab-run grant\n"
+            )
+            _sys.stderr.flush()
+            return
+        import shlex  # noqa: PLC0415
+
+        params = getattr(config, "invocation_params", None)
+        args = list(getattr(params, "args", None) or _sys.argv[1:])
+    except Exception as exc:  # noqa: BLE001 — the guard must never break collection on its own bug
+        _sys.stderr.write(f"laptop heavy-run guard skipped on its own error: {exc!r}\n")
+        return
+    pytest.exit(
+        f"laptop heavy run: refusing to start. This is a Mac with no lab-run grant, and the run "
+        f"is under xdist with {workers} workers with an engine substrate that can boot "
+        f"(NX_TEST_T2_SUBSTRATE is not none); several sessions share "
+        f"this laptop. {_LOCAL_HEAVY_ENV}=1 runs it here anyway (for a run that needs claude, bd or "
+        "this laptop's credentials); NX_TEST_T2_SUBSTRATE=none needs no engine. Run it on chas: "
+        f"lab-remote -c lab-l -- uv run pytest {shlex.join(str(a) for a in args)}",
+        returncode=75,
+    )
+
+
+def _take_suite_lease(*, platform: str | None = None) -> None:
+    """Hold the box for THIS substrate-heavy run; queue behind a live holder.
 
     The build lease made the box single-writer for Maven and the gate above
     already refuses a suite while a build holds it. But the suite took no
@@ -327,6 +412,20 @@ def _take_suite_lease() -> None:
     exhaust the machine-wide SysV shared-memory budget and report thousands
     of setup errors that read as breakage rather than contention
     (nexus-6qp25).
+
+    A second run QUEUES by default (nexus-tvt6u): several sessions share one
+    box, and contention between them is ordinary, so it waits up to
+    ``DEFAULT_WAIT_SECONDS`` for the holder and then runs, printing who it
+    waits for once a minute. ``NX_SUITE_LEASE_WAIT=0`` keeps the immediate
+    exit 75. A run that is still refused after the wait exits 75 naming the
+    holder. ``NX_SUITE_LEASE_UNGUARDED=1`` runs on at once unless a wait was
+    asked for by name. Inside a lab-run grant (LAB_CPUS or LAB_MEM_MB set) on a
+    non-macOS box the lease is skipped: lab-run is the queue there, and this
+    stays the fallback for a run with no grant. On macOS a grant is admission
+    and accounting only (no cap), and ``tests/e2e/macos-guest/host.sh`` guard
+    and hold read the ``suite`` lease to keep a VM run off a running suite, so
+    the lease is taken there grant or no grant. ``platform`` is injected, as in
+    ``_refuse_heavy_laptop_run``.
 
     Gated on the same predicate as the build check -- only a run that will
     boot the engine competes for that budget, so `=none` runs take nothing
@@ -348,25 +447,37 @@ def _take_suite_lease() -> None:
         if _suite_lease.inside_a_holder():
             return
 
+        # Inside a lab-run grant on Linux the scheduler is the gate: lab-run queues
+        # the run before it starts, so a second lease here would be a second queue
+        # behind the first. The lease stays the fallback for a run with no grant. NOT
+        # on macOS: a lab-mac grant is admission only, and the macos-guest host.sh
+        # guard/hold see a running suite only through this lease.
+        import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+        if _lab_run_grant_present(os.environ) and (_sys.platform if platform is None else platform) != "darwin":
+            return
+
+        wait = _suite_lease_wait_seconds()
         held = _suite_lease.holder()
         if held is not None:
-            wait = _suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0
             if wait == 0 and not _suite_lease_unguarded():
                 _suite_lease.record_refusal()  # nexus-jqk5c: this exit never reaches acquire, which logs the rest
                 pytest.exit(
-                    "suite lease: refusing to start — another substrate-heavy "
-                    f"run holds this box ({held}). Two at once exhaust the "
+                    f"suite lease: refusing to start. The lease is held by {held}; "
+                    "NX_SUITE_LEASE_WAIT=0 is set, so this run does not queue. "
+                    "Two substrate-heavy runs at once exhaust the "
                     "machine-wide shared-memory budget and report contention "
-                    "as thousands of setup errors (nexus-6qp25). Wait for it, "
-                    "set NX_SUITE_LEASE_WAIT=1 to queue behind it, or "
+                    "as thousands of setup errors (nexus-6qp25). Unset "
+                    "NX_SUITE_LEASE_WAIT to wait for it, or "
                     "NX_TEST_T2_SUBSTRATE=none for a run that needs no engine. "
                     + _suite_lease.recovery_hint(),
                     returncode=75,
                 )
         _suite_lease_release = _suite_lease.acquire(
             _suite_lease_label(),
-            wait_seconds=_suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0,
+            wait_seconds=wait,
             unguarded=_suite_lease_unguarded(),  # nexus-jqk5c: marks a bypassed refusal in the events log
+            on_wait=lambda who, waited: _announce_suite_lease_wait(who, waited, wait),
         )
         if _suite_lease_release is None:
             # Held past the wait, or another run took it between the check
@@ -382,8 +493,8 @@ def _take_suite_lease() -> None:
                 )
             else:
                 pytest.exit(
-                    f"suite lease: refusing to run — {who} still holds this box "
-                    "after the wait (or won the race for it). Two substrate-heavy "
+                    f"suite lease: refusing to run. The lease is held by {who} after waiting "
+                    f"{wait} s (or it won the race for the lease); two substrate-heavy "
                     "runs at once exhaust the machine-wide shared-memory budget "
                     "(nexus-6qp25). Re-run when it finishes, or set "
                     f"{_SUITE_LEASE_UNGUARDED_ENV}=1 to run without the guard. "
@@ -398,15 +509,39 @@ def _take_suite_lease() -> None:
         _sys.stderr.write(f"suite-lease gate skipped on its own error: {exc!r}\n")
 
 
+def _announce_suite_lease_wait(who: str, waited_s: float, budget_s: float) -> None:
+    """One progress line for a queued run; also what keeps watched_pytest.py's stall clock from firing."""
+    import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+    _sys.stderr.write(
+        f"suite lease: waiting for {who}; waited {int(waited_s)} s of {int(budget_s)} s, "
+        "will start when it finishes\n"
+    )
+    _sys.stderr.flush()
+
+
 def _suite_lease_unguarded() -> bool:
     # Exactly "1", like the rest of this file's opt-ins: `false`, `no`, `off` and a
     # typo must not turn the guard off (round-3 review L3).
     return os.environ.get(_SUITE_LEASE_UNGUARDED_ENV, "").strip() == "1"
 
 
-def _suite_lease_wait_requested() -> bool:
+def _suite_lease_wait_seconds() -> int:
+    """How long this run queues behind a live holder: 0 (do not queue) or ``DEFAULT_WAIT_SECONDS``.
+
+    Queueing is the default (nexus-tvt6u). ``NX_SUITE_LEASE_WAIT=0`` opts out; any
+    other non-empty value (``1``) asks for the wait by name. The one exception to
+    "unset means wait" is the unguarded escape, which means "run now": with it
+    set and no explicit wait the run does not queue first.
+    """
+    from tests import _suite_lease  # noqa: PLC0415 — deferred, as in _take_suite_lease
+
     raw = os.environ.get("NX_SUITE_LEASE_WAIT", "").strip()
-    return bool(raw) and raw != "0"
+    if raw == "0":
+        return 0
+    if not raw and _suite_lease_unguarded():
+        return 0
+    return _suite_lease.DEFAULT_WAIT_SECONDS
 
 
 def _suite_lease_label() -> str:
@@ -651,6 +786,7 @@ def pytest_sessionstart(session):
     if _is_controller_or_serial:
         _capture_real_manager_env()
     if _is_controller_or_serial:
+        _refuse_heavy_laptop_run(session.config)
         _gate_on_build_lease()
         _take_suite_lease()
         _preflight_engine_substrate()
@@ -1295,16 +1431,25 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # hook) appends one sha to ``session_commits/<session_id>`` after every
     # ``git commit`` a Claude Code session makes. Several sessions share the
     # box and commit at any time, so a 90-second unit run routinely sees a
-    # peer's file grow: MEASURED on the plugin-v7.36.1-1 cut battery
-    # (two peers' files modified during tests/hooks/). Append-only, one
+    # peer's file grow: MEASURED on the 7.36.1 plugin cut battery
+    # (the retired anchored channel, nexus-rbmja.8; two peers' files modified during tests/hooks/). Append-only, one
     # line per commit, never read by any test.
     "session_commits/",
-    # The conexus plugin's git-integrity hook
-    # (conexus/hooks/scripts/routing/subagent_git_integrity_check.py) writes
-    # ``git-integrity/<session_id>/*`` on every tool call of the live Claude
+    # The conexus plugin's git-integrity hook, REMOVED from the tree at
+    # nexus-i93tz (Sam, 2026-10-25) but still LIVE in every session whose
+    # installed plugin copy is 7.83.x to 7.86.x: it writes
+    # ``git-integrity/<session_id>/*`` on every tool call of the Claude
     # session that is RUNNING this pytest, so the directory changes during any
-    # run launched from such a session with no test involved. No test reads
-    # the REAL directory; the hook's own tests use a sandboxed config dir.
+    # run launched from such a session with no test involved. MEASURED
+    # 2026-10-26 on the removing worktree: with this entry deleted, a run
+    # failed the mutation guard on 8 ``git-integrity/`` paths. DELETE THIS
+    # ENTRY (and flip ``test_git_integrity_carveout_waits_for_the_plugin_upgrade``)
+    # once the plugin cut that drops the hook is installed in the sessions
+    # that run these tests; until then it is a live writer, not a dead carve-out.
+    # MECHANICAL TRIGGER: that test goes RED, with the delete instruction, as
+    # soon as the conexus ref pinned in .claude-plugin/marketplace.json is a tag
+    # whose conexus/hooks/hooks.json no longer registers the hook (the plugin
+    # cut that drops it), so this entry cannot outlive its writer unnoticed.
     "git-integrity/",
     # Live aspect-worker daemon's own address/heartbeat registration file
     # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
@@ -1370,7 +1515,7 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # configured) every live ``nx-mcp`` host and the aspect-worker daemon
     # re-mints and rewrites the lease when its 1 h TTL crosses the 20 %
     # refresh threshold -- entirely independent of pytest. MEASURED
-    # 2026-08-30 (plugin-cut rehearsal run 7, this box armed since RDR-005
+    # 2026-08-30 (rehearsal run 7 of the retired anchored plugin cut, this box armed since RDR-005
     # step (d) that morning): the guard failed a 487-passed / 0-failed
     # tests/hooks run on exactly ``MODIFIED data_token_lease.<digest>``;
     # the lease's own ``minted_by_pid`` was the live aspect-worker daemon
@@ -1384,7 +1529,7 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # ``<config_dir>/aspect_wake`` from ``HttpAspectQueue`` after EVERY
     # successful enqueue, i.e. from any live nx-mcp host or CLI on the box
     # that stores or indexes, in any session -- independent of pytest.
-    # MEASURED 2026-08-30 (plugin-cut rehearsal, final host run): the guard
+    # MEASURED 2026-08-30 (final host run of the retired anchored plugin-cut rehearsal): the guard
     # failed a 481-passed / 0-failed tests/hooks run on exactly ``MODIFIED
     # aspect_wake``; the live file's mtime was one minute old at the time,
     # with two other Claude sessions active on the box. Unit tests resolve
@@ -4054,7 +4199,8 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # real catalog engine then refuses with a 409 (referenced=0). Proven
     # by A/B: swapped -> FAILED, reverted -> passes. Not swappable;
     # reverted to the real literal.
-    "tests/test_catalog_path.py::TestIndexDocumentSourceKey::test_staleness_check_uses_content_hash_when_catalog_absent",
+    # nexus-3ajpd renamed it from test_staleness_check_uses_content_hash_when_catalog_absent; same reason.
+    "tests/test_catalog_path.py::TestIndexDocumentSourceKey::test_staleness_check_reads_the_catalog_document_not_a_content_hash_where",
     #
     # nexus-03wze fix round (review fold): test_rdr_109_phase2_
     # dispatch.py's file-level exclusion reclassified per-test.

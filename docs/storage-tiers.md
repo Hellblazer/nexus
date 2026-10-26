@@ -358,6 +358,10 @@ T3 has no separate `expires_at` field: expiry is computed client-side as `indexe
 
 `ttl_days=0` is rejected outright by `T3Database.put` (the test facade) and, until nexus-nt76j retired it, `HttpVectorClient.put`, the live writer (RDR-194 D5, nexus-tk070.p6b); there is no coercion of 0 to "permanent" anywhere in this path.
 
+### A note's own keys in the catalog
+
+Two notes with identical text share one T3 chunk, and that chunk carries the last writer's `tags`, `category`, `ttl_days` and `source_agent`. Each note's catalog entry therefore keeps its own four values in its `meta`, written on every put (`nx store put`, MCP `store_put`, `nx memory promote`, a recovery import) in the same catalog write that stamps `meta.doc_id` (the `update` of an existing entry, or the `register` that mints one). A key is written only when the put gives it a real value (non-empty `tags`, `category` and `source_agent`; a positive `ttl_days`). A re-put under the same title replaces them: a key the put leaves unset, which the entry already held, is overwritten with a retraction value (`ttl_days` to `0`, the others to the empty string), so a note re-put without a TTL does not keep the old one. The `0` exists only because catalog `update` cannot delete a `meta` key; it is not an accepted input (`put_note` and `write_note` reject `ttl_days=0`, and the chunk row spells permanent as `null` or absent), and a reader must treat a catalog `ttl_days` of `0` and an absent one alike, as permanent. A write that does not land puts the old values back with the old `doc_id` stamp, unless a newer put of the same content has since written different values for the keys this put wrote (the check compares only those keys). A recovery import writes the values its bundle carries (the chunk row's, until the bundle exports each note's own values) and `source_agent` `recovery-import`. Nothing reads these keys yet; the readers that move onto them (`store_get` and `store_list` display, `nx store expire`, the recovery bundle, the contradiction flag) are tracked as follow-up work on shared-chunk metadata.
+
 ## When to Use Each Tier
 
 | Scenario | Tier | Why |

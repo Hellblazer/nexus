@@ -2869,7 +2869,20 @@ class TestProactiveDataTokenRefresh:
         monkeypatch.setenv("NX_MINT_TOKEN", _MINT_CREDENTIAL)
         self._reset_manager()
         clock = _FakeMonotonicClock()
-        manager = DataTokenManager(clock=clock, mint_credential=lambda: _MINT_CREDENTIAL, config_dir=tmp_path)
+        # wall_clock follows the fake clock: the refresh reads the lease the
+        # first mint published (nexus-dncjg) and a real wall clock beside a
+        # fake monotonic one would make that lease look 245s newer.
+        class _MidRng:
+            """Pins the per-manager refresh jitter (nexus-dncjg) to the
+            nominal 20%: 55s left of 300s (18.3%) is due only above that."""
+
+            def uniform(self, a: float, b: float) -> float:
+                return (a + b) / 2
+
+        manager = DataTokenManager(
+            clock=clock, wall_clock=clock, mint_credential=lambda: _MINT_CREDENTIAL, config_dir=tmp_path,
+            rng=_MidRng(),
+        )
         monkeypatch.setattr(dt_mod, "get_data_token_manager", lambda: manager)
         try:
             store = _make_echo_store()

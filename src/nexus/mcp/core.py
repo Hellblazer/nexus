@@ -10,12 +10,15 @@ operators toward no longer exists.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
+import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
-from typing import Annotated, Any
+from collections.abc import Callable, Iterable, Iterator
+from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
 from mcp.server.fastmcp import FastMCP
@@ -55,6 +58,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp._tool_failure import fail as _fail
 from nexus.mcp.hooks import register_hook_tools as _register_hook_tools
+from nexus.plans.evidence import EvidenceRequest
 from nexus.mcp_infra import (
     catalog_auto_link as _catalog_auto_link,
     get_catalog as _get_catalog,
@@ -123,6 +127,11 @@ from nexus.mcp import subscriptions as _subscriptions
 # announces mail references and never claims them -- imported as a module
 # for the same reason as `_subscriptions` just above.
 from nexus.mcp import channel as _channel
+
+if TYPE_CHECKING:
+    from nexus.plans.lifecycle_stream import LifecycleStream
+    from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
+    from nexus.plans.reserved_stream import ReservedStream
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
 #: string to the agent rather than raising; before returning an error they must
@@ -2748,12 +2757,14 @@ def _tidy_prefetch(topic: str, collection: str) -> tuple[str, int, str, bool]:
     cols = hits.get("chunk_collections") or hits.get("collections") or [collection]
 
     try:
-        hydrated = store_get_many(
-            ids,
-            cols,
-            max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
-            structured=True,
-        )
+        # The prefetch reads ``contents`` only; skip the owner lookup behind ``source_notes``.
+        with without_source_notes():
+            hydrated = store_get_many(
+                ids,
+                cols,
+                max_chars_per_doc=_TIDY_MAX_CHARS_PER_ENTRY,
+                structured=True,
+            )
     except Exception as exc:  # noqa: BLE001 — best-effort path; must not crash caller
         import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
         structlog.get_logger().debug("tidy_prefetch_hydrate_failed", exc_info=True)
@@ -3194,7 +3205,7 @@ def _search_render(
             # RDR-055 / the frecency-scoring work. Before this fix the MCP
             # path ranked by raw vector distance only and never read
             # frecency_score or bib_citation_count at all.
-            _cluster_order = [r.id for r in results] if clustered else None
+            _cluster_order = [_row_key(r) for r in results] if clustered else None
             results = apply_ranking_boosts(
                 results,
                 hybrid=cfg.get("search", {}).get("hybrid_default", False),
@@ -3241,8 +3252,13 @@ def _search_render(
                 # hybrid_score values are kept on each result; only the
                 # display ORDER is restored to the cluster-grouped order
                 # search_cross_corpus produced.
-                _by_id = {r.id: r for r in results}
-                results = [_by_id[i] for i in _cluster_order if i in _by_id]
+                # By row, not by id (nexus-tko2w): a chunk several documents hold comes back
+                # once per document with the same id and a different ``doc_id``, and an
+                # id-keyed map would keep one of the two and return it twice.
+                _by_row: dict[tuple, list] = {}
+                for r in results:
+                    _by_row.setdefault(_row_key(r), []).append(r)
+                results = [_by_row[k].pop(0) for k in _cluster_order if _by_row.get(k)]
                 if lexical_rerank:
                     # The restore above would put a lexical row back in its
                     # distance position (review finding on a463fa4ce). Keep
@@ -3373,7 +3389,7 @@ def _search_render(
         # each result carries what is already stored about its age and
         # expiry (context_annotations); the contradiction flag stays on the
         # title line where it has always been.
-        from nexus.context_annotations import READER_INSTRUCTION, annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
+        from nexus.context_annotations import READER_INSTRUCTION, hit_annotation_line  # noqa: PLC0415 — deferred; keeps core's import surface flat
 
         # Contradiction flag (RDR-057 Phase 3a; search latency, nexus-92q1p follow-up,
         # Sam 2026-10-08). Computed HERE, on `page`: the rows in final display order after
@@ -3418,7 +3434,9 @@ def _search_render(
             # never assume upstream never regresses).
             snippet = (r.content or "")[:200].replace("\n", " ")
             flag = " [CONTRADICTS ANOTHER RESULT]" if r.metadata.get("_contradiction_flag") else ""
-            note = annotation_line(r.metadata)
+            # nexus-6pfgb.11: the age and expiry are the owning documents' own,
+            # resolved with the display title; the chunk row's are the last writer's.
+            note = hit_annotation_line(r.metadata)
             note_line = f"\n  {note}" if note else ""
             lines.append(f"[{dist}] {label}{flag}{note_line}\n  {snippet}")
 
@@ -5949,6 +5967,191 @@ def _read_scope(t3, collection: str) -> list[str]:
     )
 
 
+_CHASH_ID = re.compile(r"[0-9a-f]{64}")
+
+#: Whether ``store_get_many(structured=True)`` computes ``source_notes``. On by default (the wire
+#: contract); an in-process caller that never reads the notes turns it off with
+#: :func:`without_source_notes`, so a call it makes does not pay the owner ``resolve_many``. A
+#: context variable and not a tool parameter: the MCP schema must not move (nexus-6pfgb.11).
+_SOURCE_NOTES_ON: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "nexus_store_get_many_source_notes", default=True,
+)
+
+
+@contextlib.contextmanager
+def without_source_notes() -> Iterator[None]:
+    """Within the block, ``store_get_many(structured=True)`` returns ``source_notes`` all ``""``
+    and makes no owner ``resolve_many``. For in-process callers that build their own provenance
+    (the plan runner's tumbler hydration) or never read it (the ``nx_tidy`` prefetch)."""
+    token = _SOURCE_NOTES_ON.set(False)
+    try:
+        yield
+    finally:
+        _SOURCE_NOTES_ON.reset(token)
+
+#: Sentinel: "fetch the owner rows yourself" (``None`` is a fetch that failed).
+_FETCH_OWNER_ROWS: Any = object()
+
+
+def _owner_rows_by_chash(chunk_ids: list[str], found: list[bool]) -> dict[str, list[dict]] | None:
+    """The catalog's live manifest rows holding each found, chash-shaped chunk id, by chash
+    (one ``chash_positions`` round trip for the whole batch).
+
+    ``{}`` when no id is chash-shaped (nothing to ask). ``None`` when the catalog cannot answer
+    (no handle, an engine that predates the route, a failed call): the callers then keep what
+    they had before owners were consulted. Shared by :func:`resolve_owner_section_types` and
+    :func:`resolve_owner_source_notes` so one hydration asks once.
+    """
+    wanted = [cid for cid, ok in zip(chunk_ids, found) if ok and _CHASH_ID.fullmatch(cid or "")]
+    if not wanted:
+        return {}
+    try:
+        lookup = getattr(_get_catalog(), "chash_positions", None)
+        rows = lookup(list(dict.fromkeys(wanted))) if lookup else None
+    except Exception:  # noqa: BLE001 — best-effort owner lookup; each caller documents its fallback
+        _log.debug("store_get_many_owner_rows_failed", exc_info=True)
+        return None
+    if not isinstance(rows, list):
+        return None
+    by_chash: dict[str, list[dict]] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("chash"):
+            by_chash.setdefault(row["chash"], []).append(row)
+    return by_chash
+
+
+def resolve_owner_source_notes(
+    chunk_ids: list[str],
+    found: list[bool],
+    collections: list[str],
+    *,
+    owner_rows: Any = _FETCH_OWNER_ROWS,
+) -> list[str]:
+    """The ``[source: ...]`` note of each hydrated chunk, from the catalog documents that own it
+    (nexus-6pfgb.11, census row 1).
+
+    A T3 chunk row is one per chash, so the title, indexed date, year and expiry on it are the
+    last writer's, which names the wrong document for the other owners of a shared chunk (and the
+    note is read by operator prompts). ``store_get_many`` is handed chunk ids and no document, so
+    the rule is, per chunk, over its live owners in the collection it was found in:
+
+    * every owner states the same value for a field: that value;
+    * owners disagree on a field, or one lacks it: the field is left out, except the title, where
+      the note lists the owners' titles, quoted, and counts untitled owners
+      (:func:`~nexus.context_annotations.note_facts`);
+    * no owner resolves (a chunk with no manifest row, a non-chash id, a catalog that cannot
+      answer), more owners than :data:`~nexus.context_annotations.OWNER_RESOLVE_CAP`, or an owner
+      the manifest names that ``resolve_many`` did not return (so "every owner agrees" cannot be
+      checked): the note names the collection only. The chunk row's values are never a fallback.
+
+    A missing id gets ``""``. Two catalog round trips cover the whole batch (``chash_positions``,
+    shared with the section-type read, then ``resolve_many``), never one per chunk.
+    """
+    from nexus.context_annotations import (  # noqa: PLC0415 — deferred; keeps core's import surface flat
+        OWNER_RESOLVE_CAP,
+        entry_facts,
+        note_facts,
+        source_note,
+    )
+
+    notes = [source_note({}, collection=collections[i]) if ok else "" for i, ok in enumerate(found)]
+    wanted = [i for i, cid in enumerate(chunk_ids) if found[i] and _CHASH_ID.fullmatch(cid or "")]
+    if not wanted:
+        return notes
+    if owner_rows is _FETCH_OWNER_ROWS:
+        owner_rows = _owner_rows_by_chash(chunk_ids, found)
+    if not owner_rows:
+        return notes
+    owners_of: dict[int, list[str]] = {}
+    for i in wanted:
+        docs = list(dict.fromkeys(
+            row["doc_id"] for row in owner_rows.get(chunk_ids[i], ())
+            if row.get("doc_id") and (not row.get("collection") or row["collection"] == collections[i])
+        ))
+        if docs and len(docs) <= OWNER_RESOLVE_CAP:
+            owners_of[i] = docs
+    if not owners_of:
+        return notes
+    try:
+        entries = _get_catalog().resolve_many(sorted({d for docs in owners_of.values() for d in docs}))
+    except Exception:  # noqa: BLE001 — best-effort provenance; the collection-only note is the documented fallback
+        _log.debug("store_get_many_owner_entries_failed", exc_info=True)
+        return notes
+    if not isinstance(entries, dict):
+        return notes
+    for i, docs in owners_of.items():
+        if any(entries.get(d) is None for d in docs):
+            # The manifest lists only live rows, so an owner with no entry is an anomaly (a
+            # skipped page, a race), not a tombstone: an owner that could disagree went unheard.
+            continue
+        live = [
+            entries[d] for d in docs
+            if (getattr(entries[d], "physical_collection", "") or "") in ("", collections[i])
+        ]
+        facts = note_facts([entry_facts(e) for e in live])
+        notes[i] = source_note(facts, collection=collections[i])
+    return notes
+
+
+def _row_key(r) -> tuple:
+    """The identity of one search row: its chunk id, collection and the owning document it
+    speaks for (a per-document expansion repeats the id once per document)."""
+    return (r.id, r.collection, r.metadata.get("doc_id"), r.metadata.get("position"))
+
+
+def resolve_owner_section_types(
+    chunk_ids: list[str],
+    found: list[bool],
+    collections: list[str],
+    stored: list[str],
+    *,
+    owner_rows: Any = _FETCH_OWNER_ROWS,
+) -> list[str]:
+    """The ``section_type`` of each hydrated chunk, read from the catalog manifest of the
+    documents that own it (nexus-tko2w, RDR-108).
+
+    A T3 chunk row is one per chash, so the ``section_type`` on it is whichever owning
+    document wrote last. The label of a chunk is a fact about its position in ONE document;
+    the manifest row carries it, and ``labels_written`` says whether the row's label is that
+    document's own answer (a row written before catalog-046, or by a client that predates it,
+    is ``labels_written`` false: its NULL means "never recorded"). ``store_get_many`` is handed
+    chunk ids and no document, so the chash does not name one occurrence. The rule, per chunk,
+    over the live owners in the collection the chunk was found in:
+
+    * no owner (a note, a chunk with no manifest row, an engine without the route): the chunk
+      row's own *stored* value, the answer this field always gave;
+    * every owner is legacy: the stored value too, until a re-index writes the manifest;
+    * every owner is written and they all AGREE: that label ("" when all of them wrote an empty
+      one: the chunk row's value is another document's and does not apply);
+    * anything else, owners that DISAGREE or a mix of written and legacy owners: ``""``. The
+      label is ambiguous for a bare chunk id, and an empty type is the value every filter on it
+      treats as "keep" (the plan runner drops only a chunk whose type is exactly ``imports``).
+
+    Best-effort: a catalog that is unreachable, or an engine that predates the
+    ``chash_positions`` route, leaves every entry on its stored value.
+    """
+    wanted = [i for i, cid in enumerate(chunk_ids) if found[i] and _CHASH_ID.fullmatch(cid or "")]
+    if not wanted:
+        return stored
+    if owner_rows is _FETCH_OWNER_ROWS:
+        owner_rows = _owner_rows_by_chash(chunk_ids, found)
+    if owner_rows is None:
+        return stored
+    by_chash = owner_rows
+    out = list(stored)
+    for i in wanted:
+        owners = [
+            row for row in by_chash.get(chunk_ids[i], ())
+            if not row.get("collection") or row["collection"] == collections[i]
+        ]
+        written = [bool(row.get("labels_written")) for row in owners]
+        if not owners or not any(written):
+            continue  # no owner, or only legacy owners: the stored value stands
+        labels = {str(row.get("section_type") or "") for row in owners}
+        out[i] = next(iter(labels)) if all(written) and len(labels) == 1 else ""
+    return out
+
+
 def _unique_preserve_order(ids: Iterable[str]) -> list[str]:
     """Dedupe an id sequence while keeping first-seen order.
 
@@ -6119,7 +6322,8 @@ def store_get_many(
         description=(
             "Return {contents, missing, section_types} instead of the "
             "human-readable string; section_types aligns 1:1 with contents/ids "
-            "(\"\" when missing or unstamped)."
+            "(\"\" when missing, unstamped, or when the documents that own the "
+            "chunk disagree on its section type)."
         ),
     )] = False,
     limit_per_source: Annotated[int | list[int] | None, Field(
@@ -6138,7 +6342,10 @@ def store_get_many(
     human-readable "Hydrated N/M docs" listing with each document's content
     under an `[id]` line and a trailing `Missing: ...` line, or, when
     `structured=True`, `{contents, missing, section_types, source_notes}`
-    (`source_notes` names the collection each entry was found in), or
+    (`source_notes` is one provenance line per entry: the collection it was
+    found in, plus the catalog documents' titles and the indexed date, year and
+    expiry they agree on; a date the owners disagree on, or that no owner
+    states, is left out), or
     `{contents, missing, error}` as an error result if the batch fetch
     itself failed.
 
@@ -6347,19 +6554,11 @@ def store_get_many(
         # unconditionally (not gated on `structured`) so callers cannot
         # observe stale data by mixing modes.
         section_types: list[str] = []
-        # nexus-onn7s: ``source_notes`` rides the same fetch, same
-        # alignment, same "" for a missing id -- one line per chunk naming
-        # its document, collection and dates, which the plan runner
-        # prefixes onto the hydrated content an operator prompt sees.
-        from nexus.context_annotations import source_note  # noqa: PLC0415 — deferred; keeps core's import surface flat
-
-        source_notes: list[str] = []
-        for doc_id, entry, entry_collection in zip(id_list, entries, entry_collections):
+        for doc_id, entry in zip(id_list, entries):
             if entry is None:
                 missing.append(doc_id)
                 contents.append("")
                 section_types.append("")
-                source_notes.append("")
                 continue
 
             body = str(entry.get("content") or "")
@@ -6374,9 +6573,27 @@ def store_get_many(
                 )
             contents.append(body)
             section_types.append(str(entry.get("section_type") or ""))
-            source_notes.append(source_note(entry, collection=entry_collection))
 
         if structured:
+            # nexus-tko2w: the stored value above is the chunk row's, the last writer's; the
+            # label is read from the owning documents' manifest rows (only the structured
+            # result carries it, so only that mode pays the lookup).
+            found_flags = [entry is not None for entry in entries]
+            owner_rows = _owner_rows_by_chash(id_list, found_flags)
+            section_types = resolve_owner_section_types(
+                id_list, found_flags, entry_collections, section_types, owner_rows=owner_rows,
+            )
+            # nexus-onn7s: ``source_notes`` rides the same fetch, same alignment, same "" for
+            # a missing id -- one line per chunk naming its document, collection and dates,
+            # which the plan runner prefixes onto the hydrated content an operator prompt sees.
+            # nexus-6pfgb.11: the document and its dates are the OWNING documents' (the same
+            # rows as the section types), not the chunk row's, which is the last writer's.
+            source_notes = (
+                resolve_owner_source_notes(
+                    id_list, found_flags, entry_collections, owner_rows=owner_rows,
+                )
+                if _SOURCE_NOTES_ON.get() else [""] * len(id_list)
+            )
             return {
                 "contents": contents, "missing": missing,
                 "section_types": section_types,
@@ -7241,12 +7458,18 @@ def plan_save(
     matched to a verb-shaped intent by `nx_answer`'s plan-match gate.
 
     Returns "Saved plan: [<id>] <query>", or a refusal naming why (missing
-    verb, invalid JSON, or a plan with no executable steps).
+    verb, invalid JSON, a plan with no executable steps, a plan that
+    declares a reserved binding name, or a `$stepN.<field>` reference
+    inside other text or an object).
 
     Constraints:
     - `verb` is required; a verb-less plan is refused outright.
     - `plan_json` must be valid JSON with a non-empty `steps` list, each
       step naming a tool.
+    - `source`, `owner` and `project` are reserved for `nx_answer`'s
+      evidence request: a plan that lists one in `required_bindings`,
+      `optional_bindings` or `default_bindings`, or references it as
+      `$name` in a step's args, is refused.
     """
     try:
         if not query or not plan_json:
@@ -7280,11 +7503,28 @@ def plan_save(
         try:
             validate_plan_steps(parsed_plan, require_steps=True)
         except PlanTemplateSchemaError as exc:
+            from nexus.plans.evidence import ReservedBindingError  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+            if isinstance(exc.__cause__, ReservedBindingError):
+                # The message already names the reserved key and says it is
+                # nx_answer's evidence request; the generic "executable
+                # plans" tail below would misdescribe a well-formed plan.
+                return _fail(f"Plan not saved: {exc}")
             return _fail(
                 f"Plan not saved: {exc}. The plan library stores executable "
                 "retrieval plans (a non-empty steps list, each step with a "
                 "tool); implementation / phased plans belong in beads + T2 "
                 "memory (memory_put)."
+            )
+        # nexus-jypmj.4: a $stepN.field inside other text or an object is never substituted,
+        # so the plan would fail at run time (nexus-jypmj.1.19). Refuse it at the door.
+        from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        embedded = find_embedded_step_ref(parsed_plan)
+        if embedded is not None:
+            return _fail(
+                f"Plan not saved: {embedded.ref} sits where the runner will not substitute it "
+                f"({embedded.reason})."
             )
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
         # _WRITE_OPS; the daemon serialises the write through its single WAL
@@ -8797,31 +9037,53 @@ def traverse(
     )] = "",
     depth: Annotated[int, Field(description="BFS depth, capped at 3.")] = 1,
     direction: Annotated[str, Field(description="Traversal direction: \"out\", \"in\", or \"both\".")] = "both",
+    policy: Annotated[dict | None, Field(
+        description=(
+            "Optional traversal evidence policy (RDR-232): {allowed_collections, allowed_owners, "
+            "preserve_seed_documents, max_documents, max_chunks, require_link_role}. Absent: the legacy "
+            "result, unchanged."
+        ),
+    )] = None,
 ) -> dict:
-    """Walk the catalog link graph from seed tumblers, unranked (RDR-078 P3).
+    """Walk the catalog link graph from seed tumblers (RDR-078 P3).
 
     Use `search_graph_hop` instead when the reachable set should also be
-    vector-ranked in one call. Accepts either `link_types` or `purpose`,
-    never both.
+    vector-ranked in one call. Takes `link_types` or `purpose`, never both.
 
-    Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`:
-    the reachable document tumblers, the chunk ids (chashes) of those
-    documents' manifests, and their collections (sorted). `$stepN.ids` with
-    `$stepN.collections` hydrates through `store_get_many`. When `purpose`
-    does not resolve to a known name the call fails with
-    `{"tumblers": [...], "ids": [...], "collections": [...], "warning": "..."}`
-    as an error result, and so does a call where no seed parses as a
-    tumbler. A `warning` entry on a successful result names seeds that
-    did not parse, or says the chunk ids are missing because the manifest
-    lookup failed.
+    Returns `{"tumblers": [...], "ids": [...], "collections": [...],
+    "warning": "..."}`: the reachable document tumblers, their manifests'
+    chunk ids (chashes) and their collections; `warning` only when set.
+    `$stepN.ids` with `$stepN.collections` hydrates
+    through `store_get_many`. An unknown `purpose`, or no seed that parses
+    as a tumbler, is an error result carrying a `warning`; on success a
+    `warning` names unparsed seeds or a failed manifest lookup.
 
     Constraints:
-    - `ids` is capped at 300 (a two-hop walk from one note reached 1,196
-      chunks); when capped, an `ids_truncated` entry carries the total and
-      kept counts. `tumblers` is not capped.
-    - `link_types` and `purpose` are mutually exclusive.
+    - `ids` is capped at 300; when capped, `ids_truncated` carries the
+      total and kept counts. `tumblers` is not capped.
+
+    Without a `policy` the result is in graph order. With a `policy`
+    (RDR-232 section 3) it runs after the walk, before manifest expansion:
+    documents outside `allowed_collections` are dropped, the rest ranked by
+    link role, distance, then tumbler, and non-seeds capped at
+    `max_documents`; only retained manifests are read and `max_chunks` is
+    shared per document. The result adds `chunk_collections` (one per id)
+    and `traversal`: walked, retained and dropped counts,
+    `possibly_truncated` (the engine caps a walk at 500 nodes, so a
+    response that size is never contained), `widened` and `scope_conflict`.
+    A policy that cannot be applied returns no graph evidence and a
+    `warning`, never an unrestricted walk.
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    from nexus.plans import traversal_policy as _tp  # noqa: PLC0415 — deferred, like this function's other imports
+
+    # RDR-232 section 3: a policy that does not parse is a policy failure, decided before any walk.
+    parsed_policy = None
+    if policy is not None:
+        try:
+            parsed_policy = _tp.TraversalPolicy.from_wire(policy)
+        except _tp.TraversalPolicyError as exc:
+            return _traverse_policy_failed(f"{type(exc).__name__}: {exc}")
 
     # SC-16: mutual exclusion.
     if link_types and purpose:
@@ -8885,6 +9147,11 @@ def traverse(
         result = catalog.graph_many(seed_tumblers, **kw)
 
     nodes = result.get("nodes") or []
+    if parsed_policy is not None:
+        return _traverse_with_policy(
+            catalog, nodes, result.get("edges") or [], seed_tumblers, parsed_policy,
+            direction=direction, warnings=warnings,
+        )
     tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
     collections = sorted({
         n.physical_collection
@@ -8927,6 +9194,82 @@ def traverse(
                  "collections": collections}
     if len(chunk_ids) > MAX_QUERY_RESULTS:
         out["ids_truncated"] = {"total": len(chunk_ids), "kept": MAX_QUERY_RESULTS}
+    if warnings:
+        out["warning"] = "; ".join(warnings)
+    return out
+
+
+def _traverse_policy_failed(reason: str, *, warnings: list[str] | None = None) -> dict:
+    """The graph stream a failed traversal policy leaves: nothing, with a warning (RDR-232 s3).
+
+    The primary and vector streams are the caller's other steps and keep running; this one never
+    falls back to an unrestricted walk. ``contained`` is False so no diagnostic reads it as safe.
+    """
+    _log.warning("traverse_policy_failed", reason=reason)
+    return {
+        "tumblers": [], "ids": [], "collections": [], "chunk_collections": [],
+        "traversal": {"policy_applied": False, "policy_failed": True, "contained": False, "reason": reason},
+        "warning": "; ".join([*(warnings or []), f"traverse: traversal policy failed ({reason}); graph evidence omitted"]),
+    }
+
+
+def _traverse_with_policy(
+    catalog: Any, nodes: list, edges: list, seeds: list, policy: Any,
+    *, direction: str, warnings: list[str],
+) -> dict:
+    """``traverse`` under a :class:`~nexus.plans.traversal_policy.TraversalPolicy` (RDR-232 s3).
+
+    Order is the contract: the policy selects documents from the walk BEFORE any manifest is read,
+    so out-of-scope documents cannot spend the chunk budget, then the budget is split per document.
+    """
+    from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
+
+    try:
+        kinds: "dict[str, str] | None" = None
+        if policy.allowed_owners:
+            # nexus-jypmj.1.18: the owner filter applies to project-owned collections only, the same rule the
+            # vector stream applies; traversal_policy is stdlib-only, so the kind of each walked collection
+            # is read here by the one seam the vector filter uses.
+            from nexus.plans.owner_narrowing import collection_kind  # noqa: PLC0415 — deferred, like traverse's other imports
+
+            kinds = {c: collection_kind(c) for c in {str(getattr(n, "physical_collection", "") or "") for n in nodes}}
+        selection = tp.select_documents(nodes, edges, seeds, policy, direction=direction, collection_kinds=kinds)
+    except Exception as exc:  # noqa: BLE001 — any policy failure omits the graph stream; it never widens
+        return _traverse_policy_failed(f"{type(exc).__name__}: {exc}", warnings=warnings)
+    report = selection.report
+    if report["possibly_truncated"]:
+        # The count nexus-jypmj.1.12 reads over a window of live traffic: the engine's own
+        # graph_node_limit log carries no caller, this one does (the policy scope).
+        _log.warning(
+            "traverse_graph_node_cap", nodes=report["nodes_walked"], cap=tp.MAX_GRAPH_NODES,
+            caller_scope=policy.allowed_collections.value,
+        )
+        warnings.append(
+            f"traverse: the engine returned {report['nodes_walked']} nodes, its {tp.MAX_GRAPH_NODES}-node cap; "
+            "the walk is possibly truncated and is not reported as contained"
+        )
+
+    manifests: dict[str, list] = {}
+    if selection.kept:
+        try:
+            manifests = {str(k): v for k, v in catalog.get_manifests(list(selection.kept)).items()}
+        except Exception as exc:  # noqa: BLE001 — ids are an enrichment; the retained documents still answer
+            _log.warning("traverse_manifest_lookup_failed", error=str(exc), exc_info=True)
+            warnings.append(f"traverse: chunk ids unavailable, manifest lookup failed: {type(exc).__name__}: {exc}")
+    pairs, total = tp.allocate_chunks(
+        selection.kept,
+        {doc: [getattr(r, "chash", "") or "" for r in rows] for doc, rows in manifests.items()},
+        policy.max_chunks,
+    )
+    out: dict = {
+        "tumblers": list(selection.kept),
+        "ids": [chash for _doc, chash in pairs],
+        "collections": sorted({c for c in selection.collections.values() if c}),
+        "chunk_collections": [selection.collections[doc] for doc, _chash in pairs],
+    }
+    if total > len(pairs):
+        out["ids_truncated"] = {"total": total, "kept": len(pairs)}
+    out["traversal"] = report
     if warnings:
         out["warning"] = "; ".join(warnings)
     return out
@@ -9082,8 +9425,11 @@ Each requires hydrated text as input — NOT ids/tumblers.
       - Output: {summary: str}
 
   generate(template, context, cited=false)
-      - `template` is a natural-language instruction; `context` is a
-        string (similar rules as summarize.content).
+      - `template` is a natural-language instruction; `context` follows
+        the rules of summarize.content: one $stepN.field reference, a
+        JSON list of them, or a literal string with no reference in it.
+        To pass several sources write context=[$step3.contents,
+        $step4.contents], never one string that quotes them.
       - Output: {text: str}
 
 === Correct chain patterns ===
@@ -9107,6 +9453,11 @@ Pattern B (operator auto-hydration shortcut):
   $stepN.<field> — e.g. $step1.ids, $step2.contents.  Never $stepN alone.
   The <field> must be one the tool actually returns (see output contracts
   above).  A mismatch fails with PlanRunStepRefError.
+  An argument value is EITHER exactly one $stepN.<field> reference OR a JSON
+  list of such references.  Never put a reference inside other text
+  ("Code: $step3.contents") or inside an object ({"a": "$step3.contents"}):
+  the runner does not substitute it, and the run fails with
+  PlanRunStepRefError before any step dispatches.
 
 === Forbidden tools ===
   Do NOT emit mcp__plugin_conexus_nexus-catalog__* names — use traverse.
@@ -9181,6 +9532,10 @@ def _nx_answer_is_empty_retrieval(steps: "list") -> bool:
     for step_out in steps:
         if not isinstance(step_out, dict):
             continue
+        # RDR-232 (nexus-jypmj.1.3): a step skipped for a scope conflict is a
+        # retrieval step that contributed nothing, whatever else its output holds.
+        if isinstance(step_out.get("scope_conflict"), dict):
+            had_retrieval = True
         ids = step_out.get("ids")
         tumblers = step_out.get("tumblers")
         if isinstance(ids, list):
@@ -9190,6 +9545,28 @@ def _nx_answer_is_empty_retrieval(steps: "list") -> bool:
             had_retrieval = True
             total_evidence += len(tumblers)
     return had_retrieval and total_evidence == 0
+
+
+def _nx_answer_reserved_stream_is_evidence(stream: "ReservedStream | None") -> bool:
+    """Whether the runner merged a reserved primary stream into a reduction (RDR-232, nexus-jypmj.1.8).
+
+    The empty-retrieval guard looks at the retrieval steps' ids and tumblers only. A resolved source
+    whose vector and graph streams found nothing still feeds the reducer its primary chunks and T2
+    records, so a merged, non-empty reserved stream is evidence and the reducer's answer stands. A
+    stream no operator consumed (``merged`` false) reached no reducer and is not.
+    """
+    from nexus.plans.reserved_stream import reserved_stream_is_evidence  # noqa: PLC0415 — deferred; matches this module's convention
+
+    return reserved_stream_is_evidence(stream)
+
+
+def _nx_answer_scope_conflict_sentence(diagnostics: Any) -> str:
+    """``scope conflict: step 1 (search) declares corpus 'code', ...`` for the no-match
+    text, or ``""`` when no step conflicted (RDR-232 section 2a, nexus-jypmj.1.3)."""
+    from nexus.plans.evidence import scope_conflict_clauses  # noqa: PLC0415 — deferred; matches this module's convention
+
+    clauses = scope_conflict_clauses(diagnostics)
+    return f"scope conflict: {'; '.join(clauses)}" if clauses else ""
 
 
 def _plan_retrieval_step_basis(plan_json: str | dict | None) -> list[dict[str, Any]]:
@@ -9306,7 +9683,9 @@ def _render_zero_evidence_step_basis_text(
         return "; ".join(
             f"step{a.get('step_index')}={a.get('tool', '')}"
             f"(corpus={str(a.get('corpus') or '')!r}, "
-            f"query={str(a.get('query') or '')!r})"
+            + (f"subtree={str(a['subtree'])!r}, " if a.get("subtree") else "")
+            + f"query={str(a.get('query') or '')!r})"
+            + (" [skipped]" if a.get("skipped") else "")
             for a in resolved_step_args
         )
     return _render_retrieval_step_basis_text(plan_json)
@@ -9630,6 +10009,26 @@ def _step_record_to_wire(step: Any) -> dict[str, Any]:
     }
 
 
+def _run_cost_usd(step_records: list[Any] | None, planner_cost_usd: float | None = None) -> float | None:
+    """The cost of one ``nx_answer`` run: every step's known cost plus the inline planner's own
+    dispatch cost (nexus-jypmj.1.20), or ``None`` when neither is known, never a fabricated zero.
+
+    The envelope's ``cost_usd`` and the stored ``nx_answer_runs.cost_usd`` both come from here, so
+    they cannot disagree. A plan-match hit has no planner dispatch (``planner_cost_usd`` is ``None``).
+    """
+    known = [s.cost_usd for s in (step_records or []) if getattr(s, "cost_usd", None) is not None]
+    if planner_cost_usd is not None:
+        known.append(planner_cost_usd)
+    return sum(known) if known else None
+
+
+def _planner_cost_usd(usage_sink: list[Any]) -> float | None:
+    """The summed known cost of the inline planner's dispatches captured in *usage_sink*, or ``None``
+    when none was captured or none reported a cost (a plan-match hit never dispatches a planner)."""
+    known = [u.cost_usd for u in usage_sink if getattr(u, "cost_usd", None) is not None]
+    return sum(known) if known else None
+
+
 def _nx_answer_record_run(
     telemetry: Any,
     *,
@@ -9641,6 +10040,7 @@ def _nx_answer_record_run(
     step_records: list[Any] | None,
     duration_ms: int,
     trace: bool,
+    planner_cost_usd: float | None = None,
 ) -> None:
     """Persist one ``nx_answer_runs`` row (+ its ``step_records``, when any)
     via the telemetry store. Redacts when ``trace=False``.
@@ -9651,8 +10051,11 @@ def _nx_answer_record_run(
 
     ``cost_usd`` (RDR-196 .p1d, nexus-nyry9.10 — replaces 9 former
     hardcoded-zero-cost literals, one per call site): the SUM of every step's
-    ``cost_usd`` that is not ``None``, or ``None`` when no step reports a
-    known cost — an empty *step_records* trivially falls into the latter
+    ``cost_usd`` that is not ``None``, PLUS *planner_cost_usd* when a plan-miss
+    run paid for the inline planner (nexus-jypmj.1.20; the planner dispatch is
+    no step's, so the run cost may exceed the step sum), or ``None`` when no
+    step and no planner reports a known cost — an empty *step_records* with no
+    planner cost trivially falls into the latter
     (sum of nothing is "unknown", never a fabricated zero). This is
     deliberately a BLANKET rule, not case-by-case: a call site with
     genuinely zero steps (e.g. the single-step fast path, which bypasses
@@ -9667,8 +10070,7 @@ def _nx_answer_record_run(
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     steps = step_records or []
-    _known_costs = [s.cost_usd for s in steps if s.cost_usd is not None]
-    cost_usd = sum(_known_costs) if _known_costs else None
+    cost_usd = _run_cost_usd(steps, planner_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
     try:
         telemetry.record_nx_answer_run(
@@ -9752,6 +10154,12 @@ def _nx_answer_caller_bindings(
     slips through JSON tool arguments easily, and treating it as supplied
     would reopen the offer-a-plan-that-cannot-run hole from the other
     side.
+
+    ``source``, ``owner`` and ``project`` are the caller's evidence request
+    (RDR-232, ``nexus.plans.evidence``), not plan bindings: they are removed
+    here, before the run bindings and the availability set exist, so they
+    never reach plan binding resolution or ``plan_match``. They are read
+    separately by :func:`_nx_answer_evidence_request`.
     """
     # Typed bindings the question itself supplies, derived FIRST so an
     # explicit caller value always overrides one that was inferred
@@ -9769,14 +10177,230 @@ def _nx_answer_caller_bindings(
     # query without it returned the right paper first.
     from nexus.plans.binding_infer import infer_typed_bindings  # noqa: PLC0415 — deferred; matches this module's convention
 
+    from nexus.plans.evidence import RESERVED_BINDINGS, split_reserved  # noqa: PLC0415 — deferred; matches this module's convention
+
     run: dict[str, Any] = dict(infer_typed_bindings(question))
-    run.update({
-        k: v for k, v in (bindings or {}).items() if v is not None
-    })
+    plan_bindings, _reserved = split_reserved(bindings)
+    run.update(plan_bindings)
+    for _name in RESERVED_BINDINGS:
+        run.pop(_name, None)
+    # The internal run bindings are nx_answer's own: a caller binding of the same name must not reach the
+    # runner as the scope or the owner narrowing (nexus-jypmj.1.18; _nx_owners is set from the evidence
+    # request after this, _nx_scope just below).
+    from nexus.plans.owner_narrowing import OWNERS_BINDING  # noqa: PLC0415 — deferred; matches this module's convention
+
+    run.pop(OWNERS_BINDING, None)
+    run.pop("_nx_scope", None)
     run["intent"] = question
     if scope:
         run["_nx_scope"] = scope
     return run, frozenset(run)
+
+
+def _nx_answer_owner_binding(request: EvidenceRequest) -> dict[str, str]:
+    """The ``_nx_owners`` run binding for *request*: ``{}`` unless it carries an explicit, resolved owner
+    qualifier (RDR-232, nexus-jypmj.1.18). Only an owner or project binding, or a catalog-subtree scope
+    that serves as the qualifier, narrows the secondary streams; a corpus scope alone, an owner that
+    resolution inferred, and a conflicting or unresolved qualifier do not."""
+    from nexus.plans.owner_narrowing import OWNERS_BINDING, owners_binding_value, request_owners  # noqa: PLC0415 — deferred; matches this module's convention
+
+    value = owners_binding_value(request_owners(request))
+    return {OWNERS_BINDING: value} if value else {}
+
+
+def _nx_answer_seconds_left(ceiling: float, deadline: float | None) -> float:
+    """Seconds an evidence step may take: its fixed *ceiling*, or what is left of ``nx_answer``'s own
+    absolute ``time.monotonic()`` *deadline* if that is shorter (never negative)."""
+    left = ceiling if deadline is None else min(ceiling, deadline - time.monotonic())
+    return max(left, 0.0)
+
+
+async def _nx_answer_evidence_request(
+    *,
+    bindings: dict[str, Any] | None,
+    scope: str,
+    deadline: float | None = None,
+) -> EvidenceRequest:
+    """Read the caller's evidence request from the reserved bindings and scope.
+
+    RDR-232 Phase 1 (nexus-jypmj.1.2). The catalog is consulted only when
+    ``owner`` or ``project`` is a name rather than a tumbler; the lookup is
+    the same owner-name resolution ``scope`` uses. Never raises: a failure
+    is carried in the returned request and disclosed in the envelope.
+
+    The lookup is blocking catalog I/O, so a request that names an owner or project runs in a worker thread
+    (a call with no reserved binding touches neither the catalog nor a thread). It is bounded by
+    ``PrimaryEvidenceCaps.max_seconds`` and *deadline* (``nx_answer``'s own, absolute ``time.monotonic()``):
+    no lookup starts past it, and a lookup that has not returned by then makes the qualifier ``unresolved``
+    with the deadline as the reason, never a guess (nexus-jypmj.1.9 code review F2).
+    """
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+        OwnerNameError,
+        build_evidence_request,
+        catalog_name_lookup,
+        split_reserved,
+    )
+    from nexus.plans.primary_evidence import DEFAULT_CAPS  # noqa: PLC0415 — deferred; matches this module's convention
+
+    _, reserved = split_reserved(bindings)
+    if not reserved:
+        def _none_named(name: str) -> str:
+            raise OwnerNameError("no owner or project was named")  # unreachable: no reserved binding, no lookup
+
+        return build_evidence_request(bindings, scope=scope, name_lookup=_none_named)
+    ceiling = DEFAULT_CAPS.max_seconds
+    end = time.monotonic() + _nx_answer_seconds_left(ceiling, deadline)
+    stopped = (
+        f"the owner lookup stopped at the deadline (at most {ceiling:g} s, or the answer's own budget if that "
+        "was shorter)"
+    )
+
+    def _lookup(name: str) -> str:
+        # Lazy: a tumbler-shaped owner needs no catalog at all. No lookup starts past the deadline.
+        if time.monotonic() >= end:
+            raise OwnerNameError(stopped)
+        return catalog_name_lookup(_get_catalog())(name)
+
+    def _build() -> EvidenceRequest:
+        return build_evidence_request(bindings, scope=scope, name_lookup=_lookup)
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_build), timeout=max(end - time.monotonic(), 0.0))
+    except asyncio.TimeoutError:
+        def _hung(name: str) -> str:  # noqa: ARG001
+            raise OwnerNameError(stopped)
+
+        return build_evidence_request(bindings, scope=scope, name_lookup=_hung)
+
+
+async def _nx_answer_named_sources(
+    request: EvidenceRequest, *, deadline: float | None = None,
+) -> NamedSourceResolution | None:
+    """Resolve the request's named sources (RDR-232 Phase 1, nexus-jypmj.1.4).
+
+    ``None`` when no source was named, with no catalog call. The resolution is
+    bounded (``PrimaryEvidenceCaps``) and never raises; what it could not
+    resolve is disclosed in the envelope and the text. Reading the resolved
+    document's chunks happens where the primary stream is merged (nexus-jypmj.1.6),
+    not here, so a call that never reaches a reduction pays for the lookup only.
+
+    The up-to-13 catalog calls are blocking, so they run in a worker thread, bounded by
+    ``PrimaryEvidenceCaps.max_seconds`` and *deadline* (``nx_answer``'s own, absolute ``time.monotonic()``):
+    the resolution starts no call past it, and one that has not returned by then is abandoned (a thread
+    cannot be cancelled; it ends after its current call) and every source is ``unresolved`` with the
+    deadline as the reason (nexus-jypmj.1.9 code review F2).
+    """
+    if not request.sources:
+        return None
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.primary_evidence import DEFAULT_CAPS, NamedSourceResolution, resolve_named_sources  # noqa: PLC0415 — deferred; matches this module's convention
+
+    def _resolve() -> NamedSourceResolution:
+        try:
+            cat = _get_catalog()
+        except Exception as exc:  # noqa: BLE001 — a missing catalog is disclosed as an unresolved source
+            _log.warning("nx_answer_named_sources_catalog_unavailable", error=str(exc))
+            cat = None
+        return resolve_named_sources(request.sources, request.owner, cat=cat, deadline=deadline)
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_resolve), timeout=_nx_answer_seconds_left(DEFAULT_CAPS.max_seconds, deadline),
+        )
+    except asyncio.TimeoutError:
+        _log.warning("nx_answer_named_sources_deadline", sources=len(request.sources))
+        return NamedSourceResolution.deadline_hit(request.sources)
+
+
+async def _nx_answer_lifecycle_stream(
+    resolution: NamedSourceResolution | None,
+    *,
+    deadline: float | None = None,
+) -> "LifecycleStream | None":
+    """Read the resolved RDR sources' T2 lifecycle records (RDR-232, nexus-jypmj.1.7, A7).
+
+    ``None`` when no source was named, with no catalog or T2 call. The reads are exact
+    ``get(project, title)`` calls through the shared ``_t2_index_write`` transport (the process's one
+    pooled ``T2Database``, keyed by the endpoint and bearer, so the tenant binding is the one every
+    other ``nx_answer`` T2 access has) rather than a fresh ``T2Database`` of eight pools per call,
+    bounded by ``LifecycleCaps``; blocking I/O, so it runs in a worker thread. *deadline* is
+    ``nx_answer``'s own absolute ``time.monotonic()`` deadline: the thread cannot be cancelled, so each
+    read is given what is left of the budget as its timeout and is not retried at that clamp. It never
+    raises: a T2 that cannot be reached is reported per source.
+    """
+    if resolution is None or not resolution.sources:
+        return None
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.lifecycle_stream import LifecycleStream, read_lifecycle_stream  # noqa: PLC0415 — deferred; matches this module's convention
+
+    try:
+        cat = _get_catalog()
+    except Exception as exc:  # noqa: BLE001 — a missing catalog leaves the project undetermined, which is disclosed
+        _log.warning("nx_answer_lifecycle_catalog_unavailable", error=str(exc))
+        cat = None
+
+    def _get(project: str, title: str, timeout: float) -> "dict[str, Any] | None":
+        # db.memory.get, not the facade's get: only the store takes a per-call timeout.
+        return _t2_index_write(
+            lambda db: db.memory.get(project=project, title=title, timeout=timeout, retry_read_timeout=False),
+            op="lifecycle_get",
+        )
+
+    def _read() -> "LifecycleStream | None":
+        return read_lifecycle_stream(resolution, cat=cat, t2_get=_get, deadline=deadline)
+
+    try:
+        return await asyncio.to_thread(_read)
+    except Exception as exc:  # noqa: BLE001 — an unreadable T2 is disclosed, never a failed answer
+        _log.warning("nx_answer_lifecycle_stream_failed", error=str(exc))
+        return LifecycleStream.unavailable(resolution, f"{type(exc).__name__} opening T2")
+
+
+async def _nx_answer_primary_stream(
+    resolution: NamedSourceResolution | None,
+    lifecycle: "LifecycleStream | None" = None,
+    *,
+    deadline: float | None = None,
+) -> "tuple[PrimaryEvidence | None, ReservedStream | None]":
+    """Read the resolved named sources and build the reserved stream (RDR-232, nexus-jypmj.1.6).
+
+    Uses the resolution ``nx_answer`` already holds (``select_primary_evidence``, not
+    ``gather_primary_evidence``, so no source is resolved twice). ``(None, None)`` when no source
+    resolved, so a run without one is byte-identical to before. The read is blocking catalog and
+    T3 I/O, so it runs in a worker thread; it never raises, and a failure is disclosed as an
+    unread source (``PrimaryEvidence.error``), not a failed answer.
+
+    The read is bounded by ``PrimaryEvidenceCaps.max_seconds`` and *deadline* (``nx_answer``'s own, absolute
+    ``time.monotonic()``): it starts no fetch past it, and a read that has not returned by then is abandoned (a
+    thread cannot be cancelled) with ``deadline`` on ``caps_hit``; the answer proceeds without the chunks
+    (nexus-jypmj.1.9 code review F2).
+
+    *lifecycle* (nexus-jypmj.1.7) supplies the T2 records of a resolved RDR; they lead the reserved
+    share, ahead of the chunks, and do not depend on the T3 read: a failed chunk read still yields a
+    stream of the records.
+    """
+    if resolution is None or not resolution.resolved():
+        return None, None
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.primary_evidence import PrimaryEvidence, select_primary_evidence, t3_chunk_fetcher  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.reserved_stream import ReservedStream  # noqa: PLC0415 — deferred; matches this module's convention
+
+    records = lifecycle.reserved_items() if lifecycle is not None else ()
+    try:
+        cat = _get_catalog()
+        fetch = t3_chunk_fetcher(_get_t3())
+        evidence = await asyncio.wait_for(
+            asyncio.to_thread(select_primary_evidence, resolution, cat=cat, fetch_chunks=fetch, deadline=deadline),
+            timeout=_nx_answer_seconds_left(resolution.caps.max_seconds, deadline),
+        )
+    except asyncio.TimeoutError:
+        _log.warning("nx_answer_primary_evidence_deadline")
+        evidence = PrimaryEvidence(caps_hit=("deadline",), caps=resolution.caps)
+    except Exception as exc:  # noqa: BLE001 — an unreadable source is disclosed, never a failed answer
+        _log.warning("nx_answer_primary_evidence_failed", error=str(exc))
+        evidence = PrimaryEvidence(error=type(exc).__name__, caps=resolution.caps)
+    return evidence, ReservedStream.from_evidence(evidence, extra=records)
 
 
 def _autoalias_bindings(
@@ -9840,6 +10464,24 @@ def _nx_answer_text_is_empty(text: str) -> bool:
     failure, which is the same class of wrong signal in the other direction.
     """
     return text.strip().lower() in _EMPTY_ANSWER_TEXTS
+
+
+def _nx_answer_empty_retrieval_outcome(steps: Any) -> bool | None:
+    """The outcome to count for a zero-evidence plan run (RDR-232, nexus-jypmj.1.3).
+
+    ``False`` (a failure, nexus-yg49g) when a retrieval step ran and found nothing. ``None``
+    (no verdict) when EVERY retrieval step was skipped for a conflict between the plan's corpus
+    and the caller's scope: that is the caller's error, and counting it would feed plan hygiene.
+    """
+    retrieval = [
+        s for s in (steps or ())
+        if isinstance(s, dict)
+        and (isinstance(s.get("scope_conflict"), dict)
+             or isinstance(s.get("ids"), list) or isinstance(s.get("tumblers"), list))
+    ]
+    if retrieval and all(isinstance(s.get("scope_conflict"), dict) for s in retrieval):
+        return None
+    return False
 
 
 def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
@@ -9914,9 +10556,10 @@ def _nx_answer_record_complete(
     step_records: list[Any] | None,
     duration_ms: int,
     trace: bool,
-    success: bool,
+    success: bool | None,
     composite_supported_at_start: bool,
     early_bump_fired: bool,
+    planner_cost_usd: float | None = None,
 ) -> None:
     """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
     outcome-counter bump for ONE converting arm, issued as ONE function
@@ -10003,6 +10646,12 @@ def _nx_answer_record_complete(
     against the outer one. The 404 fallback's own outcome bump reuses
     this exact shape for the same reason.
 
+    **success is None** (RDR-232 nexus-jypmj.1.3): the run is recorded and counted in
+    ``use_count`` but no outcome is counted. A run whose every retrieval step conflicted with the
+    CALLER's scope is the caller's error, not a plan failure, and a failure count would feed plan
+    hygiene and the always-failing skip. The composite route carries a verdict, so a verdictless
+    run takes the per-call record path on either capability, as the 404 fallback does.
+
     This REPRODUCES the source functions' bodies rather than delegating
     to them, so each keeps its own behaviour precisely:
 
@@ -10031,11 +10680,10 @@ def _nx_answer_record_complete(
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
     steps = step_records or []
-    _known_costs = [s.cost_usd for s in steps if s.cost_usd is not None]
-    cost_usd = sum(_known_costs) if _known_costs else None
+    cost_usd = _run_cost_usd(steps, planner_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
 
-    if composite_supported_at_start:
+    if composite_supported_at_start and success is not None:
         import httpx  # noqa: PLC0415 — rare/branch-local path; only the composite route needs the 404-vs-other-failure distinction
         from datetime import datetime, timezone  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
@@ -10089,7 +10737,7 @@ def _nx_answer_record_complete(
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
         _warn_telemetry_drop("nx_answer_runs", exc)
 
-    if plan_id:
+    if plan_id and success is not None:
         try:
             # Own independent _t2_index_write call, NOT the record half's
             # `db` above — see the docstring's eviction-classifier note.
@@ -10317,94 +10965,127 @@ async def _nx_answer_plan_miss(
         from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS  # noqa: PLC0415 — rare/branch-local path; default-path pin (nexus-ek8tr)
 
         _planner_model = STRONG_DEFAULT_ALIAS
-    payload = None
-    last_output_error: _OpOutputError | None = None
-    for attempt in range(2):
-        attempt_timeout = 300.0 if attempt == 0 else 150.0
-        try:
-            payload = await claude_dispatch(
-                prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
-                model=_planner_model, operator="planner",
-            )
-            break
-        except _OpOutputError as exc:
-            last_output_error = exc
-            import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-            _slog.get_logger().warning(
-                "nx_answer_planner_output_error",
-                attempt=attempt + 1,
-                error=str(exc)[:300],
-            )
-    if payload is None:
-        # Both attempts hit OperatorOutputError. Re-raise the second one
-        # (most recent diagnostic) so the caller's error string carries
-        # the most-actionable snippet.
-        assert last_output_error is not None
-        raise last_output_error
-    steps = payload.get("steps", []) if isinstance(payload, dict) else []
-    if not steps:
-        raise ValueError("planner returned empty plan")
 
-    _ALLOWED_TOOLS = {
-        "search", "query", "traverse", "store_get_many",
-        "extract", "rank", "compare", "summarize", "generate",
-    }
-    # The LLM planner emits either the bare operator name ("extract") or
-    # the resolved MCP tool name ("operator_extract" / full prefix form).
-    # Normalize all three to the bare form the dispatcher's _OPERATOR_TOOL_MAP
-    # expects as a key.
-    _TOOL_ALIASES = {
-        "grep": "search", "read": "search", "bash": "search",
-        "find": "search", "glob": "search",
-        "web_search": "search", "web_fetch": "search",
-        # operator_* → bare op name (the runner dispatcher remaps back)
-        "operator_extract": "extract",
-        "operator_rank": "rank",
-        "operator_compare": "compare",
-        "operator_summarize": "summarize",
-        "operator_generate": "generate",
-    }
-    # Catalog tools the LLM might reach for — map to the closest allowed
-    # tool (traverse covers link walks; search covers catalog_search use
-    # cases).  Prevents silent `planner_step_dropped` when the planner
-    # hasn't fully internalised the "no catalog_* in plans" rule.
-    _CATALOG_TOOL_REDIRECTS = {
-        "link_query": "traverse",
-        "links": "traverse",
-        "catalog_search": "search",
-        "catalog_show": "query",
-        "catalog_list": "query",
-        "catalog_resolve": "traverse",
-        "catalog_stats": None,  # nothing plan-step-worthy to redirect to
-    }
-    _TOOL_ALIASES.update({
-        k: v for k, v in _CATALOG_TOOL_REDIRECTS.items() if v is not None
-    })
-    import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-    _plog = _slog.get_logger()
-    normalized = []
-    dropped: list[str] = []
-    for step in steps:
-        raw_tool = step.get("tool", "")
-        bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
-        bare = _TOOL_ALIASES.get(bare.lower(), bare)
-        if bare not in _ALLOWED_TOOLS:
-            _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
-            dropped.append(raw_tool or bare or "?")
-            continue
-        step["tool"] = bare
-        normalized.append(step)
+    async def _plan_from(planner_prompt: str) -> str:
+        """One planner round trip, normalized to the dispatchable tools, as ``plan_json`` text."""
+        payload = None
+        last_output_error: _OpOutputError | None = None
+        for attempt in range(2):
+            attempt_timeout = 300.0 if attempt == 0 else 150.0
+            try:
+                payload = await claude_dispatch(
+                    planner_prompt, _PLANNER_SCHEMA, timeout=attempt_timeout,
+                    model=_planner_model, operator="planner",
+                )
+                break
+            except _OpOutputError as exc:
+                last_output_error = exc
+                import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+                _slog.get_logger().warning(
+                    "nx_answer_planner_output_error",
+                    attempt=attempt + 1,
+                    error=str(exc)[:300],
+                )
+        if payload is None:
+            # Both attempts hit OperatorOutputError. Re-raise the second one
+            # (most recent diagnostic) so the caller's error string carries
+            # the most-actionable snippet.
+            assert last_output_error is not None
+            raise last_output_error
+        steps = payload.get("steps", []) if isinstance(payload, dict) else []
+        if not steps:
+            raise ValueError("planner returned empty plan")
 
-    if not normalized:
-        # Search review I-5: surface the dropped tools in the error so the
-        # caller's "planner failed" message can explain why (e.g. the LLM
-        # picked Bash / grep / WebFetch which aren't dispatchable).
-        detail = ", ".join(sorted(set(dropped))) if dropped else "(no tools at all)"
-        raise ValueError(
-            f"planner returned only non-dispatchable tools: {detail}"
+        _ALLOWED_TOOLS = {
+            "search", "query", "traverse", "store_get_many",
+            "extract", "rank", "compare", "summarize", "generate",
+        }
+        # The LLM planner emits either the bare operator name ("extract") or
+        # the resolved MCP tool name ("operator_extract" / full prefix form).
+        # Normalize all three to the bare form the dispatcher's _OPERATOR_TOOL_MAP
+        # expects as a key.
+        _TOOL_ALIASES = {
+            "grep": "search", "read": "search", "bash": "search",
+            "find": "search", "glob": "search",
+            "web_search": "search", "web_fetch": "search",
+            # operator_* → bare op name (the runner dispatcher remaps back)
+            "operator_extract": "extract",
+            "operator_rank": "rank",
+            "operator_compare": "compare",
+            "operator_summarize": "summarize",
+            "operator_generate": "generate",
+        }
+        # Catalog tools the LLM might reach for — map to the closest allowed
+        # tool (traverse covers link walks; search covers catalog_search use
+        # cases).  Prevents silent `planner_step_dropped` when the planner
+        # hasn't fully internalised the "no catalog_* in plans" rule.
+        _CATALOG_TOOL_REDIRECTS = {
+            "link_query": "traverse",
+            "links": "traverse",
+            "catalog_search": "search",
+            "catalog_show": "query",
+            "catalog_list": "query",
+            "catalog_resolve": "traverse",
+            "catalog_stats": None,  # nothing plan-step-worthy to redirect to
+        }
+        _TOOL_ALIASES.update({
+            k: v for k, v in _CATALOG_TOOL_REDIRECTS.items() if v is not None
+        })
+        import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        _plog = _slog.get_logger()
+        normalized = []
+        dropped: list[str] = []
+        for step in steps:
+            raw_tool = step.get("tool", "")
+            bare = raw_tool.rsplit("__", 1)[-1] if raw_tool.startswith("mcp__") else raw_tool
+            bare = _TOOL_ALIASES.get(bare.lower(), bare)
+            if bare not in _ALLOWED_TOOLS:
+                _plog.warning("planner_step_dropped", raw_tool=raw_tool, bare=bare)
+                dropped.append(raw_tool or bare or "?")
+                continue
+            step["tool"] = bare
+            normalized.append(step)
+
+        if not normalized:
+            # Search review I-5: surface the dropped tools in the error so the
+            # caller's "planner failed" message can explain why (e.g. the LLM
+            # picked Bash / grep / WebFetch which aren't dispatchable).
+            detail = ", ".join(sorted(set(dropped))) if dropped else "(no tools at all)"
+            raise ValueError(
+                f"planner returned only non-dispatchable tools: {detail}"
+            )
+        return json.dumps({"steps": normalized})
+
+    plan_json = await _plan_from(prompt)
+    # nexus-jypmj.4: a $stepN.field inside other text or an object is never substituted, so plan_run
+    # would refuse this plan after the planner was paid for. Say what is wrong and ask once more. The
+    # retry is the same prompt with the error text appended (concatenation: the text carries a token
+    # from the planner's own output, so it is never a format string). A second bad plan goes on to
+    # plan_run, which refuses it as it did before; the retry's cost lands in the ambient usage sink.
+    from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred; runner is heavy and this is the planner path
+
+    embedded = find_embedded_step_ref(plan_json)
+    if embedded is not None:
+        import structlog as _slog3  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+        _slog3.get_logger().warning(
+            "nx_answer_planner_step_ref_retry", ref=embedded.ref, reason=embedded.reason[:200],
         )
-
-    plan_json = json.dumps({"steps": normalized})
+        try:
+            plan_json = await _plan_from(
+                prompt
+                + "\n\nYour previous plan was refused before it ran: "
+                + str(embedded)[:200]
+                + "\nReturn the plan again with every argument exactly one $stepN.<field> reference, "
+                + "a list of them, or a literal with no reference in it."
+            )
+        except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan stands and plan_run refuses it by name
+            # A retry that times out, returns unusable output or an empty plan must not replace the
+            # real refusal with its own error: keep the first plan, whose embedded ref plan_run
+            # reports exactly as it did before the retry existed.
+            _slog3.get_logger().warning(
+                "nx_answer_planner_step_ref_retry_failed",
+                error_type=type(exc).__name__, error=str(exc)[:200],
+            )
     return Match(
         plan_id=0,
         name="ad-hoc",
@@ -10485,6 +11166,15 @@ _NX_ANSWER_BUDGET_EXHAUSTED_PRE_PLAN: int = 0
 #: keeping the marker to one emitter; the read side needs the prefix
 #: too, so it is exported as a named constant instead of inlined here).
 NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX: str = "[budget exhausted"
+
+
+def _non_answer_prefix() -> str:
+    """``NON_ANSWER_NOTICE_PREFIX``, imported on first use (deferred like its
+    other consumer, ``_error_result``)."""
+    from nexus.plans.answer_shape import NON_ANSWER_NOTICE_PREFIX  # noqa: PLC0415 — deferred: only reached when a notice is composed
+
+    return NON_ANSWER_NOTICE_PREFIX
+
 
 #: RDR-200 §Telemetry (nexus-4e75w.5). Handoff-row marker — the SAME
 #: "a stable prefix, followed by call-specific detail" convention as
@@ -10572,7 +11262,16 @@ async def nx_answer(
     scope: Annotated[str, Field(
         description=(
             "Catalog subtree or corpus filter (e.g. \"1.2\" or \"knowledge\"). "
-            "Honoured on every path, including the single-step query() fast path."
+            "A corpus scope narrows the corpus a plan declares (a plan entry under "
+            "the scope is kept, \"all\" becomes the scope); a retrieval step whose "
+            "corpus has nothing under the scope is skipped and reported in the "
+            "envelope's scope_diagnostics. A catalog subtree is a filter, never a corpus: "
+            "it filters every query and search_metadata_scoped step, whatever its corpus "
+            "(outcome subtree_filtered). A step on a tool with no subtree filter "
+            "(search, search_topic_scoped, search_graph_hop, search_aspect_scoped) runs "
+            "unscoped, and so does any step under a document-level address such as "
+            "1.2.4686; both are named in the answer text and in scope_diagnostics "
+            "(outcome subtree_not_applied)."
         ),
     )] = "",
     context: Annotated[str, Field(description="Supplementary caller-supplied context for the plan matcher.")] = "",
@@ -10622,7 +11321,13 @@ async def nx_answer(
         description=(
             "Caller-supplied plan bindings (e.g. {\"content_type\": \"rdr\"}) "
             "that reach the plan runner and are advertised to the matcher as "
-            "available, making type-scoped builtin plans reachable."
+            "available, making type-scoped builtin plans reachable. The keys "
+            "source (an RDR id such as RDR-084, or a catalog tumbler), owner "
+            "(a tumbler or registered owner name) and project (a registered "
+            "owner name such as ART) are reserved: they name the document the "
+            "question is about and which project's it is, are never plan "
+            "bindings, and are reported back in the envelope's "
+            "evidence_request."
         ),
     )] = None,
     continuation: Annotated[bool | None, Field(
@@ -10654,6 +11359,10 @@ async def nx_answer(
     - `budget_usd` is a soft cost guide (warns, does not hard-block, and
       can overshoot); `budget_seconds` is a hard wall-clock cap on plan
       execution only.
+    - A corpus-prefix or collection `scope` narrows each retrieval step's
+      plan-declared corpus; a step with nothing under the scope is skipped,
+      named in the `scope_diagnostics` list of a `structured=True` envelope
+      and in a `[scope conflict: ...]` line in text mode.
     - `continuation=True` is live for eligible plan cuts and requires a
       matching `nx_answer_report` call from the caller afterward.
     - A `structured=True` `answer_shape` other than "answered" means
@@ -10791,15 +11500,35 @@ async def nx_answer(
     #: a stub result) — the same "no plan_run, nothing to drop" reading
     #: ``step_records``'s own default in ``_result`` already gives.
     _dropped_reduce_steps: "list[int]" = []
+    #: RDR-232 section 2a (nexus-jypmj.1.3): the per-step scope diagnostics
+    #: (``PlanResult.scope_diagnostics``, or the fast path's one entry), read by
+    #: ``_result``'s closure on every exit path exactly like ``_dropped_reduce_steps``
+    #: above. A path whose own text already names the conflict (the no-match
+    #: notice) suppresses the extra notice line: ``_result`` checks the text.
+    _scope_diagnostics: "list[dict[str, Any]]" = []
+
+    def _set_scope_diagnostics(plan_result: Any) -> None:
+        # Defensive isinstance: a MagicMock result's unconfigured attribute is a
+        # truthy non-list (same landmine as ``_dropped_reduce_steps`` below).
+        diag = getattr(plan_result, "scope_diagnostics", None)
+        _scope_diagnostics[:] = (
+            [d for d in diag if isinstance(d, dict)] if isinstance(diag, list) else []
+        )
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
     # scope to broad search (with a warning) so it doesn't filter
     # retrieval to nothing and trigger the ambient-context synthesis
     # failure. Done before any scope use (plan_match scope_preference,
     # plan-miss planner, grown-plan scope_tags).
+    _scope_given = scope
     scope, _scope_warning = _nx_answer_normalize_scope(scope)
     if _scope_warning:
         _log.warning("nx_answer_scope_normalized", detail=_scope_warning)
+    # nexus-jypmj.1.8 (code review F6, nexus-n1908): the caller asked for a scope and the run is NOT scoped.
+    # The log line alone was silent to the caller; the text and the envelope say it too.
+    _scope_normalized: "dict[str, str] | None" = (
+        {"given": _scope_given.strip(), "applied": scope, "reason": _scope_warning} if _scope_warning else None
+    )
 
     # nexus-0yrjr: derive the run bindings and the availability set
     # together, AFTER scope normalization so ``_nx_scope`` carries the
@@ -10810,6 +11539,77 @@ async def nx_answer(
     _caller_run, _caller_available = _nx_answer_caller_bindings(
         question=question, scope=scope, bindings=bindings,
     )
+    # RDR-232 Phase 1 (nexus-jypmj.1.2): the reserved bindings source,
+    # owner and project were removed from the run above; read them here as
+    # the caller's evidence request. Disclosed in the envelope.
+    _evidence_request = await _nx_answer_evidence_request(
+        bindings=bindings, scope=scope, deadline=deadline,
+    )
+    # nexus-jypmj.1.18: an explicit owner also narrows the secondary streams (vector corpus, traversal).
+    _caller_run.update(_nx_answer_owner_binding(_evidence_request))
+    # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
+    # (bounded; nothing is guessed). The primary stream that reads the
+    # resolved documents is merged at the runner (nexus-jypmj.1.6).
+    _named_sources = await _nx_answer_named_sources(_evidence_request, deadline=deadline)
+    # Set by the single_query fast path, which has no primary evidence stream: the
+    # named-source notice then says so instead of implying the document was read.
+    _single_query_fast_path = False
+    # nexus-jypmj.1.6: the named sources' primary evidence and the stream the runner merges. Set
+    # just before plan_run, never on the single_query fast path (it has no operator step).
+    _primary_evidence: "PrimaryEvidence | None" = None
+    _reserved_stream: "ReservedStream | None" = None
+    # nexus-jypmj.1.7: the T2 lifecycle records of a resolved RDR source, read just before plan_run.
+    _lifecycle: "LifecycleStream | None" = None
+    # nexus-jypmj.1.8: what the first evidence-consuming operator was handed (the runner's hydration
+    # reports it), and the inputs of the run's evidence diagnostics, built once at the first envelope.
+    from nexus.plans.evidence_diagnostics import ReducerInputRecorder, reducer_input_scope  # noqa: PLC0415 — deferred; matches this module's convention
+
+    _reducer_recorder = ReducerInputRecorder()
+    _diag_inputs: "dict[str, Any]" = {}
+    _diag_cache: "list[dict[str, Any] | None]" = []
+
+    def _set_evidence_inputs(plan_result: Any, plan_json: Any, plan_id: int, *, reducer_expected: bool = True) -> None:
+        # Defensive isinstance, same landmine as _set_scope_diagnostics: a MagicMock result's
+        # unconfigured attribute is a truthy non-list.
+        steps = getattr(plan_result, "steps", None)
+        resolved = getattr(plan_result, "resolved_step_args", None)
+        _diag_inputs.clear()
+        _diag_inputs.update(
+            steps=list(steps) if isinstance(steps, list) else [], plan_json=plan_json, plan_id=plan_id,
+            resolved_args=list(resolved) if isinstance(resolved, list) else [],
+            reducer_expected=reducer_expected,
+        )
+        _diag_cache.clear()
+
+    def _evidence_diagnostics_now() -> "dict[str, Any] | None":
+        # Built once, at the first envelope the call returns after a run, and logged once.
+        if not _diag_inputs:
+            return None
+        if _diag_cache:
+            return _diag_cache[0]
+        from nexus.plans.evidence import ScopeConstraint  # noqa: PLC0415 — deferred; matches this module's convention
+        from nexus.plans.evidence_diagnostics import (  # noqa: PLC0415 — deferred; matches this module's convention
+            build_evidence_diagnostics,
+            log_evidence_diagnostics,
+            plan_tools,
+        )
+
+        try:
+            diag = build_evidence_diagnostics(
+                steps=_diag_inputs["steps"], tools=plan_tools(_diag_inputs["plan_json"]),
+                scope=ScopeConstraint.parse(scope), scope_diagnostics=_scope_diagnostics,
+                resolved_args=_diag_inputs["resolved_args"], recorder=_reducer_recorder,
+                reserved=_reserved_stream, primary=_primary_evidence, lifecycle=_lifecycle,
+                named_sources=_named_sources, reducer_expected=_diag_inputs["reducer_expected"],
+                dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
+                owner_resolution=_evidence_request.owner.to_wire(),
+            )
+            log_evidence_diagnostics(diag, plan_id=_diag_inputs["plan_id"])
+        except Exception as exc:  # noqa: BLE001 — diagnostics never fail an answer
+            _log.warning("nx_answer_evidence_diagnostics_failed", error=str(exc))
+            diag = None
+        _diag_cache[:] = [diag]
+        return diag
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -10880,17 +11680,66 @@ async def nx_answer(
             + ", ".join(str(i) for i in _dropped_reduce_steps) + "]"
             if _dropped_reduce_steps else None
         )
+        # RDR-232 (nexus-jypmj.1.3): steps skipped for a scope conflict are
+        # disclosed AFTER classify_answer_shape ran (that happens before this
+        # closure is called), so the shape is unchanged by the notice.
+        from nexus.plans.evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+            scope_conflict_clauses,
+            scope_conflict_notice,
+            scope_unapplied_clauses,
+            scope_unapplied_notice,
+        )
+
+        _scope_clauses = scope_conflict_clauses(_scope_diagnostics)
+        _scope_notice = (
+            None if all(c in text for c in _scope_clauses)
+            else scope_conflict_notice(_scope_diagnostics)
+        )
+        # nexus-jypmj.1.16: steps a catalog-subtree scope could not filter ran unscoped; the caller sees
+        # that in the text, not only in the structured envelope.
+        _unapplied_notice = (
+            None if all(c in text for c in scope_unapplied_clauses(_scope_diagnostics))
+            else scope_unapplied_notice(_scope_diagnostics)
+        )
+        _scope_normalized_text = (
+            f"[scope: {_scope_normalized['given']!r} is a comma-list; scope takes one corpus prefix or catalog "
+            "subtree, so this run was NOT scoped (broad search). Pass one scope token to filter.]"
+            if _scope_normalized else None
+        )
         _extra_lines = [
-            line for line in (_budget_warning_text, _dropped_reduce_text)
+            line for line in (
+                _budget_warning_text, _dropped_reduce_text, _scope_normalized_text, _scope_notice,
+                _unapplied_notice,
+                *_evidence_request.disclosures(),
+                *(_primary_evidence.disclosures() if _primary_evidence else ()),
+                *(_reserved_stream.disclosures() if _reserved_stream else ()),
+                *(_lifecycle.disclosures() if _lifecycle else ()),
+                *(
+                    _named_sources.disclosures(
+                        owner_failure_disclosed=_evidence_request.owner.status in ("conflict", "unresolved"),
+                        primary_stream=not _single_query_fast_path,
+                    ) if _named_sources else ()
+                ),
+            )
             if line
         ]
         _extra_text = "\n".join(_extra_lines) if _extra_lines else None
         if not _extra_text:
             _text = text
-        elif text.startswith(NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX):
+        elif text.startswith(
+            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix())
+        ):
+            # The tool contract: a degraded text answer STARTS with its
+            # marker. Both markers keep the leading position and the extra
+            # notices (budget warnings, dropped reduce steps, evidence-
+            # request disclosures) follow.
             _text = f"{text}\n{_extra_text}"
         else:
             _text = f"{_extra_text}\n{text}"
+        # nexus-jypmj.1.8 (code review F1): the diagnostics are built and logged in BOTH modes, before the
+        # text return, so the default (text) call emits the nx_answer_evidence_diagnostics event too. Only the
+        # structured envelope carries the object.
+        _diagnostics = _evidence_diagnostics_now()
         if not structured:
             return _text
         # RDR-196 .p1e (nexus-nyry9.11): per-step breakdown in the
@@ -10900,14 +11749,12 @@ async def nx_answer(
         # whether it reads the envelope or `nx answer-runs --json`).
         # ``[]`` when no plan_run steps executed (single-step fast path,
         # or any error/miss path before plan_run ever ran).
-        # ``cost_usd`` mirrors _nx_answer_record_run's own blanket rule:
-        # the sum of every step's non-None cost, or None when no step
-        # reports a known cost — never a fabricated 0.0.
+        # ``cost_usd`` comes from _run_cost_usd, the function
+        # _nx_answer_record_run uses too: every step's non-None cost plus
+        # the inline planner's own dispatch cost on a plan-miss run, or
+        # None when neither is known — never a fabricated 0.0.
         _steps = step_records or []
-        _known_costs = [
-            s.cost_usd for s in _steps if getattr(s, "cost_usd", None) is not None
-        ]
-        cost_usd = sum(_known_costs) if _known_costs else None
+        cost_usd = _run_cost_usd(_steps, _planner_cost_usd(_planner_usage_sink))
         return {
             "final_text": _text,
             "chunks": chunks if chunks is not None else [],
@@ -10983,6 +11830,45 @@ async def nx_answer(
             # handoff, and the budget-exhausted marker (which carries its
             # own prefix).
             "answer_shape": _answer_shape,
+            # RDR-232 Phase 1 (nexus-jypmj.1.4): how each named source
+            # resolved: {sources: [{source, status, tumbler, candidates,
+            # detail, ...}], dropped, catalog_calls}. None when no source
+            # was named.
+            "named_sources": _named_sources.to_wire() if _named_sources else None,
+            # RDR-232 Phase 1 (nexus-jypmj.1.6): the primary evidence read from the resolved
+            # sources (per-document coverage, selected items by position, caps hit) and what the
+            # runner did with it (merged step, secondary items cut or deduplicated, reserved
+            # items an intermediate operator dropped). None when no source resolved or the run
+            # had no reduction to feed (the single_query fast path).
+            "primary_evidence": _primary_evidence.to_wire() if _primary_evidence else None,
+            "reserved_stream": _reserved_stream.report() if _reserved_stream else None,
+            # RDR-232 Phase 1 (nexus-jypmj.1.7, A7): the T2 lifecycle records (metadata and latest
+            # gate record) of a resolved RDR source: {sources: [{source, status, project, rdr_number,
+            # detail}], records: [{source, project, title, kind, chars, chars_full, kept, truncated}],
+            # reads, chars, caps_hit, caps}. None when no source was named or the run took the
+            # single_query fast path.
+            "lifecycle_stream": _lifecycle.to_wire() if _lifecycle else None,
+            # RDR-232 Phase 1 (nexus-jypmj.1.2): the caller's evidence
+            # request read from the reserved bindings (source, owner,
+            # project) and a subtree scope: {source, source_error, owner:
+            # {status, tumbler, contributions, detail}}. Always present,
+            # None when no reserved binding was passed.
+            "evidence_request": _evidence_request.to_wire(),
+            # RDR-232 section 2a (nexus-jypmj.1.3): one entry per corpus-taking
+            # retrieval step the caller's scope reached: {step_index, tool,
+            # plan_corpus, caller_scope, scope_kind, outcome, resolved_corpus}.
+            # outcome "conflict" means the step was skipped; see
+            # PlanResult.scope_diagnostics. Always present, [] when the caller
+            # gave no scope or the call never reached a retrieval step.
+            "scope_diagnostics": [dict(d) for d in _scope_diagnostics],
+            # nexus-jypmj.1.8 (code review F6): {given, applied, reason} when the caller's scope was a comma-list
+            # and the run went unscoped (nexus-n1908); None otherwise. Always present.
+            "scope_normalized": dict(_scope_normalized) if _scope_normalized else None,
+            # RDR-232 Phase 1 (nexus-jypmj.1.8): per-stream corpus counts, the reducer input by stream
+            # and collection, and the deterministic source and scope checks. Envelope and logs only
+            # until Phase 3 persists a run summary. Always present; None when no retrieval ran
+            # (an error before the plan, a plan-miss refusal).
+            "evidence_diagnostics": _diagnostics,
         }
 
     # nexus-f9kxd: single emitter for every error return. The tool contract
@@ -11140,6 +12026,7 @@ async def nx_answer(
                     success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -11358,6 +12245,7 @@ async def nx_answer(
                         matched_confidence=matches[0].confidence if matches else None,
                         step_count=0, final_text=f"Planner error: {exc}",
                         step_records=[], duration_ms=elapsed_ms, trace=trace,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -11657,6 +12545,7 @@ async def nx_answer(
         try:
             from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred; matches this module's convention
             from nexus.plans.runner import (  # noqa: PLC0415 — deferred; matches this module's convention
+                PlanRunStepRefError,
                 PlanRunUnresolvedVarError,
                 resolve_step_bindings,
             )
@@ -11713,6 +12602,7 @@ async def nx_answer(
                             duration_ms=elapsed_ms, trace=trace, success=False,
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
+                            planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -11731,7 +12621,7 @@ async def nx_answer(
                     default_bindings=best.default_bindings or {},
                     caller_bindings=step_bindings,
                 )
-            except PlanRunUnresolvedVarError as exc:
+            except (PlanRunUnresolvedVarError, PlanRunStepRefError) as exc:
                 # nexus-pucte: this fast path bypasses plan_run (and its
                 # pre-dispatch _validate_var_refs check) entirely by
                 # design; resolve_step_bindings now runs the same check
@@ -11739,12 +12629,22 @@ async def nx_answer(
                 # handling immediately above — refuse loudly rather than
                 # let a $var with no default and no caller value reach
                 # query() as a literal token string.
+                # nexus-jypmj.4: it also raises PlanRunStepRefError for a
+                # $stepN.field in the step's args (inside other text, or a
+                # reference to a step that never ran); same refusal.
                 elapsed_ms = int((time.monotonic() - start) * 1000)
-                _log.warning(
-                    "nx_answer_single_query_unresolved_var",
-                    plan_id=best.plan_id, plan_name=best.name,
-                    var_name=exc.var_name, confidence=best.confidence,
-                )
+                if isinstance(exc, PlanRunStepRefError):
+                    _log.warning(
+                        "nx_answer_single_query_step_ref",
+                        plan_id=best.plan_id, plan_name=best.name,
+                        ref=exc.ref, confidence=best.confidence,
+                    )
+                else:
+                    _log.warning(
+                        "nx_answer_single_query_unresolved_var",
+                        plan_id=best.plan_id, plan_name=best.name,
+                        var_name=exc.var_name, confidence=best.confidence,
+                    )
                 try:
                     with _t2_ctx() as db:
                         _nx_answer_record_complete(
@@ -11754,6 +12654,7 @@ async def nx_answer(
                             duration_ms=elapsed_ms, trace=trace, success=False,
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
+                            planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -11765,7 +12666,80 @@ async def nx_answer(
             # query()'s bare "knowledge" default -- the degenerate class A
             # listings of the RDR-200 Phase 1b gate (q06/q08/q19).
             from nexus.plans.runner import _PLAN_STEP_DEFAULT_CORPUS  # noqa: PLC0415 — deferred; runner is heavy and this branch is rare
-            corpus = step_args.get("corpus") or _PLAN_STEP_DEFAULT_CORPUS
+            # RDR-232 section 2a (nexus-jypmj.1.3): this fast path bypasses
+            # plan_run, so the caller's scope is applied to the step's corpus
+            # here, by the same rule (nexus.plans.evidence.narrow_corpus). A
+            # corpus-prefix or collection scope narrows ``corpus`` and is NOT
+            # passed as ``subtree`` (query() rejects a non-tumbler subtree as an
+            # unknown owner). A catalog-subtree scope is a filter: it rides ``subtree``
+            # whatever the plan's corpus (none, ``all`` or a list), exactly as the
+            # runner sends it to a ``query`` step (nexus.plans.evidence.narrow_subtree,
+            # nexus-jypmj.1.16), and a document-depth address is not passed at all. A
+            # conflict skips the step: the no-match notice names it and query() is
+            # never called.
+            from nexus.plans.evidence import ScopeConstraint, narrow_corpus, narrow_subtree  # noqa: PLC0415 — deferred; matches this module's convention
+
+            _single_query_fast_path = True
+            _fast_scope = ScopeConstraint.parse(scope)
+            _fast_subtree = ""
+            if _fast_scope.kind == "subtree":
+                _fast_narrowing, _fast_subtree = narrow_subtree(
+                    step_args.get("corpus") or None, _fast_scope, tool="query", takes_subtree=True,
+                )
+            else:
+                _fast_narrowing = narrow_corpus(step_args.get("corpus") or None, _fast_scope)
+            if _fast_scope.kind != "none":
+                _scope_diagnostics.append(
+                    _fast_narrowing.to_diagnostic(step_index=0, tool="query")
+                )
+            _fast_conflict = _fast_narrowing.conflict
+            if _fast_conflict:
+                _log.warning(
+                    "nx_answer_single_query_scope_conflict",
+                    plan_id=best.plan_id, plan_corpus=_fast_narrowing.plan_corpus,
+                    caller_scope=scope,
+                )
+                no_match = (
+                    f"No matching evidence found for {question!r} in scope {scope!r}. "
+                    f"The plan's one retrieval step was skipped (plan_id={best.plan_id}); "
+                    f"{_nx_answer_scope_conflict_sentence(_scope_diagnostics)} — pass a scope "
+                    "the plan's corpus covers, or use search/query directly."
+                )
+            corpus = _fast_narrowing.corpus or _PLAN_STEP_DEFAULT_CORPUS
+            # nexus-jypmj.1.18: the runner's owner narrowing, applied to the fast path's one corpus. A
+            # corpus left with no collection of the owner skips the query, like a scope conflict.
+            import asyncio  # noqa: PLC0415 — stdlib, branch-local
+            from nexus.plans.owner_narrowing import OWNERS_BINDING, narrow_args_by_owner  # noqa: PLC0415 — deferred; matches this module's convention
+
+            _fast_owner_marker: "dict[str, Any] | None" = None
+            if not _fast_conflict:
+                # The corpus expansion can be a cold T3 listing: off the event loop, like this call's other
+                # blocking catalog reads (a copy of the context goes with it).
+                _fast_owner_args, _fast_owner = await asyncio.to_thread(
+                    narrow_args_by_owner, {"corpus": corpus}, _caller_run.get(OWNERS_BINDING),
+                )
+                if _fast_owner is not None:
+                    _scope_diagnostics.append(_fast_owner.to_diagnostic(step_index=0, tool="query"))
+                    if _fast_owner.conflict:
+                        _fast_conflict = True
+                        _log.warning(
+                            "nx_answer_single_query_owner_conflict",
+                            plan_id=best.plan_id, plan_corpus=corpus, owners=list(_fast_owner.owners),
+                        )
+                        _fast_owner_marker = {
+                            "step_index": 0, "tool": "query", "plan_corpus": corpus,
+                            "caller_scope": _fast_owner.scope.value, "scope_kind": "owner",
+                            "owners": list(_fast_owner.owners),
+                        }
+                        no_match = (
+                            f"No matching evidence found for {question!r}. The plan's one retrieval step was "
+                            f"skipped (plan_id={best.plan_id}); "
+                            f"{_nx_answer_scope_conflict_sentence(_scope_diagnostics)} — name an owner whose "
+                            "collections the plan's corpus covers, or use search/query directly."
+                        )
+                    else:
+                        corpus = str(_fast_owner_args["corpus"])
+            fast_subtree = _fast_subtree
             try:
                 limit = int(step_args.get("limit", 10))
             except (TypeError, ValueError):
@@ -11782,14 +12756,17 @@ async def nx_answer(
             # ``result_text`` (doubling the T3 round-trip) even though
             # the structured envelope already contains enough to
             # synthesize a result summary.
-            if structured:
+            if _fast_conflict:
+                chunks = []
+                result_text = no_match
+            elif structured:
                 # GH #1523 (nexus-hfflc): the caller's scope is a catalog
                 # subtree filter and rode only the plan-run path as the
                 # _nx_scope binding; this fast path dropped it and answered
                 # from every collection. Pass it through as query()'s own
                 # subtree so both paths honour the same filter.
                 q_struct = query(question=q, corpus=corpus, limit=limit, structured=True,
-                                 subtree=scope or "")
+                                 subtree=fast_subtree)
                 chunks: list[dict] = []
                 if isinstance(q_struct, dict):
                     ids = q_struct.get("ids", [])
@@ -11833,7 +12810,7 @@ async def nx_answer(
                 else:
                     result_text = "No results."
             else:
-                result_text = query(question=q, corpus=corpus, limit=limit, subtree=scope or "")
+                result_text = query(question=q, corpus=corpus, limit=limit, subtree=fast_subtree)
                 chunks = []
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -11849,12 +12826,38 @@ async def nx_answer(
                         matched_confidence=best.confidence, step_count=1,
                         final_text=str(result_text)[:2000], step_records=[],
                         duration_ms=elapsed_ms, trace=trace,
-                        success=not _nx_answer_text_is_empty(str(result_text)),
+                        # a scope conflict is the caller's error: the run counts no outcome
+                        success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
+            if structured or _fast_conflict:
+                # nexus-jypmj.1.8: the fast path's one query is the vector stream; it has no reducer. A text-mode
+                # call ran query() without its structured output, so its references are unobserved and no event
+                # is logged for it (a conflict needs none: nothing ran, and the log carries it).
+                _set_evidence_inputs(
+                    SimpleNamespace(
+                        steps=[
+                            {"ids": [], "tumblers": [], "scope_conflict": _fast_owner_marker or {
+                                "step_index": 0, "tool": "query", "plan_corpus": _fast_narrowing.plan_corpus,
+                                "caller_scope": scope, "scope_kind": _fast_scope.kind}}
+                            if _fast_conflict else {
+                                "ids": [c["id"] for c in chunks],
+                                "chunk_collections": [c["collection"] for c in chunks],
+                                "chunk_text_hash": [c["chash"] for c in chunks],
+                            }
+                        ],
+                        resolved_step_args=[],
+                    ),
+                    best.plan_json, best.plan_id, reducer_expected=False,
+                )
+            if _fast_conflict:
+                return _error_result(
+                    no_match, shape="no_evidence", plan_id=best.plan_id, step_count=1, chunks=chunks,
+                )
             return _result(
                 str(result_text),
                 plan_id=best.plan_id,
@@ -11872,6 +12875,7 @@ async def nx_answer(
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -11894,8 +12898,9 @@ async def nx_answer(
     # ── Step 4: execute plan ─────────────────────────────────────────────
     # nexus-zs1d Phase 1: propagate caller-supplied scope as the
     # ``_nx_scope`` binding so retrieval steps in library-matched plans
-    # honour the caller's corpus intent. Plans that pin their own corpus
-    # still win; this only fills in the gap when a plan is agnostic.
+    # honour the caller's corpus intent. RDR-232 section 2a: a corpus-prefix or
+    # collection scope narrows a plan-declared corpus (a conflict skips the
+    # step) and fills in when the plan declares none.
     run_bindings = dict(_caller_run)
 
     # Auto-alias the question text into any required binding the plan
@@ -11945,6 +12950,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
             pass
@@ -11964,6 +12970,13 @@ async def nx_answer(
     # degrade to "Error during plan execution" — exactly the "changed
     # default behavior" this parameter must not cause.
     _plan_run_kwargs: dict[str, Any] = {}
+    # RDR-232 (nexus-jypmj.1.6): the reserved primary stream, passed only when a named source
+    # resolved and yielded evidence (the same "only pass when set" rule as the kwargs below).
+    # nexus-jypmj.1.7: the resolved RDR's T2 lifecycle records ride the same stream, ahead of the chunks.
+    _lifecycle = await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
+    _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle, deadline=deadline)
+    if _reserved_stream is not None:
+        _plan_run_kwargs["reserved_stream"] = _reserved_stream
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline
     # RDR-196 .p3c (nexus-nyry9.21) D5: same "only pass when set"
@@ -12023,8 +13036,12 @@ async def nx_answer(
                 _continuation_engaged = True
                 _plan_run_kwargs["continuation_cut_at_step"] = _cut.cut_at_step
 
+    async def _plan_run_recorded(*args: Any, **kwargs: Any) -> Any:
+        with reducer_input_scope(_reducer_recorder):
+            return await _plan_run(*args, **kwargs)
+
     try:
-        result = await _plan_run(best, run_bindings, **_plan_run_kwargs)
+        result = await _plan_run_recorded(best, run_bindings, **_plan_run_kwargs)
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
@@ -12052,6 +13069,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -12074,6 +13092,8 @@ async def nx_answer(
     _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
     if not isinstance(_dropped_reduce_steps, list):
         _dropped_reduce_steps = []
+    _set_scope_diagnostics(result)
+    _set_evidence_inputs(result, best.plan_json, best.plan_id)
     # nexus-vply6 fix round 2 (coordinator follow-up, "never silent" for
     # the person reading the answer): a retrieval step's own structured
     # output carries an additive "warnings" list when
@@ -12201,12 +13221,17 @@ async def nx_answer(
             from nexus.plans.runner import merge_bindings  # noqa: PLC0415 — rare/branch-local path
 
             _continuation_merged = merge_bindings(best.default_bindings, run_bindings)
-            _continuation_envelope = assemble_continuation_envelope(
-                cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
-                step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
-                prefix_may_redispatch=_prefix_may_redispatch,
-                prefix_redispatch_step_count=_prefix_redispatch_step_count,
-            )
+            # nexus-jypmj.1.6: the continuation re-runs the runner's hydration, so it merges the
+            # same reserved stream and the caller-side reduction sees the same evidence.
+            from nexus.plans.reserved_stream import reserved_scope  # noqa: PLC0415 — rare/branch-local path
+
+            with reserved_scope(_reserved_stream), reducer_input_scope(_reducer_recorder):
+                _continuation_envelope = assemble_continuation_envelope(
+                    cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
+                    step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
+                    prefix_may_redispatch=_prefix_may_redispatch,
+                    prefix_redispatch_step_count=_prefix_redispatch_step_count,
+                )
         except Exception as exc:  # noqa: BLE001 — a broken reconstruction must never strand a call whose prefix already stopped short of the suffix — falls back exactly like an assembly-returns-None case
             _log.warning(
                 "nx_answer_continuation_envelope_assembly_failed",
@@ -12246,6 +13271,7 @@ async def nx_answer(
                         step_count=len(result.steps),
                         final_text=_handoff_text, step_records=_result_step_records,
                         duration_ms=_continuation_elapsed_ms, trace=trace,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -12291,7 +13317,7 @@ async def nx_answer(
         _continuation_fallback_kwargs = dict(_plan_run_kwargs)
         _continuation_fallback_kwargs.pop("continuation_cut_at_step", None)
         try:
-            result = await _plan_run(best, run_bindings, **_continuation_fallback_kwargs)
+            result = await _plan_run_recorded(best, run_bindings, **_continuation_fallback_kwargs)
         except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller — mirrors the primary plan_run call's own except-arm above
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log.error("nx_answer_plan_run_error", plan_id=best.plan_id, error=str(exc))
@@ -12308,6 +13334,7 @@ async def nx_answer(
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
+                        planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -12328,6 +13355,8 @@ async def nx_answer(
         _dropped_reduce_steps = getattr(result, "dropped_reduce_steps", None)
         if not isinstance(_dropped_reduce_steps, list):
             _dropped_reduce_steps = []
+        _set_scope_diagnostics(result)
+        _set_evidence_inputs(result, best.plan_json, best.plan_id)
         _budget_response = _budget_exhausted_response(result)
         if _budget_response is not None:
             return _budget_response
@@ -12395,7 +13424,12 @@ async def nx_answer(
     # (naming the scope so a malformed/over-narrow scope is visible)
     # instead of the misleading synthesis. Fires BEFORE plan-grow so we
     # never persist an ad-hoc plan that produced no evidence.
-    if _nx_answer_is_empty_retrieval(result.steps):
+    # RDR-232 (nexus-jypmj.1.3): when the zero is partly or wholly the caller's
+    # scope contradicting the plan's corpus, the no-match text below says so (it
+    # is also the telemetry row's final_text); `_result` then adds no notice line.
+    _conflict_part = _nx_answer_scope_conflict_sentence(_scope_diagnostics)
+    _conflict_part = f"; {_conflict_part}" if _conflict_part else ""
+    if _nx_answer_is_empty_retrieval(result.steps) and not _nx_answer_reserved_stream_is_evidence(_reserved_stream):
         _log.info(
             "nx_answer_empty_retrieval_guard",
             plan_id=best.plan_id,
@@ -12429,8 +13463,8 @@ async def nx_answer(
             + (f" in scope {scope!r}" if scope else "")
             + f". The plan's retrieval steps returned zero results "
             f"(plan_id={best.plan_id}, basis: "
-            f"{_render_zero_evidence_step_basis_text(resolved_step_args=getattr(result, 'resolved_step_args', None), plan_json=best.plan_json)}) — "
-            "rephrase the question, correct/widen the scope, or use "
+            f"{_render_zero_evidence_step_basis_text(resolved_step_args=getattr(result, 'resolved_step_args', None), plan_json=best.plan_json)})"
+            f"{_conflict_part} — rephrase the question, correct/widen the scope, or use "
             "search/query directly."
         )
         try:
@@ -12445,9 +13479,11 @@ async def nx_answer(
                     matched_confidence=best.confidence,
                     step_count=len(result.steps),
                     final_text=no_match[:2000], step_records=_result_step_records,
-                    duration_ms=elapsed_ms, trace=trace, success=False,
+                    duration_ms=elapsed_ms, trace=trace,
+                    success=_nx_answer_empty_retrieval_outcome(result.steps),
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -12511,6 +13547,7 @@ async def nx_answer(
                     duration_ms=elapsed_ms, trace=trace, success=False,
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
+                    planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the notice must still surface
             pass
@@ -12556,7 +13593,10 @@ async def nx_answer(
     # the return; it stays 0 (the envelope's "no library row" sentinel) when
     # nothing was saved (ttl 0, a save failure, a library-matched run).
     _saved_grown_plan_id = 0
-    if best.plan_id == 0:
+    # RDR-232 (nexus-jypmj.1.8): a reserved stream can carry an answer past the empty-retrieval guard above, but
+    # that is the caller's evidence, not the plan's. A plan whose own retrieval steps found nothing is still
+    # never grown (nexus-yg49g).
+    if best.plan_id == 0 and not _nx_answer_is_empty_retrieval(result.steps):
         ttl_days = _load_ad_hoc_ttl()
         if ttl_days > 0:
             try:
@@ -12677,6 +13717,7 @@ async def nx_answer(
                 duration_ms=elapsed_ms, trace=trace, success=True,
                 composite_supported_at_start=composite_supported_at_start,
                 early_bump_fired=early_bump_fired,
+                planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
             ),
             op="record_run",
         )

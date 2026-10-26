@@ -102,13 +102,30 @@ _COST_EPSILON_REL = 0.005
 _COST_EPSILON_ABS_FLOOR = 1e-6
 
 
-def _costs_agree(run_cost: "float | None", step_sum: "float | None") -> bool:
+def _costs_agree(
+    run_cost: "float | None", step_sum: "float | None", *, planner_share_allowed: bool = False,
+) -> bool:
     """Whether a row's own ``cost_usd`` and the sum of its step costs
     agree within the relative/sub-cent epsilon. Both ``None`` (unknown vs
     unknown) trivially agree; exactly one ``None`` never agrees.
+
+    *planner_share_allowed* (an inline-planned run, ``plan_id`` 0; nexus-jypmj.1.20): the run's
+    ``cost_usd`` also carries the planner dispatch's own cost, which is no step's, so a run cost
+    at or above the step sum agrees, and a known run cost agrees with no known step cost. A run
+    cost below its steps is still a drop.
+
+    The allowance is one-sided on purpose (nexus-jypmj.4): the planner's own cost is not stored, so
+    ``run_cost - step_sum`` cannot be told from an over-count and no upper bound on it is sound.
+    Catching an over-count needs ``planner_cost_usd`` persisted on the run, a stored-run schema
+    change that was ruled out for this bead.
     """
     if run_cost is None and step_sum is None:
         return True
+    if planner_share_allowed and run_cost is not None:
+        if step_sum is None:
+            return True
+        if run_cost >= step_sum:
+            return True
     if run_cost is None or step_sum is None:
         return False
     epsilon = max(
@@ -652,7 +669,7 @@ def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
         plan_key = str(plan_id) if plan_id is not None else "fallback"
         run_cost = row.get("cost_usd")
         step_sum = _row_step_cost_sum(row)
-        if not _costs_agree(run_cost, step_sum):
+        if not _costs_agree(run_cost, step_sum, planner_share_allowed=plan_id == 0):
             violations.append({
                 "id": row.get("id"), "run_cost_usd": run_cost,
                 "step_cost_sum_usd": step_sum,

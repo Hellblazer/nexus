@@ -104,6 +104,7 @@ def test_previously_missing_code_extensions(filename: str):
     "page.htm",
     "styles.css",
     "logo.svg",
+    "diagram.drawio",
     "run.cmd",
     "build.bat",
     "deploy.ps1",
@@ -470,3 +471,104 @@ def test_the_repo_bundle_itself_is_never_prose():
         pytest.skip("archive bundle not present in this checkout")
     assert classify_file(bundle) is ContentClass.SKIP
     assert looks_like_binary_content(bundle)
+
+
+# -- nexus-5j8fp: whitespace-only text is never chunked, so the indexer
+# must not register a document for it (nexus-rqsh1 invariant, extended
+# from zero-byte to whitespace-only). ---------------------------------
+
+
+class TestIsWhitespaceOnlyText:
+    @pytest.mark.parametrize("payload", [b"\n", b" ", b"\r\n", b"\n\n\t  \n", b"  \n" * 100])
+    def test_whitespace_only_file_is_whitespace_only(self, tmp_path: Path, payload: bytes):
+        from nexus.classifier import is_whitespace_only_text
+        p = tmp_path / "ws.py"
+        p.write_bytes(payload)
+        assert is_whitespace_only_text(p) is True
+
+    def test_zero_byte_file_is_not_this_guards_case(self, tmp_path: Path):
+        """Zero-byte files have their own earlier guard; this one reports
+        False so the two reasons stay distinguishable in the skip log."""
+        from nexus.classifier import is_whitespace_only_text
+        p = tmp_path / "empty.py"
+        p.write_bytes(b"")
+        assert is_whitespace_only_text(p) is False
+
+    @pytest.mark.parametrize("payload", [b"x", b"\n# c\n", b" \n a \n", b"\xef\xbb\xbf"])
+    def test_any_visible_character_is_text(self, tmp_path: Path, payload: bytes):
+        from nexus.classifier import is_whitespace_only_text
+        p = tmp_path / "real.py"
+        p.write_bytes(payload)
+        assert is_whitespace_only_text(p) is False
+
+    def test_binary_or_undecodable_content_is_not_whitespace_only(self, tmp_path: Path):
+        """Binary has its own guard (looks_like_binary_content); a NUL or an
+        invalid byte must never read as 'blank'."""
+        from nexus.classifier import is_whitespace_only_text
+        nul = tmp_path / "nul.dat2"
+        nul.write_bytes(b"\x00\x00")
+        bad = tmp_path / "bad.dat2"
+        bad.write_bytes(b" \xff \n")
+        assert is_whitespace_only_text(nul) is False
+        assert is_whitespace_only_text(bad) is False
+
+    def test_file_over_the_cap_is_never_read(self, tmp_path: Path):
+        """The cap bounds the read: a blank file larger than max_bytes is
+        left to the normal path rather than slurped."""
+        from nexus.classifier import is_whitespace_only_text
+        p = tmp_path / "big_blank.py"
+        p.write_bytes(b" " * 5000)
+        assert is_whitespace_only_text(p, max_bytes=4096) is False
+        assert is_whitespace_only_text(p, max_bytes=8192) is True
+
+    def test_missing_file_is_false(self, tmp_path: Path):
+        from nexus.classifier import is_whitespace_only_text
+        assert is_whitespace_only_text(tmp_path / "nope.py") is False
+
+    def test_a_file_that_grew_between_stat_and_read_is_left_to_the_normal_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """stat reports a small size but the read returns more than max_bytes
+        (the file grew in between): the post-read length check must refuse it
+        rather than judge a truncated prefix as blank."""
+        from types import SimpleNamespace
+
+        from nexus.classifier import is_whitespace_only_text
+
+        p = tmp_path / "grew.py"
+        p.write_bytes(b" " * 5000)
+        real_stat = type(p).stat
+
+        def fake_stat(self, *a, **k):
+            if self == p:
+                return SimpleNamespace(st_size=10)
+            return real_stat(self, *a, **k)
+
+        monkeypatch.setattr(type(p), "stat", fake_stat)
+        assert is_whitespace_only_text(p, max_bytes=4096) is False
+        # Control: with the cap above the real size the same file is blank, so
+        # the False above is the post-read length check and nothing else.
+        assert is_whitespace_only_text(p, max_bytes=8192) is True
+
+    @pytest.mark.parametrize("suffix", [".py", ".md", ".txt"])
+    @pytest.mark.parametrize(
+        "text",
+        [" ", "\u0085", "　", "\x1c", " 　\n", " x", "\x1cz\n", "﻿"],
+    )
+    def test_guard_agrees_with_the_chunker_on_unicode_whitespace(
+        self, tmp_path: Path, suffix: str, text: str,
+    ):
+        """The guard must skip exactly the files the chunking path yields no
+        non-blank chunk for: chunk_file followed by the ``d and d.strip()``
+        filter code_indexer and prose_indexer apply before embedding."""
+        from nexus.chunker import chunk_file
+        from nexus.classifier import is_whitespace_only_text
+
+        p = tmp_path / f"sample{suffix}"
+        p.write_bytes(text.encode("utf-8"))
+        chunks = chunk_file(p, p.read_text(encoding="utf-8"))
+        chunkable = any(c["text"] and c["text"].strip() for c in chunks)
+        assert is_whitespace_only_text(p) is (not chunkable), (
+            f"{text!r}{suffix}: guard and chunker disagree "
+            f"(chunker yields {len(chunks)} chunk(s))"
+        )

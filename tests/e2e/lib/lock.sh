@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# tests/e2e/lib/lock.sh — POSIX-mkdir-based atomic lock primitive.
+# tests/e2e/lib/lock.sh — directory-lock primitive (mv-claim, not mkdir-claim).
 # RDR-184 P0.1 (nexus-ccs9v.1). Shared across e2e harnesses that guard a
 # fixed, singleton resource (docker tag, sandbox dir, tmux session name) —
 # per the "daemon-lifecycle fixes land in the shared primitive, never one
 # tier's copy" convention (AGENTS.md), this is the ONE lock helper, not a
 # per-harness copy.
 #
-# WHY mkdir, not flock: `flock` is absent on darwin (RDR-184 finding 3),
-# the primary dev platform for this repo. `mkdir <path>` is POSIX-atomic on
-# every filesystem this repo targets — verified live on darwin AND
-# debian:trixie-slim (finding 3) — and needs no external binary at all.
+# WHY no flock: `flock` is absent on darwin (RDR-184 finding 3), the primary
+# dev platform for this repo. The primitive needs no external binary beyond
+# mkdir and mv. mkdir(1) is NOT the claim: it is atomic on darwin and GNU
+# coreutils (verified live on darwin AND debian:trixie-slim, finding 3), but
+# uutils coreutils 0.8.0 (Ubuntu 26.04, chas) reports the EEXIST of a lost race
+# as success (nexus-bo01z, nexus-x8sk8). So mkdir only makes a pid-unique
+# STAGING directory; the claim is the `mv` of that fully populated directory
+# onto the lock path, plus the pid readback after it (ACQUIRE-PATH ATOMICITY).
 #
 # STALE-LOCK RECLAIM: mkdir gives no auto-release on crash, so a lockdir
 # left behind by a dead holder must be detected and reclaimed rather than
@@ -259,6 +263,10 @@ lock_acquire() {
         # race in the single-statement gap, since a nesting mv still
         # exits 0 and must not be trusted blindly.
         fresh="$lockdir.fresh.$$"
+        # This mkdir picks a pid-unique staging name; it is NOT the claim, so
+        # mkdir(1) being non-exclusive under a race (uutils coreutils 0.8.0,
+        # nexus-x8sk8) cannot admit a second holder. The claim is the
+        # `mv "$fresh" "$lockdir"` below plus the pid readback after it.
         if mkdir "$fresh" 2>/dev/null; then
             printf '%s\n' "$$" >"$fresh/pid"
             _lock_start_token "$$" >"$fresh/start_token"

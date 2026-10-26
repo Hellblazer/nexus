@@ -49,13 +49,18 @@ import os as _os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from dataclasses import dataclass, field, replace as _dc_replace
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import structlog
 
 from nexus import call_deadline
 from nexus.plans.match import Match
+from nexus.plans.owner_narrowing import OWNERS_BINDING
+
+if TYPE_CHECKING:
+    from nexus.plans.evidence import CorpusNarrowing
+    from nexus.plans.owner_narrowing import OwnerNarrowing
 
 _log = structlog.get_logger(__name__)
 
@@ -97,6 +102,7 @@ __all__ = [
     "PlanRunUnresolvedVarError",
     "StepRecord",
     "ToolDispatcher",
+    "find_embedded_step_ref",
     "merge_bindings",
     "plan_run",
     "resolve_step_bindings",
@@ -519,6 +525,22 @@ class PlanResult:
     #: :func:`_discarded_reduce_steps`'s docstring for the "smallest
     #: change that makes the loss visible" rationale.
     dropped_reduce_steps: list[int] = field(default_factory=list)
+    #: RDR-232 Phase 1 (nexus-jypmj.1.3): one dict per corpus-taking retrieval step the caller's
+    #: ``scope`` reached, in step order -- ``{step_index, tool, plan_corpus, caller_scope,
+    #: scope_kind, outcome, resolved_corpus}``. ``outcome`` is a
+    #: :data:`nexus.plans.evidence.NarrowStatus`: ``conflict`` (the step was skipped),
+    #: ``narrowed``, ``within_scope``, ``scope_applied``, ``scope_all``,
+    #: ``subtree_filtered`` (a catalog subtree became the step's own ``subtree`` filter, whatever its
+    #: corpus; nexus-jypmj.1.16), ``subtree_not_applied`` (the subtree could not filter the step, which ran
+    #: as it would without a scope, with a ``detail``) or ``unscoped_collection_pin`` (a step pinned through
+    #: ``collection``/``collections`` keeps today's behaviour). An explicit owner (the
+    #: ``_nx_owners`` binding, nexus-jypmj.1.18) adds one more entry per step with ``scope_kind``
+    #: ``owner`` (the owners and ``removed_collections`` ride along; a ``conflict`` skips the step).
+    #: Empty when the caller gave neither scope nor owner, so an unscoped run reports nothing.
+    scope_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    #: RDR-232 (nexus-jypmj.1.6): what the reserved primary stream did in this run
+    #: (:meth:`ReservedStream.report`); ``None`` when no stream was passed.
+    reserved_report: dict[str, Any] | None = None
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -575,6 +597,12 @@ _RETRIEVAL_TOOLS: frozenset[str] = frozenset(
 #: missing-scope defect rather than the tool simply having no such args.
 _CORPUS_QUERY_TOOLS: frozenset[str] = _RETRIEVAL_TOOLS - {"store_get_many"}
 
+#: The :data:`_CORPUS_QUERY_TOOLS` that take a catalog ``subtree`` filter (RDR-232 section 2a,
+#: nexus-jypmj.1.16). A caller's catalog-subtree scope reaches a step of one of these through that
+#: argument, whatever its corpus; any other retrieval tool runs as before and the step is disclosed.
+#: ``tests/test_rdr232_caller_scope.py`` pins this set to the tools' real signatures.
+_SUBTREE_FILTER_TOOLS: frozenset[str] = frozenset({"query", "search_metadata_scoped"})
+
 #: Args keys that may carry a collection name. The runner extracts
 #: candidates from these to validate the cross-embedding guard, and
 #: skips corpus injection when any of these are populated.
@@ -583,8 +611,12 @@ _COLLECTION_ARG_KEYS: tuple[str, ...] = ("collection", "collections")
 #: Binding key used by ``nx_answer`` to propagate the caller-supplied
 #: ``scope`` parameter through ``plan_run``. Nexus-zs1d Phase 1: gives
 #: the runner a way to honour caller-supplied corpus intent without
-#: requiring plan-library schema changes. Plans that pin their own
-#: corpus still win; this binding only fills in the gap.
+#: requiring plan-library schema changes. RDR-232 section 2a
+#: (nexus-jypmj.1.3): a corpus-prefix or collection scope NARROWS the
+#: corpus a plan declares (a conflict skips the step); it fills in when the
+#: plan declares none. A catalog-subtree scope is never a corpus
+#: (nexus-jypmj.1.16): it filters a step through the tool's ``subtree``
+#: argument (:func:`_apply_caller_scope_to_args`).
 _CALLER_SCOPE_BINDING: str = "_nx_scope"
 
 #: Last-resort ``corpus`` default for a ``search``/``query`` retrieval
@@ -644,8 +676,20 @@ _STEPREF_RE = re.compile(r"^\$step(\d+)\.([A-Za-z_][A-Za-z0-9_]*)$")
 #: carries the chain internally. The KEY string lives in
 #: :mod:`nexus.plans.bundle` (``DEFERRED_REF_KEY``) so a rename or typo
 #: on either side can't silently drop the sentinel (substantive-critic C2).
-from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY  # noqa: E402
+from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY, _extract_tool_name  # noqa: E402
 import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
+from nexus.plans.evidence_diagnostics import (  # noqa: E402
+    active_recorder,
+    note_reducer_input,
+    set_recorder_step,
+)
+from nexus.plans.reserved_stream import (  # noqa: E402
+    EVIDENCE_KEYS as _RESERVED_EVIDENCE_KEYS,
+    ReservedStream,
+    active_reserved_stream,
+    reserved_scope,
+    set_reserved_step,
+)
 
 
 def _is_operator_error(exc: BaseException) -> bool:
@@ -813,6 +857,26 @@ def _rollup_step_usage(entries: list) -> Any:
     )
 
 
+class _StepId(str):
+    """A string that came out of a ``$stepN.ids`` / ``.tumblers`` reference inside a list arg
+    (nexus-jypmj.4). It compares and serialises as the plain string; the type is the provenance, so
+    evidence hydration can tell a chunk id from fetched text that merely looks like one."""
+
+    __slots__ = ()
+
+
+#: Step output fields that hold identifiers, never evidence text.
+_ID_FIELDS: frozenset[str] = frozenset({"ids", "tumblers"})
+
+
+def _is_id_field_ref(item: Any) -> bool:
+    """True when *item* is a whole-value ``$stepN.ids`` / ``$stepN.tumblers`` reference."""
+    if not isinstance(item, str):
+        return False
+    m = _STEPREF_RE.match(item)
+    return m is not None and m.group(2) in _ID_FIELDS
+
+
 def _resolve_value(
     value: Any,
     *,
@@ -845,6 +909,8 @@ def _resolve_value(
                 deferred_step_indices=deferred_step_indices,
             )
             if isinstance(r, list):
+                if _is_id_field_ref(item):
+                    r = [_StepId(x) if isinstance(x, str) else x for x in r]
                 resolved.extend(r)
             else:
                 resolved.append(r)
@@ -922,13 +988,89 @@ def _resolve_value(
     return value
 
 
+#: A ``$stepN.field`` token anywhere in a string (:data:`_STEPREF_RE` is the anchored, whole-value form).
+_EMBEDDED_STEPREF_RE = re.compile(r"\$step\d+\.[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _find_unsubstitutable_step_ref(value: Any, *, in_dict: bool = False) -> str | None:
+    """The first ``$stepN.field`` token in *value* that :func:`_resolve_value` would leave as text.
+
+    It substitutes a string only when the whole string is the one token, and does not look inside a
+    dict at all; lists resolve element-wise. So a token inside a longer string, or anywhere inside a
+    dict (at any depth, whole-value or not), reaches the tool as the literal ``$stepN.field``.
+    """
+    if isinstance(value, str):
+        found = _EMBEDDED_STEPREF_RE.search(value)
+        if found is None or (not in_dict and _STEPREF_RE.match(value)):
+            return None
+        return found.group(0)
+    if isinstance(value, list):
+        children: Any = value
+    elif isinstance(value, dict):
+        children, in_dict = value.values(), True
+    else:
+        return None
+    for child in children:
+        if (token := _find_unsubstitutable_step_ref(child, in_dict=in_dict)) is not None:
+            return token
+    return None
+
+
+def _reject_unsubstitutable_step_refs(raw_args: dict[str, Any], step_index: int | None) -> None:
+    """Fail loud before dispatch on a step arg that holds a ``$stepN.field`` the runner cannot
+    substitute (nexus-jypmj.1.19). Reads the RAW plan args, never the resolved ones: ``$intent``
+    resolves to the caller's question, which may itself contain ``$step`` text."""
+    for key, val in raw_args.items():
+        token = _find_unsubstitutable_step_ref(val)
+        if token is not None:
+            where = "a step" if step_index is None else f"step {step_index + 1}"
+            raise PlanRunStepRefError(
+                ref=token,
+                reason=(
+                    f"{where} arg {key!r} holds it inside other text or an object, where it is "
+                    "not substituted; an arg is exactly one $stepN.<field> reference or a list of them"
+                ),
+            )
+
+
+def find_embedded_step_ref(plan: "str | dict[str, Any] | None") -> PlanRunStepRefError | None:
+    """The first unsubstitutable ``$stepN.field`` in a whole plan, as the error ``plan_run`` would
+    raise for it, else ``None`` (nexus-jypmj.4).
+
+    The pre-run form of :func:`_reject_unsubstitutable_step_refs`, which it calls on each step's raw
+    args: ``plan_save``, the plan matcher, ``nx plan hygiene`` and the inline planner's output all
+    ask it rather than carry a second copy of the rule. *plan* is the ``plan_json`` text or its
+    decoded mapping. Anything that is not a plan with a ``steps`` list of mappings returns ``None``:
+    shape problems belong to the schema validator, not to this scan.
+    """
+    if isinstance(plan, str):
+        try:
+            plan = json.loads(plan)
+        except (TypeError, ValueError):
+            return None
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    if not isinstance(steps, list):
+        return None
+    for index, step in enumerate(steps):
+        args = step.get("args") if isinstance(step, dict) else None
+        if not isinstance(args, dict):
+            continue
+        try:
+            _reject_unsubstitutable_step_refs(args, index)
+        except PlanRunStepRefError as exc:
+            return exc
+    return None
+
+
 def _resolve_args(
     args: dict[str, Any],
     *,
     bindings: dict[str, Any],
     step_outputs: list[dict[str, Any]],
     deferred_step_indices: set[int] | None = None,
+    step_index: int | None = None,
 ) -> dict[str, Any]:
+    _reject_unsubstitutable_step_refs(args, step_index)
     return {
         key: _resolve_value(
             val, bindings=bindings, step_outputs=step_outputs,
@@ -1158,37 +1300,171 @@ def _apply_caller_scope_to_args(
     args: dict[str, Any],
     *,
     bindings: dict[str, Any],
-) -> dict[str, Any]:
-    """Return *args* with caller-supplied scope forwarded as ``corpus``
-    when the plan step is corpus-agnostic (nexus-zs1d Phase 1).
+) -> tuple[dict[str, Any], "CorpusNarrowing | None"]:
+    """Apply the caller's ``scope`` (the ``_nx_scope`` binding) to a corpus-taking
+    retrieval step's resolved *args*; returns ``(args, narrowing)``.
 
-    When ``nx_answer`` is invoked with a ``scope`` argument, it is
-    propagated as the ``_nx_scope`` binding. This helper reads that
-    binding and fills in ``args["corpus"]`` for retrieval tools that
-    haven't already pinned one. Behaviour:
+    nexus-zs1d Phase 1 filled ``corpus`` from the scope only when the plan left it
+    unset, so a plan-declared corpus beat the caller. RDR-232 section 2a (nexus-jypmj.1.3)
+    narrows it instead (:func:`nexus.plans.evidence.narrow_corpus`):
 
-      * Only retrieval tools in :data:`_RETRIEVAL_TOOLS` are affected.
-      * Plan-declared ``corpus`` / ``collection`` / ``collections`` win
-        (``_collections_in_args`` covers the latter two); this helper
-        does not overwrite them.
-      * Plan-declared ``scope.taxonomy_domain`` still wins too, because
-        :func:`_apply_scope_to_args` runs first and populates ``corpus``
-        before this helper sees the args.
-      * Empty / missing binding → no-op, existing behaviour preserved.
-        (:func:`_apply_default_corpus_to_args` runs next in the pipeline
-        and fills the remaining gap for ``search``/``query`` steps —
-        this function's own no-op is unchanged.)
+      * Only tools in :data:`_CORPUS_QUERY_TOOLS` are affected (``store_get_many`` takes no
+        corpus; ``traverse`` and operators never did).
+      * The step's corpus here is whatever it has after binding resolution and
+        ``scope.taxonomy_domain`` (:func:`_apply_scope_to_args` runs first). None gives the
+        scope, ``all`` gives the scope, entries under the scope (or a scope under an entry)
+        give the narrower of the two, and no overlap is a ``conflict``: the returned args are
+        the unchanged input and the CALLER skips the step. The step is never run unscoped.
+      * A step pinned through ``collection``/``collections`` keeps today's behaviour (the plan
+        wins) and is reported as ``unscoped_collection_pin``.
+      * A catalog-subtree scope is a filter and never a corpus (nexus-jypmj.1.16; forwarded as
+        ``corpus`` it resolved to no collection), so it does not depend on the step's corpus
+        (none, ``all``, a list). On :data:`_SUBTREE_FILTER_TOOLS` (``query``,
+        ``search_metadata_scoped``) it becomes the step's ``subtree`` argument
+        (``subtree_filtered``) and the corpus stays what it was, or the default when it had none.
+        A tool with no subtree filter runs unchanged and is reported ``subtree_not_applied``; so
+        is a document-depth address (not a subtree filter) and a step that sets its own
+        ``subtree``, which it keeps. :func:`nexus.plans.evidence.narrow_subtree` decides, and the
+        ``single_query`` fast path in ``nx_answer`` calls the same function. A subtree never
+        narrows by owner (nexus-jypmj.1.18).
+      * No scope binding is a no-op and returns ``(args, None)``.
+
+    The narrowing is ``None`` exactly when the scope did not reach the step. The same helper
+    serves ``plan_run``'s isolated path and the continuation path
+    (:func:`nexus.plans.continuation_envelope._compose_shape_b`).
     """
-    if tool not in _RETRIEVAL_TOOLS:
-        return args
+    if tool not in _CORPUS_QUERY_TOOLS:
+        return args, None
     override = bindings.get(_CALLER_SCOPE_BINDING)
     if not override:
-        return args
-    if "corpus" in args or _collections_in_args(args):
-        return args
+        return args, None
+    from nexus.plans.evidence import (  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
+        CorpusNarrowing,
+        ScopeConstraint,
+        narrow_corpus,
+        narrow_subtree,
+    )
+
+    scope = ScopeConstraint.parse(override)
+    if _collections_in_args(args):
+        plan_corpus = args.get("corpus")
+        return args, CorpusNarrowing(
+            "unscoped_collection_pin", plan_corpus or None, plan_corpus or None, scope,
+        )
+    if scope.kind == "subtree":
+        # A subtree is a filter and never a corpus: the step's corpus (none, ``all`` or a list) is left as it is.
+        narrowing, subtree = narrow_subtree(
+            args.get("corpus"), scope, tool=tool, takes_subtree=tool in _SUBTREE_FILTER_TOOLS,
+            own_subtree=str(args.get("subtree") or ""),
+        )
+        out = dict(args)
+        if subtree:
+            out["subtree"] = subtree
+        if narrowing.status == "subtree_filtered" and tool == "search_metadata_scoped" and not out.get("corpus"):
+            # the tool's own corpus default has no rdr; a plan step reads the same default ``query`` does
+            out["corpus"] = _PLAN_STEP_DEFAULT_CORPUS
+        return out, narrowing
+    narrowing = narrow_corpus(args.get("corpus"), scope)
+    if narrowing.conflict:
+        return args, narrowing
     out = dict(args)
-    out["corpus"] = override
-    return out
+    if narrowing.corpus is not None:
+        out["corpus"] = narrowing.corpus
+    return out, narrowing
+
+
+async def _apply_owner_narrowing_to_args(
+    tool: str, args: dict[str, Any], *, bindings: dict[str, Any],
+) -> tuple[dict[str, Any], "OwnerNarrowing | None"]:
+    """Narrow a corpus-taking retrieval step to the request's explicit owners (RDR-232,
+    nexus-jypmj.1.18); returns ``(args, narrowing)``.
+
+    Runs after the section 2a scope narrowing and the default corpus, so it sees the corpus the step
+    would actually search. The owners ride in the ``_nx_owners`` binding (set by ``nx_answer`` only for
+    an explicit, resolved owner qualifier); without it, or for a tool outside
+    :data:`_CORPUS_QUERY_TOOLS`, this is a no-op returning ``(args, None)``. See
+    :func:`nexus.plans.owner_narrowing.narrow_args_by_owner` for the rule; a ``conflict`` is skipped
+    by the caller exactly like a section 2a conflict.
+
+    The corpus expansion reads the collection listing, which on a cold cache is a blocking T3 call, so
+    it runs in a worker thread (a copy of the context goes with it); the no-owner path never leaves
+    the loop.
+    """
+    owners = bindings.get(OWNERS_BINDING)
+    if not owners or tool not in _CORPUS_QUERY_TOOLS:
+        return args, None
+    from nexus.plans.owner_narrowing import narrow_args_by_owner  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
+
+    return await asyncio.to_thread(narrow_args_by_owner, args, owners)
+
+
+def _apply_traversal_policy_to_args(
+    tool: str, args: dict[str, Any], *, bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Give a ``traverse`` step its evidence policy (RDR-232 section 3, nexus-jypmj.1.5).
+
+    Every ``traverse`` step the runner dispatches carries a policy derived from the caller's scope
+    (the ``_nx_scope`` binding; none means no containment) and the step's own link types. A policy
+    the plan declared is replaced, never merged: the plan does not loosen the caller's scope.
+    Any other tool is returned unchanged.
+    """
+    if tool != "traverse":
+        return args
+    from nexus.plans.traversal_policy import derive_policy  # noqa: PLC0415 — deferred: keeps this hot-path module's import light
+
+    return {**args, "policy": derive_policy(
+        args, bindings.get(_CALLER_SCOPE_BINDING), bindings.get(OWNERS_BINDING),
+    )}
+
+
+def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
+    """Tell the reserved stream which plan step is about to hydrate, and which tools produced its
+    evidence args (the ``$stepN`` refs in the step's raw args), so only a producer that keeps or
+    reorders items can be blamed for a missing reserved item. The reducer-input recorder
+    (nexus-jypmj.1.8) is told the step too. No-op without a stream or a recorder."""
+    set_recorder_step(index)
+    if active_reserved_stream() is None:
+        return
+    producers: list[str] = []
+
+    def _walk(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                _walk(item)
+        elif isinstance(value, str) and (m := _STEPREF_RE.match(value)):
+            ref = int(m.group(1)) - 1
+            if 0 <= ref < len(steps):
+                producers.append(_extract_tool_name(steps[ref]))
+
+    raw = steps[index].get("args", {}) or {}
+    for key in _RESERVED_EVIDENCE_KEYS:
+        _walk(raw.get(key))
+    set_reserved_step(index, feeds_from=producers)
+
+
+def _scope_conflict_output(
+    narrowing: "CorpusNarrowing | OwnerNarrowing", *, step_index: int, tool: str,
+) -> dict[str, Any]:
+    """The output of a retrieval step skipped for a scope conflict (RDR-232 S2).
+
+    The empty structured retrieval shape: every key ``query``/``search`` return in structured mode
+    (``hybrid_scores``, ``also_in`` and ``also_in_ids`` included) plus the runner's ``contents``,
+    so a later ``$stepN.<key>`` reference resolves to the empty value and never raises
+    :class:`PlanRunStepRefError`; plus the ``scope_conflict`` marker carrying the plan's corpus
+    and the caller's scope.
+    """
+    return {
+        "ids": [], "tumblers": [], "distances": [], "hybrid_scores": [], "collections": [],
+        "chunk_collections": [], "also_in": [], "also_in_ids": [], "chunk_text_hash": [],
+        "contents": [],
+        "scope_conflict": {
+            "step_index": step_index,
+            "tool": tool,
+            "plan_corpus": narrowing.plan_corpus,
+            "caller_scope": narrowing.scope.value,
+            "scope_kind": narrowing.scope.kind,
+        },
+    }
 
 
 #: Tools eligible for the :func:`_apply_default_corpus_to_args`
@@ -1407,6 +1683,7 @@ def _validate_var_refs(
                     "rejected before any step dispatched"
                 ),
             )
+        _reject_unsubstitutable_step_refs(args, step_index)
         found: set[str] = set()
         for val in args.values():
             _scan_var_refs(val, found)
@@ -1488,6 +1765,31 @@ def _is_tumbler_shaped(value: str) -> bool:
     """True when *value* looks like a catalog document tumbler rather
     than a T3 chunk chash. See :data:`_TUMBLER_ID_RE`."""
     return bool(_TUMBLER_ID_RE.match(value))
+
+
+def _drop_step_ids_from_evidence(
+    values: list[Any], *, tool: str, resolved_tool: str, branch: str,
+) -> list[Any]:
+    """Drop the chunk ids from an evidence list that also holds fetched text (nexus-jypmj.4).
+
+    ``[$step3.contents, $step5.ids]`` flattens to fetched texts and ids. An id is an identifier,
+    not evidence: only the ``ids=`` arg hydrates one, and that needs the paired ``collections`` a
+    flat list no longer has (the default collection would hydrate a code or rdr chash to ""). So a
+    list that mixes texts with ids loses the ids, as the pass-through loses empty strings, and says
+    so. Provenance decides, not shape: only a string :func:`_resolve_value` marked as coming from an
+    ``.ids`` / ``.tumblers`` reference is an id, so fetched text that reads like one ("1.2.3") is
+    kept. A list of ids alone is the plan author's explicit choice and is returned as it is.
+    """
+    ids = [v for v in values if isinstance(v, _StepId)]
+    if not ids or not any(v and not isinstance(v, _StepId) for v in values):
+        return values
+    kept = [v for v in values if not isinstance(v, _StepId)]
+    _log.warning(
+        "evidence_step_ids_dropped",
+        tool=tool, resolved_tool=resolved_tool, branch=branch,
+        dropped=len(ids), kept=len(kept), sample=[str(v)[:24] for v in ids[:3]],
+    )
+    return kept
 
 
 #: nexus-mm5tx follow-up (code-review T2 [24199]): fixed, machine-
@@ -1589,6 +1891,13 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     flat_ids: list[str] = []
     flat_collections: list[str] = []
     owner: list[str] = []
+    # nexus-tko2w (RDR-108): the label of a chunk is a fact about its position in ONE
+    # document. This path reads each document's own manifest, so it has the document: the
+    # row's ``section_type`` is that document's label, where the chunk row's (read below
+    # through store_get_many) is whichever document wrote it last. An entry is ``None`` for a
+    # row written before the manifest carried labels (``labels_written`` false: the hydrated
+    # value decides, as it always did); otherwise the document's own label, "" included.
+    flat_manifest_types: list[str | None] = []
     for doc_id in tumbler_ids:
         if doc_id in excluded_doc_ids:
             # Contributes no chunks -- per_doc[doc_id] stays empty, so
@@ -1612,13 +1921,20 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
             flat_ids.append(row.chash)
             flat_collections.append(row.collection)
             owner.append(doc_id)
+            flat_manifest_types.append(
+                (getattr(row, "section_type", None) or "")
+                if getattr(row, "labels_written", False) else None
+            )
 
     if not flat_ids:
         return {"contents": ["" for _ in tumbler_ids], "missing": list(tumbler_ids)}
 
-    hydrated = mcp_core.store_get_many(
-        ids=flat_ids, collections=flat_collections, structured=True,
-    )
+    # The notes below come from each document's own catalog entry, so the chunk-level
+    # ``source_notes`` (an owner ``resolve_many`` over the same documents) is not asked for.
+    with mcp_core.without_source_notes():
+        hydrated = mcp_core.store_get_many(
+            ids=flat_ids, collections=flat_collections, structured=True,
+        )
     chunk_contents = hydrated.get("contents", []) if isinstance(hydrated, dict) else []
     # nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, Sam's decision 3):
     # ``section_types`` rides the SAME store_get_many call above -- no
@@ -1633,31 +1949,42 @@ def _hydrate_tumbler_ids(tumbler_ids: list[str]) -> dict[str, Any]:
     chunk_section_types = (
         hydrated.get("section_types", []) if isinstance(hydrated, dict) else []
     )
-    # nexus-onn7s: ``source_notes`` rides the same call; a document's note
-    # is its first kept chunk's note, prefixed once on the reassembled
-    # text. Absent or short list degrades to no note, never to a drop.
-    chunk_source_notes = (
-        hydrated.get("source_notes", []) if isinstance(hydrated, dict) else []
-    )
-    if not isinstance(chunk_source_notes, list):
-        chunk_source_notes = []
-
     per_doc: dict[str, list[str]] = {doc_id: [] for doc_id in tumbler_ids}
-    doc_note: dict[str, str] = {}
+    # nexus-onn7s: a document's note is prefixed once on its reassembled text.
+    # nexus-6pfgb.11: it is built from THIS document's own catalog entry, never
+    # from the chunk's ``source_notes`` line: that line speaks for a bare chunk
+    # id, and a chunk two documents share would name the same document (or no
+    # field at all) for both. The collection is the first kept chunk's.
+    doc_collection: dict[str, str] = {}
     for i, (doc_id, content) in enumerate(zip(owner, chunk_contents)):
         if not content:
             continue
-        section_type = chunk_section_types[i] if i < len(chunk_section_types) else ""
+        section_type = flat_manifest_types[i]
+        if section_type is None:
+            section_type = chunk_section_types[i] if i < len(chunk_section_types) else ""
         if section_type == "imports":
             continue
         per_doc[doc_id].append(content)
-        if doc_id not in doc_note and i < len(chunk_source_notes) and chunk_source_notes[i]:
-            doc_note[doc_id] = str(chunk_source_notes[i])
+        doc_collection.setdefault(doc_id, flat_collections[i])
 
-    from nexus.context_annotations import with_source_note  # noqa: PLC0415 — deferred; runner imports stay lazy
+    from nexus.context_annotations import (  # noqa: PLC0415 — deferred; runner imports stay lazy
+        agreed_facts,
+        entry_facts,
+        source_note,
+        with_source_note,
+    )
+
+    def _doc_note(doc_id: str) -> str:
+        # A document the catalog did not resolve (the lookup failed, or it is
+        # gone) gets no note: nothing here may speak for it, and the chunk
+        # rows' values are the last writer's.
+        entry = catalog_entries.get(doc_id) if isinstance(catalog_entries, dict) else None
+        if entry is None:
+            return ""
+        return source_note(agreed_facts([entry_facts(entry)]), collection=doc_collection.get(doc_id, ""))
 
     contents = [
-        with_source_note("\n\n".join(per_doc[doc_id]), doc_note.get(doc_id, ""))
+        with_source_note("\n\n".join(per_doc[doc_id]), _doc_note(doc_id) if per_doc[doc_id] else "")
         for doc_id in tumbler_ids
     ]
     missing = [doc_id for doc_id in tumbler_ids if not per_doc[doc_id]]
@@ -1828,6 +2155,34 @@ def _drop_intent_from_list_args(
     return out
 
 
+def _merge_reserved_explicit_inputs(
+    value: list[Any], args: dict[str, Any], tool: str, resolved_tool: str,
+) -> list[Any]:
+    """Merge the reserved stream ahead of an operator's explicit ``inputs`` list and cap the merged
+    list the way the ``ids`` branch does (RDR-232, nexus-jypmj.1.6).
+
+    The cap runs ONLY when a stream merges (S4): a run without one keeps today's uncapped inputs.
+    A cap that fires sets ``args["_truncation_metadata"]``. Returns *value* unchanged when there
+    is no stream or it has already merged at an earlier step.
+    """
+    rs = active_reserved_stream()
+    if rs is None or not rs.should_merge():
+        return value
+    value = rs.merge(value)
+    if len(value) > _OPERATOR_MAX_INPUTS:
+        rs.note_cap(len(value), _OPERATOR_MAX_INPUTS)
+        _log.warning(
+            "explicit_inputs_overflow_with_reserved_stream",
+            tool=tool, resolved_tool=resolved_tool,
+            input_count=len(value), max_inputs=_OPERATOR_MAX_INPUTS,
+        )
+        args["_truncation_metadata"] = {
+            "truncated": True, "original_count": len(value), "kept_count": _OPERATOR_MAX_INPUTS,
+        }
+        value = value[:_OPERATOR_MAX_INPUTS]
+    return value
+
+
 def _hydrate_operator_args(
     tool: str, args: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
@@ -1849,6 +2204,10 @@ def _hydrate_operator_args(
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+    # RDR-232 (nexus-jypmj.1.20): set once the explicit-``inputs`` pass-through below has merged the
+    # reserved stream and recorded the evidence, so the Pattern A site does not merge it again (a
+    # second merge would count the primary items as deduplicated secondary ones).
+    _evidence_handled = False
 
     # nexus-mm5tx follow-up (code-review T2 [24199]): an EXPLICIT plan
     # step whose tool is literally "store_get_many" is a DIFFERENT code
@@ -1942,10 +2301,23 @@ def _hydrate_operator_args(
                 with_source_note(c, str(notes[i])) if i < len(notes) else c
                 for i, c in enumerate(contents)
             ]
+        # RDR-232 (nexus-jypmj.1.6): the reserved primary stream enters ahead of the plan's own
+        # items, so the positional cap below cuts only secondary ones. A vector hit that is a
+        # reserved chunk (same chash) is dropped; the primary copy keeps its attribution header.
+        _rs = active_reserved_stream()
+        _rs_merge = _rs is not None and _rs.should_merge()
+        if _rs_merge:
+            _rs_dups = [k for k, (cid, c) in enumerate(zip(id_list_raw, contents)) if c and _rs.is_primary_chash(str(cid))]
+            for k in _rs_dups:
+                contents[k] = ""
         non_empty = [c for c in contents if c]
+        if _rs_merge:
+            non_empty = _rs.merge(non_empty, pre_deduped=len(_rs_dups))
         original_count = len(non_empty)
         truncation_metadata: dict[str, Any] | None = None
         if original_count > _OPERATOR_MAX_INPUTS:
+            if _rs_merge:
+                _rs.note_cap(original_count, _OPERATOR_MAX_INPUTS)
             _log.warning(
                 "auto_hydration_overflow",
                 tool=tool, resolved_tool=resolved_tool,
@@ -1976,6 +2348,7 @@ def _hydrate_operator_args(
                 "kept_count": _OPERATOR_MAX_INPUTS,
             }
             non_empty = non_empty[:_OPERATOR_MAX_INPUTS]
+        note_reducer_input(non_empty)  # nexus-jypmj.1.8: reads the final list, changes nothing
         args = {k: v for k, v in args.items() if k not in ("ids", "collections")}
         if resolved_tool == "operator_summarize":
             args.setdefault("content", "\n\n".join(non_empty))
@@ -2015,8 +2388,25 @@ def _hydrate_operator_args(
     # Without this, isolated dispatch of summarize / rank / compare /
     # generate fires with no positional arg and raises TypeError
     # (plan 57 ``find-by-author`` is the canonical repro).
+    # RDR-232 (nexus-jypmj.1.6): ``operator_extract`` takes ``inputs`` as it is, so it is not in
+    # ``_INPUTS_TARGET``; when the plan passed it a list it is still the first evidence-consuming
+    # operator in the ``review-default`` shape (extract, then compare), and merges the stream here.
+    if resolved_tool == "operator_extract" and isinstance(args.get("inputs"), list):
+        args["inputs"] = _drop_step_ids_from_evidence(
+            args["inputs"], tool=tool, resolved_tool=resolved_tool, branch="extract_inputs",
+        )
+    if resolved_tool == "operator_extract" and isinstance(args.get("inputs"), list):
+        _rs = active_reserved_stream()
+        if _rs is not None and _rs.should_merge():
+            args["inputs"] = _merge_reserved_explicit_inputs(
+                [v for v in args["inputs"] if v], args, tool, resolved_tool,
+            )
+    if resolved_tool == "operator_extract" and isinstance(args.get("inputs"), list):
+        note_reducer_input([v for v in args["inputs"] if v])
+
     target_key = _INPUTS_TARGET.get(resolved_tool)
     if target_key and "inputs" in args and target_key not in args:
+        _evidence_handled = True
         value = args.pop("inputs")
         _passthrough_count = len(value) if isinstance(value, list) else (1 if value else 0)
         if isinstance(value, list):
@@ -2036,6 +2426,11 @@ def _hydrate_operator_args(
                     tool=tool, resolved_tool=resolved_tool,
                     original_count=original_count, kept_count=len(value),
                 )
+            value = _drop_step_ids_from_evidence(
+                value, tool=tool, resolved_tool=resolved_tool, branch="inputs_alias",
+            )
+            value = _merge_reserved_explicit_inputs(value, args, tool, resolved_tool)
+            note_reducer_input(value)  # nexus-jypmj.1.8: the explicit-inputs reducer input, after merge and cap
             if target_key == "items":
                 value = json.dumps(value)
         args[target_key] = value
@@ -2047,6 +2442,28 @@ def _hydrate_operator_args(
             args.setdefault("_zero_evidence_text", _no_evidence_result_text(
                 tool=tool, filtered_count=_passthrough_count,
             ))
+
+    # RDR-232 (nexus-jypmj.1.20): the planner's documented Pattern A passes the evidence in the
+    # operator's own arg (``summarize(content=$stepN.contents)``, ``generate(context=...)``,
+    # ``rank(items=...)``), which resolves to a list of fetched texts and reaches the joins below
+    # with no ids and no ``inputs``. It is the same evidence, so it takes the same merge, cap and
+    # reducer-input record. Only a list of strings counts: a string is a condensed prior output
+    # (``$step5.summary``) and a deferred bundle ref is a dict. A run without a stream gets back
+    # the very list it passed in (``_merge_reserved_explicit_inputs`` returns it unchanged).
+    if target_key and not _evidence_handled:
+        _listed = args.get(target_key)
+        if isinstance(_listed, list) and all(isinstance(v, str) for v in _listed):
+            _texts = [v for v in _listed if v]
+            _kept = _drop_step_ids_from_evidence(
+                _texts, tool=tool, resolved_tool=resolved_tool, branch="pattern_a",
+            )
+            if _kept is not _texts:
+                _texts = _kept
+                args[target_key] = _texts
+            _merged = _merge_reserved_explicit_inputs(_texts, args, tool, resolved_tool)
+            note_reducer_input(_merged)
+            if _merged is not _texts:
+                args[target_key] = _merged
 
     if resolved_tool == "operator_summarize" and isinstance(args.get("content"), list):
         args["content"] = "\n\n".join(str(x) for x in args["content"] if x)
@@ -2067,6 +2484,16 @@ def _hydrate_operator_args(
     # f-string in claude_dispatch).
     if resolved_tool == "operator_aggregate" and isinstance(args.get("groups"), list):
         args["groups"] = json.dumps(args["groups"])
+
+    # RDR-232 (nexus-jypmj.1.6, critique observation 13): an operator after the merge step is not
+    # given the stream again; count the reserved items its input no longer holds, so a drop by an
+    # intermediate operator (an unbundled rank) is reported, not silent.
+    _rs = active_reserved_stream()
+    if (
+        _rs is not None and _rs.merged and _rs.merged_step != _rs.current_step
+        and resolved_tool in _OPERATOR_RESOLVED_TOOLS
+    ):
+        _rs.observe(args)
 
     return resolved_tool, args
 
@@ -2377,7 +2804,7 @@ setattr(_default_dispatcher, _SUPPORTS_BUNDLING_ATTR, True)
 # ── Public API ──────────────────────────────────────────────────────────────
 
 
-async def plan_run(
+async def _plan_run_impl(
     match: Match,
     bindings: dict[str, Any] | None = None,
     *,
@@ -2607,6 +3034,8 @@ async def plan_run(
     #: nexus-ivv4d code-review follow-up (T2 [24198]). See
     #: :attr:`PlanResult.resolved_step_args`'s own docstring.
     resolved_step_args: list[dict[str, Any]] = []
+    #: RDR-232 (nexus-jypmj.1.3). See :attr:`PlanResult.scope_diagnostics`.
+    scope_diagnostics: list[dict[str, Any]] = []
     #: RDR-200 .p1c (nexus-4e75w.5): set True the moment the
     #: ``continuation_cut_at_step`` pre-segment check actually stops
     #: dispatch. See ``continuation_cut_at_step``'s own docstring
@@ -2783,6 +3212,9 @@ async def plan_run(
                 tools=_seg_tools,
                 total_steps=len(steps),
             )
+            # RDR-232 (nexus-jypmj.1.6): the reserved stream merges at one plan step; tell it
+            # which one this segment hydrates (the bundle loops below refine it per step).
+            _mark_reserved_step(_seg_indices[0], steps)
 
             if isinstance(seg, OperatorBundleSlice):
                 # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
@@ -2794,7 +3226,7 @@ async def plan_run(
                     b_raw_args = bstep.get("args", {}) or {}
                     b_resolved = _resolve_args(
                         b_raw_args, bindings=merged, step_outputs=step_outputs,
-                        deferred_step_indices=deferred_indices,
+                        deferred_step_indices=deferred_indices, step_index=bi,
                     )
                     # nexus-4jj40: strip a literal $intent from any
                     # items/inputs-shaped list arg before it reaches the
@@ -2810,6 +3242,7 @@ async def plan_run(
                     )
                     # Operators skip _check_embedding_domain / scope / caller-
                     # scope injection — those are retrieval-tool concerns.
+                    _mark_reserved_step(bi, steps)
                     _, b_prepared = _hydrate_operator_args(btool, b_resolved)
                     # RDR-093 S-1: strip the runner-internal truncation
                     # marker so it never leaks into the bundled prompt.
@@ -2858,12 +3291,13 @@ async def plan_run(
                         bundle_plan_indices=list(seg.plan_indices),
                     )
                     for bi in seg.plan_indices:
+                        _mark_reserved_step(bi, steps)
                         bstep = steps[bi]
                         btool = _extract_tool(bstep)
                         b_raw_args = bstep.get("args", {}) or {}
                         b_resolved = _resolve_args(
                             b_raw_args, bindings=merged,
-                            step_outputs=step_outputs,
+                            step_outputs=step_outputs, step_index=bi,
                         )
                         # nexus-4jj40: see the main bundle path's identical
                         # call above -- this is the oversized-bundle,
@@ -3091,7 +3525,7 @@ async def plan_run(
             scope = step.get("scope")
 
             resolved = _resolve_args(
-                raw_args, bindings=merged, step_outputs=step_outputs,
+                raw_args, bindings=merged, step_outputs=step_outputs, step_index=index,
             )
             # nexus-4jj40: strip a literal $intent from any items/inputs-
             # shaped list arg before this step dispatches -- see
@@ -3111,19 +3545,86 @@ async def plan_run(
             )
             # nexus-zs1d Phase 1: caller-supplied scope (from nx_answer's
             # ``scope`` argument, propagated via the ``_nx_scope`` binding)
-            # fills in the corpus when the plan step is agnostic. Runs after
-            # _apply_scope_to_args so plan-declared corpus / taxonomy_domain
-            # always wins.
-            resolved = _apply_caller_scope_to_args(
+            # reaches the corpus. Runs after _apply_scope_to_args so a
+            # taxonomy_domain-derived corpus is narrowed like a declared one.
+            # RDR-232 section 2a (nexus-jypmj.1.3): the same hook now NARROWS a
+            # plan-declared corpus to the caller's scope instead of deferring to it.
+            # A step whose corpus has nothing under the scope is a scope conflict:
+            # it is skipped (never run unscoped) and contributes an empty structured
+            # result plus a ``scope_conflict`` marker, so a later ``$stepN.field``
+            # reference resolves to the empty value.
+            resolved, _narrowing = _apply_caller_scope_to_args(
                 tool, resolved, bindings=merged,
             )
+            if _narrowing is not None:
+                scope_diagnostics.append(
+                    _narrowing.to_diagnostic(step_index=index, tool=tool)
+                )
+                if _narrowing.conflict:
+                    _log.warning(
+                        "nx_answer_scope_conflict_step_skipped",
+                        step_index=index, tool=tool,
+                        plan_corpus=_narrowing.plan_corpus,
+                        caller_scope=_narrowing.scope.value,
+                    )
+                    resolved_step_args.append({
+                        "step_index": index,
+                        "tool": tool,
+                        "corpus": _narrowing.plan_corpus or "",
+                        "query": resolved.get("query") or resolved.get("question") or "",
+                        "skipped": True,
+                    })
+                    step_outputs.append(_scope_conflict_output(
+                        _narrowing, step_index=index, tool=tool,
+                    ))
+                    _log.info(
+                        "nx_answer_step_complete",
+                        kind="isolated_skipped_scope_conflict",
+                        step_indices=_seg_indices,
+                        tools=_seg_tools,
+                        elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    )
+                    continue
             # RDR-200 Phase 1b (nexus-rl59s): last-resort corpus default for
             # a bare search/query step that still has no corpus after plan,
             # scope, AND caller scope all declined to set one. Runs after
             # _apply_caller_scope_to_args so a plan-declared corpus,
             # scope.taxonomy_domain, and a caller's _nx_scope binding all
-            # still win over this fall-through.
+            # take precedence over this fall-through.
             resolved = _apply_default_corpus_to_args(tool, resolved)
+            # RDR-232 (nexus-jypmj.1.18): an explicit owner narrows the corpus to its own project's
+            # collections (knowledge passes). A step left with no collection is skipped like a scope
+            # conflict: empty structured result plus a ``scope_conflict`` marker, never run unscoped.
+            resolved, _owner_narrowing = await _apply_owner_narrowing_to_args(tool, resolved, bindings=merged)
+            if _owner_narrowing is not None:
+                scope_diagnostics.append(_owner_narrowing.to_diagnostic(step_index=index, tool=tool))
+                if _owner_narrowing.conflict:
+                    _log.warning(
+                        "nx_answer_owner_narrowing_step_skipped",
+                        step_index=index, tool=tool, plan_corpus=_owner_narrowing.plan_corpus,
+                        owners=list(_owner_narrowing.owners), detail=_owner_narrowing.detail,
+                    )
+                    resolved_step_args.append({
+                        "step_index": index,
+                        "tool": tool,
+                        "corpus": _owner_narrowing.plan_corpus or "",
+                        "query": resolved.get("query") or resolved.get("question") or "",
+                        "skipped": True,
+                    })
+                    _skipped = _scope_conflict_output(_owner_narrowing, step_index=index, tool=tool)
+                    _skipped["scope_conflict"]["owners"] = list(_owner_narrowing.owners)
+                    step_outputs.append(_skipped)
+                    _log.info(
+                        "nx_answer_step_complete",
+                        kind="isolated_skipped_owner_narrowing",
+                        step_indices=_seg_indices,
+                        tools=_seg_tools,
+                        elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    )
+                    continue
+            # RDR-232 section 3 (nexus-jypmj.1.5): a traverse step carries the evidence policy
+            # derived from the caller's scope, applied inside ``traverse`` before manifest expansion.
+            resolved = _apply_traversal_policy_to_args(tool, resolved, bindings=merged)
             # nexus-h3e2: ``mode: broad`` is an authoring affordance for
             # abstract / community-summary plans whose per-corpus default
             # threshold drops 100% of candidates. Runs last so an explicit
@@ -3143,6 +3644,8 @@ async def plan_run(
                     "tool": tool,
                     "corpus": resolved.get("corpus", ""),
                     "query": resolved.get("query") or resolved.get("question") or "",
+                    # nexus-jypmj.1.16: a catalog-subtree filter the step ran under is part of what it searched.
+                    **({"subtree": resolved["subtree"]} if resolved.get("subtree") else {}),
                 })
 
             # nexus-h33x8.6 a4: an active deadline threads the REMAINING
@@ -3349,4 +3852,40 @@ async def plan_run(
         continuation_cut_applied=continuation_cut_applied,
         resolved_step_args=resolved_step_args,
         dropped_reduce_steps=_dropped_reduce_steps,
+        scope_diagnostics=scope_diagnostics,
     )
+
+
+async def plan_run(
+    match: Match,
+    bindings: dict[str, Any] | None = None,
+    *,
+    dispatcher: ToolDispatcher | None = None,
+    bundle_operators: bool = True,
+    deadline: float | None = None,
+    budget_usd_remaining: float | None = None,
+    continuation_cut_at_step: int | None = None,
+    reserved_stream: ReservedStream | None = None,
+) -> PlanResult:
+    """Execute *match*'s steps; see :func:`_plan_run_impl` for every parameter but one.
+
+    ``reserved_stream`` (RDR-232 Phase 1, nexus-jypmj.1.6): the named source's primary evidence,
+    built by ``nx_answer`` from the resolved sources. Operator hydration merges it ahead of the
+    plan's own inputs at the first operator that consumes retrieved evidence (see
+    :mod:`nexus.plans.reserved_stream`). ``None`` (the default) runs exactly as before and
+    leaves :attr:`PlanResult.reserved_report` ``None``.
+    """
+    if reserved_stream is not None:
+        reserved_stream.reset_run()
+    _recorder = active_recorder()
+    if _recorder is not None:  # nexus-jypmj.1.8: a whole-plan re-run starts from a clean reducer input
+        _recorder.reset_run()
+    with reserved_scope(reserved_stream):
+        result = await _plan_run_impl(
+            match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
+            deadline=deadline, budget_usd_remaining=budget_usd_remaining,
+            continuation_cut_at_step=continuation_cut_at_step,
+        )
+    if reserved_stream is not None:
+        result = _dc_replace(result, reserved_report=reserved_stream.report())
+    return result

@@ -137,6 +137,13 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not verb or not verb.strip():
             raise ValueError("verb required")
+        # RDR-232 (nexus-jypmj.1.2): source, owner and project are the
+        # caller's evidence request on nx_answer, never a plan binding.
+        # default_bindings is its own column, invisible to plan_json
+        # validation, so this shared choke point checks both.
+        from nexus.plans.evidence import check_no_reserved_declarations  # noqa: PLC0415 — deferred, matches this method's imports
+
+        check_no_reserved_declarations(plan_json, default_bindings)
         # nexus-i711w Stage 2 Phase 0: the scope helpers were only RE-EXPORTED
         # by plan_library (they live in nexus.plans.scope), and match-text
         # synthesis now has its own home. Neither import touches a dying module.
@@ -226,6 +233,13 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ``success_count``, ``failure_count``, and ``disabled_at`` verbatim
         from the source row. Re-runs are idempotent.
 
+        Deliberately skips the RDR-232 reserved-name check that
+        :meth:`save_plan` applies (a plan may not declare ``source``,
+        ``owner`` or ``project``): this is the fidelity path, so a row that
+        already declares one is imported as it is. The matcher's own
+        exclusion (``nexus.plans.matcher``) keeps such a row out of
+        matching, whichever path wrote it.
+
         Args:
             created_at: Required ISO-8601 UTC string, e.g. ``"2026-05-15T08:30:00Z"``.
             last_used:  Optional ISO-8601 UTC string or ``None``.
@@ -304,6 +318,9 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ``/v1/plans/import_batch`` in ONE request — the service lands them under
         one tenant transaction. Collapses an N-row leg to ceil(N/batch). Caller
         keeps each batch within the per-write quota. Empty list is a no-op.
+
+        Like :meth:`import_plan`, deliberately skips the RDR-232 reserved-name
+        check (fidelity path); the matcher's exclusion covers imported rows.
         """
         if not rows:
             return 0

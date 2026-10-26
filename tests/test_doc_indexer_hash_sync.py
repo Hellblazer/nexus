@@ -65,19 +65,21 @@ def _content_hash(content: str) -> str:
 def test_unchanged_file_skips_embed(tmp_path: Path) -> None:
     """Second index call with identical content does not call Voyage embed.
 
-    Scenario: col.get() returns metadata with matching content_hash AND
-    embedding_model → staleness check short-circuits, embed is never called.
+    Scenario: the staleness cache (what ``nx index repo`` builds, with the
+    catalog fence's hash overlaid; nexus-3ajpd) holds this document at the
+    same hash AND embedding_model → the check short-circuits and embed is
+    never called. The collection itself is never consulted for a hash.
     """
+    from nexus.indexer_utils import StalenessCache
+
     content = "def hello():\n    return 'world'\n"
     f = tmp_path / "hello.py"
     f.write_text(content)
     h = _content_hash(content)
 
-    # Simulate T3 already having this file at the same hash + model
     mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "metadatas": [{"content_hash": h, "embedding_model": _TARGET_MODEL}]
-    }
+    mock_col.get.return_value = {"metadatas": []}
+    cache = StalenessCache(by_doc_id={"1.1.1": (h, _TARGET_MODEL)})
 
     voyage = _make_voyage_client()
     db = _make_db()
@@ -93,6 +95,8 @@ def test_unchanged_file_skips_embed(tmp_path: Path) -> None:
         git_meta={},
         now_iso="2026-01-01T00:00:00Z",
         score=1.0,
+        doc_id_resolver=lambda p: "1.1.1",
+        staleness_cache=cache,
     )
 
     assert result == 0, "Should return 0 (skipped) when hash unchanged"

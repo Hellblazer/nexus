@@ -5514,4 +5514,162 @@ class CatalogRepositoryTest {
         repo.upsertCollection(TENANT_A, row);
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
     }
+    // ── nexus-tko2w (RDR-108): per-position section labels on the manifest row ──────
+
+    /** A manifest row; a label that is null is OMITTED, and a row with none of the three keys is a legacy write. */
+    private static Map<String, Object> labelled(int position, String chash, String title, String type, Integer page) {
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put("position", position);
+        row.put("chash", chash);
+        row.put("chunk_index", position);
+        if (title != null) row.put("section_title", title);
+        if (type != null) row.put("section_type", type);
+        if (page != null) row.put("page_number", page);
+        return row;
+    }
+
+    /** What a current client sends for a chunk with no heading: all three keys, "" and a null page. */
+    private static Map<String, Object> writtenEmpty(int position, String chash) {
+        Map<String, Object> row = labelled(position, chash, null, null, null);
+        row.put("section_title", "");
+        row.put("section_type", "");
+        row.put("page_number", null);
+        return row;
+    }
+
+    @Test @Order(400)
+    void manifestLabels_writeThenReadBack_onGetManifest_andGetManifestMany_andChashPositions() {
+        String coll = "knowledge__tko2w-labels__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.1", "title", "Labels A",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.2", "title", "Labels B",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        String shared = ch("tko2w-shared");
+        // The SAME chunk text in two documents, labelled differently: each manifest row keeps its own.
+        writeManifestSeeded(TENANT_A, "tko2w.1", coll, List.of(
+            labelled(0, shared, "References", "references", 9),
+            labelled(1, ch("tko2w-only-a"), null, null, null),
+            writtenEmpty(2, ch("tko2w-empty-a"))));
+        writeManifestSeeded(TENANT_A, "tko2w.2", coll, List.of(
+            labelled(0, shared, "Methods", "body", 3)));
+
+        var a = repo.getManifest(TENANT_A, "tko2w.1");
+        assertThat(a.get(0).get("section_title")).isEqualTo("References");
+        assertThat(a.get(0).get("section_type")).isEqualTo("references");
+        assertThat(a.get(0).get("page_number")).isEqualTo(9);
+        assertThat(a.get(0).get("labels_written")).isEqualTo(true);
+        // A row sent with no label key is LEGACY: NULL labels, labels_written false, every key present.
+        assertThat(a.get(1)).containsKeys("section_title", "section_type", "page_number", "labels_written");
+        assertThat(a.get(1).get("section_type")).isNull();
+        assertThat(a.get(1).get("page_number")).isNull();
+        assertThat(a.get(1).get("labels_written")).isEqualTo(false);
+        // A row sent with the keys and nothing in them is WRITTEN: "" labels, authoritative.
+        assertThat(a.get(2).get("labels_written")).isEqualTo(true);
+        assertThat(a.get(2).get("section_type")).isEqualTo("");
+        assertThat(a.get(2).get("page_number")).isNull();
+
+        var many = repo.getManifestMany(TENANT_A, List.of("tko2w.1", "tko2w.2"));
+        assertThat(many.get("tko2w.2").get(0).get("section_type")).isEqualTo("body");
+        assertThat(many.get("tko2w.2").get(0).get("page_number")).isEqualTo(3);
+        assertThat(many.get("tko2w.1").get(0).get("section_type")).isEqualTo("references");
+        assertThat(many.get("tko2w.1").stream().map(r -> r.get("labels_written")).toList())
+            .containsExactly(true, false, true);
+
+        var positions = repo.chashPositions(TENANT_A, List.of(shared));
+        assertThat(positions).hasSize(2);
+        assertThat(positions.stream().map(r -> r.get("doc_id") + ":" + r.get("section_type")).toList())
+            .containsExactly("tko2w.1:references", "tko2w.2:body");
+        assertThat(positions.get(0).get("collection")).isEqualTo(coll);
+        assertThat(positions.get(0).get("section_title")).isEqualTo("References");
+        assertThat(positions.get(1).get("page_number")).isEqualTo(3);
+        assertThat(positions.stream().map(r -> r.get("labels_written")).toList()).containsExactly(true, true);
+    }
+
+    @Test @Order(404)
+    void manifestLabels_anExplicitLabelsWrittenWinsOverTheKeysPresent_soARowReadBackAndRewrittenKeepsItsState() {
+        String coll = "knowledge__tko2w-rewrite__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.6", "title", "Rewrite",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        String legacy = ch("tko2w-rewrite-legacy");
+        String written = ch("tko2w-rewrite-written");
+        writeManifestSeeded(TENANT_A, "tko2w.6", coll, List.of(
+            labelled(0, legacy, null, null, null), labelled(1, written, "Intro", "body", 2)));
+
+        // The re-embed move (and a client's manifest rewrite) writes back the rows it READ, which always
+        // carry the three label keys: the legacy row must stay legacy, the written one stay written.
+        var readBack = repo.getManifest(TENANT_A, "tko2w.6");
+        assertThat(readBack.get(0)).containsKeys("section_title", "section_type", "page_number");
+        writeManifestSeeded(TENANT_A, "tko2w.6", coll, readBack.stream()
+            .map(r -> (Map<String, Object>) new java.util.LinkedHashMap<>(r)).toList());
+
+        var again = repo.getManifest(TENANT_A, "tko2w.6");
+        assertThat(again.get(0).get("labels_written")).isEqualTo(false);
+        assertThat(again.get(0).get("section_type")).isNull();
+        assertThat(again.get(1).get("labels_written")).isEqualTo(true);
+        assertThat(again.get(1).get("section_type")).isEqualTo("body");
+        assertThat(again.get(1).get("page_number")).isEqualTo(2);
+    }
+
+    @Test @Order(401)
+    void manifestLabels_aReplaceWithoutThem_clearsThem_aReplaceWithThem_setsThem() {
+        String coll = "knowledge__tko2w-replace__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.3", "title", "Replace",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        String chash = ch("tko2w-replace-chunk");
+        writeManifestSeeded(TENANT_A, "tko2w.3", coll, List.of(labelled(0, chash, "Intro", "body", 1)));
+        assertThat(repo.getManifest(TENANT_A, "tko2w.3").get(0).get("section_type")).isEqualTo("body");
+
+        // A client that predates the columns re-writes the manifest: the row is the new row, legacy.
+        writeManifestSeeded(TENANT_A, "tko2w.3", coll, List.of(labelled(0, chash, null, null, null)));
+        assertThat(repo.getManifest(TENANT_A, "tko2w.3").get(0).get("section_type")).isNull();
+        assertThat(repo.getManifest(TENANT_A, "tko2w.3").get(0).get("labels_written")).isEqualTo(false);
+
+        writeManifestSeeded(TENANT_A, "tko2w.3", coll, List.of(labelled(0, chash, "Refs", "references", 12)));
+        var row = repo.getManifest(TENANT_A, "tko2w.3").get(0);
+        assertThat(row.get("section_title")).isEqualTo("Refs");
+        assertThat(row.get("page_number")).isEqualTo(12);
+        assertThat(row.get("labels_written")).isEqualTo(true);
+    }
+
+    @Test @Order(402)
+    void manifestLabels_theAppendUpsertMovesTheLabelsWithTheChashAtThePosition() {
+        String coll = "knowledge__tko2w-append__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.4", "title", "Append",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        String first = ch("tko2w-append-first");
+        String second = ch("tko2w-append-second");
+        stubChunk(TENANT_A, coll, first);
+        stubChunk(TENANT_A, coll, second);
+        repo.appendManifestChunks(TENANT_A, "tko2w.4", coll, List.of(labelled(0, first, "Old", "references", 9)));
+        // The same position now holds another chunk, with its own label.
+        repo.appendManifestChunks(TENANT_A, "tko2w.4", coll, List.of(labelled(0, second, "New", "body", 2)));
+
+        var row = repo.getManifest(TENANT_A, "tko2w.4").get(0);
+        assertThat(row.get("chash")).isEqualTo(second);
+        assertThat(row.get("section_title")).isEqualTo("New");
+        assertThat(row.get("section_type")).isEqualTo("body");
+        assertThat(row.get("page_number")).isEqualTo(2);
+        assertThat(row.get("labels_written")).isEqualTo(true);
+
+        // The position is re-pointed by a client that sends no labels: the labels follow, and the row is
+        // legacy again (it must not keep the previous chunk's "written" claim over NULL labels).
+        repo.appendManifestChunks(TENANT_A, "tko2w.4", coll, List.of(labelled(0, first, null, null, null)));
+        var legacy = repo.getManifest(TENANT_A, "tko2w.4").get(0);
+        assertThat(legacy.get("section_type")).isNull();
+        assertThat(legacy.get("labels_written")).isEqualTo(false);
+    }
+
+    @Test @Order(403)
+    void manifestLabels_theImportPathKeepsThem() {
+        String coll = "knowledge__tko2w-import__v1";
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "tko2w.5", "title", "Import",
+            "content_type", "paper", "corpus", "knowledge", "physical_collection", coll));
+        importChunkSeeded(TENANT_A, "tko2w.5", coll, labelled(0, ch("tko2w-import-chunk"), "Abs", "abstract", 1));
+
+        var row = repo.getManifest(TENANT_A, "tko2w.5").get(0);
+        assertThat(row.get("section_type")).isEqualTo("abstract");
+        assertThat(row.get("section_title")).isEqualTo("Abs");
+        assertThat(row.get("page_number")).isEqualTo(1);
+        assertThat(row.get("labels_written")).isEqualTo(true);
+    }
 }

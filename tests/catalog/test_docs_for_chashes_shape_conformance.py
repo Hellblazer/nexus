@@ -123,4 +123,5 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
         with patch.object(_factory_mod, "make_catalog_reader", return_value=http_client):
             cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
+        # nexus-3ajpd: presence and model only (the hash slot is the catalog fence's to fill).
+        assert cache.by_doc_id == {"1.1.1": ("", "model-code")}

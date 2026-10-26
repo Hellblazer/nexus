@@ -637,6 +637,175 @@ nx --version                 # must print X.Y.Z
 
 `pyproject.toml` bumps the project version, but the local `nx` shim does not point at a wheel: it resolves `<tools>/current` at spawn time and execs the generation that pointer names, so until this step flips `current` every new spawn still lands in the old generation (and existing holders keep running from theirs afterwards). Caught on v4.9.11: `nx --version` reported 4.9.10 even after PyPI showed 4.9.11.
 
+## Plugin-only fast lane
+
+A patch release that ships plugin-surface content (`conexus/`, `sn/`,
+`tool-spill/`, `.claude-plugin/marketplace.json`) while `develop` carries `src/`
+work that must not ship yet. It is a client release: same tag form, same
+`release.yml` publish, same version surfaces. This section lists only what
+differs; every step it points at runs exactly as written above. Design record:
+T2 `nexus/design-plugin-only-fast-lane.md`.
+
+Base tag is vX.Y.Z (the last client tag), the new release is vX.Y.N with N = Z+1.
+Steps 0 (beyond the floor check in item 4 below) and 6d do not apply: the engine
+pin does not move and no migration ships.
+
+**1. When to use it.** The plugin fixes waiting in `conexus/PENDING_RELEASE.md`
+are worth shipping now, and there is no open release PR (a release PR already in
+flight is the normal release). If `src/`, `service/`, a dependency file or the
+engine pin has to move, cut a normal release instead. The lane is open only
+while the newest published `engine-service-v*` tag is the one the base tag pins:
+`release.yml` runs `check_engine_release_floor.py` at tag time, its pin-currency
+check goes red when a newer engine tag exists, and the only remedy (bumping
+`REQUIRED_ENGINE_VERSION`) is a `src/` change this lane refuses. A red there
+closes the lane: cut a normal release. The lane runs the bare form, not the
+workflow's `--paired-deploy-auto`: they agree when the cloud meets the floor, and
+when it does not the bare form goes red where the workflow could pass on a fresh
+paired engine tag. A paired engine tag means a normal paired release, so the
+stricter form is the right one here.
+
+The base tag must itself carry the lane's machinery, because the gate refuses
+`scripts/` and the harness in the diff and there is no exemption. The releaser
+checks it, instead of trusting a version number:
+
+```bash
+git cat-file -e vX.Y.Z:scripts/check_plugin_only_eligibility.py
+git cat-file -e vX.Y.Z:tests/e2e/plugin-delivery-proof.sh
+git show vX.Y.Z:tests/e2e/release-battery.sh | grep -q -- '--plugin-only'
+```
+
+Any non-zero exit means the base tag predates the lane: normal release.
+
+**2. Branch off the tag, never off `develop`.** In a sibling worktree of the primary
+checkout (see "Where to run the battery"):
+
+```bash
+git fetch origin --tags
+git worktree add ../nexus-wt/release-vX.Y.N -b release/vX.Y.N vX.Y.Z
+# the ledger names the entries to ship (each entry names its bead); skip those
+# under "Deferred to the next client release". This log only helps you FIND
+# their commits: pick the ledger's commits, not everything the range lists.
+git log --reverse --format='%h %s' vX.Y.Z..origin/develop -- conexus sn tool-spill .claude-plugin/marketplace.json
+git cherry-pick -x <sha> [<sha> ...]     # -x records the develop sha in each message
+```
+
+The nx code under test is the tag's own, so there is no main/develop skew and
+Step 7's pre-merge of `main` has nothing to do. A conflict in `CHANGELOG.md` or
+`conexus/PENDING_RELEASE.md` is resolved with the release branch's side, because
+the bump commit writes both:
+
+```bash
+git checkout --ours CHANGELOG.md conexus/PENDING_RELEASE.md   # whichever conflicted
+git add CHANGELOG.md conexus/PENDING_RELEASE.md
+git cherry-pick --continue
+```
+
+A conflict in a plugin file means the pick depends on a commit you skipped:
+`git cherry-pick --abort`, and defer that entry and every entry that builds on
+it to the next normal release. A commit that also touches `src/` or `service/`
+cannot be cherry-picked whole either: that entry waits. So does a bead whose
+other commits do: the eligibility gate (item 4) reads every bead id named in
+the picked commits and refuses the release when another commit naming that bead
+on `origin/develop` since the tag touches a path the lane does not ship. It
+matches the whole bead id in commit messages, so a commit that does not name its
+bead is not seen by that check; the per-path rules still bind the diff. A change that names an
+nx verb the tag lacks fails the existing verb-rot test in the preflight; it is
+not eligible.
+
+**3. Bump (Steps 3, 4, 5).** The same surfaces as Step 3 (`pyproject.toml`,
+`mcpb/pyproject.toml`, `mcpb/manifest.json`, `.claude-plugin/marketplace.json`
+version and `source.ref` for every plugin, every `plugin.json`, `uv.lock` via
+Step 5's `uv sync`), both changelogs, and `conexus/PENDING_RELEASE.md` emptied of
+the entries that shipped. The engine pin does not move, and a diff that touches
+`src/` or `scripts/` is refused, so do not run `scripts/regen-install-constraints.sh`
+unless `uv sync` changed a dependency (in which case this is not a fast-lane
+release). Steps 4a and 4b do not apply. The new `CHANGELOG.md` section must name
+its engine pairing as its first `engine-service-v` mention, for example `Pairs
+with engine-service-vA.B.C (REQUIRED_ENGINE_VERSION unchanged from X.Y.Z)`
+(A.B.C is the engine tag the base tag's own CHANGELOG section names),
+or the preflight's pin-tests fail (`tests/test_engine_version.py`, nexus-9gggv).
+Commit it all as one `chore(release): conexus X.Y.N` commit.
+
+**4. Eligibility and floor gates.** On the committed HEAD:
+
+```bash
+uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z   # last line must be PLUGIN-ONLY ELIGIBILITY PASSED
+uv run python scripts/check_engine_release_floor.py                    # must exit 0 before the PR (item 1: red closes the lane)
+```
+
+For the eligibility script, exit 1 lists each offending path or straddling bead
+(naming the commit) and why; exit 2 means it could not check, including a
+`--develop-ref` (default `origin/develop`, so fetch first) that does not resolve.
+Neither is a pass.
+
+**5. Gates.** From the release worktree with a clean tree (the mode refuses
+uncommitted or untracked paths, and refuses `--skip-preflight`):
+
+```bash
+lab-remote -c lab-l -- python3 scripts/watched_pytest.py --stall 180 --status /tmp/fastlane-X.Y.N.json -- uv run pytest -n auto   # the unit suite: a hand step, SERIAL to the battery (Common Mistakes), not a leg; the status file stays outside the worktree
+tests/e2e/release-battery.sh --plugin-only vX.Y.Z
+```
+
+The battery runs the eligibility gate again, then the preflight (which holds the
+lint bucket and the pin tests, so Step 1's separate lint run is covered), the
+hook-CLI skew leg and the plugin-lockstep leg. `lsg`, `pkgup`, `mvv`, `dual` and
+`resolve` are shown as `SKIPPED(plugin-only: ...)`, never omitted, and the closing
+line names the mode and the skipped count; a plain `RELEASE BATTERY PASSED` is
+not what this lane prints. **Accepted risk:** those five legs, and Step 1's
+integration suite, are skipped because the wheel and the engine are identical to
+the base tag's but for the version, not because their inputs are identical:
+`resolve`, `mvv`, `pkgup` and `dual` also depend on package indexes and keys that
+change with time, so a dependency or index break since the base tag goes
+undetected by a plugin-only run. The evidence for skipping is one measured
+identical-code bump (2026-10-26, all six legs passed). Step 11c below stays in the
+lane as the post-publish control for exactly this risk. Then Step 8's pre-push
+greps, unchanged.
+
+**6. Publish.** The normal flow, with the same human gates, except at Step 7: the
+branch from item 2 already exists and is built off the tag, so skip Step 7's
+branch-creation and pre-merge lines and run only its push and
+`gh pr create --base main` from that branch. Before Step 9, re-run the
+eligibility script on the exact PR head (`git rev-parse HEAD` equals
+`git rev-parse origin/release/vX.Y.N`; a later push re-opens items 4 and 5).
+Then merge (never squash), Sam's "tag and push" (Step 9; its paired-release
+deploy paragraph does not apply, because the engine pin is unchanged), Step 10
+(release.yml publishes the identical nx code under the new version), Step 11, and
+Step 11b's back-merge of `main` into `develop`.
+
+The back-merge is not trivially clean in this lane (Step 11b's remark assumes the
+release branch contained develop; this one did not). Expect conflicts in both
+changelogs and the ledger, and resolve them by hand; there is no helper script.
+Changelogs, in this order: develop's `## [Unreleased]` first, with the entries that
+shipped in X.Y.N deleted from it, then main's `## [X.Y.N]` section, then the older
+sections. `conexus/PENDING_RELEASE.md`: develop's side minus the entries that
+shipped (the deferred ones and any plugin commit not picked stay pending). A
+later develop edit to a file whose entry you removed still differs from the new
+pin, so keep or re-add an entry for it; `tests/test_plugin_release_drift_ledger.py`
+fails on an undeclared file or a stale entry.
+
+**7. Post-publish.** Once Step 11 shows PyPI at X.Y.N, on the laptop (it needs the
+`claude` CLI), run Step 11c exactly as written (`tests/e2e/fresh-install-mvv.sh
+--published X.Y.N` and the `--package-upgrade` leg with `NEXUS_TARGET_RELEASE`;
+they are the only check of the published bytes), and in addition:
+
+```bash
+tests/e2e/plugin-delivery-proof.sh --prev X.Y.Z --new X.Y.N   # must print PLUGIN DELIVERY PROOF PASSED; exit 2 (UNVERIFIED) is not a pass
+```
+
+It installs the previous release in a scrubbed HOME, runs Claude Code's normal
+plugin update and checks that the new plugin files arrived; with no `--source` it
+also adds the real GitHub marketplace and checks every plugin's version and
+`source.ref`. What it does not cover is a running session's in-session
+auto-update. Then Step 12 (the `nx --version` check), and restart sessions
+together, as after any release: a plugin update says "Restart to apply" and only a
+restarted session loads it. No Windows guest leg.
+
+For the first real use of this lane, paste the eligibility output, the battery
+table and the delivery-proof verdict into bead nexus-rbmja.13.
+
+The releaser is human: the AI prepares the branch and runs the gates; Sam says
+"cut the release" and pushes the tag.
+
 ## Common Mistakes
 
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
@@ -653,7 +822,7 @@ nx --version                 # must print X.Y.Z
 ## See also
 
 - `.claude/rules/releases-and-engine.md` § Cutting a release (a pointer to this file; this file is canonical for the procedure)
-- `docs/contributing.md#release-process` (long form: the plugin channel cut, and the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
+- `docs/contributing.md#release-process` (long form: the Break-glass subsection for retry / yank / revert / tag-retraction procedures, and the Schema/data-migration releases subsection Step 6d above draws its rationale from)
 - `feedback_invoke_release_skill.md` (memory entry: invoke this skill, do not freehand)
 - `feedback_post_release_reinstall.md` (memory entry: reinstall after tag)
 - `feedback_release_discipline.md` (memory entry: full suite before tag, not after)

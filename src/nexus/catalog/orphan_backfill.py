@@ -113,6 +113,24 @@ class BackfillReport:
     chunks_linked: int = 0
 
 
+@dataclass
+class LinkSkips:
+    """Rows ``link-existing`` left alone, and why.
+
+    Filled in by :func:`link_by_title`, :func:`link_by_content_hash` and
+    :func:`register_synthetic` (pass one in as ``skips=``, with ``skip_owned=True``)
+    so the verb can say what it did not take. "Owned" means a LIVE Document's manifest names the
+    chash in the target collection; a chunk only a trashed Document names, or
+    one an earlier version of the target left behind, is not owned.
+    """
+
+    held_by_target: int = 0  #: the target Document's own manifest already holds the chash (under any collection value)
+    owned_elsewhere: int = 0  #: another live Document's manifest holds it, in this collection
+    ambiguous_titles: int = 0  #: title groups whose title names more than one live Document
+    ambiguous_title_chunks: int = 0  #: chunks in those groups
+    synthetic_owned: int = 0  #: chunks the synthetic fallback left alone because a live Document owns them
+
+
 # ── T3 chunk gathering ───────────────────────────────────────────────────────
 
 
@@ -432,6 +450,9 @@ def register_synthetic(
     owner: "Tumbler",
     collection: str,
     groups: list[TitleGroup],
+    *,
+    skips: LinkSkips | None = None,
+    skip_owned: bool = False,
 ) -> tuple[int, int]:
     """Register one Document per group with synthetic
     ``nx-orphan-backfill://`` URI; write document_chunks rows.
@@ -440,16 +461,40 @@ def register_synthetic(
     distinct chash gets its own minimal Document so manifest rows can
     still be written. The synthetic URI scheme is intentionally clear
     so search consumers can distinguish residual data from authoritative
-    provenance."""
+    provenance.
+
+    Every chunk of a group is registered unless ``skip_owned`` is set, which only
+    ``link-existing --also-synthetic`` does. The direct ``synthetic`` verb leaves
+    it off: it may be run again, the Document's URI is the same, and a manifest
+    write REPLACES the Document's rows, so a run that left out the chunks the
+    first run registered (now owned by that Document) would drop them.
+
+    With ``skip_owned``, a chunk a live Document of *collection* already names is
+    left alone (counted in ``skips.synthetic_owned``): a synthetic Document would
+    hold it a second time. A group left with nothing registers no Document. The
+    ownership lookup runs before the first registration and raises rather than
+    answer partially, so a failure registers nothing. Those groups are the ones
+    no live Document of the title matched, so no synthetic Document of the title
+    exists for the write to replace."""
+    owners: dict[str, list[str]] = {}
+    if skip_owned:
+        owners = live_owners_in_collection(
+            catalog, [c.chash for g in groups for c in g.chunks], collection,
+        )
     docs = 0
     links = 0
     for g in groups:
+        chunks = [c for c in g.chunks if c.chash not in owners]
+        if skips is not None:
+            skips.synthetic_owned += len(g.chunks) - len(chunks)
+        if not chunks:
+            continue
         if g.title:
             uri = f"nx-orphan-backfill://{collection}/{g.title}"
             title = g.title
             # nexus-w5zv: stable sort by chunk_index (same rationale as
             # register_dt_linked above).
-            ordered_chunks = sorted(g.chunks, key=lambda c: c.chunk_index)
+            ordered_chunks = sorted(chunks, key=lambda c: c.chunk_index)
             chunks_payload = [
                 {
                     "chash": c.chash, "position": pos,
@@ -464,7 +509,7 @@ def register_synthetic(
                 content_type=_content_type_for_collection(collection),
                 file_path="",
                 physical_collection=collection,
-                chunk_count=len(g.chunks),
+                chunk_count=len(chunks),
                 source_uri=uri,
                 meta={
                     "backfill_from": "t3_orphan",
@@ -476,7 +521,7 @@ def register_synthetic(
             links += len(chunks_payload)
         else:
             # No title; bucket each chunk under its chash as a singleton doc.
-            for c in g.chunks:
+            for c in chunks:
                 title = f"orphan-chunk-{c.chash[:12]}"
                 uri = f"nx-orphan-backfill://{collection}/chash/{c.chash}"
                 tumbler = catalog.register(
@@ -630,62 +675,202 @@ def apply_csv(
 
 
 # ── Link T3 chunks to EXISTING catalog Documents ─────────────────────────────
+#
+# A T3 chunk row is one per (collection, chunk text) and is shared by every
+# Document holding that text; its ``title`` and ``content_hash`` are the LAST
+# writer's. So a title or hash group is not "the Document's chunks": it holds
+# chunks the target already owns (a second manifest row for the same chunk) and
+# chunks another Document owns, and it misses a chunk the target owns that
+# another writer restamped. The only chunks that are the target's to take are
+# those no live manifest names (nexus-6pfgb.22, census rows x54wv 13 and 3ajpd 7).
+
+
+def live_owners_in_collection(
+    catalog: "CatalogReader", chashes: list[str], collection: str,
+) -> dict[str, list[str]]:
+    """``chash -> [doc_id, ...]`` for the LIVE Documents whose manifest names the
+    chash in *collection*. A chash nothing names there is absent.
+
+    Reads the engine's chash-positions route (its payload is proportional to the
+    hits); where its rows carry their own collection they are filtered on it. An
+    engine whose rows carry none (engine-service-v0.1.164 and earlier, the
+    released engines) or that has no route falls back to the full manifests of
+    the referencing Documents, filtered the same way. A row with no collection
+    counts as owned (it cannot be shown to belong elsewhere). Both reads raise
+    rather than answer partially, so a caller that asks before it writes links
+    nothing on a failure.
+    """
+    return _lookup_owners(catalog, chashes, collection)[0]
+
+
+def _lookup_owners(
+    catalog: "CatalogReader", chashes: list[str], collection: str,
+) -> tuple[dict[str, list[str]], dict[str, set[str]]]:
+    """``(owners, holders)``: *owners* as :func:`live_owners_in_collection`;
+    *holders* is ``chash -> {doc_id, ...}`` over the live manifests under ANY
+    collection value, so a target that names a chash under another collection
+    value can be told from a Document that does not name it at all."""
+    wanted = list(dict.fromkeys(c for c in chashes if c))
+    if not wanted:
+        return {}, {}
+    owners: dict[str, list[str]] = {}
+    holders: dict[str, set[str]] = {}
+
+    def _add(chash: str, doc_id: str, row_collection: object) -> None:
+        holders.setdefault(chash, set()).add(doc_id)
+        if row_collection in (collection, None):
+            held = owners.setdefault(chash, [])
+            if doc_id not in held:
+                held.append(doc_id)
+
+    lookup = getattr(catalog, "chash_positions", None)
+    rows = lookup(wanted) if lookup is not None else None
+    if rows is not None and all(isinstance(r, dict) and "collection" in r for r in rows):
+        for r in rows:
+            _add(r["chash"], r["doc_id"], r["collection"])
+        return owners, holders
+    _by_chash, manifests = catalog.docs_and_manifests_for_chashes(wanted)
+    want = set(wanted)
+    for doc_id, manifest in manifests.items():
+        for m in manifest:
+            if m.chash in want:
+                _add(m.chash, doc_id, m.collection)
+    return owners, holders
+
+
+def _manifest_less_for(
+    tumbler: str,
+    chunks: list[ChunkRef],
+    owners: dict[str, list[str]],
+    holders: dict[str, set[str]],
+    skips: LinkSkips,
+) -> list[ChunkRef]:
+    """The chunks of *chunks* that no live manifest in the collection names,
+    deduplicated by chash.
+
+    A chash the target's manifest names, under any collection value, counts under
+    ``held_by_target`` (also when another Document holds it too): a second row for
+    it would double it. One only another live Document names in the collection
+    counts under ``owned_elsewhere``.
+    """
+    keep: list[ChunkRef] = []
+    seen: set[str] = set()
+    for c in chunks:
+        if c.chash in seen:
+            continue
+        seen.add(c.chash)
+        if tumbler in holders.get(c.chash, ()):
+            skips.held_by_target += 1
+        elif not owners.get(c.chash):
+            keep.append(c)
+        else:
+            skips.owned_elsewhere += 1
+    return keep
+
+
+def _append_after_existing(
+    catalog: "CatalogReader", tumbler: str, collection: str, chunks: list[ChunkRef],
+) -> None:
+    """Append *chunks* to *tumbler*'s manifest after its current rows, in chunk_index order.
+
+    Positions are not dense (a manifest can keep a gap), and an append upserts BY
+    position, so the start is past the highest position held, never the row count.
+    """
+    start_pos = max((r.position for r in catalog.get_manifest(tumbler)), default=-1) + 1
+    # nexus-w5zv: stable sort by chunk_index (see register_dt_linked).
+    ordered_chunks = sorted(chunks, key=lambda c: c.chunk_index)
+    catalog.append_manifest_chunks(tumbler, [
+        {
+            "chash": c.chash,
+            "position": start_pos + pos,
+            "line_start": None, "line_end": None,
+            "char_start": None, "char_end": None,
+        }
+        for pos, c in enumerate(ordered_chunks)
+    ], collection=collection)
 
 
 def link_by_title(
     catalog: "CatalogReader",
     collection: str,
     groups: list[TitleGroup],
+    *,
+    dry_run: bool = False,
+    skips: LinkSkips | None = None,
 ) -> tuple[int, int, list[TitleGroup]]:
     """For each titled group, find an existing catalog Document with the
     same title in ``collection`` and append manifest rows linking the
-    group's chunks to that Document.
+    group's MANIFEST-LESS chunks to that Document.
+
+    A chunk some live manifest in the collection already names is not appended:
+    one the target holds would become a second row for the same chunk, and one
+    another live Document owns is not the target's (the chunk's ``title`` is the
+    last writer's). Both are counted in *skips*. A matched group is never
+    returned as unlinked, even when every chunk in it was skipped. A title two
+    live Documents share matches neither: its group is counted in *skips*
+    (``ambiguous_titles``) and returned nowhere.
 
     Returns ``(linked_chunks, linked_docs, unlinked_groups)``.
     ``unlinked_groups`` are groups whose title has no catalog match;
-    callers route them to synthetic mode.
+    callers route them to synthetic mode. With ``dry_run`` nothing is written
+    and the counts are what a real run would link.
 
     Untitled groups are passed through to ``unlinked_groups`` so
     callers can branch them to chash fallback.
     """
+    skips = skips if skips is not None else LinkSkips()
     # nexus-2hgxb (nrxs9 final review Critical-2): this was a raw
     # ``catalog._db`` reach — an AttributeError against the service client,
     # the only catalog since the local deletion. The public per-collection
-    # listing carries (tumbler, title, head_hash); the explicit high limit
-    # matters — a server-side default page would silently truncate the
-    # backfill's match universe.
+    # listing carries (tumbler, title, index_content_hash, meta); the explicit
+    # high limit matters — a server-side default page would silently truncate
+    # the backfill's match universe.
     entries = catalog.list_by_collection(collection, limit=1_000_000)
-    by_title: dict[str, str] = {
-        e.title: str(e.tumbler) for e in entries if e.title
-    }
-    linked_chunks = 0
-    linked_docs = 0
+    tumblers_by_title: dict[str, list[str]] = defaultdict(list)
+    for e in entries:
+        if e.title:
+            tumblers_by_title[e.title].append(str(e.tumbler))
+    # A title two live Documents share names no single Document: its group is
+    # neither linked to an arbitrary one nor passed on to the synthetic fallback
+    # (which would register a third Document of that title).
+    by_title = {t: ts[0] for t, ts in tumblers_by_title.items() if len(ts) == 1}
+    ambiguous = {t: ts for t, ts in tumblers_by_title.items() if len(ts) > 1}
+    matched: list[TitleGroup] = []
     unlinked: list[TitleGroup] = []
     for g in groups:
-        if not g.title or g.title not in by_title:
+        if g.title and g.title in by_title:
+            matched.append(g)
+        elif g.title and g.title in ambiguous:
+            skips.ambiguous_titles += 1
+            skips.ambiguous_title_chunks += len(g.chunks)
+            _log.warning(
+                "orphan_backfill_title_ambiguous",
+                collection=collection, title=g.title, tumblers=ambiguous[g.title],
+            )
+        else:
             unlinked.append(g)
-            continue
+    if not matched:
+        return 0, 0, unlinked
+    # One reverse lookup for every candidate chash. It raises rather than answer
+    # partially, so a failure links nothing.
+    owners, holders = _lookup_owners(
+        catalog, [c.chash for g in matched for c in g.chunks], collection,
+    )
+    linked_chunks = 0
+    linked_docs = 0
+    for g in matched:
         tumbler = by_title[g.title]
-        # Read existing manifest to know where to append (preserve order).
-        existing = catalog.get_manifest(tumbler)
-        start_pos = len(existing)
-        # nexus-w5zv: stable sort by chunk_index (see register_dt_linked).
-        ordered_chunks = sorted(g.chunks, key=lambda c: c.chunk_index)
-        catalog.append_manifest_chunks(tumbler, [
-            {
-                "chash": c.chash,
-                "position": start_pos + pos,
-                "line_start": None, "line_end": None,
-                "char_start": None, "char_end": None,
-            }
-            for pos, c in enumerate(ordered_chunks)
-        ], collection=collection)
-        linked_chunks += len(g.chunks)
+        chunks = _manifest_less_for(tumbler, g.chunks, owners, holders, skips)
+        if not chunks:
+            continue
+        if not dry_run:
+            _append_after_existing(catalog, tumbler, collection, chunks)
+        linked_chunks += len(chunks)
         linked_docs += 1
         _log.info(
             "orphan_backfill_linked_by_title",
-            collection=collection, tumbler=tumbler,
-            title=g.title, chunks=len(g.chunks),
+            collection=collection, tumbler=tumbler, title=g.title,
+            chunks=len(chunks), dry_run=dry_run,
         )
     return linked_chunks, linked_docs, unlinked
 
@@ -694,12 +879,19 @@ def link_by_content_hash(
     catalog: "CatalogReader",
     t3_db,
     collection: str,
+    *,
+    dry_run: bool = False,
+    skips: LinkSkips | None = None,
 ) -> tuple[int, int, int]:
     """For each existing catalog Document with a file-content hash, find
     T3 chunks in ``collection`` whose ``content_hash`` matches and append
-    manifest rows.
+    manifest rows for the MANIFEST-LESS ones.
 
     Returns ``(linked_chunks, linked_docs, unmatched_chunks)``.
+    ``unmatched_chunks`` are chunks whose ``content_hash`` names no single
+    Document. A chunk some live manifest already names is skipped and counted
+    in *skips* (see :func:`link_by_title`). With ``dry_run`` nothing is
+    written and the counts are what a real run would link.
 
     Used when T3 chunks lack ``title`` metadata but have
     ``content_hash`` (PDF-shaped chunks). The Document side is
@@ -710,6 +902,7 @@ def link_by_content_hash(
     A hash two Documents share names no single Document, so its chunks
     stay unmatched rather than join an arbitrary one.
     """
+    skips = skips if skips is not None else LinkSkips()
     # nexus-2hgxb: same public-read port as link_by_title above.
     entries = catalog.list_by_collection(collection, limit=1_000_000)
     tumblers_by_hash: dict[str, list[str]] = defaultdict(list)
@@ -759,28 +952,27 @@ def link_by_content_hash(
                 unmatched += 1
         offset += _PAGE
 
+    if not by_hash:
+        return 0, 0, unmatched
+    # One reverse lookup for every candidate chash; it raises rather than answer
+    # partially, so a failure links nothing.
+    owners, holders = _lookup_owners(
+        catalog, [c.chash for chunks in by_hash.values() for c in chunks], collection,
+    )
     linked_chunks = 0
     linked_docs = 0
-    for content_hash, chunks in by_hash.items():
+    for content_hash, group in by_hash.items():
         tumbler = by_content[content_hash]
-        existing = catalog.get_manifest(tumbler)
-        start_pos = len(existing)
-        # nexus-w5zv: stable sort by chunk_index (see register_dt_linked).
-        ordered_chunks = sorted(chunks, key=lambda c: c.chunk_index)
-        catalog.append_manifest_chunks(tumbler, [
-            {
-                "chash": c.chash,
-                "position": start_pos + pos,
-                "line_start": None, "line_end": None,
-                "char_start": None, "char_end": None,
-            }
-            for pos, c in enumerate(ordered_chunks)
-        ], collection=collection)
+        chunks = _manifest_less_for(tumbler, group, owners, holders, skips)
+        if not chunks:
+            continue
+        if not dry_run:
+            _append_after_existing(catalog, tumbler, collection, chunks)
         linked_chunks += len(chunks)
         linked_docs += 1
         _log.info(
             "orphan_backfill_linked_by_content_hash",
             collection=collection, tumbler=tumbler,
-            content_hash=content_hash[:16], chunks=len(chunks),
+            content_hash=content_hash[:16], chunks=len(chunks), dry_run=dry_run,
         )
     return linked_chunks, linked_docs, unmatched

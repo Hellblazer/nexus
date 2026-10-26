@@ -36,6 +36,9 @@ _SKIP_EXTENSIONS: frozenset[str] = frozenset({
     ".ini", ".cfg", ".conf", ".gradle",
     # Web / markup
     ".html", ".htm", ".css", ".svg",
+    # Diagram source: draw.io files are XML, so they fell through to PROSE
+    # and chunked as noise (nexus-5j8fp measurement, mapfront/framework.drawio).
+    ".drawio",
     # Shell / batch (Windows)
     ".cmd", ".bat", ".ps1",
     # Lock files
@@ -190,6 +193,45 @@ def looks_like_binary_content(path: Path, *, sample_bytes: int = 65536) -> bool:
     except UnicodeDecodeError:
         return True
     return False
+
+
+#: Upper bound, in bytes, on a file ``is_whitespace_only_text`` will read. The
+#: population it guards is 1-2 bytes (a lone newline in ``__init__.py`` or a
+#: ``Module.manifest``); a few KB covers a blank-lines-only file without ever
+#: slurping a real one.
+WHITESPACE_ONLY_MAX_BYTES: int = 4096
+
+
+def is_whitespace_only_text(path: Path, *, max_bytes: int = WHITESPACE_ONLY_MAX_BYTES) -> bool:
+    """True when *path* is a small, non-empty UTF-8 text file with nothing but
+    whitespace (``str.strip() == ""``).
+
+    Such a file yields zero chunks under every classifier: CODE's
+    ``chunk_file`` returns ``[]`` and the prose chunker fails with "all chunks
+    empty after whitespace filtering". Registering a catalog document for it
+    mints a ``chunk_count=0`` document whose fence can never complete, the
+    same phantom class as the zero-byte file (nexus-rqsh1), so the indexer
+    skips it before registration (nexus-5j8fp). The guard asks the question
+    the chunker asks, ``str.strip()``, so it never skips a file the chunker
+    would have chunked (a lone BOM is not whitespace to ``str.strip`` and is
+    left to the normal path).
+
+    Returns False for a zero-byte file (its own earlier guard, kept distinct in
+    the skip log), a file over *max_bytes* (never read), binary or non-UTF-8
+    content (``looks_like_binary_content`` owns that), and any stat or read
+    failure (the per-file indexer is the authority on I/O errors).
+    """
+    try:
+        size = path.stat().st_size
+        if size == 0 or size > max_bytes:
+            return False
+        with path.open("rb") as f:
+            data = f.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return False  # grew between stat and read
+        return data.decode("utf-8").strip() == ""
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def classify_file(

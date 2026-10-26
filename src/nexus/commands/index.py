@@ -2431,11 +2431,18 @@ def _project_cross_collections(
     chroma_client: Any,
     *,
     threshold: float = 0.85,
-) -> int:
+) -> tuple[int, int, int, int]:
     """Project each collection against the others and persist the assignments.
 
-    Returns ``(assignments persisted, collections with an incomplete source
-    fetch, non-finite source chunks excluded)``.
+    Returns ``(assignments written, collections with an incomplete source
+    fetch, non-finite source chunks excluded, assignments the engine skipped
+    because their topic belongs to a superseded collection)``.
+
+    nexus-h2v0l: superseded collections are left out of both the sources and
+    the targets, as ``nx taxonomy project`` and ``--backfill`` do. The
+    engine skips a projection row onto a retired topic on its own, but a
+    kept tombstone could still win a chunk's single best pick and lose the
+    live runner-up.
 
     nexus-g25dk: ``_persist_assignments`` requires ``source_collection`` as a
     3rd positional. The previous inline call omitted it, raising a TypeError
@@ -2444,11 +2451,17 @@ def _project_cross_collections(
     (the bug shipped because it was untested inline). Each collection's
     assignments are stamped with that collection as the source.
     """
-    from nexus.commands.taxonomy_cmd import _persist_assignments  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+    from nexus.commands.taxonomy_cmd import (  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+        _persist_assignments_counted,
+        _without_superseded,
+    )
 
     total = 0
     incomplete = 0
     nonfinite = 0
+    skipped_superseded = 0
+    if len(collections) > 1:
+        collections = _without_superseded(collections)
     for col_name in collections:
         others = [c for c in collections if c != col_name]
         if not others:
@@ -2467,9 +2480,10 @@ def _project_cross_collections(
         nonfinite += len(result.get("nonfinite_chunks", []))
         assignments = result.get("chunk_assignments", [])
         if assignments:
-            _persist_assignments(assignments, col_name, quiet=True)
-            total += len(assignments)
-    return total, incomplete, nonfinite
+            written, skipped = _persist_assignments_counted(assignments, col_name, quiet=True)
+            total += written
+            skipped_superseded += skipped
+    return total, incomplete, nonfinite, skipped_superseded
 
 
 def _run_projection_pass(
@@ -2492,7 +2506,7 @@ def _run_projection_pass(
 
     try:
         _proj_t0 = time.monotonic()
-        proj_total, proj_incomplete, proj_nonfinite = _project_cross_collections(
+        proj_total, proj_incomplete, proj_nonfinite, proj_skipped = _project_cross_collections(
             taxonomy, collections, chroma_client,
         )
         if proj_total:
@@ -2500,6 +2514,10 @@ def _run_projection_pass(
                 f"  Project:  {proj_total} cross-collection "
                 f"assignments ({time.monotonic() - _proj_t0:.1f}s)"
             )
+        if proj_skipped:
+            # nexus-h2v0l: the engine skipped projection rows onto a
+            # superseded collection's topics; they were not written.
+            say(f"  Project:  {proj_skipped} assignment(s) skipped (superseded targets)")
         if proj_incomplete:
             # nexus-ou4tb: partial source reads previously vanished
             # here — the count-skew signal was computed and dropped.
@@ -3750,7 +3768,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # nexus-y8qtj / nexus-3o4lt: fail-loud identity errors surface the same way.
         raise click.ClickException(str(exc)) from exc
     except UnchunkableContentError as exc:
-        # nexus-rqsh1 round 2: a zero-byte or binary-content file named
+        # nexus-rqsh1 round 2: a zero-byte, whitespace-only or binary-content file named
         # explicitly on this command must fail loud, before any catalog
         # write -- see index_markdown's guard for the full rationale.
         raise click.ClickException(str(exc)) from exc

@@ -64,10 +64,18 @@ RESOURCE = "suite"
 #: relationship we want: only children get it, and nesting depth is free.
 HELD_BY_ENV = "NX_SUITE_LEASE_HELD_BY"
 
-#: How long a caller waits for a live holder before giving up, when it has
-#: asked to wait at all. Suites here run ~5-15 minutes, so a wait that cannot
+#: How long a caller waits for a live holder before giving up. Waiting is the
+#: DEFAULT (``tests/conftest.py`` ``_take_suite_lease``; ``NX_SUITE_LEASE_WAIT=0``
+#: opts out): several sessions share one box, and contention between them is
+#: ordinary, not an error. Suites here run ~5-15 minutes, so a wait that cannot
 #: outlast one is a wait that never succeeds.
 DEFAULT_WAIT_SECONDS = 1800
+
+#: While a caller waits, ``acquire`` reports the holder and the time waited at
+#: the first contended pass and then every this many seconds. The cadence is
+#: also what keeps ``scripts/watched_pytest.py`` (default ``--stall 180``) from
+#: reading a queued run as hung: any output resets its stall clock.
+WAIT_REPORT_SECONDS = 60.0
 
 #: A lease directory whose pid file is MISSING, EMPTY or GARBAGE is reclaimed
 #: once it is this old. Younger than this, the holder may be between its
@@ -433,8 +441,17 @@ def _write_shared(path: Path, text: str) -> None:
     path.chmod(LEASE_FILE_MODE)
 
 
+def _describe(fields: tuple[int | None, str | None]) -> str:
+    """The holder a lease directory records, worded the way ``holder`` words it."""
+    pid, label = fields
+    if pid is None:
+        return label or "an unknown holder"
+    return f"pid {pid}" + (f" ({label})" if label else "")
+
+
 def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None,
-            now: Callable[[], float] = time.time, unguarded: bool = False):
+            now: Callable[[], float] = time.time, unguarded: bool = False,
+            on_wait: Callable[[str, float], None] | None = None):
     """Take the suite lease, or report who holds it.
 
     Returns a zero-argument release callable on success, or ``None`` when the
@@ -448,6 +465,11 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
     are read against; only tests pass it. *unguarded* only marks the refusal and
     give-up lines (``unguarded=1``) when the caller will run on without the lease.
 
+    *on_wait*, when given, is called as ``on_wait(holder, waited_s)`` on the
+    first contended pass and then every ``WAIT_REPORT_SECONDS`` while the wait
+    lasts (never on an immediate acquire or an immediate refusal), so a queued
+    run can say who it is waiting for. A callback that raises is ignored.
+
     One wait writes at most one telemetry line, its final outcome, carrying the
     whole wait: ``stale_reclaimed`` or ``acquired_after_wait`` once the lease is
     held (after its files are written, so no logging sits inside a race window),
@@ -459,6 +481,7 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
     deadline = started + max(0, wait_seconds)
     contended = False  # slept at least once: a wait, not an immediate acquire
     seen: tuple[int | None, str | None] = (None, None)  # the holder last waited on
+    last_report: float | None = None  # monotonic time of the last on_wait call
 
     _sweep_stale(root, now)
     while True:
@@ -480,6 +503,14 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
                     return None
                 seen = _holder_fields(lease)
                 contended = True
+                if on_wait is not None:
+                    tick = time.monotonic()
+                    if last_report is None or tick - last_report >= WAIT_REPORT_SECONDS:
+                        last_report = tick
+                        try:
+                            on_wait(_describe(seen), tick - started)
+                        except Exception:  # noqa: BLE001 -- a progress line must never change the outcome
+                            pass
                 time.sleep(1.0)
                 continue
         except Exception:  # noqa: BLE001 — an unwritable lease root must not block the suite

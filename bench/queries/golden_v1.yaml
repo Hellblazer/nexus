@@ -1,0 +1,429 @@
+# RDR-232 golden set v1 (nexus-jypmj.1.1).
+#
+# Extends the RDR-090 labeled query format (spike_5q.yaml) with the labels the RDR-232 measures
+# need. Every request carries all of them; scripts/bench/schema.py::load_golden_set rejects a set
+# with a missing field, an unknown kind or corpus prefix, or a wrong golden_set_version.
+#
+#   answer_kind         lookup | synthesis | discovery | comparison | audit | debug | unknown.
+#                       Labeled BY HAND from the request's wording, independently of any plan's
+#                       own declaration (RDR-232 Phase 2 exit criteria depend on that; the A1
+#                       spike used each plan's own kind and that is not acceptable here).
+#                       "unknown" is a request whose phrasing does not settle a kind.
+#   required_sources    source refs the answer must draw on: RDR-NNN, or RDR-NNN@PROJECT when
+#                       several projects hold an RDR with that number; paper titles for
+#                       knowledge-base papers.
+#   required_facets     stable ids of the facets the request asks for (a treatment constraint is
+#                       not a facet).
+#   allowed_corpora     collection-family prefixes (knowledge, code, docs, rdr) evidence may come
+#                       from. Evidence outside them is scope leakage unless a permitted reason is
+#                       recorded.
+#   unacceptable_plans  "<verb>:<strategy>" keys of builtin plans that are the wrong shape for the
+#                       request, read from each plan's description, not from a declared kind. A
+#                       grown plan has no template strategy to name it, so the fixture's grown clone
+#                       of plan 473 (nexus-jypmj.1.14) is named "grown:hybrid-factual-lookup-473"; it
+#                       is listed wherever "lookup:hybrid-factual-lookup" is, since it has 473's body.
+#                       The clone stands for ONE Phase 2 exit clause, "unknown-grown plans cannot
+#                       bypass the gate" (it is stored ad-hoc,grown and carries no answer-kind
+#                       declaration). It does NOT measure the clause "473 is ineligible" (a
+#                       builtin-tagged row that declares lookup). Plan 473's builtin origin is inferred
+#                       from RDR-232 line 1606 and T2 nexus_rdr/189-research-11; no live read was made.
+#
+# Real requests: the first three lookups and the post-store-hook and retrieval-layer requests are
+# the RDR-090 spike queries (ground_truth kept so the spike's NDCG axis still reads); the ART
+# RDR-084 request is the 2026-10-23 incident request, verbatim (the RDR-232 Problem Statement; full
+# text from nx_answer_runs run 722, 2026-10-23T22:25:33Z). The rest are requests of the shapes the RDR names, written against this
+# repository's own RDRs and code.
+#
+# A relabel that can change a measure of an already-recorded observation set bumps
+# golden_set_version; a key no recorded observation can contain does not. (Adding a request changes
+# the set's size, so it bumps too.) nexus-jypmj.1.14 added the one grown key above without a bump:
+# every recorded observation set is builtins-only, none can contain a "grown:" key, so every recorded
+# measure reads as it did and the report carries the version it loads from bench.schema.
+# tests/test_rdr232_grown_clone.py pins that the key appears exactly where
+# "lookup:hybrid-factual-lookup" does and that no builtin plan is tagged grown.
+golden_set_version: 1
+queries:
+  # ── lookup ───────────────────────────────────────────────────────────────
+  - qid: G01-lookup-tumblers
+    category: factual
+    text: "Which RDR introduced catalog tumblers as hierarchical document addresses?"
+    answer_kind: lookup
+    required_sources: ["RDR-049"]
+    required_facets: ["introducing-rdr"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+    ground_truth:
+      "rdr-049-": 3
+      "rdr-053-": 1
+
+  - qid: G02-lookup-chash
+    category: factual
+    text: "Which RDR added the content-hash chunk index for stable chunk identity?"
+    answer_kind: lookup
+    required_sources: ["RDR-086"]
+    required_facets: ["introducing-rdr"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+    ground_truth:
+      "rdr-086-": 3
+      "rdr-061-": 1
+      "rdr-075-": 1
+
+  - qid: G03-lookup-taxonomy
+    category: factual
+    text: "Which RDR proposed the BERTopic-based taxonomy with HDBSCAN clustering?"
+    answer_kind: lookup
+    required_sources: ["RDR-070"]
+    required_facets: ["introducing-rdr"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+      - "debug:default"
+    ground_truth:
+      "rdr-070-": 3
+      "rdr-067-": 1
+
+  - qid: G04-lookup-min-confidence
+    category: factual
+    text: "What minimum confidence does plan_match use by default before a plan counts as a hit?"
+    answer_kind: lookup
+    required_sources: ["RDR-079"]
+    required_facets: ["default-min-confidence"]
+    allowed_corpora: ["rdr", "code"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "review:default"
+
+  - qid: G05-lookup-hybridrag-cap
+    category: factual
+    text: "Which paper reported the context-precision tradeoff for per-source caps in hybrid retrieval, and what split did it recommend?"
+    answer_kind: lookup
+    required_sources: ["HybridRAG"]
+    required_facets: ["reporting-paper", "recommended-split"]
+    allowed_corpora: ["knowledge"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "review:default"
+      - "debug:default"
+
+  # ── synthesis ────────────────────────────────────────────────────────────
+  # The 2026-10-23 incident request, verbatim (nx_answer_runs run 722, 2026-10-23T22:25:33Z).
+  # Over ART RDR-084; the question carries no project token, so an owner/project binding
+  # (owner 1.2 or project ART) is what names the source.
+  - qid: G06-synthesis-art-rdr084
+    category: compositional
+    text: "Synthesize RDR-084, LIST PARSE Canonical Consolidation. State the locked architecture and numerical conventions, the evidence and gate history supporting them, the implementation work recorded as complete or pending, and what remains open by design. Distinguish facts at the RDR's 2026-07-30 acceptance from later records, cite source documents, and do not infer current code status beyond the retrieved evidence."
+    scope: rdr
+    answer_kind: synthesis
+    required_sources: ["RDR-084@ART"]
+    required_facets:
+      - "locked-architecture"
+      - "numerical-conventions"
+      - "evidence"
+      - "gate-history"
+      - "implementation-state"
+      - "open-by-design"
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: G07-synthesis-rdr155
+    category: compositional
+    text: "Synthesize RDR-155: what the local and cloud storage modes are, what was removed, what the migration path is, and what remains open."
+    answer_kind: synthesis
+    required_sources: ["RDR-155"]
+    required_facets: ["storage-modes", "removed-components", "migration-path", "open-items"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: G08-synthesis-tiers
+    category: compositional
+    text: "Explain how the T1, T2 and T3 storage tiers divide responsibility, what each stores, and how long each lives."
+    answer_kind: synthesis
+    required_sources: []
+    required_facets: ["t1-role", "t2-role", "t3-role", "lifetimes"]
+    allowed_corpora: ["docs", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: G09-synthesis-retrieval-evolution
+    category: compositional
+    text: >-
+      Trace the retrieval-layer evolution: how did plan-first dispatch,
+      operator extraction, and plan match scope-awareness develop across
+      the RDR-078 through RDR-095 sequence?
+    answer_kind: synthesis
+    required_sources: ["RDR-078", "RDR-080", "RDR-088", "RDR-091", "RDR-092"]
+    required_facets: ["plan-first-dispatch", "operator-extraction", "scope-aware-matching"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:document-discovery"
+    ground_truth:
+      "rdr-078-": 3
+      "rdr-080-": 3
+      "rdr-088-": 3
+      "rdr-091-": 3
+      "rdr-092-": 2
+      "rdr-079-": 1
+
+  # ── discovery / listing ──────────────────────────────────────────────────
+  - qid: G10-discovery-link-types
+    category: factual
+    text: "Which RDRs discuss catalog link types?"
+    answer_kind: discovery
+    required_sources: []
+    required_facets: ["rdrs-on-link-types"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "analyze:default"
+      - "query:abstract-themes"
+      - "debug:default"
+      - "review:default"
+
+  - qid: G11-discovery-chash
+    category: factual
+    text: "List the documents that mention the chash index."
+    answer_kind: discovery
+    required_sources: []
+    required_facets: ["documents-on-chash-index"]
+    allowed_corpora: ["rdr", "docs"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "analyze:default"
+      - "query:abstract-themes"
+      - "debug:default"
+      - "review:default"
+
+  - qid: G12-discovery-papers
+    category: factual
+    text: "Which papers in the knowledge base discuss graph-based retrieval augmentation?"
+    answer_kind: discovery
+    required_sources: []
+    required_facets: ["papers-on-graph-rag"]
+    allowed_corpora: ["knowledge"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "analyze:default"
+      - "debug:default"
+      - "review:default"
+
+  # ── comparison ───────────────────────────────────────────────────────────
+  - qid: G13-comparison-hooks
+    category: comparative
+    text: >-
+      Compare the post-store hook chain mechanisms — single-document
+      vs batch vs document-grain — and identify which RDR introduced each.
+    answer_kind: comparison
+    required_sources: ["RDR-070", "RDR-095", "RDR-089"]
+    required_facets: ["single-document-chain", "batch-chain", "document-grain-chain"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:document-discovery"
+      - "research:find-by-author"
+    ground_truth:
+      "rdr-070-": 3
+      "rdr-095-": 3
+      "rdr-089-": 3
+      "rdr-086-": 1
+
+  - qid: G14-comparison-embedders
+    category: comparative
+    text: "Compare voyage-context-3 and the bundled bge-base embedder for knowledge collections: their dimensions, cost, and when each is used."
+    answer_kind: comparison
+    required_sources: []
+    required_facets: ["dimensions", "cost", "when-used"]
+    allowed_corpora: ["docs", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:document-discovery"
+      - "research:find-by-author"
+
+  - qid: G15-comparison-harnesses
+    category: comparative
+    text: "How do the RDR-090 five-query spike and the RDR-196 operator proxy differ in what they measure?"
+    answer_kind: comparison
+    required_sources: ["RDR-090", "RDR-196"]
+    required_facets: ["spike-measures", "operator-proxy-measures"]
+    allowed_corpora: ["rdr", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:document-discovery"
+      - "research:find-by-author"
+
+  # ── audit ────────────────────────────────────────────────────────────────
+  - qid: G16-audit-rdr210
+    category: compositional
+    text: "Audit RDR-210 against its implementation: which decisions are implemented, which are still pending, and where does the code diverge?"
+    answer_kind: audit
+    required_sources: ["RDR-210"]
+    required_facets: ["implemented-decisions", "pending-decisions", "divergences"]
+    allowed_corpora: ["rdr", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+
+  - qid: G17-audit-nx-answer-docs
+    category: compositional
+    text: "Is the documentation for nx_answer up to date with the code? List the gaps."
+    answer_kind: audit
+    required_sources: []
+    required_facets: ["documented-behavior", "code-behavior", "gaps"]
+    allowed_corpora: ["docs", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+
+  - qid: G18-audit-traverse-cap
+    category: compositional
+    text: "Check whether the traverse tool's result cap is described consistently across its docstring, the plan YAML comments, and the RDRs."
+    answer_kind: audit
+    required_sources: []
+    required_facets: ["docstring-cap", "plan-yaml-cap", "rdr-cap"]
+    allowed_corpora: ["code", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+
+  # ── debug ────────────────────────────────────────────────────────────────
+  - qid: G19-debug-traverse-empty-ids
+    category: compositional
+    text: "Why does traverse return no chunk ids when the catalog manifest lookup fails?"
+    answer_kind: debug
+    required_sources: []
+    required_facets: ["failure-path", "root-cause"]
+    allowed_corpora: ["code", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+      - "research:corpus-coverage-check"
+      - "document:default"
+
+  - qid: G20-debug-wrong-plan
+    category: compositional
+    text: "Why does nx_answer pick the factual-lookup plan for a multi-facet synthesis request?"
+    answer_kind: debug
+    required_sources: []
+    required_facets: ["selection-path", "root-cause"]
+    allowed_corpora: ["code", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+      - "research:corpus-coverage-check"
+      - "document:default"
+
+  - qid: G21-debug-shm
+    category: compositional
+    text: "What causes shared memory allocation errors when many xdist workers each start a Postgres cluster?"
+    answer_kind: debug
+    required_sources: []
+    required_facets: ["failure-path", "root-cause"]
+    allowed_corpora: ["docs", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+      - "research:corpus-coverage-check"
+      - "document:default"
+
+  # ── ambiguous phrasing ───────────────────────────────────────────────────
+  - qid: G22-unknown-plan-matching
+    category: compositional
+    text: "Tell me about plan matching."
+    answer_kind: unknown
+    required_sources: []
+    required_facets: ["whole-question"]
+    allowed_corpora: ["knowledge", "code", "docs", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+
+  - qid: G23-unknown-chunking
+    category: compositional
+    text: "Anything on chunking?"
+    answer_kind: unknown
+    required_sources: []
+    required_facets: ["whole-question"]
+    allowed_corpora: ["knowledge", "code", "docs", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+
+  - qid: G24-unknown-search-slow
+    category: compositional
+    text: "Walk me through how search works and why it is sometimes slow."
+    answer_kind: unknown
+    required_sources: []
+    required_facets: ["whole-question"]
+    allowed_corpora: ["knowledge", "code", "docs", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"

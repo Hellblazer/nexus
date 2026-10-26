@@ -193,13 +193,11 @@ def test_registered_bash_hooks_within_cap() -> None:
 
 
 #: The real cross-plugin per-Bash-call hook count right now:
-#: `subagent_git_write_requires_orchestrator` + `credential_print_guard` +
-#: the PreToolUse half of `subagent_git_integrity_check` (nexus-i93tz), plus
-#: that script's post-call half (PostToolUse or PostToolUseFailure, one fires).
+#: `subagent_git_write_requires_orchestrator` + `credential_print_guard`.
 #: The bd-close gate and the phase-review close gate left at cleanup steps
 #: A2/A3 (nexus-0r1uz), taking the count from the cap (4) to 2; nexus-i93tz
-#: takes it back to the cap, so the next Bash hook needs consolidation.
-CURRENT_BASH_HOOK_COUNT = 4
+#: took it back to 4 and Sam's decision of 2026-10-25 removed that hook again.
+CURRENT_BASH_HOOK_COUNT = 2
 
 
 def test_registered_bash_hooks_is_currently_pinned() -> None:

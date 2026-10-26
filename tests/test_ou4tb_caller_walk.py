@@ -32,6 +32,18 @@ from nexus.indexer import _prune_misclassified_in_collection
 _BOOM = VectorServiceError("GET /v1/vector/get failed: connection refused")
 
 
+@pytest.fixture
+def no_superseded_collections(monkeypatch) -> None:
+    """nexus-h2v0l: the projection passes read the collection registry to leave
+    superseded collections out; these tests are about the vector-service arms,
+    not the registry, so the registry answers "none superseded"."""
+    class _Registry:
+        def list_collections(self) -> list[dict]:
+            return []
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Registry())
+
+
 class _RaisingCol:
     """A collection handle whose reads/deletes see a degraded service."""
 
@@ -63,6 +75,7 @@ def _events(logs: list[dict]) -> list[str]:
     return [entry["event"] for entry in logs]
 
 
+@pytest.mark.usefixtures("no_superseded_collections")
 class TestProjectionIncompleteFetchCounted:
     def test_incomplete_fetch_is_counted_not_dropped(self, monkeypatch) -> None:
         """The index auto-pass computed ``incomplete_fetch`` and dropped it
@@ -71,7 +84,7 @@ class TestProjectionIncompleteFetchCounted:
             def project_against(self, col, others, client, threshold=0.85):
                 return {"chunk_assignments": [], "incomplete_fetch": True}
 
-        total, incomplete, nonfinite = _project_cross_collections(
+        total, incomplete, nonfinite, _skipped = _project_cross_collections(
             _Tax(), ["code__a", "code__b"], None,
         )
         assert total == 0
@@ -85,7 +98,7 @@ class TestProjectionIncompleteFetchCounted:
             def project_against(self, col, others, client, threshold=0.85):
                 return {"chunk_assignments": [], "nonfinite_chunks": ["x", "y"]}
 
-        total, incomplete, nonfinite = _project_cross_collections(
+        total, incomplete, nonfinite, _skipped = _project_cross_collections(
             _Tax(), ["code__a", "code__b"], None,
         )
         assert (total, incomplete, nonfinite) == (0, 0, 4)
@@ -438,6 +451,7 @@ class _DegradedTaxonomy:
         raise _BOOM
 
 
+@pytest.mark.usefixtures("no_superseded_collections")
 class TestProjectionPassBehavior:
     """The index auto-projection pass, extracted to _run_projection_pass
     (ou4tb critique: the inline arms were pinned only by source greps)."""
@@ -484,6 +498,7 @@ class TestProjectionPassBehavior:
         assert "_run_projection_pass(" in src
 
 
+@pytest.mark.usefixtures("no_superseded_collections")
 class TestDiscoverProjectionBehavior:
     """The discover auto-projection pass, extracted to
     _run_discover_projection."""

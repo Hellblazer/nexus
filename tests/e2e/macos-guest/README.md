@@ -57,8 +57,12 @@ overlap. The run enforces that for its whole duration, not only at the start:
 - `host.sh hold` takes the hellmini `suite` lease (the same directory
   `tests/_suite_lease.py` and `scripts/lib/build-lease.sh` use, in the git
   common dir of `/Volumes/Bulk/src/nexus`) over an ssh session whose stdin
-  `launch.sh` owns. A suite started mid-run finds it held and fails closed
-  (exit 75); the runner overlap guard waits. The hold destroys the VM
+  `launch.sh` owns. A suite started mid-run finds it held and queues behind it
+  for up to 30 minutes, then fails closed (exit 75; `NX_SUITE_LEASE_WAIT=0`
+  refuses at once), grant or no grant: a `lab-mac` grant is admission and
+  accounting only, so on macOS the conftest takes the lease inside one (off
+  macOS a lab-run grant skips it). The runner overlap guard waits. The hold
+  destroys the VM
   before it releases the lease; if the destroy fails the lease is still released
   and the deadman deletes the VM at its cap.
 - `host.sh guard` reads those leases (`suite`, `service`) before the hold. An

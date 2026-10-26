@@ -54,14 +54,17 @@ class TestSharedChashPresence:
         with patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat):
             cache = build_staleness_cache(col)
         assert set(cache.by_doc_id) == {"1.1.1", "1.1.2"}
-        assert cache.by_doc_id["1.1.1"] == ("hash-a", "model-a")
+        # nexus-3ajpd: presence and model only; the chunk row's hash is the
+        # last writer's, never a document's, so the hash slot stays empty.
+        assert cache.by_doc_id["1.1.1"] == ("", "model-a")
 
     @pytest.mark.parametrize("shared_first", [True, False])
-    def test_unique_chunk_value_is_not_overwritten_by_shared_chunk(
+    def test_no_chunk_row_hash_is_recorded_whatever_the_sweep_order(
         self, shared_first: bool,
     ) -> None:
-        """A doc's own (unique) chunk value wins over a shared chunk's
-        first-writer value, whatever order the sweep returns rows in."""
+        """nexus-3ajpd: neither a shared chunk's last-writer hash nor a
+        document's own chunk hash lands in the cache; only the catalog overlay
+        fills the hash slot."""
         rows = [
             {"chunk_text_hash": "shared", "content_hash": "hash-other", "embedding_model": "model-a"},
             {"chunk_text_hash": "own-2", "content_hash": "hash-2", "embedding_model": "model-a"},
@@ -73,7 +76,7 @@ class TestSharedChashPresence:
         }
         with patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat):
             cache = build_staleness_cache(col)
-        assert cache.by_doc_id["1.1.2"] == ("hash-2", "model-a")
+        assert cache.by_doc_id == {"1.1.1": ("", "model-a"), "1.1.2": ("", "model-a")}
 
 
 class TestCatalogOverlay:

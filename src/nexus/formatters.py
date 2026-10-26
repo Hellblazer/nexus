@@ -11,9 +11,13 @@ from typing import Any
 import structlog
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.context_annotations import OWNER_FACTS_KEY
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
+
+#: Metadata keys the search sets for its own use; ``format_json`` leaves them out.
+_INTERNAL_METADATA_KEYS: frozenset[str] = frozenset({"_owner_doc_ids", OWNER_FACTS_KEY})
 
 
 def _display_path(meta: dict, default: str = "") -> str:
@@ -438,9 +442,9 @@ def format_json(results: list[SearchResult]) -> str:
     items: list[dict[str, Any]] = []
     for r in results:
         item: dict[str, Any] = {
-            # _owner_doc_ids is the search's own working list (nexus-sis0m.5),
-            # not a result field.
-            **{k: v for k, v in r.metadata.items() if k != "_owner_doc_ids"},
+            # _owner_doc_ids (nexus-sis0m.5) and _owner_facts (nexus-6pfgb.11)
+            # are the search's own working keys, not result fields.
+            **{k: v for k, v in r.metadata.items() if k not in _INTERNAL_METADATA_KEYS},
             "id": r.id,
             "content": r.content,
             "distance": r.distance,

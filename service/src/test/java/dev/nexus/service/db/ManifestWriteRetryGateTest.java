@@ -100,6 +100,8 @@ class ManifestWriteRetryGateTest {
         "DeadlockRetry", "class javadoc naming the manifest writers it guards; the belt itself touches no table",
         "CatalogHandler", "comments only",
         "VectorHandler", "javadoc only",
+        "ManifestLabelStage", "nexus-tko2w: one SELECT over the manifest joined to its live document (the occurrences of a"
+            + " search hit's chash, for the section-label where-filter); it writes nothing",
         "ReembedSourceReader", "RDR-210 Phase 6 Step 2 (nexus-f98bg): selects only (EXISTS and count over the manifest to"
             + " find a source's candidate documents and what a cutover's delete would destroy); the re-embed move"
             + " writes the manifest through CatalogRepository"));

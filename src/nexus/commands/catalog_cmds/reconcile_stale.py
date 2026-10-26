@@ -60,9 +60,9 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          verifiably unchunkable (see zero_content_by_design
                          below) — re-index is a plausible remedy.
                          zero_content_by_design -> the resolved, existing
-                         file is zero-byte or binary content (same
-                         ``classifier.looks_like_binary_content`` sniff the
-                         producer-side registration fix uses, nexus-rqsh1)
+                         file is zero-byte, binary content or whitespace-only text (same
+                         ``classifier`` sniffs the producer-side registration
+                         fix uses, nexus-rqsh1 / nexus-5j8fp)
                          — it can NEVER produce a chunk no matter how many
                          times it is re-indexed, so re-index is never the
                          correct remedy; tombstone is. An HONEST bucket,
@@ -588,8 +588,8 @@ _WRITE_TIME_GUARDS: dict[str, dict] = {
     },
     "tombstone-zero-content": {
         "status": "shipped",
-        "guard": "unchunkable sources (zero-byte, binary) never registered (nexus-rqsh1)",
-        "where": "nexus.classifier.looks_like_binary_content at the indexer's registration guard; "
+        "guard": "unchunkable sources (zero-byte, binary, whitespace-only) never registered (nexus-rqsh1, nexus-5j8fp)",
+        "where": "nexus.classifier.looks_like_binary_content and is_whitespace_only_text at the indexer's registration guard; "
                  "catalog_cmds.integrity._is_zero_content_by_design mirrors it",
         "residual_beads": [],
     },
@@ -773,7 +773,7 @@ def _classify(cat: "CatalogReader", t3: object) -> tuple[dict, list[str]]:
                     })
                 elif resolved is not None and resolved.exists():
                     if _is_zero_content_by_design(resolved):
-                        # nexus-rqsh1: a zero-byte or binary source can
+                        # nexus-rqsh1: a zero-byte, binary or whitespace-only source can
                         # NEVER produce a chunk no matter how many times it
                         # is re-indexed -- reindex_candidate implies
                         # re-index is a valid remedy, which is false here.
@@ -924,7 +924,7 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
             _echo_sample(zc_reindex, _CAP_ACTION, _label_zero_count)
         if zc_zero_content:
             click.echo(
-                "  Zero-content-by-design (zero-byte or binary source; "
+                "  Zero-content-by-design (zero-byte, binary or whitespace-only source; "
                 "will never chunk; producer no longer registers these; "
                 "remedy is tombstone, not re-index):"
             )
@@ -978,7 +978,7 @@ def _echo_human_report(report: dict, unreadable: list[str]) -> None:
     )
     click.echo(
         f"  nx catalog reconcile-stale --execute tombstone-zero-content --no-dry-run --confirm"
-        f"  # tombstone {len(zc_zero_content)} doc(s) whose source will never chunk (zero-byte/binary)"
+        f"  # tombstone {len(zc_zero_content)} doc(s) whose source will never chunk (zero-byte/binary/whitespace-only)"
     )
 
     if unreadable:
@@ -1399,8 +1399,8 @@ def reconcile_stale_cmd(action: str | None, dry_run: bool, confirm: bool, json_o
                              ``unresolvable_provenance`` in the report.
       tombstone-zero-content delete zero-count docs whose confirmed on-disk
                              source is verifiably unchunkable by
-                             construction (zero-byte, or binary content —
-                             nexus-rqsh1): re-indexing can never produce a
+                             construction (zero-byte, binary content or
+                             whitespace-only text — nexus-rqsh1, nexus-5j8fp): re-indexing can never produce a
                              chunk for these, so re-index is never the
                              correct remedy, only tombstone.
       tombstone-ghost-notes  delete store_put-origin notes (note-shaped: no

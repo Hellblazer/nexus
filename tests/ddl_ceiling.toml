@@ -81,7 +81,13 @@ migration_wal_bytes_per_worker = 11038000
 # each of the two tables), and 2 from the runAlways grants loop for the two new tables. The +11 is measured on chas
 # (scoped substrate run, ddl: migration=2118, twice, on the tree at 2107; migration=2120 on this tree, rebased onto
 # 2109); the 2 from the grants loop is the remainder, not itemized.
-migration_ddl_per_worker = 2120
+# 2120 -> 2121 (2026-10-25): catalog-046-1 (nexus-tko2w, section_title/section_type/page_number on
+# catalog_document_chunks) adds one ALTER TABLE (three ADD COLUMN clauses in one statement) to a fresh migration.
+# 2121 -> 2139 (2026-10-25): vectors-038-1 (nexus-2k8wi, the cross pass skips superseded collections) adds eighteen DDL
+# statements to a fresh migration: 9 CREATE OR REPLACE FUNCTION (assign_from_chashes, cross_preview and
+# taxonomy_ann_query at 384, 768 and 1024) and their 9 GRANT EXECUTE. Measured on chas (scoped substrate run, 3 workers,
+# ddl: migration=6417, 2139 each).
+migration_ddl_per_worker = 2139
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

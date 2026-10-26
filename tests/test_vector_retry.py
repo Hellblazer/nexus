@@ -344,24 +344,26 @@ def test_list_store_retries_on_read_timeout(t3_mock) -> None:
     assert len(db.list_store("knowledge__mystore")) == 1
 
 
-def test_index_code_file_retries_on_connect_error(tmp_path) -> None:
-    from nexus.indexer import _index_code_file
-    src = tmp_path / "hello.py"
-    src.write_text("def hello(): pass\n")
+def test_staleness_probe_retries_on_connect_error(monkeypatch) -> None:
+    """The per-file staleness decision (nexus-3ajpd: the catalog fence, then one chunk of the
+    document's own manifest read from T3) retries a transport failure of its T3 read; callers
+    do not wrap it."""
+    from nexus import doc_indexer
+    from nexus.indexer_utils import check_staleness
+
+    monkeypatch.setattr(doc_indexer, "_index_fence_state", lambda doc_id: ("complete", "h"))
+    # The manifest read is the catalog's; only the T3 row read is under test.
+    monkeypatch.setattr(
+        "nexus.catalog.factory.make_catalog_reader",
+        lambda *a, **k: MagicMock(get_manifest=lambda d: [MagicMock(chash="c1", position=0)]),
+        raising=False,
+    )
     mock_col = MagicMock()
     mock_col.get.side_effect = [httpx.ConnectError("connection refused"),
-                                {"ids": [], "metadatas": []}]
-    mock_voyage = MagicMock()
-    mock_voyage.embed.return_value = MagicMock(embeddings=[[0.1, 0.2]])
-    result = _index_code_file(file=src, repo=tmp_path, collection_name="code__myrepo",
-                              # Neutral model token on purpose (RDR-109 mode lint):
-                              # target_model is opaque to _index_code_file/index_code_file --
-                              # threaded through to staleness comparison and chunk metadata
-                              # only, never a dispatch predicate. voyage_client is mocked.
-                              target_model="model-code", col=mock_col, db=MagicMock(),
-                              voyage_client=mock_voyage, git_meta={},
-                              now_iso="2026-01-01T00:00:00+00:00", score=1.0)
-    assert result >= 0 and mock_col.get.call_count == 2
+                                {"ids": ["c1"], "metadatas": [{"embedding_model": "model-code"}]}]
+    # Neutral model token on purpose (RDR-109 mode lint): opaque to the staleness comparison.
+    assert check_staleness(mock_col, "hello.py", "h", "model-code", doc_id="1.1.1") is True
+    assert mock_col.get.call_count == 2
 
 
 # ── RDR-020 regression: disjoint from Voyage AI ────────────────────────────

@@ -1026,6 +1026,7 @@ class TestManifestNeverOutrunsConfirmedChunks:
         f.write_text("hello tp8yk")
 
         with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="1.9.99"), \
+                patch("nexus.doc_indexer._doc_id_for_path", return_value=""), \
                 patch("nexus.doc_indexer._write_chunks_with_owner_rows", _write_fails), \
                 patch("nexus.doc_indexer._fence_fail"):
             with pytest.raises(RuntimeError, match="did not land"):

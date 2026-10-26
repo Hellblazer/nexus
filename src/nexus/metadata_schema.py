@@ -69,6 +69,12 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "chunk_end_char",
     "line_start",
     "line_end",
+    # ``page_number``, ``section_title`` and ``section_type`` below are labels of a chunk's
+    # POSITION in one document, so since nexus-tko2w (RDR-108) they also ride the catalog
+    # manifest row (``catalog_document_chunks``, per (doc_id, position)). The copy on the
+    # shared T3 chunk row is the last writer's; it is still written as the fallback for a
+    # manifest row that predates the columns, and a reader that needs the label of a chunk in
+    # a given document reads the manifest.
     "page_number",
     # Display / user-facing (6) — ``title`` is intentionally KEPT
     # per the rdr-101-phase4-reader-audit + 2026-05-03 re-verification:

@@ -223,19 +223,47 @@ def test_a_lock_that_cannot_be_flocked_falls_back_to_the_plain_write(
     assert len(_lease_files(tmp_path)) == 1
 
 
+def test_a_cold_start_on_a_filesystem_that_cannot_flock_still_mints_and_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cold path shares the guarded mint with the refresh (nexus-dncjg), so
+    it falls back to the unguarded mint on ENOLCK too, where it used to raise
+    the OSError out of ``bearer_for``. No cached token: this is a cold start."""
+    import errno
+
+    def refuse(fd: int, *, blocking: bool = True) -> None:
+        raise OSError(errno.ENOLCK, "No locks available (simulated)")
+
+    monkeypatch.setattr(_locking, "lock_fd", refuse)
+    mgr = _manager(tmp_path)
+    assert mgr.has_live_token(BASE_URL, TENANT) is False
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-minted"
+    assert len(_lease_files(tmp_path)) == 1
+
+
 def test_a_lock_held_past_the_wait_skips_the_publish_and_still_returns_the_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A holder that never lets go (a wedged minter): the publisher waits
+    """A holder that never lets go (a wedged minter) against the UNGUARDED
+    mint (its first lock open failed): the publisher waits
     ``_LEASE_PUBLISH_LOCK_WAIT_S``, then leaves the lease to it. No write, no
     raise, and the caller still gets the token it minted."""
     monkeypatch.setattr(data_token, "_LEASE_PUBLISH_LOCK_WAIT_S", 0.2)
     mgr = _manager(tmp_path)
-    _refresh_due(mgr)
     lock_path = _data_token_mint_lock_path(BASE_URL, TENANT, tmp_path)
     lock_path.write_text("{}\n")
     holder = os.open(str(lock_path), os.O_WRONLY)
     _locking.lock_fd(holder, blocking=False)  # lifecycle-gate-allow: test holder that never lets go (nexus-fcwbd)
+    real_open = data_token._open_mint_lock_logged
+    opened = {"n": 0}
+
+    def first_open_fails(*a: Any, **k: Any) -> int:
+        opened["n"] += 1
+        if opened["n"] == 1:
+            raise OSError("EMFILE (simulated)")
+        return real_open(*a, **k)
+
+    monkeypatch.setattr(data_token, "_open_mint_lock_logged", first_open_fails)
     writes: list[int] = []
     real = DataTokenManager._write_lease
     monkeypatch.setattr(
@@ -249,6 +277,38 @@ def test_a_lock_held_past_the_wait_skips_the_publish_and_still_returns_the_token
         _locking.unlock_fd(holder)  # lifecycle-gate-allow: test holder release
         os.close(holder)
     assert writes == [] and _lease_files(tmp_path) == []
+    assert 0.2 <= waited < 5.0, f"waited {waited:.2f}s: the bound was not honoured"
+
+
+def test_a_refresh_against_a_lock_that_never_frees_returns_the_cached_token_without_minting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-dncjg: the refresh no longer mints outside the lock. A holder that
+    never lets go costs it ``_REFRESH_LOCK_WAIT_S``, then it hands back the
+    still-valid cached token: no mint, no write, no raise."""
+    monkeypatch.setattr(data_token, "_REFRESH_LOCK_WAIT_S", 0.2)
+    mints: list[int] = []
+
+    def poster(url: str, headers: dict, body: dict) -> tuple[int, dict, dict]:
+        mints.append(1)
+        return _poster(url, headers, body)
+
+    mgr = DataTokenManager(
+        poster=poster, mint_credential=lambda: "mintcred", mint_tenant=lambda: "", config_dir=tmp_path,
+    )
+    _refresh_due(mgr)
+    lock_path = _data_token_mint_lock_path(BASE_URL, TENANT, tmp_path)
+    lock_path.write_text("{}\n")
+    holder = os.open(str(lock_path), os.O_WRONLY)
+    _locking.lock_fd(holder, blocking=False)  # lifecycle-gate-allow: test holder that never lets go (nexus-dncjg)
+    try:
+        started = time.monotonic()
+        assert mgr.bearer_for(BASE_URL, TENANT) == "old"
+        waited = time.monotonic() - started
+    finally:
+        _locking.unlock_fd(holder)  # lifecycle-gate-allow: test holder release
+        os.close(holder)
+    assert mints == [] and _lease_files(tmp_path) == []
     assert 0.2 <= waited < 5.0, f"waited {waited:.2f}s: the bound was not honoured"
 
 
@@ -318,7 +378,9 @@ def test_a_reopen_that_fails_falls_back_to_the_plain_write(
 
     monkeypatch.setattr(data_token, "_open_mint_lock_logged", second_open_fails)
     assert mgr.bearer_for(BASE_URL, TENANT) == "tok-minted"
-    assert n["c"] == 2
+    # open 1: the guarded mint; open 2 (fails): its reopen, which falls to the
+    # unguarded mint; open 3: that mint's publish, under the lock again.
+    assert n["c"] == 3
     assert len(_lease_files(tmp_path)) == 1
 
 
@@ -329,19 +391,21 @@ def test_two_refreshers_on_one_key_are_never_inside_the_publish_together(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two managers (two processes' worth: no shared in-process key lock)
-    refresh the same key at once. Each stays inside the publish 0.15s. The
-    count of publishers inside at one instant must never reach two."""
+    refresh the same key at once. The mint lock admits one at a time and the
+    second adopts the first's lease instead of minting (nexus-dncjg): exactly
+    one publish, and publishers inside at one instant never reach two."""
     probe = _LockProbe(monkeypatch, tmp_path, hold_s=0.15)
     managers = [_manager(tmp_path), _manager(tmp_path)]
     for m in managers:
         _refresh_due(m)
     barrier = threading.Barrier(len(managers))
     errors: list[BaseException] = []
+    tokens: list[str | None] = []
 
     def run(m: DataTokenManager) -> None:
         try:
             barrier.wait()
-            m.bearer_for(BASE_URL, TENANT)
+            tokens.append(m.bearer_for(BASE_URL, TENANT))
         except BaseException as exc:  # noqa: BLE001 -- surfaced below
             errors.append(exc)
 
@@ -351,7 +415,9 @@ def test_two_refreshers_on_one_key_are_never_inside_the_publish_together(
     for t in threads:
         t.join()
     assert not errors, errors
-    assert len(probe.held_at_publish) == 2, "both refreshers must have published (the wait is not a drop)"
+    assert tokens == ["tok-minted", "tok-minted"]
+    assert len(probe.held_at_publish) == 1, "one refresher mints and publishes; the other adopts its lease"
+    assert probe.held_at_publish == [True]
     assert probe.max_inside == 1, f"{probe.max_inside} publishers were inside at once"
 
 

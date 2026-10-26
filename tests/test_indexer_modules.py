@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nexus.index_context import IndexContext
-from nexus.indexer_utils import build_context_prefix, check_staleness
+from nexus.indexer_utils import StalenessCache, build_context_prefix, check_staleness
 from tests.conftest import make_vector_test_client
 
 
@@ -30,6 +30,9 @@ def make_ctx(tmp_path: Path):
             voyage_client=MagicMock(), repo_path=tmp_path,
             corpus="code__test", embedding_model="model-code",
             git_meta={}, now_iso="2026-01-01T00:00:00+00:00", force=False,
+            # nexus-3ajpd: every `nx index repo` call site passes a cache; an
+            # empty one answers "stale" without touching the catalog.
+            staleness_cache=StalenessCache(),
         )
         defaults.update(overrides)
         return IndexContext(**defaults)
@@ -56,47 +59,49 @@ def test_index_context_score_mutability(make_ctx):
 
 # ── check_staleness ──────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("stored_hash,stored_model,query_hash,query_model,expected", [
+@pytest.mark.parametrize("fence_hash,stored_model,query_hash,query_model,expected", [
     ("abc123", "model-code", "abc123", "model-code", True),   # current
     ("old_hash", "model-code", "new_hash", "model-code", False),  # stale hash
     ("abc123", "old-model", "abc123", "model-code", False),       # model mismatch
 ])
-def test_check_staleness(tmp_path, stored_hash, stored_model, query_hash, query_model, expected):
-    mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "metadatas": [{"content_hash": stored_hash, "embedding_model": stored_model}],
-        "ids": ["id1"],
-    }
-    assert check_staleness(mock_col, tmp_path / "foo.py", query_hash, query_model) is expected
-
-
-def test_check_staleness_no_existing_chunks(tmp_path):
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"metadatas": [], "ids": []}
-    assert check_staleness(mock_col, tmp_path / "foo.py", "abc123", "model-code") is False
-
-
-def test_check_staleness_uses_content_hash_when_provided(tmp_path):
-    """RDR-108 Phase 3: chunks no longer carry ``doc_id``; ``check_staleness``
-    keys on ``content_hash`` (which is in ALLOWED_TOP_LEVEL and shared by
-    every chunk of the same file). The ``doc_id=`` kwarg is accepted for
-    backwards compatibility but is no longer the where-filter key.
-    """
-    mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "metadatas": [{
-            "content_hash": "abc",
-            "embedding_model": "model-code",
-        }],
-        "ids": ["id1"],
-    }
-    result = check_staleness(
-        mock_col, tmp_path / "shared.py", "abc", "model-code",
-        doc_id="ART-deadbeef",
+def test_check_staleness(tmp_path, monkeypatch, fence_hash, stored_model, query_hash, query_model, expected):
+    """Without a cache the decision is the catalog document's (nexus-3ajpd): a
+    'complete' fence at the file's hash, then one chunk of the document's own
+    manifest with the target model."""
+    monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", fence_hash))
+    monkeypatch.setattr(
+        "nexus.doc_indexer._own_chunk_metadata", lambda col, doc_id: {"embedding_model": stored_model},
     )
-    assert result is True
-    where = mock_col.get.call_args.kwargs["where"]
-    assert where == {"content_hash": "abc"}
+    assert check_staleness(
+        MagicMock(), tmp_path / "foo.py", query_hash, query_model, doc_id="1.1.1",
+    ) is expected
+
+
+def test_check_staleness_no_existing_chunks(tmp_path, monkeypatch):
+    monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", "abc123"))
+    monkeypatch.setattr("nexus.doc_indexer._own_chunk_metadata", lambda col, doc_id: None)
+    assert check_staleness(MagicMock(), tmp_path / "foo.py", "abc123", "model-code", doc_id="1.1.1") is False
+
+
+def test_check_staleness_never_matches_content_hash_on_a_chunk_row(tmp_path, monkeypatch):
+    """nexus-3ajpd (was test_check_staleness_uses_content_hash_when_provided,
+    RDR-108 Phase 3): the per-file decision used to be
+    ``col.get(where={"content_hash": h})``, collection-wide, ignoring
+    ``doc_id``. A chunk row's ``content_hash`` is the LAST writer's, so that
+    read matched another document's rows. The collection is never queried by
+    metadata now."""
+    mock_col = MagicMock()
+    mock_col.get.return_value = {
+        "metadatas": [{"content_hash": "abc", "embedding_model": "model-code"}],
+        "ids": ["id1"],
+    }
+    monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", "something-else"))
+    result = check_staleness(
+        mock_col, tmp_path / "shared.py", "abc", "model-code", doc_id="ART-deadbeef",
+    )
+    assert result is False
+    for call in mock_col.get.call_args_list:
+        assert "where" not in call.kwargs, call
 
 
 def test_check_staleness_no_content_hash_returns_stale_source_path_fallback_deleted_as_dead_code(
@@ -125,19 +130,16 @@ def test_check_staleness_no_content_hash_returns_stale_source_path_fallback_dele
     mock_col.get.assert_not_called()
 
 
-def test_check_staleness_passes_when_chunk_has_matching_content_hash(tmp_path):
-    """Inverse: stored chunk has the same content_hash + model → stale."""
-    mock_col = MagicMock()
-    mock_col.get.return_value = {
-        "metadatas": [{
-            "content_hash": "abc",
-            "embedding_model": "model-code",
-        }],
-        "ids": ["chunk-0"],
-    }
+def test_check_staleness_passes_when_the_fence_and_an_own_chunk_agree(tmp_path, monkeypatch):
+    """Inverse: a complete fence at the same hash and an own chunk with the
+    target model -> current, whatever hash the chunk row carries."""
+    monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("complete", "abc"))
+    monkeypatch.setattr(
+        "nexus.doc_indexer._own_chunk_metadata",
+        lambda col, doc_id: {"content_hash": "another-docs-hash", "embedding_model": "model-code"},
+    )
     result = check_staleness(
-        mock_col, tmp_path / "foo.py", "abc", "model-code",
-        doc_id="ART-deadbeef",
+        MagicMock(), tmp_path / "foo.py", "abc", "model-code", doc_id="ART-deadbeef",
     )
     assert result is True
 
@@ -255,19 +257,13 @@ def test_index_code_file_skips_current_file(tmp_path, make_ctx):
     py_file.write_text("print('hello')\n")
     h = hashlib.sha256(py_file.read_text().encode("utf-8")).hexdigest()
 
-    # nexus-8g79.28: seed a real EphemeralClient collection with a
-    # chunk that matches the file's content_hash + embedding_model so
-    # check_staleness round-trips against real ChromaDB return shapes.
-    col = _real_col()
-    col.add(
-        ids=["id1"],
-        documents=["print('hello')"],
-        metadatas=[{
-            "content_hash": h, "embedding_model": "model-code",
-            "source_path": str(py_file),
-        }],
+    # nexus-3ajpd: the repo path decides from the cache the orchestrator
+    # builds (fence hash overlaid), never from a chunk row's content_hash, so
+    # the collection here holds nothing.
+    ctx = make_ctx(
+        col=_real_col(), doc_id_resolver=lambda p: "1.1.5",
+        staleness_cache=StalenessCache(by_doc_id={"1.1.5": (h, "model-code")}),
     )
-    ctx = make_ctx(col=col)
 
     assert index_code_file(ctx, py_file) == 0
 
@@ -301,16 +297,10 @@ def test_index_code_file_fresh_skip_stays_a_plain_zero_no_exception(tmp_path, ma
     py_file = tmp_path / "hello2.py"
     py_file.write_text("print('hello again')\n")
     h = hashlib.sha256(py_file.read_text().encode("utf-8")).hexdigest()
-    col = _real_col()
-    col.add(
-        ids=["id1"],
-        documents=["print('hello again')"],
-        metadatas=[{
-            "content_hash": h, "embedding_model": "model-code",
-            "source_path": str(py_file),
-        }],
+    ctx = make_ctx(
+        col=_real_col(), doc_id_resolver=lambda p: "1.1.6",
+        staleness_cache=StalenessCache(by_doc_id={"1.1.6": (h, "model-code")}),
     )
-    ctx = make_ctx(col=col)
 
     with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
          patch("nexus.doc_indexer._fence_begin") as fence_begin:
@@ -520,19 +510,12 @@ def test_index_prose_file_skips_current_file(tmp_path, make_ctx):
     md_file = tmp_path / "README.md"
     md_file.write_text("# Hello\n\nSome content here.\n")
     h = hashlib.sha256(md_file.read_text().encode()).hexdigest()
-    # nexus-8g79.28: real EphemeralClient collection seeded with the
-    # matching chunk so staleness check round-trips real ChromaDB.
-    col = _real_col("docs__t_" + uuid.uuid4().hex[:12])
-    col.add(
-        ids=["id1"],
-        documents=["# Hello\n\nSome content here."],
-        metadatas=[{
-            "content_hash": h, "embedding_model": "model-ctx",
-            "source_path": str(md_file),
-        }],
+    # nexus-3ajpd: the cache carries the fence hash; the collection holds nothing.
+    ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]), corpus="docs__test",
+        embedding_model="model-ctx", doc_id_resolver=lambda p: "1.1.7",
+        staleness_cache=StalenessCache(by_doc_id={"1.1.7": (h, "model-ctx")}),
     )
-    ctx = make_ctx(col=col, corpus="docs__test",
-                   embedding_model="model-ctx")
 
     assert index_prose_file(ctx, md_file) == 0
 
@@ -666,17 +649,11 @@ def test_index_prose_file_fresh_skip_stays_a_plain_zero_no_exception(
     md_file = tmp_path / "README.md"
     md_file.write_text("# Hello\n\nSome content here.\n")
     h = hashlib.sha256(md_file.read_text().encode()).hexdigest()
-    col = _real_col("docs__t_" + uuid.uuid4().hex[:12])
-    col.add(
-        ids=["id1"],
-        documents=["# Hello\n\nSome content here."],
-        metadatas=[{
-            "content_hash": h, "embedding_model": "model-ctx",
-            "source_path": str(md_file),
-        }],
+    ctx = make_ctx(
+        col=_real_col("docs__t_" + uuid.uuid4().hex[:12]), corpus="docs__test",
+        embedding_model="model-ctx", doc_id_resolver=lambda p: "1.1.7",
+        staleness_cache=StalenessCache(by_doc_id={"1.1.7": (h, "model-ctx")}),
     )
-    ctx = make_ctx(col=col, corpus="docs__test",
-                   embedding_model="model-ctx")
 
     with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
          patch("nexus.doc_indexer._fence_begin") as fence_begin:

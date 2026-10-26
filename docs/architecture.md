@@ -203,7 +203,12 @@ supersedes) as a graph of nodes agents can traverse without touching vectors.
 This is the git/IPFS-style blob (T3 chunk) + tree (catalog manifest) split:
 T3 chunks are content-addressed blobs with no notion of document structure or
 order; the catalog's `document_chunks` manifest is the sole source of truth
-for which chashes compose a document and in what order.
+for which chashes compose a document and in what order. Anything that is a
+fact about a chunk's POSITION in one document rides the manifest row, because a
+chunk text two documents share is one T3 row whose metadata is the last
+writer's: the spans (`line_*`, `char_*`) and, since `catalog-046`
+(nexus-tko2w), the labels `section_title`, `section_type` and `page_number`
+(nullable, with a `labels_written` marker that tells a document's own empty label from a row written before the columns existed; a re-index fills them).
 
 Indexing (`nx index repo`, `nx index pdf`, `nx index rdr`) and MCP `store_put`
 auto-register entries via catalog hooks (see [Post-Store Hooks](#post-store-hooks)
@@ -448,17 +453,17 @@ A frecency-boosted fifth shape named in the RDR was retired before implementatio
 
 ### Metadata field semantics (chunk vs document level)
 
-Two hash fields look similar but mean very different things. Confusing them produces false-positive panic findings (e.g. "94% redundancy across the corpus" turns out to be 94% of chunks share a doc-level hash, which is correct: every chunk of one paper has the same `content_hash`). The table below locks the contract; consult before drawing conclusions from a metadata distribution.
+Two hash fields look similar but mean very different things. Confusing them produces false-positive panic findings (e.g. "94% redundancy across the corpus" turns out to be 94% of chunks sharing one `content_hash`, which is expected: the chunks of one paper were written by the same file). The table below locks the contract; consult before drawing conclusions from a metadata distribution. One caveat applies to every row: a T3 chunk row is one per (collection, chunk text), so a chunk two documents hold is one row, and its metadata is the LAST writer's (`PgVectorRepository.mergeMetadata`). A chunk-row field that names a document (`content_hash`, `title`, `source_author`, `page_number`, the section labels) is therefore that of whichever document wrote the text last, not of every document that holds it. What belongs to a document lives on its catalog row.
 
 | Metadata field | Level | Keyed on | Set by | Used for |
 |---|---|---|---|---|
-| `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison — paired with the index-run fence's three-way state, see [Index-run fence (RUNFENCE)](#index-run-fence-runfence) below; backup-snapshot identity |
+| `content_hash` | the file of the LAST document to write the chunk | `sha256(file_bytes)` | every indexer (the chunk stamp), and at register time for a repo file's catalog `meta.content_hash` (`indexer.py:1198`) | not a staleness input: a document is current when its catalog fence is `complete` at the file's hash (`index_content_hash`, see [Index-run fence (RUNFENCE)](#index-run-fence-runfence) below) and one chunk of its own manifest is present with the target model (nexus-3ajpd). On a chunk row it is a diagnostic and a repair key; the manifest heal (which now never writes into a document that has manifest rows) still selects rows by it, and `orphan-backfill link-existing` takes it as a candidate key only (it links just the chunks no live manifest of the collection names) |
 | `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; healed on an upgraded store by the ladder (`nx upgrade`) | content-addressed link spans (`chash:<hex>`); cross-collection chunk dedup |
 | `chunk_text_hash` (as chunk id) | chunk | the full SHA (RDR-180) | every indexer via `chunk_identity.chunk_id` | the chunk natural ID and the `document_chunks.chash` join key; the pre-RDR-180 `[:32]` truncation is retired, and so (nexus-lgdel.l1) is the `chash_alias` legacy-reference resolver that used to bridge it — a legacy 32-hex reference is unresolvable now, re-index the source |
 | `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
 | `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
 | `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
-| `section_title` / `section_type` | chunk | tree-sitter / Markdown section header | code/prose chunkers | search-time filtering (`section_type!=references`) |
+| `section_title` / `section_type` / `page_number` | chunk position | tree-sitter / Markdown section header / PDF page | code/prose/PDF chunkers | search-time filtering (`section_type!=references`), answered per (document, position) from the catalog manifest columns of the same names (nexus-tko2w, `catalog-046`); the T3 copy is the last writer's and is consulted only for a row whose `labels_written` is false (legacy) |
 | `embedding_model` | document | model id string | every write through the T3 client (`HttpVectorClient`; `T3Database`/`db/t3.py` is the retired serving path kept only as a test facade — see Storage row above) | `voyage-code-3` vs `voyage-context-3` routing; embedding-model drift/staleness detection (`nx doctor`, `indexer_utils.py` re-embed check) |
 | `extraction_method` | chunk | PDF-extractor identity string | PDF chunks only, via `pipeline_stages._enrich_metadata_from_extraction` post-pass (streaming) / `doc_indexer._pdf_chunks` (legacy batch path) | retroactively scoping extractor regressions — `docling` \| `mineru` \| `pymupdf_normalized`, or the honest mixed aggregate `mineru+docling-degraded` when an `--on-formula-oom docling` per-page degrade fired (nexus-1oguj, new-writes-only — see epistemic-hole note below) |
 
@@ -472,7 +477,8 @@ For operator runbooks built on this vocabulary see [`docs/operations/t3-health.m
 
 ### Index-run fence (RUNFENCE)
 
-(nexus-5xn3k). Chunk-level `content_hash` matching (the metadata-table row above) has one
+(nexus-5xn3k). The original chunk-level `content_hash` matching (a T3 row carrying the file's
+hash, since replaced by the fence-first decision below) had one
 blind spot: a run that dies partway through leaves T3 and the catalog
 manifest *consistently* truncated — every artifact the staleness check
 could compare agrees with every other, because all of them were written by
@@ -517,20 +523,45 @@ routes (`CatalogHandler.java`):
 
 All three routes refuse against a tombstoned document.
 
-**The three-way staleness gate** (`doc_indexer._index_run_fresh`) layers on
-top of the pre-existing chunk-level `content_hash` + `embedding_model`
-match (a `limit=1` probe against one surviving chunk) — it never replaces
-that check, it closes the blind spot on top of it:
+**The staleness gate** (`doc_indexer._document_is_current`, nexus-3ajpd) decides
+from the CATALOG DOCUMENT. It does not start from a T3 row matched on
+`content_hash`: that row is shared by every document holding the chunk text
+and carries the last writer's file hash, so the old probe judged an
+unchanged document stale (all its rows restamped by another document) and a
+changed one with no fence current (another document's identical new bytes
+had stamped a row). The fence is the per-document record of what a completed run verified
+(`doc_indexer._index_run_fresh`):
 
 1. `index_state == 'complete'` AND `index_content_hash == content_hash` →
-   definitely fresh, no further probe.
-2. `index_state in ('indexing', 'failed')` → definitely stale, no probe —
-   a partial or errored run must never read as done regardless of what T3
-   happens to hold right now.
-3. Anything else (`NULL` — legacy row, pre-fence engine, unresolvable
-   `doc_id`, or a fence-read failure) → the fence has nothing to say; fall
-   through to the pre-RUNFENCE behavior, one `manifest_verify` call against
-   the engine (`_manifest_is_fully_present`).
+   current as far as the fence can tell. The gate then reads one chunk of the
+   document's OWN manifest (selected by the manifest chash, not by hash) and
+   requires it present in T3 with the target embedding model.
+2. `index_state in ('indexing', 'failed')` → stale, no probe. A partial or
+   errored run must never read as done regardless of what T3 happens to
+   hold right now.
+3. Anything else (`NULL`: a document indexed before the fence existed, an
+   unresolvable `doc_id`, or a fence-read failure) → stale. The fence has
+   nothing to say and no other document-level record carries the hash a
+   completed run verified, so a file-backed document that yields chunks is
+   indexed once on its next index run and its completion stamps a fence (a
+   document with no chunks has none to probe and is indexed on every run); the
+   engine skips re-embedding chunks it already holds. An
+   unreadable fence fails closed (the document re-indexes for that run), not
+   open. Both are Sam's ruling of 2026-10-26, which amends the 5xn3k design
+   memo §3.1 and §3.4 (T2 `nexus/5xn3k-design-amendment-2026-10-26`). (Before
+   nexus-3ajpd a NULL-fence document skipped on any chunk row stamped with the
+   file's hash; `indexing` and `failed` were already stale.)
+
+`nx index repo` uses the same record through its staleness cache:
+`build_staleness_cache` records only presence and the embedding model, and
+`apply_catalog_content_hashes` fills the hash from each `complete` fence, so
+a document the overlay does not reach is stale (`check_staleness` with no
+cache applies the gate above).
+`nx index repo --since-head` does not sweep the collection: it seeds the cache
+for the delta's own documents from the catalog
+(`seed_staleness_cache_from_catalog`, one batched manifest read and batched chunk
+reads), so a delta file already indexed at its current hash is skipped
+(nexus-a3rl7).
 
 **Completion riding the manifest write (nexus-5xn3k.4).** The hot indexing
 path rarely calls `/index-run/complete` directly — completion instead
@@ -574,11 +605,11 @@ rides the existing flush-grain manifest write, at zero extra round trips:
 `nx catalog manifest-verify`) and `manifest_verify_all()` (every live
 document, grouped by collection — the former `nx doctor` sweep primitive)
 are both retired: the manifest-chunk FK makes the dangling state they
-diagnosed unreachable. `doc_indexer._manifest_is_fully_present` is now an
+diagnosed unreachable. `doc_indexer._manifest_is_fully_present` became an
 unconditional `return True` (the FK makes its underlying question
-provably always-false) — see that function's own docstring for the full
-argument, including why `CatalogRepository.completeIndexRun`'s still-live
-write-path use of the SAME underlying `nexus.manifest_verify(text)` SQL
+provably always-false) and was deleted with nexus-3ajpd, which made the
+staleness gate decide from the document's fence. `CatalogRepository.completeIndexRun`'s
+still-live write-path use of the SAME underlying `nexus.manifest_verify(text)` SQL
 function answers a *different* question the FK does not.
 
 **Doctor axis.** `nx doctor` separately flags documents stranded in
@@ -912,12 +943,17 @@ mint also (best-effort) persists the short-TTL DATA TOKEN — never the mint
 credential — to `~/.config/nexus/data_token_lease.<key>`, where `<key>` is
 a filesystem-safe digest of `(base_url host:port, tenant)`. Mode `0600`,
 atomic temp-file + `os.replace` publish. On a genuine in-process cache MISS
-(never on a refresh-due-but-still-cached entry), `DataTokenManager.
-bearer_for` reads the lease file BEFORE minting, accepting it only when its
-format version, tenant, and base-url digest all match AND its remaining
-TTL exceeds the same 20% refresh threshold the in-process cache enforces;
-any other state (absent, corrupt, foreign, stale) is a clean miss and the
-manager mints as before. A lease-write failure is logged as a warning and
+and also on a refresh-due-but-still-cached entry,
+`DataTokenManager.bearer_for` reads the lease file BEFORE minting, accepting
+it only when its format version, tenant, and base-url digest all match AND
+it is not yet refresh-due for the reading manager (each manager draws its
+own refresh point once, 15% to 25% of the TTL remaining, so borrowers of one
+lease do not come due together); a refresh-due entry adopts only a sibling's
+remint (a different token that expires later) and otherwise mints under the
+host's mint lock, so one process per host mints. A refresh that fails while
+the cached token is still valid keeps that token (one mint attempt, no retry
+sleep) and waits a jittered 15 to 45 seconds; any other state (absent,
+corrupt, foreign, stale) is a clean miss and the manager mints as before. A lease-write failure is logged as a warning and
 NEVER fails the mint — the lease is an optimization, the mint is the
 source of truth. `invalidate()` (the 401 self-heal path) removes the lease
 file alongside the in-process entry, best-effort. A mint also removes up

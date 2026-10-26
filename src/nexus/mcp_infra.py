@@ -3214,6 +3214,17 @@ def _manifest_chunk_rows(indexed_metas) -> list[dict]:
             "line_end": m.get("line_end") or None,
             "char_start": m.get("chunk_start_char") or None,
             "char_end": m.get("chunk_end_char") or None,
+            # nexus-tko2w (RDR-108): position-derived labels belong to the (doc, position)
+            # manifest row, not to the shared T3 chunk row. The three keys are ALWAYS sent:
+            # their presence is what marks the row's labels as this document's own answer
+            # (the engine's labels_written), and a chunk with no heading sends "" ("none
+            # here"), which readers then take as authoritative instead of falling back to the
+            # chunk row's (another document's) label. A client that predates the columns sends
+            # no key and its rows stay legacy. Page 0 is the chunkers' "not paged" default and
+            # travels as null.
+            "section_title": m.get("section_title") or "",
+            "section_type": m.get("section_type") or "",
+            "page_number": m.get("page_number") or None,
         }
         for i, m in indexed_metas
     ]

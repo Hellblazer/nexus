@@ -1073,9 +1073,19 @@ def reconcile_cmd(dry_run: bool) -> None:
     title for a note), which rewrites the manifest without re-embedding
     unchanged text. A rebuilt document that comes out short of its
     ``chunk_count`` is written (its chunk_count becomes the rows written) and
-    marked the same way, and is not listed again by a later pass. Documents
-    whose chunks cannot be found in T3 (no content_hash recorded, or no
-    matching chunks) are reported, not silently skipped. A marked document makes
+    marked the same way, and is not listed again by a later pass. A document
+    with no manifest rows and ``chunk_count`` above zero whose chunks cannot be
+    found in T3 (no content_hash recorded, no matching chunks, chunks that name
+    no chunk hash, or a collection that is not in the service's live listing) is
+    listed ``LOST`` and marked for re-index too, because there is nothing to
+    rebuild it from (the next index run that walks its file re-indexes it
+    either way unless a pre-Phase-3 chunk still carrying ``doc_id`` puts it in
+    the staleness cache; the mark changes what the fence says, which
+    ``nx t3 gc`` and the PDF early probe in ``nx index repo`` read); one whose
+    chunks could not be looked for (a failed T3 fetch, a service error while
+    asking whether the collection exists), or that a re-read showed no longer
+    owes the mark, is listed ``LOST`` and left as it is, with
+    ``(not marked: <reason>)`` on its line. A marked document makes
     ``nx t3 gc`` refuse its collection unless
     ``--allow-incomplete-index-state`` is passed.
 
@@ -1136,8 +1146,19 @@ def reconcile_cmd(dry_run: bool) -> None:
     if result.write_failed:
         click.echo(f"    {result.write_failed} write failure(s); see the log")
     if result.lost:
+        # nexus-v9xwj: a lost document the pass could mark (its chunks are not
+        # in T3, or its collection is not) has its fence failed too; one it
+        # could not ask about (a failed fetch, a service error listing the
+        # collections) is only listed, and so is one a re-read showed to owe
+        # nothing (chunk_count 0) or to be mid-run (fence 'indexing').
+        marked_ids = {str(r.entry.tumbler) for r in result.reindex}
         for entry in result.lost[:20]:
-            click.echo(f"    LOST {entry.tumbler}  {entry.file_path or entry.title}")
+            if str(entry.tumbler) in marked_ids:
+                note = f" ({mark} for re-index)"
+            else:
+                left = result.lost_unmarked_why.get(str(entry.tumbler))
+                note = f" (not marked: {left})" if left else ""
+            click.echo(f"    LOST {entry.tumbler}{note}  {entry.file_path or entry.title}")
         if len(result.lost) > 20:
             click.echo(f"    ... and {len(result.lost) - 20} more")
     if result.never_chunked:

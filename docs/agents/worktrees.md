@@ -70,8 +70,7 @@ things to avoid carefully; they are impossible.
    dir and the jar cache is keyed on the engine's build inputs, so any
    worktree links the cached jar (`scripts/build-gate-jar.sh`).
 
-5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** Scoped runs
-   are unaffected. This rule exists because worktrees DESTROY an accidental
+5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** This rule exists because worktrees DESTROY an accidental
    serialisation: three sessions in one tree cannot comfortably run three
    suites at once, so they take turns without agreeing to. Three worktrees
    make three concurrent `pytest -n auto` runs easy, and that exhausts the
@@ -79,6 +78,21 @@ things to avoid carefully; they are impossible.
    Postgres substrate holding a segment against `kern.sysv.shmmni`
    (nexus-6qp25). The build lease does not cover this; it is a separate
    budget.
+
+   The suite lease (`tests/_suite_lease.py`, taken in `tests/conftest.py`
+   `_take_suite_lease`) now makes the second run QUEUE rather than exit 75
+   (nexus-tvt6u): any run whose `NX_TEST_T2_SUBSTRATE` is not `none`, a scoped
+   one included, waits up to 30 minutes behind a holder, printing who it waits
+   for, and starts when the holder exits (`NX_SUITE_LEASE_WAIT=0` refuses at
+   once). Scoped substrate runs are therefore NOT unaffected; they queue
+   behind a full suite. Two limits. Inside a lab-run grant on Linux (chas) the
+   lease is skipped and lab-run admits by CPU and memory, so two `lab-l`
+   suites can run together there; the one-suite rule is by hand on chas. On
+   macOS a `lab-mac` grant is admission only, so the lease is still taken
+   inside one, and `tests/e2e/macos-guest/host.sh` guard and hold read it to
+   keep a VM run and a suite apart. Also on macOS, `_refuse_heavy_laptop_run`
+   refuses an xdist run with a substrate that is not `none` and no grant, and
+   prints the `lab-remote` line (`NX_LOCAL_HEAVY=1` opts out).
 
 6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST
    SUBSTRATE-BACKED TEST.** `service/target/` is untracked build output, so

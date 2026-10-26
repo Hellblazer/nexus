@@ -25,6 +25,7 @@ import httpx
 import structlog
 
 from nexus.aspect_readers import uri_for
+from nexus.catalog.types import manifest_row_wire
 from nexus.embed_window import window_for_model
 
 _log = structlog.get_logger(__name__)
@@ -749,6 +750,50 @@ def _find_ghost_by_title(reader, owner, title: str):
     return None
 
 
+#: The note keys that have no catalog column, kept in the document's ``meta`` (nexus-6pfgb.5). The
+#: chunk row carries them too, but a chunk shared by two notes carries only the last writer's.
+NOTE_META_KEYS: tuple[str, ...] = ("tags", "category", "ttl_days", "source_agent")
+
+#: What a note key reads as when it is unset: the retraction sentinel written over a key the entry held
+#: (catalog ``update`` has no meta delete-keys, so a written key cannot be removed). In catalog meta a
+#: ``ttl_days`` of 0 is that sentinel, not an accepted input (``put_note`` and ``write_note`` reject 0;
+#: the chunk row spells permanent as ``None``/absent): readers treat 0 and absent as permanent.
+_NOTE_META_UNSET: dict[str, Any] = {"tags": "", "category": "", "ttl_days": 0, "source_agent": ""}
+
+
+def note_catalog_meta(
+    *, tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
+    prior: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The note keys one put writes to its catalog entry's ``meta``, and what undoes them.
+
+    Returns ``(write, revert)``. *write* holds a key only when this put gives it a real value (the
+    engine merges ``meta`` and an explicit empty overwrites, so an unset key is never sent), plus the
+    unset value for a key the entry (*prior*, its ``meta`` before this call) holds and this put
+    leaves unset: a re-put under the same title replaces the note's keys, as it does on the chunk
+    row, and a ``ttl_days`` of 7 that outlived a permanent re-put would expire the note. *revert* maps
+    each written key to the value *prior* held (or the unset value), for
+    :func:`restore_pre_call_stamp` when the write does not land.
+    """
+    given: dict[str, Any] = {
+        "tags": tags or "", "category": category or "",
+        "ttl_days": ttl_days if ttl_days and ttl_days > 0 else 0, "source_agent": source_agent or "",
+    }
+    prior = prior or {}
+    write: dict[str, Any] = {}
+    revert: dict[str, Any] = {}
+    for key in NOTE_META_KEYS:
+        unset = _NOTE_META_UNSET[key]
+        if given[key] != unset:
+            write[key] = given[key]
+        elif prior.get(key) not in (None, unset):
+            write[key] = unset
+        else:
+            continue
+        revert[key] = prior[key] if prior.get(key) is not None else unset
+    return write, revert
+
+
 def catalog_store_hook(
     title: str, doc_id: str, collection_name: str,
 ) -> str:
@@ -764,8 +809,9 @@ def catalog_store_hook(
 
 def catalog_store_hook_tracked(
     title: str, doc_id: str, collection_name: str, *,
-    pre_call_doc_id_out: dict[str, str] | None = None,
+    pre_call_doc_id_out: dict[str, Any] | None = None,
     error_out: dict[str, str] | None = None,
+    tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
 ) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
 
@@ -848,6 +894,15 @@ def catalog_store_hook_tracked(
             Left untouched (absent) on the brand-new-mint leg
             (``writer.register``, ``created=True``): a freshly minted
             document has no prior identity to protect by construction.
+        tags, category, ttl_days, source_agent: the note's own keys
+            (nexus-6pfgb.5). A chunk shared by two notes carries only the
+            last writer's, so each note's values live in its catalog entry's
+            ``meta`` as well, written in the same update as ``doc_id`` on
+            every put (see :func:`note_catalog_meta`: only a real value is
+            sent; an unset key the entry already holds is retracted).
+            ``pre_call_doc_id_out["note_meta"]`` carries what
+            :func:`restore_pre_call_stamp` needs to put them back and
+            ``["note_meta_stamped"]`` what this call wrote (its compare-and-set).
         error_out: Optional out-parameter, like *pre_call_doc_id_out* (no
             return-shape change). The ``("", False)`` return does not say
             WHY; when it is returned, ``error_out["error"]`` names the
@@ -890,6 +945,17 @@ def catalog_store_hook_tracked(
         # Computed BEFORE the chash dedup below (moved up at nexus-bb6n2
         # round 2) so a dedup HIT can stamp it too.
         source_uri = uri_for(collection_name, title) if title else None
+
+        def stamp_for(entry) -> dict[str, Any]:
+            """The ``meta`` to merge into *entry* (``None`` for a brand-new row): the identity stamp
+            and the note keys. Records the note keys' undo in ``pre_call_doc_id_out``."""
+            write, revert = note_catalog_meta(
+                tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent,
+                prior=(getattr(entry, "meta", None) or {}) if entry is not None else None)
+            if pre_call_doc_id_out is not None and revert:
+                pre_call_doc_id_out["note_meta"] = revert
+                pre_call_doc_id_out["note_meta_stamped"] = write
+            return {"doc_id": doc_id, **write}
 
         # Dedup by chash stored in meta.doc_id. nexus-5axey: by_doc_id is a
         # TUMBLER-only lookup on the engine and always mismatched this
@@ -949,7 +1015,7 @@ def catalog_store_hook_tracked(
             writer.update(
                 existing.tumbler,
                 physical_collection=collection_name,
-                meta={"doc_id": doc_id},
+                meta=stamp_for(existing),
                 source_uri=source_uri or "",
             )
             return str(existing.tumbler), False
@@ -1002,7 +1068,7 @@ def catalog_store_hook_tracked(
                 writer.update(
                     existing_by_uri.tumbler,
                     physical_collection=collection_name,
-                    meta={"doc_id": doc_id},
+                    meta=stamp_for(existing_by_uri),
                 )
                 _log.debug(
                     "catalog_store_hook_reput",
@@ -1039,7 +1105,7 @@ def catalog_store_hook_tracked(
             writer.update(
                 ghost.tumbler,
                 physical_collection=collection_name,
-                meta={"doc_id": doc_id},
+                meta=stamp_for(ghost),
                 source_uri=source_uri or "",
             )
             _log.debug(
@@ -1080,7 +1146,7 @@ def catalog_store_hook_tracked(
         tumbler, created = writer.register(
             owner=owner, title=title, content_type="knowledge",
             physical_collection=collection_name,
-            meta={"doc_id": doc_id},
+            meta=stamp_for(None),
             source_uri=source_uri or "",
             with_created=True,
         )
@@ -1195,6 +1261,8 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
 
 def restore_pre_call_stamp(
     catalog_doc_id: str, pre_call_doc_id: str, stamped_doc_id: str,
+    pre_call_note_meta: dict[str, Any] | None = None,
+    stamped_note_meta: dict[str, Any] | None = None,
 ) -> None:
     """Undo :func:`catalog_store_hook_tracked`'s own pre-write identity
     stamp on a refused or failed note write (nexus-k54nk fix-round 2).
@@ -1235,6 +1303,15 @@ def restore_pre_call_stamp(
     the wire — a race between this read and the write below remains);
     this narrows the window, it does not close it.
 
+    *pre_call_note_meta* (``pre_call_doc_id_out["note_meta"]``, nexus-6pfgb.5) is
+    what the note keys (tags, category, ttl_days, source_agent) held before
+    this call wrote them; it goes back in the same update, so a failed
+    re-put leaves the old note's keys whole. *stamped_note_meta*
+    (``pre_call_doc_id_out["note_meta_stamped"]``) is what this call wrote there:
+    the restore runs only while the entry still holds every one of those values,
+    so a failed re-put racing a successful retag of the same content (same
+    ``doc_id``, different keys) does not overwrite the newer keys.
+
     Best-effort like every other step in
     :func:`nexus.catalog.note_write.put_note`'s failure path: a lookup or
     write failure here is logged and never raises — the caller's own
@@ -1264,9 +1341,14 @@ def restore_pre_call_stamp(
         # A newer stamp landed since this call's own write (a concurrent
         # re-put reconciled onto the same document) — never clobber it.
         return
+    cur_meta = current.meta or {}
+    if any(cur_meta.get(key) != value for key, value in (stamped_note_meta or {}).items()):
+        # Same doc_id, different note keys: a concurrent put of the same content landed its own
+        # keys after this call's write (nexus-6pfgb.5) — never clobber them either.
+        return
     try:
         writer = make_catalog_writer()
-        writer.update(catalog_doc_id, meta={"doc_id": pre_call_doc_id})
+        writer.update(catalog_doc_id, meta={"doc_id": pre_call_doc_id, **(pre_call_note_meta or {})})
     except Exception:  # noqa: BLE001 — best-effort restore; the caller's own store_put error must still surface
         _log.warning(
             "store_put_rollback_stamp_restore_failed",
@@ -1343,14 +1425,7 @@ def _retract_manifest_rows_for_chash(
     """
     tumbler_str = str(entry.tumbler)
     current_rows = reader.get_manifest(tumbler_str)
-    remaining = [
-        {
-            "position": r.position, "chash": r.chash, "chunk_index": r.chunk_index,
-            "line_start": r.line_start, "line_end": r.line_end,
-            "char_start": r.char_start, "char_end": r.char_end,
-        }
-        for r in current_rows if r.chash != chash
-    ]
+    remaining = [manifest_row_wire(r) for r in current_rows if r.chash != chash]
     if len(remaining) == len(current_rows):
         return  # chash was not present in this entry's manifest -- nothing to retract
     collection = entry.physical_collection or expected_collection
@@ -1489,14 +1564,7 @@ def reap_catalog_documents_by_title(
         for entry in entries:
             tumbler = str(entry.tumbler)
             rows = reader.get_manifest(tumbler)
-            original = [
-                {
-                    "position": r.position, "chash": r.chash, "chunk_index": r.chunk_index,
-                    "line_start": r.line_start, "line_end": r.line_end,
-                    "char_start": r.char_start, "char_end": r.char_end,
-                }
-                for r in rows
-            ]
+            original = [manifest_row_wire(r) for r in rows]
             row_collection = entry.physical_collection or collection
             try:
                 if original:

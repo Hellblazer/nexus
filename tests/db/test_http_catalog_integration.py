@@ -814,6 +814,69 @@ class TestManifest:
         chashes = [r.chash for r in rows]
         assert _ch("chunk_hash_030000000000000000000") in chashes
 
+    def test_section_labels_round_trip_on_the_manifest_row(self, cat, pg_instance) -> None:
+        """nexus-tko2w: the per-position section labels are written with the manifest row and
+        read back by ``get_manifest``, ``get_manifests`` and ``chash_positions``; a row sent
+        without them reads as unlabelled (None), not as a missing field."""
+        coll = "knowledge__test__voyage-context-3__v1"
+        labelled = _ch("section_label_chunk_00000000000")
+        bare = _ch("section_label_chunk_01000000000")
+        t = cat.register(
+            "1.1", "Section Label Doc", content_type="paper",
+            source_uri="file:///manifest/section-labels.md",
+        )
+        _seed_chunks(pg_instance, "default", coll, [labelled, bare])
+        cat.write_manifest(str(t), [
+            {"position": 0, "chash": labelled, "section_title": "Abstract",
+             "section_type": "abstract", "page_number": 1},
+            {"position": 1, "chash": bare},
+        ], collection=coll)
+
+        rows = cat.get_manifest(str(t))
+        assert [(r.section_title, r.section_type, r.page_number) for r in rows] == [
+            ("Abstract", "abstract", 1), (None, None, None),
+        ]
+        # labels_written: the row that carried the keys is the document's own answer; the row sent
+        # with none is legacy (its NULL labels mean "never recorded").
+        assert [r.labels_written for r in rows] == [True, False]
+        assert [r.section_type for r in cat.get_manifests([str(t)])[str(t)]] == ["abstract", None]
+
+        positions = cat.chash_positions([labelled])
+        assert positions is not None
+        assert [(p["doc_id"], p["section_type"], p["section_title"], p["page_number"], p["collection"],
+                 p["labels_written"])
+                for p in positions] == [(str(t), "abstract", "Abstract", 1, coll, True)]
+
+    def test_an_empty_label_written_by_a_current_client_is_authoritative_and_survives_a_rewrite(
+        self, cat, pg_instance,
+    ) -> None:
+        """nexus-tko2w: a row sent with the three keys and nothing in them ("" title and type, a null
+        page: a chunk with no heading) is WRITTEN, not legacy; a manifest rewrite from the rows read
+        back (a retraction, a pruned collection) keeps both the empty row written and the legacy row
+        legacy."""
+        from nexus.catalog.types import manifest_row_wire
+
+        coll = "knowledge__test__voyage-context-3__v1"
+        empty = _ch("section_label_empty_0000000000")
+        legacy = _ch("section_label_legacy_000000000")
+        t = cat.register(
+            "1.1", "Section Label Empty Doc", content_type="paper",
+            source_uri="file:///manifest/section-labels-empty.md",
+        )
+        _seed_chunks(pg_instance, "default", coll, [empty, legacy])
+        cat.write_manifest(str(t), [
+            {"position": 0, "chash": empty, "section_title": "", "section_type": "", "page_number": None},
+            {"position": 1, "chash": legacy},
+        ], collection=coll)
+
+        rows = cat.get_manifest(str(t))
+        assert [(r.section_title, r.section_type, r.page_number, r.labels_written) for r in rows] == [
+            ("", "", None, True), (None, None, None, False),
+        ]
+
+        cat.write_manifest(str(t), [manifest_row_wire(r) for r in rows], collection=coll)
+        assert [r.labels_written for r in cat.get_manifest(str(t))] == [True, False]
+
     def test_docs_for_chashes_reverse_lookup(self, cat, doc_with_manifest) -> None:
         """docs_for_chashes returns dict[chash, [doc_id, ...]] (nexus-h8rf6.3).
 

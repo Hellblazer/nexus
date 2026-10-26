@@ -16,6 +16,13 @@ import structlog
 
 from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
+from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exported: callers import it from here
+    OWNER_FACTS_KEY,
+    OWNER_RESOLVE_CAP,
+    agreed_facts,
+    entry_facts,
+    owner_titles,
+)
 from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
     embedding_model_for_collection_name,
@@ -436,24 +443,40 @@ def _attach_display_paths(
     if not doc_ids:
         return
     if prefetched is not None and doc_ids <= prefetched.doc_ids:
-        cache, titles, homes = prefetched.maps()
+        cache, titles, homes, facts = prefetched.maps()
     else:
-        cache, titles, homes = _resolve_display_maps(doc_ids, catalog)
+        cache, titles, homes, facts = _resolve_display_maps(doc_ids, catalog)
     for r in results:
         did = r.metadata.get("doc_id", "")
         path = cache.get(did) if did else None
         if path:
             r.metadata["_display_path"] = path
-        owners = (r.metadata.get("_owner_doc_ids") or ([did] if did else []))[:_OWNER_TITLE_RESOLVE_CAP]
+        all_owners = r.metadata.get("_owner_doc_ids") or ([did] if did else [])
+        owners = all_owners[:_OWNER_TITLE_RESOLVE_CAP]
         # The owner lookups are tenant-wide (chash is a function of text
         # alone), so an owner in another collection is kept out: a hit
         # names only documents in its own collection, or a ghost with none.
-        live = [
-            titles[o] for o in owners
-            if titles.get(o) and homes.get(o, "") in ("", r.collection)
+        live_owners = [
+            o for o in owners
+            if o in homes and homes[o] in ("", r.collection)
         ]
+        live = [titles[o] for o in live_owners if titles.get(o)]
         if live:
             r.metadata["_display_title"] = owner_titles(live)
+        # nexus-6pfgb.11: the hit's age and expiry are the owners' agreed
+        # facts. Past the cap only some owners were resolved, and an owner the
+        # lookup named but did not resolve (a live co-owner the catalog read
+        # dropped) is unheard: either could disagree, so such a hit states
+        # nothing rather than the facts of the owners that happened to answer.
+        # An owner known to live in another collection is not an owner here.
+        if (
+            live_owners
+            and len(all_owners) <= _OWNER_TITLE_RESOLVE_CAP
+            and all(o in homes for o in owners)
+        ):
+            agreed = agreed_facts([facts.get(o, {}) for o in live_owners])
+            if agreed:
+                r.metadata[OWNER_FACTS_KEY] = agreed
 
 
 def _display_doc_ids(results: list[SearchResult]) -> set[str]:
@@ -472,16 +495,24 @@ def _display_doc_ids(results: list[SearchResult]) -> set[str]:
     return doc_ids
 
 
-def _resolve_display_maps(
-    doc_ids: set[str], catalog: Any,
-) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """``(file_path, title, physical_collection)`` per doc_id, best-effort."""
+#: ``(file_path, title, physical_collection, facts)`` per doc_id; ``facts`` is
+#: :func:`nexus.context_annotations.entry_facts` of the live entry.
+_DisplayMaps = tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, dict[str, Any]]]
+
+
+def _resolve_display_maps(doc_ids: set[str], catalog: Any) -> _DisplayMaps:
+    """``(file_path, title, physical_collection, facts)`` per doc_id, best-effort.
+
+    ``facts`` carries the provenance a hit's age line reads (indexed date, year,
+    expiry), taken from the catalog entries this lookup already resolves
+    (nexus-6pfgb.11): no extra round trip."""
     # Batch-resolve all doc_ids in one call when the catalog backend
     # supports resolve_many() (nexus-7lm3q).  Falls back to the per-doc
     # by_doc_id() loop for older/local catalogs that lack the method.
     cache: dict[str, str] = {}
     titles: dict[str, str] = {}  # live documents only (resolve skips tombstones)
     homes: dict[str, str] = {}  # doc_id -> physical_collection
+    facts: dict[str, dict[str, Any]] = {}  # doc_id -> entry_facts
     _resolve_many = getattr(catalog, "resolve_many", None)
     if _resolve_many is not None:
         try:
@@ -492,6 +523,7 @@ def _resolve_display_maps(
                 if entry is not None:
                     titles[did] = getattr(entry, "title", "") or ""
                     homes[did] = getattr(entry, "physical_collection", "") or ""
+                    facts[did] = entry_facts(entry)
         except Exception:  # noqa: BLE001 — best-effort batch resolve; failure logged at debug, display path dropped for set (see comment)
             _log.debug("attach_display_paths_batch_failed", exc_info=True)
             # Degradation granularity (CR Med-1 / critic obs): a single
@@ -511,7 +543,8 @@ def _resolve_display_maps(
             if entry is not None:
                 titles[did] = getattr(entry, "title", "") or ""
                 homes[did] = getattr(entry, "physical_collection", "") or ""
-    return cache, titles, homes
+                facts[did] = entry_facts(entry)
+    return cache, titles, homes, facts
 
 
 class _DisplayLookup:
@@ -525,7 +558,7 @@ class _DisplayLookup:
     def __init__(self, doc_ids: set[str], catalog: Any) -> None:
         self.doc_ids = doc_ids
         self._catalog = catalog
-        self._maps: tuple[dict[str, str], dict[str, str], dict[str, str]] = ({}, {}, {})
+        self._maps: _DisplayMaps = ({}, {}, {}, {})
         # Run in the caller's context so a ContextVar the catalog client
         # reads (a per-call deadline, for one) reaches the worker too.
         ctx = contextvars.copy_context()
@@ -546,29 +579,13 @@ class _DisplayLookup:
         # _resolve_display_maps is best-effort and catches its own failures.
         self._maps = _resolve_display_maps(self.doc_ids, self._catalog)
 
-    def maps(self) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    def maps(self) -> _DisplayMaps:
         self._thread.join()
         return self._maps
 
 
 #: The most owners of one hit's chunk resolved for its display title.
-_OWNER_TITLE_RESOLVE_CAP: int = 10
-
-
-def owner_titles(titles: list[str], *, limit: int = 3) -> str:
-    """The title a hit displays for the documents holding its chunk
-    (nexus-sis0m.5).
-
-    A chunk row carries its last writer's title, which names the wrong
-    document when two share identical text, and a deleted one once that
-    writer is removed. The catalog's live owners in the hit's collection are
-    named instead: the one title, or several joined, past *limit* with a
-    count. The hit's doc_id still names one of them.
-    """
-    distinct = sorted(dict.fromkeys(t for t in titles if t))
-    if len(distinct) <= limit:
-        return " · ".join(distinct)
-    return " · ".join(distinct[:limit]) + f" (+{len(distinct) - limit} more)"
+_OWNER_TITLE_RESOLVE_CAP: int = OWNER_RESOLVE_CAP
 
 
 # Maximum ID-set size for ChromaDB $in filter — cap to avoid payload bloat.

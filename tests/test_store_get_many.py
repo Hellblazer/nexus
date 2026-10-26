@@ -869,7 +869,9 @@ class TestStoreGetManySourceNotes:
     aligned 1:1 with ``contents``, from the same fetch that resolves
     content -- one line per chunk naming its document, collection and
     dates; "" for a missing id. The plan runner prefixes it onto the
-    content an operator prompt sees."""
+    content an operator prompt sees. nexus-6pfgb.11: the document and its
+    dates are the OWNING documents' (tests/test_6pfgb11_provenance_from_catalog.py
+    pins that); the chunk row's title and dates, the last writer's, are not read."""
 
     @pytest.mark.t2_tenant
     def test_source_notes_aligned_and_empty_for_missing(self):
@@ -888,6 +890,56 @@ class TestStoreGetManySourceNotes:
         assert out["contents"] == ["body one", ""]
         assert len(out["source_notes"]) == 2
         note = out["source_notes"][0]
-        assert note.startswith("Doc One · knowledge")
-        assert "indexed 2026-09-01" in note and "published 2024" in note
+        # "doc-1" is not a chunk hash, so no catalog document owns it: the note names
+        # the collection it was found in and nothing from the row.
+        assert note.startswith("knowledge")
+        assert "Doc One" not in note and "2026-09-01" not in note and "2024" not in note
         assert out["source_notes"][1] == ""
+
+
+# Outside TestStoreGetManySectionTypes on purpose: that class carries t2_tenant, and this test
+# stubs both T3 and the catalog, so it mints no tenant (nexus-tko2w, the storage-touch ratchet).
+def test_section_types_come_from_the_owning_documents_not_the_chunk_rows_last_writer() -> None:
+    """nexus-tko2w (RDR-108): the chunk row's ``section_type`` is whichever document wrote
+    last. For a chash-shaped id the structured result reads the label from the manifest rows
+    of the documents that own it: owners that agree give their label, owners that disagree
+    give "" (ambiguous for a bare chunk id), and a chunk whose owners all predate the labels
+    (``labels_written`` false) keeps the stored value, while an owner that wrote an EMPTY
+    label has answered "" whatever the chunk row says. Human mode never asks (it does not
+    show the field)."""
+    from types import SimpleNamespace
+
+    from nexus.mcp.core import store_get_many
+
+    agreed, split, legacy, emptied = "a" * 64, "b" * 64, "c" * 64, "d" * 64
+    found = {
+        agreed: {"content": "A", "section_type": "body"},     # stored: another document's label
+        split: {"content": "B", "section_type": "imports"},
+        legacy: {"content": "C", "section_type": "imports"},
+        emptied: {"content": "D", "section_type": "imports"},   # stored: another document's label
+    }
+
+    def owner(chash, doc, kind, written=True):
+        # No "collection" key: an engine that predates it; the rows then apply to any collection.
+        return {"chash": chash, "doc_id": doc, "position": 0, "chunk_count": 1, "section_type": kind,
+                "labels_written": written}
+
+    rows = [
+        owner(agreed, "1.1.1", "references"), owner(agreed, "1.1.2", "references"),
+        owner(split, "1.1.1", "imports"), owner(split, "1.1.2", "method"),
+        owner(legacy, "1.1.1", None, written=False),
+        owner(emptied, "1.1.1", ""),
+    ]
+    catalog = SimpleNamespace(chash_positions=lambda chashes: rows)
+    mock_t3, _ = _make_stub_t3({"*": found})
+
+    # The "knowledge" scope is expanded from the live collection list, which builds its own
+    # engine client; naming the scope keeps the test off storage, so it needs no tenant.
+    with patch("nexus.mcp.core._get_t3", return_value=mock_t3), patch(
+        "nexus.mcp.core._get_catalog", return_value=catalog,
+    ), patch("nexus.mcp.core._read_scope", return_value=["knowledge__notes"]):
+        result = store_get_many(
+            ids=[agreed, split, legacy, emptied], collections="knowledge", structured=True,
+        )
+
+    assert result["section_types"] == ["references", "", "imports", ""]

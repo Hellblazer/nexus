@@ -312,9 +312,11 @@ def _doc_id_for_path(file_path: Path) -> str:
     registered without an explicit URI (catalog register, RDR-096 P3.1), so
     that is the key tried here.
 
-    Returns "" when the document cannot be identified, which
-    ``_manifest_is_fully_present`` treats as "no evidence of damage" — the
-    pre-fix behaviour. A miss is therefore SAFE, never a spurious re-embed.
+    Returns "" when the document cannot be identified. The staleness gate
+    then has no fence to read and reads the document as stale
+    (:func:`_index_run_fresh`), which re-indexes it and registers it; the
+    index path resolves identity itself, so a miss here costs a re-index of
+    a document the catalog could not name, never a skipped one.
     """
     try:
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
@@ -329,62 +331,18 @@ def _doc_id_for_path(file_path: Path) -> str:
         return ""
 
 
-def _manifest_is_fully_present(col: Any, doc_id: str) -> bool:  # noqa: ARG001 — col/doc_id kept for signature stability, see below
-    """Always ``True`` — RDR-191 Phase 6 (nexus-o8dil.33), 2026-08-15.
-
-    HISTORY: nexus-5xn3k AC2 (original), reworked for RUNFENCE (nexus-5xn3k.3,
-    design memo §3.4) to call the engine's per-document ``manifest/verify``
-    (a single SQL anti-join: referenced/present/missing chash counts for one
-    document) instead of an O(manifest size / 300) client-side existence
-    loop. That route (and the ``nexus.manifest_verify(text)`` call it made
-    through :meth:`HttpCatalogClient.manifest_verify`) is retired in THIS
-    bead — but not because the check became unreachable through disuse: the
-    manifest-chunk FK (``catalog-029-manifest-chunk-fk.xml``, VALIDATEd and
-    deployed) makes ``missing`` — the ONLY value this function ever branched
-    on — PROVABLY ALWAYS 0 for any manifest row that exists at all. The FK
-    guarantees every ``catalog_document_chunks`` row references a matching
-    ``nexus.chunks`` row at write time (a dangling INSERT is rejected, a
-    DELETE of a still-referenced chunk is rejected); ``manifest_verify``'s
-    SQL computed exactly that same existence check via anti-join. So this
-    function's ``missing`` branch (the ONLY path that ever returned
-    ``False``) became dead code the moment the FK was validated on THIS
-    checkout's engine (Phase 5, engine-service-v0.1.76) — independent of
-    whether the route/client method survived Phase 6's subtraction. Removing
-    the now-provably-vacuous call, rather than leaving it to raise
-    ``AttributeError`` and silently fail open through the broad ``except``
-    below, keeps this function honest about what it actually decides now.
-
-    NOTE this is a DIFFERENT question from write-path COMPLETENESS (did
-    every expected chunk for THIS run get a manifest row at all) — that
-    remains a live, load-bearing check, just not this one:
-    ``CatalogRepository.completeIndexRun``'s fail-closed verify-then-stamp
-    (``referenced == the caller's claimed chunk_count``) still runs
-    server-side on every index completion via the SAME underlying
-    ``nexus.manifest_verify(text)`` SQL function, which is DELIBERATELY KEPT
-    (not dropped) for exactly that reason. This function's remaining
-    fallback role — deciding whether a document with no reliable RUNFENCE
-    fence signal (a legacy pre-fence row, an unresolvable doc_id, or a fence
-    read failure) is safe to skip re-indexing — is answered by the SAME FK
-    guarantee: any manifest row visible here already passed completeIndexRun
-    (or an older writer) at write time, so there is no evidence of damage to
-    find. ``col``/``doc_id`` are kept unused in the signature (not renamed to
-    ``_col``/``_doc_id``) so :func:`_index_run_fresh` and every existing
-    caller/test need no further change.
-    """
-    return True
-
-
 def _index_fence_state(doc_id: str) -> tuple[str | None, str]:
     """Read-only lookup of the RUNFENCE fields for *doc_id* (nexus-5xn3k.3,
-    design memo §3.4). Returns ``(index_state, index_content_hash)``.
+    design memo §3.4 as amended by T2 nexus/5xn3k-design-amendment-2026-10-26).
+    Returns ``(index_state, index_content_hash)``.
 
     ``index_state`` comes back ``None`` for an empty *doc_id*, an
     unresolvable entry, a legacy pre-fence row (NULL column, or a field
     absent entirely on a pre-fence engine), OR a read failure — every one of
-    these collapses to the same "the fence has nothing to say" bucket that
-    :func:`_index_run_fresh` falls through to :func:`_manifest_is_fully_present`
-    for. A read failure is logged at WARNING, never DEBUG: a fence that
-    silently stops working recreates the ac4id bug one layer up.
+    these collapses to the same "the fence has nothing to say" bucket, which
+    :func:`_index_run_fresh` reads as stale (nexus-3ajpd). A read failure is
+    logged at WARNING, never DEBUG: a fence that silently stops working
+    recreates the ac4id bug one layer up.
     """
     if not doc_id:
         return None, ""
@@ -398,41 +356,100 @@ def _index_fence_state(doc_id: str) -> tuple[str | None, str]:
         if entry is None:
             return None, ""
         return entry.index_state, entry.index_content_hash
-    except Exception as exc:  # noqa: BLE001 — fail-open, but LOUD (ac4id lesson)
+    except Exception as exc:  # noqa: BLE001 — fails CLOSED (the document re-indexes) and LOUD (ac4id lesson)
         _log.warning("index_fence_read_failed", doc_id=str(doc_id), error=str(exc))
         return None, ""
 
 
-def _index_run_fresh(col: Any, doc_id: str, content_hash: str) -> bool:
-    """The staleness three-way (RUNFENCE, nexus-5xn3k.3, design memo §3.4).
+def _index_run_fresh(col: Any, doc_id: str, content_hash: str) -> bool:  # noqa: ARG001 — col kept for signature stability
+    """The document-level staleness decision (RUNFENCE, nexus-5xn3k.3; fence
+    only since nexus-3ajpd).
 
-    Call ONLY after the existing chunk-level match (content_hash +
-    embedding_model against ONE surviving chunk, ``limit=1``) already holds —
-    this layers the fence's document-level intent/completion record on top
-    of that per-chunk signal, closing the AC2 blind spot the memo's §1
-    describes (a consistent T3/manifest truncation that no comparison
-    between two artifacts written by the SAME broken run can ever see).
+    The document's hash of record is its fence: ``index_content_hash`` under
+    ``index_state == 'complete'``. A chunk row's own ``content_hash`` is NOT a
+    document property: a chunk is one row per (collection, chunk text), its
+    metadata merge is last-writer-wins, so a chunk two documents share carries
+    one of their file hashes. Before nexus-3ajpd the skip started from a T3 row
+    matched on ``content_hash``, which judged an unchanged document stale when
+    another document had written all its rows last, and judged a changed one
+    current when another document's identical new bytes had stamped a row.
 
-    * ``index_state == 'complete'`` AND the fence's own
-      ``index_content_hash`` agrees with *content_hash* -> definitely fresh,
-      no probe.
-    * ``'indexing'`` / ``'failed'`` -> definitely stale, no probe. A partial
-      or errored run must never read as done, regardless of what T3 happens
-      to hold right now (nexus-lcmbp non-goal: this is NOT a lock — it never
-      means "someone else is running, skip").
-    * anything else (``None`` — a NULL column, a field absent on a pre-fence
-      engine, an unresolvable doc_id, or a fence read failure) -> the fence
-      has nothing to say; fall through to :func:`_manifest_is_fully_present`,
-      which is unconditionally ``True`` as of RDR-191 Phase 6 (see its own
-      docstring for why the FK makes that provably correct now, not merely
-      a simplification).
+    * ``index_state == 'complete'`` AND ``index_content_hash == content_hash``
+      -> fresh as far as the fence can tell (the caller still checks that a
+      chunk of the document is present with the target model).
+    * ``'indexing'`` / ``'failed'`` -> stale, no probe. A partial or errored
+      run must never read as done (nexus-lcmbp non-goal: this is NOT a lock,
+      it never means "someone else is running, skip").
+    * anything else (``None``: a NULL column, a field absent on a pre-fence
+      engine, an unresolvable doc_id, or a fence read failure) -> stale. The
+      fence has nothing to say and no other document-level record carries the
+      hash that an index run completed with, so the only safe answer is to
+      index. That costs one re-index of a document that never had a fence,
+      and its completion stamps one. Before nexus-3ajpd such a document
+      skipped on a matching chunk row, which is the shared-chunk read above.
     """
     state, fence_hash = _index_fence_state(doc_id)
-    if state == "complete":
-        return fence_hash == content_hash
-    if state in ("indexing", "failed"):
+    return state == "complete" and bool(content_hash) and fence_hash == content_hash
+
+
+def _own_chunk_metadata(col: Any, doc_id: str) -> dict | None:
+    """The T3 metadata of one chunk THIS document's catalog manifest names, or
+    ``None`` when the manifest is empty or unreadable or the row is not in *col*.
+
+    A presence-and-model probe, never a hash source: the row is shared, so its
+    ``content_hash`` is the last writer's (nexus-3ajpd). Selecting by the
+    manifest chash (the document's own binding) rather than by ``content_hash``
+    is what keeps the probe from landing on another document's rows. The first
+    manifest position is used; one row is the same ``limit=1`` cost the skip
+    path always paid. A catalog failure answers ``None`` (the document reads
+    stale and is re-indexed), logged at WARNING; a T3 read failure propagates
+    so the caller's fence-fail bracket sees it, as it always has.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return None
+        try:
+            manifest = reader.get_manifest(str(doc_id))
+        finally:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
+        rows = sorted(
+            (r for r in manifest if getattr(r, "chash", "")),
+            key=lambda r: getattr(r, "position", 0) or 0,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail toward re-index, but LOUD (ac4id lesson)
+        _log.warning("index_manifest_probe_read_failed", doc_id=str(doc_id), error=str(exc))
+        return None
+    if not rows:
+        return None
+    batch = _vector_with_retry(col.get, ids=[rows[0].chash], include=["metadatas"])
+    metas = (batch or {}).get("metadatas") or []
+    return metas[0] if metas and metas[0] is not None else None
+
+
+def _document_is_current(
+    col: Any, doc_id: str, content_hash: str, target_model: str, model_known: bool = True,
+) -> bool:
+    """Whether *doc_id* is already indexed at *content_hash* with *target_model*:
+    the one skip-if-current decision of ``index_markdown`` / ``index_pdf`` (and
+    of ``check_staleness`` without a cache). nexus-3ajpd.
+
+    Decided from the CATALOG DOCUMENT: a ``'complete'`` fence whose
+    ``index_content_hash`` equals *content_hash* (:func:`_index_run_fresh`),
+    and then one chunk of the document's own manifest present in *col* and
+    stamped with the target model (:func:`_stored_model_is_current`). No T3 row
+    is matched on ``content_hash``.
+    """
+    if not doc_id or not content_hash or not _index_run_fresh(col, doc_id, content_hash):
         return False
-    return _manifest_is_fully_present(col, doc_id)
+    own = _own_chunk_metadata(col, doc_id)
+    if own is None:
+        return False
+    return _stored_model_is_current(own.get("embedding_model", ""), target_model, model_known)
 
 
 # nexus-hg2dw round 3 (T2 code-review-nexus-hg2dw-52d06c8c5 [24626]
@@ -1812,43 +1829,31 @@ def _index_document(
     # resolved), so it was previously invisible to every fence try/except in
     # this function. Mark the row 'failed' before re-raising rather than
     # leaving it looking like an ordinary live document.
-    incremental_where = _identity_where(sp, corpus, content_hash=content_hash)
-    try:
-        existing = _vector_with_retry(
-            col.get,
-            where=incremental_where,
-            include=["metadatas"],
-            limit=1,
-        )
-    except Exception as exc:
-        # _fence_fail never raises, so the original exception always
-        # propagates unmasked.
-        if doc_id:
-            _fence_fail(doc_id, str(exc))
-        raise
-    # nexus-o19i0: the lookup above matches on content_hash collection-wide,
-    # and identical text collapses to one T3 row per collection, so a
-    # byte-identical file at a SECOND path read as "already indexed": its
-    # Document was registered with no manifest, present in the catalog and
-    # absent from every search. A Document this very call minted cannot have
-    # been indexed before, whatever another path's chunks say. The flag comes
-    # from the pre-flight registration the caller already made; no catalog
-    # read is added to the skip path (RDR-191 Phase 6 stands).
-    if not force and not doc_just_created and existing["metadatas"]:
-        stored_hash = existing["metadatas"][0].get("content_hash", "")
-        stored_model = existing["metadatas"][0].get("embedding_model", "")
-        # nexus-5xn3k AC2 / RUNFENCE (nexus-5xn3k.3): the match above is
-        # satisfied by ONE surviving chunk (limit=1), so a mid-write failure
-        # leaves the document permanently "fresh". The three-way fence check
-        # (index_state == 'complete' + hash match -> skip; 'indexing'/'failed'
-        # -> re-index; unknown -> one engine manifest/verify call) closes that
-        # gap. Identity is resolved READ-ONLY and only on the skip path; a
-        # miss fails open.
-        if (
-            stored_hash == content_hash
-            and _stored_model_is_current(stored_model, target_model, model_known)
-            and _index_run_fresh(col, _doc_id_for_path(file_path), content_hash)
-        ):
+    # nexus-3ajpd: the skip is decided from the CATALOG DOCUMENT (its
+    # 'complete' fence at this file hash, then one chunk of its own manifest
+    # present with the target model), not from a T3 row matched on
+    # content_hash: a chunk row is shared and carries its last writer's hash.
+    # nexus-o19i0: a Document this very call minted cannot have been indexed
+    # before, whatever another path's chunks say; the flag comes from the
+    # pre-flight registration the caller already made. nexus-5xn3k AC2 /
+    # RUNFENCE: a 'complete' fence is what makes a partial run read as stale.
+    # The fence is read from the caller's resolved *doc_id* when it has one
+    # (identity read-only otherwise, a miss fails toward indexing).
+    if not force and not doc_just_created:
+        try:
+            _current = _document_is_current(
+                col, doc_id or _doc_id_for_path(file_path), content_hash,
+                target_model, model_known,
+            )
+        except Exception as exc:
+            # nexus-t952k half 2: this read runs after registration but before
+            # ``_fence_begin``, a window no fence try/except covers. Mark the
+            # row 'failed' before re-raising; _fence_fail never raises, so the
+            # original exception always propagates unmasked.
+            if doc_id:
+                _fence_fail(doc_id, str(exc))
+            raise
+        if _current:
             return 0
 
     now_iso = datetime.now(UTC).isoformat()
@@ -2894,37 +2899,22 @@ def index_pdf(
     # then looked like an ordinary live, complete document to
     # ``nx catalog verify``/doctor. Mark it 'failed' before re-raising,
     # exactly like the embed/upsert try/except further below does.
-    incremental_where = _identity_where(str(pdf_path), corpus, content_hash=content_hash)
-    try:
-        existing = _vector_with_retry(
-            col.get,
-            where=incremental_where,
-            include=["metadatas"],
-            limit=1,
-        )
-    except Exception as exc:
-        # _fence_fail never raises, so the original exception always
-        # propagates unmasked.
-        if doc_id:
-            _fence_fail(doc_id, str(exc))
-        raise
-    # nexus-o19i0 sibling: same collection-wide content_hash match, same
-    # wrong skip for a byte-identical PDF at a second path. index_pdf has
-    # carried the freshly-minted flag since nexus-uxg4u; it now gates the skip.
-    if not force and not _doc_id_freshly_minted and existing["metadatas"]:
-        stored_hash = existing["metadatas"][0].get("content_hash", "")
-        stored_model = existing["metadatas"][0].get("embedding_model", "")
-        # nexus-5xn3k AC2 / RUNFENCE (nexus-5xn3k.3): the hash/model match
-        # above is satisfied by ONE surviving chunk (limit=1), so a mid-write
-        # failure leaves the document permanently "fresh". The three-way
-        # fence check (index_state == 'complete' + hash match -> skip;
-        # 'indexing'/'failed' -> re-index; unknown -> one engine
-        # manifest/verify call) closes that gap.
-        if (
-            stored_hash == content_hash
-            and _stored_model_is_current(stored_model, target_model, model_known)
-            and _index_run_fresh(col, doc_id, content_hash)
-        ):
+    # nexus-3ajpd: decided from the catalog document, as in _index_document
+    # (fence 'complete' at this file hash, then one chunk of the document's
+    # own manifest present with the target model); no T3 row is matched on
+    # content_hash. nexus-o19i0 sibling: index_pdf has carried the
+    # freshly-minted flag since nexus-uxg4u; a byte-identical PDF at a second
+    # path must not skip on another path's chunks.
+    if not force and not _doc_id_freshly_minted:
+        try:
+            _current = _document_is_current(col, doc_id, content_hash, target_model, model_known)
+        except Exception as exc:
+            # _fence_fail never raises, so the original exception always
+            # propagates unmasked.
+            if doc_id:
+                _fence_fail(doc_id, str(exc))
+            raise
+        if _current:
             if return_metadata:
                 return {"chunks": 0, "pages": [], "title": "", "author": ""}
             return 0
@@ -3761,7 +3751,7 @@ def index_markdown(
     # function) targets a file the operator named explicitly: fail
     # loud, before any catalog write, rather than silently registering
     # nothing while reporting plain success.
-    from nexus.classifier import looks_like_binary_content  # noqa: PLC0415 — circular-dep avoidance (nexus.classifier)
+    from nexus.classifier import is_whitespace_only_text, looks_like_binary_content  # noqa: PLC0415 — circular-dep avoidance (nexus.classifier)
     from nexus.errors import UnchunkableContentError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
     try:
         _md_size = md_path.stat().st_size
@@ -3775,6 +3765,12 @@ def index_markdown(
         raise UnchunkableContentError(
             f"{md_path} looks like binary content, not markdown text, "
             "and cannot be chunked"
+        )
+    # nexus-5j8fp: a whitespace-only file chunks to nothing either, and would
+    # mint a chunk_count=0 document whose fence can never complete.
+    if is_whitespace_only_text(md_path):
+        raise UnchunkableContentError(
+            f"{md_path} contains only whitespace and cannot be chunked"
         )
 
     # RDR-103 Phase 5 leaf fallback (see _index_document for the

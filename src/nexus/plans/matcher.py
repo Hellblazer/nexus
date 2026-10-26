@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
     # the SQLite PlanLibrary.
     from nexus.db.t2.http_plan_library import HttpPlanLibrary
+from nexus.plans.evidence import declared_reserved_names
 from nexus.plans.match import Match, _decode_json_dict
 from nexus.plans.schema import unsatisfiable_typed_binding
 from nexus.plans.scope import _SCOPE_AGNOSTIC_SENTINELS, _normalize_scope_string
@@ -268,6 +269,78 @@ def _unmet_typed_binding(
         # nexus-7y4v0: pass the plan so a binding that FLOWS INTO a typed
         # slot counts as typed even when its name does not look it.
         plan_json=m.plan_json,
+    )
+
+
+def _reserved_declared(m: Match) -> tuple[str, ...]:
+    """The RDR-232 reserved binding names *m* declares, else ``()``.
+
+    ``source``, ``owner`` and ``project`` are the caller's evidence request
+    on ``nx_answer`` and are removed before binding resolution, so a plan
+    declaring one could never run correctly. Save time refuses such a plan;
+    this guards the rows that predate the refusal or arrived by import
+    (nexus-jypmj.1.2). It does not depend on ``available_bindings``.
+    """
+    return declared_reserved_names(m.plan_json, m.default_bindings)
+
+
+def _log_reserved_drops(drops: list[tuple[int, tuple[str, ...]]]) -> None:
+    """Report plans excluded for declaring a reserved binding name.
+
+    INFO for the same reason as :func:`_log_binding_drops` (the CLI
+    defaults to WARNING and MCP to INFO), and drained the same way so a
+    T1-then-FTS5 call reports each exclusion once. The row is neither
+    rewritten nor deleted; the remedy is the operator's.
+    """
+    if not drops:
+        return
+    snapshot = list(drops)
+    drops.clear()
+    _log.info(
+        "plan_match_reserved_binding_excluded",
+        dropped=len(snapshot),
+        detail=[
+            {"plan_id": pid, "bindings": list(names)} for pid, names in snapshot
+        ],
+        remedy=(
+            "the plan declares source, owner or project, which nx_answer "
+            "reserves for the caller's evidence request; edit the plan to "
+            "drop the declaration, or retire it with nx plan disable"
+        ),
+    )
+
+
+def _embedded_step_ref(m: Match) -> tuple[str, str] | None:
+    """``(ref, reason)`` when *m*'s plan holds a ``$stepN.field`` the runner will not substitute.
+
+    The runner raises on such a plan before its first dispatch (nexus-jypmj.1.19), so a saved or
+    imported row holding one only wastes a match and bumps its failure count (nexus-jypmj.4). The
+    scan is the runner's own, imported at call time so this module stays light.
+    """
+    from nexus.plans.runner import find_embedded_step_ref  # noqa: PLC0415 — deferred: the runner is heavy and this is the rare path
+
+    err = find_embedded_step_ref(m.plan_json)
+    return None if err is None else (err.ref, err.reason)
+
+
+def _log_embedded_ref_drops(drops: list[tuple[int, str, str]]) -> None:
+    """Report plans excluded for an unsubstitutable ``$stepN.field`` in a step arg.
+
+    INFO and drained exactly like :func:`_log_reserved_drops`; the row is neither rewritten nor
+    deleted, and ``nx plan hygiene`` reports it.
+    """
+    if not drops:
+        return
+    snapshot = list(drops)
+    drops.clear()
+    _log.info(
+        "plan_match_embedded_step_ref_excluded",
+        dropped=len(snapshot),
+        detail=[{"plan_id": pid, "ref": ref, "reason": why} for pid, ref, why in snapshot],
+        remedy=(
+            "the plan can only fail at run time; nx plan hygiene --apply retires it, or "
+            "edit it so each arg is one $stepN.<field> reference or a list of them"
+        ),
     )
 
 
@@ -628,6 +701,12 @@ def plan_match(
     # by _log_binding_drops on each return path so the pool never shrinks
     # silently.
     binding_drops: list[tuple[int, str]] = []
+    # (plan_id, names) for every candidate excluded for declaring a
+    # reserved binding name (nexus-jypmj.1.2); drained like binding_drops.
+    reserved_drops: list[tuple[int, tuple[str, ...]]] = []
+    # (plan_id, ref, reason) for every candidate excluded for a $stepN.field the runner will not
+    # substitute (nexus-jypmj.4); drained like reserved_drops.
+    embedded_ref_drops: list[tuple[int, str, str]] = []
     if cache is not None and cache.is_available:
         hits = cache.query(intent, _over)
         # Gather all admissible candidates with (adjusted_score, specificity).
@@ -735,6 +814,14 @@ def plan_match(
                 literal_drops.append(row.get("id"))
                 continue
             m = Match.from_plan_row(row, confidence=confidence)
+            reserved = _reserved_declared(m)
+            if reserved:
+                reserved_drops.append((m.plan_id, reserved))
+                continue
+            embedded = _embedded_step_ref(m)
+            if embedded is not None:
+                embedded_ref_drops.append((m.plan_id, *embedded))
+                continue
             if filter_dims and not _superset(m.dimensions, filter_dims):
                 continue
             # nexus-mz5tv: a scoped caller must not match an unanchored
@@ -803,6 +890,8 @@ def plan_match(
             scope_pref=scope_pref,
         )
         _log_binding_drops(binding_drops)
+        _log_reserved_drops(reserved_drops)
+        _log_embedded_ref_drops(embedded_ref_drops)
         _log_literal_drops(literal_drops)
 
         if scored:
@@ -863,6 +952,14 @@ def plan_match(
             # nexus-vtp8h: same skip on the FTS5 path.
             continue
         m = Match.from_plan_row(row, confidence=None)
+        reserved = _reserved_declared(m)
+        if reserved:
+            reserved_drops.append((m.plan_id, reserved))
+            continue
+        embedded = _embedded_step_ref(m)
+        if embedded is not None:
+            embedded_ref_drops.append((m.plan_id, *embedded))
+            continue
         if filter_dims and not _superset(m.dimensions, filter_dims):
             continue
         # nexus-mz5tv: same unanchored-grown drop on the FTS5 path — an
@@ -887,6 +984,8 @@ def plan_match(
             break
 
     _log_binding_drops(binding_drops)
+    _log_reserved_drops(reserved_drops)
+    _log_embedded_ref_drops(embedded_ref_drops)
     _log_literal_drops(fts_literal_drops)
     for m in matches:
         library.increment_match_metrics(m.plan_id, confidence=None)

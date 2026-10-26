@@ -481,14 +481,14 @@ def _deferred_declared_paths() -> set[str]:
     release-window "ledger must be empty" contract below.
 
     A deferred entry says its straddling bead is intentionally held back
-    from THIS cut too (`cut_plugin_release._hold_back_deferred_paths`),
+    from THIS release too (the cherry-pick skips it),
     so it stays declared even while the plugin's pin advances to the tag
     this branch cuts -- still declared is correct there, not stale.
-    Reuses `cut_plugin_release.deferred_paths`, the one parser of the
+    Reuses `plugin_ledger.deferred_paths`, the one parser of the
     "## Deferred to the next client release" section, rather than a
-    second copy that could drift from what the cut script itself reads.
+    second copy that could drift from what the release tooling itself reads.
     """
-    from cut_plugin_release import deferred_paths
+    from plugin_ledger import deferred_paths
 
     return deferred_paths(_ledger_text())
 
@@ -595,15 +595,15 @@ def test_a_client_tag_checkout_is_not_a_plugin_tag_checkout() -> None:
 def test_phase2_plugin_parts_are_deferred_until_the_client_release_carries_them() -> None:
     """RDR-228 Phase 2's plugin parts never ride a plugin-only cut (nexus-sv2wx.13).
 
-    The same check the cut runs (`cut_plugin_release.phase2_deferral_check`),
+    The check `plugin_ledger.phase2_deferral_check` implements,
     run here against the tree being landed, so a Phase 2 bead that files its
     entry under "Awaiting" fails on develop the day it lands, not at cut
     time. It has nothing to check while `conexus/launch/nx_setup.py` is not
-    in the tree or the pinned tag already carries it; the fixture tests in
-    test_cut_plugin_release.py (TestPhase2DeferralGuard) prove the refusal.
+    in the tree or the pinned tag already carries it; the fixture tests
+    (TestPhase2DeferralGuard) prove the refusal.
     """
     _require_or_skip()
-    from cut_plugin_release import phase2_deferral_check
+    from plugin_ledger import phase2_deferral_check
 
     ref = _pinned_refs()["conexus"]
     if plugin_in_release_window("conexus", ref):
@@ -720,7 +720,7 @@ def test_every_changed_conexus_path_is_guarded_or_listed_safe_with_a_reason() ->
     taglessness rule, `_require_or_skip`).
     """
     _require_or_skip()
-    from cut_plugin_release import (
+    from plugin_ledger import (
         PHASE2_GUARDED,
         PHASE2_SAFE_ALONE,
         phase2_guarded_paths,
@@ -748,7 +748,7 @@ def test_every_changed_conexus_path_is_guarded_or_listed_safe_with_a_reason() ->
     uncovered = _uncovered(changed, guarded, PHASE2_SAFE_ALONE)
     assert not uncovered, (
         "these conexus/ paths differ from the pin and are neither on "
-        "PHASE2_GUARDED nor in PHASE2_SAFE_ALONE (scripts/cut_plugin_release.py), "
+        "PHASE2_GUARDED nor in PHASE2_SAFE_ALONE (scripts/plugin_ledger.py), "
         "so a plugin-only cut could ship them without the Phase 2 files they "
         "need. Guard each, or list it with the reason it stands alone:\n  "
         + "\n  ".join(uncovered)
@@ -787,14 +787,14 @@ def test_every_changed_conexus_path_is_guarded_or_listed_safe_with_a_reason() ->
     assert not hits, (
         "files under the safe-alone text prefixes name a Phase 2 file or the "
         "setup command, so they are not safe alone (guard the path in "
-        "PHASE2_GUARDED in scripts/cut_plugin_release.py, or take the name "
+        "PHASE2_GUARDED in scripts/plugin_ledger.py, or take the name "
         "out of the text):\n  " + "\n  ".join(hits)
     )
 
 
 def test_the_coverage_rule_names_a_path_taken_off_the_guard() -> None:
     """The rule above is not vacuous: removing one guarded path reports it."""
-    from cut_plugin_release import PHASE2_GUARDED, PHASE2_SAFE_ALONE
+    from plugin_ledger import PHASE2_GUARDED, PHASE2_SAFE_ALONE
 
     changed = [
         "conexus/hooks/scripts/_cli_lookup.py",
@@ -816,7 +816,7 @@ def test_the_coverage_rule_names_a_path_taken_off_the_guard() -> None:
 def test_the_import_check_covers_the_launch_modules_the_guard_names_by_prefix() -> None:
     """The gap: the module list came from the ``.py`` entries of PHASE2_GUARDED, which names ``conexus/launch/``
     only as a prefix, so a safe-alone file importing ``nx_setup`` was not checked at all."""
-    from cut_plugin_release import PHASE2_GUARDED
+    from plugin_ledger import PHASE2_GUARDED
 
     launch = ["conexus/launch/nx_launch.py", "conexus/launch/nx_setup.py", "conexus/launch/nx_standin.py"]
     assert "nx_setup" not in _phase2_modules(PHASE2_GUARDED, [])  # the old list
@@ -1034,6 +1034,15 @@ class TestTheCIWiringItself:
             f"could merge undeclared on a green PR."
         )
 
+    def test_the_path_filter_covers_the_ledger_module_the_test_imports(self) -> None:
+        """nexus-rbmja.5: the ledger parser moved to ``scripts/plugin_ledger.py``
+        (rbmja.2); an edit there changes what this check computes, so it must
+        trigger the workflow as the cut script's own path does."""
+        wf = self._workflow()
+        on = wf[True] if True in wf else wf["on"]
+        for event in ("push", "pull_request"):
+            assert "scripts/plugin_ledger.py" in on[event]["paths"], event
+
     def _fetch_step(self) -> dict:
         steps = self._workflow()["jobs"]["ledger"]["steps"]
         matches = [
@@ -1062,14 +1071,18 @@ class TestTheCIWiringItself:
         assert "github.event_name == 'pull_request'" in str(env["PR_HEAD_SHA"])
         assert 'git fetch --depth=1 origin "$PR_HEAD_SHA"' in step["run"]
 
-    def test_the_fetch_step_tolerates_the_anchored_shape(self) -> None:
-        """Site 2 of the window (nexus-a2wmi.4): the per-ref bash loop must
-        accept plugin-v<pyproject>-<n> for the current version on a cut PR,
-        keeping the hard exit for every other unresolvable ref."""
+    def test_the_fetch_step_no_longer_tolerates_the_anchored_shape(self) -> None:
+        """The anchored plugin-v<version>-<n> channel is retired
+        (nexus-rbmja.8) and nothing produces such a ref, so the per-ref bash
+        loop tolerates only v<pyproject>; an absent anchored ref hard-exits
+        like any other unresolvable one."""
         run = self._fetch_step()["run"]
-        assert 'grep -qE "^plugin-v${version_re}-[1-9][0-9]*$"' in run, (
-            "the anchored-shape tolerance is gone from the fetch loop: every "
-            "plugin-cut PR hard-exits at the fetch step."
+        assert "plugin-v" not in run, (
+            "the fetch loop still names the retired anchored tag shape and "
+            "would wave an absent plugin-vX.Y.Z-N ref through"
+        )
+        assert 'if [ "$ref" = "v$version" ]; then' in run, (
+            "the client release window tolerance is gone from the fetch loop"
         )
 
 

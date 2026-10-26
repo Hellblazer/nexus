@@ -447,6 +447,125 @@ def test_self_gc_swallows_a_spawn_failure(monkeypatch, capsys):
     assert captured.err == ""
 
 
+# ── self-gc also reaps the removed git-integrity hook's session dirs ────────
+#
+# nexus-i93tz: the conexus hook that wrote ``<config>/git-integrity/<session>/``
+# is gone from the tree, taking its ``_prune`` (the only reaper) with it, while
+# installed 7.83.x to 7.86.x plugin copies keep writing there. Bounds copied
+# from that ``_prune``: a session directory untouched for two days.
+
+_DAY = 86400.0
+_NOW = 1_800_000_000.0
+
+
+def _session_dir(parent: Path, name: str, age_seconds: float) -> Path:
+    d = parent / name
+    d.mkdir(parents=True)
+    (d / "snap.json").write_text("{}", encoding="utf-8")
+    (d / "findings").write_text("x", encoding="utf-8")
+    # Set AFTER the files exist: creating a file moves the directory's mtime.
+    os.utime(d, (_NOW - age_seconds, _NOW - age_seconds))
+    return d
+
+
+def test_reap_removes_stale_session_dirs_and_keeps_fresh_ones(tmp_path):
+    parent = tmp_path / self_gc.GIT_INTEGRITY_DIR
+    stale = _session_dir(parent, "stale", 3 * _DAY)
+    just_over = _session_dir(parent, "just-over", 2 * _DAY + 1)
+    exactly = _session_dir(parent, "exactly-two-days", 2 * _DAY)
+    fresh = _session_dir(parent, "fresh", 3600)
+    marker = parent / ".last-prune"
+    marker.write_text("", encoding="utf-8")
+    os.utime(marker, (_NOW - 9 * _DAY, _NOW - 9 * _DAY))
+
+    removed = self_gc.reap_git_integrity_dirs(tmp_path, now=_NOW)
+
+    assert removed == 2
+    assert not stale.exists() and not just_over.exists()
+    assert exactly.exists() and fresh.exists(), "two days exactly is kept, as the old _prune kept it"
+    assert (fresh / "snap.json").exists(), "a kept directory keeps its files"
+    assert marker.exists(), "a plain file is never a session directory, however old"
+
+
+def test_reap_is_bounded_per_sweep(tmp_path, monkeypatch):
+    parent = tmp_path / self_gc.GIT_INTEGRITY_DIR
+    for i in range(5):
+        _session_dir(parent, f"s{i}", 5 * _DAY)
+    monkeypatch.setattr(self_gc, "_GIT_INTEGRITY_MAX_REMOVALS", 2)
+    assert self_gc.reap_git_integrity_dirs(tmp_path, now=_NOW) == 2
+    assert len(list(parent.iterdir())) == 3
+    assert self_gc.reap_git_integrity_dirs(tmp_path, now=_NOW) == 2, "the next sweep carries on"
+
+
+def test_reap_without_a_directory_is_a_zero(tmp_path):
+    assert self_gc.reap_git_integrity_dirs(tmp_path, now=_NOW) == 0
+
+
+@_posix_only
+def test_reap_does_not_follow_a_symlinked_session_dir(tmp_path):
+    outside = _session_dir(tmp_path / "elsewhere", "victim", 9 * _DAY)
+    parent = tmp_path / self_gc.GIT_INTEGRITY_DIR
+    parent.mkdir()
+    (parent / "link").symlink_to(outside, target_is_directory=True)
+    assert self_gc.reap_git_integrity_dirs(tmp_path, now=_NOW) == 0
+    assert (outside / "snap.json").exists()
+
+
+def test_a_nested_directory_fails_one_removal_and_no_more(tmp_path):
+    parent = tmp_path / self_gc.GIT_INTEGRITY_DIR
+    odd = _session_dir(parent, "odd", 5 * _DAY)
+    (odd / "nested").mkdir()
+    os.utime(odd, (_NOW - 5 * _DAY, _NOW - 5 * _DAY))
+    plain = _session_dir(parent, "plain", 5 * _DAY)
+    assert self_gc.reap_git_integrity_dirs(tmp_path, now=_NOW) == 1
+    assert odd.exists() and (odd / "nested").exists()
+    assert not plain.exists()
+
+
+@pytest.mark.parametrize("nx_present", [True, False])
+def test_self_gc_verb_reaps_under_the_users_home(spy, monkeypatch, tmp_path, capsys, nx_present):
+    """Through ``run``, against a tmp HOME: stale dirs go, fresh ones stay, with
+    or without ``nx`` on PATH, and the verb still says nothing."""
+    import time
+
+    monkeypatch.delenv("NEXUS_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    parent = tmp_path / ".config" / "nexus" / self_gc.GIT_INTEGRITY_DIR
+    now = time.time()
+    stale = parent / "old-session"
+    fresh = parent / "live-session"
+    for d, age in ((stale, 3 * _DAY), (fresh, 3600.0)):
+        d.mkdir(parents=True)
+        (d / "snap.json").write_text("{}", encoding="utf-8")
+        os.utime(d, (now - age, now - age))
+    _stub_nx(monkeypatch, _FAKE_NX if nx_present else None)
+
+    calls, _ = spy
+    result = self_gc.run(None)
+
+    assert not stale.exists()
+    assert (fresh / "snap.json").exists()
+    assert bool(calls) is nx_present, "the generation sweep is unaffected by the reap"
+    captured = capsys.readouterr()
+    assert result.stdout is None and captured.out == "" and captured.err == ""
+
+
+def test_a_failing_reap_does_not_stop_the_generation_sweep(spy, monkeypatch, capsys):
+    calls, _ = spy
+    _stub_nx(monkeypatch, _FAKE_NX)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("no home directory")
+
+    monkeypatch.setattr(self_gc, "reap_git_integrity_dirs", _boom)
+    result = self_gc.run(None)
+    assert len(calls) == 1
+    assert result.stdout is None
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""
+
+
 # ── both are registered, and reachable through the real entry point ─────────
 
 

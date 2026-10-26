@@ -351,6 +351,46 @@ def test_cli_marks_unregistered_rules(tmp_path, monkeypatch):
     assert "ghost_rule (unregistered)" in result.output
 
 
+def test_historical_rows_of_the_removed_integrity_check_still_read(tmp_path, monkeypatch):
+    """nexus-i93tz (Sam, 2026-10-25): the subagent git-integrity hook was
+    removed, but conexus 7.83.1 to 7.8x installs wrote its rows
+    (``integrity_info`` / ``integrity_unverified`` / ``integrity_change``) to
+    users' stores. Readers must tolerate them: the outcomes land in ``extra``
+    and the rule shows as unregistered against the shipped manifest."""
+    from nexus.cli import main
+    from nexus.routing_stats import registered_rules
+
+    rule = "subagent_git_integrity_check"
+    outcomes = ["integrity_info"] * 3 + ["integrity_unverified", "integrity_change"]
+    log = tmp_path / "log.jsonl"
+    _write_log(log, [{"ts": f"t{i}", "rule": rule, "outcome": o} for i, o in enumerate(outcomes)])
+    stats = aggregate(log)
+    assert stats[rule].total == 5
+    assert stats[rule].extra == {"integrity_info": 3, "integrity_unverified": 1, "integrity_change": 1}
+
+    manifest = pathlib.Path(__file__).resolve().parents[1] / "conexus" / "hooks" / "hooks.json"
+    assert rule not in (registered_rules(manifest) or set()), "the removed hook must not come back unnoticed"
+
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log))
+    result = CliRunner().invoke(main, ["hook", "routing-stats", "--json"])
+    assert result.exit_code == 0, result.output
+    assert rule in result.output and "integrity_change" in result.output
+
+    # The CHANGELOG and ledger say old rows show as "(unregistered)": read the
+    # repo's new hooks.json (the CLI otherwise probes whatever plugin copy is
+    # installed on the box, which may still register the hook).
+    import nexus.routing_stats as rs
+
+    shipped = registered_rules(manifest)
+    assert shipped and "subagent_git_write_requires_orchestrator" in shipped, (
+        "the shipped manifest must still register the live guard, or every row would read unregistered"
+    )
+    monkeypatch.setattr(rs, "registered_rules", lambda hooks_json=None: shipped)
+    text = CliRunner().invoke(main, ["hook", "routing-stats"])
+    assert text.exit_code == 0, text.output
+    assert f"{rule} (unregistered)" in text.output
+
+
 def test_cli_escapes_lists_reasons(tmp_path, monkeypatch):
     from nexus.cli import main
     log = tmp_path / "log.jsonl"

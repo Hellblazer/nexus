@@ -265,30 +265,37 @@ def _prior_round_identity(client: Any, project: str, latest_content: str) -> str
     return str(rid) if rid is not None else "?"
 
 
-def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
-    """Read RDR list from T2; return [] if T2 is unavailable or empty."""
-    rdrs: list[dict] = []
+def _preamble_t2_rdr_entries(repo_name: str) -> list[dict] | None:
+    """Every ``{repo}_rdr`` T2 entry, or None when T2 cannot be read."""
     try:
         from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         with T2Database(default_db_path()) as db:  # boundary-allow: short-lived read-only preamble CLI
-            entries = db.get_all(project=f"{repo_name}_rdr")
-            for entry in entries:
-                title = entry.get("title", "")
-                if not re.match(r"^\d+$", title):
-                    continue
-                content = entry.get("content", "")
-                rdrs.append({
-                    "id": title,
-                    "title": _preamble_parse_t2_field(content, "title") or title,
-                    "status": _preamble_parse_t2_field(content, "status") or "?",
-                    "rtype": _preamble_parse_t2_field(content, "type") or "?",
-                    "priority": _preamble_parse_t2_field(content, "priority") or "?",
-                    "file_path": (
-                        _preamble_parse_t2_field(content, "file_path")
-                        or f"{rdr_dir}/{title}-*.md"
-                    ),
-                })
+            return list(db.get_all(project=f"{repo_name}_rdr"))
+    except Exception:  # noqa: BLE001 — callers treat an unreadable T2 as no entries, or report it
+        return None
+
+
+def _preamble_get_rdrs_from_t2(repo_name: str, rdr_dir: str) -> list[dict]:
+    """Read RDR list from T2; return [] if T2 is unavailable or empty."""
+    rdrs: list[dict] = []
+    try:
+        for entry in _preamble_t2_rdr_entries(repo_name) or []:
+            title = entry.get("title", "")
+            if not re.match(r"^\d+$", title):
+                continue
+            content = entry.get("content", "")
+            rdrs.append({
+                "id": title,
+                "title": _preamble_parse_t2_field(content, "title") or title,
+                "status": _preamble_parse_t2_field(content, "status") or "?",
+                "rtype": _preamble_parse_t2_field(content, "type") or "?",
+                "priority": _preamble_parse_t2_field(content, "priority") or "?",
+                "file_path": (
+                    _preamble_parse_t2_field(content, "file_path")
+                    or f"{rdr_dir}/{title}-*.md"
+                ),
+            })
     except Exception:  # noqa: BLE001 — best-effort RDR scan; returns whatever was collected
         pass
     return rdrs
@@ -1412,6 +1419,115 @@ def preamble_rdr_list(args: tuple[str, ...]) -> None:
 # preamble rdr-create
 # ---------------------------------------------------------------------------
 
+#: ``rdr-NNN-...`` or a bare three-digit ``NNN-...``: a dated or numbered
+#: non-RDR note (``2026-10-26-handoff.md``) is not an RDR number.
+_RDR_NUMBER_RE: Final = re.compile(r"^(?:rdr-(\d+)|(\d{3}))[-_.]", re.IGNORECASE)
+
+
+def _rdr_number(name: str) -> int | None:
+    """The RDR number a file name in the RDR directory carries, or None."""
+    if name.lower() in _PREAMBLE_EXCLUDED or not name.lower().endswith(".md"):
+        return None
+    m = _RDR_NUMBER_RE.match(name)
+    return int(m.group(1) or m.group(2)) if m else None
+
+
+def _git_lines(repo_root: str, *args: str) -> list[str] | None:
+    """stdout lines of a read-only git command; None when git fails."""
+    try:
+        out = run_bounded(
+            argv_off_cwd(["git", "-C", repo_root, "-c", "core.quotepath=off", *args]),
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout.splitlines() if out.returncode == 0 else None
+
+
+def _preamble_rdr_numbers_held_elsewhere(
+    repo_root: str, rdr_dir: str, repo_name: str,
+) -> tuple[dict[int, list[str]], bool]:
+    """RDR numbers held outside this tree, each with who holds it (nexus-3piej).
+
+    Holders: any commit reachable from any ref (an unmerged branch, local or
+    remote), a file in another worktree's RDR directory (an uncommitted
+    draft), and a ``{repo}_rdr`` T2 record. Only direct children of the RDR
+    directory count, as in this tree's own listing. The flag is False when
+    git could not be asked, so the caller can say the answer is local only.
+    """
+    held: dict[int, list[str]] = {}
+
+    def add(num: int, holder: str) -> None:
+        holders = held.setdefault(num, [])
+        if holder not in holders:
+            holders.append(holder)
+
+    rdr_dir = rdr_dir.removeprefix("./")
+    prefix = rdr_dir.rstrip("/") + "/"
+    ref = ""
+    log = _git_lines(
+        repo_root, "log", "--all", "--source", "--name-only", "--format=\x01%S", "--", rdr_dir,
+    )
+    worktrees = _git_lines(repo_root, "worktree", "list", "--porcelain")
+    complete = log is not None and worktrees is not None
+    for line in log or []:
+        if line.startswith("\x01"):
+            ref = line[1:].removeprefix("refs/heads/").removeprefix("refs/remotes/")
+            ref = ref if ref.startswith("refs/") else f"branch {ref}"
+            continue
+        if not line.startswith(prefix) or "/" in line[len(prefix):]:
+            continue
+        num = _rdr_number(line[len(prefix):])
+        if num is not None:
+            add(num, ref)
+
+    here = Path(repo_root).resolve()
+    for line in worktrees or []:
+        if not line.startswith("worktree "):
+            continue
+        wt = Path(line.removeprefix("worktree "))
+        if wt.resolve() == here:
+            continue
+        for f in (wt / rdr_dir).glob("*.md"):
+            num = _rdr_number(f.name)
+            if num is not None:
+                add(num, f"worktree {wt}")
+
+    t2_titles = _preamble_t2_rdr_titles(repo_name)
+    complete = complete and t2_titles is not None
+    for title in t2_titles or []:
+        m = re.match(r"^(\d+)(?:-|$)", title)
+        if m:
+            add(int(m.group(1)), f"T2 {repo_name}_rdr/{title}")
+    return held, complete
+
+
+def _preamble_t2_rdr_titles(repo_name: str) -> list[str] | None:
+    """Every ``{repo}_rdr`` T2 title, or None when T2 cannot be read.
+
+    ``NNN`` metadata rows and ``NNN-research-*`` / ``NNN-gate-latest`` rows
+    alike: a draft with research rows and no ``NNN`` row still holds NNN.
+    """
+    entries = _preamble_t2_rdr_entries(repo_name)
+    return None if entries is None else [e.get("title", "") for e in entries]
+
+
+def _print_held_elsewhere(
+    skipped: dict[int, list[str]], complete: bool, fmt: Callable[[int], str],
+) -> None:
+    if skipped:
+        print()
+        print("**Numbers held elsewhere (skipped):**")
+        for num in sorted(skipped):
+            print(f"- {fmt(num)}: {'; '.join(skipped[num])}")
+    if not complete:
+        print()
+        print(
+            "> Holder scan incomplete (git or T2 could not be read): Next ID may "
+            "repeat a number an unmerged branch, another worktree or a T2 record holds."
+        )
+
+
 @preamble.command("rdr-create")
 @click.argument("args", nargs=-1)
 def preamble_rdr_create(args: tuple[str, ...]) -> None:
@@ -1423,11 +1539,16 @@ def preamble_rdr_create(args: tuple[str, ...]) -> None:
     print(f"**Repo:** `{repo_name}`  **RDR directory:** `{rdr_dir}`")
     print()
 
+    # nexus-3piej: a number held by any ref, another worktree or a T2 record
+    # is taken too, or the new RDR's record write upserts over it.
+    held, complete = _preamble_rdr_numbers_held_elsewhere(repo_root, rdr_dir, repo_name)
+
     if not rdr_path.exists():
         print(f"> RDR directory `{rdr_dir}` does not exist — bootstrap required.")
         print()
-        print("**Next ID:** `RDR-001`")
+        print(f"**Next ID:** `RDR-{max([0, *held]) + 1:03d}`")
         print("**ID style detected:** `RDR-NNN-kebab-title.md` (default — no existing files)")
+        _print_held_elsewhere(held, complete, lambda num: f"RDR-{num:03d}")
         print()
         print("### Existing RDRs (0 found)")
         print()
@@ -1452,21 +1573,21 @@ def preamble_rdr_create(args: tuple[str, ...]) -> None:
         else:
             id_style = "RDR-NNN-kebab-title.md"
 
-        # Compute next sequential ID
-        max_num = 0
-        for r in rdrs:
-            nums = re.findall(r"\d+", r["file"])
-            if nums:
-                max_num = max(max_num, int(nums[0]))
-        next_num = max_num + 1
+        # Compute next sequential ID. The same name parser as the holder scan,
+        # so a dated note in the directory (2026-10-26-x.md) is not RDR-2026.
+        local = {n for r in rdrs if (n := _rdr_number(r["file"])) is not None}
+        max_num = max([0, *local])
+        skipped = {n: h for n, h in held.items() if n > max_num and n not in local}
+        next_num = max([max_num, *skipped]) + 1
 
-        if rdr_prefix_style:
-            next_id = f"RDR-{next_num:03d}"
-        else:
-            next_id = f"{next_num:03d}"
+        def fmt(num: int) -> str:
+            return f"RDR-{num:03d}" if rdr_prefix_style else f"{num:03d}"
+
+        next_id = fmt(next_num)
 
         print(f"**Next ID:** `{next_id}`")
         print(f"**ID style detected:** `{id_style}`")
+        _print_held_elsewhere(skipped, complete, fmt)
         print()
         print(f"### Existing RDRs ({len(rdrs)} found)")
         print()

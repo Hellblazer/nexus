@@ -28,6 +28,8 @@ import logging
 import re
 from typing import Any
 
+from nexus.plans.evidence import ReservedBindingError, check_no_reserved_declarations
+
 __all__ = [
     "TYPED_BINDING_DOMAINS",
     "TYPED_FILTER_BINDINGS",
@@ -308,6 +310,23 @@ def validate_plan_template(
             "plan template requires a 'plan_json' object with a 'steps' list"
         )
     validate_plan_steps(plan_json)
+    # RDR-232 (nexus-jypmj.1.2): a template's binding lists sit at the
+    # template level, not inside plan_json, until the seed loader folds
+    # them in; check both places.
+    _refuse_reserved_declarations({
+        "required_bindings": template.get("required_bindings"),
+        "optional_bindings": template.get("optional_bindings"),
+        "default_bindings": template.get("default_bindings"),
+    })
+
+
+def _refuse_reserved_declarations(plan: dict[str, Any]) -> None:
+    """Raise :class:`PlanTemplateSchemaError` when *plan* declares source,
+    owner or project (RDR-232 reserved bindings, nexus-jypmj.1.2)."""
+    try:
+        check_no_reserved_declarations(plan)
+    except ReservedBindingError as exc:
+        raise PlanTemplateSchemaError(str(exc)) from exc
 
 
 def validate_plan_steps(
@@ -374,6 +393,10 @@ def validate_plan_steps(
                     f"plan_json.steps[{index}] (traverse) must declare "
                     f"either 'link_types' or 'purpose' (SC-16)"
                 )
+    # RDR-232 (nexus-jypmj.1.2): source, owner and project are the caller's
+    # evidence request, never a plan binding. Save-time refusal; an
+    # already-saved plan is excluded by the matcher instead.
+    _refuse_reserved_declarations(plan_json)
 
 
 # ── Loader (P4a) ────────────────────────────────────────────────────────────

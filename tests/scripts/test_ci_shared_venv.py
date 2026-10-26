@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _racy_mkdir import racy_mkdir_bin
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell script; the pool is Linux")
 
@@ -407,6 +408,35 @@ def test_concurrent_jobs_result_in_exactly_one_build(tmp_path: Path, project_tem
     # ONE build, not one winner among several builders. The message is a joined string, not
     # the list: pytest truncates a list repr, which hid the second build's job (nexus-6xlce).
     full = "\n".join(f"--- job c{i} ---\n{o}" for i, o in enumerate(outs))
+    assert _build_count(outs) == 1, full
+    assert sum("published shared venv" in o for o in outs) == 1, full
+
+
+def test_concurrent_jobs_build_once_when_mkdir_reports_a_lost_race_as_success(
+    tmp_path: Path, project_template: Path, lab_root: Path
+) -> None:
+    """nexus-x8sk8: uutils mkdir (Ubuntu 26.04, chas) exits 0 for the loser of a create race, so
+    `mkdir .lock.<key>` alone admitted two builders (4 of 200 racing pairs). The stand-in below
+    reproduces that on any host; the claim must hold through the exclusive `owner` create."""
+    shim, lost = racy_mkdir_bin(tmp_path)
+    jobs = [Job(tmp_path, project_template, f"r{i}", lab_root) for i in range(4)]
+    for j in jobs:
+        j.env["NX_SHARED_VENV_WAIT"] = "300"
+        j.env["PATH"] = f"{shim}{os.pathsep}{j.env['PATH']}"
+    procs = [_spawn(j) for j in jobs]
+    outs = [p.communicate(timeout=300)[0] for p in procs]
+    full = "\n".join(f"--- job r{i} ---\n{o}" for i, o in enumerate(outs))
+    assert [p.returncode for p in procs] == [0, 0, 0, 0], full
+    assert lost.exists() and lost.read_text(encoding="utf-8").strip(), \
+        "no mkdir lost a race: the test proved nothing"
+    [entry] = entries(lab_root)
+    assert tmp_dirs(lab_root) == [] and lock_dirs(lab_root) == [], "a job left partial state behind"
+    # Every job USES the one entry: a loser that fell back to its own sync (used=false) would pass
+    # the build and publish counts below without having taken part in the claim at all.
+    for i, j in enumerate(jobs):
+        assert j.used and j.outputs["key"] == entry.name, (f"job r{i}", j.outputs, full)
+        res = subprocess.run([str(j.thin / "bin" / "fxdep-tool")], capture_output=True, text=True, env=_clean_env())
+        assert res.stdout.strip() == "fxdep ok", (f"job r{i}", res.stdout, res.stderr)
     assert _build_count(outs) == 1, full
     assert sum("published shared venv" in o for o in outs) == 1, full
 
@@ -897,6 +927,25 @@ def test_a_lock_it_cannot_write_into_is_removed_not_left_ownerless(
     assert "cannot write into the build lock" in res.stdout, res.stdout
 
 
+def test_a_lock_dir_made_unwritable_by_mkdir_is_dropped_by_the_claim(
+    job: Job, lab_root: Path, tmp_path: Path
+) -> None:
+    """claim_lock's own cannot-write branch (nexus-x8sk8): mkdir makes the lock directory but nothing
+    can be created in it, so `owner` never lands. That is a filesystem fault, not contention: the
+    directory is rmdir'd and the job falls back, instead of waiting out a lock no one will release."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions; the CI pool user is not root")
+    real_mkdir = shutil.which("mkdir")
+    assert real_mkdir
+    shim = _path_shim(tmp_path, "mkdir",
+                      'for a in "$@"; do last="$a"; done\n'
+                      f'{real_mkdir} "$@" || exit $?\n'
+                      'case "$last" in */.lock.*) chmod 500 "$last" ;; esac\n')
+    res = job.run(env={**job.env, **shim})
+    _assert_fell_back_cleanly(job, res, lab_root)
+    assert "cannot write into the build lock" in res.stdout, res.stdout
+
+
 def test_a_failing_chmod_of_the_built_venv_falls_back_and_leaves_nothing(
     job: Job, lab_root: Path, tmp_path: Path
 ) -> None:
@@ -1143,3 +1192,16 @@ def test_the_exit_trap_is_a_catch_all_for_a_command_nothing_guards(
     assert second.outputs == {"used": "false", "venv": str(second.disk / "venv")}, second.outputs
     assert "ended early" in res.stdout, res.stdout
     assert second.env_untouched() and not second.thin.exists() and lock_dirs(lab_root) == []
+
+
+def test_a_genuine_mkdir_failure_on_the_lock_falls_back(job, lab_root, tmp_path):
+    """A mkdir that really fails (not a lost race) still falls back with its own message
+    (nexus-x8sk8: the check moved into claim_lock's mkdir-failed branch)."""
+    real_mkdir = shutil.which("mkdir")
+    shim = _path_shim(tmp_path, "mkdir",
+                      'for a in "$@"; do last="$a"; done\n'
+                      'case "$last" in */.lock.*) echo "mkdir: Permission denied" >&2; exit 1 ;; esac\n'
+                      f'exec {real_mkdir} "$@"\n')
+    res = job.run(env={**job.env, **shim})
+    _assert_fell_back_cleanly(job, res, lab_root)
+    assert "cannot create the build lock" in res.stdout, res.stdout

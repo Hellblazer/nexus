@@ -20,7 +20,7 @@ effort: low
 # Analytical answer (RDR-080) — plan-match-first, falls through to inline planner on miss
 mcp__plugin_conexus_nexus__nx_answer(question="how does plan matching work"                  # primary front door
 mcp__plugin_conexus_nexus__nx_answer(question="...", dimensions={"verb":"research"}          # pin a verb for the matcher
-mcp__plugin_conexus_nexus__nx_answer(question="...", scope="1.2"                             # catalog subtree filter
+mcp__plugin_conexus_nexus__nx_answer(question="...", scope="1.2"                             # catalog subtree: filters query and search_metadata_scoped steps; a search step runs unscoped and the answer says so
 
 # Search (chunk-level) / query (document-level)
 mcp__plugin_conexus_nexus__search(query="query"                          # semantic search across T3

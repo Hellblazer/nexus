@@ -620,6 +620,17 @@ public final class VectorHandler implements HttpHandler {
      *
      * <p>Response 200: [{"id","content","distance","collection","retention", ...metadata}]
      *
+     * <p><b>Section labels (nexus-tko2w, additive).</b> A {@code where} naming {@code section_title},
+     * {@code section_type} or {@code page_number} is answered per (document, position) from the catalog
+     * manifest, not from the shared chunk row (whose copy is the last writer's). A chunk held by several
+     * documents comes back once for each document whose label passes the filter, and those rows carry
+     * {@code doc_id}, {@code position} and that document's own labels; the limit applies after that
+     * expansion; with {@code include_source_uri} each of those rows carries its own document's URI, on {@code
+     * /hybrid-search} as on the other two routes. A manifest row whose {@code labels_written} is true is
+     * authoritative (an empty label is "none here"); only a legacy row falls back to the chunk row's label.
+     * A request without those keys is unchanged. Same behavior on {@code /search-per-collection} and {@code
+     * /hybrid-search}. See {@code ManifestLabelStage}.
+     *
      * <p>{@code retention} ({@code "full"} or {@code "reference-only"}, RDR-169 Phase B
      * fix round 1, Gap 2) and a nullable {@code content} are additive — existing consumers
      * that ignore the two new fields see the same shape they always have. A

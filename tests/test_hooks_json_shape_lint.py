@@ -117,7 +117,8 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: 16 -> 19 at nexus-i93tz: `subagent_git_integrity_check.py`, registered for
 #: PreToolUse, PostToolUse and PostToolUseFailure on Bash (one script, three
 #: events; a Bash call that exits non-zero fires PostToolUseFailure instead).
-EXPECTED_CONEXUS_ENTRIES = 19
+#: 19 -> 16 at nexus-i93tz (Sam's decision 2026-10-25): all three entries removed.
+EXPECTED_CONEXUS_ENTRIES = 16
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -170,7 +171,6 @@ PLUGIN_RESIDENT_SCRIPTS = frozenset(
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/version_lockstep_hook.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py",
         "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/credential_print_guard.py",
-        "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/routing/subagent_git_integrity_check.py",
     }
 )
 

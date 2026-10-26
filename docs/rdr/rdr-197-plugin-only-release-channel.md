@@ -2,8 +2,9 @@
 title: "Independent Plugin Release Channel (plugin-vX.Y.Z-n)"
 id: RDR-197
 type: Architecture
-status: closed
+status: superseded
 closed_date: 2026-08-31
+superseded_by: "T2 nexus/design-plugin-only-fast-lane.md, the plugin-only fast lane on the client release (nexus-rbmja; Sam, 2026-10-26)"
 postmortem_waiver: >-
   The arc's one transferable lesson — rehearse cut machinery end to end
   against a fake origin, on every CI checkout shape, before the real run —

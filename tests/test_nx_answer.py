@@ -5342,10 +5342,16 @@ class TestContinuationGoLiveMidPrefixFailure:
 
         search_calls: list = []
 
+        # The budget must outlast the work nx_answer does before the first
+        # step (matching, request analysis, scope) on a loaded CI runner:
+        # at 0.05 s that work alone used it up on develop ffb0fc040 and step 1
+        # never dispatched. The first step outsleeps the budget by far, and
+        # the retrieval wait_for cuts it at the deadline, so the test still
+        # takes about one budget.
         async def stub_search(**kwargs):
             search_calls.append(kwargs)
             if len(search_calls) == 1:
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(10.0)
             return {"ids": ["a"], "tumblers": ["1.1"], "distances": [0.1], "collections": ["knowledge"]}
 
         recorded_calls: list = []
@@ -5371,9 +5377,13 @@ class TestContinuationGoLiveMidPrefixFailure:
              patch.object(mcp_core, "search", stub_search):
             t2_ctx.return_value.__enter__.return_value = db_stub
             result = await nx_answer(
-                question="q", continuation=True, structured=True, budget_seconds=0.05,
+                question="q", continuation=True, structured=True, budget_seconds=1.0,
             )
 
+        assert search_calls, (
+            "the first prefix step never dispatched: the budget ran out before "
+            "the plan started, so this run does not test the mid-prefix cut"
+        )
         assert len(search_calls) == 1, (
             "the second prefix step must never dispatch -- the deadline "
             "was already past before its pre-segment check"

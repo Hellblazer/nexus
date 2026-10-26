@@ -196,7 +196,11 @@ def _drive_index_document(tmp_path: Path, seq: list, fence: _RecordingFenceWrite
         seq.append(("register", register_returns))
         return register_returns
 
+    # nexus-3ajpd: the skip gate now reads the catalog document before it
+    # decides, so a path the catalog cannot name is stubbed unnamed here
+    # (read-only identity; the real lookup would need a service).
     with patch("nexus.doc_indexer._register_or_lookup_doc_id", side_effect=_register), \
+            patch("nexus.doc_indexer._doc_id_for_path", return_value=""), \
             patch("nexus.catalog.factory.make_catalog_writer", return_value=fence):
         n = _index_document(
             f, "testowner", _chunks, _T3(seq),
@@ -319,7 +323,7 @@ def test_index_document_fresh_skip_never_registers(tmp_path) -> None:
     seq: list = []
     register = MagicMock(return_value=DOC_ID)
     with patch("nexus.doc_indexer._register_or_lookup_doc_id", register), \
-            patch("nexus.doc_indexer._index_run_fresh", return_value=True):
+            patch("nexus.doc_indexer._document_is_current", return_value=True):
         n = _index_document(
             f, "testowner", _chunks, _FreshT3(seq),
             collection_name=COLLECTION, embed_fn=_embed,

@@ -83,7 +83,7 @@ Full text with history: [hot-rules](docs/agents/hot-rules.md).
 
 These load only when you read a file their `paths:` matches; each is the short-rules form of a former section of this file, and the full text is in [`docs/agents/`](docs/agents/README.md):
 
-- [`releases-and-engine.md`](.claude/rules/releases-and-engine.md): release cadence, plugin channel, engine-service release, cutting a release and its blocking Step 0. The `release` and `engine-release` skills stay the authority.
+- [`releases-and-engine.md`](.claude/rules/releases-and-engine.md): release cadence, plugin-only fast lane, engine-service release, cutting a release and its blocking Step 0. The `release` and `engine-release` skills stay the authority.
 - [`ci-and-runners.md`](.claude/rules/ci-and-runners.md): CI Cost Discipline, self-hosted runners and fork PRs.
 - [`external-service-limits.md`](.claude/rules/external-service-limits.md): `QUOTAS` limits and Voyage limits.
 - [`adding-a-cli-command.md`](.claude/rules/adding-a-cli-command.md).
@@ -101,7 +101,7 @@ These always-on rules are repeated here because no file read triggers them:
 2. **The primary KEEPS `develop` checked out** and is the reference checkout (git then refuses a second checkout of `develop`).
 3. **In the primary: no edits, no commits, no staging, no branch switches.** Build and test output is fine.
 4. **The release battery runs IN THE RELEASE WORKTREE, never the primary** (`tests/e2e/release-battery.sh` refuses otherwise; `NX_BATTERY_ALLOW_DEVELOP=1` opts a non-release sweep back in).
-5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** Concurrent `pytest -n auto` runs exhaust the SysV shared-memory budget. Scoped runs are unaffected.
+5. **ONE FULL SUITE PER BOX AT A TIME, announced on the bus.** Concurrent `pytest -n auto` runs exhaust the SysV shared-memory budget. The suite lease (taken by any run whose `NX_TEST_T2_SUBSTRATE` is not `none`, a scoped single-test run included) makes a second such run QUEUE behind the first, up to 30 minutes: it prints who it waits for and starts when the holder exits (`NX_SUITE_LEASE_WAIT=0` refuses at once instead). So a scoped substrate run is not unaffected; it waits behind a full suite. On macOS an xdist run whose substrate is not `none` and that has no lab-run grant is refused with the `lab-remote` command to use (`NX_LOCAL_HEAVY=1` opts out). Inside a lab-run grant on Linux the lease is skipped and this rule is NOT enforced by it: lab-run admits by CPU and memory, so two `lab-l` suites can run together on chas. Keep one full suite per box by hand there. On macOS a grant (`lab-mac`) is admission only, so the lease is still taken and a VM hold queues a suite.
 6. **A NEW WORKTREE RUNS `scripts/build-gate-jar.sh` BEFORE ITS FIRST SUBSTRATE-BACKED TEST** (Quick start; a setup-error wall also means rule 5's shared-memory exhaustion or a jar rewritten mid-run).
 7. **Before pushing, ask whether a run someone is waiting on is in flight.** Read checks with `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs`; never `gh run watch`, never a polling loop (secondary rate limit).
 8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...` from INSIDE the worktree (it reads HEAD from cwd). `PUSH_REFUSED_LOCK_HELD` names the holder; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape. **Batch develop pushes**: develop CI runs one run at a time, so hold green commits and push them together, alone only for a develop red or a peer who is waiting.

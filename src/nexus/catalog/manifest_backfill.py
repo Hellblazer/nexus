@@ -458,6 +458,12 @@ def _fetch_chunks_by_key(
                 "line_end": meta.get("line_end"),
                 "char_start": meta.get("chunk_start_char"),
                 "char_end": meta.get("chunk_end_char"),
+                # nexus-tko2w: deliberately NO section_title / section_type / page_number. The
+                # labels on the chunk row are the last writer's (the contamination the manifest
+                # columns exist to end), and a row that carried the keys would be marked
+                # labels_written, i.e. authoritative. Left out, the row stays legacy and readers
+                # keep falling back to the chunk row's own label until a re-index writes the
+                # document's real ones.
                 "chunk_index_present": "chunk_index" in meta,
             })
         if len(page_ids) < _PAGE_SIZE:

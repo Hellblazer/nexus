@@ -42,6 +42,22 @@ class _FakeClock:
         self._now += seconds
 
 
+class _CeilingRng:
+    """RNG stand-in whose ``uniform(a, b)`` returns ``b``: pins every jittered
+    draw to its ceiling so a test can assert the design-of-record numbers."""
+
+    def uniform(self, a: float, b: float) -> float:
+        return b
+
+
+class _MidRng:
+    """``uniform(a, b)`` returns the midpoint, so the per-manager refresh point
+    is exactly the nominal 20% and a test can sit on either side of it."""
+
+    def uniform(self, a: float, b: float) -> float:
+        return (a + b) / 2
+
+
 class _FakePoster:
     """Records calls; returns a canned (status, body, headers) sequence."""
 
@@ -85,6 +101,8 @@ def _manager(
     credential: str | None = "mintcred",
     mint_tenant: str | None = "",
     sleep: Callable[[float], None] | None = None,
+    wall_clock: Callable[[], float] | None = None,
+    rng: Any = None,
 ) -> DataTokenManager:
     cred_fn = (lambda: credential) if credential is not None else (lambda: "")
     # nexus-ssqk9: default to an explicit empty override (never the REAL
@@ -96,6 +114,10 @@ def _manager(
     kwargs: dict[str, Any] = {"mint_tenant": tenant_fn}
     if sleep is not None:
         kwargs["sleep"] = sleep
+    if wall_clock is not None:
+        kwargs["wall_clock"] = wall_clock
+    if rng is not None:
+        kwargs["rng"] = rng
     return DataTokenManager(clock=clock, poster=poster, mint_credential=cred_fn, **kwargs)
 
 
@@ -150,7 +172,10 @@ def test_refresh_below_twenty_percent_ttl() -> None:
     poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 100})
     poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 100})
     clock = _FakeClock()
-    mgr = _manager(poster, clock)
+    # wall_clock follows the fake clock: the refresh reads the lease the first
+    # mint published (nexus-dncjg), and a real wall clock beside a fake
+    # monotonic one would make that lease look 85s newer than the cached token.
+    mgr = _manager(poster, clock, wall_clock=clock, rng=_MidRng())
 
     first = mgr.bearer_for(BASE_URL, TENANT)
     clock.advance(85)  # 15s remaining of 100s TTL = 15% < 20% threshold
@@ -165,7 +190,7 @@ def test_no_refresh_above_twenty_percent_ttl() -> None:
     poster = _FakePoster()
     poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 100})
     clock = _FakeClock()
-    mgr = _manager(poster, clock)
+    mgr = _manager(poster, clock, rng=_MidRng())
 
     mgr.bearer_for(BASE_URL, TENANT)
     clock.advance(75)  # 25s remaining of 100s TTL = 25% > 20% threshold
@@ -290,13 +315,13 @@ def test_mint_retries_on_429_then_succeeds() -> None:
     poster.queue(429, {"error": "rate limit exceeded, retry later"})
     poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
     sleep = _FakeSleep()
-    mgr = _manager(poster, _FakeClock(), sleep=sleep)
+    mgr = _manager(poster, _FakeClock(), sleep=sleep, rng=_CeilingRng())
 
     token = mgr.bearer_for(BASE_URL, TENANT)
 
     assert token == "tok-1"
     assert len(poster.calls) == 2
-    assert sleep.calls == [1.0]  # first backoff slot, no Retry-After supplied
+    assert sleep.calls == [1.0]  # first backoff slot (jitter pinned to its ceiling), no Retry-After supplied
 
 
 def test_mint_retry_honors_retry_after_header() -> None:
@@ -361,13 +386,13 @@ def test_mint_retry_exhausts_after_three_attempts_then_fails_loud() -> None:
     poster.queue(503, {"error": "unavailable"})
     poster.queue(503, {"error": "still unavailable"})
     sleep = _FakeSleep()
-    mgr = _manager(poster, _FakeClock(), sleep=sleep)
+    mgr = _manager(poster, _FakeClock(), sleep=sleep, rng=_CeilingRng())
 
     with pytest.raises(DataTokenMintError, match="503"):
         mgr.bearer_for(BASE_URL, TENANT)
 
     assert len(poster.calls) == 3  # 1 initial + 2 retries, no more
-    assert sleep.calls == [1.0, 2.0]  # design of record: "1s/2s"
+    assert sleep.calls == [1.0, 2.0]  # design of record "1s/2s" are the CEILINGS (nexus-kcdbx)
 
 
 def test_mint_retry_never_touches_the_shared_rate_brake() -> None:

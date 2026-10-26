@@ -5229,7 +5229,8 @@ public final class CatalogRepository {
          *  conflict is possible in practice. */
         PLAIN,
         /** Mirrors {@link #appendManifestChunks}' pre-existing minimal upsert: only
-         *  {@code chash}/{@code collection} are updated on conflict (chunk_index/line/char
+         *  {@code chash}/{@code collection} (and, nexus-tko2w, the section labels that describe the
+         *  chunk at the position, with their {@code labels_written} marker) are updated on conflict (chunk_index/line/char
          *  positions are NOT touched — this method's long-standing contract, unchanged). */
         UPSERT_APPEND,
         /** Mirrors the two RDR-176 ETL import paths' full-column upsert. */
@@ -5298,7 +5299,9 @@ public final class CatalogRepository {
         var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                 CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL);
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER,
+                CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN);
         for (var row : rows) {
             // hygiene-001 (nexus-tk070.p6a follow-on): catalog_document_chunks.chunk_index
             // is NOT NULL now — a client that omits it (the wire field predates this
@@ -5308,7 +5311,14 @@ public final class CatalogRepository {
             insert = insert.values(tenant, docId, i(row,"position"), s(row,"chash"),
                     ni(i(row,"chunk_index"), i(row,"position")),
                     i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"), coll,
-                    embeddingModel);
+                    embeddingModel,
+                    // nexus-tko2w (RDR-108): the per-position section labels and whether they are this
+                    // document's own answer (labels_written). A client that predates them sends no label
+                    // key: the columns stay NULL and labels_written false ("legacy", exactly the state of
+                    // every row written before catalog-046), and a reader then falls back to the chunk
+                    // row's own label for the row.
+                    s(row,"section_title"), s(row,"section_type"), i(row,"page_number"),
+                    labelsWritten(row));
         }
         switch (mode) {
             case PLAIN -> insert.execute();
@@ -5326,6 +5336,11 @@ public final class CatalogRepository {
                 // (tenant, collection, chash, model)); a conflict that re-points the row at another
                 // collection re-points its model with it.
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
+                // nexus-tko2w: the labels describe the chunk AT this position, so they follow its chash.
+                .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE))
+                .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE))
+                .set(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER))
+                .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN))
                 .execute();
             case UPSERT_IMPORT -> insert
                 .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -5339,8 +5354,27 @@ public final class CatalogRepository {
                 // RDR-191: same reasoning as the UPSERT_APPEND arm above.
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
+                .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE))
+                .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE))
+                .set(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER))
+                .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN))
                 .execute();
         }
+    }
+
+    /**
+     * nexus-tko2w: whether an incoming manifest row's section labels are the document's own answer. An
+     * explicit boolean {@code labels_written} wins (a row read back from this engine and written again, as the
+     * re-embed move and a client's manifest rewrite do, says what it was: a legacy row stays legacy even
+     * though the read always carries the three label keys); otherwise the row is written iff it carries any
+     * of the three label keys (a client sends them all, "" for a chunk with no heading; a client that
+     * predates catalog-046 sends none, and so does a backfill, which must not mint authoritative labels).
+     */
+    private static boolean labelsWritten(Map<String, Object> row) {
+        if (row.get("labels_written") instanceof Boolean explicit) {
+            return explicit;
+        }
+        return row.containsKey("section_title") || row.containsKey("section_type") || row.containsKey("page_number");
     }
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
@@ -7254,6 +7288,21 @@ public final class CatalogRepository {
     }
 
     /**
+     * nexus-tko2w: the per-position section labels of one manifest row, as the wire carries them: the keys
+     * are always present. {@code labels_written} says whether the three are this document's own answer
+     * (true: an empty title or type means "none here", and the chunk row's label never overrides it) or the
+     * row predates catalog-046 / was written by a client that sends no labels (false: the labels are NULL
+     * because nothing was ever recorded, and a reader may fall back to the chunk row's label).
+     */
+    private static void putSectionLabels(Map<String, Object> m, String title, String type, Integer page,
+                                         boolean labelsWritten) {
+        m.put("section_title", title);
+        m.put("section_type",  type);
+        m.put("page_number",   page);
+        m.put("labels_written", labelsWritten);
+    }
+
+    /**
      * Get manifest rows for docId, ordered by position. Tombstoned docs read empty (nexus-mqd6t).
      *
      * <p>nexus-kzso5 (RDR-191 follow-up, ADDITIVE wire change): each row now
@@ -7267,7 +7316,9 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
-                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                       CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER,
+                       CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
                .from(CATALOG_DOCUMENT_CHUNKS)
                .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId).and(liveParentDoc(ctx, tenant)))
                .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -7282,6 +7333,7 @@ public final class CatalogRepository {
                    m.put("char_start",  r.value7());
                    m.put("char_end",    r.value8());
                    m.put("collection",  r.value9());
+                   putSectionLabels(m, r.value10(), r.value11(), r.value12(), Boolean.TRUE.equals(r.value13()));
                    return m;
                })
         );
@@ -7929,7 +7981,10 @@ public final class CatalogRepository {
                 ctx.selectCount().from(all)
                    .where(all.DOC_ID.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID).and(liveParentDoc(ctx, tenant))));
             var rows = ctx.select(CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                                  CATALOG_DOCUMENT_CHUNKS.POSITION, chunkCount)
+                                  CATALOG_DOCUMENT_CHUNKS.POSITION, chunkCount,
+                                  CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                                  CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
+                                  CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           .where(CHK_CHASH_HEX.in(chashes).and(liveParentDoc(ctx, tenant)))
                           .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
@@ -7941,6 +7996,13 @@ public final class CatalogRepository {
                 m.put("doc_id",      r.value2());
                 m.put("position",    r.value3());
                 m.put("chunk_count", r.value4());
+                // nexus-tko2w (additive): the row's own collection and per-position section labels, so a
+                // caller holding a chash resolves the label of THIS owner, not the shared chunk row's.
+                m.put("collection",  r.value5());
+                m.put("section_title", r.value6());
+                m.put("section_type",  r.value7());
+                m.put("page_number",   r.value8());
+                m.put("labels_written", Boolean.TRUE.equals(r.value9()));
                 out.add(m);
             }
             return out;
@@ -7962,7 +8024,9 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                                   CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
-                                  CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                                  CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                                  CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER,
+                                  CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           // nexus-mqd6t: batch twin of getManifest's tombstone filter.
                           // Load-bearing beyond parity — HttpCatalogClient.docs_for_chashes
@@ -7984,6 +8048,7 @@ public final class CatalogRepository {
                 m.put("char_end",    r.value8());
                 // nexus-kzso5: row's own collection, same additive field as getManifest.
                 m.put("collection",  r.value9());
+                putSectionLabels(m, r.value10(), r.value11(), r.value12(), Boolean.TRUE.equals(r.value13()));
                 result.computeIfAbsent(docId, k -> new ArrayList<>()).add(m);
             }
             return result;

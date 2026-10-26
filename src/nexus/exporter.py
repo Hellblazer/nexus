@@ -13,11 +13,14 @@ Embeddings are stored as little-endian float32 bytes (numpy tobytes).
 
 nexus-wbfpw.31 (RDR-192 Step 5, client): each record MAY also carry an
 ``owner`` key -- ``{"source_uri": str, "title": str, "content_type": str,
-"position": int, "index_content_hash": str, "manifest_rows": int}`` -- naming
+"position": int, "index_content_hash": str, "manifest_rows": int,
+"key_registered": bool}`` -- naming
 the chunk's LIVE, own-collection catalog document at export time and its
-manifest position within it; the last two (nexus-mjikf) are that document's
-content key when it is complete ("" otherwise) and its manifest row count, so
-an import can stamp a document it holds whole with the key. This is an
+manifest position within it; the last three (nexus-mjikf, nexus-3ajpd) are that
+document's content key when it is complete ("" otherwise), its manifest row
+count, and whether the document's own registration recorded the same file hash
+(``meta.content_hash`` equals the key), so an import can stamp a document it
+holds whole with the key. This is an
 UNKNOWN key to every importer predating this change (older importers
 ignore unrecognized record fields), so ``FORMAT_VERSION`` is not bumped.
 Without it, an imported chunk has no catalog document or manifest row at
@@ -343,12 +346,25 @@ def _resolve_export_owners(
             # the source document's index_content_hash, only when it is complete, and its manifest
             # row count, so the import can tell a whole document from one whose shared chunks
             # were written under another owner (the import uses the key only when it holds every row
-            # and one of the document's chunks witnesses the key, _note_source_evidence). The entry is
-            # read after the manifests, and the three reads are not one snapshot: the source is
-            # assumed quiescent during export. A re-index landing between them usually pairs a new
-            # key with old rows whose chunks carry the old key, which the witness check refuses.
+            # and the key is witnessed, _note_source_evidence: by the registration, key_registered
+            # below, or by one of the document's chunks carrying the key). The entry is read after
+            # the manifests, and the three reads are not one snapshot: the source is assumed
+            # quiescent during export, and that assumption is what bounds the race. A re-index
+            # landing between the reads leaves the entry (read last) with the NEW fence and key
+            # while the manifest rows and chunks read earlier are the old ones. The chunk witness
+            # then refuses (the old chunks carry the old key), but key_registered is True for the
+            # new entry, so the old rows can be stamped with the new key. Nothing in the export
+            # detects that; a quiescent source is the only guard.
             "index_content_hash": entry.index_content_hash if entry.index_state == "complete" else "",
             "manifest_rows": len(manifests.get(chosen, [])),
+            # nexus-3ajpd: catalog-side evidence that the key is a file hash: the document's own
+            # registration recorded the same value. A chunk row cannot say it (its content_hash is
+            # the last writer's, so a chunk another document wrote last carries that document's
+            # hash), and this does not depend on any chunk row surviving unrestamped.
+            "key_registered": bool(
+                entry.index_state == "complete" and entry.index_content_hash
+                and (getattr(entry, "meta", None) or {}).get("content_hash") == entry.index_content_hash
+            ),
         }
     return owners
 
@@ -673,6 +689,11 @@ def _locate_owner_group(
     )
     if group.setdefault("source", pair) != pair:
         group["source"] = None
+    # nexus-3ajpd: the catalog's own evidence that the key is a file hash (``key_registered``),
+    # trusted only when every record of the group says so; one record without it, an old bundle
+    # included, withdraws it for the group (applied at consume time, :func:`_whole_source`).
+    registered = isinstance(owner_meta, dict) and owner_meta.get("key_registered") is True
+    group["registered"] = group.get("registered", True) and registered
     return group, position
 
 
@@ -823,11 +844,23 @@ def _prepass_groups(
 
 
 def _note_source_evidence(group: dict, meta: dict, position: int) -> None:
-    """nexus-mjikf: what lets the import trust a group's source key. A record whose chunk carries
-    the key as its ``content_hash`` WITNESSES it: a native index writes the file's hash on its
-    chunks, while a bundle-wide key stamped by a release before nexus-8hhbk, or an 8hhbk unique
-    key, matches no chunk. Two records at one position mean the group is not one whole manifest
-    (a live export can read a record twice and miss another), so the key is dropped."""
+    """nexus-mjikf: what lets the import trust a group's source key. The key is trusted when
+    something shows it is a file hash a native index wrote, rather than a bundle-wide key stamped
+    by a release before nexus-8hhbk or an 8hhbk unique key, which match no file. Two kinds of
+    evidence count (nexus-3ajpd):
+
+    * the exporting catalog's own record, ``key_registered`` on every record of the group: the
+      document's registration recorded the same hash. This is the document's property and
+      survives a chunk it shares being restamped;
+    * a record whose chunk carries the key as its ``content_hash``. A chunk row is one per chunk
+      text and its ``content_hash`` is the LAST writer's, so this reads "some file has this hash",
+      which cannot make a wrong key trusted, but a document whose chunks other documents wrote
+      last has none left to show it (the document then gets the unique key: no same-as, never a
+      wrong one). Only the registration record above covers it, and a PDF or note registers
+      without a file hash, so for those the chunk evidence is all there is.
+
+    Two records at one position mean the group is not one whole manifest (a live export can read
+    a record twice and miss another), so the key is dropped."""
     source = group.get("source")
     # Track only a group whose key could ever be used, so an old bundle or an incomplete source
     # costs nothing beyond the group's small dict.
@@ -835,8 +868,11 @@ def _note_source_evidence(group: dict, meta: dict, position: int) -> None:
             or not isinstance(source[1], int) or isinstance(source[1], bool)):
         group.pop("positions", None)
         return
+    # The chunk witness is sticky (one record's chunk carrying the key is enough). The registration
+    # evidence is not recorded here: it is "every record said so", which only the end of the scan can
+    # know, so :func:`_whole_source` reads ``group["registered"]`` at consume time.
     if meta.get("content_hash") == source[0]:
-        group["witnessed"] = True
+        group["chunk_witness"] = True
     positions = group.setdefault("positions", set())
     if position in positions:
         group["source"] = None
@@ -850,7 +886,9 @@ def _whole_source(group: dict) -> tuple[str, Any] | None:
     record witnessed the key (:func:`_note_source_evidence`): distinct positions exactly 0..rows-1.
     Anything short of that is None, which gives the document the unique key."""
     source = group.get("source")
-    if not source or not group.get("witnessed"):
+    # Witness at consume time: the catalog's record on EVERY record of the group (one record without
+    # it withdraws it), or any record's chunk carrying the key.
+    if not source or not (group.get("registered") is True or group.get("chunk_witness")):
         return None
     rows = source[1]
     if not isinstance(rows, int) or isinstance(rows, bool):
@@ -883,7 +921,8 @@ def _document_completion_hash(
     the file's sha256, stamped on every document as before, made all of one bundle's PDFs share a
     key, and a document missing rows (a chunk it shares was exported under another owner, a chunk
     sits at two positions, or the export filtered one out) must not read as current. A chunk's own
-    ``content_hash`` metadata is never used: it is the first writer's value."""
+    ``content_hash`` metadata is never used as the key: it is the LAST writer's value (a chunk row
+    is shared by every document holding that text; nexus-3ajpd)."""
     if sources is not None and len(sources) == 1 and sources[0] is not None:
         key, source_rows = sources[0]
         if (isinstance(key, str) and _CONTENT_KEY.fullmatch(key)

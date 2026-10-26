@@ -5268,9 +5268,10 @@ class HttpVectorClient:
         ``VectorServiceError`` instead, so a caller with its own
         genuinely-empty exit path (``nx t3 census-manifest-less --all``)
         can tell a real outage from a clean tenant. The 404
-        deployment-skew fallback below is unaffected by ``strict`` either
-        way — that branch is a known pre-catalog-005 accommodation, not a
-        failure.
+        deployment-skew fallback below is still taken either way — that branch
+        is a known pre-catalog-005 accommodation, not a failure — but under
+        ``strict`` a failing ``/collections`` call inside it raises too
+        (nexus-v9xwj), so the fallback cannot read an outage as an empty tenant.
         """
         if routing and lifecycle_state is None and not strict:
             prefetched, self._routing_prefetch = self._routing_prefetch, None
@@ -5298,7 +5299,7 @@ class HttpVectorClient:
             # A pre-catalog-005 JAR has no catalog join to filter on: every
             # row it can name is treated as live (absent state = live, the
             # same reading is_live_collection_row applies to the joined route).
-            return self._list_collections_via_count()
+            return self._list_collections_via_count(strict=strict)
         rows = self._merge_stats_rows(stats)
         # nexus-7l3zo: this IS the listing seam every CLI verb goes through,
         # so prime the process's collection-row cache here, once, with the
@@ -5375,7 +5376,7 @@ class HttpVectorClient:
         rows = self.list_collections(lifecycle_state="live", routing=routing)
         return [row for row in rows if is_live_collection_row(row)]
 
-    def _list_collections_via_count(self) -> list[dict]:
+    def _list_collections_via_count(self, *, strict: bool = False) -> list[dict]:
         """Deployment-skew fallback: ``/collections`` names + N ``/count`` calls.
 
         Pre-catalog-005 JARs have no ``/stats`` route. Counts here are RAW
@@ -5384,11 +5385,17 @@ class HttpVectorClient:
         ``stored_count`` is set equal to ``count`` here — this engine predates
         the RDR-192 Step 5 amendment entirely, so live and physical coincide
         from its point of view.
+
+        A failing ``/collections`` call returns ``[]`` with a WARNING; under
+        ``strict`` (a listing whose caller must tell an outage from an empty
+        tenant) it raises the ``VectorServiceError`` instead.
         """
         try:
             result = _get("/v1/vectors/collections", tenant=self._tenant)
         except VectorServiceError as e:
             _log.warning("http_vector_fallback_collections_failed", error=str(e))
+            if strict:
+                raise
             return []
         names = [c.get("name", "") for c in result] if isinstance(result, list) else []
         out: list[dict] = []
@@ -5661,14 +5668,35 @@ class HttpVectorClient:
         both via :func:`nexus.errors.collection_not_found_errors` during the
         transition window) rather than creating a zombie collection
         (contrast with :meth:`get_or_create_collection`).
+
+        A service error while listing (anything but the pre-catalog-005 404)
+        also raises ``CollectionNotFoundError``, with the ``VectorServiceError``
+        as ``__cause__``; a collection that is truly absent raises it with no
+        cause. The type is the same either way, so a catcher that only skips
+        is unaffected.
         """
         from nexus.errors import CollectionNotFoundError  # noqa: PLC0415 — local import mirrors the deferred style of this method's callers
 
         try:
-            cols = self.list_collections()
+            # strict: the default listing swallows a non-404 service error and
+            # returns [], which would read as "the collection does not exist"
+            # and raise below with no __cause__. A caller that has to tell an
+            # absent collection from a service that could not be asked (the
+            # manifest heal's LOST marking) reads the __cause__.
+            cols = self.list_collections(strict=True)
             if not any(c.get("name") == name for c in cols):
                 raise CollectionNotFoundError(f"collection {name!r} not found in service")
         except VectorServiceError as exc:
+            # The strict listing raises where the default one logged
+            # http_vector_list_collections_failed, and the callers that skip a
+            # CollectionNotFoundError silently (frecency, the misclassified
+            # prune, the orphan GC, the manifest backfill) would otherwise lose
+            # the outage signal.
+            _log.warning(
+                "http_vector_get_collection_service_unavailable",
+                collection=name,
+                error=str(exc),
+            )
             raise CollectionNotFoundError(
                 f"service unavailable checking collection {name!r}"
             ) from exc

@@ -403,6 +403,11 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # above (topics.doc_count is trigger-maintained).
         'get_doc_count_drift': [],
         'recount_doc_count': ['dry_run'],
+        # nexus-h2v0l: persist_assignments plus the number the engine skipped
+        # as superseded (engine-service-v0.1.165 answers skipped_superseded
+        # on /assignments/assign_many). Service-only by construction: the
+        # SQLite twin had no superseded-collection guard to count.
+        'persist_assignments_counted': ['assignments'],
     },
     'telemetry': {
         # nexus-onjvy: hook_failures was WRITE-ONLY over HTTP (/record + /trim,

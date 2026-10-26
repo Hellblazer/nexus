@@ -122,6 +122,28 @@ class HubRow(NamedTuple):
     is_stale: bool
 
 
+def hub_is_stale(
+    last_assigned_at: str | None,
+    max_last_discover_at: str | None,
+    never_discovered_count: int,
+) -> bool:
+    """RDR-077 hub staleness: a contributing collection was discovered after
+    the hub's latest projection, or one was never discovered (nexus-9kp10).
+
+    Timestamps are parsed, not compared as strings, so "...T00:00Z" and
+    "...T00:00:00Z" order correctly. A hub with no assignment timestamp
+    (legacy rows) is not called stale on the timestamp test.
+    """
+    if never_discovered_count > 0:
+        return True
+    if not last_assigned_at or not max_last_discover_at:
+        return False
+    return (
+        datetime.fromisoformat(str(max_last_discover_at))
+        > datetime.fromisoformat(str(last_assigned_at))
+    )
+
+
 class AuditReport(NamedTuple):
     """Summary of projection quality for a single source collection.
 

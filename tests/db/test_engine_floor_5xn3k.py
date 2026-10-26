@@ -4,7 +4,10 @@
 Design memo (T2 nexus "5xn3k-design-2026-08-02") §6: "the client ships
 WITHOUT waiting on REQUIRED_ENGINE_VERSION. A pre-fence engine 404s the
 index-run routes and omits the fence fields; the client treats both as
-'unknown' and falls through to verification (today's post-AC2 behaviour)."
+'unknown' and falls through to verification (today's post-AC2 behaviour)." Amended by T2
+nexus/5xn3k-design-amendment-2026-10-26: an unknown or unreadable fence no longer falls
+through to verification, it reads stale and the document re-indexes. A pre-fence engine is
+below REQUIRED_ENGINE_VERSION anyway, so this file pins only that the client does not crash.
 
 A pre-fence engine (one built before catalog-020/021 landed) has no
 ``case "/index-run/..." -> ...`` / ``case "/manifest/verify..." -> ...`` in
@@ -114,26 +117,21 @@ def test_fail_index_run_404_is_swallowed(pre_fence_client, caplog) -> None:
 # (both called the now-removed methods directly).
 
 
-def test_staleness_gate_returns_true_without_any_engine_call(
+def test_staleness_gate_reads_a_pre_fence_engine_as_stale_and_does_not_raise(
     pre_fence_client, monkeypatch,
 ) -> None:
-    """RDR-191 Phase 6 rebase: the staleness gate's fallback,
-    ``_manifest_is_fully_present``, no longer calls ``manifest_verify`` at
-    all — the manifest-chunk FK makes the ``missing`` question it asked
-    provably always False for any manifest row that exists, so the function
-    is a bare ``return True`` now (see its own docstring for the full FK
-    argument). This test pins that: even against a server that 404s EVERY
-    route (the pre-fence emulator this module's other tests use for a
-    genuinely different purpose — 404 SWALLOWING on the advisory
-    begin/complete/fail writes), the staleness gate returns True WITHOUT
-    ever making a request that could 404, and logs nothing (the old
-    fail-open+WARNING contract had a real failure path to warn about; this
-    one has none)."""
+    """nexus-3ajpd rebase. The staleness gate decides from the document's
+    fence. An engine that 404s every route has no fence to read, so the fence
+    read fails (logged at WARNING, never raised) and the document reads as
+    stale: it is indexed, never skipped on a chunk row's ``content_hash``,
+    which is the last writer's and not this document's hash. Before
+    nexus-3ajpd this case fell through to a bare ``return True`` and skipped.
+    """
     _configure_structlog_to_stdlib()
     monkeypatch.setattr(
         "nexus.catalog.factory.make_catalog_reader",
         lambda *a, **k: pre_fence_client, raising=False,
     )
-    from nexus.doc_indexer import _manifest_is_fully_present
+    from nexus.doc_indexer import _index_run_fresh
 
-    assert _manifest_is_fully_present(object(), "1.1.1") is True
+    assert _index_run_fresh(object(), "1.1.1", "abc123") is False
