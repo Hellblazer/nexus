@@ -2,7 +2,8 @@
 title: "One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side"
 id: RDR-210
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-10-26
 priority: high
 author: Sam
 reviewed-by: self
@@ -428,7 +429,8 @@ the code is cited and the disagreement is noted.
   (`tests/catalog/test_collection_scoped_tables_schema_parity.py:139-152`), and
   that gate asks `information_schema` for every collection column, so the 15 are
   all of them. The same-model rename re-homes all 14; the cross-model branch of
-  `renameCollectionTxn` (`:9122-9168`) updates only `catalog_documents` and
+  `renameCollectionTxn` (`:9122-9168`; removed by nexus-avjrb in v0.1.164, so
+  these line numbers describe the code as the spike read it) updates only `catalog_documents` and
   `catalog_document_chunks`, and its own comment (`:9149-9152`) says topic
   assignments and orphan stamps stay. The spike found the same of the
   per-document move: aspects, highlights, the aspect queue and topic rows all
@@ -745,7 +747,11 @@ use, carrying the document's aspects and highlights with it.
      DJL tokenizers library does its own network I/O in native code that a URL
      factory cannot see. The guard is therefore a source-level check plus a
      tokenizer-build check, and the documents that cite it say that and no more.
-     The follow-up gaps are bead nexus-3va7p.
+     The shipped guard has 22 constructs, each with a planted positive control,
+     and a third witness (`EgressVoyageClientWitnessTest`) for each Voyage
+     client's default host. Not covered, and tracked in nexus-4lqi7: a JDBC or
+     Hikari pool URL other than the local `NX_DB_URL`, and the effect of
+     `Main.goOffline` in the witness JVM.
 8. **Java comments.** The stale router comments are corrected here, since they
    describe the router this RDR changes: `Main.java:37-41` (says an ONNX fallback
    exists when keyed), the class javadoc at `EmbedderRouter.java:33-47`, and the
@@ -1173,8 +1179,8 @@ job routes accept requests only when the supervisor marks the engine local at
 spawn, with a variable it sets the way it sets `NX_SERVICE_PARENT_DEATH_EXIT`
 (`storage_service_daemon.py:1484`, read at `Main.java:434`); otherwise the routes
 refuse, naming local mode. The verb refuses unless `is_local_mode()`
-(`config.py:939`). Inferred, not read: that no managed deployment sets that
-variable; Phase 6 Step 2 names it and checks.
+(`config.py:939`). The variable is `NX_ENGINE_LOCAL`; `git grep` on develop (2026-10-26) shows only
+the local supervisor (`storage_service_daemon.py:1547`) sets it.
 
 | State | Meaning | Leaves to |
 | --- | --- | --- |
@@ -1337,12 +1343,12 @@ takes the same flag to raise it (author's decision).
 | Cross-model dispositions | `COLLECTION_SCOPED_TABLES` (`CatalogRepository.java:8804`) | New: a disposition per table, with a parity test |
 | Cutover | `supersedeCollection` (`:8492`), `deleteCollection` (`:8280`) | Reuse unchanged |
 | Taxonomy rebuild | `discover_for_collection` (`taxonomy_cmd.py:274`), as `nx index` calls it (`commands/index.py:674-690`) | Reuse from `re-embed --wait` |
-| Cross-model rename | `renameCollectionTxn` copy branch (`:9122-9168`) | Not used by this RDR |
+| Cross-model rename | `renameCollectionTxn` copy branch (`:9122-9168`; removed by nexus-avjrb, v0.1.164) | Not used by this RDR |
 | Client reference cascade | `remap_collection_references` (`collection_rename.py:174`) | Delete: no production caller, and it would violate `topic_assignments_chunk_fk` (210-research-14) |
 | Re-embed verb | `nx collection re-embed` (`commands/collection.py:1659`) | Extend: `--all`, cross-model `--to` starts the job, job controls |
 | Job table and runner | none; scheduler at `NexusService.java:686-729` | New Liquibase changeset for the tenant tables `reembed_jobs` and `reembed_job_moves`, with the new-tenant-table obligations (Managed); runner on the existing scheduler |
 | Doctor rows | off-profile row (`health.py:8471-8493`) | Extend; one new job row |
-| Keyed gate | none (`rdr195-voyage-mvv.sh` deleted) | New script, a fourth battery leg |
+| Keyed gate | none (`rdr195-voyage-mvv.sh` deleted) | New script, a fifth battery leg |
 
 ### Decision Rationale
 
@@ -1395,7 +1401,8 @@ reversed the choice the same day.
 An engine job calls `upsertChunks` with no guard (an `ALLOWED_CALLERS` entry in
 `OwnershipGuardCoverageScan`), copying every live chunk into the target, then
 repoints all manifests at once through `renameCollectionTxn`'s cross-model branch
-(`CatalogRepository.java:9122-9168`) and supersedes the source. The composite
+(`CatalogRepository.java:9122-9168`; removed by nexus-avjrb in v0.1.164, see
+the note at Key Discoveries) and supersedes the source. The composite
 foreign key aborts the repoint if the source gained a chash after the copy, so it
 doubles as the parity check: copy the delta and retry. The spike confirmed all of
 that (210-research-18).
@@ -1507,9 +1514,9 @@ calibrated order and warns (Technical Design 12).
   c03352a2a..6cd90aab5).
 - [x] Open Questions 1-3 decided (Sam, 2026-10-17).
 - [x] `HttpsSchemeHandler` and `POST /v1/vectors/resolve` removed (nexus-3t0jv,
-  c143a27ab, on develop; the bead stays open until the next engine tag).
+  c143a27ab, on develop; the bead is closed).
 - [x] The DJL instance-metadata and native-download paths closed (nexus-17jvq,
-  2416ce891, on develop; the bead stays open until the next engine tag), so
+  2416ce891, on develop; the bead is closed), so
   Phase 2 Step 6's runtime witness does not fail on them.
 
 ### Minimum Viable Validation
