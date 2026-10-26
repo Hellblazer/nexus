@@ -6,7 +6,16 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jooq.Field;
+import org.jooq.JSONB;
+import org.jooq.impl.DSL;
+
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -57,6 +66,30 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *   <li>The caller's limit applies after expansion and de-duplication, never before.</li>
  * </ul>
  *
+ * <p><b>Document-level keys (nexus-6pfgb.24, epic nexus-6pfgb).</b> The same stage answers the keys that
+ * describe a whole document, not a position, per owning document, because the shared chunk row holds the
+ * last writer's value of each. The catalog is the authority:
+ * <ul>
+ *   <li>{@code source_author} reads {@code catalog_documents.author}; {@code indexed_at} reads {@code
+ *       catalog_documents.indexed_at} (rendered as the chunk rows' own text shape, UTC, microseconds). An
+ *       empty author, or no {@code indexed_at}, falls back to the chunk row: markdown authors predate their
+ *       catalog home.</li>
+ *   <li>{@code bib_*} read the {@code bib_*} columns and are AUTHORITATIVE: those columns are NOT NULL with
+ *       defaults (0 / ''), so a document counts as enriched when {@code bib_enriched_at} is set or any bib
+ *       column holds a value, and an unenriched document has no bib at all. The chunk row is never
+ *       consulted, because a shared row carries the bib of whichever owner was enriched. An enriched
+ *       document's year 0 or empty string is "not recorded" (unlabelled); its citation count 0 is a
+ *       count.</li>
+ *   <li>{@link #META_KEYS} read the document's {@code metadata} jsonb. A key the document's meta holds (not
+ *       absent, not JSON null) is its answer, an empty string included; a key it does not hold is a legacy
+ *       document and falls back to the chunk row, the same rule {@code labels_written = false} applies to
+ *       the section labels.</li>
+ * </ul>
+ * Operators, the unlabelled rules ({@code IS DISTINCT FROM}), the per-document lowest-passing-position
+ * expansion and the cut are the section labels'. An expanded row speaks for its document on the document
+ * keys the filter names: the owner's value replaces the chunk row's, and an authoritative absence (an
+ * unenriched document's bib) removes the key.
+ *
  * <p><b>Known cost.</b> The search is cut at {@link #OVERFETCH} times the limit before this stage
  * filters, so a filter that rejects most of the neighbourhood (a positive filter on a rare label) can
  * return fewer rows than the limit where the old in-index {@code hnsw.iterative_scan} would have kept
@@ -65,8 +98,39 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  */
 final class ManifestLabelStage {
 
-    /** The metadata keys answered from the manifest. */
+    /** The per-position keys answered from the manifest rows. */
     static final Set<String> LABEL_KEYS = Set.of("section_title", "section_type", "page_number");
+
+    /** {@code source_author}: answered from {@code catalog_documents.author}, the chunk row when that is empty. */
+    static final String AUTHOR_KEY = "source_author";
+
+    /** {@code indexed_at}: answered from {@code catalog_documents.indexed_at}, the chunk row when that is NULL. */
+    static final String INDEXED_AT_KEY = "indexed_at";
+
+    /** The bibliographic keys: answered from the {@code bib_*} columns, authoritative with no row fallback. */
+    static final Set<String> BIB_KEYS = Set.of("bib_year", "bib_authors", "bib_venue", "bib_citation_count",
+        "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi");
+
+    /** The keys answered from the document's {@code metadata} jsonb, the chunk row when the document lacks the key. */
+    static final Set<String> META_KEYS = Set.of("tags", "category", "ttl_days", "source_agent", "extraction_method",
+        "quality_gate_overridden", "extraction_source", "frecency_score");
+
+    /** Every document-level key this stage answers. */
+    static final Set<String> DOC_KEYS =
+        Set.copyOf(union(union(Set.of(AUTHOR_KEY, INDEXED_AT_KEY), BIB_KEYS), META_KEYS));
+
+    /** Every key this stage answers: the per-position labels and the document-level keys. */
+    static final Set<String> ANSWERED_KEYS = Set.copyOf(union(LABEL_KEYS, DOC_KEYS));
+
+    private static Set<String> union(Set<String> first, Set<String> second) {
+        Set<String> all = new LinkedHashSet<>(first);
+        all.addAll(second);
+        return all;
+    }
+
+    /** The chunk rows' own {@code indexed_at} text: UTC, microseconds, an explicit offset (catalog-031's shape). */
+    private static final DateTimeFormatter INDEXED_AT_TEXT =
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'+00:00'");
 
     /** How many times the caller's limit the underlying search is asked for when labels filter. */
     static final int OVERFETCH = 4;
@@ -89,9 +153,9 @@ final class ManifestLabelStage {
     record Predicate(String key, String operator, Object operand) {}
 
     /**
-     * @param rest   the {@code where} without the label keys: what the search itself receives. The same
-     *               instance as the input when no label key is present.
-     * @param labels the label predicates, ANDed
+     * @param rest   the {@code where} without the answered keys: what the search itself receives. The same
+     *               instance as the input when no answered key is present.
+     * @param labels the label and document-key predicates, ANDed
      */
     record Split(Map<String, Object> rest, List<Predicate> labels) {
         boolean active() {
@@ -100,7 +164,7 @@ final class ManifestLabelStage {
     }
 
     /**
-     * Separate the label predicates from a Chroma-style {@code where} map. Operator shapes the search's
+     * Separate the label and document-key predicates from a Chroma-style {@code where} map. Operator shapes the search's
      * own planner accepts are accepted here; anything else fails with the same kind of
      * {@link IllegalArgumentException} (the handler's 400 ladder).
      */
@@ -110,7 +174,7 @@ final class ManifestLabelStage {
         }
         boolean any = false;
         for (String key : where.keySet()) {
-            if (LABEL_KEYS.contains(key)) {
+            if (ANSWERED_KEYS.contains(key)) {
                 any = true;
                 break;
             }
@@ -122,7 +186,7 @@ final class ManifestLabelStage {
         List<Predicate> labels = new ArrayList<>();
         for (Map.Entry<String, Object> e : where.entrySet()) {
             String key = e.getKey();
-            if (!LABEL_KEYS.contains(key)) {
+            if (!ANSWERED_KEYS.contains(key)) {
                 rest.put(key, e.getValue());
                 continue;
             }
@@ -263,18 +327,175 @@ final class ManifestLabelStage {
     // ── manifest lookup ─────────────────────────────────────────────────────
 
     /**
-     * One live manifest occurrence of a chash: the owning document, the position and its own labels, and
-     * the document's {@code source_uri} (a row that carries one is re-pointed at the document it speaks for).
+     * One live manifest occurrence of a chash: the owning document, the position and its own labels, the
+     * document's {@code source_uri} (a row that carries one is re-pointed at the document it speaks for), and
+     * the document's own answers on the document-level keys the filter names.
+     *
+     * @param docValues the document's AUTHORITATIVE value for each document-level key the predicates name:
+     *                  a key that is present answers for the document (a null value is an authoritative
+     *                  absence, an unenriched document's bib); a key that is absent falls back to the chunk
+     *                  row (a legacy document). Empty when the filter names no document-level key.
      */
     record Occurrence(String docId, int position, String sectionTitle, String sectionType, Integer pageNumber,
-                      boolean labelsWritten, String sourceUri) {}
+                      boolean labelsWritten, String sourceUri, Map<String, Object> docValues) {}
+
+    /** The document-level keys the predicates name. */
+    static Set<String> docKeysOf(List<Predicate> predicates) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (Predicate p : predicates) {
+            if (DOC_KEYS.contains(p.key())) {
+                keys.add(p.key());
+            }
+        }
+        return keys;
+    }
+
+    /** The document columns / jsonb extractions one lookup reads for {@code docKeys}, and how to read them back. */
+    private record DocFields(Set<String> keys, Field<String> author, Field<OffsetDateTime> indexedAt,
+                             Field<Integer> bibYear, Field<String> bibAuthors, Field<String> bibVenue,
+                             Field<Integer> bibCitations, Field<String> bibS2, Field<String> bibOpenAlex,
+                             Field<String> bibDoi, Field<OffsetDateTime> bibEnrichedAt,
+                             Map<String, Field<JSONB>> meta) {
+
+        static DocFields of(Set<String> keys) {
+            boolean bib = keys.stream().anyMatch(BIB_KEYS::contains);
+            Map<String, Field<JSONB>> meta = new LinkedHashMap<>();
+            int i = 0;
+            for (String key : keys) {
+                if (META_KEYS.contains(key)) {
+                    // metadata -> 'key': SQL NULL when the document's meta lacks the key, jsonb 'null' for a JSON null.
+                    meta.put(key, DSL.jsonbGetAttribute(CATALOG_DOCUMENTS.METADATA, key).as("meta_" + i));
+                    i++;
+                }
+            }
+            return new DocFields(keys,
+                keys.contains(AUTHOR_KEY) ? CATALOG_DOCUMENTS.AUTHOR : null,
+                keys.contains(INDEXED_AT_KEY) ? CATALOG_DOCUMENTS.INDEXED_AT : null,
+                bib ? CATALOG_DOCUMENTS.BIB_YEAR : null, bib ? CATALOG_DOCUMENTS.BIB_AUTHORS : null,
+                bib ? CATALOG_DOCUMENTS.BIB_VENUE : null, bib ? CATALOG_DOCUMENTS.BIB_CITATION_COUNT : null,
+                bib ? CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID : null, bib ? CATALOG_DOCUMENTS.BIB_OPENALEX_ID : null,
+                bib ? CATALOG_DOCUMENTS.BIB_DOI : null, bib ? CATALOG_DOCUMENTS.BIB_ENRICHED_AT : null,
+                meta);
+        }
+
+        void addTo(List<Field<?>> select) {
+            for (Field<?> f : java.util.Arrays.asList(author, indexedAt, bibYear, bibAuthors, bibVenue, bibCitations,
+                                                      bibS2, bibOpenAlex, bibDoi, bibEnrichedAt)) {
+                if (f != null) {
+                    select.add(f);
+                }
+            }
+            select.addAll(meta.values());
+        }
+
+        Map<String, Object> read(org.jooq.Record r) {
+            Map<String, Object> out = new HashMap<>();
+            if (author != null) {
+                String a = r.get(author);
+                if (a != null && !a.isBlank()) {
+                    out.put(AUTHOR_KEY, a);
+                }
+            }
+            if (indexedAt != null) {
+                OffsetDateTime at = r.get(indexedAt);
+                if (at != null) {
+                    out.put(INDEXED_AT_KEY, indexedAtText(at));
+                }
+            }
+            if (bibYear != null) {
+                bibValues(keys, r.get(bibYear), r.get(bibAuthors), r.get(bibVenue), r.get(bibCitations),
+                    r.get(bibS2), r.get(bibOpenAlex), r.get(bibDoi), r.get(bibEnrichedAt) != null, out);
+            }
+            for (Map.Entry<String, Field<JSONB>> e : meta.entrySet()) {
+                JSONB raw = r.get(e.getValue());
+                Object value = metaValue(raw == null ? null : raw.data());
+                if (value != null) {
+                    out.put(e.getKey(), value);
+                }
+            }
+            return out;
+        }
+    }
+
+    /** A catalog timestamp as the chunk rows' own {@code indexed_at} text, so range operands compare alike. */
+    static String indexedAtText(OffsetDateTime at) {
+        return at.withOffsetSameInstant(ZoneOffset.UTC).format(INDEXED_AT_TEXT);
+    }
+
+    /**
+     * The document's bib values for the named bib keys, into {@code out}. The columns are NOT NULL with
+     * defaults, so "enriched" is read off them: {@code bib_enriched_at} set, or any column holding a value. An
+     * unenriched document answers an authoritative absence (null) for every bib key; an enriched one answers
+     * its values, a year of 0 and an empty string being "not recorded" (null) and a citation count of 0 a count.
+     */
+    static void bibValues(Set<String> keys, Integer yearColumn, String authors, String venue, Integer citationColumn,
+                          String s2, String openAlex, String doi, boolean enrichedAtSet, Map<String, Object> out) {
+        int year = yearColumn == null ? 0 : yearColumn;
+        int citations = citationColumn == null ? 0 : citationColumn;
+        boolean enriched = enrichedAtSet || year != 0 || citations != 0 || notEmpty(authors) || notEmpty(venue)
+            || notEmpty(s2) || notEmpty(openAlex) || notEmpty(doi);
+        Map<String, Object> all = new HashMap<>();
+        all.put("bib_year", enriched && year != 0 ? (Object) year : null);
+        all.put("bib_authors", enriched && notEmpty(authors) ? authors : null);
+        all.put("bib_venue", enriched && notEmpty(venue) ? venue : null);
+        all.put("bib_citation_count", enriched ? (Object) citations : null);
+        all.put("bib_semantic_scholar_id", enriched && notEmpty(s2) ? s2 : null);
+        all.put("bib_openalex_id", enriched && notEmpty(openAlex) ? openAlex : null);
+        all.put("bib_doi", enriched && notEmpty(doi) ? doi : null);
+        for (String key : keys) {
+            if (BIB_KEYS.contains(key)) {
+                out.put(key, all.get(key));
+            }
+        }
+    }
+
+    private static boolean notEmpty(String s) {
+        return s != null && !s.isEmpty();
+    }
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /**
+     * One meta key's value from its jsonb text: null when the key is absent (SQL NULL) or JSON null (the
+     * document does not hold it: legacy, fall back to the row), else the value in its JSON type. A nested
+     * array or object is its JSON text.
+     */
+    static Object metaValue(String json) {
+        if (json == null) {
+            return null;
+        }
+        JsonNode node;
+        try {
+            node = JSON.readTree(json);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            return null;
+        }
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return null;
+        }
+        if (node.isTextual()) {
+            return node.asText();
+        }
+        if (node.isBoolean()) {
+            return node.asBoolean();
+        }
+        if (node.isIntegralNumber() && node.canConvertToLong()) {
+            return node.asLong();
+        }
+        if (node.isNumber()) {
+            return node.asDouble();
+        }
+        return node.toString();
+    }
 
     /**
      * The live manifest occurrences of each (collection, chash) the rows name, in (doc_id, position)
      * order. One bounded statement per collection and batch, under the tenant's row-level security, joined
-     * to the document so a tombstoned document owns nothing.
+     * to the document so a tombstoned document owns nothing. The same statement reads the document-level
+     * values the predicates name ({@code docKeys}); nothing is read for a filter that names none.
      */
-    private Map<String, List<Occurrence>> occurrences(String tenant, List<Map<String, Object>> rows) {
+    private Map<String, List<Occurrence>> occurrences(String tenant, List<Map<String, Object>> rows,
+                                                      Set<String> docKeys) {
         Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
             Object id = row.get("id");
@@ -287,6 +508,14 @@ final class ManifestLabelStage {
         if (chashesByCollection.isEmpty()) {
             return out;
         }
+        Field<String> chashHex = ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH);
+        DocFields docFields = DocFields.of(docKeys);
+        List<Field<?>> select = new ArrayList<>(List.of(chashHex,
+            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+            CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
+            CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
+            CATALOG_DOCUMENTS.SOURCE_URI));
+        docFields.addTo(select);
         tenantScope.withTenant(tenant, ctx -> {
             for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
                 List<String> hexes = new ArrayList<>(e.getValue());
@@ -296,13 +525,7 @@ final class ManifestLabelStage {
                     for (String hex : batch) {
                         keys.add(Chash.fromHex(hex).toBytes());
                     }
-                    var fetched = ctx.select(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH),
-                                             CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                                             CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE,
-                                             CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
-                                             CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER,
-                                             CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
-                                             CATALOG_DOCUMENTS.SOURCE_URI)
+                    var fetched = ctx.select(select)
                         .from(CATALOG_DOCUMENT_CHUNKS)
                         .join(CATALOG_DOCUMENTS)
                             // A tombstoned document owns nothing (nexus-mqd6t): its occurrence is not a hit.
@@ -315,9 +538,15 @@ final class ManifestLabelStage {
                         .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                         .fetch();
                     for (var r : fetched) {
-                        out.computeIfAbsent(key(e.getKey(), r.value1()), k -> new ArrayList<>())
-                           .add(new Occurrence(r.value2(), r.value3(), r.value4(), r.value5(), r.value6(),
-                                               Boolean.TRUE.equals(r.value7()), r.value8()));
+                        out.computeIfAbsent(key(e.getKey(), r.get(chashHex)), k -> new ArrayList<>())
+                           .add(new Occurrence(r.get(CATALOG_DOCUMENT_CHUNKS.DOC_ID),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.POSITION),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE),
+                                               r.get(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER),
+                                               Boolean.TRUE.equals(r.get(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)),
+                                               r.get(CATALOG_DOCUMENTS.SOURCE_URI),
+                                               docFields.read(r)));
                     }
                 }
             }
@@ -342,7 +571,8 @@ final class ManifestLabelStage {
         if (rows.isEmpty()) {
             return rows;
         }
-        Map<String, List<Occurrence>> owners = occurrences(tenant, rows);
+        Set<String> docKeys = docKeysOf(predicates);
+        Map<String, List<Occurrence>> owners = occurrences(tenant, rows, docKeys);
         List<Map<String, Object>> out = new ArrayList<>(Math.min(rows.size(), Math.max(limit, 0)));
         for (Map<String, Object> row : rows) {
             Object id = row.get("id");
@@ -350,8 +580,8 @@ final class ManifestLabelStage {
             List<Occurrence> occ = id instanceof String ch && coll instanceof String c
                 ? owners.getOrDefault(key(c, ch), List.of()) : List.of();
             if (occ.isEmpty()) {
-                // No live manifest row: judged on the chunk row's own label, no document to name.
-                if (passes(predicates, rowLabels(row, null))) {
+                // No live manifest row: judged on the chunk row's own values, no document to name.
+                if (passes(predicates, rowLabels(row, null, docKeys))) {
                     out.add(row);
                 }
             } else {
@@ -360,7 +590,7 @@ final class ManifestLabelStage {
                     if (seenDocs.contains(o.docId())) {
                         continue;
                     }
-                    Map<String, Object> labels = rowLabels(row, o);
+                    Map<String, Object> labels = rowLabels(row, o, docKeys);
                     if (passes(predicates, labels)) {
                         seenDocs.add(o.docId());
                         out.add(expanded(row, o));
@@ -375,12 +605,14 @@ final class ManifestLabelStage {
     }
 
     /**
-     * The effective label of one occurrence, per key. A WRITTEN manifest row (see {@link Occurrence})
-     * answers for itself, an empty or NULL label included. A legacy row, or a hit with no live manifest row
-     * ({@code o == null}), takes the chunk row's own label (flattened into the row map), else is absent.
+     * The effective value of one occurrence, per key. A WRITTEN manifest row (see {@link Occurrence})
+     * answers the section labels for itself, an empty or NULL label included. A legacy row, or a hit with no
+     * live manifest row ({@code o == null}), takes the chunk row's own label (flattened into the row map),
+     * else is absent. A document-level key the document answers (see {@link Occurrence#docValues}) is its
+     * value, a null one an authoritative absence; any other falls back to the chunk row.
      */
-    private static Map<String, Object> rowLabels(Map<String, Object> row, Occurrence o) {
-        Map<String, Object> m = new HashMap<>(4);
+    private static Map<String, Object> rowLabels(Map<String, Object> row, Occurrence o, Set<String> docKeys) {
+        Map<String, Object> m = new HashMap<>(4 + docKeys.size());
         if (o != null && o.labelsWritten()) {
             m.put("section_title", o.sectionTitle());
             m.put("section_type", o.sectionType());
@@ -390,6 +622,9 @@ final class ManifestLabelStage {
             m.put("section_type", row.get("section_type"));
             m.put("page_number", row.get("page_number"));
         }
+        for (String key : docKeys) {
+            m.put(key, o != null && o.docValues().containsKey(key) ? o.docValues().get(key) : row.get(key));
+        }
         return m;
     }
 
@@ -397,7 +632,8 @@ final class ManifestLabelStage {
      * A copy of {@code row} that speaks for one owning document: its id, position and own labels. A written
      * occurrence replaces the chunk row's (foreign) labels outright: an empty title or type is sent as
      * {@code ""} (the chunkers' "none here"), and an unset page removes the key instead of leaving another
-     * document's page behind.
+     * document's page behind. The document-level keys the filter named, where the document answers them,
+     * are replaced the same way: the owner's value, or no key for an authoritative absence.
      */
     private static Map<String, Object> expanded(Map<String, Object> row, Occurrence o) {
         Map<String, Object> copy = new LinkedHashMap<>(row);
@@ -414,6 +650,13 @@ final class ManifestLabelStage {
                 copy.remove("page_number");
             } else {
                 copy.put("page_number", o.pageNumber());
+            }
+        }
+        for (Map.Entry<String, Object> d : o.docValues().entrySet()) {
+            if (d.getValue() == null) {
+                copy.remove(d.getKey());
+            } else {
+                copy.put(d.getKey(), d.getValue());
             }
         }
         return copy;
