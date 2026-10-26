@@ -185,6 +185,21 @@ class TestHttpDocumentAspectsStore:
         store = self._store({"/v1/aspects/get_by_doc_id": (404, {})})
         assert store.get_by_doc_id("missing") is None
 
+    def test_get_by_doc_id_hands_its_timeout_to_the_request_and_defaults_to_the_clients(self):
+        """nexus-xho6c: a caller spending one budget over several reads clamps each read's timeout."""
+        seen: list[dict] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen.append(dict(request.extensions["timeout"]))
+            return httpx.Response(404, json={})
+
+        store = HttpDocumentAspectsStore(base_url="http://test", _token="tok")
+        store._client = httpx.Client(transport=httpx.MockTransport(handle))
+        assert store.get_by_doc_id("1.2.3", timeout=1.5, retry_read_timeout=False) is None
+        assert store.get_by_doc_id("1.2.3") is None
+        assert seen[0]["read"] == 1.5, "the per-call override reaches the request"
+        assert seen[1]["read"] != 1.5, "no override: the client-wide default, as before"
+
     def test_list_by_collection_returns_records(self):
         body_list = [
             {"collection": "c", "source_path": f"doc{i}.pdf", "problem_formulation": None,

@@ -10285,7 +10285,9 @@ async def _nx_answer_named_sources(
     document's chunks happens where the primary stream is merged (nexus-jypmj.1.6),
     not here, so a call that never reaches a reduction pays for the lookup only.
 
-    The up-to-13 catalog calls are blocking, so they run in a worker thread, bounded by
+    The catalog calls (an owner probe and at most two capped finds per source) and, where sibling files share an
+    RDR number, up to ``max_frontmatter_lookups`` aspect-row or file reads per number are blocking, so they run
+    in a worker thread, bounded by
     ``PrimaryEvidenceCaps.max_seconds`` and *deadline* (``nx_answer``'s own, absolute ``time.monotonic()``):
     the resolution starts no call past it, and one that has not returned by then is abandoned (a thread
     cannot be cancelled; it ends after its current call) and every source is ``unresolved`` with the
@@ -10294,7 +10296,12 @@ async def _nx_answer_named_sources(
     if not request.sources:
         return None
     import asyncio  # noqa: PLC0415 — stdlib, branch-local
-    from nexus.plans.primary_evidence import DEFAULT_CAPS, NamedSourceResolution, resolve_named_sources  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.primary_evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+        DEFAULT_CAPS,
+        NamedSourceResolution,
+        recorded_frontmatter_id,
+        resolve_named_sources,
+    )
 
     def _resolve() -> NamedSourceResolution:
         try:
@@ -10302,7 +10309,13 @@ async def _nx_answer_named_sources(
         except Exception as exc:  # noqa: BLE001 — a missing catalog is disclosed as an unresolved source
             _log.warning("nx_answer_named_sources_catalog_unavailable", error=str(exc))
             cat = None
-        return resolve_named_sources(request.sources, request.owner, cat=cat, deadline=deadline)
+        # Sibling files of one RDR number are told apart by the frontmatter id the aspect row records (nexus-xho6c).
+        # Each read is given what is left of the budget as its timeout and is not retried at that clamp.
+        ids = recorded_frontmatter_id(lambda doc_id, timeout: _t2_index_write(
+            lambda db: db.document_aspects.get_by_doc_id(doc_id, timeout=timeout, retry_read_timeout=False),
+            op="rdr_frontmatter_id",
+        ))
+        return resolve_named_sources(request.sources, request.owner, cat=cat, deadline=deadline, frontmatter_id=ids)
 
     try:
         return await asyncio.wait_for(

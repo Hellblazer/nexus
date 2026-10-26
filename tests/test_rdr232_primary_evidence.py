@@ -745,6 +745,7 @@ def test_a_golden_required_source_label_maps_to_a_source_ref_and_a_project() -> 
 async def _answer(
     cat: FakeCatalog, *, bindings: dict, structured: bool, t3: FakeT3 | None = None,
     t2_records: dict[tuple[str, str], str] | None = None, plan_run_calls: list | None = None,
+    aspects: dict[str, Any] | None = None, aspect_calls: list[tuple[str, dict]] | None = None,
 ) -> Any:
     """``nx_answer`` over a one-step ad-hoc plan, the catalog replaced by *cat*. The same
     patches ``test_rdr232_reserved_bindings._text_answer`` uses, plus the catalog."""
@@ -767,6 +768,12 @@ async def _answer(
     records = t2_records or {}
     db_stub.memory.get.side_effect = lambda project=None, title=None, id=None, **_kw: (
         {"project": project, "title": title, "content": records[(project, title)]} if (project, title) in records else None)
+    def _get_aspect(doc_id: str, **kw: Any) -> Any:
+        if aspect_calls is not None:
+            aspect_calls.append((doc_id, kw))
+        return (aspects or {}).get(doc_id)
+
+    db_stub.document_aspects.get_by_doc_id.side_effect = _get_aspect
     plan_run = AsyncMock(return_value=result)
     if plan_run_calls is not None:
         plan_run_calls.append(plan_run)
@@ -1082,3 +1089,592 @@ def test_a_failing_manifest_call_is_a_manifest_error_for_the_documents_of_that_c
     _res, primary = _select(cat, t3, refs)
     assert [d.status for d in primary.documents] == ["manifest_error"] * 3
     assert primary.items == ()
+
+
+# ── Sibling files: the frontmatter id decides (nexus-xho6c) ───────────────────────────────
+
+from nexus.plans.primary_evidence import (  # noqa: E402 — grouped with the tests they serve
+    FILE_ABSENT,
+    FILE_NOT_ALLOWED,
+    FILE_PARSE_FAILED,
+    FRONTMATTER_NOT_PARSED,
+    OTHER_EXTRACTOR,
+    ID_UNREADABLE,
+    NO_ASPECT_ROW,
+    FrontmatterId,
+    _file_frontmatter_id,
+    _read_id,
+    recorded_frontmatter_id,
+)
+
+RDR200 = SourceRef.parse("RDR-200")
+_MAIN200 = "docs/rdr/rdr-200-nx-answer-continuation-mode.md"
+_SIBLINGS200 = (
+    "docs/rdr/rdr-200-phase1-prereg.md", "docs/rdr/rdr-200-phase1-gate-result.md",
+    "docs/rdr/rdr-200-phase1b-prereg.md",
+)
+
+
+class IdSource:
+    """A frontmatter-id lookup over a fixed table: tumbler -> the recorded id ('' = parsed, no id key; a
+    ``FrontmatterId`` as given; absent or ``None`` = nothing recorded). Keeps the ledger of every call."""
+
+    def __init__(self, table: dict[str, Any], fail: Exception | None = None) -> None:
+        self.table, self.fail = table, fail
+        self.asked: list[str] = []
+        self.timeouts: list[float] = []
+        self.prefixes: list[str] = []
+
+    def __call__(self, entry: CatalogEntry, timeout: float = 1.0, source_prefix: str = "") -> FrontmatterId:
+        self.asked.append(str(entry.tumbler))
+        self.timeouts.append(timeout)
+        self.prefixes.append(source_prefix)
+        if self.fail is not None:
+            raise self.fail
+        got = self.table.get(str(entry.tumbler))
+        if isinstance(got, FrontmatterId):
+            return got
+        return FrontmatterId.unknown(NO_ASPECT_ROW) if got is None else FrontmatterId.of(got)
+
+
+def _siblings(cat: FakeCatalog, t3: FakeT3, *, main_id: Any = "RDR-200") -> tuple[str, dict[str, Any]]:
+    """The main RDR-200 file (1.2.20) and three siblings (1.2.21-23); returns the main tumbler and an id table
+    in which only the main file carries an id."""
+    _doc(cat, t3, "1.2.20", _MAIN200, ["# RDR-200\nbody"])
+    table: dict[str, Any] = {"1.2.20": main_id}
+    for i, path in enumerate(_SIBLINGS200, start=21):
+        _doc(cat, t3, f"1.2.{i}", path, ["# note\nbody"])
+        table[f"1.2.{i}"] = ""
+    return "1.2.20", table
+
+
+def test_a_bare_rdr_number_with_sibling_files_resolves_to_the_file_whose_frontmatter_carries_the_id() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    main, table = _siblings(cat, t3)
+    ids = IdSource(table)
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=ids).sources
+    assert (src.status, src.tumbler) == ("resolved", main), src.detail
+    assert src.rdr_number == 200
+    for path in _SIBLINGS200:
+        assert path.rsplit("/", 1)[-1] in src.detail, "the passed-over sibling files are named"
+    assert "frontmatter" in src.detail
+
+
+def test_the_passed_over_siblings_reach_the_text_disclosure_of_a_resolved_source() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _siblings(cat, t3)
+    res = resolve_named_sources([RDR200], _resolved(ART_OWNER), cat=cat, frontmatter_id=IdSource({
+        "1.2.20": "RDR-200", "1.2.21": "", "1.2.22": "", "1.2.23": ""}))
+    (src,) = res.sources
+    assert src.status == "resolved" and src.qualified is True
+    lines = res.disclosures()
+    assert any("RDR-200" in ln and "frontmatter" in ln and "rdr-200-phase1-prereg.md" in ln for ln in lines), lines
+    assert src.to_wire()["detail"] == src.detail, "the envelope carries the same note"
+
+
+@pytest.mark.parametrize("recorded", ["RDR-200", "rdr-200", "200", 200, "Rdr_200", " RDR-200 ", "rdr-0200"])
+def test_the_frontmatter_id_is_compared_the_way_a_source_binding_is_normalized(recorded: Any) -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    main, table = _siblings(cat, t3, main_id=recorded)
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert (src.status, src.tumbler) == ("resolved", main), (recorded, src.detail)
+
+
+def test_a_file_carrying_another_rdrs_id_or_no_rdr_id_is_not_a_carrier() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3, main_id="RDR-201")
+    table["1.2.21"] = "companion-note"
+    table["1.2.22"] = "1.2.3"  # a tumbler-shaped value is not an RDR id
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert src.status == "candidates" and src.tumbler is None
+    assert "no file" in src.detail and "RDR-200" in src.detail and "by its tumbler" in src.detail
+    assert len(src.candidates) == 4
+
+
+def test_two_files_carrying_the_id_are_candidates_and_both_are_named() -> None:
+    """RDR-040 in this repo: two real RDR files both say id: RDR-040."""
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, "1.2.30", "docs/rdr/rdr-040-cce-postmortem-gaps.md", ["x"])
+    _doc(cat, t3, "1.2.31", "docs/rdr/rdr-040-developer-agent-circuit-breaker.md", ["x"])
+    ids = IdSource({"1.2.30": "RDR-040", "1.2.31": "RDR-040"})
+    (src,) = resolve_named_sources([SourceRef.parse("RDR-040")], _resolved(None), cat=cat, frontmatter_id=ids).sources
+    assert src.status == "candidates" and src.tumbler is None
+    assert "2 files" in src.detail
+    assert "rdr-040-cce-postmortem-gaps.md" in src.detail and "rdr-040-developer-agent-circuit-breaker.md" in src.detail
+
+
+def test_an_unreadable_sibling_id_keeps_candidates_because_a_second_carrier_could_hide_there() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3)
+    table["1.2.22"] = None  # nothing recorded for this file
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert src.status == "candidates" and src.tumbler is None
+    assert "rdr-200-phase1-gate-result.md" in src.detail and "could not be checked" in src.detail
+
+
+@pytest.mark.parametrize("odd", [
+    "RDR-200 (superseded)", ["RDR-200"], 200.0,
+    pytest.param("RDR-" + "9" * 5000, id="rdr-then-5000-digits"),
+    pytest.param(10 ** 5000, id="int-of-5000-digits"),
+])
+def test_a_present_but_unreadable_rdr_id_on_a_sibling_is_unknown_not_clear_and_never_raises(odd: Any) -> None:
+    """A sibling whose id is meant as an RDR id but cannot be read might be a second carrier. The 5000-digit
+    values are the code-review case: ``int()`` of them raises ``ValueError`` past 4300 digits."""
+    cat, t3 = FakeCatalog(), FakeT3()
+    main, table = _siblings(cat, t3)
+    table["1.2.22"] = odd
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert (src.status, src.tumbler) == ("candidates", None), src.detail
+    assert "rdr-200-phase1-gate-result.md" in src.detail
+    assert "not a readable RDR id" in src.detail
+
+
+def test_a_value_that_is_plainly_not_an_rdr_id_stays_clear() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    main, table = _siblings(cat, t3)
+    table.update({"1.2.21": "companion-note", "1.2.22": True, "1.2.23": "phase-2-note"})
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert (src.status, src.tumbler) == ("resolved", main), src.detail
+
+
+@pytest.mark.parametrize(("raw", "want"), [
+    ("RDR-200", ("number", 200)), ("rdr_200", ("number", 200)), ("200", ("number", 200)), (200, ("number", 200)),
+    ("040", ("number", 40)), ("", ("none", None)), (None, ("none", None)), ("companion-note", ("none", None)),
+    ("1.2.3", ("none", None)), (True, ("none", None)), ("phase-2-note", ("none", None)),
+    ("RDR-200 (superseded)", ("unreadable", None)), ("200 draft", ("unreadable", None)),
+    ([200], ("unreadable", None)), ({"id": 1}, ("unreadable", None)), (200.0, ("unreadable", None)),
+    pytest.param("RDR-" + "9" * 4400, ("unreadable", None), id="rdr-then-4400-digits"),
+    pytest.param("9" * 4400, ("unreadable", None), id="4400-digit-string"),
+    pytest.param(10 ** 4400, ("unreadable", None), id="int-of-4400-digits"),
+    pytest.param("x" * 100_000, ("none", None), id="long-plain-string"),
+])
+def test_read_id_classifies_every_shape_and_never_raises(raw: Any, want: tuple[str, int | None]) -> None:
+    assert _read_id(raw) == want
+
+
+def test_a_failing_id_source_is_candidates_with_the_failure_named_and_never_raises() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _siblings(cat, t3)
+    ids = IdSource({}, fail=RuntimeError("t2 down"))
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=ids).sources
+    assert src.status == "candidates" and src.tumbler is None
+    assert "RuntimeError" in src.detail
+    assert len(ids.asked) == 1, "a failing source is not asked again for every sibling"
+
+
+def test_the_owner_qualifier_applies_first_and_a_foreign_projects_files_are_never_asked_about() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    main, table = _siblings(cat, t3)
+    _doc(cat, t3, "1.1.50", "docs/rdr/rdr-200-other-project.md", ["x"], collection=NEXUS_COL)
+    table["1.1.50"] = "RDR-200"  # a second carrier, but in another project
+    ids = IdSource(table)
+    (art,) = resolve_named_sources([RDR200], _resolved(ART_OWNER), cat=cat, frontmatter_id=ids).sources
+    assert (art.status, art.tumbler) == ("resolved", main), art.detail
+    assert "1.1.50" not in ids.asked
+    (open_,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert open_.status == "candidates", "unqualified, one carrier in each project: two carriers, nothing picked"
+
+
+def test_a_single_file_is_resolved_without_asking_the_id_source() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, "1.2.20", _MAIN200, ["x"])
+    ids = IdSource({})
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=ids).sources
+    assert (src.status, src.tumbler, src.detail) == ("resolved", "1.2.20", "")
+    assert ids.asked == [], "no sibling, no lookup"
+
+
+def test_a_document_tumbler_still_wins_outright_and_asks_nothing() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _siblings(cat, t3)
+    ids = IdSource({"1.2.20": "RDR-200"})
+    (src,) = resolve_named_sources([SourceRef.parse("1.2.22")], _resolved(None), cat=cat, frontmatter_id=ids).sources
+    assert (src.status, src.tumbler) == ("resolved", "1.2.22")
+    assert ids.asked == []
+
+
+def test_two_registrations_of_the_carrier_file_are_one_carrier_not_two() -> None:
+    """A file counts once however often it is registered: the canonical rule, not the carrier count,
+    then reports the double registration."""
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3)
+    _doc(cat, t3, "1.2.40", _MAIN200, ["again"])
+    table["1.2.40"] = "RDR-200"
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert src.status == "candidates" and "registered more than once" in src.detail, src.detail
+    assert "files carry" not in src.detail
+
+
+def test_without_an_id_source_siblings_are_candidates_exactly_as_before() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _siblings(cat, t3)
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat).sources
+    assert src.status == "candidates" and src.tumbler is None
+    assert "by its tumbler" in src.detail and "frontmatter" not in src.detail
+
+
+def test_the_id_lookups_are_bounded_by_one_cap_and_a_group_over_it_is_candidates() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3)
+    ids = IdSource(table)
+    caps = replace(DEFAULT_CAPS, max_frontmatter_lookups=2)
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=ids, caps=caps).sources
+    assert src.status == "candidates" and len(ids.asked) <= 2
+    assert "cap of 2" in src.detail
+    assert "max_frontmatter_lookups" in DEFAULT_CAPS.to_wire()
+
+
+def test_no_id_read_starts_past_the_deadline_and_the_deadline_is_the_reason() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3)
+    now = [0.0]
+    ids = IdSource(table)
+
+    real_find = cat.find
+
+    def find(*a: Any, **kw: Any) -> list[CatalogEntry]:
+        out = real_find(*a, **kw)
+        now[0] = 100.0  # the finds took the whole budget; the id reads have none left
+        return out
+
+    cat.find = find  # type: ignore[method-assign]
+    (src,) = resolve_named_sources(
+        [RDR200], _resolved(None), cat=cat, frontmatter_id=ids, clock=lambda: now[0], deadline=50.0,
+    ).sources
+    assert src.status == "candidates" and ids.asked == []
+    assert "deadline" in src.detail
+
+
+def test_each_id_read_is_given_the_time_left_clamped_to_one_call() -> None:
+    """The lookup's timeout is the smaller of the per-call cap and what remains of the deadline (S3)."""
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3)
+    ids = IdSource(table)
+    (_s,) = resolve_named_sources(
+        [RDR200], _resolved(None), cat=cat, frontmatter_id=ids, clock=lambda: 0.0, deadline=2.0,
+    ).sources
+    assert ids.timeouts and all(t == pytest.approx(2.0) for t in ids.timeouts), ids.timeouts
+    ids2 = IdSource(table)
+    resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=ids2, clock=lambda: 0.0, deadline=500.0)
+    assert ids2.timeouts and all(t == pytest.approx(DEFAULT_CAPS.frontmatter_call_seconds) for t in ids2.timeouts)
+
+
+def test_a_second_carrier_stops_the_lookups() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _doc(cat, t3, "1.2.30", "docs/rdr/rdr-040-a.md", ["x"])
+    _doc(cat, t3, "1.2.31", "docs/rdr/rdr-040-b.md", ["x"])
+    for i in range(32, 36):
+        _doc(cat, t3, f"1.2.{i}", f"docs/rdr/rdr-040-c{i}.md", ["x"])
+    ids = IdSource({"1.2.30": "RDR-040", "1.2.31": "RDR-040"})
+    resolve_named_sources([SourceRef.parse("RDR-040")], _resolved(None), cat=cat, frontmatter_id=ids)
+    assert len(ids.asked) == 2
+
+
+def test_the_owners_docs_rdr_prefix_is_handed_to_the_lookup_for_containment(tmp_path) -> None:
+    cat, t3 = FakeCatalog(repo_roots={ART_OWNER: str(tmp_path)}), FakeT3()
+    _, table = _siblings(cat, t3)
+    ids = IdSource(table)
+    resolve_named_sources([RDR200], _resolved(ART_OWNER), cat=cat, frontmatter_id=ids)
+    assert ids.prefixes and all(p == f"file://{tmp_path.resolve()}/docs/rdr/" for p in ids.prefixes), ids.prefixes
+    ids = IdSource(table)
+    resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=ids)
+    assert set(ids.prefixes) == {""}
+
+
+# ── Why an id is unknown, and what to do about it ────────────────────────────────────────
+
+
+def test_candidates_over_missing_rows_name_the_count_the_cause_and_the_remedy() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _siblings(cat, t3)
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource({})).sources
+    assert src.status == "candidates"
+    assert "no aspect row yet for 4" in src.detail
+    assert f"`nx enrich aspects {ART_COL} --validate-sample 0`" in src.detail and "--all" not in src.detail
+    assert "asynchronously" in src.detail and "by its tumbler" in src.detail
+
+
+def test_rows_with_no_parsed_frontmatter_get_the_all_flag_remedy_and_each_cause_is_counted() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3)
+    table["1.2.20"] = FrontmatterId.unknown(FRONTMATTER_NOT_PARSED, FILE_ABSENT)
+    table["1.2.21"] = FrontmatterId.unknown(FRONTMATTER_NOT_PARSED)
+    table["1.2.22"] = FrontmatterId.unknown(NO_ASPECT_ROW, FILE_ABSENT)
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert src.status == "candidates"
+    assert "an aspect row whose frontmatter was not parsed for 2" in src.detail
+    assert "no aspect row yet for 1" in src.detail
+    assert "the file is not readable on this host for 2" in src.detail
+    assert f"`nx enrich aspects {ART_COL} --all --validate-sample 0`" in src.detail
+    assert f"`nx enrich aspects {ART_COL} --validate-sample 0`" in src.detail
+    assert "no model call" not in src.detail, "the default sample check calls a model; the remedy turns it off, not hides it"
+
+
+def test_rows_by_another_extractor_get_the_all_flag_remedy() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3)
+    table["1.2.20"] = FrontmatterId.unknown(OTHER_EXTRACTOR)
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert f"`nx enrich aspects {ART_COL} --all --validate-sample 0`" in src.detail, (
+        "gap-fill skips a document that has any row, so the other extractor's row needs --all")
+
+
+def test_an_unreadable_id_value_is_named_without_an_enrich_remedy() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _, table = _siblings(cat, t3)
+    table["1.2.22"] = "RDR-200 (superseded)"
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=IdSource(table)).sources
+    assert "an id value that is not a readable RDR id for 1" in src.detail
+    assert "nx enrich" not in src.detail
+
+
+# ── The recorded id: the aspects row, then the file ──────────────────────────────────────
+
+
+def _aspect(doc_id: str, extras: dict, *, extractor: str = "rdr-frontmatter-v1", confidence: float | None = 1.0) -> Any:
+    from nexus.db.t2.records import AspectRecord
+
+    return AspectRecord(
+        collection=ART_COL, source_path="x.md", problem_formulation=None, proposed_method=None,
+        extras=extras, extractor_name=extractor, doc_id=doc_id, confidence=confidence,
+    )
+
+
+def _rdr_dir(tmp_path):
+    d = tmp_path / "docs" / "rdr"
+    d.mkdir(parents=True)
+    return d
+
+
+def _entry_at(tumbler: str, path: str = _MAIN200, *, source_uri: str = "") -> CatalogEntry:
+    return _entry(tumbler, path, source_uri=source_uri)
+
+
+def _lookup(get_aspect: Any, entry: CatalogEntry, prefix: str = "") -> FrontmatterId:
+    return recorded_frontmatter_id(get_aspect)(entry, 1.0, prefix)
+
+
+def test_the_aspect_extractor_name_this_module_trusts_is_the_rdr_frontmatter_extractors() -> None:
+    from nexus.aspect_extractor import _REGISTRY
+    from nexus.plans.primary_evidence import RDR_FRONTMATTER_EXTRACTOR
+
+    assert RDR_FRONTMATTER_EXTRACTOR == _REGISTRY["rdr__"].extractor_name
+
+
+def test_the_recorded_id_is_the_aspect_rows_rdr_id() -> None:
+    asked: list[tuple[str, float]] = []
+
+    def aspects(doc_id: str, timeout: float) -> Any:
+        asked.append((doc_id, timeout))
+        return _aspect(doc_id, {"rdr_id": "RDR-200", "rdr_status": "accepted"})
+
+    got = recorded_frontmatter_id(aspects)(_entry_at("1.2.20"), 3.5, "")
+    assert (got.known, got.value) == (True, "RDR-200")
+    assert asked == [("1.2.20", 3.5)], "the row is looked up by the catalog tumbler, with the call's timeout"
+
+
+def test_a_parsed_aspect_row_without_an_rdr_id_is_a_recorded_absence_not_an_unknown() -> None:
+    got = _lookup(lambda d, t: _aspect(d, {"rdr_status": "closed"}), _entry_at("1.2.21"))
+    assert (got.known, got.value) == (True, "")
+
+
+def test_a_row_that_shows_no_parsed_frontmatter_is_unknown_and_the_file_decides(tmp_path) -> None:
+    """The live shape (nexus-xho6c, 377 of 377 rows): extras empty, confidence 1.0. And the null-fields row
+    an extractor that failed leaves: confidence None. Neither says the document has no id."""
+    d = _rdr_dir(tmp_path)
+    carrier = d / "rdr-200-nx-answer-continuation-mode.md"
+    carrier.write_text("---\ntitle: x\nid: RDR-200\n---\n# body\n")
+    note = d / "rdr-200-phase1-prereg.md"
+    note.write_text("---\ntitle: y\nid: companion-note\n---\n# body\n")
+    for row in (lambda doc: _aspect(doc, {}), lambda doc: _aspect(doc, {}, confidence=None),
+                lambda doc: _aspect(doc, {"rdr_id": "RDR-999"}, confidence=None)):
+        got = _lookup(lambda doc, t, row=row: row(doc), _entry_at("1.2.20", source_uri=carrier.as_uri()))
+        assert (got.known, got.value) == (True, "RDR-200"), "the row says nothing; the file is the carrier"
+        got = _lookup(lambda doc, t, row=row: row(doc), _entry_at("1.2.21", source_uri=note.as_uri()))
+        assert (got.known, got.value) == (True, "companion-note")
+    gone = _lookup(lambda doc, t: _aspect(doc, {}), _entry_at("1.2.22", source_uri=(d / "gone.md").as_uri()))
+    assert not gone.known and gone.reasons == (FRONTMATTER_NOT_PARSED, FILE_ABSENT)
+    gone = _lookup(lambda doc, t: _aspect(doc, {}, confidence=None), _entry_at("1.2.22"))
+    assert not gone.known and gone.reasons[0] == FRONTMATTER_NOT_PARSED
+
+
+def test_live_shaped_rows_resolve_end_to_end_through_the_files(tmp_path) -> None:
+    """Every sibling's aspect row has extras={} (the live fact). Under 'row read as known, no id' no group
+    ever had a carrier; now the files decide."""
+    d = _rdr_dir(tmp_path)
+    cat, t3 = FakeCatalog(), FakeT3()
+    main = d / _MAIN200.rsplit("/", 1)[-1]
+    main.write_text("---\nid: RDR-200\n---\n")
+    _doc(cat, t3, "1.2.20", _MAIN200, ["x"])
+    cat.entries[-1] = replace(cat.entries[-1], source_uri=main.as_uri())
+    for i, rel in enumerate(_SIBLINGS200, start=21):
+        note = d / rel.rsplit("/", 1)[-1]
+        note.write_text("---\nid: companion-note\n---\n")
+        _doc(cat, t3, f"1.2.{i}", rel, ["x"])
+        cat.entries[-1] = replace(cat.entries[-1], source_uri=note.as_uri())
+    lookup = recorded_frontmatter_id(lambda doc, t: _aspect(doc, {}))
+    (src,) = resolve_named_sources([RDR200], _resolved(None), cat=cat, frontmatter_id=lookup).sources
+    assert (src.status, src.tumbler) == ("resolved", "1.2.20"), src.detail
+
+
+def test_an_aspect_row_from_another_extractor_or_no_row_is_unknown_without_a_file() -> None:
+    other = _lookup(lambda d, t: _aspect(d, {"rdr_id": "RDR-200"}, extractor="other-v1"), _entry_at("1.2.21"))
+    assert not other.known and other.reasons[0] == "other_extractor"
+    none = _lookup(lambda d, t: None, _entry_at("1.2.21"))
+    assert not none.known and none.reasons == (NO_ASPECT_ROW, "no_file_source")
+
+
+def test_an_aspect_store_error_falls_back_to_the_file_and_the_store_is_not_asked_again(tmp_path) -> None:
+    d = _rdr_dir(tmp_path)
+    f1, f2 = d / "rdr-200-a.md", d / "rdr-200-b.md"
+    f1.write_text("---\nid: RDR-200\n---\n")
+    f2.write_text("---\nid: companion-note\n---\n")
+    calls: list[str] = []
+
+    def aspects(doc_id: str, timeout: float) -> Any:
+        calls.append(doc_id)
+        raise TimeoutError("t2 slow")
+
+    lookup = recorded_frontmatter_id(aspects)
+    a = lookup(_entry_at("1.2.20", source_uri=f1.as_uri()), 1.0, "")
+    b = lookup(_entry_at("1.2.21", source_uri=f2.as_uri()), 1.0, "")
+    assert (a.known, a.value) == (True, "RDR-200") and (b.known, b.value) == (True, "companion-note")
+    assert calls == ["1.2.20"], "after the first failure the store is not asked again this request"
+    c = lookup(_entry_at("1.2.22"), 1.0, "")
+    assert not c.known and c.reasons[0] == "aspect_store_error"
+
+
+def test_the_file_is_read_only_as_a_fallback_and_only_where_it_exists(tmp_path) -> None:
+    d = _rdr_dir(tmp_path)
+    path = d / "rdr-200-nx-answer-continuation-mode.md"
+    path.write_text("---\ntitle: x\nid: RDR-200\n---\n# body\n")
+    note = d / "rdr-200-phase1-prereg.md"
+    note.write_text("---\ntitle: y\nid: companion-note\n---\n# body\n")
+    bare = d / "rdr-200-bare.md"
+    bare.write_text("# no frontmatter\n")
+    empty_header = d / "rdr-200-empty-header.md"
+    empty_header.write_text("---\n---\n# body\n")
+    unclosed = d / "rdr-200-unclosed.md"
+    unclosed.write_text("---\nid: RDR-200\n# the header never closes\n")
+    octal = d / "rdr-040-octal.md"
+    octal.write_text("---\nid: 040\n---\n")
+    row = lambda doc, t: None  # noqa: E731 — no aspect rows: the file is all there is
+    assert _lookup(row, _entry_at("1.2.20", source_uri=path.as_uri())).value == "RDR-200"
+    assert _lookup(row, _entry_at("1.2.21", source_uri=note.as_uri())).value == "companion-note"
+    assert _read_id(_lookup(row, _entry_at("1.2.28", source_uri=octal.as_uri())).value) == ("number", 40), (
+        "id: 040 is the number 40, never octal 32")
+    for one in (bare, empty_header):
+        got = _lookup(row, _entry_at("1.2.22", source_uri=one.as_uri()))
+        assert (got.known, got.value) == (True, ""), one.name
+    got = _lookup(row, _entry_at("1.2.27", source_uri=unclosed.as_uri()))
+    assert not got.known and FILE_PARSE_FAILED in got.reasons, "an unclosed header is unknown"
+    assert FILE_ABSENT in _lookup(row, _entry_at("1.2.24", source_uri=(d / "gone.md").as_uri())).reasons
+    assert "no_file_source" in _lookup(row, _entry_at("1.2.25", source_uri="")).reasons
+    assert "no_file_source" in _lookup(row, _entry_at("1.2.26", source_uri="https://example.invalid" + str(path))).reasons
+
+    path.write_text("---\nid: RDR-999\n---\n")
+    full = _lookup(lambda doc, t: _aspect(doc, {"rdr_id": "RDR-200"}), _entry_at("1.2.20", source_uri=path.as_uri()))
+    assert full.value == "RDR-200", "a parsed row outranks the file"
+
+
+def test_the_file_fallback_is_contained(tmp_path) -> None:
+    """Only a .md under docs/rdr (and under the owner's prefix when it has one); no host part; symlinks
+    are followed before the check (code review S1, critique F5)."""
+    d = _rdr_dir(tmp_path)
+    ok = d / "rdr-200-a.md"
+    ok.write_text("---\nid: RDR-200\n---\n")
+    other = tmp_path / "notes" / "rdr-200-b.md"
+    other.parent.mkdir()
+    other.write_text("---\nid: RDR-200\n---\n")
+    txt = d / "rdr-200-c.txt"
+    txt.write_text("---\nid: RDR-200\n---\n")
+    link = d / "rdr-200-link.md"
+    link.symlink_to(other)
+    row = lambda doc, t: None  # noqa: E731
+
+    def read(path_or_uri: Any, prefix: str = "") -> FrontmatterId:
+        uri = path_or_uri if isinstance(path_or_uri, str) else path_or_uri.as_uri()
+        return _file_frontmatter_id(_entry_at("1.2.20", source_uri=uri), prefix)
+
+    assert read(ok).value == "RDR-200"
+    for refused in (other, txt, link):
+        got = read(refused)
+        assert not got.known and got.reasons == (FILE_NOT_ALLOWED,), (refused.name, got)
+    host = read("file://elsewhere" + str(ok))
+    assert not host.known and host.reasons == (FILE_NOT_ALLOWED,), "a non-empty netloc is refused"
+    own = f"file://{tmp_path.resolve()}/docs/rdr/"
+    assert read(ok, own).value == "RDR-200"
+    foreign = f"file://{(tmp_path / 'checkout2').resolve()}/docs/rdr/"
+    got = read(ok, foreign)
+    assert not got.known and got.reasons == (FILE_NOT_ALLOWED,), "outside the owner's own docs/rdr tree"
+    assert _lookup(row, _entry_at("1.2.20", source_uri=other.as_uri()), own).reasons[-1] == FILE_NOT_ALLOWED
+
+
+def test_a_repo_root_behind_a_symlink_does_not_refuse_its_files(tmp_path) -> None:
+    """The file is resolved before the check, so the owner's prefix is resolved too: a prefix spelled through
+    a symlink still contains the file it points at."""
+    real = tmp_path / "real"
+    d = _rdr_dir(real)
+    ok = d / "rdr-200-a.md"
+    ok.write_text("---\nid: RDR-200\n---\n")
+    via = tmp_path / "via"
+    via.symlink_to(real)
+    prefix = f"file://{via}/docs/rdr/"  # as an owner whose root is registered through the link spells it
+    got = _file_frontmatter_id(_entry_at("1.2.20", source_uri=(via / "docs" / "rdr" / ok.name).as_uri()), prefix)
+    assert got.known and got.value == "RDR-200", got
+    foreign = f"file://{tmp_path / 'checkout2'}/docs/rdr/"
+    refused = _file_frontmatter_id(_entry_at("1.2.20", source_uri=ok.as_uri()), foreign)
+    assert not refused.known and refused.reasons == (FILE_NOT_ALLOWED,), "a different tree is still refused"
+
+
+def test_a_parse_failure_is_unknown_and_logs_nothing_of_the_file(tmp_path, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    d = _rdr_dir(tmp_path)
+    f = d / "rdr-200-secret.md"
+    f.write_text("---\nid: RDR-200\n---\nPRIVATE-BODY\n")
+
+    def boom(_text: str) -> Any:
+        raise ValueError("PRIVATE-BODY leaked through a parser message")
+
+    monkeypatch.setattr("nexus.aspect_extractor._split_rdr_frontmatter", boom)
+    with capture_logs() as logs:
+        got = _file_frontmatter_id(_entry_at("1.2.20", source_uri=f.as_uri()))
+    assert not got.known and got.reasons == (FILE_PARSE_FAILED,)
+    assert "PRIVATE-BODY" not in repr(logs) and logs, "a warning is logged, with the exception type only"
+
+
+@pytest.mark.asyncio
+async def test_nx_answer_resolves_a_bare_rdr_with_siblings_through_the_aspects_store() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    main, _ = _siblings(cat, t3)
+    rows = {"1.2.20": _aspect("1.2.20", {"rdr_id": "RDR-200"})}
+    rows.update({f"1.2.{i}": _aspect(f"1.2.{i}", {"rdr_id": "companion-note"}) for i in (21, 22, 23)})
+    calls: list[tuple[str, dict]] = []
+    env = await _answer(cat, bindings={"source": "RDR-200"}, structured=True, t3=t3, aspects=rows, aspect_calls=calls)
+    (src,) = env["named_sources"]["sources"]
+    assert (src["status"], src["tumbler"]) == ("resolved", main), src["detail"]
+    assert "rdr-200-phase1-prereg.md" in src["detail"]
+    assert calls and all(
+        0 < kw["timeout"] <= DEFAULT_CAPS.frontmatter_call_seconds and kw["retry_read_timeout"] is False
+        for _doc, kw in calls
+    ), f"each aspect read is clamped to the budget and not retried at the clamp: {calls}"
+    assert any("frontmatter" in ln and "rdr-200-phase1-prereg.md" in ln for ln in env["final_text"].splitlines())
+
+
+@pytest.mark.asyncio
+async def test_nx_answer_over_live_shaped_rows_and_no_files_discloses_the_reason_and_the_remedy() -> None:
+    cat, t3 = FakeCatalog(), FakeT3()
+    _siblings(cat, t3)
+    rows = {f"1.2.{i}": _aspect(f"1.2.{i}", {}) for i in (20, 21, 22, 23)}  # extras={} on every row, as live
+    env = await _answer(cat, bindings={"source": "RDR-200"}, structured=True, t3=t3, aspects=rows)
+    (src,) = env["named_sources"]["sources"]
+    assert (src["status"], src["tumbler"]) == ("candidates", None), "nothing is guessed from an unparsed row"
+    assert "an aspect row whose frontmatter was not parsed for 4" in src["detail"]
+    assert f"`nx enrich aspects {ART_COL} --all --validate-sample 0`" in src["detail"]
+    assert "nx enrich aspects" in env["final_text"], "the remedy reaches the text a caller reads"
+
+    env = await _answer(cat, bindings={"source": "RDR-200"}, structured=True, t3=t3, aspects={})
+    (src,) = env["named_sources"]["sources"]
+    assert (src["status"], src["tumbler"]) == ("candidates", None), "no row recorded: nothing is guessed"
+    assert "no aspect row yet for 4" in src["detail"]

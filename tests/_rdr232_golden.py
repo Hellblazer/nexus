@@ -726,7 +726,7 @@ def golden_source_bindings(q, owners: dict[str, str] | None = None) -> tuple[dic
     project ``ART``, which *owners* maps to an owner tumbler (``owner`` binding; a project with no
     mapping is not guessed and travels as the ``project`` binding). A bare id (``RDR-049``) has no
     qualifier, so its binding carries no owner: where sibling files share the number it resolves to
-    candidates, and what to do about that is nexus-xho6c's decision, not made here. A label that is not
+    the file whose frontmatter carries the id (nexus-xho6c). A label that is not
     an RDR id or a tumbler (the paper title ``HybridRAG``, G05) is returned in the second list and is
     scored by its label only.
     """

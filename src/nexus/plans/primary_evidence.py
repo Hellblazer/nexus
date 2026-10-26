@@ -12,7 +12,9 @@ Two stages, both bounded and both disclosing what they could not do:
    and ``resolve_canonical_tumbler`` with the qualified owner as the admitted owner. It never
    calls the unbounded listings that rule's old caller used, nor ``resolve_tumbler``'s first
    exact match. A candidate set that reaches its cap is never resolved: the missing
-   candidate could be a second one.
+   candidate could be a second one. Where one number has sibling files (``rdr-200-*.md``), the file whose
+   frontmatter ``id`` is the number resolves (nexus-xho6c): the id comes from an injected
+   :data:`FrontmatterIdLookup`, never from the catalog document or the chunks, which do not record it.
 2. :func:`select_primary_evidence` reads a resolved document's ordered manifest, hydrates
    its chunks (capped, shared chashes fetched once), labels each chunk, and selects a
    section-diverse subset under the evidence budget.
@@ -39,7 +41,8 @@ import re
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
 import structlog
@@ -53,7 +56,7 @@ from nexus.catalog.rdr_canonical import (
 )
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, ManifestRow
-from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRef
+from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRef, SourceRefError
 
 _log = structlog.get_logger(__name__)
 
@@ -66,11 +69,15 @@ __all__ = [
     "NamedSourceResolution",
     "PrimaryEvidence",
     "PrimaryEvidenceCaps",
+    "RDR_FRONTMATTER_EXTRACTOR",
+    "FrontmatterId",
+    "FrontmatterIdLookup",
     "ResolvedSource",
     "SelectedChunk",
     "SourceCandidate",
     "derive_content_labels",
     "gather_primary_evidence",
+    "recorded_frontmatter_id",
     "resolve_named_sources",
     "select_primary_evidence",
     "t3_chunk_fetcher",
@@ -105,6 +112,11 @@ class PrimaryEvidenceCaps:
     max_selected_items: int = 24
     #: Characters in the selected evidence.
     max_selected_chars: int = 60_000
+    #: Frontmatter-id reads one RDR number may cost when several files share it (nexus-xho6c); the
+    #: largest group in docs/rdr is nine files. A group past it is candidates, with the cap named.
+    max_frontmatter_lookups: int = 24
+    #: Seconds one frontmatter-id read may take (what is left of the time budget can make it shorter).
+    frontmatter_call_seconds: float = 5.0
     #: Chashes per T3 fetch.
     fetch_batch_ids: int = 100
     #: Seconds named-source resolution may take, and the same again for the primary read. The caller's
@@ -112,7 +124,7 @@ class PrimaryEvidenceCaps:
     #: event loop, and a hit is disclosed (the answer proceeds without the stream).
     max_seconds: float = 20.0
 
-    def to_wire(self) -> dict[str, int]:
+    def to_wire(self) -> dict[str, int | float]:
         return asdict(self)
 
 
@@ -247,15 +259,18 @@ class NamedSourceResolution:
         """
         lines: list[str] = []
         for s in self.sources:
-            if s.status == "resolved" and not s.qualified:
-                tail = (
-                    "" if primary_stream else
-                    "; this single-step plan has no primary evidence stream, so the document is not read as evidence"
-                )
-                lines.append(
-                    f"[evidence request: named source {s.ref.value} resolved to {s.tumbler} but was not "
-                    f"owner-qualified (pass owner or project to pin it){tail}]"
-                )
+            if s.status == "resolved":
+                if not s.qualified:
+                    tail = (
+                        "" if primary_stream else
+                        "; this single-step plan has no primary evidence stream, so the document is not read as evidence"
+                    )
+                    lines.append(
+                        f"[evidence request: named source {s.ref.value} resolved to {s.tumbler} but was not "
+                        f"owner-qualified (pass owner or project to pin it){tail}]"
+                    )
+                if s.detail:  # a choice among sibling files, and the files passed over (nexus-xho6c)
+                    lines.append(f"[evidence request: named source {s.ref.value} resolved to {s.tumbler}: {s.detail}]")
             elif s.status == "candidates":
                 names = ", ".join(c.tumbler for c in s.candidates)
                 lines.append(
@@ -327,6 +342,15 @@ class _Calls:
     def _gate(self) -> None:
         if self.end is not None and self.clock() >= self.end:
             raise LookupDeadline
+
+    def call_timeout(self, limit: float) -> float:
+        """Seconds a read that is not a catalog call may take: *limit*, or what is left of the budget if
+        that is less. Raises :class:`LookupDeadline` when too little is left to start one."""
+        self._gate()
+        left = limit if self.end is None else min(limit, self.end - self.clock())
+        if left < _MIN_CALL_SECONDS:
+            raise LookupDeadline
+        return left
 
     def failed(self, what: str, exc: Exception) -> str:
         """The ``detail`` for a catalog call that raised *exc*."""
@@ -425,7 +449,295 @@ def _resolve_tumbler(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls
     return _resolved(ref, entry, qualifier is not None)
 
 
-def _resolve_rdr(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, caps: PrimaryEvidenceCaps) -> ResolvedSource:
+# ── Sibling files: which one is the RDR (nexus-xho6c) ────────────────────────────────────
+
+#: The ``extractor_name`` of the deterministic RDR parser (``aspect_extractor._REGISTRY["rdr__"]``); a pin
+#: in the tests holds the two together. Only a row it wrote says what the file's frontmatter holds.
+RDR_FRONTMATTER_EXTRACTOR = "rdr-frontmatter-v1"
+
+# Why a file's frontmatter id is unknown. Counted per file and named in the candidates ``detail``.
+NO_ASPECT_ROW = "no_aspect_row"
+OTHER_EXTRACTOR = "other_extractor"
+FRONTMATTER_NOT_PARSED = "frontmatter_not_parsed"
+ASPECT_STORE_ERROR = "aspect_store_error"
+NO_FILE_SOURCE = "no_file_source"
+FILE_ABSENT = "file_absent"
+FILE_NOT_ALLOWED = "file_not_allowed"
+FILE_PARSE_FAILED = "file_parse_failed"
+ID_UNREADABLE = "id_unreadable"
+
+_REASON_TEXT: dict[str, str] = {
+    NO_ASPECT_ROW: "no aspect row yet",
+    OTHER_EXTRACTOR: "an aspect row from another extractor",
+    FRONTMATTER_NOT_PARSED: "an aspect row whose frontmatter was not parsed",
+    ASPECT_STORE_ERROR: "the aspect store could not be read",
+    NO_FILE_SOURCE: "no file:// source on the registration",
+    FILE_ABSENT: "the file is not readable on this host",
+    FILE_NOT_ALLOWED: "the file lies outside the allowed docs/rdr path",
+    FILE_PARSE_FAILED: "the file's frontmatter did not parse",
+    ID_UNREADABLE: "an id value that is not a readable RDR id",
+}
+
+#: A read is not started with less than this left of the time budget.
+_MIN_CALL_SECONDS: float = 0.25
+
+
+@dataclass(frozen=True)
+class FrontmatterId:
+    """What is known of one registration's frontmatter ``id``.
+
+    ``known`` with ``value == ""``: the frontmatter was parsed and has no ``id``. ``known`` with another
+    value: the raw ``id`` (``"RDR-200"``, ``200``, ``"companion-note"``), compared through :func:`_read_id`,
+    never as text. Not ``known``: ``reasons`` says why (the codes above), and nothing is assumed.
+    """
+
+    known: bool
+    value: Any = None
+    reasons: tuple[str, ...] = ()
+
+    @classmethod
+    def of(cls, value: Any) -> FrontmatterId:
+        return cls(True, "" if value is None else value)
+
+    @classmethod
+    def unknown(cls, *reasons: str) -> FrontmatterId:
+        return cls(False, None, tuple(reasons))
+
+
+#: ``(entry, timeout seconds, the owner's docs/rdr source prefix or "") -> what is known of its frontmatter
+#: id``. The timeout is what is left of the budget, at most ``PrimaryEvidenceCaps.frontmatter_call_seconds``.
+FrontmatterIdLookup = Callable[[CatalogEntry, float, str], FrontmatterId]
+
+#: A file larger than this is not read as a fallback; an RDR is tens of KB.
+_MAX_FRONTMATTER_FILE_BYTES = 2_000_000
+
+#: An id that opens with a digit or has ``rdr`` before a digit is meant as an RDR id even when it is not
+#: readable as one (``RDR-200 (superseded)``); ``companion-note`` is not.
+_RDR_ISH = re.compile(r"rdr\W*\d|^\W*\d", re.IGNORECASE)
+_MAX_ID_TEXT = 64
+
+
+def _read_id(raw: Any) -> tuple[Literal["number", "none", "unreadable"], int | None]:
+    """Classify a frontmatter ``id``: ``("number", n)`` for an RDR id (normalized as a ``source`` binding
+    is: ``RDR-200``, ``rdr-200``, ``200`` and the integer 200 give 200); ``("none", None)`` for no id or a
+    value that is plainly not an RDR id (``companion-note``, a tumbler, a boolean); ``("unreadable", None)``
+    for a value that is present and meant as an RDR id but cannot be read as one (``RDR-200 (superseded)``,
+    a list, a float, a number too large to read). Never raises."""
+    if raw is None or isinstance(raw, bool):
+        return "none", None
+    if isinstance(raw, (list, tuple, dict, set, float)):
+        return "unreadable", None
+    try:
+        text = str(raw).strip()
+        if not text:
+            return "none", None
+        if len(text) > _MAX_ID_TEXT:
+            return ("unreadable", None) if _RDR_ISH.search(text[:_MAX_ID_TEXT]) else ("none", None)
+        try:
+            ref = SourceRef.parse(text)
+        except SourceRefError:  # not a readable id; whether it was meant as one decides below
+            return ("unreadable", None) if _RDR_ISH.search(text) else ("none", None)
+        return ("number", ref.number) if ref.kind == "rdr" and ref.number is not None else ("none", None)
+    except Exception:  # noqa: BLE001 — a value that cannot even be rendered (a huge int) is unreadable
+        return "unreadable", None
+
+
+def _file_frontmatter_id(entry: CatalogEntry, source_prefix: str = "") -> FrontmatterId:
+    """The ``id`` in the frontmatter of the file the registration points at, when this host has that file.
+
+    A fallback only: the server may be remote, and then the file is not there. The path is the
+    registration's own ``file://`` source (no host part), resolved; it must be a ``.md`` file under a
+    ``docs/rdr`` directory and, when the owner has a source prefix, under that prefix. The header is split
+    by the extractor's own parser (``_split_rdr_frontmatter``), so a value reads as the aspect row would
+    read it (``id: 040`` is 40, never octal). Nothing of the file's content is logged.
+    """
+    uri = entry.source_uri
+    if not uri.startswith("file://"):
+        return FrontmatterId.unknown(NO_FILE_SOURCE)
+    try:
+        from nexus.aspect_extractor import RdrSourceNotAllowed, contained_rdr_md_from_uri  # noqa: PLC0415 — deferred: the extractor module is heavy; its one containment rule is shared with the header read
+
+        try:
+            path = contained_rdr_md_from_uri(uri, source_prefix)
+        except RdrSourceNotAllowed:
+            return FrontmatterId.unknown(FILE_NOT_ALLOWED)
+        if not path.is_file() or path.stat().st_size > _MAX_FRONTMATTER_FILE_BYTES:
+            return FrontmatterId.unknown(FILE_ABSENT)
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError, UnicodeDecodeError):
+        return FrontmatterId.unknown(FILE_ABSENT)
+    try:
+        from nexus.aspect_extractor import _split_rdr_frontmatter  # noqa: PLC0415 — deferred: the extractor module is heavy; the one parser the aspect row uses
+
+        data, body = _split_rdr_frontmatter(text)
+    except Exception as exc:  # noqa: BLE001 — an unparseable header is unknown, never a failure
+        _log.warning("named_source_frontmatter_file_parse_failed", error=type(exc).__name__)
+        return FrontmatterId.unknown(FILE_PARSE_FAILED)
+    if text.lstrip().startswith("---") and not data and body == text:
+        return FrontmatterId.unknown(FILE_PARSE_FAILED)  # an opening fence with no closing one
+    return FrontmatterId.of(data.get("id"))
+
+
+def recorded_frontmatter_id(get_aspect: Callable[[str, float], Any] | None) -> FrontmatterIdLookup:
+    """The id source for :func:`resolve_named_sources`: the document's ``document_aspects`` row, then its file.
+
+    The RDR indexer records the frontmatter ``id`` neither on the catalog document (``meta`` holds the
+    content hash) nor on its chunks (the frontmatter is stripped before chunking). The one place it is
+    recorded is the deterministic ``rdr-frontmatter-v1`` aspect row (``extras["rdr_id"]``), in the engine's
+    T2 in local and cloud mode alike, filled asynchronously by the aspect worker. *get_aspect* is
+    ``(doc_id, timeout) -> AspectRecord | None`` (the store's ``get_by_doc_id``).
+
+    A row is authoritative only when it shows the frontmatter was parsed: written by the RDR extractor, with
+    a confidence and non-empty ``extras``. A row without them (an extractor that failed leaves null fields;
+    rows written before nexus-xho6c have empty ``extras`` on every document) says nothing about the header,
+    and neither does a row from another extractor or no row: the lookup then reads the file under the
+    registration's ``file://`` source where this host has it. A store that raises is not asked again for the
+    rest of the request, and the file is tried all the same.
+    """
+    store_failed = False
+
+    def lookup(entry: CatalogEntry, timeout: float, source_prefix: str = "") -> FrontmatterId:
+        nonlocal store_failed
+        reasons: list[str] = []
+        if get_aspect is not None and not store_failed:
+            try:
+                row = get_aspect(str(entry.tumbler), timeout)
+            except Exception as exc:  # noqa: BLE001 — a failing store falls through to the file
+                store_failed = True
+                _log.warning("named_source_aspect_store_failed", error=type(exc).__name__)
+                reasons.append(ASPECT_STORE_ERROR)
+            else:
+                extras = getattr(row, "extras", None)
+                if row is None:
+                    reasons.append(NO_ASPECT_ROW)
+                elif row.extractor_name != RDR_FRONTMATTER_EXTRACTOR:
+                    reasons.append(OTHER_EXTRACTOR)
+                elif row.confidence is None or not isinstance(extras, dict) or not extras:
+                    reasons.append(FRONTMATTER_NOT_PARSED)
+                else:
+                    return FrontmatterId.of(extras.get("rdr_id"))
+        elif get_aspect is not None:
+            reasons.append(ASPECT_STORE_ERROR)
+        from_file = _file_frontmatter_id(entry, source_prefix)
+        if from_file.known:
+            return from_file
+        return FrontmatterId.unknown(*reasons, *from_file.reasons)
+
+    return lookup
+
+
+def _file_name(entries: Sequence[CatalogEntry], key: str) -> str:
+    return PurePosixPath(entries[0].file_path).name if entries and entries[0].file_path else key
+
+
+def _names(names: Sequence[str], limit: int = 12) -> str:
+    shown = ", ".join(names[:limit])
+    return shown + (f", and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def _why_unknown(unknown: Mapping[str, tuple[str, list[str], str]], capped: bool, caps: PrimaryEvidenceCaps) -> str:
+    """The aggregated reason (and remedy) for files whose frontmatter id could not be read."""
+    counts: dict[str, int] = {}
+    collections: dict[str, set[str]] = {}
+    for _name, reasons, collection in unknown.values():
+        for code in dict.fromkeys(reasons):
+            counts[code] = counts.get(code, 0) + 1
+            collections.setdefault(code, set()).add(collection)
+    parts = [f"{_REASON_TEXT[c]} for {counts[c]}" for c in _REASON_TEXT if c in counts]
+    if capped:
+        parts.append(f"the lookup reached its cap of {caps.max_frontmatter_lookups} frontmatter reads")
+    why = "; ".join(parts) or "their frontmatter id could not be read"
+    hints: list[str] = []
+    for code, flag in ((NO_ASPECT_ROW, ""), (OTHER_EXTRACTOR, " --all"), (FRONTMATTER_NOT_PARSED, " --all")):
+        for coll in sorted(collections.get(code, ())):
+            cmd = f"`nx enrich aspects {coll}{flag} --validate-sample 0`"
+            if cmd not in hints:
+                hints.append(cmd)
+    remedy = (
+        f"the aspect rows are filled asynchronously; run {' and '.join(hints)} to fill them "
+        "(the parse is deterministic; `--validate-sample 0` skips the model-based sample check), or "
+    ) if hints else ""
+    return f"{why}; {remedy}"
+
+
+def _carrier_group(
+    ref: SourceRef, groups: dict[str, list[CatalogEntry]], lookup: FrontmatterIdLookup,
+    calls: _Calls, caps: PrimaryEvidenceCaps, source_prefix: str = "",
+) -> tuple[str | None, str]:
+    """``(basename key, note)`` of the one file whose frontmatter carries *ref*'s id, or ``(None, why not)``.
+
+    A file counts once however many registrations it has. The file is picked only when every file of the
+    number has a known id and exactly one of them is *ref*'s: a file whose id could not be read might be a
+    second carrier, so it keeps the candidates, with the reason and the remedy. At most
+    ``caps.max_frontmatter_lookups`` reads, each given what is left of the time budget.
+    """
+    carriers: dict[str, str] = {}  # basename key -> file name, for each state
+    clear: dict[str, str] = {}
+    unknown: dict[str, tuple[str, list[str], str]] = {}  # key -> (file name, reasons, collection)
+    asked, capped, failure = 0, False, ""
+    for key, entries in groups.items():
+        if len(carriers) > 1:
+            break  # two carriers settle it: candidates
+        state: str | None = None  # carrier | clear | None (unknown)
+        reasons: list[str] = []
+        for entry in sorted(entries, key=lambda e: e.content_type != "rdr"):
+            if failure:
+                break
+            if asked >= caps.max_frontmatter_lookups:
+                capped = True
+                break
+            try:
+                got = lookup(entry, calls.call_timeout(caps.frontmatter_call_seconds), source_prefix)
+            except Exception as exc:  # noqa: BLE001 — reported, never raised
+                _log.warning("named_source_frontmatter_id_failed", source=ref.value, error=type(exc).__name__)
+                failure = (
+                    _deadline_detail("the frontmatter id lookup", caps) if isinstance(exc, LookupDeadline)
+                    else f"the frontmatter id lookup failed ({type(exc).__name__})"
+                )
+                break
+            asked += 1
+            if not got.known:
+                reasons.extend(got.reasons)
+                continue  # nothing readable for this registration: try the file's other one
+            kind, number = _read_id(got.value)
+            if kind == "unreadable":
+                reasons.append(ID_UNREADABLE)
+                break
+            state = "carrier" if kind == "number" and number == ref.number else "clear"
+            break
+        name = _file_name(entries, key)
+        if state == "carrier":
+            carriers[key] = name
+        elif state == "clear":
+            clear[key] = name
+        else:
+            unknown[key] = (name, reasons, entries[0].physical_collection)
+    total = len(groups)
+    hint = "name the document by its tumbler as the source"
+    if len(carriers) > 1:
+        return None, f"{len(carriers)} files carry the frontmatter id {ref.value} ({_names(list(carriers.values()))}); {hint}"
+    if failure:
+        return None, f"{failure}, so {total} files sharing the number {ref.value} stay candidates; {hint}"
+    if unknown:
+        have = (
+            f"one file carries it ({next(iter(carriers.values()))}), but " if carriers
+            else f"no file is known to carry {ref.value}, and "
+        )
+        names = _names([n for n, _r, _c in unknown.values()])
+        return None, f"{have}{len(unknown)} could not be checked ({names}): {_why_unknown(unknown, capped, caps)}{hint}"
+    if not carriers:
+        return None, f"no file among the {total} sharing the number carries the frontmatter id {ref.value}; {hint}"
+    (key, name), = carriers.items()
+    return key, (
+        f"{total} files share the number {ref.value}; its frontmatter id is in {name}; "
+        f"passed over: {_names(list(clear.values()))}"
+    )
+
+
+def _resolve_rdr(
+    ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, caps: PrimaryEvidenceCaps,
+    frontmatter_id: FrontmatterIdLookup | None = None,
+) -> ResolvedSource:
     number = ref.number or 0
     query = f"RDR-{number:03d}"
     def admitted(e: CatalogEntry) -> bool:
@@ -468,12 +780,25 @@ def _resolve_rdr(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, ca
     groups = group_rdr_candidates(scoped)
     if not groups:
         return _unresolved(ref, f"no registered document for {ref.value}{where}{note}")
+    chosen = ""  # the note of a choice among sibling files by their frontmatter id
     if len(groups) > 1:
-        return ResolvedSource(
-            ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None,
-            detail=(f"{len(groups)} documents carry the number {ref.value}{where}; "
-                    "name the document by its tumbler as the source"),
+        if frontmatter_id is None:
+            return ResolvedSource(
+                ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None,
+                detail=(f"{len(groups)} documents carry the number {ref.value}{where}; "
+                        "name the document by its tumbler as the source"),
+            )
+        # Sibling files (rdr-200-*.md, phase notes beside the RDR): the one whose frontmatter id is this
+        # number is the RDR (Sam, 2026-10-25). Zero or several carriers is still candidates, with the reason.
+        won, chosen = _carrier_group(
+            ref, groups, frontmatter_id, calls, caps, qualifier.source_prefix if qualifier is not None else "",
         )
+        if won is None:
+            return ResolvedSource(
+                ref=ref, status="candidates", candidates=candidates, qualified=qualifier is not None,
+                detail=f"{len(groups)} documents carry the number {ref.value}{where}: {chosen}",
+            )
+        groups = {won: groups[won]}
     (key, group), = groups.items()
     owners = {e.tumbler.owner_address() for e in group}
     if qualifier is None and len(owners) > 1:  # a qualifier already chose the project; its stale owners are its own
@@ -494,7 +819,8 @@ def _resolve_rdr(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls, ca
             detail=f"{ref.value} is registered more than once{where}; name the document by its tumbler as the source",
         )
     entry = next(e for e in group if e.tumbler == winner)
-    return _resolved(ref, entry, qualifier is not None, candidates)
+    out = _resolved(ref, entry, qualifier is not None, candidates)
+    return replace(out, detail=chosen) if chosen else out
 
 
 def resolve_named_sources(
@@ -505,8 +831,12 @@ def resolve_named_sources(
     caps: PrimaryEvidenceCaps = DEFAULT_CAPS,
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    frontmatter_id: FrontmatterIdLookup | None = None,
 ) -> NamedSourceResolution:
     """Resolve each named source inside the owner qualifier. Never raises.
+
+    *frontmatter_id* (:func:`recorded_frontmatter_id`): where one RDR number has sibling files, the file
+    whose frontmatter carries the id resolves; without it, siblings are candidates as before.
 
     Catalog calls: one owner probe (when a qualifier resolved) plus, per source, one
     ``resolve`` (a tumbler) or at most two capped ``find`` calls (an RDR id).
@@ -530,7 +860,7 @@ def resolve_named_sources(
         elif ref.kind == "tumbler":
             out.append(_resolve_tumbler(ref, qualifier, calls))
         else:
-            out.append(_resolve_rdr(ref, qualifier, calls, caps))
+            out.append(_resolve_rdr(ref, qualifier, calls, caps, frontmatter_id))
     return NamedSourceResolution(
         sources=tuple(out), dropped=tuple(r.value for r in dropped), catalog_calls=calls.n, caps=caps,
     )
@@ -1074,6 +1404,7 @@ def gather_primary_evidence(
     cat: NamedSourceCatalog | None,
     fetch_chunks: ChunkFetcher,
     caps: PrimaryEvidenceCaps = DEFAULT_CAPS,
+    frontmatter_id: FrontmatterIdLookup | None = None,
 ) -> tuple[NamedSourceResolution, PrimaryEvidence]:
     """Resolve the request's named sources and read their primary evidence.
 
@@ -1081,7 +1412,9 @@ def gather_primary_evidence(
     evidence; an unresolved or ambiguous one gives no evidence for it, and its reason is on
     the resolution.
     """
-    resolution = resolve_named_sources(request.sources, request.owner, cat=cat, caps=caps)
+    resolution = resolve_named_sources(
+        request.sources, request.owner, cat=cat, caps=caps, frontmatter_id=frontmatter_id,
+    )
     if cat is None:
         return resolution, PrimaryEvidence(caps=caps)
     return resolution, select_primary_evidence(resolution, cat=cat, fetch_chunks=fetch_chunks, caps=caps)

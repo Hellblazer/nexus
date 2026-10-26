@@ -98,7 +98,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
+from urllib.request import url2pathname
 
 import structlog
 
@@ -210,6 +211,11 @@ class ExtractorConfig:
     #: Batch-mode prompt header (multi-doc one-call extraction). Empty for
     #: deterministic (parser_fn) configs that never run the batch LLM path.
     batch_prompt_header: str = ""
+    #: The parser reads the document's own frontmatter, which the indexers strip before chunking, so text
+    #: reassembled from T3 chunks has none (nexus-xho6c: every live ``rdr-frontmatter-v1`` row had empty
+    #: ``extras``). When set and the content is sourced from chunks, the header is read from the source file
+    #: (see :func:`_with_source_header`) and put back in front of the chunk text.
+    needs_source_header: bool = False
 
 
 _SCHOLARLY_PAPER_PROMPT = """\
@@ -420,6 +426,7 @@ _REGISTRY: dict[str, ExtractorConfig] = {
             "experimental_results",
         ),
         parser_fn=lambda content, source_path, collection: _parse_rdr_aspects(content),
+        needs_source_header=True,
     ),
 }
 
@@ -1349,6 +1356,117 @@ def read_indexed_text(
     return None
 
 
+# ── The source file's frontmatter (nexus-xho6c) ─────────────────────────────
+
+#: A source file larger than this is not read for its header; an RDR is tens of KB.
+_MAX_HEADER_FILE_BYTES = 2_000_000
+
+
+def _frontmatter_block(text: str) -> str:
+    """The leading ``---`` ... ``---`` block of *text*, fences included; ``""`` when *text* has no
+    closed one. The same fence rule :func:`_split_rdr_frontmatter` applies."""
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].rstrip() != "---":
+        return ""
+    for idx in range(1, len(lines)):
+        if lines[idx].rstrip() == "---":
+            return "".join(lines[:idx + 1])
+    return ""
+
+
+class RdrSourceNotAllowed(ValueError):
+    """A source file the frontmatter reads must not open: not a ``.md`` under ``docs/rdr``, outside the
+    owner's prefix, or behind a host part."""
+
+
+def _under_rdr_dir(path: Path) -> bool:
+    parts = path.parts
+    return any(a == "docs" and b == "rdr" for a, b in zip(parts, parts[1:]))
+
+
+def contained_rdr_md(path: Path, source_prefix: str = "") -> Path:
+    """*path*, resolved (symlinks followed first), when it is a ``.md`` file with a ``docs/rdr`` directory
+    in its resolved path and, given a ``file://`` *source_prefix*, under that prefix (resolved as well, so a
+    repo root behind a symlink still matches). Raises :class:`RdrSourceNotAllowed` otherwise; ``OSError``
+    and ``ValueError`` from the filesystem pass through. The one containment rule of the extractor's header
+    read and of the frontmatter-id resolver (nexus-xho6c)."""
+    resolved = path.resolve()
+    if resolved.suffix.lower() != ".md" or not _under_rdr_dir(resolved):
+        raise RdrSourceNotAllowed(resolved.name)
+    if source_prefix.startswith("file://") and not resolved.is_relative_to(
+        Path(source_prefix[len("file://"):]).resolve()
+    ):
+        raise RdrSourceNotAllowed(resolved.name)
+    return resolved
+
+
+def contained_rdr_md_from_uri(uri: str, source_prefix: str = "") -> Path:
+    """:func:`contained_rdr_md` for a ``file://`` URI with no host part (``url2pathname`` decodes the path).
+    A malformed URI raises ``ValueError``, a disallowed one :class:`RdrSourceNotAllowed`."""
+    parsed = urlparse(uri)
+    if parsed.scheme != "file" or parsed.netloc or not parsed.path:
+        raise RdrSourceNotAllowed("uri")
+    return contained_rdr_md(Path(url2pathname(parsed.path)), source_prefix)
+
+
+def _header_file_candidates(
+    collection: str, source_path: str, lookup_path: str, doc_id: str,
+) -> list[Path]:
+    """Where the source file of an indexed document may be, best first: the catalog's own ``source_uri``
+    for *doc_id* (the queue row's ``source_path`` is the catalog's relative ``file_path`` when
+    canonicalized, and nothing here anchors a relative path on the working directory, nexus-yg70j), then an
+    absolute ``lookup_path`` or ``source_path``. Every candidate is contained by :func:`contained_rdr_md`
+    (resolved, ``.md`` under ``docs/rdr``); one that is not, or whose URI is malformed, is skipped."""
+    out: list[Path] = []
+    if doc_id:
+        try:
+            from nexus.aspect_worker import _resolve_source_uri_from_doc_id  # noqa: PLC0415 — deferred: aspect_worker imports this module
+            uri = _resolve_source_uri_from_doc_id(collection, doc_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort: no catalog means no catalog candidate
+            _log.debug("aspect_header_source_uri_unavailable", doc_id=doc_id, error=str(exc))
+            uri = ""
+        if uri:
+            try:
+                out.append(contained_rdr_md_from_uri(uri))
+            except (OSError, ValueError, RuntimeError) as exc:  # a malformed or disallowed URI: skipped
+                _log.debug("aspect_header_source_uri_skipped", doc_id=doc_id, reason=type(exc).__name__)
+    for raw in (lookup_path, source_path):
+        if raw and os.path.isabs(raw):
+            try:
+                out.append(contained_rdr_md(Path(raw)))
+            except (OSError, ValueError, RuntimeError) as exc:
+                _log.debug("aspect_header_path_skipped", reason=type(exc).__name__)
+    return out
+
+
+def _with_source_header(
+    text: str, *, collection: str, source_path: str, lookup_path: str = "", doc_id: str = "",
+) -> str:
+    """*text* (a document reassembled from T3 chunks) with its source file's frontmatter put back in front.
+
+    The indexers strip the frontmatter before chunking (``parse_frontmatter`` in ``doc_indexer`` and
+    ``prose_indexer``), so chunk text has none, and ``rdr-frontmatter-v1`` read ``id`` and ``status`` from
+    nothing: every live row had empty ``extras`` (nexus-xho6c). Only the header is taken from the file; the
+    body stays what was indexed. Without a readable ``.md`` file on this host, or when *text* already opens
+    with a header, *text* is returned unchanged and the row is as before (the lookup that needs the id
+    treats such a row as unknown, not as a document without one).
+    """
+    if text.lstrip().startswith("---"):
+        return text
+    for path in _header_file_candidates(collection, source_path, lookup_path, doc_id):
+        try:
+            if not path.is_file() or path.stat().st_size > _MAX_HEADER_FILE_BYTES:
+                continue
+            block = _frontmatter_block(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if block:
+            return block + text
+        return text  # the file has no header: nothing to put back
+    _log.debug("aspect_header_source_file_unavailable", collection=collection, source_path=source_path)
+    return text
+
+
 def _extract_via_parser_fn(
     config: ExtractorConfig, content: str, source_path: str, collection: str,
 ) -> AspectRecord:
@@ -1405,6 +1523,10 @@ def extract_aspects(
       ``CHROMA_IDENTITY_FIELD`` dispatch table (``title`` for
       ``knowledge__*`` collections, ``source_path`` for everything
       else).
+    * A config with ``needs_source_header`` (``rdr-frontmatter-v1``) then has
+      its source file's frontmatter put back in front of the chunk text
+      (:func:`_with_source_header`): the indexers strip it before chunking
+      (nexus-xho6c).
     * Read failure → return ``ExtractFail(uri, reason, detail)`` with
       no row written. Replaces the prior null-field-row contract that
       let drift cases (catalog-stale paths, slug-shaped sources)
@@ -1471,6 +1593,17 @@ def extract_aspects(
             return ExtractFail(uri=uri, reason=result.reason, detail=result.detail)
         assert isinstance(result, ReadOk)
         content = result.text
+        if config.needs_source_header:
+            queued = ""
+            if doc_id_lookup is not None:
+                try:
+                    queued = doc_id_lookup(collection, uri_identity) or ""
+                except Exception:  # noqa: BLE001 — best-effort: the absolute-path candidates remain
+                    queued = ""
+            content = _with_source_header(
+                content, collection=collection, source_path=source_path,
+                lookup_path=lookup_path, doc_id=queued,
+            )
 
     # Defense against embedded null bytes (P1.3 spike finding 2026-04-25):
     # some PDF extractors emit \x00 in their text output. Strip them
@@ -1650,6 +1783,17 @@ def extract_aspects_batch(
                 continue
             assert isinstance(result, ReadOk)
             content = result.text
+            _row_config = select_config(collection)
+            if _row_config is not None and _row_config.needs_source_header:
+                _header_doc_id = queue_doc_id
+                if not _header_doc_id and row_doc_id_lookup is not None:
+                    try:
+                        _header_doc_id = row_doc_id_lookup(collection, source_path) or ""
+                    except Exception:  # noqa: BLE001 — best-effort: the absolute-path candidates remain
+                        _header_doc_id = ""
+                content = _with_source_header(
+                    content, collection=collection, source_path=source_path, doc_id=_header_doc_id,
+                )
         # Defensive null-byte strip (matches single-paper path).
         content = content.replace("\x00", "")
         # nexus-kmbys: resolve per-document config (paper vs prose) now that

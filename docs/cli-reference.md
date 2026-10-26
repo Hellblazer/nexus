@@ -5474,7 +5474,34 @@ and the other seven `null` when they have nothing to report):
   candidates, candidates_truncated, detail}], dropped, catalog_calls}`.
   `status` is `resolved`, `candidates` (several documents fit; nothing is
   picked) or `unresolved`; `qualified` says an owner qualifier narrowed the
-  choice. `None` when no source was named. Text mode adds one
+  choice. Where one RDR number has sibling files (`rdr-200-*.md`: the RDR and
+  its phase notes), a bare `source=RDR-200` resolves to the one file whose
+  frontmatter `id` is that number (nexus-xho6c, Sam's ruling of 2026-10-25);
+  `detail` names the files passed over, and text mode says so on a
+  `[evidence request: ... resolved to ...]` line. Zero files carrying the id,
+  several carrying it, or a sibling whose id could not be read (a second
+  carrier might hide there) is `candidates` with the reason in `detail`. The
+  id is compared as a `source` binding is (`RDR-200`, `rdr-200`, `200` are
+  equal; `id: companion-note` is no RDR id; an `id` meant as an RDR id but
+  unreadable, such as `RDR-200 (superseded)`, makes that sibling unknown, not
+  clear). It comes from the document's `rdr-frontmatter-v1` aspect row
+  (`extras.rdr_id`, in the engine in local and cloud mode alike). The aspect
+  rows are filled asynchronously by the aspect worker, so a document the
+  worker has not reached has none; a row counts only when it shows the
+  frontmatter was parsed (a confidence and non-empty `extras`, which rows
+  written before nexus-xho6c lack), and otherwise the lookup reads the file
+  under the registration's `file://` source where the server has it (a `.md`
+  under `docs/rdr`, no host part, symlinks resolved first; a failing aspect
+  store falls back to the file too). A document with neither is not guessed:
+  `detail` counts the files by cause and names the remedy,
+  `nx enrich aspects <rdr collection> --validate-sample 0` for missing rows and
+  `nx enrich aspects <rdr collection> --all --validate-sample 0` for rows that
+  exist but were not parsed (empty `extras`, or another extractor's row). The
+  parse is deterministic, but without `--validate-sample 0` the command
+  spot-checks 5% of the new rows with a model call. Run it where the files are. At most
+  `max_frontmatter_lookups` (24) reads per number, each given at most
+  `frontmatter_call_seconds` (5) or what is left of the answer's budget; a
+  document tumbler as the source still wins outright. `None` when no source was named. Text mode adds one
   `[evidence request: ...]` line per ambiguous, unresolved or
   not-owner-qualified source, and states a failed owner qualifier once. On
   the single-step fast path the notice says the plan has no primary evidence

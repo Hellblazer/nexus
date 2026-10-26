@@ -160,9 +160,15 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             f"/v1/aspects{path}", body, idempotent=idempotent, mutates=mutates
         )
 
-    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
+    def _get(
+        self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True,
+        timeout: float | None = None, retry_read_timeout: bool = True,
+    ) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
-        return super()._get(f"/v1/aspects{path}", q, idempotent=idempotent)
+        return super()._get(
+            f"/v1/aspects{path}", q, idempotent=idempotent,
+            timeout=timeout, retry_read_timeout=retry_read_timeout,
+        )
 
     # ── Public API — mirrors DocumentAspects ──────────────────────────────────
 
@@ -217,10 +223,20 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             return None
         return _body_to_record(body)
 
-    def get_by_doc_id(self, doc_id: str) -> AspectRecord | None:
-        """Return the row matching doc_id, or None."""
+    def get_by_doc_id(
+        self, doc_id: str, *, timeout: float | None = None, retry_read_timeout: bool = True,
+    ) -> AspectRecord | None:
+        """Return the row matching doc_id, or None.
+
+        *timeout* and *retry_read_timeout* are the per-call override the memory store's ``get`` takes
+        (nexus-xho6c): a caller issuing several reads against one shared budget shrinks each read's
+        timeout to what is left and passes ``retry_read_timeout=False`` so a clamped call is not retried
+        at the same clamp.
+        """
         try:
-            body = self._get("/get_by_doc_id", {"doc_id": doc_id})
+            body = self._get(
+                "/get_by_doc_id", {"doc_id": doc_id}, timeout=timeout, retry_read_timeout=retry_read_timeout,
+            )
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return None

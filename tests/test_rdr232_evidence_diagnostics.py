@@ -1014,9 +1014,9 @@ def test_a_project_qualified_golden_source_is_a_source_binding_plus_an_owner_or_
     assert no_owner == {"source": "RDR-084", "project": "ART"}, "an unmapped project is passed on, never guessed"
 
 
-def test_a_bare_golden_source_has_no_qualifier_and_so_can_resolve_to_candidates() -> None:
-    """G01 names RDR-049 with no project. Where sibling files share the number a bare id resolves to
-    candidates; whether the golden label should carry a qualifier is nexus-xho6c's decision."""
+def test_a_bare_golden_source_has_no_qualifier() -> None:
+    """G01 names RDR-049 with no project, so its binding carries no owner. Where sibling files share the
+    number the resolver picks the file whose frontmatter carries the id (nexus-xho6c)."""
     g, q = _golden("G01")
     assert g.golden_source_bindings(q, {"ART": "1.61"}) == ({"source": "RDR-049"}, [])
 
