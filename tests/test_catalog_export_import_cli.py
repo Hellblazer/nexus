@@ -39,6 +39,7 @@ def test_catalog_export_writes_jsonl_bundle_file(tmp_path, monkeypatch):
     assert "knowledge docs: 3" in result.output
     assert "links: 7" in result.output
     assert "ghosts skipped" in result.output
+    assert "note keys not recovered" not in result.output
 
 
 def test_catalog_import_prints_summary_and_exits_nonzero_when_a_note_failed(
@@ -143,3 +144,18 @@ def test_unresolvable_links_alone_do_not_change_the_exit_status(tmp_path, monkey
     )
     result = _invoke_import(tmp_path, monkeypatch, summary)
     assert result.exit_code == 0, result.output
+
+
+def test_catalog_export_names_the_notes_whose_keys_could_not_be_recovered(tmp_path, monkeypatch):
+    """nexus-6pfgb.14: a legacy note on a shared chunk exports with empty keys, and the command says so."""
+    def _fake_export(reader, t3, path):
+        path.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": 1}) + "\n")
+        return ExportSummary(docs_exported=3, note_keys_unrecovered=2)
+
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
+    monkeypatch.setattr("nexus.catalog.recovery_bundle.export_bundle", _fake_export)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+
+    result = CliRunner().invoke(main, ["catalog", "export", str(tmp_path / "r.jsonl")])
+    assert result.exit_code == 0, result.output
+    assert "note keys not recovered: 2" in result.output

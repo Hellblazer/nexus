@@ -48,6 +48,12 @@ def export_cmd(output: Path) -> None:
         click.echo(
             f"  ghosts skipped (rows with no live content): {summary.ghosts_skipped}"
         )
+    if summary.note_keys_unrecovered:
+        click.echo(
+            f"  note keys not recovered: {summary.note_keys_unrecovered} note(s) with none of "
+            "their own tags, category and ttl_days in the catalog whose chunk row may hold "
+            "another note's; they export with those empty"
+        )
     if summary.unresolvable_link_endpoints:
         click.echo(
             f"  WARNING: {summary.unresolvable_link_endpoints} link endpoint(s) "

@@ -326,8 +326,11 @@ here carries:
 - taxonomy topics, their assignments, topic links and centroids
 - `document_aspects` (LLM-extracted; re-extracting is billed), the aspect queue
   and `aspect_promotion_log`
-- `frecency` and `relevance_log`, including per-note TTL: a note that expired on
-  its old box is permanent in the cloud
+- `frecency` and `relevance_log`. A note's TTL is not in those tables: the
+  `.nxexp` carries each chunk's `ttl_days` and `indexed_at` as stored (a shared
+  chunk holds the last writer's), and the recovery bundle, imported last, gives
+  each `store_put` note its own `ttl_days` and restarts its clock at the import
+  (a note already expired but not reaped comes back with a full TTL)
 - the telemetry stores (search telemetry, hook and index failure records)
 - DEVONthink highlights
 - curated catalog metadata beyond links and `store_put` notes: author, year,

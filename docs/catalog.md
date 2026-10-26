@@ -442,10 +442,23 @@ Locked format decisions (design of record: T2
 - **Spans degrade gracefully.** A `chash:`-anchored link span whose
   chunk no longer exists on the target is stripped and counted in the
   import report; the link itself still imports.
-- **TTL is not carried.** A store_put note that had a live TTL before
-  export imports as permanent — the bundle is a recovery artifact, and
-  silently expiring recovered content would be the worse failure. Re-set
-  TTLs after import if you need them.
+- **A note's own `tags`, `category` and `ttl_days` are carried.** They
+  come from the note's catalog entry (`meta`, see
+  [storage-tiers](storage-tiers.md#a-notes-own-keys-in-the-catalog)),
+  not from the T3 chunk row, so two notes with identical text each export
+  their own. `ttl_days` is a positive integer or `null` (permanent); a
+  recorded value that is not a positive integer imports as permanent. A
+  note written before the catalog kept these keys, or stored with none of
+  them, takes the chunk row's values only when the row's last writer is
+  that note (the row's `catalog_doc_id`; a row with none is taken only when
+  no other live document in its collection holds the chunk); otherwise it
+  exports with them empty and the export summary counts it when the row
+  held a value (`note keys not recovered`). Import restarts a note's TTL
+  clock: the expiry is `ttl_days` from the import, not from the original
+  store. Importing the same bundle again restarts it again. A note already
+  past its expiry but not yet reaped is exported (expiry cannot be judged
+  from the catalog) and comes back with a full TTL. Importing over an
+  existing permanent note of the same title makes it expiring.
 
 
 ```bash
