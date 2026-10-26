@@ -39,7 +39,10 @@ set makes the lane INELIGIBLE, naming the bead and the commit. A cherry-pick
 that takes the plugin half of a bead and leaves its ``src/`` half behind is
 exactly what this catches. Attribution is by commit message, matched on the
 whole bead token, so a straddling commit that does not name its bead escapes
-this check; the per-path rules above are what still bind it. An unreadable
+this check: the per-path rules above bind only what was picked, and an unpicked
+half that names no bead is not seen. Any bead token in a picked commit's
+message counts, a prose mention of an unrelated bead included, so the check can
+refuse more than it must and never less. An unreadable
 ``--develop-ref`` is UNVERIFIED, never a pass.
 
 Everything else is INELIGIBLE (exit 1, each offender with its reason):

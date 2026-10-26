@@ -2,9 +2,8 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Synthetic coverage of scripts/plugin_ledger.py (nexus-rbmja.10).
 
-The deferral parser and the RDR-228 Phase 2 guard used to be driven by
-tests/test_cut_plugin_release.py against the anchored-tag cut script. That
-script is retired (nexus-rbmja.8) and the guard now lives here; the drift-ledger
+The deferral parser and the RDR-228 Phase 2 guard used to be driven by the
+retired anchored-tag cut script's own tests. That script is retired (nexus-rbmja.8) and the guard now lives here; the drift-ledger
 test reads the real tree, which says nothing about the guard's refusals. So
 these tests build a small repo with a reference branch (``main``, what installs
 have) and a source branch (``develop``) and drive the guard directly.
