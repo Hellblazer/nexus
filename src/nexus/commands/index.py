@@ -3287,6 +3287,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # only once at the end (which would see only the LAST file's count).
         from nexus.mcp_infra import get_reconciled_collections_count  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when non-zero
         reconciled_total = 0
+        # RDR-237: the pages the ladder settled below MinerU's first rung, per document, for
+        # the end-of-run summary (index_pdf's on_extraction).
+        degraded_runs: list[tuple[str, dict[str, list[int]]]] = []
         # nexus-s71lr: `nx index pdf --dir` echoes `[i/total] name…` with
         # nl=False and only completes the line AFTER index_pdf returns — a
         # single slow PDF (the bead's own complaint class) is silence between
@@ -3307,15 +3310,19 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 click.echo(f"[{i}/{total}] {pdf.name}…", nl=False)
                 t0 = _time.monotonic()
                 reset_identity_drop_collectors()
+                file_extraction: list[dict] = []
                 try:
                     n = index_pdf(
                         pdf, corpus=corpus, collection_name=collection,
                         force=force, force_re_embed=re_embed, enrich=enrich, extractor=extractor,
                         on_formula_oom=on_formula_oom, streaming=streaming,
                         allow_degraded_extraction=allow_degraded_extraction,
+                        on_extraction=file_extraction.append,
                     )
                     elapsed = _time.monotonic() - t0
                     total_chunks += n
+                    if file_extraction and file_extraction[-1].get("extraction_pages"):
+                        degraded_runs.append((pdf.name, file_extraction[-1]["extraction_pages"]))
                     reconciled_total += get_reconciled_collections_count()
                     click.echo(f" — {n} chunks, {elapsed:.1f}s")
                     if emit_identity_drop_summary(indexed_count=1):
@@ -3366,8 +3373,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 f"WARNINGs above"
             )
         click.echo(summary_line)
-        from nexus.commands._helpers import emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only when a retry/brake fired)
+        from nexus.commands._helpers import emit_degraded_pages_summary, emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only when a retry/brake fired)
         emit_retry_summary()
+        emit_degraded_pages_summary(degraded_runs)
         if failures:
             click.echo(f"  {len(failures)} failure(s):")
             for fp, err in failures:
@@ -3531,6 +3539,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     label = "Force re-indexing" if force else "Indexing"
     click.echo(f"{label} {path}…")
     fork_holder: list[tuple[str, int]] = []
+    extraction_holder: list[dict] = []  # RDR-237: what index_pdf's on_extraction reports
     if monitor or not sys.stdout.isatty():
         chunk_bar = tqdm(total=0, desc="Embedding", unit="chunk", disable=None)
 
@@ -3544,7 +3553,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                              force_re_embed=re_embed,
                              return_metadata=True, on_progress=on_chunk_progress, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
                              source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
-                             allow_degraded_extraction=allow_degraded_extraction)
+                             allow_degraded_extraction=allow_degraded_extraction,
+                             on_extraction=extraction_holder.append)
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): this
             # is NOT an (ImportError, RuntimeError) — it fell through the
@@ -3575,7 +3585,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         try:
             n = index_pdf(path, corpus=corpus, collection_name=collection, force=force, force_re_embed=re_embed, enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming,
                           source_uri=source_uri or "", on_fork_detected=fork_holder.extend,
-                          allow_degraded_extraction=allow_degraded_extraction)
+                          allow_degraded_extraction=allow_degraded_extraction,
+                          on_extraction=extraction_holder.append)
         except IndexRunVerifyRefused as e:
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
             # the identical rationale on the monitor branch above.
@@ -3606,6 +3617,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo("skipped: index fresh (use --force)")
     else:
         click.echo(f"{result_label} {n} chunk(s).")
+    if extraction_holder and extraction_holder[-1].get("extraction_pages"):
+        from nexus.commands._helpers import emit_degraded_pages_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only a degraded extraction)
+
+        emit_degraded_pages_summary([(path.name, extraction_holder[-1]["extraction_pages"])])
     if fork_holder:
         # nexus-y8qtj: WARNING, not refusal — legitimate near-duplicates
         # exist. Full detail (other doc_id, shared_chunks) is in the log

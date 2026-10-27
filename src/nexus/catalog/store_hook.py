@@ -16,6 +16,7 @@ import), plus the read-side and cleanup helpers ``mcp/core.py`` and
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1871,6 +1872,90 @@ def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, li
         return {}
     finally:
         reader.close()
+
+
+#: The rungs a document's ``extraction_pages`` map can name, in display order. Mirrors
+#: ``nexus.pdf_extractor._DEGRADED_METHODS``, which this module cannot import without pulling the
+#: extractor stack into ``nx store get``; ``tests/test_degraded_pages_line.py`` pins the two equal.
+_DEGRADED_RUNG_ORDER: tuple[str, ...] = ("mineru-no-formula", "pymupdf-text", "unextracted")
+
+
+def _clean_extraction_pages(raw: object) -> dict[str, list[int]]:
+    """A catalog ``meta['extraction_pages']`` value as ``{rung: [pages]}``, non-empty rungs only.
+    Anything malformed reads as ``{}``: this feeds a display line, never a decision."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[int]] = {}
+    for rung, pages in raw.items():
+        if isinstance(pages, list) and pages and all(isinstance(p, int) for p in pages):
+            out[str(rung)] = sorted(pages)
+    return out
+
+
+def format_degraded_pages(extraction_pages: dict[str, list[int]]) -> str:
+    """``mineru-no-formula 3,7; pymupdf-text 12``: the rungs in ladder order (an unknown rung
+    after them, by name), each with its sorted 1-based pages."""
+    known = [r for r in _DEGRADED_RUNG_ORDER if r in extraction_pages]
+    rest = sorted(r for r in extraction_pages if r not in _DEGRADED_RUNG_ORDER)
+    return "; ".join(f"{r} {','.join(str(p) for p in extraction_pages[r])}" for r in known + rest)
+
+
+def degraded_pages_for_chunk(
+    collection: str, chash: str, *, holders: list[tuple[str, str]] | None = None,
+) -> tuple[list[tuple[str, str, dict[str, list[int]]]], int]:
+    """``([(tumbler, title, extraction_pages), ...], holder_count)``: the live documents holding
+    chunk *chash* in *collection* whose catalog ``meta`` records degraded pages (RDR-237), and how
+    many documents hold it. Documents with no degraded page are left out of the list.
+
+    *holders* is the ``(tumbler, title)`` list :func:`live_holders_of_chashes` already returned for
+    this chunk (the MCP ``store_get`` has it); ``None`` looks it up. Best-effort like that
+    function: ``([], 0)`` when the catalog is unavailable or unreadable, so a catalog fault never
+    breaks a ``get``.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    try:
+        if holders is None:
+            holders = live_holders_of_chashes(collection, [chash]).get(chash, [])
+        if not holders:
+            return [], 0
+        reader = make_catalog_reader()
+        if reader is None:
+            return [], len(holders)
+        try:
+            entries = reader.resolve_many([t for t, _title in holders])
+        finally:
+            reader.close()
+        rows: list[tuple[str, str, dict[str, list[int]]]] = []
+        for tumbler, title in holders:
+            entry = entries.get(tumbler)
+            pages = _clean_extraction_pages((getattr(entry, "meta", None) or {}).get("extraction_pages"))
+            if pages:
+                rows.append((tumbler, title, pages))
+        return rows, len(holders)
+    except Exception:  # noqa: BLE001 — a display line is best-effort
+        _log.debug("degraded_pages_lookup_failed", exc_info=True)
+        return [], 0
+
+
+def degraded_pages_lines(
+    collection: str, chash: str, *, holders: list[tuple[str, str]] | None = None,
+) -> list[str]:
+    """The ``Degraded:`` lines ``nx store get`` and the MCP ``store_get`` print after ``Extractor:``:
+    one per document whose catalog record has degraded pages, ``[]`` when none does. A chunk held
+    by one document prints ``Degraded:   mineru-no-formula 3,7; pymupdf-text 12``; held by several,
+    each line is labelled with its document's title (its tumbler when it has none)."""
+    rows, holder_count = degraded_pages_for_chunk(collection, chash, holders=holders)
+    lines = []
+    for tumbler, title, pages in rows:
+        text = format_degraded_pages(pages)
+        lines.append(f"Degraded:   {title or tumbler}: {text}" if holder_count > 1 else f"Degraded:   {text}")
+    return lines
 
 
 def catalog_chashes_for_title(collection: str, title: str) -> list[list[str]]:

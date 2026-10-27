@@ -244,7 +244,11 @@ def _index_record(
     relocations, and the file path returned by osascript at index time
     is not (DT moves files inside Files.noindex/ on its own schedule).
 
-    Returns ``(stamped, chunks, pages)`` (nexus-5xn3k.6 AC4 — before this, the
+    Returns ``(stamped, chunks, pages, degraded)``; the caller still accepts the older
+    ``(stamped, chunks)`` and ``(stamped, chunks, pages)`` shapes. ``degraded`` (RDR-237)
+    is the document's ``extraction_pages`` (rung to the 1-based pages that settled below
+    MinerU's first rung), ``{}`` for a clean extraction, markdown, or an unchanged
+    document. The first three, from nexus-5xn3k.6 AC4: before this, the
     indexer's chunk count was discarded and the caller could only do
     ``indexed += 1`` unconditionally, so a no-op re-index of an unchanged
     document reported "Indexed 1 record(s)" identically to a real write).
@@ -308,17 +312,23 @@ def _index_record(
     # truncated fragment) while the catalog title carried the real name.
     dt_facts = _dt_record_facts(uuid)
     dt_title = (dt_facts or {}).get("name", "")
+    degraded: dict[str, list[int]] = {}  # rung -> pages the ladder settled below rung 1 (RDR-237)
     if ext == ".pdf":
         # nexus-pxxyn: thread the operator's --extractor choice through so the
         # documented MinerU-failure recovery ("rerun with --extractor docling")
         # is actionable on the DT path. Markdown has no extractor backend.
         # nexus-i0cwh: return_metadata gives the pages that produced text,
         # the page-coverage check's input.
+        # RDR-237: on_extraction reports the pages the ladder settled below MinerU's first rung.
+        extraction_reports: list[dict] = []
         raw = index_pdf(
             file_path, corpus=corpus, collection_name=collection, extractor=extractor,
             force=force, force_re_embed=force_re_embed, return_metadata=True,
             source_uri=dt_source_uri, title_override=dt_title,
+            on_extraction=extraction_reports.append,
         )
+        if extraction_reports:
+            degraded = dict(extraction_reports[-1].get("extraction_pages") or {})
         if isinstance(raw, dict):
             chunks = int(raw.get("chunks", 0) or 0)
             # Pages the EXTRACTOR produced text for, never chunk starts
@@ -337,7 +347,7 @@ def _index_record(
         pages = None
 
     stamped = _stamp_dt_uri_on_entry(file_path, uuid, facts=dt_facts)
-    return stamped, chunks, pages
+    return stamped, chunks, pages, degraded
 
 
 def _dt_uri_is_catalogued(uuid: str) -> bool:
@@ -1102,6 +1112,7 @@ def index_cmd(
     skipped = 0
     stamp_failed = 0
     coverage_failed = 0
+    degraded_runs: list[tuple[str, dict[str, list[int]]]] = []  # RDR-237: shown at the end of the run
     coverage_unverified = 0
     unverified_no_pages = 0
     unverified_no_page_count = 0
@@ -1301,7 +1312,10 @@ def index_cmd(
                 force=force,
                 force_re_embed=re_embed,
             )
-            if len(_result) == 3:
+            degraded_pages: dict[str, list[int]] = {}
+            if len(_result) == 4:
+                stamped, chunks, pages_seen, degraded_pages = _result
+            elif len(_result) == 3:
                 stamped, chunks, pages_seen = _result
             else:
                 stamped, chunks = _result
@@ -1403,6 +1417,8 @@ def index_cmd(
         if chunks:
             indexed += 1
             touched_collections.add(resolved_collection)
+            if degraded_pages:
+                degraded_runs.append((f"{Path(path).name} ({uuid})", degraded_pages))
         else:
             unchanged += 1
             # nexus-g276c: an unchanged record still belongs to the run's
@@ -1502,6 +1518,10 @@ def index_cmd(
         summary += f", {coverage_unverified} page coverage unverified"
     summary += ")."
     click.echo(summary)
+    if degraded_runs:
+        from nexus.commands._helpers import emit_degraded_pages_summary  # noqa: PLC0415 — deferred import, shared with `nx index pdf`
+
+        emit_degraded_pages_summary(degraded_runs)
     if coverage_unverified:
         reasons = []
         unreachable = coverage_unverified - unverified_no_pages - unverified_no_page_count

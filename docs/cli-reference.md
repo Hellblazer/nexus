@@ -335,7 +335,17 @@ nx search "" --corpus docs --where quality_gate_overridden=true --files
 PDF chunk's metadata carries which backend actually produced its text:
 `docling` | `mineru` | `pymupdf_normalized`, or the honest mixed aggregate
 `mineru+degraded` when a page settled below the first MinerU attempt (RDR-237;
-the pages by rung are in the extraction result's `extraction_pages`). Chunks written before RDR-237 may
+the pages by rung are the catalog document's `meta.extraction_pages`, a map from rung
+to 1-based pages that the PDF hook writes on every extraction, `{}` when clean, so a
+clean re-extract clears an old map). `nx store get` and the MCP `store_get` print them
+as a `Degraded:   mineru-no-formula 3,7; pymupdf-text 12` line after `Extractor:`
+(one line per document, labelled with its title, when several documents hold the
+chunk; `nx store get --json` adds a `degraded_pages` list, only when some document has
+any), and `nx index pdf` and `nx dt index` list the degraded pages per document after
+their summary. A run that cannot write the record (no reachable catalog, a refused
+ephemeral path, a catalog error) logs `catalog_pdf_extraction_not_recorded` naming the
+document. After a kept-buffer resume the record covers the pages already in the buffer.
+Chunks written before RDR-237 may
 carry `mineru+docling-degraded` (a page degraded to Docling by
 `--on-formula-oom docling`, a flag that is now accepted and ignored for one release). This is what makes an extractor
 regression scopeable after the fact (e.g. "which documents did MinerU

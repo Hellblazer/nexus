@@ -529,7 +529,21 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
 
     if json_out:
         import json  # noqa: PLC0415 — stdlib import kept branch-local
-        click.echo(json.dumps({**entry, "collection": col_name}, indent=2))
+        out = {**entry, "collection": col_name}
+        if entry.get("extraction_method"):
+            # RDR-237: the text form prints the degraded pages of the catalog document(s) holding
+            # this chunk, so the machine form carries them too, as `degraded_pages`: a list of
+            # {tumbler, title, extraction_pages}, ONLY when some document has any (a clean or
+            # non-PDF chunk's JSON is unchanged). A script finding degraded documents reads this
+            # instead of scraping the text line.
+            from nexus.catalog.store_hook import degraded_pages_for_chunk  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+            rows, _n = degraded_pages_for_chunk(col_name, entry["id"])
+            if rows:
+                out["degraded_pages"] = [
+                    {"tumbler": t, "title": title, "extraction_pages": pages} for t, title, pages in rows
+                ]
+        click.echo(json.dumps(out, indent=2))
     else:
         title = entry.get("title", "")
         tags = entry.get("tags", "")
@@ -549,6 +563,11 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
             click.echo(f"Indexed:    {indexed_at}")
         if extraction_method:
             click.echo(f"Extractor:  {extraction_method}")
+            # RDR-237: same line as the MCP store_get, from the same helper.
+            from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+            for line in degraded_pages_lines(col_name, entry["id"]):
+                click.echo(line)
         click.echo(f"\n{entry.get('content', '')}")
 
 

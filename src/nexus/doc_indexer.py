@@ -2375,6 +2375,9 @@ def _pdf_chunks(
         extraction_stats["page_count"] = int(result.metadata.get("page_count", 0) or 0)
         _pwt = result.metadata.get("pages_with_text")
         extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
+        # RDR-237: the catalog hook records these on the document (see _register_in_catalog).
+        from nexus.pipeline_stages import extraction_record  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        extraction_stats.update(extraction_record(result.metadata))
     window = window_for_collection(collection_name, target_model)  # nexus-spujb, nexus-25wlq
     chunker = (
         PDFChunker(chunk_chars=chunk_chars, token_window=window)
@@ -2561,8 +2564,15 @@ def index_pdf(
     allow_degraded_extraction: bool = False,
     dry_run: bool = False,
     title_override: str = "",
+    on_extraction: Callable[[dict], None] | None = None,
 ) -> int | dict:
     """Index *pdf_path* into a T3 collection.
+
+    *on_extraction* (RDR-237) is called once, after a run that extracted and indexed this PDF,
+    with ``{"extraction_method": str, "extraction_pages": {rung: [1-based pages]}}``: the pages
+    the ladder settled below MinerU's first rung are in ``extraction_pages``, ``{}`` when none.
+    Not called for a run the staleness check skips (nothing was extracted) or one that raises.
+    The run summaries of ``nx index pdf`` and ``nx dt index`` print the degraded pages from it.
 
     By default the collection is ``docs__{corpus}``.  Pass *collection_name*
     to override (e.g. ``knowledge__delos`` for external reference corpora).
@@ -2680,6 +2690,16 @@ def index_pdf(
     # nexus-i0cwh: filled by whichever extraction path runs; surfaced in the
     # return_metadata dict so callers can check page coverage.
     _extraction_stats: dict = {}
+
+    def _report_extraction() -> None:
+        # RDR-237: tell the caller what this run's extraction settled, for its run summary. Only a
+        # run that extracted has the keys (a staleness skip returns before any extraction).
+        if on_extraction is not None and "extraction_pages" in _extraction_stats:
+            on_extraction({
+                "extraction_method": _extraction_stats.get("extraction_method", ""),
+                "extraction_pages": _extraction_stats["extraction_pages"],
+            })
+
     # GH #336 mirror: same local-fallback semantics as ``_index_document``.
     # RDR-152 Seam B (nexus-gmiaf.22): service mode checked FIRST (same
     # ordering fix as _index_document — prevents CredentialsMissingError on
@@ -2968,6 +2988,7 @@ def index_pdf(
             _forks = _check_document_fork(doc_id, col_name)
             if on_fork_detected is not None:
                 on_fork_detected(_forks)
+            _report_extraction()
             if return_metadata:
                 # nexus-w6wp0: query T3 for metadata after streaming upload.
                 # NOT _identity_where's no-hash source_path fallback, which
@@ -3148,9 +3169,21 @@ def index_pdf(
                 corpus=corpus,
                 chunk_count=chunk_count,
                 source_uri=source_uri,
+                # RDR-237: the method and the rung-to-pages map come from the extraction result
+                # (filled into ``_extraction_stats`` by ``_pdf_chunks``), not from the chunks:
+                # the map is document-level and no chunk carries it.
+                extraction={
+                    "extraction_method": _extraction_stats.get("extraction_method", ""),
+                    "extraction_pages": _extraction_stats.get("extraction_pages", {}),
+                },
             )
         except Exception:  # noqa: BLE001 — catalog registration is non-fatal; indexing continues
-            pass  # catalog registration is non-fatal
+            # Non-fatal, but never silent: the document is indexed and its catalog record
+            # (and the extraction method and degraded pages on it) is missing.
+            _log.warning(
+                "register_in_catalog_raised", file_path=str(pdf_path), source_uri=source_uri,
+                collection=col_name, exc_info=True,
+            )
 
     # Extract and chunk the entire document
     now_iso = datetime.now(UTC).isoformat()
@@ -3238,6 +3271,7 @@ def index_pdf(
         _forks = _check_document_fork(doc_id, col_name)
         if on_fork_detected is not None:
             on_fork_detected(_forks)
+        _report_extraction()
         if return_metadata:
             return {
                 "chunks": len(metadatas),
@@ -3413,6 +3447,7 @@ def index_pdf(
     _forks = _check_document_fork(doc_id, col_name)
     if on_fork_detected is not None:
         on_fork_detected(_forks)
+    _report_extraction()
 
     if return_metadata:
         return {

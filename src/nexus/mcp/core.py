@@ -5918,6 +5918,7 @@ def store_get(
         # names the wrong note when two share this text and a deleted one
         # after its writer is removed. Asked by title, show that title;
         # asked by id, name the live documents holding the chunk.
+        holders: list[tuple[str, str]] | None = None  # None: not looked up (asked by title)
         if not looks_like_hash:
             title = doc_id
         else:
@@ -5952,6 +5953,12 @@ def store_get(
             lines.append(f"Indexed:    {indexed_at}")
         if extraction_method:
             lines.append(f"Extractor:  {extraction_method}")
+            # RDR-237: the pages the ladder settled below MinerU's first rung, read from the
+            # catalog document(s) holding this chunk (one line each). Reuses the holders looked up
+            # above; best-effort, so a catalog fault leaves the line out and `get` still answers.
+            from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+            lines.extend(degraded_pages_lines(col_name, entry["id"], holders=holders))
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         if also_titled:

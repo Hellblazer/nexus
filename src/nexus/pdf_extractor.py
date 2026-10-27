@@ -2422,15 +2422,18 @@ class PDFExtractor:
                     entry["doc_page_idx"] = batch_start + entry["page_idx"]
 
         def _append_page(
-            page: int, md: str, content_list: list[dict], pdf_info: list[dict],
+            page: int, md: str, content_list: list[dict], pdf_info: list[dict], method: str,
         ) -> None:
             # Single append point so the batch-success, 1-page-retry, and
             # degrade-to-docling paths produce identical bookkeeping. For
             # batch_size > 1 the success path passes the batch start as `page`;
             # page-number metadata is only exact at batch_size == 1 (the
             # default the streaming pipeline relies on).
+            # RDR-237 (nexus-tr1rj.3): ``page_method`` is the rung this page settled on. It rides
+            # the page's buffer row, so a resumed run can rebuild the document's
+            # ``extraction_pages`` from the pages it did not write itself.
             if on_page is not None:
-                on_page(page, md, {"page_number": page + 1, "text_length": len(md)})
+                on_page(page, md, {"page_number": page + 1, "text_length": len(md), "page_method": method})
             md_parts.append(md)
             _rebase_page_idx(content_list, page)
             all_content_list.extend(content_list)
@@ -2438,7 +2441,7 @@ class PDFExtractor:
             per_page_lengths.append((page, len(md)))
 
         def _append_batch(s: int, md: str, content_list: list[dict],
-                          pdf_info: list[dict], batch_pages: int) -> None:
+                          pdf_info: list[dict], batch_pages: int, method: str) -> None:
             # batch_size>1 success: the batch md covers `batch_pages` pages and
             # we distribute its length uniformly (the only resolution available
             # without per-page md from MinerU). on_page/md_parts/content fire
@@ -2450,6 +2453,7 @@ class PDFExtractor:
                 on_page(s, md, {
                     "page_number": s + 1, "text_length": len(md),
                     "page_numbers": list(range(s + 1, s + 1 + max(1, batch_pages))),
+                    "page_method": method,
                 })
             md_parts.append(md)
             _rebase_page_idx(content_list, s)
@@ -2474,7 +2478,7 @@ class PDFExtractor:
             # (1-based page numbers; the counted pages are always the newest).
             while held and held[0][2].page not in keep:
                 s, text, outcome = held.pop(0)
-                _append_page(s, text, [], [])
+                _append_page(s, text, [], [], outcome.method)
                 outcomes[s] = outcome
 
         def _attempt(
@@ -2542,10 +2546,10 @@ class PDFExtractor:
             table_defects.extend(found)
             elapsed = time.monotonic() - started
             if span <= 1:
-                _append_page(s, md, content_list, pdf_info)
+                _append_page(s, md, content_list, pdf_info, method)
                 outcomes[s] = PageOutcome(s + 1, md, method, elapsed, error)
             else:
-                _append_batch(s, md, content_list, pdf_info, span)
+                _append_batch(s, md, content_list, pdf_info, span, method)
                 for offset in range(span):
                     outcomes[s + offset] = PageOutcome(
                         s + offset + 1, md if offset == 0 else "", method, elapsed / span, error,
@@ -2640,7 +2644,7 @@ class PDFExtractor:
             if page in counting:
                 held.append((s, text, outcome))
             else:
-                _append_page(s, text, [], [])
+                _append_page(s, text, [], [], method)
                 outcomes[s] = outcome
             _progress(f"  MinerU page {page}/{total_pages} settled as {method} ({fname})")
 

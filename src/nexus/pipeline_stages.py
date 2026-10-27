@@ -25,7 +25,7 @@ import json
 import struct
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait, ALL_COMPLETED, FIRST_EXCEPTION
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,6 +89,52 @@ class PipelineCancelled(Exception):
 # ── Stage 1: Extractor ──────────────────────────────────────────────────────
 
 
+def _page_rungs(page_metadata: Any, page_index: int) -> dict[int, str]:
+    """``{1-based page: rung}`` for one page write, from the ``page_method`` the ladder puts in
+    the page metadata (RDR-237). ``{}`` when the metadata carries none (a non-ladder extractor, or
+    a buffer row written before the ladder recorded it). *page_metadata* is the dict ``on_page``
+    gets or a buffer row's ``metadata_json`` (a JSON string or an already-decoded dict).
+    """
+    if isinstance(page_metadata, str):
+        try:
+            page_metadata = json.loads(page_metadata)
+        except ValueError:
+            return {}
+    if not isinstance(page_metadata, dict):
+        return {}
+    method = page_metadata.get("page_method")
+    if not isinstance(method, str) or not method:
+        return {}
+    numbers = page_metadata.get("page_numbers") or [page_metadata.get("page_number", page_index + 1)]
+    return {int(n): method for n in numbers if isinstance(n, int) and not isinstance(n, bool)}
+
+
+def _merge_buffered_provenance(
+    metadata: dict[str, Any], run_rungs: dict[int, str], buffered_rungs: dict[int, str],
+) -> None:
+    """Make a resumed run's ``extraction_pages`` and ``extraction_method`` describe the document.
+
+    A kept-buffer resume re-extracts every page but writes only those the buffer lacks
+    (``extractor_loop``'s ``on_page`` skip), so the chunks come from the BUFFER's text and the
+    ladder's own map describes the current run's attempt, not what was indexed. The rung a page
+    settled on is stored in its buffer row (``page_method``); that rung wins for a page the buffer
+    holds, the current run's for the rest. No-op when the buffer recorded no rung (a first run, a
+    non-ladder extractor, a buffer an older version wrote): the run's own map then stands.
+    """
+    if not buffered_rungs:
+        return
+    from nexus.pdf_extractor import _DEGRADED_METHODS  # noqa: PLC0415 — module-private rung order, shared with the ladder
+    rungs = {**run_rungs, **buffered_rungs}
+    pages = {
+        method: sorted(n for n, r in rungs.items() if r == method)
+        for method in _DEGRADED_METHODS
+        if any(r == method for r in rungs.values())
+    }
+    metadata["extraction_pages"] = pages
+    if metadata.get("extraction_method") in ("mineru", "mineru+degraded"):
+        metadata["extraction_method"] = "mineru+degraded" if pages else "mineru"
+
+
 def extractor_loop(
     pdf_path: Path,
     content_hash: str,
@@ -116,6 +162,9 @@ def extractor_loop(
     # RDR-237: the counter the row held when this run began. The resume checks below can lower
     # ``pages_extracted_at_start`` (a wiped buffer), but a heartbeat must never lower the row.
     row_pages_extracted = pages_extracted_at_start
+    #: The buffer rows a resume found (RDR-237 provenance: each row carries the rung its page
+    #: settled on); empty on a first run.
+    buffered_rows: list[dict[str, Any]] = []
 
     # Resume fast path: if all pages already in buffer, skip extraction.
     if (state and state["total_pages"] is not None
@@ -146,7 +195,8 @@ def extractor_loop(
         # partial/selective clear_orphan_wal, or out-of-order/sparse page
         # writes), this guard must switch to actually verifying index
         # coverage (e.g. the max page_index present), not just a count.
-        actual_pages = len(db.read_pages(content_hash))
+        buffered_rows = db.read_pages(content_hash)
+        actual_pages = len(buffered_rows)
         if actual_pages >= state["total_pages"]:
             stored_meta = json.loads(state["extraction_meta"])
             if extraction_done is not None:
@@ -174,14 +224,18 @@ def extractor_loop(
         # pages_extracted_at_start); when a wipe left a stale counter, this
         # is what stops on_page from skipping pages the retry needs to
         # re-extract.
-        pages_extracted_at_start = len(db.read_pages(content_hash))
+        buffered_rows = db.read_pages(content_hash)
+        pages_extracted_at_start = len(buffered_rows)
 
     #: Pages settled so far, as the counter counts them (a list so ``on_page`` can move it).
     settled = [pages_extracted_at_start]
+    #: The rung each page settled on in THIS run, by 1-based page, skipped pages included.
+    run_rungs: dict[int, str] = {}
 
     def on_page(page_index: int, page_text: str, page_metadata: dict) -> None:
         if cancel.is_set():
             raise PipelineCancelled("pipeline cancelled")
+        run_rungs.update(_page_rungs(page_metadata, page_index))
         if page_index < pages_extracted_at_start:
             return
         db.write_page(content_hash, page_index, page_text, metadata=page_metadata)
@@ -210,6 +264,13 @@ def extractor_loop(
         )
     except PipelineCancelled:
         return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
+
+    # RDR-237 provenance: a resumed run's pages came from the buffer, so the map and method
+    # describe those pages' own rungs, not only this run's attempt (nexus-q6nw0 item 6).
+    buffered_rungs: dict[int, str] = {}
+    for row in buffered_rows:
+        buffered_rungs.update(_page_rungs(row.get("metadata_json"), int(row.get("page_index", 0))))
+    _merge_buffered_provenance(result.metadata, run_rungs, buffered_rungs)
 
     page_count = result.metadata.get("page_count", 0)
     db.update_progress(content_hash, total_pages=page_count)
@@ -920,6 +981,24 @@ def uploader_loop(
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 
+def extraction_record(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The extraction fields the PDF catalog hook records, from an extraction result's metadata.
+
+    ``extraction_method`` is the document-level value (``mineru``, ``mineru+degraded``,
+    ``pymupdf``, or a legacy one), ``""`` when the extractor named none. ``extraction_pages`` is
+    the rung-to-sorted-1-based-pages map of the pages that settled below rung 1, ``{}`` when none
+    did or the extractor reports no map (a non-ladder extractor): the hook writes it on EVERY
+    extraction, because the catalog merge never removes a key and so a clean re-extract can clear
+    an old map only by replacing it with ``{}`` (RDR-237).
+    """
+    meta = metadata or {}
+    raw = meta.get("extraction_pages")
+    pages: dict[str, list[int]] = {}
+    if isinstance(raw, Mapping):
+        pages = {str(rung): sorted(int(p) for p in nums) for rung, nums in raw.items() if nums}
+    return {"extraction_method": str(meta.get("extraction_method") or ""), "extraction_pages": pages}
+
+
 def _catalog_pdf_hook(
     pdf_path: Path,
     collection_name: str,
@@ -929,10 +1008,49 @@ def _catalog_pdf_hook(
     corpus: str = "",
     chunk_count: int = 0,
     source_uri: str = "",
+    extraction: Mapping[str, Any] | None = None,
 ) -> None:
-    """Register PDF document in catalog after successful indexing. Silently skipped if absent."""
+    """Register PDF document in catalog after successful indexing. Silently skipped if absent.
+
+    *extraction* (RDR-237, :func:`extraction_record`) is merged into the catalog document's
+    ``meta`` on BOTH branches, the update of an existing row and the registration of a new one
+    (and the update that follows a registration which resolved onto an existing row, because the
+    engine's register returns that row untouched). ``extraction_pages`` is always written, ``{}``
+    when clean. ``None`` writes nothing.
+
+    Runs that record NO extraction metadata, each with a ``catalog_pdf_extraction_not_recorded``
+    warning that names the document (``reason`` says which):
+
+    - ``no_catalog_reader``: no catalog is reachable (the SQLite opt-out mode, uninitialised).
+    - ``ephemeral_path``: a NEW registration of a file under an agent worktree or system temp
+      directory is refused (an existing row is updated, so it is recorded). The refusal needs an
+      owner with a non-ephemeral ``repo_root``; the curator owners PDFs register under have none,
+      so for them this exit is not reached (``should_skip_ephemeral_registration``'s KNOWN
+      RESIDUAL), and the warning is the net if that changes.
+    - ``hook_failed``: any error in the hook; it is swallowed (the PDF is indexed either way).
+
+    The callers add their own: the streaming pipeline and ``index_pdf`` do not call the hook on a
+    dry run, and ``index_pdf``'s batch-path wrapper logs ``register_in_catalog_raised``.
+    """
     reader = None
     writer = None
+    # Bound before the try so the except handler always has a name to log (resolve() can raise).
+    file_path_str = str(pdf_path)
+    extraction_meta: dict[str, Any] | None = None
+    if extraction is not None:
+        extraction_meta = {"extraction_pages": dict(extraction.get("extraction_pages") or {})}
+        if extraction.get("extraction_method"):
+            extraction_meta["extraction_method"] = str(extraction["extraction_method"])
+
+    def _not_recorded(reason: str) -> None:
+        if extraction_meta is not None:
+            _log.warning(
+                "catalog_pdf_extraction_not_recorded", reason=reason,
+                file_path=file_path_str, source_uri=source_uri, collection=collection_name,
+                extraction_method=extraction_meta.get("extraction_method", ""),
+                extraction_pages=extraction_meta["extraction_pages"],
+            )
+
     try:
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
 
@@ -951,6 +1069,7 @@ def _catalog_pdf_hook(
         reader = make_catalog_reader()
         if reader is None:
             _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized (sqlite opt-out mode)")
+            _not_recorded("no_catalog_reader")
             return
         writer = make_catalog_writer()
         effective_title = title or pdf_path.stem
@@ -1033,6 +1152,11 @@ def _catalog_pdf_hook(
                 update_kwargs["author"] = author
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
+            if extraction_meta is not None:
+                # RDR-237: the service merges meta key by key (jsonb ||), never removing one, so
+                # a clean re-extract clears an old map only because extraction_pages is written
+                # whole here, {} included.
+                update_kwargs["meta"] = extraction_meta
             writer.update(existing.tumbler, **update_kwargs)
             # nexus-t952k (critique [24114] S1): logged AFTER the write, so
             # the claim "repointed" is only made once the row actually moved.
@@ -1075,6 +1199,7 @@ def _catalog_pdf_hook(
                 _record_ephemeral_registration_skip(
                     file_path_str, str(owner), reason="worktree_or_tempdir",
                 )
+                _not_recorded("ephemeral_path")
                 return
             # nexus-yzij1: the lookup above is owner-scoped (and the
             # source_uri leg missed, or there was no URI), so this mint can
@@ -1103,6 +1228,7 @@ def _catalog_pdf_hook(
                 source_mtime=source_mtime,
                 source_uri=source_uri,
                 with_created=True,
+                **({"meta": extraction_meta} if extraction_meta is not None else {}),
             )
             _created = created_from_register_result(_write_result)
             announce_cross_owner_mint(
@@ -1125,10 +1251,17 @@ def _catalog_pdf_hook(
                     target_collection=collection_name, file_path=file_path_str,
                     owner=owner,
                 )
+                if extraction_meta is not None:
+                    # RDR-237: register() returns an existing row untouched (the engine's
+                    # idempotency legs do not merge ``meta``), so the extraction record rides an
+                    # update, as on the ``existing`` branch above.
+                    writer.update(tumbler_from_register_result(_write_result), meta=extraction_meta)
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is
         # invisible to every catalog-routed query. WARNING + audit row.
-        _log.warning("catalog_pdf_hook_failed", exc_info=True)
+        _log.warning("catalog_pdf_hook_failed", file_path=file_path_str, source_uri=source_uri,
+                     collection=collection_name, exc_info=True)
+        _not_recorded("hook_failed")
         from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
 
         record_catalog_hook_failure(
@@ -1921,6 +2054,7 @@ def pipeline_index_pdf(
             # buffer written by an older version): "unverified", never "no pages".
             _pwt = _em.get("pages_with_text")
             extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
+            extraction_stats.update(extraction_record(_em))
 
         # Resolve collection once for all post-passes (avoids repeated API calls).
         col = t3.get_or_create_collection(collection)
@@ -2035,6 +2169,7 @@ def pipeline_index_pdf(
                 corpus=corpus,
                 chunk_count=total_chunks,
                 source_uri=source_uri,
+                extraction=extraction_record(_meta),
             )
 
             # RDR-089 document-grain chain — once per PDF boundary at the

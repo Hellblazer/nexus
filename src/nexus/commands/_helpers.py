@@ -196,6 +196,26 @@ def t2_handle() -> Iterator[Any]:
 # deferred ``from nexus.commands._helpers import ...``).
 
 
+def emit_degraded_pages_summary(degraded: "list[tuple[str, dict[str, list[int]]]]") -> None:
+    """Echo, at the end of an index run, the pages the PDF ladder settled below MinerU's first
+    rung, one line per document: ``  paper.pdf: mineru-no-formula 3,7; pymupdf-text 12``
+    (RDR-237). *degraded* is ``[(document name, extraction_pages)]``; silent when empty.
+    ``nx index pdf`` and ``nx dt index`` share it, and ``nx store get`` prints the same
+    rung/pages text from ``format_degraded_pages``."""
+    import click  # noqa: PLC0415 — deferred: CLI-only dependency, avoids import cost for non-CLI callers of this module
+
+    from nexus.catalog.store_hook import format_degraded_pages  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    if not degraded:
+        return
+    click.echo(
+        f"Degraded pages in {len(degraded)} document(s) "
+        "(MinerU fell back below its first rung; `nx store get` shows them per chunk):"
+    )
+    for name, pages in degraded:
+        click.echo(f"  {name}: {format_degraded_pages(pages)}")
+
+
 def reset_identity_drop_collectors() -> None:
     """Zero the post-store-hook failure collectors for a fresh run.
 
