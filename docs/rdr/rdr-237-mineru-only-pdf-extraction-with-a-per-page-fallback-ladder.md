@@ -72,8 +72,9 @@ nothing would remain between "fully extracted" and "failed".
 
 #### Gap 5: The MinerU server path has no real per-page bound
 
-The MinerU server serves one request at a time and runs each parse in a
-thread it cannot cancel. Nexus gives up on a server request after a fixed
+The MinerU server runs each parse in a thread it cannot cancel, and serves one
+request at a time on macOS and three elsewhere by default (Dependency table).
+Nexus gives up on a server request after a fixed
 300 s, not the configured per-page timeout, and then retries the same page on
 the server before falling back to the killable subprocess path (RF-3). One
 stuck page can therefore hold the run for about 13 minutes with no progress
@@ -140,7 +141,7 @@ beads and T2 records named in each finding; none were re-run for this draft.
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
 | MinerU 3.1.11 `do_parse` | Yes | Takes `formula_enable` and `table_enable` per call (nexus's worker passes both, `pdf_extractor.py:137-138`). |
-| MinerU 3.1.11 `/file_parse` server | Yes | `formula_enable` is a per-request form field (`fast_api.py:839`, passed to the parse at :1023). Requests are serialized by an `asyncio.Semaphore` of 1 (`:103-104`, `:260`); the parse runs in `asyncio.to_thread(do_parse)` (`:1042`), which cannot be cancelled. |
+| MinerU 3.1.11 `/file_parse` server | Yes | `formula_enable` is a per-request form field (`fast_api.py:839`, passed to the parse at :1023). Concurrent requests are capped by an `asyncio.Semaphore` whose size is 1 on macOS and `DEFAULT_MAX_CONCURRENT_REQUESTS` (3, `api_protocol.py:3`) elsewhere unless `MINERU_API_MAX_CONCURRENT_REQUESTS` is set (`fast_api.py:250-260`); the parse runs in `asyncio.to_thread(do_parse)` (`:1042`), which cannot be cancelled. |
 | PyMuPDF | Yes | `page.get_text()` per page is what the formula screen and `_extract_normalized` already use. |
 
 ### Key Discoveries
@@ -235,17 +236,48 @@ document. This is a text-completeness proxy, not a retrieval evaluation.
 a six-page server request at 3, 10 or 30 s did not delay the next one-page request
 (17.8 s, 23.1 s and 25.1 s, against warm one-page baselines of 18.9 s and 33.5 s).
 The server log shows the abandoned job ran to completion: MinerU finishes abandoned
-work rather than cancelling it. A page that never finishes was not tested and would
-still hold the server's single slot. A server restart cost about 30 s of model
-reload (the next page took 48.5 s against 17.8 s).
+work rather than cancelling it. chas is Linux, so this server had three slots
+(Dependency table); the single-slot macOS case was not run. A page that never
+finishes was not tested and would hold one slot until a restart. A server restart
+cost about 30 s of model reload (the next page took 48.5 s against 17.8 s).
+
+**RF-13 (Verified, source; T2 `nexus_rdr/237-research-6`).** The engine's
+`PipelineRepository.updateProgress` sets `updated_at` to now for any non-empty
+field map (`PipelineRepository.java:395-420`), so re-sending an unchanged
+`pages_extracted` stamps the heartbeat; the client's `update_progress` flushes at
+once when no page or chunk batch is pending (`http_pipeline_client.py:378-392`).
+
+**RF-14 (Verified, source; T2 `nexus_rdr/237-research-7`).** `extraction_method` is
+one document-level string, set in `_mineru_build_result` (`pdf_extractor.py:3007`)
+and merged onto every chunk (`pipeline_stages.py:2134`); `nx store get` prints it
+as `Extractor:` (`commands/store.py:540-550`). Chunks are content-addressed, so a
+per-page value cannot live on them. The catalog writer's `update` merges `meta`
+(`store_hook.py:1001-1003`), and the PDF catalog hook already updates the
+document row (`pipeline_stages.py:1004`).
+
+**RF-15 (Verified, source; T2 `nexus_rdr/237-research-8`).** Today's single-page
+retry catches only `RuntimeError` (`pdf_extractor.py:2076`); `MineruMemoryError`
+is a `RuntimeError` (`:215`), `MineruMachineResourceError` is a plain `Exception`
+(`_mineru_health.py:65`) and `MineruWorkerStopped` a `BaseException` (`:165`).
+The quality gate passes an empty text without judging it
+(`pdf_extractor.py:1273-1281`). The Docling doctor row is the only one that checks
+`cv2`, `torch` and `torchvision` (`health.py:2774-2776`). Six call sites require
+or install the PDF stack before any extractor runs (`pdf_extractor.py:1510`,
+`doc_indexer.py:2742`, `commands/index.py:3177` and `:3221`, `commands/dt.py:1098`
+and `:1990`). The page count comes from `len(pdf_info)` (`pdf_extractor.py:2957`).
+`git grep -i docling` finds it in five `.github` files, seven under `scripts/`
+(outside `scripts/spikes` and `scripts/experiments`), 31 under `src/`, nine docs
+outside `docs/rdr`, three under `conexus/`, `mcpb/manifest.json`, three under
+`web/`, `README.md`, `pyproject.toml`, and 68 test files.
 
 ### Critical Assumptions
 
 - [x] A1: MinerU honours `formula_enable=false` per request on the server path
   and per call in the subprocess worker, and the rest of the page (text, layout,
   tables) still extracts. — **Status**: Verified (RF-10) — **Method**: Spike.
-- [x] A2: Restarting the MinerU server frees a slot held by a stuck page, so the
-  next page is not queued behind it. — **Status**: Reframed by RF-12: a client
+- [x] A2 (reframed, not verified as stated): Restarting the MinerU server frees a slot held by a stuck page, so the
+  next page is not queued behind it. — **Status**: Reframed by RF-12, measured on a
+  three-slot server: a client
   timeout did not queue the next page, and a restart costs about 30 s, so the
   design restarts only after two consecutive timeouts (Technical Design, Bounds).
   A page that never finishes is the remaining case, and the restart is its
@@ -280,6 +312,18 @@ The ladder, per page:
 4. **Nothing**: a page with no text layer (an image-only scan) whose earlier
    rungs failed is recorded as unextracted, not silently dropped.
 
+A page descends a rung on a timeout, on `MineruMemoryError`, and on any other
+`RuntimeError` from the worker. `MineruMachineResourceError` (an `Exception`, not
+a `RuntimeError`), `MineruWorkerStopped` and every other `BaseException`, a
+cancelled run included, propagate and stop the document (RF-15).
+
+**Systemic failure.** If three consecutive pages leave rung 1 for the same reason
+(the same exception type and the same leading message line, a timeout counted as
+one reason), the cause is the install or the machine, not the pages: the document
+stops with that reason, and no further page is tried. The threshold is
+`pdf.ladder_breaker` (default 3; 0 turns it off). A document whose every page is
+`unextracted` fails with a named reason rather than indexing nothing.
+
 Docling is removed: code, dependency, configuration value, CLI choice, doctor
 row, CI steps, docs and tests.
 
@@ -295,27 +339,42 @@ that can actually stop work, so it is the path a timed-out page retries on:
   consecutive server timeouts, the sign of a page that will not finish: an
   abandoned request otherwise completes on its own and does not delay the next
   one, and a restart costs about 30 s of model reload (RF-12);
-- `mineru_page_timeout_s` must stay under the 5-minute stale window, so that one
-  page's limit cannot outlast the heartbeat (validated at config load).
+- the longest interval with no progress write is one rung attempt, plus a
+  server restart when one lands inside it. Config load refuses
+  `mineru_page_timeout_s` × `mineru_page_batch` + 30 s above 240 s (the
+  300 s stale window less a 60 s margin). The defaults, 180 s × 1 + 30 s =
+  210 s, pass, and RF-10's slowest cold page (129 s) fits under 180 s.
 
-The worst case for a document is bounded by pages × the sum of the rung limits,
-and is no longer unbounded.
+A page's worst case is rung 1 and rung 2 both timing out, about 360 s, plus about
+30 s if a restart falls in it, plus rung 3's text read; a 300-page book whose every
+page did that would take about 33 hours, which is why the systemic-failure rule
+stops a document after three consecutive pages leave rung 1 for one reason.
 
-**Progress.** Each page writes progress when it settles, whichever rung settled
-it. With one page per batch and the per-page limit under the stale window, a
-live run always writes progress more often than the takeover window allows.
+**Progress.** Each rung attempt opens with a progress write that re-sends the
+current `pages_extracted`, which stamps the heartbeat (RF-13), and each page
+writes progress again when it settles. The longest silent interval is therefore
+one rung attempt plus a restart, which config load keeps under 240 s (Bounds).
 This closes nexus-lqaq1 for the remaining extractor without an engine heartbeat
 route.
 
-**What each page records.** The page's `extraction_method` takes one of
-`mineru`, `mineru-no-formula`, `pymupdf-text` or `unextracted`. The document
-summary counts each kind and the run output names degraded pages. Existing
-values (`docling`, `mineru+docling-degraded`, `pymupdf_normalized`) stay
-readable on documents already indexed.
+**What each document and page records.** `extraction_method` stays one
+document-level value on every chunk (RF-14): `mineru` when every page settled on
+rung 1, `mineru+degraded` when any page settled lower, `pymupdf` for the explicit
+text-only extractor. The per-page detail is a document-level map,
+`extraction_pages`, from rung (`mineru-no-formula`, `pymupdf-text`,
+`unextracted`) to the 1-based page numbers that settled there; it rides the
+extraction result's metadata into the pipeline row's `extraction_meta` for the
+run, and the PDF catalog hook merges it into the catalog document's `meta`, where
+it lasts. `nx store get` prints `Extractor:` as today and a degraded-pages line
+from the catalog document. The run output names degraded pages. Existing values
+(`docling`, `mineru+docling-degraded`, `pymupdf_normalized`) stay readable on
+documents already indexed.
 
 **Configuration and CLI.** `pdf.extractor` and `--extractor` accept `mineru`
 (the default) and `pymupdf`. The values `auto` and `docling`, still present in
-users' configs and scripts, mean `mineru` and print a one-line deprecation notice.
+users' configs and scripts, mean `mineru` and print a one-line deprecation notice
+once per process; the CLI choices keep accepting them, and an invalid config value
+falls back to `mineru` (today it falls back to `auto`, `config.py:184-189`).
 `--on-formula-oom` is retired, since the ladder handles that case.
 
 **`pymupdf`, the explicit text-only extractor (Sam, 2026-10-27).** For a host that
@@ -324,16 +383,25 @@ rung 3 for every page: the PDF's own text layer, with no layout, tables or math.
 Pages are stamped `pymupdf-text`, an image-only page is `unextracted`, and the run
 names the extractor in its summary so the result is never mistaken for a MinerU
 extraction. It needs only PyMuPDF, a core dependency, so it works without the
-`pdf` extra. It is never chosen automatically.
+`pdf` extra: the six stack gates (`pdf_extractor.py:1510`, `doc_indexer.py:2742`,
+`commands/index.py:3177` and `:3221`, `commands/dt.py:1098` and `:1990`) take the
+extractor and neither require nor install the stack for `pymupdf`, and it skips
+the MinerU server probe (`commands/index.py:3242`). It is never chosen
+automatically.
 
 **No MinerU at all.** With the default `mineru`, a missing MinerU fails the run
 at once and names both fixes: install the PDF stack (`pdf_stack` already words
 this) or rerun with `--extractor pymupdf` for text only. It does not degrade every
 page to its text layer on its own.
 
-**Title.** Title resolution falls back from `docling_title` to the next source
-already in the chain (`pdf_title`, then filename); documents that carry a
-`docling_title` keep it.
+**Title.** The resolution chain (`indexer_utils.py:644-675`) loses its first
+step, `docling_title`, and keeps the rest (`pdf_title`, the first heading, then
+the filename). MinerU and the PyMuPDF path already write an empty
+`docling_title`, so only the key and its read go; documents that carry one keep it.
+
+**Page count.** The document's page count and page boundaries come from the
+PDF's own page total and the per-page outcomes, not from the length of MinerU's
+`pdf_info` (`pdf_extractor.py:2957`), which a degraded page leaves short.
 
 ```text
 // Illustrative: the per-page outcome the ladder returns
@@ -348,9 +416,9 @@ PageOutcome(page: int, text: str, method: "mineru" | "mineru-no-formula"
 | Per-page MinerU run | `_extract_with_mineru`, `_mineru_run_isolated`, `_mineru_run_subprocess` (bisect to one page) | Reuse; the ladder wraps the single-page settle. |
 | Rung 2 | `_degrade_page_to_docling` (RDR-148 Gap 5) | Replace: same one-page shape, MinerU with formulas off. |
 | Rung 3 | `_extract_normalized` (whole-document PyMuPDF) | Extend to one page. |
-| Server timeout and recovery | `_mineru_run_via_server`, `_restart_mineru_server` | Extend: per-page timeout; a timed-out page leaves the server for the next rung; restart only after two consecutive timeouts (RF-12). |
+| Server timeout and recovery | `_mineru_run_via_server`, `_restart_mineru_server` | Extend: per-page timeout; a timed-out page leaves the server for the next rung and does not mark the server down; two consecutive pages whose rung-1 server attempt timed out trigger one restart through `_restart_mineru_server`, inside its existing budget (`_MINERU_MAX_RESTARTS`, 2 per extractor, `pdf_extractor.py:2442`) and machine-wide cooldown; with the budget spent, the server is marked down as today. A restart ends peers' in-flight requests on the shared server, which recover through their own connection-error path. |
 | Missing-stack message | `pdf_stack.require` / `missing_message` | Reuse; drop Docling from `STACK_DISTS`/`STACK_MODULES`. |
-| Doctor | `health._check_pdf_support`, `_check_docling_importable` | Remove the Docling row; keep the PDF-support and MinerU rows. |
+| Doctor | `health._check_pdf_support`, `_check_docling_importable` | Retarget the Docling row to MinerU's pipeline modules (`mineru`, `cv2`, `torch`, `torchvision`), which it is the only check for (`health.py:2774-2776`); reword the MinerU server row, which says "math PDFs". |
 | Quality gate | `PDFExtractor.extract` gate | Reuse; run per document as today. |
 
 ### Decision Rationale
@@ -411,11 +479,12 @@ the install, CI and tests; Docling's whole-document convert stays silent.
 
 ### Risks and Mitigations
 
-- **Risk**: MinerU's non-math output is worse than Docling's for some PDFs (A3).
-  **Mitigation**: the A3 spike before acceptance; if it fails, revisit with Sam.
-- **Risk**: `formula_enable=false` does not behave as expected (A1).
-  **Mitigation**: the A1 spike; without it, rung 2 is dropped and rung 3 takes
-  formula failures.
+- **Risk**: MinerU's non-math output is worse than Docling's for some PDFs (A3,
+  verified only by proxy in RF-11). **Mitigation**: the MVV documents; a retrieval
+  regression found later is taken back to Sam.
+- **Risk**: `formula_enable=false` behaves differently on another platform or
+  MinerU release (A1, verified on chas with 3.1.11). **Mitigation**: the MinerU
+  pin; the MVV runs on the laptop.
 - **Risk**: users scripted `--extractor docling` or `--on-formula-oom docling`.
   **Mitigation**: `docling` maps to `mineru` with a notice; `--on-formula-oom`
   stays accepted and ignored for one release, with a notice.
@@ -425,8 +494,12 @@ the install, CI and tests; Docling's whole-document convert stays silent.
 - MinerU absent: the run fails at once with the install command (visible).
 - A page settles on rung 3 or 4: the run output names it and the document
   summary counts it (visible); the page is searchable by its text layer or not at all.
-- The MinerU server wedges: the page times out, the server restarts, the page
-  moves to the subprocess path (logged with the page number).
+- The MinerU server wedges: the page times out and moves to the subprocess path
+  at the next rung; a second consecutive timeout restarts the server (logged with
+  the page numbers).
+- MinerU is installed but broken (a module that fails to import, missing weights):
+  three consecutive pages fail rung 1 for that reason and the document stops with
+  it, instead of indexing every page as text.
 
 ## Implementation Plan
 
@@ -440,36 +513,51 @@ the install, CI and tests; Docling's whole-document convert stays silent.
 On the laptop, with Docling uninstalled, index three PDFs end to end: the
 Grossberg & Stone 1986 scan (RF-1), the 19-page paper that hung Docling for
 9 h 40 min (nexus-73pvi), and the 300-page TCoDEVONthink manual (RF-2). Each
-finishes within its page bound, writes progress at least once a minute, keeps
-the equations RF-1 found, and names any degraded page. Repeat one with a page
-forced to fail on rungs 1 and 2 to show rung 3 settle it.
+finishes within its page bound, keeps the equations RF-1 found, and names any
+degraded page. Repeat one with a page forced to time out on rungs 1 and 2, to show
+rung 3 settle it and the longest gap between progress writes stay under 240 s.
 
 ### Phase 1: Code Implementation
 
 #### Step 1: The ladder
 
 Per-page outcome type; rung 2 (MinerU without formulas) and rung 3 (one-page
-PyMuPDF text); per-page `extraction_method`; summary counts and named pages.
-Tests first, with a fake MinerU that fails on chosen pages and rungs.
+PyMuPDF text); the descend-or-propagate rule and the systemic-failure rule; the
+document-level `extraction_method` and the `extraction_pages` map in the result
+metadata, merged into the catalog document's `meta` by the PDF hook; page count
+from the page total; `nx store get`'s degraded-pages line. Tests first, with a fake
+MinerU that fails on chosen pages and rungs.
 
 #### Step 2: Bounds
 
 Server timeout from `mineru_page_timeout_s`; a timed-out page goes to the next
-rung on the subprocess path; config validation keeps the page limit under the
-stale window.
+rung on the subprocess path; the restart rule; a progress write at the start of
+each rung attempt; config load refuses `mineru_page_timeout_s` ×
+`mineru_page_batch` + 30 s above 240 s.
 
 #### Step 3: Remove Docling
 
-Router, Docling code paths, `pdf_stack` entries, doctor row, constraints pins,
-the `pdf` extra entry, CI priming and verify steps, `--on-formula-oom`; `auto`
-and `docling` become aliases with a notice; title fallback; docs and size text;
-tests (delete Docling tests, retarget routing tests to the ladder).
+Router, Docling code paths, `pdf_stack` entries, constraints pins, the `pdf`
+extra entry, `--on-formula-oom`; the doctor row retargeted; `auto` and `docling`
+become aliases with a notice; the six stack gates made extractor-aware for
+`pymupdf`; recovery and help text that points at Docling (`commands/index.py`,
+`commands/dt.py`, the quality-gate remedy in `pdf_extractor.py`); title chain;
+docs and size text. The surface, by `git grep -i docling` (RF-15): `.github`
+(the `prime-docling` action, `ci.yml`, the nightly local-service gate,
+`dependency-drift-watch.yml`, `prime-mineru` comments), `scripts/`
+(`ci_warm_docling.py` and six others), 31 files under `src/`, nine docs outside
+`docs/rdr`, three `conexus/` files, `mcpb/manifest.json`, three `web/` files,
+`README.md`, `pyproject.toml`, and 68 test files. CI: unit tests that assert real
+Docling extraction become fake-backed, and the Docling non-vacuity step is
+replaced by one that extracts a one-page fixture through real MinerU, primed by
+the existing `prime-mineru` action.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Per-page `extraction_method` on chunks | N/A | In scope: the document summary and `nx store get` show it | N/A | In scope: doctor or a query counts degraded pages | N/A |
+| `extraction_pages` on the catalog document's `meta`, and the document-level `extraction_method` on chunks | In scope: `nx search --where extraction_method=mineru+degraded` lists chunks of degraded documents | In scope: `nx store get` and `nx catalog show` print the degraded pages | N/A: deleted with the document | In scope: a re-extract (`nx index pdf --force`) rewrites both | N/A: rebuilt by re-extraction |
+| Documents extracted before this RDR (`docling`, `mineru+docling-degraded`) | In scope: `--where extraction_method=docling` or `=mineru+docling-degraded` | N/A | N/A | N/A | N/A; `nx index pdf --force` re-extracts any the user chooses |
 
 ### New Dependencies
 
@@ -491,13 +579,26 @@ None. Docling (`docling-slim` and its three companions) is removed.
   is restarted once and later pages use it again.
 - **Scenario**: MinerU not installed — **Verify**: immediate failure naming both
   fixes (install the PDF stack, or `--extractor pymupdf`), no page extracted.
-- **Scenario**: `--extractor pymupdf` without the `pdf` extra installed —
-  **Verify**: every page with a text layer is `pymupdf-text`, image-only pages are
-  `unextracted`, MinerU is never started, and the summary names the extractor.
+- **Scenario**: `--extractor pymupdf` with the PDF stack genuinely absent —
+  **Verify**: no stack install is attempted, every page with a text layer is
+  `pymupdf-text`, image-only pages are `unextracted`, MinerU is never started or
+  probed, and the summary names the extractor.
 - **Scenario**: `pdf.extractor: docling` in config — **Verify**: runs MinerU, one notice.
-- **Scenario**: `mineru_page_timeout_s` set to the stale window or more —
-  **Verify**: refused at config load.
-- **Scenario**: a long document — **Verify**: progress written at least every page.
+- **Scenario**: `mineru_page_timeout_s` × `mineru_page_batch` + 30 s above 240 s —
+  **Verify**: refused at config load; the defaults pass.
+- **Scenario**: a page times out on rungs 1 and 2 — **Verify**: it settles
+  `pymupdf-text`, and the longest gap between progress writes stays under 240 s.
+- **Scenario**: three consecutive pages fail rung 1 with the same import error —
+  **Verify**: the document stops with that reason; no later page is tried.
+- **Scenario**: every page is `unextracted` — **Verify**: the document fails with a
+  named reason.
+- **Scenario**: the run is cancelled while a page is on rung 2 — **Verify**: the
+  cancel propagates; no page is degraded by it.
+- **Scenario**: a degraded middle page — **Verify**: the page count and the page
+  numbers of later pages are right.
+- **Scenario**: a document with degraded pages — **Verify**: chunks carry
+  `mineru+degraded`, the catalog document's `meta` carries `extraction_pages`, and
+  `nx store get` prints the pages.
 
 ## Validation
 
@@ -510,7 +611,7 @@ takeover window. The MVV runs real MinerU on the three named PDFs.
 ### Performance Expectations
 
 The per-page costs are RF-1, RF-2 and RF-4; this RDR measures the three MVV
-documents on the laptop and chas before acceptance.
+documents on the laptop and chas before the RDR closes.
 
 ## Finalization Gate
 
@@ -527,8 +628,10 @@ is the reason the restart now waits for a second consecutive timeout. Gap 5's
 13-minute worst case comes from that retry logic in nexus, not from the server
 queueing work, which RF-12 did not observe; the two do not conflict.
 
-No other contradictions found between research findings, design principles, and
-proposed solution.
+Gate round 1 found two more: the Progress paragraph claimed a bound the default
+limits did not give, and per-page `extraction_method` had no valid storage. Both
+are fixed in the Technical Design (Bounds, Progress, What each document and page
+records).
 
 ### Assumption Verification
 
@@ -602,3 +705,4 @@ a candidate for trimming.
 - 2026-10-27: draft.
 - 2026-10-27: research RF-8 to RF-12; A2 reframed, so a server timeout no longer restarts the server unless it repeats.
 - 2026-10-27: Q1 answered by Sam: `--extractor pymupdf` added as an explicit text-only choice.
+- 2026-10-27: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); commit `ddacb282b`; critique `nexus_rdr/237-gate-critique-2026-10-27-r1`.
