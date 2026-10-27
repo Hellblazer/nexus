@@ -277,6 +277,11 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     "scripts/bench/paths.py": (
         2, "READ-ONLY: nx_answer import (telemetry-only write, not catalog/T3 debris).",
     ),
+    "scripts/bench/rdr232_extract_measure.py": (
+        1, "READ-ONLY: the hit is a docstring naming nx_answer; the script calls only "
+           "_nx_answer_request_coverage (no answer, no store_put / index / collection path), reads nx_answer_runs "
+           "and the plan list, and refuses to run with NX_ALLOW_PROD_WRITE set.",
+    ),
     "scripts/bench/synthesis_tier_study.py": (
         2, "READ-ONLY: line 238 dispatches summarize/generate/compare/aggregate via "
            "getattr(core, fn_name) -- all read-only operator_* tools.",

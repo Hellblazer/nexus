@@ -137,10 +137,20 @@ def _alternative_exists(
     return False
 
 
+def question_key(text: str) -> str:
+    """The key a question is deduplicated and overridden by (case-folded text)."""
+    return text.casefold()
+
+
 def classify_rows(
     rows: Sequence[Any], plans: Iterable[Mapping[str, Any]],
+    kind_override: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Replay *rows* against *plans* and return the report (no I/O; the unit of the tests).
+
+    *kind_override* maps :func:`question_key` to a request kind that replaces the deterministic reading (the
+    kind a structured extraction produced, nexus-jypmj.2.8); such a request is reported with the
+    ``model-assisted`` decision. ``None`` (the default) is the deterministic replay and changes nothing.
 
     Raises :class:`NoRowsExamined` when no row survives the skips.
     """
@@ -170,12 +180,15 @@ def classify_rows(
             handoffs += 1
         plan = plans_by_id[row["plan_id"]]
         coverage = derive_request_coverage(_row_text(row))
-        kind = coverage.answer_kind
+        kind, decision = coverage.answer_kind, coverage.kind_decision
+        overridden = kind_override.get(question_key(_row_text(row))) if kind_override else None
+        if overridden is not None:
+            kind, decision = overridden, "model-assisted"
         admitted, reason, standing = judge(kind, plan)
         bucket = _bucket(standing)
-        distinct.add(_row_text(row).casefold())
+        distinct.add(question_key(_row_text(row)))
         kinds[kind] += 1
-        decisions[coverage.kind_decision] += 1
+        decisions[decision] += 1
         if needs_structured_extract(coverage):
             structured_candidates += 1
         rk = by_request_kind.setdefault(kind, Counter())
@@ -199,7 +212,7 @@ def classify_rows(
             alt["excluded_with_library_alternative" if has_alt else "excluded_without_library_alternative"] += 1
         detail.append({
             "run_id": row.get("id"), "created_at": row.get("created_at"), "plan_id": row["plan_id"],
-            "request_kind": kind, "kind_decision": coverage.kind_decision, "plan_bucket": bucket,
+            "request_kind": kind, "kind_decision": decision, "plan_bucket": bucket,
             "plan_kind": standing.kind.value, "admitted": admitted, "reason": reason,
             "library_alternative": has_alt,
         })
