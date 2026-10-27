@@ -2897,9 +2897,10 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     which would hide the gate from every test that drives ``nx_answer``. So the setting stays at its default and
     the dispatch refuses the extraction operator (``request_coverage_extract``): the call fails the way a
     per-request failure does (outcome ``error``, the gate keeps enforcing) and every other operator reaches the
-    real ``claude_dispatch``. A test about the extraction patches ``nexus.operators.dispatch.claude_dispatch``
+    real ``claude_dispatch``, except the Phase 3 coverage assessment (an ``operator_check`` call), which is refused
+    the same way. A test about the extraction patches ``nexus.operators.dispatch.claude_dispatch``
     itself, which replaces this guard for the test. The switches are cleared so a developer's exported
-    ``NX_ANSWER_KIND_ELIGIBILITY=0`` or ``NX_ANSWER_STRUCTURED_EXTRACT=0`` cannot change what a test sees, and the
+    ``NX_ANSWER_KIND_ELIGIBILITY=0``, ``NX_ANSWER_STRUCTURED_EXTRACT=0`` or ``NX_ANSWER_COVERAGE=0`` cannot change what a test sees, and the
     process-wide memos of the gate (library check, warnings) start empty."""
     import functools  # noqa: PLC0415 — test-only import
 
@@ -2909,12 +2910,20 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("NX_ANSWER_STRUCTURED_EXTRACT", raising=False)
     monkeypatch.delenv("NX_ANSWER_KIND_ELIGIBILITY", raising=False)
+    monkeypatch.delenv("NX_ANSWER_COVERAGE", raising=False)
     real = _dispatch.claude_dispatch
 
     @functools.wraps(real)
     async def _guarded(*args, **kwargs):
         if kwargs.get("operator") == "request_coverage_extract":
             raise RuntimeError("a unit test must not make the live structured extraction call; patch claude_dispatch")
+        # RDR-232 Phase 3 (nexus-jypmj.3.3): nx_answer now hands the runner a coverage boundary, whose facet
+        # assessment is an operator_check call. A unit test that drives the real runner with its own operator stubs
+        # must not reach a live model through it either: the call fails the way an assessor outage does (state
+        # unassessed). A test about the assessment stubs the dispatcher or patches claude_dispatch, as the ledger tests do.
+        prompt = str(args[0]) if args else str(kwargs.get("prompt", ""))
+        if kwargs.get("operator") == "operator_check" and "Coverage assessment. For each facet listed below" in prompt:
+            raise RuntimeError("a unit test must not make the live coverage assessment call; stub the dispatcher or patch claude_dispatch")
         return await real(*args, **kwargs)
 
     monkeypatch.setattr(_dispatch, "claude_dispatch", _guarded)

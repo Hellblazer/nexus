@@ -11677,6 +11677,13 @@ def _non_answer_prefix() -> str:
     return NON_ANSWER_NOTICE_PREFIX
 
 
+def _insufficient_evidence_prefix() -> str:
+    """``INSUFFICIENT_EVIDENCE_NOTICE_PREFIX``, imported on first use (RDR-232 nexus-jypmj.3.3)."""
+    from nexus.plans.answer_shape import INSUFFICIENT_EVIDENCE_NOTICE_PREFIX  # noqa: PLC0415 — deferred: only reached when a notice is composed
+
+    return INSUFFICIENT_EVIDENCE_NOTICE_PREFIX
+
+
 #: RDR-200 §Telemetry (nexus-4e75w.5). Handoff-row marker — the SAME
 #: "a stable prefix, followed by call-specific detail" convention as
 #: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX`` above. Written by
@@ -12331,10 +12338,12 @@ async def nx_answer(
         if not _extra_text:
             _text = text
         elif text.startswith(
-            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix())
+            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix(), _insufficient_evidence_prefix())
         ):
             # The tool contract: a degraded text answer STARTS with its
-            # marker. Both markers keep the leading position and the extra
+            # marker. The markers (budget exhausted, non-answer, and the
+            # partial answer's insufficient-evidence notice, RDR-232
+            # nexus-jypmj.3.3) keep the leading position and the extra
             # notices (budget warnings, dropped reduce steps, evidence-
             # request disclosures) follow.
             _text = f"{text}\n{_extra_text}"
@@ -12428,8 +12437,12 @@ async def nx_answer(
             # or one of the non-answer shapes (hydration_dump,
             # extractions_only, ranking_only, operator_payload, retrieval_only, listing,
             # empty), or, set by _error_result (nexus-f9kxd), error /
-            # planner_error / no_evidence. A caller must not read final_text
-            # as prose unless this is "answered". None on the remaining
+            # planner_error / no_evidence. RDR-232 Phase 3 (nexus-jypmj.3.3)
+            # adds "insufficient_evidence" (a partial answer: the text opens
+            # with the [insufficient-evidence: <n> unresolved] notice, then the
+            # prose) and "uncovered" (evidence that covered no facet; a
+            # non-answer). A caller must not read final_text as prose unless
+            # this is "answered" or "insufficient_evidence". None on the remaining
             # unclassified paths: the single-step fast path, a continuation
             # handoff, and the budget-exhausted marker (which carries its
             # own prefix).
@@ -13624,6 +13637,22 @@ async def nx_answer(
     _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle, deadline=deadline)
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream
+    # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage boundary, built from the inputs this call already holds (the
+    # ones `_evidence_diagnostics_now` hands build_evidence_diagnostics) and given to the runner, which assesses the
+    # terminal reduction's evidence before dispatching it. It rides `_plan_run_kwargs`, so the continuation
+    # fallback re-run below gets the same one. NX_ANSWER_COVERAGE=0 passes none: every run is then unassessed and
+    # this call is what it was before Phase 3. The single_query fast path never gets here (no reduction).
+    from nexus.plans.switches import coverage_enabled as _coverage_enabled  # noqa: PLC0415 — deferred; matches this module's convention
+
+    if _coverage_enabled(_os.environ):
+        from nexus.plans.coverage_ledger import CoverageBoundary as _CoverageBoundary  # noqa: PLC0415 — deferred; matches this module's convention
+        from nexus.plans.evidence import ScopeConstraint as _ScopeConstraint  # noqa: PLC0415 — as above
+
+        _plan_run_kwargs["coverage_boundary"] = _CoverageBoundary(
+            request=_request_coverage, scope=_ScopeConstraint.parse(scope), named_sources=_named_sources,
+            primary=_primary_evidence, lifecycle=_lifecycle, owner_resolution=_evidence_request.owner.to_wire(),
+            dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
+        )
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline
     # RDR-196 .p3c (nexus-nyry9.21) D5: same "only pass when set"
@@ -14171,9 +14200,21 @@ async def nx_answer(
         NON_ANSWER_SHAPES as _NON_ANSWER_SHAPES,
         classify_answer_shape as _classify_answer_shape,
         render_non_answer_notice as _render_non_answer_notice,
+        AnswerShape as _AnswerShape,
     )
+    from nexus.plans.coverage_outcome import decide_outcome as _decide_outcome, render_insufficient_evidence as _render_insufficient_evidence  # noqa: PLC0415 — deferred: plan path only
 
-    _shape = _classify_answer_shape(final_text)
+    # RDR-232 Phase 3 (nexus-jypmj.3.3): the post-generation half of the coverage-state table. The boundary
+    # decided the state before generation; what generation returned decides whether a usable answer exists, and
+    # this verdict is the one place the result's answer_shape, the plan counter outcome, the no-grow flag and the
+    # final coverage state come from. `unassessed` (no boundary, the switch off, an assessor outage) is today's
+    # behaviour unchanged. `result` is read here, after any continuation fallback re-run replaced it.
+    _verdict_coverage = getattr(result, "coverage", None)
+    _verdict_coverage = _verdict_coverage if isinstance(_verdict_coverage, _CoverageResult) else None
+    _verdict = _decide_outcome(_verdict_coverage, _classify_answer_shape(final_text))
+    if _verdict.coverage is not _verdict_coverage:
+        _run_summary.observe_final_coverage(_verdict.coverage)  # the summary counts the state the call returned
+    _shape = _verdict.shape
     _answer_shape = _shape.value
     if _shape in _NON_ANSWER_SHAPES:
         _log.info(
@@ -14238,6 +14279,14 @@ async def nx_answer(
     # no counter arithmetic, only the record-vs-outcome POST order the
     # census below pins (residual 8).
 
+    # RDR-232 Phase 3 (nexus-jypmj.3.3): a partial answer is returned, with the marker notice ahead of it naming
+    # the facets the evidence did not settle. It counts as a success (the matcher's always-failing skip must not
+    # retire a plan that usually covers five of six facets) and is never grown (`_verdict.no_grow`, below).
+    if _shape is _AnswerShape.INSUFFICIENT_EVIDENCE and _verdict.coverage is not None:  # only ever decided from a coverage result
+        final_text = _render_insufficient_evidence(
+            _verdict.coverage, {f.id: f.text for f in _request_coverage.facets}, final_text,
+        )
+
     _log.info(
         "nx_answer_complete",
         plan_id=best.plan_id,
@@ -14260,8 +14309,8 @@ async def nx_answer(
     _saved_grown_plan_id = 0
     # RDR-232 (nexus-jypmj.1.8): a reserved stream can carry an answer past the empty-retrieval guard above, but
     # that is the caller's evidence, not the plan's. A plan whose own retrieval steps found nothing is still
-    # never grown (nexus-yg49g).
-    if best.plan_id == 0 and not _nx_answer_is_empty_retrieval(result.steps):
+    # never grown (nexus-yg49g). Nor is a partial answer (RDR-232 nexus-jypmj.3.3): the no-grow flag is the verdict's.
+    if best.plan_id == 0 and not _verdict.no_grow and not _nx_answer_is_empty_retrieval(result.steps):
         ttl_days = _load_ad_hoc_ttl()
         if ttl_days > 0:
             try:

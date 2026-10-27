@@ -442,6 +442,10 @@ def _nx_answer_envelope(art, scope, bindings, *, strategy: tuple[str, str] | Non
     patches = [
         patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True),
         patch("nexus.operators.dispatch.claude_dispatch", no_model),
+        # nexus-jypmj.3.3: with the coverage boundary on, the run assesses the reducer's input (one operator_check
+        # call) before it hands off. This journey is Phase 1's (what the reducer is handed), so the Phase 3 check is
+        # off for it; the coverage journey is nexus-jypmj.3.10's.
+        patch.dict("os.environ", {"NX_ANSWER_COVERAGE": "0"}),
     ]
     if strategy is not None:
         match = g.library_match(lib, art.text, scope=scope, bindings=bindings,

@@ -436,6 +436,19 @@ class RunSummaryRecorder:
         # An isinstance, not a duck check: a test double's unconfigured attribute is a truthy stand-in.
         self._coverage = coverage if isinstance(coverage, CoverageResult) else None
 
+    def observe_final_coverage(self, coverage: Any) -> None:
+        """Replace the assessment with the same result at the state the call RETURNED.
+
+        The boundary decides the state before generation; two rows of RDR-232 section 4's table depend on what
+        generation returned (a ``partial`` or ``complete`` ledger whose prose is no usable answer is
+        ``unavailable``; nexus-jypmj.3.3), and the summary must count the state the caller saw. A value that is
+        not a ``CoverageResult`` is ignored.
+        """
+        from nexus.plans.coverage_ledger import CoverageResult  # noqa: PLC0415 — deferred, as in observe_plan_result
+
+        if isinstance(coverage, CoverageResult):
+            self._coverage = coverage
+
     @property
     def returned_coverage_state(self) -> str:
         if self._coverage is not None:

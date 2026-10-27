@@ -761,15 +761,16 @@ async def test_scenario_1_under_the_real_default_dispatcher_the_repair_evidence_
 
 
 def _handoff_patches(boundary: CoverageBoundary, check, generated: list):
-    """The patch set the continuation tests of ``test_nx_answer.py`` use, plus a ``plan_run`` that adds the
-    boundary (``nx_answer`` builds one only from nexus-jypmj.3.3 on)."""
+    """The patch set the continuation tests of ``test_nx_answer.py`` use, plus a ``plan_run`` that runs with the
+    boundary the test chose. ``nx_answer`` builds its own from nexus-jypmj.3.3 on (from the request it derives for
+    the question); the test's replaces it, so the facets and sources are the test's."""
 
 
     texts = {_h(t): t for t in (*VECTOR_TEXTS, REPAIR_TEXT)}
     real_plan_run = runner.plan_run
 
     async def with_boundary(match, bindings=None, **kw):
-        return await real_plan_run(match, bindings, coverage_boundary=boundary, **kw)
+        return await real_plan_run(match, bindings, **{**kw, "coverage_boundary": boundary})
 
     async def stub_search(**kwargs):
         return _structured([REPAIR_TEXT] if kwargs["query"].startswith("what the document") else VECTOR_TEXTS, RDR_COLL)
@@ -851,7 +852,9 @@ async def test_a_skipped_generation_is_not_handed_off_and_does_not_rerun_the_pla
 
 
 @pytest.mark.asyncio
-async def test_a_hand_off_without_a_boundary_has_a_null_coverage() -> None:
+async def test_a_hand_off_without_a_boundary_has_a_null_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    # nexus-jypmj.3.3: nx_answer builds a boundary unless the switch is off, so "without a boundary" is the switch.
+    monkeypatch.setenv("NX_ANSWER_COVERAGE", "0")
 
     generated: list = []
 

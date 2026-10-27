@@ -5215,7 +5215,11 @@ class TestContinuationGoLive:
             "the prefix's real extract StepRecord must be visible to "
             "the fallback-decision event"
         )
-        assert events[0]["fallback_redispatch_step_count"] == 1
+        # RDR-232 Phase 3 (nexus-jypmj.3.3): nx_answer now hands the runner a coverage boundary, which assesses the
+        # terminal step's input before the cut. The summarize step's literal `content` is evidence it can read, so
+        # the prefix-only run made one assessment call (the unit-test guard refuses the live model, so it failed)
+        # and that call is a second billable record the fallback re-run pays for again.
+        assert events[0]["fallback_redispatch_step_count"] == 2, "the extract step plus the coverage assessment call"
 
 
 class TestContinuationGoLiveMidPrefixFailure:

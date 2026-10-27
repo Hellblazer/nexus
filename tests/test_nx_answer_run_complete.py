@@ -1015,7 +1015,7 @@ class TestHandoffArmUseCountInvariant:
     @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_handoff_arm_against_supporting_engine_keeps_use_count_equal_to_outcomes(
-        self,
+        self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Against the self-provisioned engine substrate (autouse
         _pin_t2_substrate) with /complete supported, drive an nx_answer
@@ -1030,6 +1030,9 @@ class TestHandoffArmUseCountInvariant:
         from nexus.mcp_infra import t2_ctx
         from nexus.plans.match import Match
 
+        # nexus-jypmj.3.3: the question names "rdr-203", which does not resolve here, so with the coverage boundary
+        # on the run would end as an `uncovered` non-answer instead of reaching the hand-off arm this test is about.
+        monkeypatch.setenv("NX_ANSWER_COVERAGE", "0")
         plan_json = json.dumps({
             "steps": [
                 {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},

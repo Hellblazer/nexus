@@ -91,8 +91,27 @@ class TestStructuralAndTextRules:
 
 
 class TestVocabulary:
-    def test_answered_is_the_only_answer(self) -> None:
-        assert set(AnswerShape) - NON_ANSWER_SHAPES == {AnswerShape.ANSWERED}
+    def test_answered_and_insufficient_evidence_are_the_two_shapes_that_carry_prose(self) -> None:
+        # RDR-232 section 4 (nexus-jypmj.3.3): a partial answer is still returned, so INSUFFICIENT_EVIDENCE is
+        # outside NON_ANSWER_SHAPES (that set also means success=False and a notice in place of the prose).
+        assert set(AnswerShape) - NON_ANSWER_SHAPES == {AnswerShape.ANSWERED, AnswerShape.INSUFFICIENT_EVIDENCE}
+
+    def test_uncovered_is_a_non_answer_distinct_from_no_evidence(self) -> None:
+        # Sam's ruling (nexus-jypmj.3.12): evidence that covered no facet is not "zero retrieval results".
+        assert AnswerShape.UNCOVERED in NON_ANSWER_SHAPES
+        assert AnswerShape.UNCOVERED is not AnswerShape.NO_EVIDENCE
+        notice = render_non_answer_notice(AnswerShape.UNCOVERED, plan_id=7, step_count=4, chunk_refs=["rdr__1-1 chash:ab"])
+        assert notice.startswith(NON_ANSWER_NOTICE_PREFIX + " uncovered]")
+        assert "rdr__1-1 chash:ab" in notice
+        # The head must hold whether generation was skipped or its prose was withheld afterwards, so it says
+        # why there is no answer and never claims that nothing was reduced.
+        assert "none of it covered a requested part of the question" in notice
+        assert "Nothing was reduced" not in notice
+
+    def test_classify_never_produces_the_coverage_decided_shapes(self) -> None:
+        # Like PLANNER_ERROR / ERROR / NO_EVIDENCE, these are set by nx_answer from the coverage state, never from text.
+        for text in ("[insufficient-evidence: 1 unresolved]\nprose", "[non-answer: uncovered] x", "plain prose"):
+            assert classify_answer_shape(text) is AnswerShape.ANSWERED
 
     def test_notice_carries_prefix_shape_and_plan_id(self) -> None:
         notice = render_non_answer_notice(AnswerShape.HYDRATION_DUMP, plan_id=488, step_count=6)
