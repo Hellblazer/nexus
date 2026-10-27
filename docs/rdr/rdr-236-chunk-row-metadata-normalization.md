@@ -1474,7 +1474,9 @@ this lands.
   array of the lower-cased, dot-stripped extension for code and prose (what
   `code_indexer` and `prose_indexer` write, RF-23; rdr files are `.md`, so
   the markdown rule covers them), NULL for knowledge and for a file with no
-  extension. A document with no
+  extension (the indexers write the empty string there, `ext.lstrip(".")`
+  of an empty suffix, so the fixture pin reads "" and NULL as equal,
+  RF-24). A document with no
   extension to read (DEVONthink records keep their on-disk file_path,
   RF-20, so they have one) comes out NULL and is counted by the Step 3
   precondition before the row fallback goes.
