@@ -12,7 +12,9 @@ It is not installed with `conexus`. Nothing changes for anyone who does not inst
 
 The `nexus-plugins` marketplace is the one `conexus` and `sn` come from; add it first with `/plugin marketplace add Hellblazer/nexus` if you have not.
 
-prose-edit keeps its memory (rejections, voice cards, example passages, the run log) in Nexus T2 through the `nx` command, so it needs Nexus installed and its service reachable. The `conexus` plugin's `/conexus:setup` does that. Each person's memory lives in the T2 that person's `nx` points at.
+prose-edit keeps its memory (rejections, voice cards, example passages, the run log) in Nexus T2 through the `nx` command, so it needs Nexus installed and its service reachable: install the `conexus` plugin first (`/plugin install conexus@nexus-plugins`) and run its `/conexus:setup`, and keep the two plugins on the same release. Each person's memory lives in the T2 that person's `nx` points at; two people on one Nexus tenant share the user-level style sheet.
+
+It runs on macOS and Linux, not Windows. The marked-up copy of a document opens in a viewer on macOS; elsewhere the run prints its path.
 
 ## Set up
 

@@ -338,7 +338,9 @@ def treatments_from_lists(lists: Obj) -> dict[str, list[str]]:
     return out
 
 
-MEMORY_CMD = f"python3 {MEMORY}"  # the prefix the skill's allowed-tools rule matches, with the plugin root filled in
+# The prefix the skill's allowed-tools rule matches once the plugin root is filled in: the path as the script was
+# started, not resolved, so a plugin root reached through a symlink still prints the text the rule names.
+MEMORY_CMD = f"python3 {Path(os.path.abspath(__file__)).parent / 'memory.py'}"
 
 
 def _remove_cmd(where: str, kind: str, entry: str) -> str:
@@ -449,7 +451,8 @@ def site_layer(site_page: Path, target: str | None = None, genre: str | None = N
     query-only or note-only; a document's own record can list them too (`target` names the document), and for a
     rule both treat the document's entry wins, so one essay can ignore or query a rule the genre applies.
     `genre` drops the rules that do not apply to it (GENRE_DROPS); None keeps every rule."""
-    repo_sheet = memory_json(["entries", "--level", "repo"])
+    # --path picks the repository (memory.py anchors on it) when the document is in another checkout
+    repo_sheet = memory_json(["entries", "--level", "repo", *(["--path", target] if target and target != "-" else [])])
     treatments = treatments_from_lists(cast(Obj, repo_sheet.get("lists") or {}))
     narrower: list[tuple[str, dict[str, list[str]], str]] = []
     if target and target != "-":
@@ -1440,8 +1443,11 @@ def cmd_setup() -> Obj:
         unmapped: dict[str, int] = {}
         for f in (f for f in listed.split("\0") if f):
             if _MEM.genre_for(f, override) is None:
+                # a genre_map entry is a prefix: "<folder>/" covers a folder, and a file at the root needs its own
+                # name, since no prefix reaches the root alone
                 folder = Path(f).parent.as_posix()
-                unmapped[folder] = unmapped.get(folder, 0) + 1
+                key = f if folder == "." else folder + "/"
+                unmapped[key] = unmapped.get(key, 0) + 1
         out["no_genre"] = dict(sorted(unmapped.items(), key=lambda kv: (-kv[1], kv[0])))
     return out
 

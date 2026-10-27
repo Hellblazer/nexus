@@ -17,6 +17,7 @@ from pathlib import Path
 
 from tests.prose_edit.conftest import ROOT, SCRIPT, Prose, git
 from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok, run_brief, seed
+from tests.prose_edit.test_review import DOC, E1, E2, review_ok, start
 
 PLUGIN = ROOT / "prose-edit"
 
@@ -114,20 +115,44 @@ def test_a_repository_without_a_site_page_builds_a_how_to_brief_with_no_site_lay
     assert gone.returncode == 1 and "no site-page style sheet" in gone.stderr
 
 
-def test_setup_lists_the_folders_no_genre_reaches_and_drops_one_once_mapped(
+def test_setup_lists_what_no_genre_reaches_as_keys_a_genre_map_entry_takes(
     prose: Prose,
 ) -> None:
     (prose.cwd / "notes").mkdir()
     (prose.cwd / "notes" / "a.md").write_text("a\n", encoding="utf-8")
     (prose.cwd / "notes" / "b.md").write_text("b\n", encoding="utf-8")
-    git(prose.cwd, "add", "notes")
+    (prose.cwd / "README.md").write_text("r\n", encoding="utf-8")
+    git(prose.cwd, "add", "notes", "README.md")
     report = json.loads(brief_ok(prose, "setup"))
     assert report["nexus"]["found"] is True and report["t2"] == {"reachable": True}
-    assert report["no_genre"] == {
-        "notes": 2
-    }  # docs/x.md is top-level docs, a reference-doc by default
+    # docs/x.md is top-level docs, a reference-doc by default; a root file is keyed by its own name, since no
+    # folder prefix reaches the root
+    assert report["no_genre"] == {"notes/": 2, "README.md": 1}
     assert report["site_page"] is False
-    seed(prose, "repo", lists={"genre_map": ["notes/=how-to"]})
+    entries = [f"{key}=how-to" for key in report["no_genre"]]
+    seed(prose, "repo", lists={"genre_map": entries})
     mapped = json.loads(brief_ok(prose, "setup"))
     assert mapped["no_genre"] == {}
-    assert mapped["genre_map"]["repo"] == ["notes/=how-to"]
+    assert mapped["genre_map"]["repo"] == entries
+    for doc in ("notes/a.md", "README.md"):
+        assert prose.ok("genre-for", doc)["genre"] == "how-to", doc
+
+
+def test_a_worktree_document_is_filtered_rendered_applied_and_logged_in_that_worktree(
+    prose: Prose,
+) -> None:
+    wt = _worktree(prose)
+    doc = wt / "docs" / "s.md"
+    work, _ = start(prose, wt, [E1, E2], target=str(doc))
+    done = review_ok(
+        prose, "apply", "--work", str(work), "--accept", "1", "--reject", "2"
+    )
+    assert [a["n"] for a in done["applied"]] == [1] and done["rejected"] == [2]
+    assert doc.read_text(encoding="utf-8") == DOC.replace(
+        "It really is quite simple.", "It is simple."
+    )
+    assert not (
+        prose.cwd / "docs" / "s.md"
+    ).exists()  # the session's own checkout is untouched
+    stored = prose.ok("rejections", str(doc))
+    assert [r["old"] for r in stored["rejections"]] == ["Basically it is ordered."]

@@ -70,7 +70,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # Same roots as the file-IO lint: shipped Python, then the tests the Windows
 # CI job runs, read from the pin on that job's list so the two cannot drift.
-SCAN_ROOTS: tuple[str, ...] = ("src/nexus", "conexus", "sn") + tuple(
+SCAN_ROOTS: tuple[str, ...] = ("src/nexus", "conexus", "sn", "prose-edit") + tuple(
     dict.fromkeys(entry.split("::")[0].rstrip("/") for entry in WINDOWS_TEST_SET)
 )
 

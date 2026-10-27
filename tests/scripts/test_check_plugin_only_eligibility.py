@@ -784,6 +784,7 @@ _SHAPE_FILES = [
     "conexus/.claude-plugin/plugin.json",
     "sn/.claude-plugin/plugin.json",
     "tool-spill/.claude-plugin/plugin.json",
+    "prose-edit/.claude-plugin/plugin.json",
     "mcpb/manifest.json",
     "mcpb/pyproject.toml",
     "pyproject.toml",

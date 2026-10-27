@@ -92,10 +92,20 @@ def test_setup_reports_only_the_rule_the_user_settings_lack(prose: Prose) -> Non
         "allow"
     ]
     (config / "settings.json").write_text(
-        json.dumps({"permissions": {"allow": [first[0], "Bash(ls:*)"]}}),
+        json.dumps(
+            {
+                "permissions": {"allow": [first[0], "Bash(ls:*)"]},
+                "env": {"CANARY_TOKEN": "canary-value-7f3a"},
+            }
+        ),
         encoding="utf-8",
     )
-    report = json.loads(brief_ok(prose, "setup"))
+    before = (config / "settings.json").read_bytes()
+    out = brief_ok(prose, "setup")
+    report = json.loads(out)
+    # only the computed rules come back: nothing else in the file is printed, and the file is left as it was
+    assert "canary" not in out.lower() and "Bash(ls:*)" not in out
+    assert (config / "settings.json").read_bytes() == before
     assert report["allow_rules"]["settings_found"] is True
     assert report["allow_rules"]["missing"] == [first[1]]
     assert report["t2"] == {"reachable": True}

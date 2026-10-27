@@ -493,7 +493,7 @@ def test_the_skill_never_lets_the_model_pick_a_genre_and_the_agent_greps_by_glob
     row = next(ln for ln in skill.splitlines() if ln.strip().startswith("| exit 1, stderr contains `no genre`"))
     assert "Never choose a genre yourself." in row and "End your turn with that question" in row
     agent = _agent()
-    assert "Pass each entry as the Grep `glob`, with `path` left at the repository root." in agent
+    assert "Pass each entry as the Grep `glob`, with `path` set to the repository root" in agent
 
 
 def test_a_failed_helper_stops_the_model_without_naming_an_action_to_avoid() -> None:

@@ -59,7 +59,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 # that writes a fixture in cp1252 fails against code that now reads UTF-8,
 # which is how the first push of this sweep went red on Windows (30 tests in
 # tests/daemon/, seeding unit files whose templates carry an em dash).
-SCAN_ROOTS: tuple[str, ...] = ("src/nexus", "conexus", "sn") + tuple(
+SCAN_ROOTS: tuple[str, ...] = ("src/nexus", "conexus", "sn", "prose-edit") + tuple(
     dict.fromkeys(entry.split("::")[0].rstrip("/") for entry in WINDOWS_TEST_SET)
 )
 
