@@ -513,9 +513,46 @@ the engine's budget for such calls.
   (E3, F25), so the per-claimant cap of 4 is untouched. Headroom
   `(32 - 9 - 1) / 32` is 69 percent against the 25 percent floor: one extra
   park per active tenant fits, and `NX_TUPLE_PARK_CAP_GLOBAL` stays as it is
-  before activation. The counters are per JVM; the instance count was not
-  recorded, and the v0.1.166 redeploy (stop then start) resets them.
+  before activation. The counters are per process; the cloud runs one
+  engine process (a single native-binary container, no replicas), so the
+  reading covers the whole cloud, and the v0.1.166 redeploy (stop then
+  start) resets them.
   *Source: research-32, research-27; src/nexus/health.py `_check_tuple_park_slots`; TupleRepository.java `parkStats`*
+- **✅ Verified** (measurement, 2026-10-27, nexus-5r2sc.1.4) — F28, A2. The
+  manifest reassembly is an acceptable extraction input for a multi-piece MCP
+  note, so E2's identity-only body stands. Method: 19 real notes (RDR and
+  docs/agents prose, 1 to 11 KB) stored through the `store_put` writer into a
+  `knowledge__` collection on a throwaway local engine (bge, 512-token window,
+  so 9 to 11 KB notes split into 6 to 8 pieces), two adversarial notes among
+  them (one with a whole piece repeated three times, one in CRLF with blank
+  lines at both ends); 18 extracted both ways with the real model
+  (claude-haiku-4-5 through `claude -p`, general-prose-v1, 36 calls): side A
+  the original content as `fire_document` passes it, side B the worker's
+  empty-content path (`extract_aspects("", ...)` with the catalog `doc_id` and
+  manifest lookups). Text: the rebuilt text is the original plus one blank
+  line per piece boundary and nothing else (19 of 19); joining the pieces by
+  manifest position with nothing between is byte-equal to the original (19 of
+  19); the repeated piece collapses to one copy (4 manifest rows, 2 distinct
+  chunk hashes, 2,328 of 5,868 characters rebuilt). Aspects: the same fields
+  populated on both sides for 18 of 18 (`problem_formulation`,
+  `proposed_method`, `salient_sentences`, empty `datasets` and `baselines`,
+  same extractor and model version); confidence differs by 0.03 on average,
+  0.08 at most; the free-text fields differ in wording on every note, the
+  five one-piece notes (byte-identical input on both sides) included, and
+  their wording distance (difflib 0.42 / 0.26 / 0.12 on the three fields)
+  equals the multi-piece group's (0.44 / 0.23 / 0.16), so the variation is the
+  model's, not the separators'. `experimental_results` came back empty on
+  side B for three notes, two of them one-piece. Read by hand, the pairs
+  carry the same facts in different sentences, the collapsed note included.
+  Two consequences: a regression test for this path compares field presence
+  and facts, never strings (the prose extractor is nondeterministic); and
+  F17's byte-equality claim holds for the nothing-between join by manifest
+  position only, while the `aspect_readers` rebuild the worker runs adds the
+  separators and drops repeated identical pieces, which is harmless here.
+  Not covered: a paper-shaped note routed to `scholarly-paper-v1` (no MCP
+  note in the sample was paper-shaped). Nothing changes for the producer
+  (3.2) or worker (3.3) beads.
+  *Source: research-33; T2 nexus/rdr235-prerequisites; src/nexus/aspect_readers.py `_gather_chroma_chunks_by_field`; src/nexus/catalog/store_hook.py `note_pieces`*
 
 ### Critical Assumptions
 
@@ -527,10 +564,14 @@ the engine's budget for such calls.
   1,000 delayed rows packed at the head of the queue (5.3 ms at 10,000). No
   index serves the arm; E1 ships the column alone. **Method**: Spike (EXPLAIN
   on a seeded tenant).
-- [ ] **A2**: A task can carry the document's identity instead of its text,
+- [x] **A2**: A task can carry the document's identity instead of its text,
   and the text the worker gets by the existing empty-content contract (the
   document reassembled from T3 chunks through the catalog manifest, F7) is an
-  acceptable input for aspect extraction. **Status**: Re-scoped at gate round 1.
+  acceptable input for aspect extraction. **Status**: Verified (F28, measured
+  2026-10-27): 18 multi-piece and one-piece MCP notes extracted both ways with
+  the real model give the same fields and facts, and the one-piece control
+  shows the wording variation is the model's. Before that, re-scoped at gate
+  round 1.
   The contract is read in source (aspect_extractor.py:1518-1525), and it is
   what a CLI-indexed document gets today, because the CLI paths pass empty
   content (aspect_worker.py:1586-1588). What is not settled is the MCP path.
@@ -538,10 +579,9 @@ the engine's budget for such calls.
   note stored in several pieces the reassembled text joins the pieces with a
   blank line (aspect_readers.py:517), while the MCP content is the pieces joined
   with nothing (F17), so the model would see a different text from today's.
-  Inferred by comparing the two reads, not run. **Method**: Source Search. The
-  settling check is to extract a sample of multi-piece notes both ways and
-  compare the aspect rows; it has not run. `document_text(doc_id)` is not part
-  of this assumption any more (F17).
+  That difference is now measured and does not change the aspects (F28).
+  **Method**: Source Search, then measurement. `document_text(doc_id)` is not
+  part of this assumption any more (F17).
 - [x] **A3**: An aspect-specific template can have a larger `max_live_rows`,
   a longer retention and its own attempt cap, without changing the sweep or
   the doctor rows for other queues. **Status**: Verified (F18). The doctor's
@@ -1500,3 +1540,4 @@ so the question is not reopened without new evidence.
 - 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `798dd7b75`; critique `nexus_rdr/235-gate-critique-2026-10-27-r2`.
 - 2026-10-27: A1 settled by the EXPLAIN spike (nexus-5r2sc.1.1): F26 added, A1 marked verified, E1 ships no index.
 - 2026-10-27: A4b settled by the busy-hour park-slot reading (nexus-5r2sc.1.2): F27 added, A4 (b) marked verified, no park-cap change before activation.
+- 2026-10-27: A2 settled by the two-way extraction sample (nexus-5r2sc.1.4): F28 added, A2 marked verified, the identity-only body stands.
