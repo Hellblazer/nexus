@@ -415,12 +415,15 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
 
 - [ ] **A1 — explicit answer-kind metadata and conservative request routing can
   improve eligibility without material recall loss.** **Status**: Partially
-  verified (research 6). **Method**: Source Search plus executed prototype
+  verified (research 6, 22). **Method**: Source Search plus executed prototype
   fixture using the real matcher. The gate passed 14/14 eligible and 0/3
   wrong-shape cases, with correct unknown routing and few-shot exclusion.
-  Production matcher/core integration and natural-language request-kind
-  inference remain unverified; the small labeled fixture is not a live recall
-  estimate. Store kind in `plan_json`, never dimensions; decode legacy absence
+  Phase 2 (2026-10-27) verified production integration on every matcher
+  branch and the planner few-shots, and request-kind inference with Haiku
+  extraction (Key Discoveries; research 22, 23). Still open: the fall in
+  wrong-shape admission is in-sample only (held-out 1 of 29 before and
+  after), and the directional rule admits synthesis plans for lookups
+  (nexus-jypmj.11). Store kind in `plan_json`, never dimensions; decode legacy absence
   or invalid metadata as `unknown`; apply eligibility on every matcher branch
   and planner few-shot selection.
 - [ ] **A2 — ordered manifests plus content-derived, document-scoped section
@@ -452,9 +455,9 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   unverified; that sub-leg's private-test write-guard opt-in was denied by the
   permission classifier and was not executed.
 
-- [ ] **A5 — deterministic-first request extraction can produce kind, facets,
+- [x] **A5 — deterministic-first request extraction can produce kind, facets,
   and project-qualified sources without silent narrowing.** **Status**:
-  Partially verified (research 10, corrected by review). **Method**: Source
+  Verified (research 10, corrected by review; research 23). **Method**: Source
   Search plus bounded extraction spike and real owner/catalog reads. The
   question's opening synthesis cue classified correctly and the splitter
   returned seven clauses, including topic and constraint clauses. It did not
@@ -462,10 +465,13 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   its absolute path, which resolved owner 1.2 and ART RDR-084 tumbler
   1.2.4686; the recorded question contains no `ART` token, so qualifier
   extraction was not proven. The MVV therefore requires an explicit owner or
-  project binding. Prototype heuristics needed fixture corrections, and
-  general inference, ambiguity fallback, optional structured extraction
-  cost, and the active-project tier (the only path that fixes the call as
-  filed) remain unverified.
+  project binding. Phase 2 (2026-10-27) verified general inference with
+  Haiku structured extraction (27 of 29 held-out; 0 of 112 calls failed;
+  about 0.002 USD and 4 s a call), the ambiguity fallback, and the
+  active-project tier live on the unmodified RDR-084 call (research 23).
+  Still open: compound single-paper questions are lookups only because Haiku
+  departs from the extraction prompt; the prompt and `_weak_lookup` are
+  aligned with the approved lookup definition in nexus-jypmj.13.
 - [ ] **A6 — traversal can apply scope before its chunk cap without losing
   alignment.** **Status**: Partially verified (research 10). **Method**: Source
   Search plus synthetic graph fixture with >300 out-of-scope ids preceding
@@ -1646,7 +1652,8 @@ The evaluation has three layers:
 2. **Golden-set comparison**: report the baseline and new eligible-plan recall,
    wrong-shape admission, source/facet coverage, and scope leakage. Ship only
    if wrong-shape admission and scope leakage fall without a material loss of
-   eligible-plan recall on lookup fixtures.
+   eligible-plan recall on lookup fixtures. For Phase 2 this was measured
+   in-sample only; see Phase 2 step 6, "As run".
 3. **Live canary**: rerun a small, labeled set including ART RDR-084 against the
    actual service, compare structured evidence and final answers, and record
    model/latency/cost. This complements rather than replaces deterministic
