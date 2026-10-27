@@ -13715,7 +13715,17 @@ async def nx_answer(
     # when it is being handed off"). Every other call (continuation
     # False/None, a non-handoff-eligible cut, or go-live not armed) skips
     # this block entirely and reaches Step 5 exactly as before.
-    if _continuation_engaged:
+    # RDR-232 Phase 3 (nexus-jypmj.3.2): a coverage boundary that skipped generation (nothing covered, even after
+    # its one repair) leaves a COMPLETE run -- the cut did not fire -- so there is nothing to hand off and no
+    # fallback re-run. ``isinstance`` rather than ``getattr``: a MagicMock result has a truthy ``coverage``.
+    from nexus.plans.coverage_ledger import CoverageResult as _CoverageResult  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.repair_stream import RepairSupplement as _RepairSupplement, supplement_scope  # noqa: PLC0415 — as above
+
+    _run_coverage = getattr(result, "coverage", None)
+    _run_coverage = _run_coverage if isinstance(_run_coverage, _CoverageResult) else None
+    _run_supplement = getattr(result, "repair_supplement", None)
+    _run_supplement = _run_supplement if isinstance(_run_supplement, _RepairSupplement) else None
+    if _continuation_engaged and not (_run_coverage is not None and _run_coverage.skip_generation):
         _continuation_envelope: "dict | None" = None
         # CR-Important-1 / critic-F1 (T2 [23951]/[23952], both reviewers
         # reproduced live): on ANY of the four fallback triggers below
@@ -13751,12 +13761,15 @@ async def nx_answer(
             # same reserved stream and the caller-side reduction sees the same evidence.
             from nexus.plans.reserved_stream import reserved_scope  # noqa: PLC0415 — rare/branch-local path
 
-            with reserved_scope(_reserved_stream), reducer_input_scope(_reducer_recorder):
+            # nexus-jypmj.3.2: and the repair evidence the boundary merged, so the hand-off prompt holds what the
+            # ledger assessed; the envelope carries the same coverage state a headless run would report.
+            with reserved_scope(_reserved_stream), supplement_scope(_run_supplement), reducer_input_scope(_reducer_recorder):
                 _continuation_envelope = assemble_continuation_envelope(
                     cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
                     step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
                     prefix_may_redispatch=_prefix_may_redispatch,
                     prefix_redispatch_step_count=_prefix_redispatch_step_count,
+                    coverage=None if _run_coverage is None else _run_coverage.to_wire(redact=not trace),
                 )
         except Exception as exc:  # noqa: BLE001 — a broken reconstruction must never strand a call whose prefix already stopped short of the suffix — falls back exactly like an assembly-returns-None case
             _log.warning(

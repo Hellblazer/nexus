@@ -52,10 +52,20 @@ pre-check) and by :data:`ASSESSMENT_CALL_TIMEOUT_S`, and it is not started when 
 calls are ``StepRecord``s past the plan's own step indices, so the shared USD accumulator and the
 ``nx_answer_steps`` primary key see them without a new step source.
 
-Re-entry (nexus-jypmj.3.2, the one repair): ``evaluate(view, prior=result)`` keeps the prior covered and
-contradicted findings, reassesses only the facets still ``unsupported`` or ``unassessed`` against the
-view's (merged) anchors, adds one round, and sums the assessment counts. Facets in
-:attr:`CoverageResult.repair_facet_ids` are the ones a targeted retrieval can still help.
+The one repair (nexus-jypmj.3.2): :meth:`CoverageBoundary.run` is ``evaluate`` plus at most one repair, and
+it is what the runner calls. When the first ledger has facets in :attr:`CoverageResult.repair_facet_ids`
+(assessed, nothing held bears on them), the boundary retrieves for them (:mod:`nexus.plans.coverage_repair`:
+primary source and explicit scope first, deterministic queries, bounded allowance and USD), asks the runner
+to merge the new chunks into the reduction's input (:mod:`nexus.plans.repair_stream`) and to hand back the
+input it now holds, and recomputes the ledger once with ``evaluate(view, prior=result)``. The skip decision
+is made on that final ledger, so a ledger that covers nothing still gets its repair first.
+
+Re-entry: ``evaluate(view, prior=result)`` keeps the prior covered and contradicted findings whose evidence
+the new input still holds, reassesses a repairable gap against the NEW anchors only (the old ones were
+already read for it), reassesses anything else not known against all of them, adds one round, and sums the
+assessment counts. Evidence ids are stable across the two rounds (:func:`build_anchors` ``known``). A
+reassessment that fails or is skipped leaves the first ledger in force for the facets it was known for: the
+result is ``partial`` (or ``complete``), not ``unassessed`` (RDR section 4).
 
 Redaction: the wire forms carry ids, states and counts; evidence text is never in them, and the source
 labels (the caller's wording) are dropped when ``redact`` is set.
@@ -82,6 +92,23 @@ from nexus.plans.evidence_diagnostics import (
     active_recorder,
     build_evidence_diagnostics,
 )
+from nexus.plans.coverage_repair import (
+    MAX_REPAIR_ITEMS,
+    MAX_REPAIR_QUERIES,
+    MIN_REPAIR_QUERY_S,
+    REPAIR_RESULTS_PER_QUERY,
+    REPAIR_RETRIEVAL_SHARE,
+    RepairHit,
+    RepairOutcome,
+    RepairReport,
+    RepairTarget,
+    build_repair_queries,
+    planned_reassessment_calls,
+    repair_allowance,
+    unresolved_note,
+    usd_affordable,
+)
+from nexus.plans.repair_stream import RepairSupplement, SupplementItem, active_supplement
 from nexus.plans.request_coverage import Facet, RequestCoverage
 from nexus.plans.reserved_stream import ReservedStream, active_reserved_stream, strip_source_note
 
@@ -233,9 +260,14 @@ class AssessmentReport:
     detail: str = ""
 
     def merged_with(self, later: AssessmentReport) -> AssessmentReport:
-        """The sum of two rounds; the later round's outcome and detail stand."""
+        """The sum of two rounds; the later round's outcome and detail stand, except that a later round that
+        failed or was skipped after an earlier round made calls is a ``partial_failure`` (the first ledger
+        stands), not a failure of the whole assessment."""
+        outcome: AssessmentOutcome = later.outcome if later.outcome != "not_attempted" else self.outcome
+        if later.outcome in ("failed", "skipped_deadline", "skipped_budget") and self.calls > 0 and self.outcome in ("ok", "partial_failure"):
+            outcome = "partial_failure"
         return AssessmentReport(
-            outcome=later.outcome if later.outcome != "not_attempted" else self.outcome,
+            outcome=outcome,
             calls=self.calls + later.calls, facets_per_call=self.facets_per_call + later.facets_per_call,
             streams=tuple(dict.fromkeys(self.streams + later.streams)),
             rejected_records=self.rejected_records + later.rejected_records,
@@ -281,6 +313,7 @@ class CoverageResult:
     reason: str
     skip_generation: bool
     ledger: CoverageLedger
+    repair: RepairReport = field(default_factory=RepairReport)
 
     @property
     def repair_facet_ids(self) -> tuple[str, ...]:
@@ -302,6 +335,9 @@ class CoverageResult:
             "facets_required": len(self.ledger.findings), "facets": by_state, "anchors": len(self.ledger.anchors),
             "rounds": self.ledger.rounds, "assessment_outcome": a.outcome, "assessment_calls": a.calls,
             "facets_per_call": list(a.facets_per_call), "rejected_records": a.rejected_records,
+            "repair_outcome": self.repair.outcome, "repair_facets": len(self.repair.facet_ids),
+            "repair_queries": self.repair.queries, "repair_items_found": self.repair.items_found,
+            "repair_items_merged": self.repair.items_merged, "repair_noted_facets": self.repair.noted_facets,
         }
 
     def to_wire(self, *, redact: bool = False) -> dict[str, Any]:
@@ -314,11 +350,16 @@ class CoverageResult:
             "scope": None if led.scope is None else {
                 "state": led.scope.state, "detail": "" if redact else led.scope.detail, "conflict_steps": list(led.scope.conflict_steps)},
             "assessment": led.assessment.to_wire(),
+            "repair": self.repair.to_wire(),
         }
 
 
 #: The async call the boundary makes for one assessment: ``(args, timeout=...) -> the operator's reply``.
 CheckCall = Callable[..., Awaitable[Mapping[str, Any]]]
+#: One repair retrieval call: ``(tool, args, timeout=...) -> the tool's structured output``.
+RetrieveCall = Callable[..., Awaitable[Mapping[str, Any]]]
+#: The repair's chunk fetch: ``(hits, timeout=...) -> the chunks' texts with provenance``.
+FetchCall = Callable[..., Awaitable[Sequence[SupplementItem]]]
 
 
 @dataclass
@@ -331,6 +372,14 @@ class BoundaryView:
     ``check`` performs one assessment call through the runner's dispatcher and accounts for it;
     ``remaining_seconds`` / ``remaining_usd`` return what is left of the answer's deadline and USD allowance
     (``None`` for no limit).
+
+    The five optional fields are the repair's (nexus-jypmj.3.2); a view without them cannot repair
+    (outcome ``unavailable``). ``retrieve(tool, args, timeout=...)`` and ``fetch(hits, timeout=...)`` run one
+    retrieval call or the chunk fetch through the runner's dispatcher, as accounted ``sql`` steps.
+    ``install_supplement(items)`` hands the new chunks to the runner's merge and ``rehydrate()`` re-reads the
+    terminal reduction's input with them merged, returning ``(texts, observed)``. ``install_note(text)`` hands
+    it the coverage note that names the unresolved facets to the generation (also read through ``rehydrate``).
+    ``assessment_cost_estimate()`` is the mean known cost of the assessment calls so far, or ``None``.
     """
 
     evidence_texts: Sequence[str]
@@ -343,6 +392,12 @@ class BoundaryView:
     remaining_seconds: Callable[[], float | None]
     remaining_usd: Callable[[], float | None]
     terminal_step: int | None = None
+    retrieve: RetrieveCall | None = None
+    fetch: FetchCall | None = None
+    install_supplement: Callable[[Sequence[SupplementItem]], None] | None = None
+    rehydrate: Callable[[], tuple[list[str], bool]] | None = None
+    install_note: Callable[[str], None] | None = None
+    assessment_cost_estimate: Callable[[], float | None] = lambda: None
 
 
 # ── anchors ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -350,15 +405,22 @@ class BoundaryView:
 
 def build_anchors(
     texts: Sequence[str], *, step_outputs: Sequence[Any], tools: Sequence[str], reserved: ReservedStream | None,
+    known: Mapping[str, str] | None = None, supplement: RepairSupplement | None = None,
 ) -> tuple[EvidenceAnchor, ...]:
     """The typed anchors for *texts*, in order, deduplicated by text.
 
     Provenance follows ``evidence_diagnostics``: a reserved item carries its own stream, collection and
-    document; any other text is attributed by the hash of its content (a retrieval step's ``ids`` and
-    ``chunk_text_hash`` are chunk hashes). A text no retrieval step produced is ``other``, kind
-    ``unattributed``, and its chash is the hash of its text.
+    document; a repair-supplement item carries the stream, collection and document it was retrieved from; any
+    other text is attributed by the hash of its content (a retrieval step's ``ids`` and ``chunk_text_hash``
+    are chunk hashes). A text no retrieval step produced is ``other``, kind ``unattributed``, and its chash
+    is the hash of its text.
+
+    *known* maps a text to the ``item_id`` an earlier round gave it, so the ids a first ledger cited stay
+    valid in the second; any other text takes the next free id after the highest known one.
     """
     by_text = {i.text: i for i in reserved.items} if reserved is not None else {}
+    known = known or {}
+    next_n = 1 + max((int(v[1:]) for v in known.values() if v[1:].isdigit()), default=0)
     index: dict[str, tuple[str, str, str]] = {}
     for i, out in enumerate(step_outputs):
         if not isinstance(out, Mapping):
@@ -385,7 +447,10 @@ def build_anchors(
         if not isinstance(text, str) or not text or text in seen:
             continue
         seen.add(text)
-        item_id = f"e{len(anchors) + 1}"
+        item_id = known.get(text)
+        if item_id is None:
+            item_id = f"e{next_n}"
+            next_n += 1
         held = by_text.get(text)
         if held is not None:
             is_t2 = held.stream == "t2"
@@ -394,6 +459,12 @@ def build_anchors(
                 collection=held.collection, tumbler="" if is_t2 else held.doc_id,
                 t2_record_id=held.token if is_t2 else "", source=held.source, content=text,
             ))
+            continue
+        repaired = supplement.provenance(text) if supplement is not None else None
+        if repaired is not None:
+            anchors.append(EvidenceAnchor(
+                item_id, repaired.stream, "chunk", repaired.chash or hashlib.sha256(strip_source_note(text).encode("utf-8")).hexdigest(),
+                repaired.collection, repaired.tumbler, "", "", text))
             continue
         digest = hashlib.sha256(strip_source_note(text).encode("utf-8")).hexdigest()
         found = index.get(digest)
@@ -464,7 +535,8 @@ class CoverageBoundary:
     ``request`` is the Phase 2 :class:`RequestCoverage`; ``None`` is a run that reached the boundary with
     none (state ``unassessed``). ``scope``, ``named_sources``, ``primary``, ``lifecycle``, ``owner_resolution``
     and ``dropped_scope`` are the inputs ``nx_answer`` already holds for ``build_evidence_diagnostics``.
-    ``skip_generation_when_uncovered`` is the one switch on the destructive rule (decision b); the other
+    ``skip_generation_when_uncovered`` is the one switch on the destructive rule (decision b);
+    ``max_repair_queries`` is the repair's (nexus-jypmj.3.2): ``0`` switches the repair off. The other
     fields are the tunables the module docstring names.
     """
 
@@ -476,6 +548,8 @@ class CoverageBoundary:
     owner_resolution: Mapping[str, Any] | None = None
     dropped_scope: str = ""
     skip_generation_when_uncovered: bool = True
+    max_repair_queries: int = MAX_REPAIR_QUERIES
+    max_repair_items: int = MAX_REPAIR_ITEMS
     max_facets_per_call: int = MAX_FACETS_PER_ASSESSMENT_CALL
     call_timeout_s: float = ASSESSMENT_CALL_TIMEOUT_S
     deadline_share: float = ASSESSMENT_DEADLINE_SHARE
@@ -535,14 +609,19 @@ class CoverageBoundary:
 
     async def evaluate(self, view: BoundaryView, *, prior: CoverageResult | None = None) -> CoverageResult:
         """Build the ledger for *view* and compute the state. Never raises for an assessment failure."""
-        anchors = build_anchors(view.evidence_texts, step_outputs=view.step_outputs, tools=view.tools, reserved=active_reserved_stream())
+        known = {a.content: a.item_id for a in prior.ledger.anchors} if prior is not None else None
+        anchors = build_anchors(
+            view.evidence_texts, step_outputs=view.step_outputs, tools=view.tools, reserved=active_reserved_stream(),
+            known=known, supplement=active_supplement(),
+        )
         sources, scope_row = self._deterministic(view)
         rounds = prior.ledger.rounds + 1 if prior is not None else 1
         base = CoverageLedger(anchors=anchors, sources=sources, scope=scope_row, rounds=rounds)
+        carried = prior.repair if prior is not None else RepairReport()
         request = self.request
         if request is None or not request.facets:
             reason = "no_request_coverage" if request is None else "no_facets"
-            result = CoverageResult("unassessed", reason, False, base)
+            result = CoverageResult("unassessed", reason, False, base, carried)
             self._log(result)
             return result
 
@@ -555,35 +634,242 @@ class CoverageBoundary:
             reason = "scope_conflict" if conflict else "no_evidence"
             findings = tuple(FacetFinding(f.id, "unsupported", (), blocked.get(f.id, reason)) for f in request.facets)
             state, why, skip = state_for([f.state for f in findings], assessment_outcome=report.outcome, anchors=0, observed=True, scope_conflict=conflict)
-            result = CoverageResult(state, why, False, replace(base, findings=findings, assessment=report))
+            result = CoverageResult(state, why, False, replace(base, findings=findings, assessment=report), carried)
             self._log(result)
             return result
 
-        keep = {fid for fid, f in prior_by_id.items() if f.state in ("covered", "contradicted")}
-        to_assess = [f for f in request.facets if f.id not in blocked and f.id not in keep]
+        anchor_ids = {a.item_id for a in anchors}
+        # A covered or contradicted finding stands only while the evidence it cites is still in the reducer's input.
+        keep = {
+            fid for fid, f in prior_by_id.items()
+            if f.state in ("covered", "contradicted") and set(f.evidence_ids) <= anchor_ids
+        }
+        # A repairable gap was assessed against everything held then, so only the new anchors can change it;
+        # every other facet that is not decided is assessed against all of them.
+        delta = [
+            f for f in request.facets
+            if f.id not in blocked and f.id not in keep and (p := prior_by_id.get(f.id)) is not None
+            and p.state == "unsupported" and p.reason == REPAIRABLE_REASON
+        ]
+        delta_ids = {f.id for f in delta}
+        full = [f for f in request.facets if f.id not in blocked and f.id not in keep and f.id not in delta_ids]
         assessed: dict[str, FacetFinding] = {}
         new_report = AssessmentReport()
-        if to_assess and anchors:
-            assessed, new_report = await self._assess(to_assess, anchors, view)
+        if full and anchors:
+            assessed, new_report = await self._assess(full, anchors, view)
+        prior_ids = {a.item_id for a in prior.ledger.anchors} if prior is not None else set()
+        fresh = [a for a in anchors if a.item_id not in prior_ids]
+        if delta and fresh:
+            more, more_report = await self._assess(delta, fresh, view)
+            assessed.update(more)
+            new_report = more_report if new_report.outcome == "not_attempted" else new_report.merged_with(more_report)
         report = report.merged_with(new_report) if prior is not None else new_report
 
         findings_list: list[FacetFinding] = []
         for f in request.facets:
+            earlier = prior_by_id.get(f.id)
             if f.id in blocked:
                 findings_list.append(FacetFinding(f.id, "unsupported", (), blocked[f.id]))
             elif f.id in keep:
                 findings_list.append(prior_by_id[f.id])
-            elif f.id in assessed:
+            elif f.id in assessed and not (assessed[f.id].state == "unassessed" and earlier is not None and earlier.state == "unsupported"):
                 findings_list.append(assessed[f.id])
+            elif earlier is not None and earlier.state == "unsupported":
+                findings_list.append(earlier)  # the reassessment failed, was skipped or had nothing new: the first ledger stands
             else:
                 findings_list.append(FacetFinding(f.id, "unassessed", (), _UNASSESSED_REASON.get(report.outcome, "assessment_failed")))
         findings = tuple(findings_list)
         state, why, skip = state_for(
             [f.state for f in findings], assessment_outcome=report.outcome, anchors=len(anchors), observed=view.observed, scope_conflict=conflict,
         )
-        result = CoverageResult(state, why, skip and self.skip_generation_when_uncovered, replace(base, findings=findings, assessment=report))
+        result = CoverageResult(state, why, skip and self.skip_generation_when_uncovered, replace(base, findings=findings, assessment=report), carried)
         self._log(result)
         return result
+
+    # ── the boundary the runner calls: the ledger, then at most one repair ──
+
+    async def run(self, view: BoundaryView) -> CoverageResult:
+        """:meth:`evaluate`, and one repair when the first ledger has a gap a targeted retrieval can still help.
+
+        The result's ``skip_generation`` is decided on the FINAL ledger, so a ledger that covers nothing gets
+        its one repair before generation is skipped. A repair that cannot run, fails or finds nothing new
+        returns the first ledger with the reason in :attr:`CoverageResult.repair`.
+        """
+        first = await self.evaluate(view)
+        targets = first.repair_facet_ids
+        result = first
+        if targets and self.max_repair_queries > 0:
+            try:
+                result = await self._repair(view, first, targets)
+            except Exception as exc:  # noqa: BLE001 — a repair failure never fails the answer; the first ledger stands
+                _log.warning("nx_answer_coverage_repair_failed", error=type(exc).__name__, detail=str(exc)[:200])
+                result = replace(first, repair=RepairReport("retrieval_failed", targets, detail=f"{type(exc).__name__}"))
+                self._withdraw(view)
+        return self._note_unresolved(view, result)
+
+    @staticmethod
+    def _withdraw(view: BoundaryView) -> None:
+        """Best effort after an unexpected failure: take the repair evidence back and read the input again, so
+        what the reduction is handed matches the ledger that stands."""
+        try:
+            if view.install_supplement is not None:
+                view.install_supplement(())
+            if view.rehydrate is not None:
+                view.rehydrate()
+        except Exception as exc:  # noqa: BLE001 — the reduction hydrates as it would have
+            _log.warning("nx_answer_coverage_repair_withdraw_failed", error=type(exc).__name__)
+
+    def _note_unresolved(self, view: BoundaryView, result: CoverageResult) -> CoverageResult:
+        """Hand the generation the explicit list of unresolved facets (RDR section 4, step 4).
+
+        Only for a ``partial`` ledger (some evidence, some facet unresolved): a ledger that skips generation
+        has no generation to tell, and a ``no_evidence`` ledger must keep the existing zero-evidence path,
+        which a note item would defeat. The note is installed on the runner's merge, the input is read once
+        more, and the note counts as delivered only if the input now holds it.
+        """
+        ids = result.unresolved_facet_ids
+        if (
+            result.state != "partial" or not ids or result.skip_generation
+            or view.install_note is None or view.rehydrate is None or self.request is None
+        ):
+            return result
+        by_id = {f.id: f for f in self.request.facets}
+        state_of = {f.facet_id: f.state for f in result.ledger.findings}
+        listed = [(by_id[fid], state_of[fid]) for fid in ids if fid in by_id]
+        if not listed:
+            return result
+        note = unresolved_note(listed)
+        view.install_note(note)
+        try:
+            texts, _ = view.rehydrate()
+        except Exception as exc:  # noqa: BLE001 — withdraw the note; the reduction hydrates as it would have
+            view.install_note("")
+            _log.warning("nx_answer_coverage_note_rehydrate_failed", error=type(exc).__name__)
+            return result
+        if note not in texts:
+            view.install_note("")
+            return result
+        return replace(result, repair=replace(result.repair, noted_facets=len(listed)))
+
+    def _repair_targets(self, view: BoundaryView) -> tuple[list[str], list[RepairTarget]]:
+        """``(primary collections, plan targets)``: where a repair query may look.
+
+        The primary source's collections, minus any a corpus scope excludes; and the corpus (and subtree) each
+        of the plan's own retrieval steps ran under, which the runner has already narrowed to the caller's
+        scope. With no such step, a corpus scope is the target itself.
+        """
+        primary = [c.collection for c in getattr(self.primary, "items", ()) or () if getattr(c, "collection", "")]
+        if self.scope.narrows_corpus:
+            primary = [c for c in primary if self.scope.admits(c)]
+        subtree = self.scope.value if self.scope.kind == "subtree" and not self.scope.is_document_address else ""
+        plan: list[RepairTarget] = []
+        for r in view.resolved_args:
+            if r.get("skipped") or r.get("tool") not in ("search", "query") or not r.get("corpus"):
+                continue
+            target = RepairTarget(str(r["corpus"]), str(r.get("subtree") or subtree))
+            if target not in plan:
+                plan.append(target)
+        if not plan and self.scope.narrows_corpus:
+            plan.append(RepairTarget(self.scope.value))
+        return list(dict.fromkeys(primary)), plan
+
+    async def _repair(self, view: BoundaryView, first: CoverageResult, targets: tuple[str, ...]) -> CoverageResult:
+        started = time.monotonic()
+
+        def done(outcome: RepairOutcome, *, queries: int = 0, found: int = 0, merged: int = 0, detail: str = "", result: CoverageResult | None = None) -> CoverageResult:
+            report = RepairReport(
+                outcome, targets, queries, found, merged, int((time.monotonic() - started) * 1000), detail)
+            return replace(result or first, repair=report)
+
+        if view.retrieve is None or view.fetch is None or view.install_supplement is None or view.rehydrate is None:
+            return done("unavailable", detail="the runner gave the boundary no retrieval hooks")
+        allowance = repair_allowance(view.remaining_seconds())
+        if allowance <= 0:
+            return done("skipped_deadline", detail="too little of the deadline was left")
+        estimate = view.assessment_cost_estimate()
+        planned = planned_reassessment_calls(len(targets), self.max_facets_per_call)
+        if not usd_affordable(view.remaining_usd(), None if estimate is None else estimate * planned):
+            return done("skipped_budget", detail="the USD allowance could not carry the reassessment")
+
+        wanted = set(targets)
+        facets = [f for f in (self.request.facets if self.request else ()) if f.id in wanted]
+        primary, plan = self._repair_targets(view)
+        queries = build_repair_queries(
+            facets, primary_collections=primary, plan_targets=plan, max_queries=self.max_repair_queries,
+            limit=REPAIR_RESULTS_PER_QUERY,
+        )
+        if not queries:
+            return done("no_target", detail="no primary collection or plan retrieval scope to ask")
+
+        # retrieval: bounded to its share of the allowance (the queries get three quarters of it, the chunk
+        # fetch the rest), stopped by the first failure
+        retrieval_until = started + allowance * REPAIR_RETRIEVAL_SHARE
+        queries_until = started + allowance * REPAIR_RETRIEVAL_SHARE * 0.75
+        held_hashes = {a.chash.lower() for a in first.ledger.anchors if a.chash}
+        hits: dict[str, RepairHit] = {}
+        issued, failure = 0, ""
+        for q in queries:
+            left = queries_until - time.monotonic()
+            if left < MIN_REPAIR_QUERY_S:
+                break
+            issued += 1
+            try:
+                out = await view.retrieve(q.tool, q.args, timeout=left)
+            except Exception as exc:  # noqa: BLE001 — a failed repair call leaves the first ledger in force
+                failure = type(exc).__name__
+                _log.warning("nx_answer_coverage_repair_query_failed", tool=q.tool, error=failure)
+                break
+            for hit in _hits(out):
+                if (hit.chash or hit.id).lower() not in held_hashes:
+                    hits.setdefault(hit.id, hit)
+        found = len(hits)
+        if failure and not hits:
+            return done("retrieval_failed", queries=issued, detail=f"a repair query failed: {failure}")
+        if not hits:
+            return done("no_new_evidence", queries=issued, detail="the targeted queries found nothing not already held")
+
+        try:
+            fetched = await view.fetch(list(hits.values())[: self.max_repair_items * 2], timeout=max(MIN_REPAIR_QUERY_S, retrieval_until - time.monotonic()))
+        except Exception as exc:  # noqa: BLE001 — as above
+            _log.warning("nx_answer_coverage_repair_fetch_failed", error=type(exc).__name__)
+            return done("retrieval_failed", queries=issued, found=found, detail=f"the chunk fetch failed: {type(exc).__name__}")
+        held_texts = {strip_source_note(t) for t in view.evidence_texts if isinstance(t, str)}
+        new: list[SupplementItem] = []
+        for item in fetched:
+            bare = strip_source_note(item.text)
+            if item.text and bare not in held_texts:
+                held_texts.add(bare)
+                new.append(item)
+            if len(new) >= self.max_repair_items:
+                break
+        if not new:
+            return done("no_new_evidence", queries=issued, found=found, detail="the chunks fetched were already held")
+
+        # merge: the runner puts the items into the reduction's input and returns that input
+        view.install_supplement(new)
+        try:
+            texts, observed = view.rehydrate()
+        except Exception as exc:  # noqa: BLE001 — withdraw the items; the reduction hydrates as it would have
+            view.install_supplement(())
+            _log.warning("nx_answer_coverage_repair_rehydrate_failed", error=type(exc).__name__)
+            return done("not_merged", queries=issued, found=found, detail=f"re-reading the input failed: {type(exc).__name__}")
+        in_input = {strip_source_note(t) for t in texts if isinstance(t, str)}
+        merged = sum(1 for i in new if strip_source_note(i.text) in in_input)
+        if merged == 0:
+            view.install_supplement(())
+            return done("not_merged", queries=issued, found=found, detail="the reduction's input holds none of the repair evidence")
+
+        # recompute the ledger once, inside the repair allowance
+        repair_until = started + allowance
+
+        def remaining() -> float | None:
+            left = max(0.0, repair_until - time.monotonic())
+            outer = view.remaining_seconds()
+            return left if outer is None else min(left, outer)
+
+        reassess = replace(view, evidence_texts=texts, observed=observed, remaining_seconds=remaining)
+        final = await replace(self, deadline_share=1.0).evaluate(reassess, prior=first)
+        return done("completed", queries=issued, found=found, merged=merged, result=final)
 
     async def _assess(
         self, facets: Sequence[Facet], anchors: Sequence[EvidenceAnchor], view: BoundaryView,
@@ -689,6 +975,20 @@ def _pack(anchors: Sequence[EvidenceAnchor]) -> tuple[list[dict[str, str]], list
         included.append(a)
         used += len(a.content)
     return payload, included, len(anchors) - len(included)
+
+
+def _hits(out: Any) -> list[RepairHit]:
+    """The chunks a repair retrieval returned: ``ids`` with their per-chunk collection, catalog document and
+    content hash where the output carries them. A step output that is not the retrieval shape has none."""
+    if not isinstance(out, Mapping) or not isinstance(out.get("ids"), list):
+        return []
+    ids = out["ids"]
+    cols = _per_chunk_collections(out, len(ids))
+    tumblers = out.get("tumblers")
+    tums = [str(t) for t in tumblers] if isinstance(tumblers, list) and len(tumblers) == len(ids) else [""] * len(ids)
+    hashes = out.get("chunk_text_hash")
+    hs = [str(h) for h in hashes] if isinstance(hashes, list) and len(hashes) == len(ids) else [""] * len(ids)
+    return [RepairHit(str(i), c, t, h) for i, c, t, h in zip(ids, cols, tums, hs, strict=True)]
 
 
 def _records(reply: Any) -> list[Mapping[str, Any]]:

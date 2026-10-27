@@ -655,7 +655,11 @@ async def test_a_second_evaluation_reassesses_only_the_unresolved_facets_and_kee
         node = json.loads(items)[0]["id"]
         return {"ok": True, "evidence": [{"item_id": node, "quote": "[f2] now there", "role": "supports"}]}
 
-    two = await _reevaluate(boundary, one, Dispatcher(check=second), result)
+    # nexus-jypmj.3.2: a repairable gap goes back to the model against the NEW evidence only (the old items were
+    # already read for it), so the re-entry view carries one chunk the first ledger did not hold.
+    view = _view(one, Dispatcher(check=second), result)
+    view.evidence_texts = [*view.evidence_texts, "a chunk the repair retrieved"]
+    two = await boundary.evaluate(view, prior=one)
     assert seen and all(tags == ["f2", "f3"] for tags in seen), "only the unresolved facets go back to the model"
     assert [f.state for f in two.ledger.findings] == ["covered", "covered", "unsupported"]
     assert two.ledger.rounds == 2 and two.ledger.assessment.calls == one.ledger.assessment.calls + len(seen)

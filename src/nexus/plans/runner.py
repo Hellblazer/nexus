@@ -51,6 +51,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace as _dc_replace
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import structlog
@@ -546,8 +547,14 @@ class PlanResult:
     #: RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary's result for the terminal reduction --
     #: the ledger, ``coverage.state`` and whether generation was skipped. ``None`` when no
     #: ``coverage_boundary`` was passed, or the run never reached a terminal operator segment (a retrieval-only
-    #: plan, a continuation cut, a budget stop).
+    #: plan, a budget stop). A continuation cut at that segment runs the boundary first (nexus-jypmj.3.2), so a
+    #: hand-off carries the state a headless run would.
     coverage: CoverageResult | None = None
+    #: RDR-232 Phase 3 step 2 (nexus-jypmj.3.2): the repair evidence the coverage boundary merged into the
+    #: terminal reduction's input. ``None`` when no ``coverage_boundary`` was passed. A continuation hand-off
+    #: re-enters it (:func:`nexus.plans.repair_stream.supplement_scope`) so the envelope's prompt is built
+    #: from the evidence the boundary assessed; its ``items`` are empty when no repair merged anything.
+    repair_supplement: RepairSupplement | None = None
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -697,6 +704,13 @@ from nexus.plans.reserved_stream import (  # noqa: E402
     active_reserved_stream,
     reserved_scope,
     set_reserved_step,
+)
+from nexus.plans.repair_stream import (  # noqa: E402
+    RepairSupplement,
+    SupplementItem,
+    active_supplement,
+    set_supplement_step,
+    supplement_scope,
 )
 
 #: RDR-232 Phase 3 (nexus-jypmj.3.1). A dispatcher carrying this attribute runs :func:`_hydrate_operator_args`
@@ -1445,6 +1459,7 @@ def _mark_reserved_step(index: int, steps: list[dict[str, Any]]) -> None:
     reorders items can be blamed for a missing reserved item. The reducer-input recorder
     (nexus-jypmj.1.8) is told the step too. No-op without a stream or a recorder."""
     set_recorder_step(index)
+    set_supplement_step(index)
     if active_reserved_stream() is None:
         return
     producers: list[str] = []
@@ -2236,16 +2251,24 @@ def _merge_reserved_explicit_inputs(
     """Merge the reserved stream ahead of an operator's explicit ``inputs`` list and cap the merged
     list the way the ``ids`` branch does (RDR-232, nexus-jypmj.1.6).
 
-    The cap runs ONLY when a stream merges (S4): a run without one keeps today's uncapped inputs.
-    A cap that fires sets ``args["_truncation_metadata"]``. Returns *value* unchanged when there
-    is no stream or it has already merged at an earlier step.
+    The cap runs ONLY when a stream or a repair supplement merges (S4): a run without either keeps
+    today's uncapped inputs. A cap that fires sets ``args["_truncation_metadata"]``. Returns *value*
+    unchanged when there is neither or each has already merged at an earlier step.
     """
-    rs = active_reserved_stream()
-    if rs is None or not rs.should_merge():
+    rs, supp = active_reserved_stream(), active_supplement()
+    if rs is not None and not rs.should_merge():
+        rs = None
+    if supp is not None and not supp.should_merge():
+        supp = None
+    if rs is None and supp is None:
         return value
-    value = rs.merge(value)
+    if supp is not None:
+        value = supp.merge(value)  # RDR-232 3.2: repair evidence ahead of the plan's own items ...
+    if rs is not None:
+        value = rs.merge(value)  # ... and the reserved stream ahead of both
     if len(value) > _OPERATOR_MAX_INPUTS:
-        rs.note_cap(len(value), _OPERATOR_MAX_INPUTS)
+        if rs is not None:
+            rs.note_cap(len(value), _OPERATOR_MAX_INPUTS)
         _log.warning(
             "explicit_inputs_overflow_with_reserved_stream",
             tool=tool, resolved_tool=resolved_tool,
@@ -2386,6 +2409,9 @@ def _hydrate_operator_args(
             for k in _rs_dups:
                 contents[k] = ""
         non_empty = [c for c in contents if c]
+        _supp = active_supplement()
+        if _supp is not None and _supp.should_merge():
+            non_empty = _supp.merge(non_empty)  # RDR-232 3.2: repair evidence ahead of the plan's own items
         if _rs_merge:
             non_empty = _rs.merge(non_empty, pre_deduped=len(_rs_dups))
         original_count = len(non_empty)
@@ -2471,8 +2497,8 @@ def _hydrate_operator_args(
             args["inputs"], tool=tool, resolved_tool=resolved_tool, branch="extract_inputs",
         )
     if resolved_tool == "operator_extract" and isinstance(args.get("inputs"), list):
-        _rs = active_reserved_stream()
-        if _rs is not None and _rs.should_merge():
+        _rs, _sp = active_reserved_stream(), active_supplement()
+        if (_rs is not None and _rs.should_merge()) or (_sp is not None and _sp.should_merge()):
             args["inputs"] = _merge_reserved_explicit_inputs(
                 [v for v in args["inputs"] if v], args, tool, resolved_tool,
             )
@@ -3000,6 +3026,22 @@ async def _plan_run_impl(
     numbered past the plan's own step indices and count against ``deadline`` and ``budget_usd_remaining``.
     A boundary failure never fails the run.
 
+    The boundary also owns the ONE repair (RDR-232 Phase 3 step 2, nexus-jypmj.3.2; see
+    :meth:`~nexus.plans.coverage_ledger.CoverageBoundary.run`): when the first ledger has a facet that was
+    assessed and nothing held bears on it, targeted retrieval calls (a ``search`` or ``query`` per facet and
+    target, then one ``store_get_many`` of the hits) run through the same dispatcher, each a ``StepRecord`` of
+    source ``sql`` numbered past the plan like the assessment calls, inside the repair's own allowance and the
+    one USD accumulator. The new chunks are installed in the run's :class:`~nexus.plans.repair_stream.
+    RepairSupplement`, the terminal segment's input is read a second time with them merged (after the
+    reserved items, ahead of the plan's own, under the same positional cap), and the ledger is recomputed once.
+    That second reading is what the terminal step is dispatched with; the prefix is not re-run. The supplement
+    is returned as :attr:`PlanResult.repair_supplement`.
+
+    With ``continuation_cut_at_step`` at the terminal operator segment, the cut no longer fires before the
+    boundary: the boundary and its repair run on the segment's input, the segment stops after them undispatched
+    (``continuation_cut_applied``), and the hand-off carries the result. If the ledger skips generation there
+    is nothing to hand off: the cut does not fire and the run completes with the skipped terminal output.
+
     **Validation is WHOLE-PLAN and PRE-DISPATCH (nexus-pucte), which
     runs BEFORE either budget check above ever executes.** Required
     bindings, malformed-step shape, and unresolved ``$var`` references
@@ -3262,26 +3304,116 @@ async def _plan_run_impl(
         )
         return result
 
-    async def _run_coverage_boundary(texts: list[str], observed: bool, terminal_index: int) -> CoverageResult | None:
-        """Evaluate the boundary on the terminal input; a failure is logged and leaves the run alone."""
+    async def _coverage_retrieval(tool: str, args: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        """One repair retrieval call (a targeted query or the chunk fetch) through the run's dispatcher,
+        accounted as a known-zero ``sql`` :class:`StepRecord` numbered past the plan like the assessment
+        calls. Cut from outside like any retrieval step (``wait_for`` plus ``call_deadline``)."""
+        nonlocal _coverage_calls
+        step_index = len(steps) + _coverage_calls
+        _coverage_calls += 1
+        started = time.monotonic()
+        usage: list[Any] = []
+        token = call_deadline.set_deadline(started + timeout)
+        try:
+            with _dispatch_mod.ambient_usage_sink(usage):
+                raw = dispatch(tool, dict(args))
+                result = await asyncio.wait_for(raw, timeout=timeout) if inspect.iscoroutine(raw) else raw
+            if not isinstance(result, dict):
+                raise PlanRunStepRefError(ref=tool, reason=f"returned {type(result).__name__}; expected dict")
+        except Exception:
+            _record_step(
+                step_index=step_index, operator=tool, source="sql",
+                elapsed_ms=int((time.monotonic() - started) * 1000), ok=False, usage=_rollup_step_usage(usage),
+            )
+            raise
+        finally:
+            call_deadline.reset(token)
+        _, result = _step_source(tool, result)
+        _record_step(
+            step_index=step_index, operator=tool, source="sql",
+            elapsed_ms=int((time.monotonic() - started) * 1000), ok=True, usage=_rollup_step_usage(usage),
+        )
+        return result
+
+    async def _coverage_fetch(hits: Sequence[Any], *, timeout: float) -> list[SupplementItem]:
+        """The chunks of the repair's hits, hydrated the way an operator's ``ids`` are: the same hygiene
+        (non-evidentiary documents and import-only chunks dropped) and the same source note."""
+        ids = [str(h.id) for h in hits]
+        cols = [str(h.collection) for h in hits]
+        collections: Any = cols if all(cols) else (",".join(dict.fromkeys(c for c in cols if c)) or "knowledge")
+        out = await _coverage_retrieval("store_get_many", {"ids": ids, "collections": collections}, timeout=timeout)
+        contents = out.get("contents")
+        if not isinstance(contents, list) or len(contents) != len(ids):
+            raise PlanRunStepRefError(ref="store_get_many", reason="the repair fetch did not return one content per id")
+        by_tumbler = bool(ids) and all(_is_tumbler_shaped(i) for i in ids)
+        excluded = set() if by_tumbler else _resolve_non_evidentiary_chashes(ids) | _import_only_ids_from_hydrated(out, ids)
+        notes = out.get("source_notes")
+        items: list[SupplementItem] = []
+        for k, (hit, text) in enumerate(zip(hits, contents)):
+            if not isinstance(text, str) or not text or str(hit.id) in excluded:
+                continue
+            if not by_tumbler and isinstance(notes, list) and k < len(notes):
+                from nexus.context_annotations import with_source_note  # noqa: PLC0415 — deferred; runner imports stay lazy
+
+                text = with_source_note(text, str(notes[k]))
+            items.append(SupplementItem(
+                text=text, chash="" if by_tumbler else (hit.chash or str(hit.id)), collection=hit.collection, tumbler=hit.tumbler,
+            ))
+        return items
+
+    def _install_supplement(items: Sequence[SupplementItem]) -> None:
+        supplement = active_supplement()
+        if supplement is not None:
+            supplement.install(items)
+
+    def _install_note(note: str) -> None:
+        supplement = active_supplement()
+        if supplement is not None:
+            supplement.install_note(note)
+
+    def _assessment_cost_estimate() -> float | None:
+        """The mean known cost of the assessment calls so far, or ``None`` (no call reported a cost)."""
+        costs = [r.cost_usd for r in step_records if r.operator == "operator_check" and r.cost_usd is not None]
+        return sum(costs) / len(costs) if costs else None
+
+    async def _run_coverage_boundary(
+        texts: list[str], observed: bool, terminal_index: int,
+        rehydrate: Callable[[], tuple[list[str], bool]] | None = None,
+    ) -> CoverageResult | None:
+        """Evaluate the boundary (the ledger and its one repair) on the terminal input; a failure is logged
+        and leaves the run alone. *rehydrate* re-reads that input after the repair merged its evidence."""
         nonlocal coverage_result
         from nexus.plans.coverage_ledger import BoundaryView  # noqa: PLC0415 — deferred, as above
 
         assert coverage_boundary is not None
+        can_repair = rehydrate is not None and active_supplement() is not None
         try:
-            coverage_result = await coverage_boundary.evaluate(BoundaryView(
+            coverage_result = await coverage_boundary.run(BoundaryView(
                 evidence_texts=texts, observed=observed, step_outputs=list(step_outputs),
                 tools=[_extract_tool(s) for s in steps], scope_diagnostics=list(scope_diagnostics),
                 resolved_args=list(resolved_step_args), check=_coverage_check,
                 remaining_seconds=_remaining_seconds, remaining_usd=_remaining_usd, terminal_step=terminal_index,
+                retrieve=_coverage_retrieval if can_repair else None, fetch=_coverage_fetch if can_repair else None,
+                install_supplement=_install_supplement if can_repair else None, rehydrate=rehydrate if can_repair else None,
+                install_note=_install_note if can_repair else None, assessment_cost_estimate=_assessment_cost_estimate,
             ))
         except Exception as exc:  # noqa: BLE001 — the boundary never fails an answer
             _log.warning("nx_answer_coverage_boundary_failed", error=type(exc).__name__, detail=str(exc)[:200])
             coverage_result = None
         return coverage_result
 
+    def _cut_here(at_index: int) -> None:
+        """The continuation cut fires at the segment starting at *at_index*."""
+        nonlocal continuation_cut_applied
+        continuation_cut_applied = True
+        _log.info(
+            "nx_answer_continuation_cut_applied",
+            at_step=at_index + 1, total_steps=len(steps), steps_completed=len(step_outputs),
+        )
+
     try:
         for seg in segments:
+            _cut_pending, _cut_start_index = False, 0
             # nexus-h33x8.6 a4: hard budget check BEFORE dispatching this
             # segment. ``deadline is None`` (the default) skips this
             # entirely — pre-a4 behavior is unchanged. Retrieval steps
@@ -3344,14 +3476,20 @@ async def _plan_run_impl(
                 else:
                     _seg_start_index = seg.plan_index
                 if _seg_start_index >= continuation_cut_at_step:
-                    continuation_cut_applied = True
-                    _log.info(
-                        "nx_answer_continuation_cut_applied",
-                        at_step=_seg_start_index + 1,
-                        total_steps=len(steps),
-                        steps_completed=len(step_outputs),
-                    )
-                    break
+                    if _at_boundary(seg):
+                        # RDR-232 Phase 3 (nexus-jypmj.3.2): the hand-off carries the coverage state, so the
+                        # boundary (the ledger and its one repair) runs on this segment's input first and
+                        # the segment stops after it, undispatched, as it always did.
+                        _cut_pending, _cut_start_index = True, _seg_start_index
+                    else:
+                        continuation_cut_applied = True
+                        _log.info(
+                            "nx_answer_continuation_cut_applied",
+                            at_step=_seg_start_index + 1,
+                            total_steps=len(steps),
+                            steps_completed=len(step_outputs),
+                        )
+                        break
 
             # nexus-0qi9: per-step progress visibility. Emit start/complete
             # log events at each segment boundary so the silent claude -p
@@ -3383,73 +3521,90 @@ async def _plan_run_impl(
             if isinstance(seg, OperatorBundleSlice):
                 # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
                 deferred_indices = set(seg.plan_indices)
-                bundle_steps: list[OperatorBundleStep] = []
                 _bundle_at_boundary = _at_boundary(seg)
-                _boundary_texts: list[str] = []
-                _boundary_observed = False
-                for bi in seg.plan_indices:
-                    bstep = steps[bi]
-                    btool = _extract_tool(bstep)
-                    b_raw_args = bstep.get("args", {}) or {}
-                    b_resolved = _resolve_args(
-                        b_raw_args, bindings=merged, step_outputs=step_outputs,
-                        deferred_step_indices=deferred_indices, step_index=bi,
-                    )
-                    # nexus-4jj40: strip a literal $intent from any
-                    # items/inputs-shaped list arg before it reaches the
-                    # bundle composer -- see _drop_intent_from_list_args.
-                    b_resolved = _drop_intent_from_list_args(
-                        b_resolved, intent=merged.get("intent"),
-                    )
-                    # Capture source collection(s) BEFORE hydration strips
-                    # them from args, so the composer can attach a "source:"
-                    # line to the prompt for parallel-branch attribution.
-                    source_collections = (
-                        b_resolved.get("collections") if "ids" in b_resolved else None
-                    )
-                    # Operators skip _check_embedding_domain / scope / caller-
-                    # scope injection — those are retrieval-tool concerns.
-                    _mark_reserved_step(bi, steps)
-                    _, b_prepared, _bundle_captured = _hydrate_capturing(btool, b_resolved, capture=_bundle_at_boundary)
-                    if _bundle_at_boundary:
-                        _step_texts, _step_observed = _boundary_evidence(b_prepared, _bundle_captured)
-                        _boundary_texts.extend(_step_texts)
-                        _boundary_observed = _boundary_observed or _step_observed
-                    # RDR-093 S-1: strip the runner-internal truncation
-                    # marker so it never leaks into the bundled prompt.
-                    # Surface-on-bundle is out of scope for this RDR
-                    # (nexus-3j6b tracks cross-operator generalisation
-                    # including bundle-aware metadata propagation); the
-                    # structlog warning still fires from _hydrate.
-                    b_prepared.pop("_truncation_metadata", None)
-                    # nexus-mm5tx follow-up (code-review T2 [24199]):
-                    # strip the zero-evidence marker so it never leaks
-                    # into the bundled prompt, same as the truncation
-                    # marker above. KNOWN LIMITATION, disclosed rather
-                    # than silently absorbed: unlike the isolated
-                    # dispatch path (_default_dispatcher), the bundle
-                    # path does NOT skip dispatch for a step with zero
-                    # evidence — composing a fused multi-step prompt
-                    # with one step excluded is out of scope here (the
-                    # composer has no per-step exclusion mechanism, and
-                    # q12's actual repro is on the isolated path — a
-                    # bare store_get_many step never bundles). Warn so
-                    # this is at least observable.
-                    if b_prepared.pop("_zero_evidence_text", None) is not None:
-                        _log.warning(
-                            "nx_answer_zero_evidence_in_bundle_not_short_circuited",
-                            step_index=bi, tool=btool,
+
+                def _build_bundle_steps(capture: bool) -> tuple[list[OperatorBundleStep], list[str], bool]:
+                    """Resolve and hydrate each step of the bundle: its steps, and (when *capture*) the texts
+                    its evidence-consuming steps were handed and whether any was observed. Run again by the
+                    coverage repair after it merged its evidence."""
+                    built: list[OperatorBundleStep] = []
+                    texts_out: list[str] = []
+                    observed_out = False
+                    for bi in seg.plan_indices:
+                        bstep = steps[bi]
+                        btool = _extract_tool(bstep)
+                        b_raw_args = bstep.get("args", {}) or {}
+                        b_resolved = _resolve_args(
+                            b_raw_args, bindings=merged, step_outputs=step_outputs,
+                            deferred_step_indices=deferred_indices, step_index=bi,
                         )
-                    bundle_steps.append(OperatorBundleStep(
-                        plan_index=bi, tool=btool, args=b_prepared,
-                        source_collections=source_collections,
-                    ))
+                        # nexus-4jj40: strip a literal $intent from any
+                        # items/inputs-shaped list arg before it reaches the
+                        # bundle composer -- see _drop_intent_from_list_args.
+                        b_resolved = _drop_intent_from_list_args(
+                            b_resolved, intent=merged.get("intent"),
+                        )
+                        # Capture source collection(s) BEFORE hydration strips
+                        # them from args, so the composer can attach a "source:"
+                        # line to the prompt for parallel-branch attribution.
+                        source_collections = (
+                            b_resolved.get("collections") if "ids" in b_resolved else None
+                        )
+                        # Operators skip _check_embedding_domain / scope / caller-
+                        # scope injection — those are retrieval-tool concerns.
+                        _mark_reserved_step(bi, steps)
+                        _, b_prepared, _bundle_captured = _hydrate_capturing(btool, b_resolved, capture=capture)
+                        if capture:
+                            _step_texts, _step_observed = _boundary_evidence(b_prepared, _bundle_captured)
+                            texts_out.extend(_step_texts)
+                            observed_out = observed_out or _step_observed
+                        # RDR-093 S-1: strip the runner-internal truncation
+                        # marker so it never leaks into the bundled prompt.
+                        # Surface-on-bundle is out of scope for this RDR
+                        # (nexus-3j6b tracks cross-operator generalisation
+                        # including bundle-aware metadata propagation); the
+                        # structlog warning still fires from _hydrate.
+                        b_prepared.pop("_truncation_metadata", None)
+                        # nexus-mm5tx follow-up (code-review T2 [24199]):
+                        # strip the zero-evidence marker so it never leaks
+                        # into the bundled prompt, same as the truncation
+                        # marker above. KNOWN LIMITATION, disclosed rather
+                        # than silently absorbed: unlike the isolated
+                        # dispatch path (_default_dispatcher), the bundle
+                        # path does NOT skip dispatch for a step with zero
+                        # evidence — composing a fused multi-step prompt
+                        # with one step excluded is out of scope here (the
+                        # composer has no per-step exclusion mechanism, and
+                        # q12's actual repro is on the isolated path — a
+                        # bare store_get_many step never bundles). Warn so
+                        # this is at least observable.
+                        if b_prepared.pop("_zero_evidence_text", None) is not None:
+                            _log.warning(
+                                "nx_answer_zero_evidence_in_bundle_not_short_circuited",
+                                step_index=bi, tool=btool,
+                            )
+                        built.append(OperatorBundleStep(
+                            plan_index=bi, tool=btool, args=b_prepared,
+                            source_collections=source_collections,
+                        ))
+                    return built, texts_out, observed_out
+
+                bundle_steps, _boundary_texts, _boundary_observed = _build_bundle_steps(_bundle_at_boundary)
                 bundle = OperatorBundle(steps=tuple(bundle_steps))
 
                 # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary, on the bundle's hydrated input,
-                # before the one fused dispatch. A skip leaves one output per plan step.
+                # before the one fused dispatch. A skip leaves one output per plan step. The repair
+                # (nexus-jypmj.3.2) re-reads the input through the same builder and replaces the bundle.
                 if _bundle_at_boundary:
-                    _cov = await _run_coverage_boundary(_boundary_texts, _boundary_observed, seg.plan_indices[0])
+                    def _rehydrate_bundle() -> tuple[list[str], bool]:
+                        nonlocal bundle
+                        rebuilt, rebuilt_texts, rebuilt_observed = _build_bundle_steps(True)
+                        bundle = OperatorBundle(steps=tuple(rebuilt))
+                        return rebuilt_texts, rebuilt_observed
+
+                    _cov = await _run_coverage_boundary(
+                        _boundary_texts, _boundary_observed, seg.plan_indices[0], _rehydrate_bundle,
+                    )
                     if _cov is not None and _cov.skip_generation:
                         for _ in range(len(seg.plan_indices) - 1):
                             step_outputs.append(dict(BUNDLED_INTERMEDIATE))
@@ -3459,6 +3614,9 @@ async def _plan_run_impl(
                             step_indices=_seg_indices, reason=_cov.reason,
                         )
                         continue
+                    if _cut_pending:
+                        _cut_here(_cut_start_index)
+                        break
 
                 # Pre-dispatch size guard. If the composite prompt would
                 # blow past the bundle budget, fall back to per-step
@@ -3840,6 +3998,9 @@ async def _plan_run_impl(
             _prehydrated = False
             if _at_boundary(seg):
                 _captured: list[list[str]] = []
+                # The args as they stand before this step's hydration, for the repair's second reading
+                # (hydration rewrites an evidence argument in place).
+                _unhydrated = dict(resolved)
                 if getattr(dispatch, _HYDRATES_ATTR, False):
                     try:
                         _, _hydrated_args, _captured = _hydrate_capturing(tool, resolved, capture=True)
@@ -3848,7 +4009,16 @@ async def _plan_run_impl(
                         _log.warning("nx_answer_coverage_prehydration_failed", error=type(exc).__name__)
                         _captured = []
                 _step_texts, _step_observed = _boundary_evidence(resolved, _captured)
-                _cov = await _run_coverage_boundary(_step_texts, _step_observed, index)
+
+                def _rehydrate_isolated() -> tuple[list[str], bool]:
+                    """The terminal step's input with the repair evidence merged. The step is handed the args
+                    this reading produced, whatever the dispatcher does (the merge is the runner's)."""
+                    nonlocal resolved, _prehydrated
+                    _, again, again_captured = _hydrate_capturing(tool, dict(_unhydrated), capture=True)  # noqa: B023
+                    resolved, _prehydrated = again, True
+                    return _boundary_evidence(again, again_captured)
+
+                _cov = await _run_coverage_boundary(_step_texts, _step_observed, index, _rehydrate_isolated)
                 if _cov is not None and _cov.skip_generation:
                     step_outputs.append(_coverage_skipped_output())
                     _log.info(
@@ -3856,6 +4026,9 @@ async def _plan_run_impl(
                         step_indices=_seg_indices, reason=_cov.reason,
                     )
                     continue
+                if _cut_pending:
+                    _cut_here(_cut_start_index)
+                    break
 
             # nexus-h33x8.6 a4: an active deadline threads the REMAINING
             # budget into an operator step's own ``timeout`` kwarg (dropped
@@ -4094,12 +4267,15 @@ async def plan_run(
     _recorder = active_recorder()
     if _recorder is not None:  # nexus-jypmj.1.8: a whole-plan re-run starts from a clean reducer input
         _recorder.reset_run()
-    with reserved_scope(reserved_stream):
+    supplement = RepairSupplement() if coverage_boundary is not None else None
+    with reserved_scope(reserved_stream), supplement_scope(supplement):
         result = await _plan_run_impl(
             match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
             deadline=deadline, budget_usd_remaining=budget_usd_remaining,
             continuation_cut_at_step=continuation_cut_at_step, coverage_boundary=coverage_boundary,
         )
+    if supplement is not None:
+        result = _dc_replace(result, repair_supplement=supplement)
     if reserved_stream is not None:
         result = _dc_replace(result, reserved_report=reserved_stream.report())
     return result
