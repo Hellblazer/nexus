@@ -93,8 +93,8 @@ HTTPS_ETAG_META_KEY = "https_etag"
 #: (RDR-108: document identity is ``source_uri``, a filesystem path).
 #: Every other prefix (``knowledge__`` and any future one) routes to
 #: ``nx-note://`` — the store_put-origin note identity (RDR-231; the
-#: ``chroma://`` spelling it replaced is residue, see
-#: ``nexus.commands.catalog_cmds.reconcile_stale._STORE_PUT_URI_PREFIX``). Single
+#: ``chroma://`` spelling it replaced is residue under a file-routed
+#: collection; ``nx catalog backfill-source-uri`` re-derives it). Single
 #: source of truth so :func:`uri_for` and every caller that needs to
 #: know "does this collection get a file:// identity" (nexus-poigc's
 #: backfill candidate filter, nexus-r0kum's aspect-writer attribution

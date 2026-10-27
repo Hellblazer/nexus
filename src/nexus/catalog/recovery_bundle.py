@@ -32,7 +32,7 @@ shape in ``commands/catalog_cmds/reconcile_stale.py`` (and its sibling in
 ``commands/`` (see ``store_hook.py``'s layering comment), the same
 three-implementations-one-contract pattern as the ``file://`` convention.
 It DIVERGES deliberately on two audited points (nx_plan_audit rounds 1-2,
-recorded on nexus-xn3fr): the ``chroma://`` leg carries a
+recorded on nexus-xn3fr): the note-URI leg carries a
 collection-prefix guard (a stray ``chroma://`` URI under a file-routed
 prefix is migration residue, never store_put-origin — importing it would
 recreate a duplicate document beside what ``nx index repo`` rebuilds,
@@ -53,7 +53,13 @@ from typing import Any, Callable, Iterable
 
 import structlog
 
-from nexus.aspect_readers import FILE_ROUTED_PREFIXES, NOTE_URI_SCHEME, uri_for
+from nexus.aspect_readers import (
+    FILE_ROUTED_PREFIXES,
+    NOTE_URI_SCHEME,
+    canonical_note_uri,
+    is_note_uri,
+    uri_for,
+)
 from nexus.catalog.note_ttl import row_may_give_tags, row_written_by
 from nexus.catalog.types import CatalogEntry
 
@@ -70,7 +76,7 @@ _LINK_PAGE: int = 200
 
 
 def classify_store_put_origin(entry: CatalogEntry) -> str | None:
-    """Return the store-put-origin leg (``"chroma_uri"`` /
+    """Return the store-put-origin leg (``"note_uri"`` /
     ``"knowledge_no_path"``) for *entry*, or ``None`` when it is not
     store_put-origin. See the module docstring for the two audited
     divergences from the ``commands/``-layer classifiers."""
@@ -82,13 +88,14 @@ def classify_store_put_origin(entry: CatalogEntry) -> str | None:
         # prefixes; a chroma:// URI under one of them is residue.
         return None
     source_uri = entry.source_uri or ""
-    # RDR-231: a note is nx-note:// now; a row still carrying the legacy
-    # chroma:// spelling is the same note until the engine rewrites it.
-    if source_uri.startswith((NOTE_URI_SCHEME, "chroma://")):
-        return "chroma_uri"
+    # RDR-231: a note is nx-note://; a row still carrying the legacy chroma://
+    # spelling is the same note until the engine rewrites it (a note "in
+    # either spelling" is is_note_uri(canonical_note_uri(u))).
+    if is_note_uri(canonical_note_uri(source_uri)):
+        return "note_uri"
     if not source_uri:
         return "knowledge_no_path"
-    return None  # non-empty, non-chroma URI without a file_path: not ours
+    return None  # non-empty, non-note URI without a file_path: not ours
 
 
 def link_identity_uri(entry: CatalogEntry) -> str:
@@ -681,21 +688,23 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
 
 
 def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:
-    """``by_source_uri``, with a chroma-identity re-derivation fallback
+    """``by_source_uri``, with a note-identity re-derivation fallback
     (review-fold, the critique's mode-change trace): a link exported from
-    a source install carries ``chroma://<SOURCE-collection>/<title>``, but
+    a source install carries ``nx-note://<SOURCE-collection>/<title>``, but
     on a mode-changed target the imported doc's minted identity uses the
     TARGET collection name — the recorded URI then resolves to nothing.
-    Re-derive: parse collection/title out of the chroma URI, resolve the
+    Re-derive: parse collection/title out of the note URI, resolve the
     collection under the target (``target_collection_for``), and retry
-    with the re-derived identity."""
+    with the re-derived identity.
+
+    An old bundle carries ``chroma://`` (RDR-231): *uri* goes through
+    :func:`canonical_note_uri` first, so the compare and the parse both see
+    the stored ``nx-note://`` form (Test Plan rows 557 and 564)."""
+    uri = canonical_note_uri(uri)
     entry = reader.by_source_uri(uri)
-    scheme = next(
-        (sch for sch in (NOTE_URI_SCHEME, "chroma://") if uri.startswith(sch)), None,
-    )
-    if entry is not None or scheme is None:
+    if entry is not None or not uri.startswith(NOTE_URI_SCHEME):
         return entry
-    rest = uri[len(scheme):]
+    rest = uri[len(NOTE_URI_SCHEME):]
     collection, sep, title = rest.partition("/")
     if not sep or not title:
         return None
@@ -751,6 +760,10 @@ def import_bundle(
     for rec in records:
         if rec.get("record") != "knowledge_doc":
             continue
+        # An old bundle carries chroma:// (RDR-231): the stored form is nx-note://,
+        # so no import_doc ever sees the legacy spelling.
+        if rec.get("source_uri"):
+            rec = {**rec, "source_uri": canonical_note_uri(rec["source_uri"])}
         try:
             do_import(t3, rec)
             summary.docs_imported += 1

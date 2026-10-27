@@ -55,7 +55,7 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.aspect_readers import uri_for
+from nexus.aspect_readers import canonical_note_uri, uri_for
 from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     embedding_model_for_collection_name,
@@ -661,7 +661,10 @@ def _locate_owner_group(
     """
     position: int | None = None
     if isinstance(owner_meta, dict) and (owner_meta.get("source_uri") or owner_meta.get("title")):
-        source_uri = owner_meta.get("source_uri") or ""
+        # RDR-231: an old export spells a note ``chroma://``; the stored form is
+        # ``nx-note://``, so the group is keyed (and later compared and registered)
+        # by that form. The one place an export's owner URI is read.
+        source_uri = canonical_note_uri(owner_meta.get("source_uri") or "")
         title = owner_meta.get("title") or ""
         content_type = owner_meta.get("content_type") or fallback_content_type
         if not source_uri:
@@ -747,7 +750,10 @@ def _resolve_owner_document(
     target), import COPIES rather than moves (Sam, 2026-09-27): the
     existing document is left untouched, so its own collection stays
     live, and the target gets a separate document under the
-    target-qualified identity ``nxexp://<target>/<original source_uri>``.
+    target-qualified identity ``nxexp://<target>/<original source_uri>``, the
+    original in its stored form: ``<canonical_note_uri(source_uri)>``, so a
+    note an old export spells ``chroma://`` still names (and finds) the
+    ``nxexp://<target>/nx-note://...`` copy (RDR-231, critique Significant 6).
     Re-importing finds that qualified document again, so it is idempotent.
 
     A legacy group (``legacy_doc_id`` set) whose original document is live
@@ -762,7 +768,7 @@ def _resolve_owner_document(
     legacy = (live_legacy or {}).get(group.get("legacy_doc_id") or "")
     if legacy is not None:
         return str(legacy.tumbler)
-    source_uri = group["source_uri"]
+    source_uri = canonical_note_uri(group["source_uri"])
     existing = reader.by_source_uri(source_uri) if source_uri else None
     if existing is not None and existing.physical_collection != collection_name:
         source_uri = f"nxexp://{collection_name}/{source_uri}"

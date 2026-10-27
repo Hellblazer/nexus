@@ -48,11 +48,10 @@ import click
 def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     """Re-derive ``chroma://`` catalog ``source_uri`` values (nexus-poigc).
 
-    ``chroma://`` is ALSO the internal store_put-origin marker
-    (``nexus.commands.catalog_cmds.reconcile_stale._STORE_PUT_URI_PREFIX``)
-    used by ``knowledge__`` documents minted via ``nx store put`` / MCP
-    ``store_put`` — that usage is unrelated to the retired ChromaDB
-    dependency (RDR-155 P4b) and is left alone. This verb ONLY rewrites
+    A legacy ``chroma://`` spelling was ALSO the store_put-origin marker of
+    ``knowledge__`` documents minted via ``nx store put`` / MCP ``store_put``
+    (now ``nx-note://``, RDR-231) — that usage is unrelated to the retired
+    ChromaDB dependency (RDR-155 P4b) and is left alone. This verb ONLY rewrites
     rows whose PHYSICAL COLLECTION routes to ``file://`` in
     ``nexus.aspect_readers.uri_for`` (the ``rdr__``/``docs__``/``code__``
     prefixes, ``FILE_ROUTED_PREFIXES``): those rows carry a ``chroma://``

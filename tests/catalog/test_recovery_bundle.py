@@ -10,7 +10,7 @@ exercised for real; only T3 is a duck-typed fake (content fetch/put).
 
 Fixture census mirrors the audited classifier legs (nx_plan_audit rounds
 1-2, recorded on nexus-xn3fr):
-  chroma-a / chroma-b   chroma:// under knowledge__  -> exported
+  note-a / note-b       nx-note:// under knowledge__ -> exported
   residue               chroma:// under code__       -> EXCLUDED (53cae class)
   legacy                empty source_uri, 1-row manifest -> exported (1uekf live-chunk case)
   ghost                 empty source_uri, 0-row manifest -> ghosts_skipped, never silent
@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import nexus.catalog.recovery_bundle as rb
+from nexus.aspect_readers import uri_for
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.note_ttl import row_may_give_tags
 from nexus.catalog.recovery_bundle import (
@@ -67,8 +68,8 @@ def _doc(tumbler: str, title: str, collection: str, *, file_path: str = "",
 
 
 DOCS = [
-    _doc("1.9.1", "title-a", KNOW, source_uri="chroma://knowledge/title-a"),
-    _doc("1.9.2", "title-b", KNOW, source_uri="chroma://knowledge/title-b"),
+    _doc("1.9.1", "title-a", KNOW, source_uri="nx-note://knowledge/title-a"),
+    _doc("1.9.2", "title-b", KNOW, source_uri="nx-note://knowledge/title-b"),
     _doc("1.9.3", "residue", CODE, source_uri="chroma://code/whoops"),
     _doc("1.9.4", "legacy-note", KNOW),                       # empty source_uri, live chunk
     _doc("1.9.5", "ghost-note", KNOW),                        # empty source_uri, no manifest
@@ -244,10 +245,10 @@ def _entry(**kw: Any) -> CatalogEntry:
 
 
 def test_classifier_legs():
-    assert classify_store_put_origin(_entry(source_uri="chroma://knowledge/x")) == "chroma_uri"
-    # RDR-231: a note's stored identity is nx-note:// (the legacy row above is
-    # the same note until the engine rewrites it).
-    assert classify_store_put_origin(_entry(source_uri="nx-note://knowledge/x")) == "chroma_uri"
+    assert classify_store_put_origin(_entry(source_uri="nx-note://knowledge/x")) == "note_uri"
+    # RDR-231: a legacy chroma:// row is the same note until the engine rewrites
+    # it, so the classifier answers in either spelling (the leg is spelling-free).
+    assert classify_store_put_origin(_entry(source_uri="chroma://knowledge/x")) == "note_uri"
     assert classify_store_put_origin(_entry(source_uri="")) == "knowledge_no_path"
     # round-2 bug pin: chroma:// under a file-routed prefix is residue.
     assert classify_store_put_origin(
@@ -271,8 +272,8 @@ def test_link_identity_uri_derives_for_legacy_docs():
     derived = link_identity_uri(legacy)
     assert derived.startswith("nx-note://")
     assert "legacy-note" in derived
-    normal = _entry(source_uri="chroma://knowledge/x")
-    assert link_identity_uri(normal) == "chroma://knowledge/x"
+    normal = _entry(source_uri="nx-note://knowledge/x")
+    assert link_identity_uri(normal) == "nx-note://knowledge/x"
 
 
 # ── export ──────────────────────────────────────────────────────────────────
@@ -903,8 +904,8 @@ CH_S = "d" * 64
 def _shared_pair(state: "_State", t3: "_FakeT3", *, a_meta: dict, b_meta: dict) -> None:
     """Two notes, one chunk: the row holds B's keys (B wrote last)."""
     state.docs = [
-        {**_doc("1.9.1", "note-a", KNOW, source_uri="chroma://knowledge/note-a"), "metadata": a_meta},
-        {**_doc("1.9.2", "note-b", KNOW, source_uri="chroma://knowledge/note-b"), "metadata": b_meta},
+        {**_doc("1.9.1", "note-a", KNOW, source_uri="nx-note://knowledge/note-a"), "metadata": a_meta},
+        {**_doc("1.9.2", "note-b", KNOW, source_uri="nx-note://knowledge/note-b"), "metadata": b_meta},
     ]
     state.manifests = {
         "1.9.1": [{"chash": CH_S, "position": 0}],
@@ -1258,3 +1259,143 @@ def test_a_positive_ttl_reaches_put_note(note_writer):
     calls, _hooks, _result = note_writer
     rb._default_import_doc(_FakeT3(), {**_REC, "ttl_days": 14})
     assert calls[0]["ttl_days"] == 14
+
+
+# ── RDR-231: an old bundle carries chroma://, the store holds nx-note:// ─────
+
+
+def _old_bundle(path, *, docs=(), links=()) -> None:
+    """A bundle as a pre-RDR-231 client wrote it: every note identity is chroma://."""
+    header = {
+        "format": "nexus-recovery-bundle", "format_version": 1,
+        "knowledge_docs": len(docs), "links": len(links),
+    }
+    lines = [json.dumps(header)]
+    lines += [json.dumps({"record": "knowledge_doc", **d}) for d in docs]
+    lines += [json.dumps({"record": "link", **l}) for l in links]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _old_link(frm: str, to: str) -> dict:
+    return {
+        "from_source_uri": frm, "to_source_uri": to, "link_type": "relates",
+        "from_span": "", "to_span": "", "created_by": "user",
+    }
+
+
+def test_resolve_link_endpoint_canonicalises_before_the_exact_compare() -> None:
+    """RDR Test Plan row 557/564: the first lookup is the stored nx-note:// form,
+    so an old bundle's chroma:// endpoint converges on the stored Document without
+    the mode-change re-derivation (which can fail for a collection the target no
+    longer resolves)."""
+    looked_up: list[str] = []
+
+    class _Reader:
+        def by_source_uri(self, uri: str):
+            looked_up.append(uri)
+            return "ENTRY" if uri == "nx-note://knowledge__k/t" else None
+
+    assert rb._resolve_link_endpoint(_Reader(), None, "chroma://knowledge__k/t") == "ENTRY"
+    assert looked_up == ["nx-note://knowledge__k/t"]
+
+    # Already stored form, and a non-note identity, pass through unchanged.
+    looked_up.clear()
+    assert rb._resolve_link_endpoint(_Reader(), None, "nx-note://knowledge__k/t") == "ENTRY"
+    assert rb._resolve_link_endpoint(_Reader(), None, "file:///r/a.py") is None
+    assert looked_up == ["nx-note://knowledge__k/t", "file:///r/a.py"]
+
+
+def test_resolve_link_endpoint_leaves_file_routed_residue_alone() -> None:
+    """canonical_note_uri leaves chroma://code__... as it is, so residue is neither
+    rewritten into a note identity nor re-derived."""
+    looked_up: list[str] = []
+
+    class _Reader:
+        def by_source_uri(self, uri: str):
+            looked_up.append(uri)
+            return None
+
+    assert rb._resolve_link_endpoint(_Reader(), None, "chroma://code__x/whoops") is None
+    assert looked_up == ["chroma://code__x/whoops"]
+
+
+def test_old_bundle_links_converge_on_the_stored_nx_note_documents(
+    fake_catalog, tmp_path, monkeypatch,
+) -> None:
+    """Row 564 end to end: the bundle's chroma:// link endpoints resolve against the
+    stored nx-note:// rows even when the mode-change re-derivation is unavailable."""
+    url, state = fake_catalog
+
+    def _boom(col, t3):
+        raise RuntimeError("collection no longer resolvable on this install")
+
+    monkeypatch.setattr(rb, "target_collection_for", _boom)
+    bundle = tmp_path / "old.jsonl"
+    _old_bundle(bundle, links=[_old_link("chroma://knowledge/title-a", "chroma://knowledge/title-b")])
+
+    with _client(url) as client:
+        summary = import_bundle(client, client, _FakeT3(), bundle, import_doc=lambda t3, rec: None)
+
+    assert summary.unresolvable_links == []
+    assert summary.links_created + summary.links_merged == 1
+    sent = state.created_links[-1]
+    assert (sent["from_tumbler"], sent["to_tumbler"]) == ("1.9.1", "1.9.2")
+
+
+def test_old_bundle_link_after_a_mode_change_rederives_through_the_note_form(
+    fake_catalog, tmp_path, monkeypatch,
+) -> None:
+    """Row 557: an old bundle's chroma://<SOURCE-col>/<t> link, on a target whose
+    imported note carries the TARGET collection, resolves through the nx-note://
+    re-derivation (neutral model token: no embedder call)."""
+    url, state = fake_catalog
+    target_col = "knowledge__knowledge__model-ctx__v1"
+    monkeypatch.setattr(rb, "target_collection_for", lambda col, t3: target_col)
+    for d in state.docs:
+        if d["title"] in ("title-a", "title-b"):
+            d["source_uri"] = uri_for(target_col, d["title"])
+            d["physical_collection"] = target_col
+    assert state.docs[0]["source_uri"].startswith("nx-note://" + target_col)
+
+    bundle = tmp_path / "old.jsonl"
+    _old_bundle(bundle, links=[_old_link("chroma://knowledge/title-a", "chroma://knowledge/title-b")])
+    with _client(url) as client:
+        summary = import_bundle(client, client, _FakeT3(), bundle, import_doc=lambda t3, rec: None)
+
+    assert summary.unresolvable_links == []
+    assert summary.links_created + summary.links_merged == 1
+
+
+def test_old_bundle_doc_record_reaches_the_importer_in_the_stored_form(tmp_path) -> None:
+    """Row 564: no import_doc sees the legacy spelling of a note's source_uri; a
+    residue or file URI in the same bundle is untouched."""
+    bundle = tmp_path / "old.jsonl"
+    docs = [
+        {"source_uri": "chroma://knowledge/t1", "collection": KNOW, "title": "t1", "content": "x"},
+        {"source_uri": "nx-note://knowledge/t2", "collection": KNOW, "title": "t2", "content": "x"},
+        {"source_uri": "chroma://code__x/whoops", "collection": CODE, "title": "r", "content": "x"},
+        {"source_uri": "", "collection": KNOW, "title": "legacy", "content": "x"},
+    ]
+    _old_bundle(bundle, docs=docs)
+    seen: list[str] = []
+    summary = import_bundle(
+        None, None, None, bundle, import_doc=lambda t3, rec: seen.append(rec["source_uri"]),
+    )
+    assert summary.docs_imported == 4
+    assert seen == [
+        "nx-note://knowledge/t1", "nx-note://knowledge/t2", "chroma://code__x/whoops", "",
+    ]
+
+
+def test_residue_counter_still_counts_chroma_residue_by_physical_collection(
+    fake_catalog,
+) -> None:
+    """The residue counter keeps its literal chroma:// + physical_collection test
+    (backfill's twin): file_routed_excluded counts the one residue fixture row and
+    not a note row."""
+    url, _state = fake_catalog
+    with _client(url) as reader:
+        entries = rb.enumerate_all_documents(reader)
+    summary = ExportSummary()
+    rb.select_store_put_documents(entries, {}, summary)
+    assert summary.file_routed_excluded == 1
