@@ -135,7 +135,13 @@ def import_cmd(bundle: Path) -> None:
 
     reader = _cat_cmd._get_catalog()
     writer = _cat_cmd._get_catalog_writer()
-    summary = import_bundle(reader, writer, make_t3(), bundle)
+    from nexus.errors import NoteUriEngineTooOldError  # noqa: PLC0415 — command-local import
+
+    try:
+        summary = import_bundle(reader, writer, make_t3(), bundle)
+    except NoteUriEngineTooOldError as exc:
+        # The first note hit it and so would every other: one clear error, not N per-note failures.
+        raise click.ClickException(f"recovery import aborted at the first note: {exc}") from exc
     click.echo(f"Imported recovery bundle: {bundle}")
     click.echo(
         f"  docs imported: {summary.docs_imported}   "

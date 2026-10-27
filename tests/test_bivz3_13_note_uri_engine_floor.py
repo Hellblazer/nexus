@@ -280,28 +280,91 @@ class TestEveryWriterRefuses:
             rb._default_import_doc(object(), rec)
         assert writes == []
 
-    def test_the_bundle_import_reports_the_refusal_per_record(self, served, writes, monkeypatch, tmp_path: Path):
-        """import_bundle's per-record catch turns the refusal into a failed record with the remedy."""
+    def test_the_bundle_import_aborts_on_the_first_refusal(self, served, writes, monkeypatch, tmp_path: Path):
+        """One refusal, not N per-record failures: the first NoteUriEngineTooOldError ends the import, so the
+        engine is asked once and not once per note."""
         from nexus.catalog import recovery_bundle as rb
 
-        def _refuse(t3, rec):
-            sev.require_note_uri_engine()
-
+        monkeypatch.setattr(rb, "target_collection_for",
+                            lambda recorded, t3: "knowledge__bivz3-13__bge-base-en-v15-768__v1")
         monkeypatch.setattr(rb, "read_bundle", lambda p: ({}, [
-            {"record": "knowledge_doc", "collection": "c", "title": "t1", "content": "x"}]))
-        out = rb.import_bundle(reader=object(), writer=object(), t3=object(), path=tmp_path / "b.jsonl",
-                      import_doc=_refuse)
-        assert out.docs_failed == 1 and out.docs_imported == 0
-        assert "restart-stale" in out.doc_failures[0]["error"] or "has not been upgraded" in out.doc_failures[0]["error"]
+            {"record": "knowledge_doc", "collection": "c", "title": f"t{i}", "content": f"body {i}", "tags": "",
+             "category": "", "ttl_days": None} for i in range(3)]))
+        with pytest.raises(NoteUriEngineTooOldError):
+            rb.import_bundle(reader=object(), writer=object(), t3=object(), path=tmp_path / "b.jsonl")
+        assert served.probes == 1, "three notes in the bundle, one probe: the import stopped at the first"
         assert writes == []
 
-    def test_exporter_import_collection_refuses_before_reading_the_file(self, served, writes, tmp_path: Path):
+    def test_the_recovery_import_command_reports_one_clear_error(self, served, monkeypatch, tmp_path: Path):
+        from nexus.catalog import recovery_bundle as rb
+
+        monkeypatch.setattr(rb, "target_collection_for",
+                            lambda recorded, t3: "knowledge__bivz3-13__bge-base-en-v15-768__v1")
+        monkeypatch.setattr(rb, "read_bundle", lambda p: ({}, [
+            {"record": "knowledge_doc", "collection": "c", "title": f"t{i}", "content": f"body {i}", "tags": "",
+             "category": "", "ttl_days": None} for i in range(3)]))
+        bundle = tmp_path / "b.jsonl"
+        bundle.write_text("{}\n")
+        with patch("nexus.commands.catalog._get_catalog", return_value=object()), \
+             patch("nexus.commands.catalog._get_catalog_writer", return_value=object()), \
+             patch("nexus.db.make_t3", return_value=object()):
+            result = CliRunner().invoke(main, ["catalog", "import", str(bundle)])
+        assert result.exit_code != 0, result.output
+        assert result.output.count("aborted at the first note") == 1 and "0.1.199" in result.output
+        assert "DOC FAILURES" not in result.output
+        assert served.probes == 1
+
+    def test_the_spy_sees_a_write_when_the_engine_is_at_the_floor(self, served, writes):
+        """Positive control for every ``writes == []`` above: the same spy records the register and the
+        write once the guard passes, so an empty list means the guard stopped them, not that the spy is blind."""
+        from nexus.catalog.note_write import put_note
+
+        served.version = _FLOOR
+        put_note(content="bivz3.13 control body", collection="knowledge__bivz3-13__bge-base-en-v15-768__v1",
+                 title="bivz3-13-control")
+        assert "register" in writes and "write" in writes, writes
+
+    @staticmethod
+    def _header_only(tmp_path: Path, collection: str) -> Path:
+        """An export file whose header names *collection* and omits ``embedding_model``: a note import
+        passes the guard and then dies on the missing key, with nothing written, which orders the two."""
+        import json
+
+        path = tmp_path / "h.nxexp"
+        path.write_text(json.dumps({"format_version": 1, "collection_name": collection}) + "\n")
+        return path
+
+    def test_exporter_import_collection_refuses_a_note_target_before_reading_any_record(self, served, writes, tmp_path: Path):
         from nexus.exporter import import_collection
 
         with pytest.raises(NoteUriEngineTooOldError):
-            import_collection(object(), tmp_path / "does-not-exist.nxexp")
+            import_collection(object(), self._header_only(tmp_path, "knowledge__bivz3-13__bge-base-en-v15-768__v1"))
         assert served.probes == 1
         assert writes == []
+
+    @pytest.mark.parametrize("target", ["docs__bivz3-13", "code__bivz3-13", "rdr__bivz3-13"])
+    def test_exporter_import_collection_does_not_probe_for_a_file_routed_target(self, served, writes, tmp_path: Path, target):
+        """docs__, code__ and rdr__ imports mint file:// URIs, no note URI: the guard is not theirs to apply."""
+        from nexus.errors import FormatVersionError
+        from nexus.exporter import import_collection
+
+        with pytest.raises(FormatVersionError, match="embedding_model"):
+            import_collection(object(), self._header_only(tmp_path, target))
+        assert served.probes == 0
+
+    def test_exporter_import_collection_judges_the_target_not_the_source_name(self, served, writes, tmp_path: Path):
+        from nexus.errors import FormatVersionError
+        from nexus.exporter import import_collection
+
+        note_file = self._header_only(tmp_path, "knowledge__bivz3-13__bge-base-en-v15-768__v1")
+        with pytest.raises(FormatVersionError):
+            import_collection(object(), note_file, target_collection="docs__bivz3-13")
+        assert served.probes == 0
+        with pytest.raises(NoteUriEngineTooOldError):
+            import_collection(object(), self._header_only(tmp_path, "docs__bivz3-13"),
+                              target_collection="knowledge__bivz3-13__bge-base-en-v15-768__v1")
+
+
 
 
 # --- the gate-jar stamp at the sites outside build-gate-jar.sh (that script has its own shell test) ----------

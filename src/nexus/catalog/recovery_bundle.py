@@ -62,6 +62,7 @@ from nexus.aspect_readers import (
 )
 from nexus.catalog.note_ttl import row_may_give_tags, row_written_by
 from nexus.catalog.types import CatalogEntry
+from nexus.errors import NoteUriEngineTooOldError
 
 _log = structlog.get_logger(__name__)
 
@@ -781,6 +782,11 @@ def import_bundle(
                 stamp_refused=exc.stamp_refused,
                 error=str(exc),
             )
+        except NoteUriEngineTooOldError:
+            # RDR-231: the engine cannot hold a note's source URI, and that is true of every record that
+            # follows. Abort on the first with the one error rather than N per-record failures, each of
+            # which would probe the engine again. Records already imported stay (the import is idempotent).
+            raise
         except Exception as exc:  # noqa: BLE001 — per-record fail-loud summary; the import must complete for the rest
             summary.docs_failed += 1
             summary.doc_failures.append(

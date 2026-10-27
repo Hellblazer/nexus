@@ -55,7 +55,7 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.aspect_readers import canonical_note_uri, uri_for
+from nexus.aspect_readers import FILE_ROUTED_PREFIXES, canonical_note_uri, uri_for
 from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     embedding_model_for_collection_name,
@@ -1504,13 +1504,6 @@ def import_collection(
         If the declared model's expected dimensionality doesn't match the
         actual vectors found in the file (a mislabeled pre-migration export).
     """
-    # RDR-231 (nexus-bivz3.13): an import registers owner documents (a title-only owner synthesizes an
-    # nx-note:// URI), so it is refused up front when the serving engine cannot hold one: before any
-    # register and before any T3 upsert. Once per import is enough. Aspect and highlight upserts and the
-    # reads are not covered (no unique key on source_uri; the backfill leaves nx-note:// rows as they are).
-    from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
-
-    require_note_uri_engine()
     t0 = time.monotonic()
     remaps = remaps or []
     if hooks is None:
@@ -1547,6 +1540,15 @@ def import_collection(
             "The file may be corrupt or was produced by an incompatible version."
         )
     collection_name: str = target_collection or source_collection
+    # RDR-231 (nexus-bivz3.13/.15): a note import registers owner documents (a title-only owner
+    # synthesizes an nx-note:// URI), so it is refused when the serving engine cannot hold one: after the
+    # header names the target, before any register and before any T3 upsert. A file-routed target
+    # (docs__, code__, rdr__) mints file:// URIs and no note URI, so the check does not apply to it.
+    # Aspect and highlight upserts and the reads are not covered (no unique key on source_uri).
+    if not collection_name.startswith(FILE_ROUTED_PREFIXES):
+        from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
+
+        require_note_uri_engine()
     bypass_schema = collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
     if _owners_apply(db) and bypass_schema:
         # Their ids are not chunk hashes and they have no catalog documents, so no chunk of theirs

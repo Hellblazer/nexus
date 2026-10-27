@@ -671,7 +671,7 @@ def put_note(
     # Exception` (and store_hook's own hook swallows every error into NO_CATALOG), so a check placed
     # inside either would be turned into "could not catalog". Every note writer reaches this function
     # (MCP store_put, nx store put, nx memory promote, the recovery-bundle import); the exporter's
-    # import_collection has its own check at its top. Not covered, on purpose: aspect and highlight
+    # import_collection has its own check, once its header names a note target. Not covered, on purpose: aspect and highlight
     # upserts (no unique key on source_uri; the backfill leaves nx-note:// rows as they are and they join
     # the note once it is backfilled) and reads (find_ids_by_title, aspect_sql), which write nothing.
     from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
