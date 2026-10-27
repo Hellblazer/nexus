@@ -228,16 +228,16 @@ def test_the_map_stored_as_a_json_string_is_read(world) -> None:
 def test_json_carries_degraded_pages_only_when_some_document_has_any(world) -> None:
     world.holders = {CHASH: [("1.1.1", "Some Paper")]}
     world.metas = {"1.1.1": {"extraction_pages": DEGRADED}}
-    out = json.loads(_cli_get("--json").output)
+    out = json.loads(_cli_get("--json").stdout)
     assert out["degraded_pages"] == [
         {"tumbler": "1.1.1", "title": "Some Paper", "extraction_pages": DEGRADED},
     ]
 
     world.metas = {"1.1.1": {"extraction_pages": {}}}
-    assert "degraded_pages" not in json.loads(_cli_get("--json").output), "a clean chunk's JSON is unchanged"
+    assert "degraded_pages" not in json.loads(_cli_get("--json").stdout), "a clean chunk's JSON is unchanged"
 
     world.reader, world.lookups = None, 0
-    out = json.loads(CliRunner().invoke(main, ["store", "get", NOTE_CHASH, "--collection", "art", "--json"]).output)
+    out = json.loads(CliRunner().invoke(main, ["store", "get", NOTE_CHASH, "--collection", "art", "--json"]).stdout)
     assert "degraded_pages" not in out
     assert world.reader is None and world.lookups == 0, "a note makes no catalog lookup"
 
