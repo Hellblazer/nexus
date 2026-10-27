@@ -2,12 +2,12 @@
 title: "Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays"
 id: RDR-235
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-10-26
-accepted_date:
+accepted_date: 2026-10-27
 related_issues: [nexus-4vx0a, nexus-lqaq1]
 related: [RDR-089, RDR-120, RDR-163, RDR-173, RDR-184, RDR-205, RDR-206, RDR-211]
 ---
