@@ -1,0 +1,31 @@
+{
+  "warm_one_page": {
+    "ok": true,
+    "seconds": 33.5,
+    "chars": 3955,
+    "formula_markers": 7
+  },
+  "gave_up_at_10s": {
+    "ok": false,
+    "timeout": true,
+    "seconds": 10.0
+  },
+  "next_page_after_10s_give_up": {
+    "ok": true,
+    "seconds": 23.1,
+    "chars": 5520,
+    "formula_markers": 0
+  },
+  "gave_up_at_30s": {
+    "ok": false,
+    "timeout": true,
+    "seconds": 30.0
+  },
+  "next_page_after_30s_give_up": {
+    "ok": true,
+    "seconds": 25.1,
+    "chars": 5520,
+    "formula_markers": 0
+  },
+  "server_log_tail": "\u2588\u2588\u2588\u2589      | 9/23 [00:06<00:10,  1.30it/s]\n\n\nMFR Predict:  50%|\u2588\u2588\u2588\u2588\u2588     | 8/16 [00:09<00:09,  1.14s/it]\u001b[A\u001b[A\nOCR-det en:  43%|\u2588\u2588\u2588\u2588\u258e     | 10/23 [00:07<00:09,  1.40it/s]\nOCR-det en:  48%|\u2588\u2588\u2588\u2588\u258a     | 11/23 [00:07<00:08,  1.38it/s]\nOCR-det en:  52%|\u2588\u2588\u2588\u2588\u2588\u258f    | 12/23 [00:08<00:08,  1.31it/s]\nOCR-det en:  57%|\u2588\u2588\u2588\u2588\u2588\u258b    | 13/23 [00:09<00:06,  1.46it/s]\nOCR-det en:  61%|\u2588\u2588\u2588\u2588\u2588\u2588    | 14/23 [00:09<00:05,  1.53it/s]\nOCR-det en:  65%|\u2588\u2588\u2588\u2588\u2588\u2588\u258c   | 15/23 [00:10<00:05,  1.44it/s]\nOCR-det en:  70%|\u2588\u2588\u2588\u2588\u2588\u2588\u2589   | 16/23 [00:12<00:07,  1.14s/it]\nOCR-det en:  74%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258d  | 17/23 [00:12<00:05,  1.16it/s]\nOCR-det en:  78%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258a  | 18/23 [00:13<00:03,  1.56it/s]\nOCR-det en:  83%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258e | 19/23 [00:14<00:03,  1.24it/s]\nOCR-det en:  91%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258f| 21/23 [00:14<00:01,  1.79it/s]\nOCR-det en:  96%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c| 22/23 [00:14<00:00,  2.16it/s]\n\n\nMFR Predict: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 16/16 [00:17<00:00,  1.08s/it]\u001b[A\u001b[A\nMFR Predict: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 16/16 [00:17<00:00,  1.09s/it]\n\n\n\nTable-ocr det: 0it [00:00, ?it/s]\u001b[A\u001b[A\nTable-ocr det: 0it [00:00, ?it/s]\n\n\n\nTable-wireless Predict: 0it [00:00, ?it/s]\u001b[A\u001b[A\nTable-wireless Predict: 0it [00:00, ?it/s]\n\n\n\nOCR-det en:   0%|          | 0/14 [00:00<?, ?it/s]\u001b[A\u001b[A\nOCR-det en: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 23/23 [00:15<00:00,  2.22it/s]\nOCR-det en: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 23/23 [00:15<00:00,  1.50it/s]\n\nSeal Predict: 0it [00:00, ?it/s]\nSeal Predict: 0it [00:00, ?it/s]\n\nProcessing pages:   0%|          | 0/6 [00:00<?, ?it/s]\n\n\nOCR-det en:  14%|\u2588\u258d        | 2/14 [00:00<00:03,  3.01it/s]\u001b[A\u001b[A\nProcessing pages:  17%|\u2588\u258b        | 1/6 [00:00<00:00,  8.82it/s]\nProcessing pages:  33%|\u2588\u2588\u2588\u258e      | 2/6 [00:00<00:00,  9.16it/s]\n\n\nOCR-det en:  21%|\u2588\u2588\u258f       | 3/14 [00:00<00:03,  3.29it/s]\u001b[A\u001b[A\nProcessing pages:  50%|\u2588\u2588\u2588\u2588\u2588     | 3/6 [00:00<00:00,  8.22it/s]\n\n\nOCR-det en:  29%|\u2588\u2588\u258a       | 4/14 [00:01<00:02,  3.99it/s]\u001b[A\u001b[A\nProcessing pages:  67%|\u2588\u2588\u2588\u2588\u2588\u2588\u258b   | 4/6 [00:00<00:00,  7.16it/s]\nProcessing pages: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 6/6 [00:00<00:00,  9.04it/s]\nProcessing pages: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 6/6 [00:00<00:00,  8.25it/s]\nINFO:     127.0.0.1:55626 - \"POST /file_parse HTTP/1.1\" 200 OK\n\n\n\nOCR-det en:  36%|\u2588\u2588\u2588\u258c      | 5/14 [00:01<00:03,  2.72it/s]\u001b[A\u001b[A\n\n\nOCR-det en:  43%|\u2588\u2588\u2588\u2588\u258e     | 6/14 [00:01<00:02,  3.27it/s]\u001b[A\u001b[A\n\n\nOCR-det en:  50%|\u2588\u2588\u2588\u2588\u2588     | 7/14 [00:02<00:02,  2.96it/s]\u001b[A\u001b[A\n\n\nOCR-det en:  64%|\u2588\u2588\u2588\u2588\u2588\u2588\u258d   | 9/14 [00:02<00:01,  4.38it/s]\u001b[A\u001b[A\n\n\nOCR-det en:  71%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258f  | 10/14 [00:02<00:00,  5.02it/s]\u001b[A\u001b[A\n\n\nOCR-det en:  86%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c | 12/14 [00:02<00:00,  5.72it/s]\u001b[A\u001b[A\n\n\nOCR-det en:  93%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258e| 13/14 [00:02<00:00,  6.27it/s]\u001b[A\u001b[A\n\n\nOCR-det en: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 14/14 [00:03<00:00,  6.58it/s]\u001b[A\u001b[A\nOCR-det en: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 14/14 [00:03<00:00,  4.49it/s]\n\nSeal Predict: 0it [00:00, ?it/s]\nSeal Predict: 0it [00:00, ?it/s]\n\nProcessing pages:   0%|          | 0/1 [00:00<?, ?it/s]\nProcessing pages: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 1/1 [00:00<00:00,  7.18it/s]\nProcessing pages: 100%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588| 1/1 [00:00<00:00,  5.89it/s]\nINFO:     127.0.0.1:44486 - \"POST /file_parse HTTP/1.1\" 200 OK\n"
+}

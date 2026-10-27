@@ -209,18 +209,50 @@ shellingham, tabulate, typer. No module in `src/nexus`, `scripts`, `tests` or
 MinerU. The pillow cap, whose stated reason is `docling-slim`, may become
 relaxable once it is gone.
 
+**RF-10 (Verified, spike; T2 `nexus_rdr/237-research-3`).** On chas (CPU only,
+MinerU 3.1.11), pages 1 to 3 of `virgo.pdf` one at a time, with the formula model
+on and then off. Page 3, which carries the equations, went from 129.1 s to 37.1 s
+on the subprocess path and from 21.2 s to 3.9 s on the server, from 4,855 to 4,503
+characters, and from 10 formula markers to 0. Pages without equations kept their
+text. The switch works per call on both paths and drops only the equations. A
+cold subprocess page with formulas took 129 s, close to the 180 s page timeout.
+
+**RF-11 (Verified by proxy, spike; T2 `nexus_rdr/237-research-4`).** Word recall
+and precision against each PDF's own text layer (ground truth for a born-digital
+PDF), counting words of three or more letters:
+
+| PDF | Pages | Docling recall / precision / time | MinerU recall / precision / time |
+| --- | --- | --- | --- |
+| `tests/fixtures/tc-sql.pdf` | 30 | 0.864 / 0.824 / 9,397 s | 0.845 / 0.736 / 297 s |
+| `papers/2408.04948.pdf` | 9 | 0.955 / 0.962 / 12.9 s | 0.951 / 0.953 / 35.8 s |
+
+Recall is within two points. MinerU writes tables as HTML, which likely lowers its
+precision on this metric through tag words. Docling's default (enriched) path took
+2.6 hours on a 30-page PDF with no math, the hang of nexus-73pvi on an ordinary
+document. This is a text-completeness proxy, not a retrieval evaluation.
+
+**RF-12 (Verified, spike; T2 `nexus_rdr/237-research-5`).** A client that gave up on
+a six-page server request at 3, 10 or 30 s did not delay the next one-page request
+(17.8 s, 23.1 s and 25.1 s, against warm one-page baselines of 18.9 s and 33.5 s).
+The server log shows the abandoned job ran to completion: MinerU finishes abandoned
+work rather than cancelling it. A page that never finishes was not tested and would
+still hold the server's single slot. A server restart cost about 30 s of model
+reload (the next page took 48.5 s against 17.8 s).
+
 ### Critical Assumptions
 
-- [ ] A1: MinerU honours `formula_enable=false` per request on the server path
+- [x] A1: MinerU honours `formula_enable=false` per request on the server path
   and per call in the subprocess worker, and the rest of the page (text, layout,
-  tables) still extracts. — **Status**: Unverified — **Method**: Source Search
-  done (the parameter exists on both paths); Spike needed.
-- [ ] A2: Restarting the MinerU server frees a slot held by a stuck page, so the
-  next page is not queued behind it. — **Status**: Unverified — **Method**: Spike.
-- [ ] A3: MinerU's output on non-math, born-digital PDFs is at least as good for
-  retrieval as Docling's. RF-1 covers one scanned math paper only. —
-  **Status**: Unverified — **Method**: Spike (retrieval comparison on non-math
-  PDFs).
+  tables) still extracts. — **Status**: Verified (RF-10) — **Method**: Spike.
+- [x] A2: Restarting the MinerU server frees a slot held by a stuck page, so the
+  next page is not queued behind it. — **Status**: Reframed by RF-12: a client
+  timeout did not queue the next page, and a restart costs about 30 s, so the
+  design restarts only after two consecutive timeouts (Technical Design, Bounds).
+  A page that never finishes is the remaining case, and the restart is its
+  release. — **Method**: Spike.
+- [x] A3: MinerU's output on non-math, born-digital PDFs is at least as good for
+  retrieval as Docling's. — **Status**: Verified by proxy (RF-11): text recall
+  within two points; a retrieval evaluation was not run. — **Method**: Spike.
 - [x] A4: PyMuPDF can return the text layer of one page of a PDF in isolation,
   quickly, for use as the last rung. — **Status**: Verified (RF-8) — **Method**:
   Source Search.
@@ -258,8 +290,11 @@ that can actually stop work, so it is the path a timed-out page retries on:
 
 - the server request timeout becomes `mineru_page_timeout_s` × pages in the
   batch (today a fixed 300 s, RF-3);
-- a server timeout restarts the server (A2) and sends that page to the next rung
-  on the subprocess path, never the same rung again on the server;
+- a server timeout sends that page to the next rung on the subprocess path,
+  never the same rung again on the server. The server is restarted only after two
+  consecutive server timeouts, the sign of a page that will not finish: an
+  abandoned request otherwise completes on its own and does not delay the next
+  one, and a restart costs about 30 s of model reload (RF-12);
 - `mineru_page_timeout_s` must stay under the 5-minute stale window, so that one
   page's limit cannot outlast the heartbeat (validated at config load).
 
@@ -307,7 +342,7 @@ PageOutcome(page: int, text: str, method: "mineru" | "mineru-no-formula"
 | Per-page MinerU run | `_extract_with_mineru`, `_mineru_run_isolated`, `_mineru_run_subprocess` (bisect to one page) | Reuse; the ladder wraps the single-page settle. |
 | Rung 2 | `_degrade_page_to_docling` (RDR-148 Gap 5) | Replace: same one-page shape, MinerU with formulas off. |
 | Rung 3 | `_extract_normalized` (whole-document PyMuPDF) | Extend to one page. |
-| Server timeout and recovery | `_mineru_run_via_server`, `_restart_mineru_server` | Extend: per-page timeout; a timed-out page leaves the server for the next rung. |
+| Server timeout and recovery | `_mineru_run_via_server`, `_restart_mineru_server` | Extend: per-page timeout; a timed-out page leaves the server for the next rung; restart only after two consecutive timeouts (RF-12). |
 | Missing-stack message | `pdf_stack.require` / `missing_message` | Reuse; drop Docling from `STACK_DISTS`/`STACK_MODULES`. |
 | Doctor | `health._check_pdf_support`, `_check_docling_importable` | Remove the Docling row; keep the PDF-support and MinerU rows. |
 | Quality gate | `PDFExtractor.extract` gate | Reuse; run per document as today. |
@@ -389,7 +424,7 @@ the install, CI and tests; Docling's whole-document convert stays silent.
 
 ### Prerequisites
 
-- [ ] A1 to A5 verified.
+- [x] A1 to A5 verified or reframed (RF-8 to RF-12).
 - [ ] Q1 answered by Sam.
 
 ### Minimum Viable Validation
@@ -441,8 +476,11 @@ None. Docling (`docling-slim` and its three companions) is removed.
 - **Scenario**: one page fails on rungs 1 and 2 — **Verify**: `pymupdf-text`.
 - **Scenario**: an image-only page fails everywhere — **Verify**: `unextracted`,
   named, the document still finishes.
-- **Scenario**: a server request times out — **Verify**: the server restarts,
-  the page retries on the subprocess path at the next rung, not on the server.
+- **Scenario**: a server request times out — **Verify**: the page retries on the
+  subprocess path at the next rung, not on the server, and the server is not
+  restarted.
+- **Scenario**: two consecutive server requests time out — **Verify**: the server
+  is restarted once and later pages use it again.
 - **Scenario**: MinerU not installed — **Verify**: immediate failure naming the fix,
   no page extracted.
 - **Scenario**: `pdf.extractor: docling` in config — **Verify**: runs MinerU, one notice.
@@ -477,9 +515,9 @@ To be completed at gate (A1 to A5).
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| `do_parse(..., formula_enable=...)` | MinerU 3.1.11 | Source Search (spike pending, A1) |
-| `POST /file_parse` `formula_enable` | MinerU 3.1.11 | Source Search (spike pending, A1) |
-| `page.get_text()` | PyMuPDF | Source Search (A4) |
+| `do_parse(..., formula_enable=...)` | MinerU 3.1.11 | Spike (RF-10) |
+| `POST /file_parse` `formula_enable` | MinerU 3.1.11 | Spike (RF-10) |
+| `page.get_text()` | PyMuPDF | Source Search (RF-8) |
 
 ### Scope Verification
 
@@ -523,3 +561,4 @@ Right-sized for a change that removes a dependency across code, CI and docs.
 ## Revision History
 
 - 2026-10-27: draft.
+- 2026-10-27: research RF-8 to RF-12; A2 reframed, so a server timeout no longer restarts the server unless it repeats.
