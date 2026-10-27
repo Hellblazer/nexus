@@ -468,13 +468,50 @@ the engine's budget for such calls.
   aspect_worker.py or aspect_worker_daemon.py), so the design gives each claim
   its own claimant string (Worker side, step 1).
   *Source: service/src/main/java/dev/nexus/service/db/TupleRepository.java:1858-1878, :1978-1985; TupleLimits.java:44; docs/tuple-space.md:97-98, :179; research-30*
+- **✅ Verified** (spike, measured 2026-10-27, nexus-5r2sc.1.1) — F26, A1. The
+  `available_at` arm keeps the claim's index scan, and no new index helps it.
+  Method: a scratch PG 17.5 cluster from the nexus PG bundle, migrated by the
+  gate jar (524 changesets; the tuples changelog is unchanged since
+  2026-09-15), `available_at TIMESTAMPTZ` added, two tenants seeded with
+  identical `aspects` backlogs (86% pending, 5% lapsed claims, 3% live claims,
+  3% dead, 3% consumed; 10% of the rows with a future `available_at`), and the
+  `claimOnce` candidate SELECT run as `nexus_svc` under `SET nexus.tenant`
+  (RLS forced, so the plan carries the `current_setting` one-time filter),
+  with and without the arm, `EXPLAIN (ANALYZE, BUFFERS)`, five runs each, warm
+  cache, fsync off. In every case the plan is an Index Scan on
+  `idx_tuples_subspace_scan` `(tenant_id, subspace, created_at, id)` with
+  `tenant_id` and `subspace` as the index condition and every other arm,
+  the new one included, as a filter on the ordered walk; `LIMIT 1` stops it
+  at the first claimable row. With the delayed rows spread uniformly the walk
+  stops at once: 0.07 ms and 5 shared buffers at both 10,000 and 100,000 rows
+  per tenant, arm on or off. With the delayed rows packed at the head of the
+  queue (a retry wave of the oldest tasks) the walk skips them: 1,000 delayed
+  of 10,000 cost 0.58 ms and 107 buffers; 10,000 delayed of 100,000 cost
+  5.3 ms (5.2 to 5.6) and 1,047 buffers, about 0.5 ms and one heap page per
+  ten skipped rows. A covering index `(tenant_id, subspace, created_at)
+  INCLUDE (available_at, consumed_at, claim_state, lease_until, expires_at,
+  keys)` (20 MB against the 26 MB of `idx_tuples_subspace_scan` at 200,000
+  rows) was tried and gave 5.0 to 5.4 ms: the claim selects every column and
+  locks the row, so the walk is never index-only. A partial index that
+  excludes delayed rows cannot serve the `IS NULL OR <= now()` arm. Also
+  observed: the partial `idx_tuples_claim_scan` (`WHERE claim_state IS NULL`)
+  does not serve the claim today either, because the lapsed-lease arm
+  `(claim_state IS NULL OR lease_until < now())` does not imply its predicate.
+  Decision for E1: the changeset adds the column and no index; the arm's cost
+  is linear in the delayed rows ahead of the first claimable one, which
+  `nack retry_after_s` bounds to the number of failing documents.
+  *Source: T2 nexus/rdr235-prerequisites (plans and scripts); TupleRepository.java:1882-1893; tuples-001-baseline.xml:96-97; tuples-005-subspace-and-claim-log-indexes.xml:86*
 
 ### Critical Assumptions
 
-- [ ] **A1**: Adding a nullable `available_at` column and one claim-predicate arm
+- [x] **A1**: Adding a nullable `available_at` column and one claim-predicate arm
   (`available_at IS NULL OR available_at <= now()`) keeps the claim's index
-  scan. **Status**: Unverified. **Method**: Spike (EXPLAIN on a seeded
-  tenant). The spike is still to run.
+  scan. **Status**: Verified (F26, measured 2026-10-27). The plan stays an
+  Index Scan on `idx_tuples_subspace_scan` at 100,000 rows per tenant; the
+  arm costs nothing when delayed rows are spread out and about 0.5 ms per
+  1,000 delayed rows packed at the head of the queue (5.3 ms at 10,000). No
+  index serves the arm; E1 ships the column alone. **Method**: Spike (EXPLAIN
+  on a seeded tenant).
 - [ ] **A2**: A task can carry the document's identity instead of its text,
   and the text the worker gets by the existing empty-content contract (the
   document reassembled from T3 chunks through the catalog manifest, F7) is an
@@ -1445,3 +1482,4 @@ so the question is not reopened without new evidence.
   - A2 held only for notes, and `document_text` has no caller today (F17).
 - 2026-10-26: Gate round 1 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); commit `609c8501f` (the develop twin of the gated branch commit, byte-identical RDR); critique `nexus_rdr/235-gate-critique-2026-10-26-r1`.
 - 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `798dd7b75`; critique `nexus_rdr/235-gate-critique-2026-10-27-r2`.
+- 2026-10-27: A1 settled by the EXPLAIN spike (nexus-5r2sc.1.1): F26 added, A1 marked verified, E1 ships no index.
