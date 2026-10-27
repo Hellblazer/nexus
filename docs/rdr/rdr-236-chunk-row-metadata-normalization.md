@@ -1966,6 +1966,7 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   route (b); the backfill applies option B per key; plus the import case of
   the frozen-row rule, Phase 5's lower bound, the `update-metadata` overlay
   writers in Step 1, and register terms.
+- 2026-10-27: Gate round 3 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); commit `d12733801`; critique `nexus_rdr/236-gate-critique-2026-10-27-r3`.
 - 2026-10-27: fix-check round on the round 2 fix (T2
   `nexus_rdr/236-fix-check-2874ec21d`, RF-24): no plain btree on title or
   author (the md5 index forms, a partial bib_doi index); the chunk routes
