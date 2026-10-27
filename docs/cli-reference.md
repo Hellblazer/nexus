@@ -5466,8 +5466,10 @@ results, or a scope conflict removed it all); and `uncovered`
 requested part, so no answer is given (terminal generation is skipped when the
 check finds none covered, and prose generated anyway is withheld). `None` on
 paths that never classified: the single-step fast path, a continuation
-handoff and a budget-exhausted stop. `NX_ANSWER_COVERAGE=0` leaves every run
-unassessed and `answer_shape` as it was before RDR-232 Phase 3.
+handoff and a budget-exhausted stop. The coverage check is off unless
+`NX_ANSWER_COVERAGE=1` is set (the default flips only after the Phase 3
+measurement, nexus-jypmj.3.10); with it off every run is unassessed and
+`answer_shape` is what it was before RDR-232 Phase 3.
 Grown plans are additionally gated on identifier agreement at match time
 (nexus-wj12p): a grown plan whose originating question named identifiers
 (RDR/JDR ids, bead ids, engine tags, client versions, GH/PR numbers) is
@@ -5831,8 +5833,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   - `reducer_input`: what the first operator that consumes retrieved evidence
     received, after the reserved merge and the input cap: `{step, items, chars,
     by_stream, by_stream_collection, by_collection, in_scope, out_of_scope,
-    unattributed}`. `by_stream` keys are `primary`, `t2`, `vector`, `graph` and
-    `unattributed`. A reserved item carries its stream and collection; any other
+    unattributed}`. `by_stream` keys are `primary`, `t2`, `vector`, `graph`,
+    `unattributed` and `coverage_note` (the note the coverage check hands the
+    final reduction; it is counted apart, not as an unattributed input). A reserved item carries its stream and collection; any other
     item is attributed by the hash of its text (with the `[source: ...]` line
     removed) against the ids the retrieval steps returned, the stream that
     produced it first winning; an item that hashes to nothing retrieved (a
@@ -5931,9 +5934,11 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `not_recorded` (no record was written, or the summary could not be built).
   HTTP 200 is not evidence of persistence: an engine that predates the column
   answers 200 and discards the field, so only `persisted` means the summary was
-  kept. `returned_coverage_state` is `complete`, `partial`, `unavailable` or
+  kept. A `trace=False` run redacts its question and text, so the readback
+  matches its row by timestamp, duration and step count only. `returned_coverage_state` is `complete`, `partial`, `unavailable` or
   `unassessed` for a run that reached its terminal reduction, and `none` for one
-  that never did (an error before it, the single-query fast path).
+  that never did (an error before it, the single-query fast path, a budget or
+  deadline stop before it).
   `persisted_coverage_state` is the state read back from the stored row, `null`
   unless `persistence` is `persisted`. A summary failure never fails the answer.
 - `coverage` (nexus-jypmj.3.6, RDR-232 section 4): what the evidence covered of
@@ -5948,7 +5953,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `missing`) and `corpus_counts` (`{anchors, by_stream, by_collection}`, what the
   final reduction was handed); `repair` holds the repair attempt. A run no
   boundary assessed has the same keys, state `unassessed` and a `reason`:
-  `switch_off` (`NX_ANSWER_COVERAGE` is off), `no_facets`,
+  `switch_off` (`NX_ANSWER_COVERAGE` is not on, the default), `no_facets`,
   `terminal_reduction_not_reached` (an error before the final reduction, the
   single-query fast path, a run whose reduction raised) or `boundary_not_run`;
   its facet lists are empty. A `partial` state goes with `answer_shape`
@@ -5964,10 +5969,13 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   skip_generation, facets_required, facets, rounds, findings, anchors, sources,
   scope, assessment, repair, ...}`. `state` is `complete` (every required facet
   covered), `partial`, `unavailable` or `unassessed` (no facets, the assessor
-  failed, or `NX_ANSWER_COVERAGE` is off); `reason` says why. `facets` counts
+  failed, or `NX_ANSWER_COVERAGE` is not on); `reason` says why. `facets` counts
   findings by state (`covered`, `unsupported`, `contradicted`, `unassessed`);
   `findings` has one `{facet_id, state, evidence_ids, reason}` per required
-  facet; `anchors` is a list of `{item_id, stream, kind, chash, collection,
+  facet (a facet with both supporting and contradicting evidence is `covered`
+  with reason `conflicted`; an assessor reply with no usable evidence record
+  leaves its facets `unassessed` with reason `assessment_unusable`, and the
+  assessment `detail` starts `assessor_unusable`); `anchors` is a list of `{item_id, stream, kind, chash, collection,
   tumbler, t2_record_id}` and carries identity only, never evidence text;
   `sources` and `scope` are the deterministic source and scope rows; `assessment`
   and `repair` report calls, facets per call, latency and outcome, with counts and

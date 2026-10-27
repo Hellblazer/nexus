@@ -46,6 +46,14 @@ CORE_PY = REPO_ROOT / "src" / "nexus" / "mcp" / "core.py"
 QUESTION = "what did RDR-084 decide, and who approved it?"
 
 
+@pytest.fixture(autouse=True)
+def _coverage_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boundary ships OFF (RDR-232 Phase 3 fix round: the default flips only after the nexus-jypmj.3.10
+    measurement), so every test here that drives the boundary opts in the way a caller does. The tests of the
+    default itself delete the variable."""
+    monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "1")
+
+
 def supports_f1_only(items: str, instruction: str) -> dict:  # noqa: ARG001
     """A check reply that says the first item supports facet f1 and nothing else."""
     first = json.loads(items)[0]["id"]
@@ -139,6 +147,44 @@ def _partial_result(prose: str = "The decision was X.") -> PlanResult:
     )
 
 
+# ── the terminal flag: a run cut before its terminal reduction never reached it ───────────────────────────────
+
+
+class TestTerminalReductionReached:
+    @staticmethod
+    def _cut(coverage: CoverageResult | None) -> PlanResult:
+        return PlanResult(
+            steps=[{"ids": ["c1"], "tumblers": ["1.1.1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"],
+                    "chunk_collections": ["rdr__1-1"], "distances": [0.1]}],
+            budget_exhausted_at_step=2, budget_exhausted_kind="time", total_planned_steps=2, coverage=coverage,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_budget_exhausted_exit_records_coverage_none_and_the_envelope_says_why(self) -> None:
+        """Code S3: the deadline expired in the retrieval segment, so the terminal reduction was never reached. The
+        run row's summary counts none of the four states (coverage_state "none") and the envelope reason is
+        terminal_reduction_not_reached, not "unassessed / boundary_not_run"."""
+        run = await _drive(plan_id=7, plan_result=self._cut(None), request=_request(2))
+        assert run.out["budget_exhausted_at_step"] == 2
+        assert run.summary["coverage_state"] == "none"
+        assert [run.summary[f"coverage_{s}"] for s in ("complete", "partial", "unavailable", "unassessed")] == [0, 0, 0, 0]
+        assert run.out["run_summary"]["returned_coverage_state"] == "none"
+        assert (run.out["coverage"]["state"], run.out["coverage"]["reason"]) == ("unassessed", "terminal_reduction_not_reached")
+
+    @pytest.mark.asyncio
+    async def test_a_cut_after_the_boundary_ran_keeps_the_ledger_it_produced(self) -> None:
+        """The boundary ran, then generation hit the deadline: the terminal reduction was reached, so the ledger stands."""
+        cov = _ledger_result("partial", "unresolved_facets", COVERED, UNSUPPORTED)
+        run = await _drive(plan_id=7, plan_result=self._cut(cov), request=_request(2))
+        assert run.summary["coverage_state"] == "partial" and run.summary["coverage_partial"] == 1
+        assert run.out["coverage"]["state"] == "partial"
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_finished_without_a_boundary_result_is_still_unassessed_not_none(self) -> None:
+        run = await _drive(plan_id=7, plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(2))
+        assert run.summary["coverage_state"] == "unassessed" and run.summary["coverage_unassessed"] == 1
+
+
 # ── A: the boundary is wired ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -173,19 +219,44 @@ class TestBoundaryWiring:
         assert run.out["answer_shape"] == "answered"
 
     @pytest.mark.asyncio
-    async def test_the_switch_is_on_by_default(self) -> None:
+    async def test_the_switch_is_off_by_default_and_every_run_is_unassessed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(switches.ANSWER_COVERAGE_ENV, raising=False)
+        run = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(2))
+        [kw] = run.plan_run_calls
+        assert "coverage_boundary" not in kw, "an unset switch leaves the plan_run call exactly as before Phase 3"
+        assert run.out["run_summary"]["returned_coverage_state"] == "unassessed"
+        assert run.out["coverage"]["state"] == "unassessed" and run.out["coverage"]["reason"] == "switch_off"
+        assert run.out["answer_shape"] == "answered"
+
+    @pytest.mark.asyncio
+    async def test_an_unset_switch_runs_no_assessment_no_repair_and_one_generation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nx_answer with the switch unset behaves as it did before Phase 3: the real runner is driven over the stub
+        dispatcher and no operator_check or repair call is made, even for a request nothing covers."""
+        monkeypatch.delenv(switches.ANSWER_COVERAGE_ENV, raising=False)
+        d = Dispatcher(check=supports_nothing)
+        run = await _drive(plan_id=7, dispatcher=d, request=_request(2))
+        assert "operator_check" not in d.tools and d.tools.count("generate") == 1
+        assert d.tools.count("search") == 1, "no repair retrieval"
+        assert run.out["answer_shape"] == "answered" and run.write["success"] is True
+        assert run.summary["coverage_state"] == "unassessed"
+
+    @pytest.mark.asyncio
+    async def test_the_opt_in_value_hands_the_runner_the_boundary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "1")
         run = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(2))
         assert isinstance(run.plan_run_calls[0]["coverage_boundary"], CoverageBoundary)
 
     @pytest.mark.asyncio
-    async def test_an_unrecognised_switch_value_warns_once_and_stays_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_an_unrecognised_switch_value_warns_once_and_stays_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A value in neither vocabulary is read as the default, which is now off: a misspelled opt-in or opt-out
+        never switches the destructive gate on. It warns once so the typo is visible."""
         monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "disable")
         with structlog.testing.capture_logs() as logs:
             first = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(1))
             second = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(1))
-        assert "coverage_boundary" in first.plan_run_calls[0] and "coverage_boundary" in second.plan_run_calls[0]
+        assert "coverage_boundary" not in first.plan_run_calls[0] and "coverage_boundary" not in second.plan_run_calls[0]
         warned = [e for e in logs if e["event"] == "answer_switch_value_unrecognised" and e["variable"] == "NX_ANSWER_COVERAGE"]
-        assert len(warned) == 1 and warned[0]["read_as"] == "on"
+        assert len(warned) == 1 and warned[0]["read_as"] == "off"
 
     @pytest.mark.asyncio
     async def test_the_continuation_fallback_run_gets_the_boundary_too(self) -> None:
@@ -367,18 +438,35 @@ class TestScenario5Uncovered:
         assert run.out["answer_shape"] == "uncovered" and run.write["success"] is False and run.write["plan_id"] == 7
 
     @pytest.mark.asyncio
-    async def test_prose_with_no_covered_facet_is_withheld_and_uncovered(self) -> None:
-        """Generation ran (one facet was not assessable) and no facet is covered: the prose is withheld."""
-        unassessed = FacetFinding("f3", "unassessed", (), "assessment_failed")
+    async def test_prose_with_no_covered_facet_and_none_unassessed_is_withheld_and_uncovered(self) -> None:
+        """Generation ran (the skip was off) and every facet is known uncovered: the prose is withheld."""
+        contradicted = FacetFinding("f3", "contradicted", ("e1",), "contradicted")
         pr = PlanResult(
             steps=[{"ids": ["c1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"], "chunk_collections": ["rdr__1-1"]},
                    {"text": "A fluent answer built on nothing."}],
-            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, unassessed),
+            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, contradicted),
         )
         run = await _drive(plan_id=0, plan_result=pr, request=_request(2))
         assert run.out["answer_shape"] == "uncovered" and "fluent answer" not in run.out["final_text"]
         assert run.write["success"] is False and not run.grew
         assert run.summary["coverage_state"] == "unavailable", "the summary carries the FINAL state"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("known_gap", [UNSUPPORTED, FacetFinding("f3", "contradicted", ("e1",), "contradicted")])
+    async def test_prose_with_no_covered_facet_but_an_unassessed_one_is_kept_as_a_partial_answer(self, known_gap: FacetFinding) -> None:
+        """An unassessed facet is not known to be uncovered (code M6, critique S2): the prose generation paid for is
+        returned behind the partial notice, which names the unassessed facet as not assessed."""
+        unassessed = FacetFinding("f4", "unassessed", (), "assessment_failed")
+        pr = PlanResult(
+            steps=[{"ids": ["c1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"], "chunk_collections": ["rdr__1-1"]},
+                   {"text": "A fluent answer built on part of the evidence."}],
+            coverage=_ledger_result("partial", "unresolved_facets", known_gap, unassessed),
+        )
+        run = await _drive(plan_id=0, plan_result=pr, request=_request(2))
+        assert run.out["answer_shape"] == "insufficient_evidence"
+        assert "fluent answer" in run.out["final_text"] and "(not assessed)" in run.out["final_text"]
+        assert run.write["success"] is True and not run.grew
+        assert run.summary["coverage_state"] == "partial", "not rewritten to unavailable"
 
 
 # ── C: the rest of the post-generation half ──────────────────────────────────────────────────────────────────
@@ -494,17 +582,24 @@ class TestCountersAndPlanHygiene:
 # ── B: the kill switch's vocabulary ──────────────────────────────────────────────────────────────────────────
 
 OFF_VALUES = ["0", "false", "off", "no", "OFF", " False ", "No"]
-ON_VALUES = ["", "   ", "1", "true", "yes", "on", "ON", "anything-else"]
+ON_VALUES = ["1", "true", "yes", "on", "ON", " Yes "]
+DEFAULT_VALUES = ["", "   ", "anything-else", "disable", "enabled"]
 
 
 @pytest.mark.parametrize("value", ON_VALUES)
-def test_the_boundary_is_on_when_the_setting_is_unset_blank_truthy_or_unrecognised(value: str) -> None:
+def test_each_opt_in_value_turns_the_boundary_on(value: str) -> None:
     assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: value}) is True
+
+
+@pytest.mark.parametrize("value", DEFAULT_VALUES)
+def test_unset_blank_and_unrecognised_values_are_the_default_which_is_off(value: str) -> None:
+    assert switches.ANSWER_COVERAGE_ENABLED is False
+    assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: value}) is False
 
 
 def test_the_switch_name_and_the_unset_default() -> None:
     assert switches.ANSWER_COVERAGE_ENV == "NX_ANSWER_COVERAGE"
-    assert switches.coverage_enabled({}) is True
+    assert switches.coverage_enabled({}) is False
 
 
 @pytest.mark.parametrize("value", OFF_VALUES)
@@ -513,6 +608,6 @@ def test_each_off_value_is_the_kill_switch(value: str) -> None:
 
 
 def test_the_default_has_one_source_the_module_constant(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(switches, "ANSWER_COVERAGE_ENABLED", False)
-    assert switches.coverage_enabled({}) is False
-    assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: "1"}) is True
+    monkeypatch.setattr(switches, "ANSWER_COVERAGE_ENABLED", True)
+    assert switches.coverage_enabled({}) is True
+    assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: "0"}) is False

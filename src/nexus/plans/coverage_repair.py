@@ -13,8 +13,11 @@ this module holds the constants, the report, the query builder and the two affor
 what the request asked for and what the first assessment found nothing for. The order is the RDR's: every
 unsupported facet against the primary source's collections first (a named source is the strongest claim on
 the answer), then against the corpora the plan's own retrieval steps used, which are already narrowed to the
-caller's explicit scope. The targets are therefore never wider than the scope that governed the plan, and a
-primary collection a corpus scope excludes is not asked. Contradicted facets are not repair targets
+caller's explicit scope. The targets are therefore never wider than the scope that governed the plan: a
+primary collection the caller's scope excludes is not asked (a corpus scope by collection, a catalog-subtree scope
+by the documents the named source holds), a subtree scope rides every query that can take one, a plan target
+carries the plan step's own ``where`` / ``content_type`` / ``author`` filters, and a retrieved hit outside the
+caller's scope is dropped (the coverage ledger does that). Contradicted facets are not repair targets
 (``CoverageResult.repair_facet_ids`` excludes them): a repair would be a search for agreement.
 
 **The bounds are starting points, not measurements** (Phase 3 step 4 owns re-fitting them), each a constant:
@@ -121,10 +124,13 @@ class RepairReport:
 
 @dataclass(frozen=True)
 class RepairTarget:
-    """Where a repair query looks: a ``search`` corpus string, and a catalog subtree when the plan's step ran under one."""
+    """Where a repair query looks: a ``search`` corpus string, a catalog subtree when the plan's step (or the
+    caller's scope) ran under one, and the plan step's other filters as sorted ``(name, value)`` pairs
+    (``where``, ``content_type``, ``author``), so a repair never searches wider than the step it repairs."""
 
     corpus: str
     subtree: str = ""
+    filters: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -176,16 +182,32 @@ NOTE_PREFIX = "[coverage note, not evidence]"
 
 def unresolved_note(unresolved: Sequence[tuple[Facet, str]]) -> str:
     """The note the terminal generation is handed: each requested facet the evidence leaves unresolved, with
-    its state (``unsupported`` or ``contradicted``). One block, single newlines, so it survives the join of an
-    operator's evidence and reads as one item. The generator is told to report each as unresolved and not to
-    answer it from general knowledge: the RDR's "an explicit list of unresolved facets" (section 4, step 4)."""
-    lines = [
-        f"{NOTE_PREFIX} The request asks for the points below and the evidence supplied does not settle them. "
-        "State each one as unresolved. Do not answer it from general knowledge and do not infer it."
-    ]
-    for facet, state in list(unresolved)[:_MAX_NOTE_FACETS]:
-        why = "the evidence contradicts it" if state == "contradicted" else "no evidence found"
-        lines.append(f"- {facet.id}: {_WS.sub(' ', facet.text).strip()[:_MAX_NOTE_FACET_CHARS]} ({why})")
+    its state (``unsupported`` or ``contradicted``), and each facet whose evidence conflicts (state
+    ``conflicted``: supported, and also contradicted). One block, single newlines, so it survives the join of an
+    operator's evidence and reads as one item. The generator is told to report each unresolved point as
+    unresolved and not to answer it from general knowledge: the RDR's "an explicit list of unresolved facets"
+    (section 4, step 4); and to answer a conflicted point from the supporting evidence while saying that other
+    evidence contradicts it."""
+    shown = list(unresolved)[:_MAX_NOTE_FACETS]
+    unsettled = [(f, s) for f, s in shown if s != "conflicted"]
+    conflicted = [f for f, s in shown if s == "conflicted"]
+    lines: list[str] = []
+    if unsettled:
+        lines.append(
+            f"{NOTE_PREFIX} The request asks for the points below and the evidence supplied does not settle them. "
+            "State each one as unresolved. Do not answer it from general knowledge and do not infer it."
+        )
+        for facet, state in unsettled:
+            why = "the evidence contradicts it" if state == "contradicted" else "no evidence found"
+            lines.append(f"- {facet.id}: {_WS.sub(' ', facet.text).strip()[:_MAX_NOTE_FACET_CHARS]} ({why})")
+    if conflicted:
+        lines.append(
+            f"{'' if unsettled else NOTE_PREFIX + ' '}The evidence supplied conflicts on the points below: some items "
+            "support them and other items contradict them. Answer each from the supporting evidence and say that "
+            "other evidence contradicts it."
+        )
+        for facet in conflicted:
+            lines.append(f"- {facet.id}: {_WS.sub(' ', facet.text).strip()[:_MAX_NOTE_FACET_CHARS]} (the evidence conflicts)")
     return "\n".join(lines)
 
 
@@ -196,31 +218,36 @@ def planned_reassessment_calls(facet_count: int, max_facets_per_call: int) -> in
 
 def build_repair_queries(
     facets: Sequence[Facet], *, primary_collections: Sequence[str], plan_targets: Sequence[RepairTarget],
-    max_queries: int, limit: int,
+    max_queries: int, limit: int, primary_subtree: str = "",
 ) -> list[RepairQuery]:
     """The targeted queries, in the RDR's order, at most *max_queries*.
 
-    Every facet against each primary collection first, then every facet against each plan target. A target
-    with a subtree uses ``query`` (the tool that takes one); any other uses ``search``. Repeats collapse.
+    Every facet against each primary collection first (under *primary_subtree* when the caller's scope is a
+    catalog subtree), then every facet against each plan target. A target with a subtree, a ``content_type`` or
+    an ``author`` uses ``query`` (the tool that takes them); any other uses ``search``. A target's ``where`` rides
+    either. Repeats collapse; targets that differ only in filters do not.
     """
     origin: Literal["primary", "plan"]
     targets: list[tuple[Literal["primary", "plan"], RepairTarget]] = [
-        ("primary", RepairTarget(c)) for c in dict.fromkeys(primary_collections) if c]
+        ("primary", RepairTarget(c, primary_subtree)) for c in dict.fromkeys(primary_collections) if c]
     targets += [("plan", t) for t in plan_targets if t.corpus]
     out: list[RepairQuery] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, tuple[tuple[str, str], ...]]] = set()
     for origin, target in targets:
         for f in facets:
-            key = (f.id, target.corpus, target.subtree)
+            key = (f.id, target.corpus, target.subtree, target.filters)
             if key in seen:
                 continue
             seen.add(key)
             if len(out) >= max_queries:
                 return out
             text = _WS.sub(" ", f.text).strip()[:_MAX_QUERY_CHARS]
-            if target.subtree:
-                args: dict[str, Any] = {"question": text, "corpus": target.corpus, "subtree": target.subtree, "limit": limit}
+            filters = dict(target.filters)
+            if target.subtree or filters.get("author") or filters.get("content_type"):
+                args: dict[str, Any] = {"question": text, "corpus": target.corpus, "limit": limit, **filters}
+                if target.subtree:
+                    args["subtree"] = target.subtree
                 out.append(RepairQuery(f.id, "query", args, origin))
             else:
-                out.append(RepairQuery(f.id, "search", {"query": text, "corpus": target.corpus, "limit": limit}, origin))
+                out.append(RepairQuery(f.id, "search", {"query": text, "corpus": target.corpus, "limit": limit, **filters}, origin))
     return out

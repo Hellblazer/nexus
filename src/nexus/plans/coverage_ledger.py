@@ -23,15 +23,23 @@ What the boundary does, in order:
    other), carrying at most :data:`MAX_FACETS_PER_ASSESSMENT_CALL` facets; more facets split into groups.
    ``check.ok`` is never read as coverage. Coverage comes from the evidence records only: each record's
    ``item_id`` must be one of the call's input ids and its ``quote`` must open with the facet tag
-   (``[f2] ...``) of a facet in that call; anything else is rejected and counted
-   (:attr:`AssessmentReport.rejected_records`). ``supports`` covers a facet, ``contradicts`` marks it
-   ``contradicted`` (retained for the reduction, never repaired into agreement), ``neutral`` does nothing.
-   The first failed call stops the assessment; no facet is then defaulted to covered.
+   (``[f2] ...``, any case) of a facet in that call; anything else is rejected and counted
+   (:attr:`AssessmentReport.rejected_records`). ``supports`` covers a facet, ``neutral`` does nothing, and
+   ``contradicts`` marks a facet ``contradicted`` (retained for the reduction, never repaired into agreement)
+   only when no item supports it: a facet with both is ``covered`` and carries the reason ``conflicted``, so
+   the reduction and the notice can say the evidence conflicts.
+   **An unusable reply is a failed assessment, not a finding.** A call that returns no evidence record at
+   all, or only rejected ones, tells us nothing about the facets in it: they are ``unassessed`` (reason
+   ``assessment_unusable``, outcome ``failed`` or ``partial_failure``, detail ``assessor_unusable``), never
+   ``unsupported``, so a model that ignores the tag convention cannot make a withheld answer. "The items were
+   read and nothing bears on the facet" is the assessor's neutral record (the instruction asks for one).
+   A call that raises stops the assessment; no facet is then defaulted to covered.
 4. **State.** :func:`state_for` computes ``coverage.state`` from the facet states (the section 4 table):
    ``complete``, ``partial``, ``unavailable`` or ``unassessed``. ``unavailable`` with reason ``uncovered``
    (every required facet known and none covered; contradicted is not covered) sets
    :attr:`CoverageResult.skip_generation`, which the runner honours by not dispatching the terminal
-   reduction (Sam's ruling of 2026-10-25, nexus-jypmj.3.12). ``no_evidence`` stays reserved for zero
+   reduction (Sam's ruling of 2026-10-25, nexus-jypmj.3.12). What lets generation proceed is one predicate,
+   :func:`counts_toward_a_usable_answer` (the all-contradicted rule, undecided: today only ``covered``). ``no_evidence`` stays reserved for zero
    retrieval results, which the existing zero-evidence path already answers, so a boundary that finds no
    anchors never skips generation. The ``AnswerShape`` value, the notice and the counters are
    nexus-jypmj.3.3's.
@@ -44,11 +52,14 @@ request that motivated the design cost one call per stream, and the first-pass e
 facet-count distribution, NOT from a measured accuracy-versus-facets-per-call curve: Phase 3 step 4
 (measurement) owns re-fitting it, and the value lives in one constant for that reason.
 
-The assessment is a stage inside the answer's own deadline: a call is bounded by
-:data:`ASSESSMENT_DEADLINE_SHARE` of what is left (so the terminal reduction is not starved by its own
-pre-check) and by :data:`ASSESSMENT_CALL_TIMEOUT_S`, and it is not started when the allowance falls under
-:data:`MIN_ASSESSMENT_CALL_S` or the USD allowance is spent (outcome ``skipped_deadline`` /
-``skipped_budget``, state ``unassessed``). These three values are unmeasured starting points. Assessment
+The assessment is a stage inside the answer's own deadline, and the stage as a whole has one allowance:
+:data:`ASSESSMENT_STAGE_DEADLINE_SHARE` of the deadline left when the stage starts (all streams and facet
+groups together, so the terminal reduction is not starved by its own pre-check, however many calls it makes).
+Each call draws its timeout from what is left of that allowance, capped by :data:`ASSESSMENT_CALL_TIMEOUT_S`;
+a call is not started when what is left falls under :data:`MIN_ASSESSMENT_CALL_S` or the USD allowance is
+spent, and its facets are then ``unassessed`` (outcome ``skipped_deadline`` / ``skipped_budget`` when no call
+was made, ``partial_failure`` after some were). Calls are serial; making them concurrent is a later
+decision. These values are unmeasured starting points. Assessment
 calls are ``StepRecord``s past the plan's own step indices, so the shared USD accumulator and the
 ``nx_answer_steps`` primary key see them without a new step source.
 
@@ -116,12 +127,16 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "ASSESSMENT_CALL_TIMEOUT_S",
-    "ASSESSMENT_DEADLINE_SHARE",
     "ASSESSMENT_MAX_ITEM_CHARS",
     "ASSESSMENT_OPERATOR",
+    "ASSESSMENT_STAGE_DEADLINE_SHARE",
+    "CONFLICTED_REASON",
+    "INSTRUCTION_MARKER",
     "MAX_FACETS_PER_ASSESSMENT_CALL",
     "MIN_ASSESSMENT_CALL_S",
     "STREAM_ORDER",
+    "UNUSABLE_REASON",
+    "USABLE_ANSWER_FINDING_STATES",
     "AssessmentReport",
     "BoundaryView",
     "CoverageBoundary",
@@ -132,6 +147,7 @@ __all__ = [
     "ScopeRow",
     "SourceRow",
     "build_anchors",
+    "counts_toward_a_usable_answer",
     "state_for",
 ]
 
@@ -140,10 +156,11 @@ ASSESSMENT_OPERATOR = "operator_check"
 
 #: Facets per assessment call. See the module docstring for the basis; unmeasured as accuracy.
 MAX_FACETS_PER_ASSESSMENT_CALL: int = 6
-#: Upper bound on one call; the share below applies first when a deadline is set.
+#: Upper bound on one call; the stage allowance below applies first when a deadline is set.
 ASSESSMENT_CALL_TIMEOUT_S: float = 60.0
-#: A call may use at most this share of the deadline left when it starts, so generation keeps the rest.
-ASSESSMENT_DEADLINE_SHARE: float = 0.4
+#: The WHOLE assessment stage (every stream, every facet group) may use at most this share of the deadline left
+#: when the stage starts, so repair and generation keep the rest. Each call draws from what is left of it.
+ASSESSMENT_STAGE_DEADLINE_SHARE: float = 0.4
 #: No call is started with less than this allowance.
 MIN_ASSESSMENT_CALL_S: float = 5.0
 #: Characters of item text one call carries (the bundle prompt guard is 200,000 for the whole prompt).
@@ -168,13 +185,41 @@ REPAIRABLE_REASON = "no_supporting_evidence"
 _TAG = re.compile(r"^\s*\[\s*([A-Za-z0-9_.\-]+)\s*\]\s*")
 _ROLES = frozenset({"supports", "contradicts", "neutral"})
 
-_INSTRUCTION = (
-    "Coverage assessment. For each facet listed below, find the items that bear on it. Add one evidence "
+#: A finding's ``reason`` for a facet that is ``covered`` while other items contradict it.
+CONFLICTED_REASON = "conflicted"
+#: A finding's ``reason`` for a facet left ``unassessed`` because the assessor's reply for it was unusable.
+UNUSABLE_REASON = "assessment_unusable"
+#: The ``AssessmentReport.detail`` prefix of an unusable reply.
+_UNUSABLE_DETAIL = "assessor_unusable"
+
+#: THE ALL-CONTRADICTED RULE (undecided; Sam is deciding it, RDR-232 critique S1). The finding states that count
+#: toward a usable answer: generation is skipped before it (``state_for``) and the prose is withheld after it
+#: (``coverage_outcome.decide_outcome``) when NO facet is in one of these states and none is unassessed. Today
+#: only ``covered``: a facet with only contradicting evidence is not usable, so a ledger of contradicted and
+#: unsupported facets is ``uncovered``. Adding ``contradicted`` makes a contradiction-only ledger ``partial`` with
+#: the contradicted facets named. Both sides read :func:`counts_toward_a_usable_answer`; this set is the one place
+#: to change.
+USABLE_ANSWER_FINDING_STATES: frozenset[str] = frozenset({"covered"})
+
+
+def counts_toward_a_usable_answer(state: str) -> bool:
+    """Whether a facet in *state* lets generation proceed (see :data:`USABLE_ANSWER_FINDING_STATES`)."""
+    return state in USABLE_ANSWER_FINDING_STATES
+
+
+#: The opening words of the coverage-assessment instruction. A stable marker, exported for the unit-test guard
+#: that refuses a live assessment (``tests/conftest.py``): retuning the rest of the prompt cannot unguard the suite.
+INSTRUCTION_MARKER = "Coverage assessment. For each facet listed below"
+
+_INSTRUCTION = INSTRUCTION_MARKER + (
+    ", find the items that bear on it. Add one evidence "
     "record per (item, facet) pair that matters: item_id is the item's id exactly as given; quote opens "
     "with the facet tag in square brackets (for example [f1]) followed by a short quote from the item; "
     "role is 'supports' when the item states what the facet asks for, 'contradicts' when it states the "
     "opposite, 'neutral' when it only mentions the topic. Use only the item ids and facet tags given, and "
-    "add no others. Coverage is read from the records, not from ok.\nFacets:\n"
+    "add no others. If no item bears on any listed facet, still add one neutral record for the first item "
+    "and the first facet: a reply with no record is read as a failed assessment. "
+    "Coverage is read from the records, not from ok.\nFacets:\n"
 )
 
 
@@ -210,8 +255,9 @@ class EvidenceAnchor:
 
 @dataclass(frozen=True)
 class FacetFinding:
-    """One required facet's state: ``covered`` (supporting evidence), ``contradicted`` (contradicting
-    evidence, retained), ``unsupported`` (assessed, none bears on it) or ``unassessed`` (not known)."""
+    """One required facet's state: ``covered`` (supporting evidence; ``reason`` is ``conflicted`` when other
+    evidence contradicts it too), ``contradicted`` (contradicting evidence and no supporting one, retained),
+    ``unsupported`` (assessed, none bears on it) or ``unassessed`` (not known)."""
 
     facet_id: str
     state: FacetState
@@ -323,6 +369,12 @@ class CoverageResult:
     def unresolved_facet_ids(self) -> tuple[str, ...]:
         """Facets the final notice names: unsupported or contradicted (an unassessed one is not known)."""
         return tuple(f.facet_id for f in self.ledger.findings if f.state in ("unsupported", "contradicted"))
+
+    @property
+    def conflicted_facet_ids(self) -> tuple[str, ...]:
+        """Facets that are covered and also contradicted by other evidence: answered, but the reduction and the
+        notice say the evidence conflicts."""
+        return tuple(f.facet_id for f in self.ledger.findings if f.state == "covered" and f.reason == CONFLICTED_REASON)
 
     def counts(self) -> dict[str, Any]:
         """The numbers the run summary carries: no text, no source label."""
@@ -531,10 +583,11 @@ def state_for(
     * observed but no anchors: ``unavailable`` (``no_evidence``, or ``scope_conflict`` when the caller's
       scope removed all of it); generation is NOT skipped, the existing zero-evidence path answers it.
     * every facet unassessed: ``unassessed``; the reason names why (failed, skipped for time or budget).
-    * every facet known and none covered (each unsupported or contradicted): ``unavailable`` /
-      ``uncovered`` and generation is skipped. A usable answer needs at least one covered facet, and the
-      nexus-jypmj.3.12 ruling skips generation when the ledger covers none; contradicted is not covered. A
-      contradicted facet beside a covered one is retained for the reduction (``partial``).
+    * every facet known and none counting toward a usable answer (:func:`counts_toward_a_usable_answer`; today
+      only ``covered``, so each unsupported or contradicted): ``unavailable`` / ``uncovered`` and generation is
+      skipped. A usable answer needs at least one such facet, and the nexus-jypmj.3.12 ruling skips generation
+      when the ledger has none. A contradicted facet beside a covered one is retained for the reduction
+      (``partial``). An unassessed facet is never known to be uncovered, so any unassessed facet keeps generation.
     * every facet covered: ``complete``. Otherwise ``partial``.
 
     The "usable answer" half of the table's ``partial`` and ``unavailable`` rows depends on the generated
@@ -551,7 +604,8 @@ def state_for(
     n = {s: sum(1 for x in finding_states if x == s) for s in ("covered", "unsupported", "contradicted", "unassessed")}
     if n["unassessed"] == total:
         return "unassessed", _UNASSESSED_REASON.get(assessment_outcome, "assessment_failed"), False
-    if n["covered"] == 0 and n["unassessed"] == 0:
+    usable = sum(1 for s in finding_states if counts_toward_a_usable_answer(s))
+    if usable == 0 and n["unassessed"] == 0:
         return "unavailable", "uncovered", True
     if n["covered"] == total:
         return "complete", "all_covered", False
@@ -589,16 +643,28 @@ class CoverageBoundary:
     max_repair_items: int = MAX_REPAIR_ITEMS
     max_facets_per_call: int = MAX_FACETS_PER_ASSESSMENT_CALL
     call_timeout_s: float = ASSESSMENT_CALL_TIMEOUT_S
-    deadline_share: float = ASSESSMENT_DEADLINE_SHARE
+    stage_share: float = ASSESSMENT_STAGE_DEADLINE_SHARE
     min_call_s: float = MIN_ASSESSMENT_CALL_S
 
-    def assessment_timeout(self, remaining: float | None) -> float:
-        """The allowance for one call: ``call_timeout_s`` with no deadline, else that or the share of what
-        is left, whichever is smaller; ``0.0`` when the allowance falls under ``min_call_s``."""
-        if remaining is None:
+    def stage_allowance(self, remaining: float | None) -> float | None:
+        """Seconds the whole assessment stage may use out of *remaining* deadline seconds: ``stage_share`` of
+        it, or ``None`` (no stage cap) with no deadline."""
+        return None if remaining is None else max(remaining, 0.0) * self.stage_share
+
+    def call_timeout(self, stage_left: float | None) -> float:
+        """The timeout of one call drawn from *stage_left* seconds of the stage allowance: ``call_timeout_s``
+        with no deadline, else that or what is left of the stage, whichever is smaller; ``0.0`` (do not start
+        the call) when it falls under ``min_call_s``."""
+        if stage_left is None:
             return self.call_timeout_s
-        allowance = min(self.call_timeout_s, max(remaining, 0.0) * self.deadline_share)
+        allowance = min(self.call_timeout_s, max(stage_left, 0.0))
         return allowance if allowance >= self.min_call_s else 0.0
+
+    def _stage_reserve(self, view: BoundaryView) -> float | None:
+        """Seconds of deadline the stage must leave untouched (repair and generation's), or ``None`` with no deadline."""
+        remaining = view.remaining_seconds()
+        allowance = self.stage_allowance(remaining)
+        return None if remaining is None or allowance is None else max(remaining, 0.0) - allowance
 
     # ── deterministic rows ──
 
@@ -692,12 +758,13 @@ class CoverageBoundary:
         full = [f for f in request.facets if f.id not in blocked and f.id not in keep and f.id not in delta_ids]
         assessed: dict[str, FacetFinding] = {}
         new_report = AssessmentReport()
+        reserve = self._stage_reserve(view)  # one stage allowance for the full and the delta assessment together
         if full and anchors:
-            assessed, new_report = await self._assess(full, anchors, view)
+            assessed, new_report = await self._assess(full, anchors, view, reserve)
         prior_ids = {a.item_id for a in prior.ledger.anchors} if prior is not None else set()
         fresh = [a for a in anchors if a.item_id not in prior_ids]
         if delta and fresh:
-            more, more_report = await self._assess(delta, fresh, view)
+            more, more_report = await self._assess(delta, fresh, view, reserve)
             assessed.update(more)
             new_report = more_report if new_report.outcome == "not_attempted" else new_report.merged_with(more_report)
         report = report.merged_with(new_report) if prior is not None else new_report
@@ -739,7 +806,7 @@ class CoverageBoundary:
             try:
                 result = await self._repair(view, first, targets)
             except Exception as exc:  # noqa: BLE001 — a repair failure never fails the answer; the first ledger stands
-                _log.warning("nx_answer_coverage_repair_failed", error=type(exc).__name__, detail=str(exc)[:200])
+                _log.warning("nx_answer_coverage_repair_failed", error=type(exc).__name__)  # the type only: an exception's text can carry prompt text
                 result = replace(first, repair=RepairReport("retrieval_failed", targets, detail=f"{type(exc).__name__}"))
                 self._withdraw(view)
         return self._note_unresolved(view, result)
@@ -757,22 +824,26 @@ class CoverageBoundary:
             _log.warning("nx_answer_coverage_repair_withdraw_failed", error=type(exc).__name__)
 
     def _note_unresolved(self, view: BoundaryView, result: CoverageResult) -> CoverageResult:
-        """Hand the generation the explicit list of unresolved facets (RDR section 4, step 4).
+        """Hand the generation the explicit list of unresolved facets (RDR section 4, step 4), and the facets
+        whose evidence conflicts (covered, and also contradicted).
 
-        Only for a ``partial`` ledger (some evidence, some facet unresolved): a ledger that skips generation
-        has no generation to tell, and a ``no_evidence`` ledger must keep the existing zero-evidence path,
-        which a note item would defeat. The note is installed on the runner's merge, the input is read once
-        more, and the note counts as delivered only if the input now holds it.
+        Only for a ``partial`` ledger (some evidence, some facet unresolved) or a ``complete`` one with a
+        conflicted facet: a ledger that skips generation has no generation to tell, and a ``no_evidence``
+        ledger must keep the existing zero-evidence path, which a note item would defeat. The note is installed
+        on the runner's merge, the input is read once more, and the note counts as delivered only if the input
+        now holds it.
         """
         ids = result.unresolved_facet_ids
+        conflicted = result.conflicted_facet_ids
         if (
-            result.state != "partial" or not ids or result.skip_generation
+            result.state not in ("partial", "complete") or not (ids or conflicted) or result.skip_generation
             or view.install_note is None or view.rehydrate is None or self.request is None
         ):
             return result
         by_id = {f.id: f for f in self.request.facets}
         state_of = {f.facet_id: f.state for f in result.ledger.findings}
         listed = [(by_id[fid], state_of[fid]) for fid in ids if fid in by_id]
+        listed += [(by_id[fid], CONFLICTED_REASON) for fid in conflicted if fid in by_id]
         if not listed:
             return result
         note = unresolved_note(listed)
@@ -788,27 +859,56 @@ class CoverageBoundary:
             return result
         return replace(result, repair=replace(result.repair, noted_facets=len(listed)))
 
-    def _repair_targets(self, view: BoundaryView) -> tuple[list[str], list[RepairTarget]]:
-        """``(primary collections, plan targets)``: where a repair query may look.
+    def _repair_targets(self, view: BoundaryView) -> tuple[list[str], str, list[RepairTarget]]:
+        """``(primary collections, their subtree, plan targets)``: where a repair query may look.
 
-        The primary source's collections, minus any a corpus scope excludes; and the corpus (and subtree) each
-        of the plan's own retrieval steps ran under, which the runner has already narrowed to the caller's
-        scope. With no such step, a corpus scope is the target itself.
+        The primary source's collections that hold something inside the caller's scope (a corpus scope admits the
+        collection; a catalog-subtree scope admits a document under it, so a document address that names no
+        primary document refuses the primary source), asked under the scope's subtree when it is a subtree a query
+        can take. And the corpus, subtree and filters (where, content_type, author) each of the plan's own
+        retrieval steps ran under, which the runner has already narrowed to the caller's scope. With no such step,
+        a corpus scope is the target itself.
         """
-        primary = [c.collection for c in getattr(self.primary, "items", ()) or () if getattr(c, "collection", "")]
-        if self.scope.narrows_corpus:
-            primary = [c for c in primary if self.scope.admits(c)]
-        subtree = self.scope.value if self.scope.kind == "subtree" and not self.scope.is_document_address else ""
+        scope = self.scope
+        primary: list[str] = []
+        for item in getattr(self.primary, "items", ()) or ():
+            col = getattr(item, "collection", "")
+            if not col:
+                continue
+            if scope.kind == "subtree":
+                admitted = scope.admits(col, tumbler=getattr(item, "doc_id", ""))
+            elif scope.narrows_corpus:
+                admitted = scope.admits(col)
+            else:
+                admitted = True
+            if admitted:
+                primary.append(col)
+        subtree = scope.value if scope.kind == "subtree" and not scope.is_document_address else ""
         plan: list[RepairTarget] = []
         for r in view.resolved_args:
             if r.get("skipped") or r.get("tool") not in ("search", "query") or not r.get("corpus"):
                 continue
-            target = RepairTarget(str(r["corpus"]), str(r.get("subtree") or subtree))
+            filters = r.get("filters")
+            kept = tuple(sorted((str(k), str(v)) for k, v in filters.items() if v)) if isinstance(filters, Mapping) else ()
+            target = RepairTarget(str(r["corpus"]), str(r.get("subtree") or subtree), kept)
             if target not in plan:
                 plan.append(target)
-        if not plan and self.scope.narrows_corpus:
-            plan.append(RepairTarget(self.scope.value))
-        return list(dict.fromkeys(primary)), plan
+        if not plan and scope.narrows_corpus:
+            plan.append(RepairTarget(scope.value))
+        return list(dict.fromkeys(primary)), subtree, plan
+
+    def _hit_in_scope(self, hit: RepairHit) -> bool:
+        """Whether a repair hit lies inside the caller's scope. A subtree filter ran server side where a query
+        could take one, so an unattributed hit is kept there; a document address cannot be filtered server side,
+        so a hit that does not name that document is not inside."""
+        scope = self.scope
+        if scope.kind == "subtree":
+            if hit.tumbler:
+                return scope.admits(hit.collection, tumbler=hit.tumbler)
+            return not scope.is_document_address
+        if scope.narrows_corpus and hit.collection:
+            return scope.admits(hit.collection)
+        return True
 
     async def _repair(self, view: BoundaryView, first: CoverageResult, targets: tuple[str, ...]) -> CoverageResult:
         started = time.monotonic()
@@ -830,10 +930,10 @@ class CoverageBoundary:
 
         wanted = set(targets)
         facets = [f for f in (self.request.facets if self.request else ()) if f.id in wanted]
-        primary, plan = self._repair_targets(view)
+        primary, primary_subtree, plan = self._repair_targets(view)
         queries = build_repair_queries(
             facets, primary_collections=primary, plan_targets=plan, max_queries=self.max_repair_queries,
-            limit=REPAIR_RESULTS_PER_QUERY,
+            limit=REPAIR_RESULTS_PER_QUERY, primary_subtree=primary_subtree,
         )
         if not queries:
             return done("no_target", detail="no primary collection or plan retrieval scope to ask")
@@ -857,7 +957,7 @@ class CoverageBoundary:
                 _log.warning("nx_answer_coverage_repair_query_failed", tool=q.tool, error=failure)
                 break
             for hit in _hits(out):
-                if (hit.chash or hit.id).lower() not in held_hashes:
+                if (hit.chash or hit.id).lower() not in held_hashes and self._hit_in_scope(hit):
                     hits.setdefault(hit.id, hit)
         found = len(hits)
         if failure and not hits:
@@ -905,36 +1005,44 @@ class CoverageBoundary:
             return left if outer is None else min(left, outer)
 
         reassess = replace(view, evidence_texts=texts, observed=observed, remaining_seconds=remaining)
-        final = await replace(self, deadline_share=1.0).evaluate(reassess, prior=first)
+        final = await replace(self, stage_share=1.0).evaluate(reassess, prior=first)
         return done("completed", queries=issued, found=found, merged=merged, result=final)
 
     async def _assess(
-        self, facets: Sequence[Facet], anchors: Sequence[EvidenceAnchor], view: BoundaryView,
+        self, facets: Sequence[Facet], anchors: Sequence[EvidenceAnchor], view: BoundaryView, reserve: float | None = None,
     ) -> tuple[dict[str, FacetFinding], AssessmentReport]:
+        """One serial assessment pass. *reserve* is the seconds of deadline the stage must leave untouched (see
+        :meth:`_stage_reserve`; ``None``: no deadline), so every call draws its timeout from what is left of
+        the one stage allowance, however many calls the streams and facet groups make."""
         cap = max(1, self.max_facets_per_call)
         groups = [list(facets[i:i + cap]) for i in range(0, len(facets), cap)]
         by_stream = {s: [a for a in anchors if a.stream == s] for s in STREAM_ORDER}
         planned = [(s, g) for s in STREAM_ORDER if by_stream[s] for g in groups]
+        tag_of = {f.id.lower(): f.id for f in facets}
         supports: dict[str, set[str]] = {f.id: set() for f in facets}
         contradicts: dict[str, set[str]] = {f.id: set() for f in facets}
         incomplete: set[str] = set()
+        unusable: set[str] = set()
         calls, rejected, skipped_items = 0, 0, 0
         per_call: list[int] = []
         used_streams: list[str] = []
         outcome: AssessmentOutcome = "ok"
         detail = ""
         started = time.monotonic()
-        completed = 0
+        completed = 0  # calls whose reply carried at least one accepted record
+        unusable_calls = 0
         for pos, (stream, group) in enumerate(planned):
             usd = view.remaining_usd()
-            timeout = self.assessment_timeout(view.remaining_seconds())
+            remaining = view.remaining_seconds()
+            stage_left = None if reserve is None or remaining is None else remaining - reserve
+            timeout = self.call_timeout(stage_left)
             stop, why = "", ""
             if usd is not None and usd <= 0:
                 stop, why = "skipped_budget", "the USD allowance was spent"
             elif timeout <= 0:
-                stop, why = "skipped_deadline", "too little of the deadline was left"
+                stop, why = "skipped_deadline", "too little of the assessment's share of the deadline was left"
             if stop:
-                outcome = stop if completed == 0 else "partial_failure"  # type: ignore[assignment]
+                outcome = stop if calls == 0 else "partial_failure"  # type: ignore[assignment]
                 detail = why
                 for _s, g in planned[pos:]:
                     incomplete.update(f.id for f in g)
@@ -942,7 +1050,6 @@ class CoverageBoundary:
             payload, included, omitted = _pack(by_stream[stream])
             skipped_items += omitted
             ids = {a.item_id for a in included}
-            tags = {f.id for f in group}
             args = {"items": json.dumps(payload), "check_instruction": _instruction(group)}
             calls += 1
             per_call.append(len(group))
@@ -958,27 +1065,45 @@ class CoverageBoundary:
                 for _s, g in planned[pos:]:
                     incomplete.update(f.id for f in g)
                 break
-            completed += 1
+            accepted = 0
             for rec in records:
                 item_id, quote, role = rec.get("item_id"), rec.get("quote"), rec.get("role")
                 m = _TAG.match(quote) if isinstance(quote, str) else None
-                if item_id not in ids or role not in _ROLES or m is None or m.group(1) not in tags:
+                facet_id = tag_of.get(m.group(1).lower()) if m is not None else None
+                if item_id not in ids or role not in _ROLES or facet_id is None:
                     rejected += 1
                     continue
+                accepted += 1
                 if role == "supports":
-                    supports[m.group(1)].add(str(item_id))
+                    supports[facet_id].add(str(item_id))
                 elif role == "contradicts":
-                    contradicts[m.group(1)].add(str(item_id))
+                    contradicts[facet_id].add(str(item_id))
+            if accepted == 0:
+                # Nothing usable came back (no record, or none that validates): that says nothing about these
+                # facets, so they are not known. An unusable reply is a failed assessment, not "nothing supports".
+                unusable_calls += 1
+                incomplete.update(f.id for f in group)
+                unusable.update(f.id for f in group)
+                detail = detail or (
+                    f"{_UNUSABLE_DETAIL}: call {calls} on the {stream} stream returned {len(records)} record(s), none usable"
+                )
+                continue
+            completed += 1
             if omitted:
                 incomplete.update(f.id for f in group)
+        if unusable_calls and outcome == "ok":
+            outcome = "failed" if completed == 0 else "partial_failure"
         findings: dict[str, FacetFinding] = {}
         for f in facets:
-            if contradicts[f.id]:
-                findings[f.id] = FacetFinding(f.id, "contradicted", tuple(sorted(supports[f.id] | contradicts[f.id])), "contradicted")
-            elif supports[f.id]:
-                findings[f.id] = FacetFinding(f.id, "covered", tuple(sorted(supports[f.id])))
+            sup, con = supports[f.id], contradicts[f.id]
+            if sup:
+                # supporting evidence covers the facet; a contradiction beside it is marked, not allowed to cancel it
+                findings[f.id] = FacetFinding(f.id, "covered", tuple(sorted(sup | con)), CONFLICTED_REASON if con else "")
+            elif con:
+                findings[f.id] = FacetFinding(f.id, "contradicted", tuple(sorted(con)), "contradicted")
             elif f.id in incomplete:
-                findings[f.id] = FacetFinding(f.id, "unassessed", (), _UNASSESSED_REASON.get(outcome, "assessment_incomplete"))
+                reason = UNUSABLE_REASON if f.id in unusable else _UNASSESSED_REASON.get(outcome, "assessment_incomplete")
+                findings[f.id] = FacetFinding(f.id, "unassessed", (), reason)
             else:
                 findings[f.id] = FacetFinding(f.id, "unsupported", (), REPAIRABLE_REASON)
         report = AssessmentReport(

@@ -48,6 +48,12 @@ from tests.test_rdr232_coverage_wiring import (
 from tests.test_rdr232_run_summary_wiring import FakeTelemetry, _db
 
 @pytest.fixture(autouse=True)
+def _coverage_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The boundary ships off (RDR-232 Phase 3 fix round); these tests drive it, so they opt in the way a caller does."""
+    monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "1")
+
+
+@pytest.fixture(autouse=True)
 def _no_catalog_lookup():
     """The runner's non-evidentiary hygiene asks the catalog; these tests are tenant-free, so it answers 'nothing excluded'."""
     with patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
@@ -128,16 +134,30 @@ class TestAssessedRun:
         assert cov["covered_facet_ids"] == ["f1"], "the ledger itself is unchanged: only the state moved"
 
     @pytest.mark.asyncio
-    async def test_prose_with_no_covered_facet_downgrades_to_unavailable_uncovered(self) -> None:
-        unassessed = FacetFinding("f3", "unassessed", (), "assessment_failed")
+    async def test_prose_with_no_covered_facet_and_every_facet_known_downgrades_to_unavailable_uncovered(self) -> None:
+        contradicted = FacetFinding("f3", "contradicted", ("e1",), "contradicted")
         pr = PlanResult(
             steps=[{"ids": ["c1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"], "chunk_collections": ["rdr__1-1"]},
                    {"text": "A fluent answer built on nothing."}],
-            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, unassessed),
+            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, contradicted),
         )
         run = await _drive(plan_id=0, plan_result=pr, request=_request(2))
         cov = run.out["coverage"]
         assert (cov["state"], cov["reason"]) == ("unavailable", "uncovered")
+        assert _gaps(cov) == [("f2", "unsupported"), ("f3", "contradicted")]
+
+    @pytest.mark.asyncio
+    async def test_prose_with_no_covered_facet_but_an_unassessed_one_stays_partial(self) -> None:
+        """An unassessed facet is not known to be uncovered: the state is not downgraded and it is still a gap."""
+        unassessed = FacetFinding("f3", "unassessed", (), "assessment_failed")
+        pr = PlanResult(
+            steps=[{"ids": ["c1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"], "chunk_collections": ["rdr__1-1"]},
+                   {"text": "A fluent answer built on part of the evidence."}],
+            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, unassessed),
+        )
+        run = await _drive(plan_id=0, plan_result=pr, request=_request(2))
+        cov = run.out["coverage"]
+        assert (cov["state"], cov["reason"]) == ("partial", "unresolved_facets")
         assert _gaps(cov) == [("f2", "unsupported"), ("f3", "unassessed")], "an unassessed facet is a gap too"
 
     @pytest.mark.asyncio

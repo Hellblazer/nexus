@@ -524,9 +524,9 @@ public final class TelemetryHandler implements HttpHandler {
      * field and return it as compact JSON text for the repository, or {@code null}
      * when absent or an explicit JSON {@code null} (stored as SQL NULL, never as an
      * empty object). The engine stores the object opaquely, so the checks are the
-     * two it can make without knowing the shape: it is a JSON object, and its
-     * serialized form fits {@link #MAX_RUN_SUMMARY_BYTES} UTF-8 bytes. Both failures
-     * are a 400 naming the field. Shared by {@code /record}, {@code /complete},
+     * three it can make without knowing the shape: it is a JSON object, it holds no
+     * U+0000 (jsonb cannot store one), and its serialized form fits
+     * {@link #MAX_RUN_SUMMARY_BYTES} UTF-8 bytes. Every failure is a 400 naming the field. Shared by {@code /record}, {@code /complete},
      * {@code /import} and {@code /import_batch}; the ETL sources that serialise a
      * JSON column as text send the object as a JSON string, which is accepted when it
      * parses to an object.
@@ -545,6 +545,11 @@ public final class TelemetryHandler implements HttpHandler {
         if (!(value instanceof Map<?, ?>)) {
             throw new IllegalArgumentException("field 'run_summary' must be a JSON object");
         }
+        // jsonb cannot hold U+0000 (Postgres: "unsupported Unicode escape sequence"); left alone it reaches the INSERT
+        // and surfaces as a 500 that loses the whole run row. Refuse it here, naming the field.
+        if (containsNul(value)) {
+            throw new IllegalArgumentException("field 'run_summary' must not contain a U+0000 character");
+        }
         String json;
         try {
             json = MAPPER.writeValueAsString(value);
@@ -557,6 +562,23 @@ public final class TelemetryHandler implements HttpHandler {
                 + " bytes serialized; the limit is " + MAX_RUN_SUMMARY_BYTES);
         }
         return json;
+    }
+
+    /** Whether any string, or any object key, anywhere in the parsed JSON {@code value} holds U+0000. */
+    private static boolean containsNul(Object value) {
+        if (value instanceof String text) return text.indexOf(0) >= 0;
+        if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> e : map.entrySet()) {
+                if (containsNul(e.getKey()) || containsNul(e.getValue())) return true;
+            }
+            return false;
+        }
+        if (value instanceof Iterable<?> items) {
+            for (Object item : items) {
+                if (containsNul(item)) return true;
+            }
+        }
+        return false;
     }
 
     /**

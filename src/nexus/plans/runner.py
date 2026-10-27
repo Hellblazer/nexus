@@ -3398,7 +3398,7 @@ async def _plan_run_impl(
                 install_note=_install_note if can_repair else None, assessment_cost_estimate=_assessment_cost_estimate,
             ))
         except Exception as exc:  # noqa: BLE001 — the boundary never fails an answer
-            _log.warning("nx_answer_coverage_boundary_failed", error=type(exc).__name__, detail=str(exc)[:200])
+            _log.warning("nx_answer_coverage_boundary_failed", error=type(exc).__name__)  # the type only: an exception's text can carry prompt text
             coverage_result = None
         return coverage_result
 
@@ -3989,6 +3989,11 @@ async def _plan_run_impl(
                     "query": resolved.get("query") or resolved.get("question") or "",
                     # nexus-jypmj.1.16: a catalog-subtree filter the step ran under is part of what it searched.
                     **({"subtree": resolved["subtree"]} if resolved.get("subtree") else {}),
+                    # RDR-232 Phase 3 fix round: so are its metadata filters; the coverage repair asks under the same ones.
+                    **({"filters": _flt} if (_flt := {
+                        k: resolved[k] for k in ("where", "content_type", "author")
+                        if isinstance(resolved.get(k), str) and resolved[k]
+                    }) else {}),
                 })
 
             # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary, on the terminal step's input,

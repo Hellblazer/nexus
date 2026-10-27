@@ -24,6 +24,8 @@ import yaml
 
 from nexus.mcp import core as mcp_core
 from nexus.plans import coverage_ledger, runner
+from nexus.plans.answer_shape import AnswerShape
+from nexus.plans.coverage_outcome import decide_outcome
 from nexus.plans.coverage_ledger import (
     MAX_FACETS_PER_ASSESSMENT_CALL,
     BoundaryView,
@@ -110,7 +112,17 @@ def supports_first_item(items: str, instruction: str) -> dict:
     ]}
 
 
-def supports_nothing(items: str, instruction: str) -> dict:  # noqa: ARG001
+def supports_nothing(items: str, instruction: str) -> dict:
+    """An assessor that read the items and found nothing bearing on any facet: one neutral record per facet.
+    (A reply with NO records is not this: it is an unusable assessment, see ``returns_no_records``.)"""
+    first = json.loads(items)[0]["id"]
+    return {"ok": False, "evidence": [
+        {"item_id": first, "quote": f"[{fid}] only mentions the topic", "role": "neutral"} for fid in _tag_lines(instruction)
+    ]}
+
+
+def returns_no_records(items: str, instruction: str) -> dict:  # noqa: ARG001
+    """A reply that parses but carries no evidence record: the assessor said nothing usable."""
     return {"ok": False, "evidence": []}
 
 
@@ -390,16 +402,26 @@ async def test_scenario_6_mixed_one_facet_blocked_one_unassessed_is_partial_not_
 
 @pytest.mark.asyncio
 async def test_scenario_7_an_id_outside_the_input_is_rejected_and_covers_nothing() -> None:
+    """An invented id cannot buy coverage. A call whose every record is rejected is an unusable assessment (the
+    facets are unassessed, generation is not skipped); next to an accepted record the rejection changes nothing."""
     def stray(items: str, instruction: str) -> dict:  # noqa: ARG001
         return {"ok": True, "evidence": [{"item_id": "e999", "quote": "[f1] invented", "role": "supports"}]}
 
     d = Dispatcher(check=stray)
-    result = await _run(d, CoverageBoundary(request=_request(1)))
-    cov = _cov(result)
-    assert [f.state for f in cov.ledger.findings] == ["unsupported"]
+    cov = _cov(await _run(d, CoverageBoundary(request=_request(1))))
+    assert [f.state for f in cov.ledger.findings] == ["unassessed"], "never covered, and not known to be unsupported either"
     report = cov.ledger.assessment
     assert report.calls == 2 and report.rejected_records == report.calls, "one invented record per call, each rejected"
-    assert cov.skip_generation, "an invented id must not buy coverage"
+    assert not cov.skip_generation and d.tools.count("generate") == 1, "the answer is generated, not withheld"
+
+    def stray_beside_a_neutral(items: str, instruction: str) -> dict:
+        reply = supports_nothing(items, instruction)
+        return {"ok": True, "evidence": [*reply["evidence"], *stray(items, instruction)["evidence"]]}
+
+    d2 = Dispatcher(check=stray_beside_a_neutral)
+    cov2 = _cov(await _run(d2, CoverageBoundary(request=_request(1))))
+    assert [f.state for f in cov2.ledger.findings] == ["unsupported"], "an accepted record exists and none supports"
+    assert cov2.skip_generation and cov2.ledger.assessment.rejected_records == cov2.ledger.assessment.calls
 
 
 @pytest.mark.asyncio
@@ -412,10 +434,154 @@ async def test_a_facet_tag_outside_the_call_and_an_untagged_quote_are_rejected()
             {"item_id": first, "quote": "[f1] fine", "role": "maybe"},
         ]}
 
-    result = await _run(Dispatcher(check=odd), CoverageBoundary(request=_request(1)))
-    cov = _cov(result)
+    d = Dispatcher(check=odd)
+    cov = _cov(await _run(d, CoverageBoundary(request=_request(1))))
     report = cov.ledger.assessment
-    assert report.rejected_records == 3 * report.calls and [f.state for f in cov.ledger.findings] == ["unsupported"]
+    assert report.rejected_records == 3 * report.calls and [f.state for f in cov.ledger.findings] == ["unassessed"]
+    assert not cov.skip_generation and d.tools.count("generate") == 1
+
+
+# ── an unusable assessor reply is an assessment failure, never "unsupported" ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_no_records_is_an_unusable_assessment_not_unsupported() -> None:
+    """RDR-232 fix round (code C1, critique C2): 'the assessor returned nothing usable' must not read as 'nothing
+    supports the facet'. The facets stay unassessed, generation runs once, no repair is attempted for them."""
+    d = Dispatcher(check=returns_no_records)
+    result = await _run(d, CoverageBoundary(request=_request(2)))
+    cov = _cov(result)
+    assert [f.state for f in cov.ledger.findings] == ["unassessed", "unassessed"]
+    assert (cov.state, cov.reason) == ("unassessed", "assessment_failed") and not cov.skip_generation
+    report = cov.ledger.assessment
+    assert report.outcome == "failed" and report.calls == 2 and report.detail.startswith("assessor_unusable")
+    assert d.tools.count("generate") == 1 and result.final == {"text": "the answer"}
+    assert cov.repair_facet_ids == () and d.tools.count("search") == 1, "no repair retrieval for a facet nobody assessed"
+    assert cov.repair.outcome == "not_attempted"
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_call_leaves_only_its_own_facets_unknown_and_the_run_a_partial_failure() -> None:
+    """Vector says f1 is supported and f2 only mentioned; graph returns nothing usable. f1 is covered whatever the
+    graph call did; f2 cannot be called unsupported while a stream was not read: unassessed."""
+    def per_stream(items: str, instruction: str) -> dict:
+        if "graph hit" in items:
+            return returns_no_records(items, instruction)
+        first = json.loads(items)[0]["id"]
+        return {"ok": True, "evidence": [
+            {"item_id": first, "quote": "[f1] it states it", "role": "supports"},
+            {"item_id": first, "quote": "[f2] only mentions it", "role": "neutral"},
+        ]}
+
+    d = Dispatcher(check=per_stream)
+    cov = _cov(await _run(d, CoverageBoundary(request=_request(2))))
+    assert [(f.facet_id, f.state) for f in cov.ledger.findings] == [("f1", "covered"), ("f2", "unassessed")]
+    assert cov.ledger.assessment.outcome == "partial_failure" and cov.ledger.assessment.calls == 2
+    assert cov.state == "partial" and not cov.skip_generation and d.tools.count("generate") == 1
+    assert cov.repair_facet_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_the_facet_tag_is_matched_without_regard_to_case() -> None:
+    def shouting(items: str, instruction: str) -> dict:
+        first = json.loads(items)[0]["id"]
+        return {"ok": True, "evidence": [{"item_id": first, "quote": "[F1]: a short quote", "role": "supports"}]}
+
+    cov = _cov(await _run(Dispatcher(check=shouting), CoverageBoundary(request=_request(1))))
+    assert [f.state for f in cov.ledger.findings] == ["covered"] and cov.ledger.assessment.rejected_records == 0
+
+
+def test_the_conftest_guard_matches_a_marker_the_built_instruction_carries() -> None:
+    """The unit-test guard refuses a live coverage assessment by a marker string. It must be the ledger module's own
+    constant and the built instruction must carry it, so a retuned prompt cannot silently unguard the suite."""
+    group = _facets(2)
+    assert coverage_ledger.INSTRUCTION_MARKER in coverage_ledger._instruction(group)
+    assert coverage_ledger._instruction(group).startswith(coverage_ledger.INSTRUCTION_MARKER)
+    guard = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
+    assert "INSTRUCTION_MARKER" in guard, "conftest matches the exported constant"
+    assert "Coverage assessment. For each facet" not in guard, "and keeps no literal copy of the prompt"
+
+
+# ── mixed evidence on one facet ─────────────────────────────────────────────────────────────────────────────
+
+
+class _ManyItems(Dispatcher):
+    """Eleven vector chunks, so a facet can hold ten supporting items and one contradicting one."""
+
+    TEXTS = [f"supporting chunk {i}" for i in range(10)] + ["an older revision that says otherwise"]
+
+    async def __call__(self, tool: str, args: dict) -> dict:
+        if tool == "search":
+            self.calls.append((tool, dict(args)))
+            return _structured(self.TEXTS, RDR_COLL)
+        if tool == "store_get_many":
+            self.calls.append((tool, dict(args)))
+            return {"contents": list(self.TEXTS)}
+        if tool == "traverse":
+            self.calls.append((tool, dict(args)))
+            return {"ids": [], "tumblers": [], "traversal": {"policy_applied": True, "widened": None}}
+        return await super().__call__(tool, args)
+
+
+def _ten_support_one_contradicts(items: str, instruction: str) -> dict:
+    payload = json.loads(items)
+    return {"ok": True, "evidence": [
+        {"item_id": it["id"], "quote": "[f1] quoted", "role": "contradicts" if "otherwise" in it["text"] else "supports"}
+        for it in payload
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_a_facet_with_ten_supports_and_one_contradiction_is_covered_and_marked_conflicted() -> None:
+    """Code C2: supports present means covered; the contradiction rides on the finding for the reduction and the notice."""
+    d = _ManyItems(check=_ten_support_one_contradicts)
+    result = await _run(d, CoverageBoundary(request=_request(1)))
+    cov = _cov(result)
+    f1 = cov.ledger.finding("f1")
+    assert f1 is not None and f1.state == "covered" and f1.reason == "conflicted"
+    assert len(f1.evidence_ids) == 11, "the supporting and the contradicting items are both cited"
+    assert (cov.state, cov.reason) == ("complete", "all_covered") and not cov.skip_generation
+    assert d.tools.count("generate") == 1 and result.final == {"text": "the answer"}
+    assert cov.conflicted_facet_ids == ("f1",)
+    assert cov.to_wire()["findings"][0]["reason"] == "conflicted", "additive: a reason value, no new key"
+    context = d.args_of("generate")[0]["context"]
+    assert isinstance(context, str) and "[coverage note, not evidence]" in context and "conflict" in context, (
+        "the reduction is told the evidence on f1 conflicts")
+    assert cov.repair.noted_facets == 1
+
+
+@pytest.mark.asyncio
+async def test_contradicting_evidence_without_support_is_still_contradicted() -> None:
+    def only_the_opposite(items: str, instruction: str) -> dict:
+        payload = json.loads(items)
+        return {"ok": True, "evidence": [{"item_id": payload[0]["id"], "quote": "[f1] the opposite", "role": "contradicts"}]}
+
+    cov = _cov(await _run(_ManyItems(check=only_the_opposite), CoverageBoundary(request=_request(1))))
+    f1 = cov.ledger.finding("f1")
+    assert f1 is not None and (f1.state, f1.reason) == ("contradicted", "contradicted") and cov.conflicted_facet_ids == ()
+
+
+# ── item 9: the all-contradicted rule is one named predicate ─────────────────────────────────────────────────
+
+
+def test_the_all_contradicted_rule_is_one_named_predicate_both_sides_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sam is deciding whether a facet with only contradicting evidence lets generation proceed. Both the
+    pre-generation skip (``state_for``) and the post-generation withhold (``decide_outcome``) ask
+    ``counts_toward_a_usable_answer``, so either answer is a change to ``USABLE_ANSWER_FINDING_STATES``."""
+    assert coverage_ledger.USABLE_ANSWER_FINDING_STATES == frozenset({"covered"}), "today's behaviour: skip, uncovered"
+    assert state_for(("contradicted",), assessment_outcome="ok", anchors=3, observed=True) == ("unavailable", "uncovered", True)
+    cov = CoverageResult("partial", "unresolved_facets", False, coverage_ledger.CoverageLedger(
+        findings=(coverage_ledger.FacetFinding("f1", "contradicted", ("e1",), "contradicted"),
+                  coverage_ledger.FacetFinding("f2", "unassessed", (), "assessment_failed"))))
+    assert decide_outcome(cov, AnswerShape.ANSWERED).shape is AnswerShape.INSUFFICIENT_EVIDENCE, "unassessed facets keep the prose"
+
+    monkeypatch.setattr(coverage_ledger, "USABLE_ANSWER_FINDING_STATES", frozenset({"covered", "contradicted"}))
+    assert coverage_ledger.counts_toward_a_usable_answer("contradicted") and not coverage_ledger.counts_toward_a_usable_answer("unsupported")
+    assert state_for(("contradicted",), assessment_outcome="ok", anchors=3, observed=True) == ("partial", "unresolved_facets", False)
+    none_settled = CoverageResult("partial", "unresolved_facets", False, coverage_ledger.CoverageLedger(
+        findings=(coverage_ledger.FacetFinding("f1", "contradicted", ("e1",), "contradicted"),
+                  coverage_ledger.FacetFinding("f2", "unsupported", (), "no_supporting_evidence"))))
+    assert decide_outcome(none_settled, AnswerShape.ANSWERED).shape is AnswerShape.INSUFFICIENT_EVIDENCE
 
 
 # ── check.ok is not coverage ────────────────────────────────────────────────────────────────────────────────
@@ -514,11 +680,53 @@ async def test_a_spent_usd_allowance_skips_the_assessment() -> None:
     assert cov.ledger.assessment.outcome == "skipped_budget" and cov.ledger.assessment.calls == 0
 
 
-def test_the_per_call_timeout_is_bounded_by_a_share_of_what_is_left() -> None:
+def test_the_stage_allowance_is_a_named_share_of_what_is_left_and_a_call_is_drawn_from_it() -> None:
     boundary = CoverageBoundary(request=_request(1))
-    assert boundary.assessment_timeout(None) == boundary.call_timeout_s
-    assert boundary.assessment_timeout(0.5) == 0.0, "too little of the deadline left for a call"
-    assert 0 < boundary.assessment_timeout(1000.0) <= boundary.call_timeout_s
+    assert coverage_ledger.ASSESSMENT_STAGE_DEADLINE_SHARE == boundary.stage_share == 0.4
+    assert boundary.stage_allowance(None) is None, "no deadline, no stage cap (the per-call ceiling still applies)"
+    assert boundary.stage_allowance(300.0) == pytest.approx(120.0)
+    assert boundary.call_timeout(None) == boundary.call_timeout_s
+    assert boundary.call_timeout(0.5) == 0.0, "too little of the stage left for a call"
+    assert boundary.call_timeout(1000.0) == boundary.call_timeout_s, "never more than the per-call ceiling"
+    assert boundary.call_timeout(12.0) == 12.0, "a call is drawn from what is left of the stage"
+
+
+@pytest.mark.asyncio
+async def test_six_calls_on_a_300_second_deadline_stay_inside_the_stage_share_and_generation_keeps_its_time() -> None:
+    """Code S1: three evidence streams and two facet groups are six calls. Each call below runs to the whole of its
+    allowance. The stage as a whole may spend 0.4 of the deadline, so the calls that do not fit are skipped (their
+    facets unassessed) and at least 0.6 of the deadline is left for repair and the terminal reduction."""
+    result = await _run(Dispatcher(hydrates=True), CoverageBoundary(request=_request(7)), reserved_stream=_reserved())
+    prior = _cov(result)
+    assert {a.stream for a in prior.ledger.anchors} == {"primary", "vector", "graph"}
+    clock = {"now": 0.0}
+    deadline_s = 300.0
+    timeouts: list[float] = []
+
+    async def slow_check(args: dict, *, timeout: float) -> dict:
+        timeouts.append(timeout)
+        clock["now"] += timeout  # the call runs to the end of its allowance
+        return supports_nothing(args["items"], args["check_instruction"])
+
+    view = BoundaryView(
+        evidence_texts=[a.content for a in prior.ledger.anchors], observed=True, step_outputs=list(result.steps),
+        tools=["search", "traverse", "store_get_many", "generate"], scope_diagnostics=[], resolved_args=[], check=slow_check, remaining_usd=lambda: None,
+        remaining_seconds=lambda: deadline_s - clock["now"],
+    )
+    boundary = CoverageBoundary(request=_request(7))
+    # outside plan_run the reserved stream is not active, so the primary items arrive as the "other" stream
+    cov = await boundary.evaluate(view)
+    streams = {a.stream for a in cov.ledger.anchors}
+    assert len(streams) == 3 and 2 * len(streams) == 6, "three streams, two facet groups: six planned calls"
+    report = cov.ledger.assessment
+    share = coverage_ledger.ASSESSMENT_STAGE_DEADLINE_SHARE
+    assert sum(timeouts) <= deadline_s * share + 1e-9, "the whole stage stays inside its share of the deadline"
+    assert deadline_s - clock["now"] >= deadline_s * (1 - share) - 1e-9, "generation keeps its time"
+    assert report.calls == len(timeouts) < 6, "calls that do not fit are skipped, not squeezed in"
+    assert report.outcome == "partial_failure" and "deadline" in report.detail
+    assert all(t <= boundary.call_timeout_s for t in timeouts)
+    assert all(f.state == "unassessed" for f in cov.ledger.findings), "a facet whose streams were not all read is not known"
+    assert not cov.skip_generation
 
 
 # ── no boundary, no change ──────────────────────────────────────────────────────────────────────────────────

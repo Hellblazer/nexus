@@ -2922,7 +2922,11 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
         # must not reach a live model through it either: the call fails the way an assessor outage does (state
         # unassessed). A test about the assessment stubs the dispatcher or patches claude_dispatch, as the ledger tests do.
         prompt = str(args[0]) if args else str(kwargs.get("prompt", ""))
-        if kwargs.get("operator") == "operator_check" and "Coverage assessment. For each facet listed below" in prompt:
+        # The marker is the ledger module's own constant, so retuning the prompt cannot silently unguard the suite
+        # (tests/test_rdr232_coverage_ledger.py pins that the built instruction carries it).
+        from nexus.plans.coverage_ledger import INSTRUCTION_MARKER  # noqa: PLC0415 — test-only import, taken when an operator_check is dispatched
+
+        if kwargs.get("operator") == "operator_check" and INSTRUCTION_MARKER in prompt:
             raise RuntimeError("a unit test must not make the live coverage assessment call; stub the dispatcher or patch claude_dispatch")
         return await real(*args, **kwargs)
 

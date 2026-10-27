@@ -5096,7 +5096,8 @@ class TestContinuationGoLive:
         )
 
     @pytest.mark.asyncio
-    async def test_interleaved_prefix_llm_step_redispatches_on_fallback(self):
+    @pytest.mark.parametrize(("coverage_on", "redispatched_steps"), [(False, 1), (True, 2)])
+    async def test_interleaved_prefix_llm_step_redispatches_on_fallback(self, monkeypatch, coverage_on, redispatched_steps):
         """CR-Important-1 / critic-F1 (T2 [23951]/[23952], both
         reproduced live): an INTERLEAVED prefix (search->extract->search
         ->summarize, the RDR's own worked example) whose `extract` step
@@ -5112,6 +5113,8 @@ class TestContinuationGoLive:
         conflated with summarize's -- the terminal step only ever
         dispatches on the fallback's full run, a THIRD, unrelated
         dispatch this test must not miscount as a repeated `extract`."""
+        if coverage_on:
+            monkeypatch.setenv("NX_ANSWER_COVERAGE", "1")
         import logging
 
         import structlog
@@ -5215,11 +5218,14 @@ class TestContinuationGoLive:
             "the prefix's real extract StepRecord must be visible to "
             "the fallback-decision event"
         )
-        # RDR-232 Phase 3 (nexus-jypmj.3.3): nx_answer now hands the runner a coverage boundary, which assesses the
-        # terminal step's input before the cut. The summarize step's literal `content` is evidence it can read, so
-        # the prefix-only run made one assessment call (the unit-test guard refuses the live model, so it failed)
-        # and that call is a second billable record the fallback re-run pays for again.
-        assert events[0]["fallback_redispatch_step_count"] == 2, "the extract step plus the coverage assessment call"
+        # RDR-232 Phase 3 (nexus-jypmj.3.3): with the coverage check on (NX_ANSWER_COVERAGE=1; it is off by default)
+        # nx_answer hands the runner a coverage boundary, which assesses the terminal step's input before the cut. The
+        # summarize step's literal `content` is evidence it can read, so the prefix-only run made one assessment call
+        # (the unit-test guard refuses the live model, so it failed) and that call is a second billable record the
+        # fallback re-run pays for again. With the default (off) there is the extract step alone.
+        assert events[0]["fallback_redispatch_step_count"] == redispatched_steps, (
+            "the extract step" + (" plus the coverage assessment call" if coverage_on else "")
+        )
 
 
 class TestContinuationGoLiveMidPrefixFailure:

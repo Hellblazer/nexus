@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import structlog.testing
 
 from nexus.mcp import core as mcp_core
 from nexus.mcp.core import nx_answer
@@ -97,6 +98,10 @@ def by_topic(*, contradict: tuple[str, ...] = (), never: tuple[str, ...] = (), t
                 if words.get(tag, "\0") in item["text"]:
                     role = "contradicts" if tag in contradict else "supports"
                     evidence.append({"item_id": item["id"], "quote": f"[{tag}] quoted", "role": role})
+        if not evidence and payload:
+            # An assessor that read the items and found nothing bearing on the listed facets says so with a neutral
+            # record; a reply with no record at all is an unusable assessment (RDR-232 fix round), not "unsupported".
+            evidence.append({"item_id": payload[0]["id"], "quote": f"[{_tag_lines(instruction)[0]}] only mentions the topic", "role": "neutral"})
         return {"ok": bool(evidence), "evidence": evidence}
 
     return check
@@ -420,6 +425,87 @@ async def test_a_primary_collection_outside_the_callers_corpus_scope_is_not_quer
     boundary = CoverageBoundary(request=_request(3), primary=_primary(), scope=ScopeConstraint.parse("docs"))
     await _run(d, boundary, reserved_stream=_reserved())
     assert RDR_COLL not in [a["corpus"] for a in d.repair_searches()], "an explicit scope bounds the repair too"
+
+
+def test_plan_step_filters_ride_the_repair_query_and_pick_the_tool_that_takes_them() -> None:
+    """Code S2: a plan step's where / content_type / author filters are part of what it searched. A repair that drops
+    them widens the plan's own scope. ``search`` takes ``where``; ``query`` takes all three."""
+    qs = build_repair_queries(
+        _facets("f3"), primary_collections=[],
+        plan_targets=[
+            RepairTarget("rdr", filters=(("where", "section_type!=references"),)),
+            RepairTarget("rdr", filters=(("author", "Hal"), ("content_type", "rdr"))),
+            RepairTarget("rdr", "1.2", (("where", "tags=arch"),)),
+        ],
+        max_queries=6, limit=5,
+    )
+    assert [(q.tool, q.args.get("where"), q.args.get("author"), q.args.get("content_type"), q.args.get("subtree")) for q in qs] == [
+        ("search", "section_type!=references", None, None, None),
+        ("query", None, "Hal", "rdr", None),
+        ("query", "tags=arch", None, None, "1.2"),
+    ]
+    assert all(q.args["corpus"] == "rdr" for q in qs)
+    same_corpus_different_filters = build_repair_queries(
+        _facets("f3"), primary_collections=[], plan_targets=[RepairTarget("rdr"), RepairTarget("rdr", filters=(("where", "a=b"),))],
+        max_queries=6, limit=5)
+    assert len(same_corpus_different_filters) == 2, "targets that differ only in filters are different targets"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_steps_where_filter_reaches_the_repair_query() -> None:
+    where = "section_type!=references"
+    plan = {"steps": [{"tool": "search", "args": {"query": "q", "corpus": "rdr", "where": where}}, *PLAN["steps"][1:]]}
+    d = RepairDispatcher()
+    cov = _cov(await _run(d, CoverageBoundary(request=_request(3)), plan=plan))
+    [repair] = d.repair_searches()
+    assert repair["where"] == where and repair["corpus"] == "rdr", "the repair asks under the plan step's own filter"
+    assert cov.repair.outcome == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_subtree_scope_reaches_the_primary_repair_query_too() -> None:
+    """Code S2: a caller's catalog-subtree scope bounded the plan's own steps; the primary-source repair query is
+    asked through ``query`` with the same subtree instead of searching the whole collection."""
+    d = RepairDispatcher(hydrates=True)
+    boundary = CoverageBoundary(request=_request(3), primary=_primary(), scope=ScopeConstraint.parse("1.1"))
+    await plan_run(_match(PLAN), {"_nx_scope": "1.1"}, dispatcher=d, bundle_operators=False, coverage_boundary=boundary,
+                   reserved_stream=_reserved())
+    repairs = [(t, a) for t, a in d.calls if t in ("search", "query") and d.is_repair_search(a)]
+    assert repairs, "a repair ran"
+    tool, first = repairs[0]
+    assert (tool, first["corpus"], first["subtree"]) == ("query", RDR_COLL, "1.1"), "the primary collection, under the scope's subtree"
+    assert all(a.get("subtree") == "1.1" for _t, a in repairs), "every repair query, plan targets included"
+
+
+@pytest.mark.asyncio
+async def test_a_document_address_scope_refuses_a_primary_collection_that_does_not_hold_it_and_filters_the_hits() -> None:
+    """A document-address scope (``1.2.4686``) names one document and no subtree filter can express it. The named
+    source here is document 1.1.9, so its collection is not asked, and a hit the plan's corpus query returns from
+    any other document is not merged into the reduction's input or the ledger."""
+    d = RepairDispatcher(hydrates=True)
+    boundary = CoverageBoundary(request=_request(3), primary=_primary(), scope=ScopeConstraint.parse("1.2.4686"))
+    result = await plan_run(_match(PLAN), {"_nx_scope": "1.2.4686"}, dispatcher=d, bundle_operators=False,
+                            coverage_boundary=boundary, reserved_stream=_reserved())
+    cov = _cov(result)
+    assert RDR_COLL not in [a["corpus"] for a in d.repair_searches()], "the primary collection does not hold the scoped document"
+    assert d.repair_searches(), "the plan's own corpus is still asked"
+    assert cov.repair.items_merged == 0 and cov.repair.outcome == "no_new_evidence", "the hits came from other documents"
+    assert REPAIR_TEXT not in d.args_of("generate")[0]["context"]
+
+
+@pytest.mark.asyncio
+async def test_a_document_address_scope_keeps_a_hit_from_the_scoped_document() -> None:
+    class InScope(RepairDispatcher):
+        async def __call__(self, tool: str, args: dict) -> dict:
+            out = await super().__call__(tool, args)
+            if tool in ("search", "query") and self.is_repair_search(args):
+                return out | {"tumblers": ["1.2.4686"] * len(out["ids"])}
+            return out
+
+    d = InScope()
+    boundary = CoverageBoundary(request=_request(3), scope=ScopeConstraint.parse("1.2.4686"))
+    cov = _cov(await plan_run(_match(PLAN), {"_nx_scope": "1.2.4686"}, dispatcher=d, bundle_operators=False, coverage_boundary=boundary))
+    assert cov.repair.outcome == "completed" and cov.repair.items_merged == 1
 
 
 @pytest.mark.asyncio
@@ -993,3 +1079,33 @@ async def test_a_repair_chunk_the_evidence_hygiene_excludes_is_not_merged() -> N
         result = await _run(d, CoverageBoundary(request=_request(3)))
     cov = _cov(result)
     assert cov.repair.outcome == "no_new_evidence" and cov.state == "partial" and REPAIR_TEXT not in str(d.args_of("generate")[0])
+
+
+# ── redaction: a failure log never carries the exception text ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_boundary_failure_warnings_carry_the_exception_type_never_its_text() -> None:
+    """Code M4: an exception that embeds prompt or question text would bypass trace=False redaction if its text
+    were logged. The runner's boundary-failure warning and the ledger's repair-failure warning log the type only."""
+    secret = "SECRET-QUESTION-TEXT-do-not-log"
+
+    async def boom(self, *a, **kw):  # noqa: ARG001
+        raise RuntimeError(secret)
+
+    with structlog.testing.capture_logs() as logs, patch.object(CoverageBoundary, "run", boom):
+        result = await _run(RepairDispatcher(), CoverageBoundary(request=_request(2)))
+    assert result.coverage is None and result.final == {"text": "the answer"}, "the boundary never fails the answer"
+    failed = [e for e in logs if e["event"] == "nx_answer_coverage_boundary_failed"]
+    assert len(failed) == 1 and failed[0]["error"] == "RuntimeError"
+    assert secret not in json.dumps(logs, default=str)
+
+    async def boom_repair(self, *a, **kw):  # noqa: ARG001
+        raise RuntimeError(secret)
+
+    with structlog.testing.capture_logs() as logs2, patch.object(CoverageBoundary, "_repair", boom_repair):
+        cov = _cov(await _run(RepairDispatcher(), CoverageBoundary(request=_request(3))))
+    assert cov.repair.outcome == "retrieval_failed"
+    failed2 = [e for e in logs2 if e["event"] == "nx_answer_coverage_repair_failed"]
+    assert len(failed2) == 1 and failed2[0]["error"] == "RuntimeError"
+    assert secret not in json.dumps(logs2, default=str) and secret not in cov.repair.detail

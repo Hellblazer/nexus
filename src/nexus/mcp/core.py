@@ -11882,9 +11882,9 @@ async def nx_answer(
     - `answer_shape` says what `final_text` is. Prose follows for
       "answered" and "insufficient_evidence" (opens with
       `[insufficient-evidence: <n> unresolved]`, names each unsettled
-      part, then answers the rest). Any other value, "uncovered" (evidence
-      found, none covering a requested part) included, is a one-line
-      notice, never the raw payload.
+      part, then answers the rest). Any other value, "uncovered" (none of
+      the evidence covers a requested part; only with NX_ANSWER_COVERAGE=1)
+      included, is a one-line notice, never the raw payload.
     - `run_summary.persistence` (persisted, dropped, unsupported,
       unverified, not_recorded): only "persisted" means the engine kept
       the run's coverage summary.

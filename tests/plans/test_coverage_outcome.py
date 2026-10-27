@@ -63,9 +63,24 @@ def test_complete_whose_prose_is_empty_is_unavailable_too() -> None:
     assert v.coverage is not None and v.coverage.state == "unavailable"
 
 
-def test_prose_with_no_covered_facet_is_uncovered() -> None:
-    """Sam's ruling (nexus-jypmj.3.12): prose with no covered facet is unavailable and its shape is ``uncovered``."""
-    cov = _cov("partial", "unresolved_facets", (UNSUPPORTED, UNASSESSED))  # generation ran: one facet was unknown
+@pytest.mark.parametrize("known_gap", [UNSUPPORTED, CONTRADICTED])
+def test_prose_with_no_covered_facet_but_an_unassessed_one_keeps_the_prose_as_partial(known_gap: FacetFinding) -> None:
+    """RDR-232 fix round (critique S2): an unassessed facet is not known to be uncovered. The pre-generation skip
+    already requires none unassessed; the post-generation withhold must agree, so the generated prose is kept as a
+    partial answer and the notice names the unassessed facet as not assessed."""
+    cov = _cov("partial", "unresolved_facets", (known_gap, UNASSESSED))  # generation ran: one facet was unknown
+    v = decide_outcome(cov, AnswerShape.ANSWERED)
+    assert v.shape is AnswerShape.INSUFFICIENT_EVIDENCE and v.success and v.no_grow
+    assert v.coverage is cov and v.coverage.state == "partial", "the state is not rewritten to unavailable"
+    out = render_insufficient_evidence(cov, {"f2": "a", "f3": "b", "f4": "what it cost"}, "The prose.")
+    assert out.startswith("[insufficient-evidence: 2 unresolved]") and "f4 (not assessed): what it cost" in out
+    assert out.endswith("The prose.")
+
+
+def test_prose_with_no_covered_facet_and_none_unassessed_is_uncovered() -> None:
+    """Sam's ruling (nexus-jypmj.3.12): prose with no covered facet, every facet known, is unavailable and its shape
+    is ``uncovered``. (Reached when the skip switch is off or a ledger was built by hand: the boundary skips first.)"""
+    cov = _cov("partial", "unresolved_facets", (UNSUPPORTED, CONTRADICTED))
     v = decide_outcome(cov, AnswerShape.ANSWERED)
     assert v.shape is AnswerShape.UNCOVERED and not v.success and v.no_grow
     assert v.coverage is not None and (v.coverage.state, v.coverage.reason) == ("unavailable", "uncovered")
@@ -118,6 +133,18 @@ def test_the_notice_opens_with_the_marker_names_each_unresolved_facet_then_gives
         assert f"{fid} " in head and texts[fid] in head
     assert "f1" not in head and "what was decided" not in head, "a covered facet is not listed as unresolved"
     assert "no supporting evidence" in head and "contradict" in head and "not assessed" in head
+
+
+def test_a_covered_facet_with_conflicting_evidence_is_named_apart_from_the_unresolved() -> None:
+    """Mixed evidence on one facet is covered (the supporting evidence answers it) and marked conflicted; the notice
+    says the evidence conflicts without counting the facet among the unresolved."""
+    conflicted = FacetFinding("f1", "covered", ("e1", "e2"), "conflicted")
+    cov = _cov("partial", "unresolved_facets", (conflicted, UNSUPPORTED))
+    out = render_insufficient_evidence(cov, {"f1": "what was decided", "f2": "who approved it"}, "The decision was X.")
+    head, _, prose = out.partition("\n\n")
+    assert prose == "The decision was X." and out.startswith("[insufficient-evidence: 1 unresolved]\n")
+    assert "conflict" in head and "f1" in head and "what was decided" in head
+    assert "f2 (no supporting evidence found)" in head
 
 
 def test_the_notice_marker_carries_no_facet_text() -> None:

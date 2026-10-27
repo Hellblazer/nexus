@@ -45,6 +45,7 @@ from typing import Any
 
 import structlog
 
+from nexus.plans.coverage_repair import NOTE_PREFIX
 from nexus.plans.evidence import ScopeConstraint
 from nexus.plans.reserved_stream import ReservedStream, strip_source_note
 from nexus.plans.traversal_policy import capped_traversal_count
@@ -74,6 +75,11 @@ GRAPH_TOOLS: frozenset[str] = frozenset({"traverse", "search_graph_hop"})
 UNATTRIBUTED = ""
 
 _SOURCE_PRIMARY_FIRST = ("missing", "partial", "covered")
+
+#: The coverage boundary's note to the terminal generation (``coverage_repair.NOTE_PREFIX``) is counted as its own
+#: ``reducer_input.by_stream`` entry, not as an unattributed input.
+COVERAGE_NOTE_PREFIX = NOTE_PREFIX
+COVERAGE_NOTE_STREAM = "coverage_note"
 
 
 # ── the reducer-input recorder ────────────────────────────────────────────────────────────────────────────
@@ -256,6 +262,10 @@ def _attribute(
         if hit is not None:
             out.append(_Attribution(hit.stream, hit.collection, hit.doc_id, hit.source))
             continue
+        if text.startswith(COVERAGE_NOTE_PREFIX):
+            # the coverage boundary's note to the generator: not retrieved evidence, so not an unattributed input
+            out.append(_Attribution(COVERAGE_NOTE_STREAM, UNATTRIBUTED))
+            continue
         found = index.get(hashlib.sha256(strip_source_note(text).encode("utf-8")).hexdigest())
         out.append(_Attribution(found[0], found[1]) if found else _Attribution("unattributed", UNATTRIBUTED))
     return out
@@ -383,13 +393,16 @@ def _reducer_wire(rec: ReducerInputRecorder, att: Sequence[_Attribution], scope:
     by_collection: dict[str, int] = {}
     for a in att:
         by_stream[a.stream] = by_stream.get(a.stream, 0) + 1
-        if a.stream in ("t2", "unattributed"):
+        if a.stream in ("t2", "unattributed", COVERAGE_NOTE_STREAM):
             continue
         by_stream_collection.setdefault(a.stream, {})
         by_stream_collection[a.stream][a.collection] = by_stream_collection[a.stream].get(a.collection, 0) + 1
         by_collection[a.collection] = by_collection.get(a.collection, 0) + 1
     # An item is unattributed when no stream produced it, or when its stream is known but not its collection.
-    unattributed = sum(1 for a in att if a.stream != "t2" and (a.stream == "unattributed" or a.collection == UNATTRIBUTED))
+    unattributed = sum(
+        1 for a in att
+        if a.stream not in ("t2", COVERAGE_NOTE_STREAM) and (a.stream == "unattributed" or a.collection == UNATTRIBUTED)
+    )
     attributed = {c: n for c, n in by_collection.items()}
     inside, outside = _scope_counts(scope, attributed)
     return {

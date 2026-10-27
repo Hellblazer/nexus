@@ -6,10 +6,11 @@ The runner's boundary (:mod:`nexus.plans.coverage_ledger`) decides the state BEF
 of RDR section 4's table depend on what generation returned, so they are applied here, after it:
 
 * a **usable answer** is prose that ``classify_answer_shape`` reads as ``answered`` AND at least one required facet
-  covered. ``partial`` with a usable answer is ``insufficient_evidence``; ``partial`` or ``complete`` without one
+  that counts toward one (``counts_toward_a_usable_answer``; today ``covered``) or one not yet assessed. ``partial`` with a usable answer is ``insufficient_evidence``; ``partial`` or ``complete`` without one
   is ``unavailable``.
-* prose with no covered facet is ``uncovered`` (Sam's ruling, nexus-jypmj.3.12); ``no_evidence`` stays reserved for
-  evidence that never reached the reduction.
+* prose with no covered facet, every facet known, is ``uncovered`` (Sam's ruling, nexus-jypmj.3.12); with an
+  unassessed facet the prose is kept as a partial answer; ``no_evidence`` stays reserved for evidence that never
+  reached the reduction.
 
 :func:`decide_outcome` is the one place ``nx_answer`` takes ``answer_shape``, the counter outcome, the no-grow flag
 and the FINAL coverage state from. The run summary is told the final state (it was built before generation), so a
@@ -28,7 +29,7 @@ from nexus.plans.answer_shape import (
     NON_ANSWER_SHAPES,
     AnswerShape,
 )
-from nexus.plans.coverage_ledger import CoverageResult
+from nexus.plans.coverage_ledger import CONFLICTED_REASON, CoverageResult, counts_toward_a_usable_answer
 
 __all__ = [
     "NO_USABLE_ANSWER_REASON",
@@ -64,8 +65,13 @@ class OutcomeVerdict:
     coverage: CoverageResult | None
 
 
-def _covered(coverage: CoverageResult) -> int:
-    return sum(1 for f in coverage.ledger.findings if f.state == "covered")
+def _usable(coverage: CoverageResult) -> int:
+    """Facets that count toward a usable answer (the all-contradicted rule lives in ``counts_toward_a_usable_answer``)."""
+    return sum(1 for f in coverage.ledger.findings if counts_toward_a_usable_answer(f.state))
+
+
+def _unassessed(coverage: CoverageResult) -> int:
+    return sum(1 for f in coverage.ledger.findings if f.state == "unassessed")
 
 
 def _unavailable(coverage: CoverageResult, reason: str) -> CoverageResult:
@@ -88,7 +94,10 @@ def decide_outcome(coverage: CoverageResult | None, classified: AnswerShape) -> 
     # complete or partial: a usable answer is answered prose with at least one covered facet.
     if classified is not AnswerShape.ANSWERED:
         return OutcomeVerdict(classified, False, True, _unavailable(coverage, NO_USABLE_ANSWER_REASON))
-    if _covered(coverage) == 0:
+    # No facet counts toward an answer: uncovered, but only when every facet is KNOWN. An unassessed facet is not
+    # known to be uncovered (the pre-generation skip already requires none unassessed), so the prose that
+    # generation paid for stays, behind the partial notice that names the unassessed facets as not assessed.
+    if _usable(coverage) == 0 and _unassessed(coverage) == 0:
         return OutcomeVerdict(AnswerShape.UNCOVERED, False, True, _unavailable(coverage, "uncovered"))
     if coverage.state == "partial":
         return OutcomeVerdict(AnswerShape.INSUFFICIENT_EVIDENCE, True, True, coverage)
@@ -103,14 +112,20 @@ def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[
     contradicted, not assessed, or its named source was not found.
     """
     pending = [f for f in coverage.ledger.findings if f.state != "covered"]
+    conflicted = [f for f in coverage.ledger.findings if f.state == "covered" and f.reason == CONFLICTED_REASON]
+
+    def clip(facet_id: str) -> str:
+        text = " ".join(str(facet_texts.get(facet_id) or facet_id).split())
+        return text if len(text) <= _MAX_FACET_CHARS else text[: _MAX_FACET_CHARS - 3] + "..."
+
     lines = [
         f"{INSUFFICIENT_EVIDENCE_NOTICE_PREFIX} {len(pending)} unresolved]",
         "The evidence did not settle these parts of the request; the answer below does not cover them:",
     ]
     for f in pending:
         label = "the named source was not found" if f.reason == "source_missing" else _STATE_LABEL.get(f.state, f.state)
-        text = " ".join(str(facet_texts.get(f.facet_id) or f.facet_id).split())
-        if len(text) > _MAX_FACET_CHARS:
-            text = text[: _MAX_FACET_CHARS - 3] + "..."
-        lines.append(f"  - {f.facet_id} ({label}): {text}")
+        lines.append(f"  - {f.facet_id} ({label}): {clip(f.facet_id)}")
+    if conflicted:
+        lines.append("The evidence conflicts on these parts; the answer below follows the supporting evidence:")
+        lines.extend(f"  - {f.facet_id} (the evidence conflicts): {clip(f.facet_id)}" for f in conflicted)
     return "\n".join(lines) + "\n\n" + prose

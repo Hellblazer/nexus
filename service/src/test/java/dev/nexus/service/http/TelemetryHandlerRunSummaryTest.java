@@ -128,6 +128,45 @@ class TelemetryHandlerRunSummaryTest {
         }
     }
 
+    // ── U+0000 ───────────────────────────────────────────────────────────────
+
+    @Test
+    void aNulCharacterInTheSummaryIsA400NamingTheFieldNotA500() throws Exception {
+        // jsonb cannot hold U+0000. The Python client strips it, so only another client sends it; it must be refused
+        // as a bad request (naming the field) rather than reaching the INSERT and losing the run row to a 500.
+        // Each body spells the NUL as the JSON escape backslash-u0000: in a value, in a nested array, in a key.
+        List<String> bad = List.of(
+            "{\"p\":\"a\\u0000b\"}",
+            "{\"p\":{\"q\":[1,\"x\\u0000\"]}}",
+            "{\"k\\u0000\":1}");
+        for (String summary : bad) {
+            String q = "nul-" + System.nanoTime();
+            Reply r = post("/record", "{\"question\":\"" + q + "\",\"created_at\":\"" + CREATED
+                + "\",\"run_summary\":" + summary + "}");
+            assertThat(r.status).as("run_summary=%s: %s", summary, r.body).isEqualTo(400);
+            assertThat(r.body).contains("run_summary").contains("U+0000");
+            assertThat(findRow(q)).as("a rejected body writes nothing").isNull();
+        }
+        String q = "nul-complete-" + System.nanoTime();
+        Reply c = post("/complete", "{\"question\":\"" + q + "\",\"created_at\":\"" + CREATED
+            + "\",\"outcome\":\"success\",\"run_summary\":" + bad.get(0) + "}");
+        assertThat(c.status).isEqualTo(400);
+        assertThat(findRow(q)).isNull();
+        Reply batch = postPath("/import_batch", "{\"table\":\"nx_answer_runs\",\"rows\":["
+            + "{\"question\":\"nul-batch-" + System.nanoTime() + "\",\"created_at\":\"" + CREATED + "\",\"run_summary\":" + bad.get(0) + "}]}");
+        assertThat(batch.status).isEqualTo(400);
+        assertThat(batch.body).contains("rows[0]").contains("run_summary");
+    }
+
+    @Test
+    void aSummaryWithAnEscapedBackslashBeforeU0000IsNotANulAndIsStored() throws Exception {
+        // The text backslash-backslash-u0000 is a backslash followed by the letters u0000, not a NUL.
+        String q = "not-nul-" + System.nanoTime();
+        assertThat(post("/record", "{\"question\":\"" + q + "\",\"created_at\":\"" + CREATED
+            + "\",\"run_summary\":{\"p\":\"a\\\\u0000b\"}}").status).isEqualTo(200);
+        assertThat(((Map<?, ?>) rowFor(q).get("run_summary")).get("p")).isEqualTo("a\\u0000b");
+    }
+
     // ── size cap ─────────────────────────────────────────────────────────────
 
     @Test

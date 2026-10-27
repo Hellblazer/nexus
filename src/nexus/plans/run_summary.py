@@ -428,13 +428,18 @@ class RunSummaryRecorder:
         self.summary: dict[str, Any] | None = None
 
     def observe_plan_result(self, plan_result: Any) -> None:
-        """Note that the run reached its terminal reduction and take its coverage assessment, if any."""
+        """Note whether the run reached its terminal reduction, and take its coverage assessment, if any.
+
+        A run the budget or deadline cut before the terminal reduction (``budget_exhausted_at_step`` set, no
+        assessment) did not reach it: its counts are all 0 and its state is ``none``, not ``unassessed``. A cut
+        after the boundary ran (an assessment exists) did reach it."""
         from nexus.plans.coverage_ledger import CoverageResult  # noqa: PLC0415 — deferred; the ledger module is heavy and the store never needs it
 
-        self._terminal = True
         coverage = getattr(plan_result, "coverage", None)
         # An isinstance, not a duck check: a test double's unconfigured attribute is a truthy stand-in.
         self._coverage = coverage if isinstance(coverage, CoverageResult) else None
+        cut = isinstance(getattr(plan_result, "budget_exhausted_at_step", None), int)
+        self._terminal = self._coverage is not None or not cut
 
     def observe_final_coverage(self, coverage: Any) -> None:
         """Replace the assessment with the same result at the state the call RETURNED.
