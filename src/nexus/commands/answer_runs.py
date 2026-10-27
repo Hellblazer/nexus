@@ -22,6 +22,14 @@ command — with a per-step breakdown (``--steps``) and a three-way
 executed-ok / executed-failed / degenerate split of the listed rows. See
 ``answer_runs_cmd``'s own docstring (what ``--help`` actually renders) for
 the default-population statement.
+
+RDR-232 Phase 3 (nexus-jypmj.3.3) adds a fourth population beside those three:
+**insufficient-evidence**, a partial answer returned behind the
+``[insufficient-evidence: <n> unresolved]`` notice. It is read from the run
+summary the row carries (``coverage_partial``), which survives ``trace=False``
+redaction, and from the notice itself when a row has no summary and its text is
+visible. See ``_row_is_insufficient_evidence`` for the rule and
+``docs/cli-reference.md`` § nx answer-runs for the reader-facing text.
 """
 from __future__ import annotations
 
@@ -935,7 +943,12 @@ def answer_runs_cmd(
     from the notice itself when its text is visible (``trace=True``); a
     ``trace=False`` row without a summary has its text redacted, so it stays
     redacted: it is counted where it was before and is not recognizable as
-    insufficient-evidence.
+    insufficient-evidence. ``--json`` carries the bucket as
+    ``insufficient_evidence_count``. The two coverage non-answers,
+    ``uncovered`` (evidence found, none of it covering a requested part) and
+    ``no_evidence`` (nothing usable reached the reduction), are not in this
+    bucket: they carry the ``[non-answer: <shape>]`` notice and are counted as
+    degenerate classes ``non_answer/uncovered`` and ``non_answer/no_evidence``.
     """
     # nexus-spbay: validate/normalize --since BEFORE the service try-block —
     # a bad value must fail as a usage error naming the value, never fall

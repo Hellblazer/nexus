@@ -11859,33 +11859,37 @@ async def nx_answer(
 ) -> "str | dict":
     """Answer a knowledge question via plan-match-first, multi-step retrieval.
 
-    Use `search`/`query` directly instead for a single-step, already-known-
-    shape lookup — this tool reduces from many documents and is NOT
-    sub-second (p50 ~80s, p95 ~217s; see the module comment above this
-    tool for the measured distribution). Matches the question to a saved
-    retrieval plan (or grows one via an inline planner on a miss), executes
-    it, and returns the synthesized answer.
+    Use `search`/`query` directly for a single-step, already-known-shape
+    lookup: this tool reduces from many documents and is NOT sub-second
+    (p50 ~80s, p95 ~217s). Matches the question to a saved retrieval plan
+    (an inline planner grows one on a miss), runs it, and returns the
+    synthesized answer.
 
-    Returns the final step's output as a string, or a structured envelope
-    (`{final_text, chunks, plan_id, step_count, answer_shape, ...}`) when
-    `structured=True`. The envelope's `plan_id` is the matched library plan
-    or, on a miss, the plan this call grew and saved, and 0 when no row
-    exists (for example ttl 0, a failed save, or a run that ended before a plan was grown).
+    Returns the final step's output as a string, or with `structured=True`
+    an envelope (`{final_text, chunks, plan_id, step_count, answer_shape,
+    coverage, run_summary, ...}`). `plan_id` is the matched library plan or, on a
+    miss, the plan this call grew and saved; 0 when no row exists (ttl 0,
+    a failed save, or a run that ended first).
 
     Constraints:
-    - `budget_usd` is a soft cost guide (warns, does not hard-block, and
-      can overshoot); `budget_seconds` is a hard wall-clock cap on plan
-      execution only.
-    - A corpus-prefix or collection `scope` narrows each retrieval step's
-      plan-declared corpus; a step with nothing under the scope is skipped,
-      named in the `scope_diagnostics` list of a `structured=True` envelope
-      and in a `[scope conflict: ...]` line in text mode.
-    - `continuation=True` is live for eligible plan cuts and requires a
-      matching `nx_answer_report` call from the caller afterward.
-    - A `structured=True` `answer_shape` other than "answered" means
-      `final_text` is a one-line notice, not the raw payload.
-    - In text mode a degraded answer starts with `[budget exhausted ...]`
-      (a cost or time budget stopped the plan) or `[non-answer: <shape>]`.
+    - `budget_usd` is a soft cost guide (warns, can overshoot);
+      `budget_seconds` is a hard wall-clock cap on plan execution only.
+    - A corpus or collection `scope` narrows each retrieval step's plan-
+      declared corpus; a step with nothing under it is skipped and named
+      in `scope_diagnostics` (text mode: a `[scope conflict: ...]` line).
+    - `continuation=True` is live for eligible plan cuts and needs a
+      matching `nx_answer_report` call afterward.
+    - `answer_shape` says what `final_text` is. Prose follows for
+      "answered" and "insufficient_evidence" (opens with
+      `[insufficient-evidence: <n> unresolved]`, names each unsettled
+      part, then answers the rest). Any other value, "uncovered" (evidence
+      found, none covering a requested part) included, is a one-line
+      notice, never the raw payload.
+    - `run_summary.persistence` (persisted, dropped, unsupported,
+      unverified, not_recorded): only "persisted" means the engine kept
+      the run's coverage summary.
+    - Text mode starts a degraded answer with `[budget exhausted ...]`,
+      `[non-answer: <shape>]` or `[insufficient-evidence: ...]`.
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -12213,6 +12217,12 @@ async def nx_answer(
 
     _run_summary = RunSummaryRecorder(trace=trace, readback=structured, inputs=_run_summary_inputs)
 
+    def _coverage_switch_on() -> bool:
+        # The envelope's `coverage` reason for a run no boundary assessed: read now, from the same switch that decided the boundary.
+        from nexus.plans.switches import coverage_enabled as _enabled  # noqa: PLC0415 — deferred; matches this module's convention
+
+        return _enabled(_os.environ)
+
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
     def _result(text: str, *, plan_id: int = 0, step_count: int = 0,
@@ -12505,6 +12515,14 @@ async def nx_answer(
             # digest}. `persisted` means the row was read back with the same version and digest; HTTP 200
             # proves nothing against an engine that predates the column. Always present.
             "run_summary": _run_summary.to_wire(),
+            # RDR-232 Phase 3 (nexus-jypmj.3.6, section 4): the coverage object, always present: the run's
+            # CoverageResult wire at the FINAL state the call returned (the one run_summary reports), or an
+            # `unassessed` object with its reason (switch_off | no_facets | terminal_reduction_not_reached |
+            # boundary_not_run) when no boundary assessed the run. Ids, states and counts only; never evidence
+            # or facet text; trace=False also blanks the source labels. Same shape as continuation.coverage.
+            "coverage": _run_summary.coverage_wire(
+                enabled=_coverage_switch_on(), facets=len(_request_coverage.facets),
+            ),
         }
 
     # nexus-f9kxd: single emitter for every error return. The tool contract

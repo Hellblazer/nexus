@@ -5326,7 +5326,9 @@ every row is split three ways:
     `extractions_only` (a bare `operator_extract` payload),
     `ranking_only`, `operator_payload` (filter, check, verify or groupby
     payload), `retrieval_only` (a search/query/traverse result payload),
-    `listing`, `empty`. A row
+    `listing`, `empty`, and, from RDR-232 Phase 3 (nexus-jypmj.3.3), `uncovered`
+    (evidence was retrieved and covered no requested part) and `no_evidence`
+    (nothing usable reached the reduction). A row
     written by a post-fix client carries the `[non-answer: <shape>]`
     notice as its `final_text` and is named by that prefix; a pre-fix row
     (the 2026-09-06 run 706 / plan 488 class) is named from its body by
@@ -5334,8 +5336,27 @@ every row is split three ways:
     Before this class existed these rows counted as executed-ok and the
     plan-grow path saved them as successes.
 
+- **insufficient-evidence** (RDR-232 Phase 3, nexus-jypmj.3.3) — a partial
+  answer: `nx_answer` returned prose behind the `[insufficient-evidence: <n>
+  unresolved]` notice (`answer_shape` `insufficient_evidence`). It is a success,
+  not a failure, so it is taken off BEFORE the split above and is in none of
+  executed-ok, executed-failed, handed-off or degenerate; it is therefore also
+  outside the executed-ok latency block and the `--steps` aggregates. A row that
+  carries a run summary is bucketed from it, for `trace=True` and `trace=False`
+  alike: a successful `nx_answer` run whose summary has `coverage_partial` 1 (the
+  summary records the state the call returned, so text that merely opens like the
+  notice cannot override it, and a partial ledger on a run that did not succeed is
+  not an insufficient-evidence result). A row without a summary (an engine that
+  predates the `run_summary` column, or a row written before it) is bucketed from
+  the notice at the start of its text when that text is visible (`trace=True`). A
+  `trace=False` row without a run summary has nothing left to read: its text is
+  `[redacted]`, so it stays redacted, is counted where it was before and is not
+  recognizable as insufficient-evidence. The human report's `of the N row(s)
+  shown` line counts the bucket as `insufficient-evidence N`.
+
 `--json` carries `executed_ok_count`, `executed_failed_count`,
-`degenerate_count`, `degenerate_breakdown: {class: count}`, plus a
+`degenerate_count`, `degenerate_breakdown: {class: count}`,
+`insufficient_evidence_count`, plus a
 page-scoped, executed-ok-only latency view: `executed_ok_avg_duration_ms`
 and `executed_ok_latency_buckets` (same fixed edges as the whole-set
 `latency_buckets` above, computed client-side from just the executed-ok
@@ -5412,14 +5433,29 @@ predicted `usd`/`ms`/`basis`, and which one was chosen are written to
 predicted_cost_usd, basis}`; `None` on any path that never reaches Step
 1's hit branch — force_dynamic, a plan-miss, or an error before Step 1).
 
-The envelope also carries `answer_shape` (nexus-90gyo): `"answered"` when
-`final_text` is a synthesized answer, otherwise one of `hydration_dump`,
-`extractions_only`, `ranking_only`, `operator_payload`, `retrieval_only`, `listing`, `empty`.
-On a non-answer `final_text` is a one-line `[non-answer: <shape>]` notice
-(the raw payload is never returned as prose), the `chunks` list still
-carries what was retrieved, the run is recorded as a failure, and no plan
-is grown from it (nexus-zy0kj). `None` on paths that never classified:
-errors, misses, the single-step fast path, a continuation handoff.
+The envelope also carries `answer_shape` (nexus-90gyo; extended by RDR-232 Phase 3, nexus-jypmj.3.3):
+what `final_text` structurally is. Two shapes carry prose. `answered` is a
+synthesized answer. `insufficient_evidence` is a partial answer: the coverage
+check found some requested parts supported and others not, so `final_text`
+opens `[insufficient-evidence: <n> unresolved]` (a count, no question text),
+names each unresolved part and why (no supporting evidence found, the evidence
+contradicts it, not assessed, or its named source was not found), then gives
+the prose for the rest. It counts as a plan success, and a run planned inline
+is never saved as a plan. Every other value is a non-answer: `final_text` is a
+one-line `[non-answer: <shape>]` notice (the raw payload is never returned as
+prose), the `chunks` list still carries what was retrieved, the run is
+recorded as a failure, and no plan is grown from it (nexus-zy0kj). Of those,
+`hydration_dump`, `extractions_only`, `ranking_only`, `operator_payload`,
+`retrieval_only`, `listing` and `empty` classify the final text itself;
+`planner_error` and `error` are set on a failure path; `no_evidence` means
+nothing usable reached the reduction (every retrieval step returned zero
+results, or a scope conflict removed it all); and `uncovered`
+(nexus-jypmj.3.12) means retrieval returned evidence and none of it covered a
+requested part, so no answer is given (terminal generation is skipped when the
+check finds none covered, and prose generated anyway is withheld). `None` on
+paths that never classified: the single-step fast path, a continuation
+handoff and a budget-exhausted stop. `NX_ANSWER_COVERAGE=0` leaves every run
+unassessed and `answer_shape` as it was before RDR-232 Phase 3.
 Grown plans are additionally gated on identifier agreement at match time
 (nexus-wj12p): a grown plan whose originating question named identifiers
 (RDR/JDR ids, bead ids, engine tags, client versions, GH/PR numbers) is
@@ -5428,12 +5464,14 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
+The envelope has twelve RDR-232 keys, all always present (`scope_diagnostics`,
 `scope_normalized`, `evidence_request`, `named_sources`, `primary_evidence`,
-`reserved_stream`, `lifecycle_stream`, `evidence_diagnostics`, `request_coverage` and
-`plan_eligibility`; `scope_diagnostics` is `[]` when it has nothing to report,
-`request_coverage` and `plan_eligibility` are always objects, and the other seven are
-`null` when they have nothing to report):
+`reserved_stream`, `lifecycle_stream`, `evidence_diagnostics`, `request_coverage`,
+`plan_eligibility`, `run_summary` and `coverage`; `scope_diagnostics` is `[]` when it has
+nothing to report, `request_coverage`, `plan_eligibility`, `run_summary` and `coverage` are
+always objects, and the other seven are `null` when they have nothing to report). `coverage`
+is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same object is
+`continuation.coverage` in a continuation hand-off:
 
 - `scope_normalized` (nexus-jypmj.1.8, nexus-n1908): `{given, applied, reason}`
   when the caller's `scope` was a comma-list. `scope` takes one corpus prefix or
@@ -5861,6 +5899,69 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   handoff's empty-evidence check uses the same predicate). A planner-made plan
   whose own retrieval steps found nothing keeps that answer but is not grown
   into the plan library.
+- `run_summary` (nexus-jypmj.3.5, RDR-232 Phase 3): what became of the run's
+  summary, with the coverage state the call returned kept apart from the one
+  stored. `{version, persistence, detail, returned_coverage_state,
+  persisted_coverage_state, digest}`; always an object. The summary (version 1:
+  coverage counts and state, request kind, eligibility, per-stream counts, scope,
+  repair, cost and latency; no question text, and with `trace=False` no facet text
+  or source hint) rides on the run's `/record` and `/complete` write, in the same
+  row, and is sent only when the engine's `/version` advertises
+  `nx_answer_run_summary_supported` (engine-service-v0.1.166 and later).
+  `persistence` is `persisted` (the run row was read back and carries a summary
+  of the same version and a matching digest over canonical JSON), `dropped`
+  (written, but the row came back without it, with another version or digest, or
+  the write failed; `detail` says which, and a warning is logged), `unsupported`
+  (the engine does not advertise the flag, so nothing was sent: the state on
+  every engine older than v0.1.166, and on the public edge until it allowlists the
+  flag), `unverified` (sent, but no readback was asked for or the readback could
+  not be read; a text call, `structured=False`, reads nothing back) or
+  `not_recorded` (no record was written, or the summary could not be built).
+  HTTP 200 is not evidence of persistence: an engine that predates the column
+  answers 200 and discards the field, so only `persisted` means the summary was
+  kept. `returned_coverage_state` is `complete`, `partial`, `unavailable` or
+  `unassessed` for a run that reached its terminal reduction, and `none` for one
+  that never did (an error before it, the single-query fast path).
+  `persisted_coverage_state` is the state read back from the stored row, `null`
+  unless `persistence` is `persisted`. A summary failure never fails the answer.
+- `coverage` (nexus-jypmj.3.6, RDR-232 section 4): what the evidence covered of
+  what was asked; always an object. For a run whose final reduction was assessed
+  it is the coverage boundary's wire form (the `continuation.coverage` object,
+  below) at the state the call RETURNED, the value `run_summary.returned_coverage_state`
+  reports, so a run whose prose was not a usable answer shows `unavailable` here
+  even when the ledger said `complete`. It adds `requested_facet_ids` and
+  `covered_facet_ids`, `residual_gaps` (`{facet_id, state, reason}` for every
+  facet not covered, an unassessed one included), `primary_source`
+  (`{state, sources}`; `state` is `not_named`, `covered`, `partial` or
+  `missing`) and `corpus_counts` (`{anchors, by_stream, by_collection}`, what the
+  final reduction was handed); `repair` holds the repair attempt. A run no
+  boundary assessed has the same keys, state `unassessed` and a `reason`:
+  `switch_off` (`NX_ANSWER_COVERAGE` is off), `no_facets`,
+  `terminal_reduction_not_reached` (an error before the final reduction, the
+  single-query fast path, a run whose reduction raised) or `boundary_not_run`;
+  its facet lists are empty. A `partial` state goes with `answer_shape`
+  `insufficient_evidence`, never `answered`. Ids, states, counts and closed
+  names only; no evidence text and no facet text, and with `trace=False` the
+  source labels and row details are blanked as in `continuation.coverage`.
+- `continuation.coverage` (nexus-jypmj.3.2, nexus-jypmj.3.3): the coverage
+  object of a continuation hand-off, so the hand-off reports the same state a
+  headless run would instead of reverting to `unassessed` (it is also the top-level
+  `coverage` of that envelope); always present in the
+  `continuation` envelope, `null` when no boundary ran. It is the coverage
+  boundary's wire form (`CoverageResult.to_wire`): `{state, reason,
+  skip_generation, facets_required, facets, rounds, findings, anchors, sources,
+  scope, assessment, repair, ...}`. `state` is `complete` (every required facet
+  covered), `partial`, `unavailable` or `unassessed` (no facets, the assessor
+  failed, or `NX_ANSWER_COVERAGE` is off); `reason` says why. `facets` counts
+  findings by state (`covered`, `unsupported`, `contradicted`, `unassessed`);
+  `findings` has one `{facet_id, state, evidence_ids, reason}` per required
+  facet; `anchors` is a list of `{item_id, stream, kind, chash, collection,
+  tumbler, t2_record_id}` and carries identity only, never evidence text;
+  `sources` and `scope` are the deterministic source and scope rows; `assessment`
+  and `repair` report calls, facets per call, latency and outcome, with counts and
+  closed names only. With `trace=False` the source labels and the `detail` of
+  `sources` and `scope` are blanked; ids, counts and closed names stay.
+
 - `traverse` under `nx_answer` (nexus-jypmj.1.5): `nx_answer` always supplies the
   traversal policy, so an unscoped call is not the legacy `traverse`. The
   document cap (500, the engine's node cap) does not bind with no scope, but

@@ -455,6 +455,26 @@ class RunSummaryRecorder:
             return str(self._coverage.state)
         return "unassessed" if self._terminal else "none"
 
+    def coverage_wire(self, *, enabled: bool, facets: int) -> dict[str, Any]:
+        """The envelope's top-level ``coverage`` object (RDR-232 section 4), always a dict.
+
+        The assessed run's :meth:`CoverageResult.to_wire` at the state :meth:`observe_final_coverage` last
+        recorded, so it cannot differ from :attr:`returned_coverage_state`; redacted when the call is untraced.
+        A run with no assessment gets the same keys with state ``unassessed`` and the reason it was not
+        assessed: ``switch_off`` (*enabled* is false), ``no_facets`` (*facets* is 0), ``terminal_reduction_not_reached``
+        (an error before it, the single-query fast path) or ``boundary_not_run`` (it was reached, and the runner
+        returned no assessment).
+        """
+        from nexus.plans.coverage_ledger import CoverageLedger, CoverageResult  # noqa: PLC0415 — deferred, as in observe_plan_result
+
+        if self._coverage is not None:
+            return self._coverage.to_wire(redact=not self.trace)
+        reason = (
+            "switch_off" if not enabled else "no_facets" if facets <= 0
+            else "terminal_reduction_not_reached" if not self._terminal else "boundary_not_run"
+        )
+        return CoverageResult("unassessed", reason, False, CoverageLedger()).to_wire(redact=not self.trace)
+
     def _set(self, state: PersistenceState, detail: str) -> None:
         self.persistence = state
         self.detail = detail

@@ -340,10 +340,47 @@ class CoverageResult:
             "repair_items_merged": self.repair.items_merged, "repair_noted_facets": self.repair.noted_facets,
         }
 
+    @property
+    def residual_gaps(self) -> tuple[FacetFinding, ...]:
+        """Every required facet that is not covered, in ledger order (unassessed ones included: not known is a gap)."""
+        return tuple(f for f in self.ledger.findings if f.state != "covered")
+
+    @property
+    def primary_source_state(self) -> dict[str, Any]:
+        """The named sources' state in one word: ``not_named`` (none), ``missing`` (any source not found),
+        ``partial`` (any partly read), else ``covered``; with the number of named sources."""
+        states = {s.state for s in self.ledger.sources}
+        state = "not_named" if not states else "missing" if "missing" in states else "partial" if "partial" in states else "covered"
+        return {"state": state, "sources": len(self.ledger.sources)}
+
+    @property
+    def corpus_counts(self) -> dict[str, Any]:
+        """What the terminal reduction was handed, counted: anchors in all, by evidence stream and by collection
+        (the collection name is a corpus identifier, never caller wording)."""
+        by_stream: dict[str, int] = {}
+        by_collection: dict[str, int] = {}
+        for a in self.ledger.anchors:
+            by_stream[a.stream] = by_stream.get(a.stream, 0) + 1
+            if a.collection:
+                by_collection[a.collection] = by_collection.get(a.collection, 0) + 1
+        return {"anchors": len(self.ledger.anchors), "by_stream": by_stream, "by_collection": by_collection}
+
     def to_wire(self, *, redact: bool = False) -> dict[str, Any]:
+        """The ``coverage`` object: the envelope's top-level key (RDR-232 section 4) and ``continuation.coverage``.
+
+        Ids, states, counts and closed names only: never evidence text, never a facet's text. ``requested_facet_ids``
+        and ``covered_facet_ids`` name the facets asked for and the ones settled; ``residual_gaps`` is every other
+        facet with its state and reason; ``primary_source`` and ``corpus_counts`` say what was read. ``redact`` blanks
+        the caller's source wording (source labels, row details).
+        """
         led = self.ledger
         return {
             **self.counts(),
+            "requested_facet_ids": [f.facet_id for f in led.findings],
+            "covered_facet_ids": [f.facet_id for f in led.findings if f.state == "covered"],
+            "residual_gaps": [{"facet_id": f.facet_id, "state": f.state, "reason": f.reason} for f in self.residual_gaps],
+            "primary_source": self.primary_source_state,
+            "corpus_counts": self.corpus_counts,
             "findings": [f.to_wire() for f in led.findings],
             "anchors": [a.to_wire() for a in led.anchors],
             "sources": [{"state": s.state, "detail": "" if redact else s.detail, **({} if redact else {"source": s.source})} for s in led.sources],

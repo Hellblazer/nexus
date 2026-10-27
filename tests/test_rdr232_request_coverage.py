@@ -1223,7 +1223,7 @@ def test_an_unresolved_or_ambiguous_source_stays_reported_unqualified() -> None:
 
 def test_the_cli_reference_documents_the_request_coverage_key() -> None:
     docs = (Path(__file__).resolve().parents[1] / "docs" / "cli-reference.md").read_text(encoding="utf-8")
-    assert "ten RDR-232 keys" in docs and "nine RDR-232 keys" not in docs
+    assert "twelve RDR-232 keys" in docs and "eleven RDR-232 keys" not in docs
     assert "- `request_coverage` (nexus-jypmj.2.2" in docs
     life = docs[docs.index("- `lifecycle_stream` (nexus-jypmj.1.7)"):]
     assert "gate, lifecycle or status facet" in life[: life.index("\n- `", 10)]
