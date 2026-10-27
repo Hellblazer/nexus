@@ -234,8 +234,10 @@ The `--extractor` flag overrides the config when passed explicitly.
 streaming run's pipeline row is taken over after 300 s of silence. A MinerU run
 refuses to start when the product is above 240 s, naming both settings (the commands
 exit 1); the defaults (180 × 1) pass, and a batch of 4 pages needs 60 s or less per
-page. `nx config set` warns when a change would cross the limit. A server request that
-times out sends its page to the next rung on the subprocess path; the server is
+page. A setting that holds no integer (`soon`, `true`, `2.5`) is named the same way and
+exits 1 without a traceback. `nx config set` warns when a change would cross the limit.
+A server request that times out sends its page to the next rung on the subprocess path
+(a batch that times out bisects on the subprocess path too, never on the server); the server is
 restarted after the first such timeout on a one-slot server (macOS) or after two
 consecutive pages on a server with more slots, and only a server nexus started itself.
 

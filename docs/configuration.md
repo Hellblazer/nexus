@@ -159,7 +159,8 @@ printf %s "$KEY" | nx config set openai_compat_api_key --stdin              # op
 | `pdf.extractor` | — | `auto` | PDF extraction backend: `auto`, `docling`, or `mineru`. Set globally with `nx config set pdf.extractor=mineru` |
 | `pdf.mineru_server_url` | — | `http://127.0.0.1:8010` | MinerU API server URL. Auto-updated when `nx mineru start` binds a port |
 | `pdf.mineru_table_enable` | — | `true` | Table extraction in MinerU. Off, every table becomes an image reference and its values are not indexed; the chunk then carries a `[Table N not extracted as text; values not indexed]` marker. Set `false` only for corpora with no tables where the table models' memory matters |
-| `pdf.mineru_page_batch` | — | `1` | Pages per MinerU request. Increase for faster throughput at the cost of memory |
+| `pdf.mineru_page_batch` | — | `1` | Pages per MinerU request. A larger batch can raise throughput at the cost of memory, but `pdf.mineru_page_timeout_s` × `pdf.mineru_page_batch` must be at most 240 s (RDR-237): at the default timeout of 180 s only a batch of 1 passes, and a batch of 2 or more needs a lower `pdf.mineru_page_timeout_s` (a batch of 4 needs 60 s or less). A larger product refuses to start and names both settings; `nx config set` warns when a change would cross the limit |
+| `pdf.mineru_page_timeout_s` | — | `180` | Wall-clock budget, in seconds, for each page of a MinerU request or worker run; a range of N pages gets N times this. Must be an integer, and this × `pdf.mineru_page_batch` must be at most 240 s: a streaming run's pipeline row is taken over after 300 s without a progress write, and the longest attempt keeps a 60 s margin under that. A timed-out server request sends its page to the next rung on the subprocess path (see [PDF Extraction Backends](cli-reference.md#pdf-extraction-backends)) |
 | `voyageai.read_timeout_seconds` | `NX_VOYAGEAI_READ_TIMEOUT_SECONDS` | `120` | Request timeout (seconds) for Voyage AI API calls. Increase for large PDF indexing |
 | `search.hybrid_default` | — | `false` | Default hybrid-scoring mode for `nx search`: blends git frecency into the score for code corpora (0.7*vector + 0.3*frecency). Set `true` to always blend |
 | `search.hnsw_ef` | — | `256` | Legacy client-side HNSW tuning key, inert in production. Every current install (local or cloud) serves T3 through the nexus-service over pgvector, which tunes HNSW server-side — that knob is `NX_HNSW_EF_SEARCH` above, not this key. This value only still applies to a Chroma-backed test double; there is no live SPANN or ChromaDB Cloud path left to be "ignored in" |
@@ -200,6 +201,7 @@ pdf:
   mineru_server_url: http://127.0.0.1:8010  # MinerU API endpoint (default)
   mineru_table_enable: true     # table extraction (default: true; off = tables indexed as markers only)
   mineru_page_batch: 1          # pages per MinerU request (default: 1)
+  mineru_page_timeout_s: 180    # per-page budget; × mineru_page_batch must be at most 240
 ```
 
 Or set via CLI: `nx config set pdf.extractor=mineru` (writes to global config). See [PDF Extraction Backends](cli-reference.md#pdf-extraction-backends) for details.

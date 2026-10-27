@@ -124,15 +124,16 @@ def extractor_loop(
         # nexus-gl99l: the counters above are NOT proof the WAL pages
         # backing them still exist. pipeline_index_pdf's caught-exception
         # handler calls db.mark_failed + db.clear_orphan_wal, which wipes
-        # the pdf_pages/pdf_chunks WAL rows but never resets these
-        # progress counters (deliberately — mark_failed's audit trail is
-        # load-bearing, nexus-2fyb/nexus-rewgw). Trusting the counters
-        # alone after ANY caught pipeline exception means a retry sees a
-        # row that CLAIMS full extraction with none of the underlying
-        # data, and silently skips re-extraction. Verify the actual WAL
-        # page count agrees with the claim before trusting the fast path
-        # — this also self-heals rows stranded by any earlier code
-        # version that never checked, not just future failures.
+        # the pdf_pages/pdf_chunks WAL rows. Since nexus-33q80 the engine's
+        # clearOrphanWal zeroes pages_extracted and chunks_uploaded in the
+        # same transaction as the wipe, so today's wipe leaves no stale
+        # counter behind. Rows stranded by an earlier engine or client
+        # (which left the counters up) can still exist: trusting the
+        # counters alone for such a row means a retry sees a row that
+        # CLAIMS full extraction with none of the underlying data, and
+        # silently skips re-extraction. Verify the actual WAL page count
+        # agrees with the claim before trusting the fast path — this
+        # self-heals those rows, not just future failures.
         # A COUNT (not an index-coverage check) is sound here only because
         # of two coupled invariants: clear_orphan_wal deletes ALL of a
         # content_hash's pdf_pages/pdf_chunks rows in one server-side
@@ -162,13 +163,15 @@ def extractor_loop(
         # attempt did NOT complete cleanly — either a SIGKILL mid-stream
         # (WAL rows for the pages already written stay intact) or a
         # caught exception followed by pipeline_index_pdf's
-        # mark_failed + clear_orphan_wal (the WAL is wiped but
-        # pages_extracted survives it, per the nexus-gl99l comment above).
-        # pages_extracted alone cannot distinguish the two: verify against
+        # mark_failed + clear_orphan_wal (the WAL is wiped, and today's
+        # engine zeroes pages_extracted with it; a row stranded by an
+        # earlier engine can still hold the old counter, per the
+        # nexus-gl99l comment above).
+        # pages_extracted alone cannot distinguish the cases: verify against
         # the actual WAL before trusting it, exactly as the fast path
         # above does for the total_pages-set case. When the WAL still
         # backs the counter this is a no-op (actual_pages ==
-        # pages_extracted_at_start); when clear_orphan_wal wiped it, this
+        # pages_extracted_at_start); when a wipe left a stale counter, this
         # is what stops on_page from skipping pages the retry needs to
         # re-extract.
         pages_extracted_at_start = len(db.read_pages(content_hash))

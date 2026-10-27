@@ -2559,9 +2559,14 @@ class PDFExtractor:
             # Exception, MineruWorkerStopped a BaseException: neither is caught.
             return not _is_run_fence(exc)
 
-        def _settle_page(s: int, e: int | None, rung1_exc: BaseException, started: float) -> None:
+        def _settle_page(
+            s: int, e: int | None, rung1_exc: BaseException, started: float,
+            *, via_server: bool = True,
+        ) -> None:
             # Page s failed its rung-1 attempt with *rung1_exc* (already known to
-            # be a descent). Walk it down the ladder; callbacks (_append_page ->
+            # be a descent). *via_server* False: an enclosing batch timed out on the
+            # server, which is still parsing it, so no step of this page goes there.
+            # Walk it down the ladder; callbacks (_append_page ->
             # on_page) run OUTSIDE every try, so a cancel or a fenced run raised
             # there is never read as MinerU failing.
             page = s + 1
@@ -2594,7 +2599,8 @@ class PDFExtractor:
                 # and cannot be told to stop. Rung 2 goes to the subprocess path, the one path
                 # whose timeout actually kills the work.
                 retried = _attempt(
-                    s, e, 2, via_server=not isinstance(rung1_exc, MineruServerTimeout),
+                    s, e, 2,
+                    via_server=via_server and not isinstance(rung1_exc, MineruServerTimeout),
                 )
             except (RuntimeError, *_DROPPED_CONNECTION) as caught:
                 if not _is_descent(caught):
@@ -2638,18 +2644,22 @@ class PDFExtractor:
                 outcomes[s] = outcome
             _progress(f"  MinerU page {page}/{total_pages} settled as {method} ({fname})")
 
-        def _extract_range(s: int, e: int | None) -> None:
+        def _extract_range(s: int, e: int | None, *, via_server: bool = True) -> None:
             # RDR-148 Gap 6 batch//2 ladder: extract pages [s, e) in one
             # subprocess; on failure BISECT (full range -> halves -> ... -> one
             # page) instead of dropping straight to 1-page, so a mid-size batch
             # that fits memory is tried before the slowest per-page path. A
             # single page that fails goes down the RDR-237 ladder (_settle_page).
+            # RDR-237: a range whose server request timed out never goes back to the server,
+            # nor does any step below it: the server is still parsing that request and cannot
+            # be told to stop. Its steps run on the subprocess path, which kills what it
+            # times out, and add nothing to the restart streak (only server requests do).
             rng_end = e if e is not None else total_pages
             span = rng_end - s
             started = time.monotonic()
             failure: BaseException | None = None
             try:
-                attempted = _attempt(s, e, 1)
+                attempted = _attempt(s, e, 1, via_server=via_server)
             except (RuntimeError, *_DROPPED_CONNECTION) as exc:
                 if not _is_descent(exc):
                     raise
@@ -2660,8 +2670,9 @@ class PDFExtractor:
                 _accept(s, rng_end, *attempted, "mineru", started, None)
                 return
             if span <= 1:
-                _settle_page(s, e, failure, started)
+                _settle_page(s, e, failure, started, via_server=via_server)
                 return
+            steps_via_server = via_server and not isinstance(failure, MineruServerTimeout)
             mid = s + span // 2
             _log.warning(
                 "mineru_oom_retry", pages=f"{s + 1}–{rng_end}",
@@ -2671,8 +2682,8 @@ class PDFExtractor:
                 f"  MinerU: pages {s + 1}–{rng_end} failed — bisecting "
                 f"at {mid + 1} ({fname})"
             )
-            _extract_range(s, mid)
-            _extract_range(mid, rng_end)
+            _extract_range(s, mid, via_server=steps_via_server)
+            _extract_range(mid, rng_end, via_server=steps_via_server)
 
         fname = pdf_path.name
         for batch_idx, (start, end) in enumerate(batches):
@@ -3027,6 +3038,23 @@ class PDFExtractor:
 
     _MINERU_MAX_RESTARTS: int = 2
 
+    def _restart_refused(self) -> bool:
+        """Whether this extractor may not restart a server at all: its own restart budget
+        (``_MINERU_MAX_RESTARTS``) is spent, or the spawn policy forbids a spawn. Logged. Checked
+        before the machine-wide cooldown is claimed, so a process that cannot restart never
+        spends the cooldown other processes need."""
+        if self._mineru_server_restarts >= self._MINERU_MAX_RESTARTS:
+            _log.warning("mineru_restart_budget_exhausted",
+                         restarts=self._mineru_server_restarts)
+            return True
+
+        from nexus.daemon.mineru_lifecycle import spawn_policy_allows  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        if not spawn_policy_allows():
+            _log.info("mineru_restart_blocked_by_policy")
+            return True
+        return False
+
     def _restart_mineru_server(self, replace_pid: int | None = None) -> bool:
         """Attempt to restart the MinerU server after a crash.
 
@@ -3044,16 +3072,14 @@ class PDFExtractor:
         ``pdf.mineru_server_url`` with a restart onto a random port left
         a live server ``get_mineru_server_url`` would never find).
         """
-        if self._mineru_server_restarts >= self._MINERU_MAX_RESTARTS:
-            _log.warning("mineru_restart_budget_exhausted",
-                         restarts=self._mineru_server_restarts)
+        if self._restart_refused():
             return False
 
-        from nexus.daemon.mineru_lifecycle import spawn_policy_allows  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-        if not spawn_policy_allows():
-            _log.info("mineru_restart_blocked_by_policy")
-            return False
+        # RDR-237: the request that brought us here may have run its whole budget (up to 240 s)
+        # since its own beat. Beat before the election, the stop's SIGTERM grace and the spawn,
+        # none of which writes a page, so their time adds to a gap that starts here (the health
+        # wait below beats again once the spawn is done).
+        self._beat()
 
         self._mineru_server_restarts += 1
         _log.info("mineru_server_restarting",
@@ -3359,10 +3385,14 @@ class PDFExtractor:
         """Replace the registered server *info* describes, found up but broken.
         Bounded: one replacement per ``BROKEN_RESTART_COOLDOWN_S`` across the
         whole machine (``claim_broken_restart``), and only inside
-        ``_MINERU_MAX_RESTARTS``. Logged."""
+        ``_MINERU_MAX_RESTARTS``. Logged. The budget and the spawn policy are checked BEFORE
+        the claim: the claim stamps the cooldown for every process on the machine, so a refusal
+        that comes after it would burn the cooldown on a restart that never happens."""
         from nexus._mineru_health import claim_broken_restart  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         if info is None or not isinstance(info.get("pid"), int):
+            return False
+        if self._restart_refused():
             return False
         if not claim_broken_restart():
             _log.warning("mineru_broken_restart_in_cooldown")

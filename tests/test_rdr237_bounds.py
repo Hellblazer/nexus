@@ -31,7 +31,7 @@ import yaml
 from click.testing import CliRunner
 from structlog.testing import capture_logs
 
-from nexus._mineru_health import is_registered_server_url
+from nexus._mineru_health import _RESTART_STAMP_NAME, _restart_stamp_path, is_registered_server_url
 from nexus.cli import main
 from nexus.config import (
     MINERU_ATTEMPT_BOUND_S,
@@ -42,6 +42,7 @@ from nexus.config import (
 from nexus.daemon.mineru_lifecycle import HEARTBEAT_EVERY_S, ensure_mineru_running
 from nexus.db.http_pipeline_client import PipelineRunFenced
 from nexus.pdf_extractor import (
+    ExtractionResult,
     MineruBoundsError,
     MineruServerTimeout,
     PDFExtractor,
@@ -714,7 +715,7 @@ def test_a_failing_batch_of_four_at_60_s_opens_every_bisect_step_with_a_heartbea
     assert steps == [
         ("server", 0, 4), ("sub", 0, 4),          # the batch: server error, then the worker, both fail
         ("server", 0, 2), ("server", 2, 2),       # the halves; the second times out (120 s)
-        ("server", 2, 1), ("server", 3, 1),       # and is bisected to its pages
+        ("sub", 2, 1), ("sub", 3, 1),             # and is bisected to its pages on the SUBPROCESS
     ], steps
     _assert_every_attempt_opens_with_a_beat(world)
     assert world.longest_gap() < MINERU_ATTEMPT_BOUND_S
@@ -784,10 +785,12 @@ def test_a_server_connection_error_then_a_restart_then_a_retry_keeps_the_gap_und
     lost = [i for i, e in enumerate(world.events) if e[0] == "server" and e[2] == 1][0]
     retry = [i for i, e in enumerate(world.events) if e[0] == "server" and e[2] == 1][1]
     assert "spawn" in kinds[lost:retry], "the restart ran between the failure and the retry"
-    beats_between = [i for i in range(lost + 1, retry) if kinds[i] == "beat"]
-    assert len(beats_between) >= 2, "the restart's health wait and the retry each open with a heartbeat"
+    spawned = kinds.index("spawn", lost)
+    before_spawn = [i for i in range(lost + 1, spawned) if kinds[i] == "beat"]
+    after_spawn = [i for i in range(spawned + 1, retry) if kinds[i] == "beat"]
+    assert before_spawn, "the restart opens with a heartbeat, before its election, stop and spawn"
+    assert len(after_spawn) >= 2, "the health wait and the retry each open with a heartbeat after it"
     assert kinds[retry - 1] == "beat"
-    assert kinds.index("spawn", lost) < beats_between[0], "the wait's own heartbeat follows the spawn"
     assert world.longest_gap() < MINERU_ATTEMPT_BOUND_S
     assert ext._mineru_server_restarts == 1
 
@@ -1058,3 +1061,311 @@ def test_is_registered_server_url_is_the_pid_files_own_loopback_port_only() -> N
     assert not is_registered_server_url("http://gpu.example.com:8010", REGISTERED)
     assert not is_registered_server_url(None, REGISTERED)
     assert not is_registered_server_url(URL, None)
+
+
+# ── 9. fix round 1 (reviews of a9c6cfffa): the restart streak, pinned rule by rule ───────────────
+
+
+def _linux_streak_run(tmp_path, monkeypatch, pages, plan, *, fault=None, ext=None, restart=None):
+    """Run on a three-slot server (a restart needs two consecutive rung-1 timeouts) with the broken
+    restart replaced by a spy; ``(world, spy, ext, logs)``."""
+    if fault is not None:
+        monkeypatch.setenv("NX_MINERU_FAULT_PAGES", fault)
+    world = World(tmp_path, pages, plan)
+    ext = ext or PDFExtractor()
+    spy = restart or _restart_spy(world)
+    with world.active(monkeypatch=monkeypatch, page_timeout=60, platform="linux"), \
+            patch.object(ext, "_restart_broken_mineru_server", spy):
+        with capture_logs() as logs:
+            world.extract(ext)
+    return world, spy, ext, logs
+
+
+def _server_attempts(world: World) -> list[tuple[int, int]]:
+    """The server requests as ``(page 1-based, rung)`` (single-page ranges)."""
+    return [(e[2] + 1, e[4]) for e in server_events(world)]
+
+
+def test_a_rung_2_server_timeout_is_not_counted_toward_the_restart_streak(tmp_path, monkeypatch) -> None:
+    """Page 2 times out at rung 1 (streak 1). Page 3's rung 1 is forced to fail without touching
+    the server, so its rung 2 goes to the server and times out too. Only rung-1 requests count: no
+    restart. (Counting it would make the two 'consecutive pages' the rule restarts on.)"""
+    world, spy, _, logs = _linux_streak_run(
+        tmp_path, monkeypatch, 4, times_out(("server", 2, 1), ("server", 3, 2)), fault="3:1",
+    )
+
+    timeouts = [(e["pages"], e["rung"]) for e in logs if e.get("event") == "mineru_server_timeout"]
+    assert timeouts == [("2", 1), ("3", 2)], "both timeouts happened, one at each rung"
+    assert (3, 1) not in _server_attempts(world), "page 3's rung 1 never reached the server"
+    spy.assert_not_called()
+
+
+def test_a_dropped_connection_ends_the_streak(tmp_path, monkeypatch) -> None:
+    """Timeout on page 2, a dropped connection on page 3 (the lost-server branch retries it on a
+    'restarted' server), timeout on page 4: the dropped connection ended the streak, so page 4 is
+    the first of a new one."""
+    calls = {"n": 0}
+
+    def plan(route, start, span, rung):
+        if route == "server" and rung == 1 and start == 2:
+            calls["n"] += 1
+            return "connect" if calls["n"] == 1 else "ok"
+        return "timeout" if (route, start, rung) in {("server", 1, 1), ("server", 3, 1)} else "ok"
+
+    world = World(tmp_path, 5, plan)
+    ext = PDFExtractor()
+    spy = _restart_spy(world)
+
+    def fake_lost_server_restart(replace_pid=None) -> bool:
+        ext._mineru_server_checked = True
+        ext._mineru_server_up = True
+        return True
+
+    with world.active(monkeypatch=monkeypatch, page_timeout=60, platform="linux"), \
+            patch.object(ext, "_restart_broken_mineru_server", spy), \
+            patch.object(ext, "_restart_mineru_server", side_effect=fake_lost_server_restart):
+        with capture_logs() as logs:
+            world.extract(ext)
+
+    assert [e for e in logs if e.get("event") == "mineru_server_lost"], "page 3 took the lost-server branch"
+    assert [(e["pages"], e["rung"]) for e in logs if e.get("event") == "mineru_server_timeout"] == [
+        ("2", 1), ("4", 1),
+    ]
+    spy.assert_not_called()
+
+
+def test_a_rung_2_server_answer_does_not_end_a_rung_1_streak(tmp_path, monkeypatch) -> None:
+    """Timeout on page 2, then page 3's rung 1 is forced to fail and its rung 2 is ANSWERED by the
+    server, then a timeout on page 4. The rung-2 answer is not a rung-1 request, so pages 2 and 4
+    are consecutive rung-1 timeouts: one restart, after page 4."""
+    world, spy, _, logs = _linux_streak_run(
+        tmp_path, monkeypatch, 5, times_out(("server", 2, 1), ("server", 4, 1)), fault="3:1",
+    )
+
+    assert (3, 2) in _server_attempts(world), "page 3's rung 2 was answered by the server"
+    spy.assert_called_once_with(REGISTERED)
+    (restart,) = [e for e in logs if e.get("event") == "mineru_server_timeout_restart"]
+    assert restart["pages"] == ["2", "4"]
+
+
+@pytest.mark.parametrize("path", ["docling", "auto without formulas"])
+def test_the_240_s_check_does_not_fire_on_a_path_that_never_reaches_mineru(tmp_path, monkeypatch, path) -> None:
+    """A product above 240 s concerns MinerU only: a run the Docling path serves is untouched, and
+    the check is not even asked."""
+    world = World(tmp_path, 2)
+    ext = PDFExtractor()
+    clean = ExtractionResult(text="A clean page of ordinary prose, long enough to pass the gate. " * 6)
+    with world.active(monkeypatch=monkeypatch, page_timeout=100, batch=3), \
+            patch("nexus.config.mineru_attempt_bound_problem", wraps=mineru_attempt_bound_problem) as asked, \
+            patch("nexus.pdf_extractor._has_formulas_quick", return_value=0), \
+            patch.object(PDFExtractor, "_extract_with_docling", return_value=clean) as docling:
+        result = ext.extract(
+            world.pdf, extractor="docling" if path == "docling" else "auto", allow_degraded=True,
+        )
+
+    assert result is clean and docling.call_count == 1, "Docling served the run"
+    asked.assert_not_called()
+    assert world.events == [], "no MinerU request, worker or heartbeat"
+    with world.active(monkeypatch=monkeypatch, page_timeout=100, batch=3):
+        assert mineru_attempt_bound_problem() is not None, "non-vacuity: this pair is refused on MinerU"
+
+
+# ── 10. a server timeout bisects on the subprocess (RDR-237 Bounds: never the same rung again) ───
+
+
+def test_a_batch_that_times_out_on_the_server_bisects_on_the_subprocess_and_counts_once(
+    tmp_path, monkeypatch,
+) -> None:
+    """The first half would time out on the server too (the abandoned parse of the batch still holds
+    the slot), and a batch plus its half would read as two consecutive pages: a restart of a
+    three-slot server for one bad region. The halves never go to the server."""
+    def plan(route, start, span, rung):
+        return "timeout" if (route, start, span) in {("server", 0, 4), ("server", 0, 2)} else "ok"
+
+    world = World(tmp_path, 4, plan)
+    ext = PDFExtractor()
+    spy = _restart_spy(world)
+    with world.active(monkeypatch=monkeypatch, page_timeout=60, batch=4, platform="linux"), \
+            patch.object(ext, "_restart_broken_mineru_server", spy):
+        world.extract(ext)
+
+    assert [(e[0], e[2], e[3]) for e in world.attempts()] == [
+        ("server", 0, 4), ("sub", 0, 2), ("sub", 2, 2),
+    ]
+    spy.assert_not_called()
+    assert ext._server_timeout_pages == ["1-4"], "the batch is one entry in the streak"
+
+
+def test_no_step_below_a_server_timeout_goes_back_to_the_server(tmp_path, monkeypatch) -> None:
+    """The subtree stays on the subprocess: the quarters, and the page's own rung 2."""
+    def plan(route, start, span, rung):
+        if (route, start, span, rung) == ("server", 0, 4, 1):
+            return "timeout"
+        if (route, start, span, rung) in {("sub", 0, 2, 1), ("sub", 0, 1, 1)}:
+            return ("exit", 1)
+        return "ok"
+
+    result, world, _ = run(tmp_path, monkeypatch, 4, plan, batch=4, page_timeout=60)
+
+    assert [(e[0], e[2], e[3], e[4]) for e in world.attempts()] == [
+        ("server", 0, 4, 1),
+        ("sub", 0, 2, 1),    # first half: the worker fails it
+        ("sub", 0, 1, 1),    # its first page: fails
+        ("sub", 0, 1, 2),    # and rung 2 is the subprocess, not the server
+        ("sub", 1, 1, 1),
+        ("sub", 2, 2, 1),    # the second half
+    ]
+    assert result.metadata["extraction_pages"] == {"mineru-no-formula": [1]}
+    _assert_every_attempt_opens_with_a_beat(world)
+
+
+def test_a_range_that_failed_on_something_else_still_bisects_on_the_server(tmp_path, monkeypatch) -> None:
+    """Only a server TIMEOUT moves the steps off the server: a server error leaves the server fine."""
+    def plan(route, start, span, rung):
+        return ("http", 500) if (route, start, span) == ("server", 0, 4) else (
+            ("exit", 1) if (route, start, span) == ("sub", 0, 4) else "ok"
+        )
+
+    _, world, _ = run(tmp_path, monkeypatch, 4, plan, batch=4, page_timeout=60)
+
+    assert [(e[0], e[2], e[3]) for e in world.attempts()] == [
+        ("server", 0, 4), ("sub", 0, 4), ("server", 0, 2), ("server", 2, 2),
+    ]
+
+
+# ── 11. the restart: heartbeat first, budget before the machine-wide cooldown ────────────────────
+
+
+def test_the_restart_opens_with_a_heartbeat_before_its_stop_and_spawn_so_the_gap_stays_under_240_s(
+    tmp_path, monkeypatch,
+) -> None:
+    """A 4-page batch at 60 s times out after 240 s. The restart then stops the old server (the
+    SIGTERM grace) and spawns a new one before its health wait beats: with the beat there, the
+    silent gap is 240 + 10 + 5. The restart's own beat comes first."""
+    world = World(tmp_path, 4, lambda route, start, span, rung: "timeout" if (route, start, span) == ("server", 0, 4) else "ok")
+    ext = PDFExtractor()
+
+    def stop(pid):
+        world.events.append(("stop", world.now))
+        world.now += 10.0
+        return "terminated"
+
+    def spawn(port):
+        world.events.append(("spawn", world.now))
+        world.now += 5.0
+        proc = MagicMock(pid=5151)
+        proc.poll.return_value = None
+        return proc
+
+    with world.active(monkeypatch=monkeypatch, page_timeout=60, batch=4, platform="darwin"), \
+            patch("nexus._mineru_pid.is_process_alive", return_value=True), \
+            patch("nexus._mineru_spawn.classify_server_pid", return_value="mineru"), \
+            patch("nexus._mineru_spawn.stop_server_group", side_effect=stop), \
+            patch("nexus._mineru_spawn.spawn_server_process", side_effect=spawn):
+        world.extract(ext)
+
+    kinds = [e[0] for e in world.events]
+    assert "stop" in kinds and "spawn" in kinds, "the real restart ran, stop and spawn included"
+    assert ext._mineru_server_restarts == 1
+    first_server = kinds.index("server")
+    stop_at = kinds.index("stop")
+    assert "beat" in kinds[first_server + 1:stop_at], "a beat sits between the timed-out request and the stop"
+    assert world.longest_gap() <= MINERU_ATTEMPT_BOUND_S, f"gap {world.longest_gap()}"
+    assert world.longest_gap() == MINERU_ATTEMPT_BOUND_S, "the request's own 240 s is the longest silence"
+
+
+def _restart_claim_spy():
+    return patch("nexus._mineru_health.claim_broken_restart", return_value=True)
+
+
+def test_a_process_whose_restart_budget_is_spent_does_not_claim_the_machine_wide_cooldown(
+    tmp_path, monkeypatch,
+) -> None:
+    ext = PDFExtractor()
+    ext._mineru_server_restarts = ext._MINERU_MAX_RESTARTS
+    with _restart_claim_spy() as claim, patch.object(ext, "_restart_mineru_server") as restart:
+        assert ext._restart_broken_mineru_server(REGISTERED) is False
+
+    claim.assert_not_called()
+    restart.assert_not_called()
+
+
+def test_a_process_that_may_not_spawn_does_not_claim_the_machine_wide_cooldown(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "0")
+    ext = PDFExtractor()
+    with _restart_claim_spy() as claim, patch.object(ext, "_restart_mineru_server") as restart:
+        assert ext._restart_broken_mineru_server(REGISTERED) is False
+
+    claim.assert_not_called()
+    restart.assert_not_called()
+
+
+def test_a_process_that_can_restart_claims_the_cooldown_then_restarts(tmp_path, monkeypatch) -> None:
+    """Non-vacuity for the two above: the same call with budget and policy open does claim."""
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
+    ext = PDFExtractor()
+    with _restart_claim_spy() as claim, patch.object(ext, "_restart_mineru_server", return_value=True) as restart:
+        assert ext._restart_broken_mineru_server(REGISTERED) is True
+
+    claim.assert_called_once()
+    restart.assert_called_once_with(replace_pid=REGISTERED["pid"])
+
+
+@pytest.mark.parametrize("budget_spent", [True, False])
+def test_the_cooldown_stamp_is_written_only_by_a_process_that_can_restart(
+    tmp_path, monkeypatch, budget_spent,
+) -> None:
+    """Through the real claim: the stamp next to the pid file exists after a restart the budget
+    allowed (the control), and does not after one it refused."""
+    world = World(tmp_path, 4, times_out(("server", 2, 1)))
+    ext = PDFExtractor()
+    if budget_spent:
+        ext._mineru_server_restarts = ext._MINERU_MAX_RESTARTS
+    with world.active(monkeypatch=monkeypatch, page_timeout=60, platform="darwin"), \
+            patch.object(ext, "_restart_mineru_server", return_value=True):
+        world.extract(ext)
+        stamp = _restart_stamp_path()
+
+    assert stamp.name == _RESTART_STAMP_NAME
+    assert stamp.exists() is (not budget_spent)
+    if budget_spent:
+        assert ext._mineru_server_up is False, "the server is marked down, as before"
+
+
+# ── 12. the restart log names a multi-page range ─────────────────────────────────────────────────
+
+
+def test_the_restart_log_names_a_multi_page_range_as_first_last(tmp_path, monkeypatch) -> None:
+    """Batch 2 over five pages: the second batch is pages 3 and 4. On a one-slot server its
+    timeout restarts at once, and the log and the progress line say '3-4'."""
+    world = World(tmp_path, 5, times_out(("server", 3, 1)))
+    ext = PDFExtractor()
+    with world.active(monkeypatch=monkeypatch, page_timeout=60, batch=2, platform="darwin"), \
+            patch.object(ext, "_restart_broken_mineru_server", return_value=True):
+        with capture_logs() as logs:
+            world.extract(ext)
+
+    (timeout,) = [e for e in logs if e.get("event") == "mineru_server_timeout"]
+    assert timeout["pages"] == "3-4" and timeout["budget_s"] == 120
+    (restart,) = [e for e in logs if e.get("event") == "mineru_server_timeout_restart"]
+    assert restart["pages"] == ["3-4"]
+
+
+# ── 13. a pdf integer setting is an integer ──────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("key", ["mineru_page_timeout_s", "mineru_page_batch", "mineru_memory_ceiling_mb"])
+@pytest.mark.parametrize("bad", [True, False, 2.5, 0.1, float("inf"), float("nan"), "2.5"])
+def test_a_boolean_or_a_fractional_number_is_not_an_integer_setting(key, bad) -> None:
+    """``int(True)`` is 1 and ``int(2.5)`` is 2, and either would have been used without a word."""
+    with _config_with(**{key: bad}):
+        with pytest.raises(PdfConfigError) as info:
+            get_pdf_config()
+    assert f"pdf.{key}" in str(info.value)
+    assert repr(bad) in str(info.value), "the value that was refused is named"
+
+
+@pytest.mark.parametrize("value,expected", [(180.0, 180), (60, 60), ("60", 60), (" 60 ", 60), (4.0, 4)])
+def test_an_integral_number_is_an_integer_setting(value, expected) -> None:
+    with _config_with(mineru_page_timeout_s=value):
+        assert get_pdf_config().mineru_page_timeout_s == expected
