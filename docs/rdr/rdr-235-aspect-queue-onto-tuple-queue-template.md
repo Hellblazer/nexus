@@ -501,6 +501,21 @@ the engine's budget for such calls.
   is linear in the delayed rows ahead of the first claimable one, which
   `nack retry_after_s` bounds to the number of failing documents.
   *Source: T2 nexus/rdr235-prerequisites (plans and scripts); TupleRepository.java:1882-1893; tuples-001-baseline.xml:96-97; tuples-005-subspace-and-claim-log-indexes.xml:86*
+- **✅ Verified** (measurement, 2026-10-27, nexus-5r2sc.1.2) — F27, A4b. The
+  cloud engine's park slots at a busy hour: 9 of 32 in use, `refused_global`
+  and `refused_claimant` both 0, read 2026-10-27 19:54Z through the doctor row
+  `tuples.park_slots` (one `GET /v1/tuples/park_stats`) with nine live Claude
+  Code sessions on the laptop and one tenant. The 2026-10-26 21:55Z reading
+  (research-27) was the same, 9 of 32, so the refused counters did not move
+  across a day. The cloud operator (conexus_c2b) confirmed no busier hour
+  exists for this engine. The new demand is one parked `in` per tenant with a
+  live aspect-worker lease, a handful at most, under its own claimant string
+  (E3, F25), so the per-claimant cap of 4 is untouched. Headroom
+  `(32 - 9 - 1) / 32` is 69 percent against the 25 percent floor: one extra
+  park per active tenant fits, and `NX_TUPLE_PARK_CAP_GLOBAL` stays as it is
+  before activation. The counters are per JVM; the instance count was not
+  recorded, and the v0.1.166 redeploy (stop then start) resets them.
+  *Source: research-32, research-27; src/nexus/health.py `_check_tuple_park_slots`; TupleRepository.java `parkStats`*
 
 ### Critical Assumptions
 
@@ -537,16 +552,17 @@ the engine's budget for such calls.
   park-slot caps, alongside the existing parkers. **Status**: Split, three
   parts. (a) The caps are verified: default 16 global (the cloud measured 32,
   research-27), 4 per claimant, 25 s, engine-wide (F19). (b) Fit alongside the
-  existing parkers is Assumed, pending `park_stats` on the cloud engine at a
-  busy hour (F20); one reading at nine live sessions found 9 of 32 in use
-  (research-27). The mailbox and ledger have no parked `in` consumer; the
-  standing parkers are the MCP `ChannelWaiter` waits, one per live session.
+  existing parkers is Verified (F27, measured 2026-10-27): two busy-hour
+  readings on two days found 9 of 32 in use with the refused counters at 0,
+  and the cloud operator confirmed no busier hour exists; one extra park per
+  active tenant leaves 69 percent headroom. The mailbox and ledger have no
+  parked `in` consumer; the standing parkers are the MCP `ChannelWaiter`
+  waits, one per live session.
   (c) Per-collection parked queues are verified not to fit past 4 collections
   per claimant (F21); the design uses one `aspects` queue per tenant, so one
   worker parks one `in`, under its slot-0 claimant string: 1 global slot and
   1 of that string's 4 (E3, F25).
-  **Method**: Source Search; the busy-hour count of live parkers is still
-  missing.
+  **Method**: Source Search for (a) and (c); measurement for (b).
 
 ### Open Questions
 
@@ -1483,3 +1499,4 @@ so the question is not reopened without new evidence.
 - 2026-10-26: Gate round 1 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); commit `609c8501f` (the develop twin of the gated branch commit, byte-identical RDR); critique `nexus_rdr/235-gate-critique-2026-10-26-r1`.
 - 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `798dd7b75`; critique `nexus_rdr/235-gate-critique-2026-10-27-r2`.
 - 2026-10-27: A1 settled by the EXPLAIN spike (nexus-5r2sc.1.1): F26 added, A1 marked verified, E1 ships no index.
+- 2026-10-27: A4b settled by the busy-hour park-slot reading (nexus-5r2sc.1.2): F27 added, A4 (b) marked verified, no park-cap change before activation.
