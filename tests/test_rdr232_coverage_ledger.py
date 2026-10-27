@@ -482,6 +482,25 @@ async def test_an_unusable_call_leaves_only_its_own_facets_unknown_and_the_run_a
 
 
 @pytest.mark.asyncio
+async def test_a_tag_for_a_facet_another_call_carries_is_rejected_not_accepted() -> None:
+    """Seven facets split into a six-facet call and a one-facet call per stream. A record in the first call tagged
+    [f7] names a facet that call's prompt never showed the model: it is rejected, never support for f7 (fix-round
+    confirmation N1, the tag check must be the call's group, not the whole pass)."""
+    def strays_into_f7(items: str, instruction: str) -> dict:
+        first = json.loads(items)[0]["id"]
+        shown = re.findall(r"^\[(f\d+)\]", instruction, flags=re.M)
+        records = [{"item_id": first, "quote": f"[{fid}] mentioned only", "role": "neutral"} for fid in shown]
+        if "f7" not in shown:
+            records.append({"item_id": first, "quote": "[f7] borrowed from another call", "role": "supports"})
+        return {"ok": True, "evidence": records}
+
+    cov = _cov(await _run(Dispatcher(check=strays_into_f7), CoverageBoundary(request=_request(7))))
+    f7 = next(f for f in cov.ledger.findings if f.facet_id == "f7")
+    assert f7.state == "unsupported", "a record from a call that never showed f7 cannot support f7"
+    assert cov.ledger.assessment.rejected_records >= 1
+
+
+@pytest.mark.asyncio
 async def test_the_facet_tag_is_matched_without_regard_to_case() -> None:
     def shouting(items: str, instruction: str) -> dict:
         first = json.loads(items)[0]["id"]

@@ -546,7 +546,8 @@ public final class TelemetryHandler implements HttpHandler {
             throw new IllegalArgumentException("field 'run_summary' must be a JSON object");
         }
         // jsonb cannot hold U+0000 (Postgres: "unsupported Unicode escape sequence"); left alone it reaches the INSERT
-        // and surfaces as a 500 that loses the whole run row. Refuse it here, naming the field.
+        // and surfaces as a 422 naming no field (HttpUtil's class-22 mapping) that loses the whole run row. Refuse it
+        // here with a 400 naming the field.
         if (containsNul(value)) {
             throw new IllegalArgumentException("field 'run_summary' must not contain a U+0000 character");
         }

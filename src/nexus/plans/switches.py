@@ -68,8 +68,9 @@ def reset_warned() -> None:
 def coverage_enabled(environ: Mapping[str, str]) -> bool:
     """Whether ``nx_answer`` runs the coverage boundary for a request, decided now from *environ*.
 
-    Unset, blank, or a value in neither vocabulary: :data:`ANSWER_COVERAGE_ENABLED` (``False``), and a value
-    outside both vocabularies logs one warning per process. An on value (``1``, ``true``, ``yes``, ``on``): on.
+    Unset or blank: :data:`ANSWER_COVERAGE_ENABLED` (``False``). A value in neither vocabulary: off whatever the
+    default, so a mistyped value can never switch the assessor on, and one warning per process. An on value
+    (``1``, ``true``, ``yes``, ``on``): on.
     An off value (``0``, ``false``, ``off``, ``no``): off. Off means every run is unassessed and ``nx_answer``
     behaves exactly as before Phase 3 (no boundary is handed to the runner, so no assessment call, no repair, no
     skipped generation, no partial notice).
@@ -79,5 +80,7 @@ def coverage_enabled(environ: Mapping[str, str]) -> bool:
         return True
     if raw in OFF_VALUES:
         return False
-    warn_unrecognised(ANSWER_COVERAGE_ENV, raw, read_as="on" if ANSWER_COVERAGE_ENABLED else "off")
-    return ANSWER_COVERAGE_ENABLED
+    if not raw:
+        return ANSWER_COVERAGE_ENABLED
+    warn_unrecognised(ANSWER_COVERAGE_ENV, raw, read_as="off")
+    return False

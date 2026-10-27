@@ -1066,10 +1066,13 @@ class CoverageBoundary:
                     incomplete.update(f.id for f in g)
                 break
             accepted = 0
+            # The call's own facets only: a tag for a facet this prompt never showed is rejected (N1).
+            call_tags = {f.id.lower() for f in group}
             for rec in records:
                 item_id, quote, role = rec.get("item_id"), rec.get("quote"), rec.get("role")
                 m = _TAG.match(quote) if isinstance(quote, str) else None
-                facet_id = tag_of.get(m.group(1).lower()) if m is not None else None
+                tag = m.group(1).lower() if m is not None else None
+                facet_id = tag_of.get(tag) if tag in call_tags else None
                 if item_id not in ids or role not in _ROLES or facet_id is None:
                     rejected += 1
                     continue

@@ -611,3 +611,13 @@ def test_the_default_has_one_source_the_module_constant(monkeypatch: pytest.Monk
     monkeypatch.setattr(switches, "ANSWER_COVERAGE_ENABLED", True)
     assert switches.coverage_enabled({}) is True
     assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: "0"}) is False
+
+
+def test_an_unrecognised_value_reads_as_off_even_when_the_default_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mistyped value must never switch an assessor on: once the default flips to on (nexus-jypmj.3.10),
+    NX_ANSWER_COVERAGE=disable still reads as off (fix-round confirmation critique S-A). Unset and blank keep the
+    default."""
+    monkeypatch.setattr(switches, "ANSWER_COVERAGE_ENABLED", True)
+    switches.reset_warned()
+    assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: "disable"}) is False
+    assert switches.coverage_enabled({switches.ANSWER_COVERAGE_ENV: ""}) is True

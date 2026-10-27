@@ -5464,7 +5464,9 @@ nothing usable reached the reduction (every retrieval step returned zero
 results, or a scope conflict removed it all); and `uncovered`
 (nexus-jypmj.3.12) means retrieval returned evidence and none of it covered a
 requested part, so no answer is given (terminal generation is skipped when the
-check finds none covered, and prose generated anyway is withheld). `None` on
+check has assessed every facet and found none covered, and prose generated
+anyway is withheld; while any facet is unassessed the prose is kept as
+`insufficient_evidence`). `None` on
 paths that never classified: the single-step fast path, a continuation
 handoff and a budget-exhausted stop. The coverage check is off unless
 `NX_ANSWER_COVERAGE=1` is set (the default flips only after the Phase 3
