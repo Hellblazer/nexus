@@ -133,6 +133,7 @@ if TYPE_CHECKING:
     from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
     from nexus.plans.request_coverage import RequestCoverage
     from nexus.plans.reserved_stream import ReservedStream
+    from nexus.plans.run_summary import RunSummaryRecorder
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
 #: string to the agent rather than raising; before returning an error they must
@@ -10061,9 +10062,16 @@ def _nx_answer_record_run(
     duration_ms: int,
     trace: bool,
     planner_cost_usd: float | None = None,
+    run_summary: "RunSummaryRecorder | None" = None,
+    summary_outcome: str = "recorded",
 ) -> None:
     """Persist one ``nx_answer_runs`` row (+ its ``step_records``, when any)
     via the telemetry store. Redacts when ``trace=False``.
+
+    *run_summary* (RDR-232 Phase 3, nexus-jypmj.3.5) is the call's summary recorder: when given, the run
+    summary rides on the same ``/record`` write (with the stamp that finds the row again), under the store's
+    capability rule, and the recorder is told what became of it. *summary_outcome* names the arm in the
+    summary (``planner_failure``, ``handoff``). ``None`` keeps this write exactly as it was.
 
     nexus-pyzk7: routes through ``telemetry.record_nx_answer_run`` (the
     service's POST /v1/telemetry/nx_answer_runs/record), not a raw
@@ -10092,16 +10100,55 @@ def _nx_answer_record_run(
     steps = step_records or []
     cost_usd = _run_cost_usd(steps, planner_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
+    summary = None
+    created_at = None
+    extra: dict[str, Any] = {}
+    if run_summary is not None:
+        summary = run_summary.prepare(
+            telemetry, outcome=summary_outcome, plan_id=plan_id, step_count=step_count,
+            duration_ms=duration_ms, cost_usd=cost_usd,
+        )
+        if summary is not None:
+            created_at = _utc_now_iso()
+            extra = {"run_summary": summary, "created_at": created_at}
     try:
         telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
             step_count=step_count, final_text=text, cost_usd=cost_usd,
-            duration_ms=duration_ms, steps=wire_steps,
+            duration_ms=duration_ms, steps=wire_steps, **extra,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
         # Best-effort, but warn once so a service-mode drop is visible (the call
         # sites also swallow; this makes the failure mode observable). nexus-pyzk7.
         _warn_telemetry_drop("nx_answer_runs", exc)
+        if run_summary is not None:
+            run_summary.settle(
+                telemetry, summary, question=q, created_at=created_at, sent=False, error=exc,
+                final_text=text, duration_ms=duration_ms, step_count=step_count,
+            )
+        return
+    if run_summary is not None:
+        run_summary.settle(
+            telemetry, summary, question=q, created_at=created_at, sent=summary is not None,
+            final_text=text, duration_ms=duration_ms, step_count=step_count,
+        )
+
+
+def _utc_now_iso() -> str:
+    """The instant a run record is stamped with, as ISO-8601 UTC (RDR-203: stamped once, before the first attempt)."""
+    from datetime import datetime, timezone  # noqa: PLC0415 — stdlib import deferred to call site
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _nx_answer_report_summary(telemetry: Any, *, ok: bool) -> "dict[str, Any] | None":
+    """The summary of an ``nx_answer_report`` row: the report's verdict and nothing about the run it reports
+    (the report cannot know that run's ``trace`` setting, so it carries no text at all). ``None`` when the
+    engine does not keep a run summary; the store would drop it anyway, this keeps the drop logged once."""
+    from nexus.plans.run_summary import RunSummaryRecorder  # noqa: PLC0415 — deferred; matches this module's convention
+
+    recorder = RunSummaryRecorder(trace=False, readback=False, kind="continuation_report")
+    return recorder.prepare(telemetry, outcome="report_ok" if ok else "report_failed", plan_id=None, step_count=0, duration_ms=0, cost_usd=None)
 
 
 #: Literal no-result texts the single-step reroute path can synthesize. Kept as
@@ -10916,6 +10963,7 @@ def _nx_answer_record_complete(
     composite_supported_at_start: bool,
     early_bump_fired: bool,
     planner_cost_usd: float | None = None,
+    run_summary: "RunSummaryRecorder | None" = None,
 ) -> None:
     """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
     outcome-counter bump for ONE converting arm, issued as ONE function
@@ -11008,6 +11056,13 @@ def _nx_answer_record_complete(
     hygiene and the always-failing skip. The composite route carries a verdict, so a verdictless
     run takes the per-call record path on either capability, as the 404 fallback does.
 
+    **run_summary** (RDR-232 Phase 3, nexus-jypmj.3.5): the call's summary recorder. The summary rides on
+    the SAME write (``/complete``, or ``/record`` on the degradation path and the 404 fallback), prepared
+    once so both attempts carry the one object and one stamp; the store sends it only to an engine that
+    advertises ``nx_answer_run_summary_supported``. After the write the recorder reads the row back when the
+    call is structured and sets its persistence state; a readback is a GET, never a second write. None of this
+    can raise into the caller. ``None`` keeps every write exactly as it was.
+
     This REPRODUCES the source functions' bodies rather than delegating
     to them, so each keeps its own behaviour precisely:
 
@@ -11038,21 +11093,34 @@ def _nx_answer_record_complete(
     steps = step_records or []
     cost_usd = _run_cost_usd(steps, planner_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
+    # RDR-232 Phase 3: prepared once, before either attempt, so a 404 fallback re-sends the same summary
+    # under the same stamp. None when there is no recorder, the engine cannot take it, or it could not be built.
+    summary = None
+    stamp: str | None = None
+    if run_summary is not None:
+        summary = run_summary.prepare(
+            db.telemetry, outcome="unscored" if success is None else "success" if success else "failure",
+            plan_id=plan_id, step_count=step_count, duration_ms=duration_ms, cost_usd=cost_usd,
+        )
 
     if composite_supported_at_start and success is not None:
         import httpx  # noqa: PLC0415 — rare/branch-local path; only the composite route needs the 404-vs-other-failure distinction
-        from datetime import datetime, timezone  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
         # RDR-203 Idempotency: stamped ONCE, here, before the first
         # attempt — never inside a retry loop. See docstring.
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = stamp = _utc_now_iso()
         try:
             db.telemetry.record_nx_answer_run_complete(
                 question=q, plan_id=plan_id, matched_confidence=matched_confidence,
                 step_count=step_count, final_text=text, cost_usd=cost_usd,
                 duration_ms=duration_ms, created_at=created_at, steps=wire_steps,
-                success=success,
+                success=success, **({"run_summary": summary} if summary is not None else {}),
             )
+            if run_summary is not None:
+                run_summary.settle(
+                    db.telemetry, summary, question=q, created_at=created_at, sent=summary is not None,
+                    final_text=text, duration_ms=duration_ms, step_count=step_count,
+                )
             return
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
@@ -11061,6 +11129,11 @@ def _nx_answer_record_complete(
                 # whole composite write, exactly as a single
                 # _nx_answer_record_run failure is dropped today.
                 _warn_telemetry_drop("nx_answer_runs", exc)
+                if run_summary is not None:
+                    run_summary.settle(
+                        db.telemetry, summary, question=q, created_at=created_at, sent=False, error=exc,
+                        final_text=text, duration_ms=duration_ms, step_count=step_count,
+                    )
                 return
             # D5 404 downgrade guard: the cached probe said supported and
             # the running engine now disagrees. Flip the cache for FUTURE
@@ -11075,6 +11148,11 @@ def _nx_answer_record_complete(
                 pass
         except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
             _warn_telemetry_drop("nx_answer_runs", exc)
+            if run_summary is not None:
+                run_summary.settle(
+                    db.telemetry, summary, question=q, created_at=created_at, sent=False, error=exc,
+                    final_text=text, duration_ms=duration_ms, step_count=step_count,
+                )
             return
 
     # Degradation path: byte-for-byte today's (pre-composite) behaviour,
@@ -11084,14 +11162,28 @@ def _nx_answer_record_complete(
     # downgrade guard's fallback for THIS call, falling through from
     # above with early_bump_fired == False.
     _nx_answer_ensure_run_started(db, plan_id, early_bump_fired)
+    extra: dict[str, Any] = {}
+    if summary is not None:
+        stamp = stamp or _utc_now_iso()
+        extra = {"run_summary": summary, "created_at": stamp}
     try:
         db.telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
             step_count=step_count, final_text=text, cost_usd=cost_usd,
-            duration_ms=duration_ms, steps=wire_steps,
+            duration_ms=duration_ms, steps=wire_steps, **extra,
         )
+        if run_summary is not None:
+            run_summary.settle(
+                db.telemetry, summary, question=q, created_at=stamp, sent=summary is not None,
+                final_text=text, duration_ms=duration_ms, step_count=step_count,
+            )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
         _warn_telemetry_drop("nx_answer_runs", exc)
+        if run_summary is not None:
+            run_summary.settle(
+                db.telemetry, summary, question=q, created_at=stamp, sent=False, error=exc,
+                final_text=text, duration_ms=duration_ms, step_count=step_count,
+            )
 
     if plan_id and success is not None:
         try:
@@ -11934,6 +12026,9 @@ async def nx_answer(
         _scope_diagnostics[:] = (
             [d for d in diag if isinstance(d, dict)] if isinstance(diag, list) else []
         )
+        # RDR-232 Phase 3 (nexus-jypmj.3.5): called right after every plan_run, so it is also where the run
+        # summary notes that the run reached its terminal reduction and takes the coverage assessment.
+        _run_summary.observe_plan_result(plan_result)
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
     # scope to broad search (with a warning) so it doesn't filter
@@ -12097,6 +12192,19 @@ async def nx_answer(
             diag = None
         _diag_cache[:] = [diag]
         return diag
+
+    # RDR-232 Phase 3 (nexus-jypmj.3.5): the run summary every telemetry write of this call carries. It reads
+    # the call's live state when a record is written (the request coverage can be re-derived, the
+    # diagnostics are built once a run has finished); a structured call asks for the readback.
+    from nexus.plans.run_summary import RunSummaryInputs, RunSummaryRecorder  # noqa: PLC0415 — deferred; matches this module's convention
+
+    def _run_summary_inputs() -> "RunSummaryInputs":
+        return RunSummaryInputs(
+            request=_request_coverage, eligibility=_plan_eligibility.to_wire(),
+            diagnostics=_evidence_diagnostics_now(), scope_diagnostics=list(_scope_diagnostics),
+        )
+
+    _run_summary = RunSummaryRecorder(trace=trace, readback=structured, inputs=_run_summary_inputs)
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -12378,6 +12486,12 @@ async def nx_answer(
             # until Phase 3 persists a run summary. Always present; None when no retrieval ran
             # (an error before the plan, a plan-miss refusal).
             "evidence_diagnostics": _diagnostics,
+            # RDR-232 Phase 3 (nexus-jypmj.3.5): what became of the run summary, with the coverage state the
+            # call RETURNED and the one PERSISTED apart: {version, persistence (persisted | dropped |
+            # unsupported | unverified | not_recorded), detail, returned_coverage_state, persisted_coverage_state,
+            # digest}. `persisted` means the row was read back with the same version and digest; HTTP 200
+            # proves nothing against an engine that predates the column. Always present.
+            "run_summary": _run_summary.to_wire(),
         }
 
     # nexus-f9kxd: single emitter for every error return. The tool contract
@@ -12536,6 +12650,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -12765,6 +12880,7 @@ async def nx_answer(
                         step_count=0, final_text=f"Planner error: {exc}",
                         step_records=[], duration_ms=elapsed_ms, trace=trace,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary, summary_outcome="planner_failure",
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -13124,6 +13240,7 @@ async def nx_answer(
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
                             planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                            run_summary=_run_summary,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -13176,6 +13293,7 @@ async def nx_answer(
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
                             planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                            run_summary=_run_summary,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -13352,6 +13470,7 @@ async def nx_answer(
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -13397,6 +13516,7 @@ async def nx_answer(
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -13472,6 +13592,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
             pass
@@ -13596,6 +13717,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -13811,6 +13933,7 @@ async def nx_answer(
                         final_text=_handoff_text, step_records=_result_step_records,
                         duration_ms=_continuation_elapsed_ms, trace=trace,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary, summary_outcome="handoff",
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -13874,6 +13997,7 @@ async def nx_answer(
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -14023,6 +14147,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -14087,6 +14212,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the notice must still surface
             pass
@@ -14267,6 +14393,7 @@ async def nx_answer(
                 composite_supported_at_start=composite_supported_at_start,
                 early_bump_fired=early_bump_fired,
                 planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                run_summary=_run_summary,
             ),
             op="record_run",
         )
@@ -14327,8 +14454,16 @@ async def nx_answer_report(
     )
     try:
         with _t2_ctx() as db:
+            _report_question = f"nx_answer_report({continuation_id})"
+            # RDR-232 Phase 3 (nexus-jypmj.3.5): the report row carries a minimal summary under the same
+            # capability rule as every other /record path. The tool's own return shape is unchanged, so no
+            # readback is asked for here.
+            _report_summary = _nx_answer_report_summary(db.telemetry, ok=ok)
+            _report_extra: dict[str, Any] = (
+                {"run_summary": _report_summary, "created_at": _utc_now_iso()} if _report_summary is not None else {}
+            )
             db.telemetry.record_nx_answer_run(
-                question=f"nx_answer_report({continuation_id})",
+                question=_report_question,
                 plan_id=None,
                 matched_confidence=None,
                 step_count=0,
@@ -14336,6 +14471,7 @@ async def nx_answer_report(
                 cost_usd=None,
                 duration_ms=0,
                 steps=None,
+                **_report_extra,
             )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller
         _warn_telemetry_drop("nx_answer_runs", exc)
