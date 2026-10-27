@@ -406,6 +406,15 @@ critiqued once before Sam's gate decision (T2
   row-filtered for the owner role under `SET LOCAL ROLE nexus_admin`
   (cause unconfirmed); a direct-SQL sweep run as the owner sees every
   tenant and must carry tenant_id in its batches.
+- **RF-17 (Decided, Sam 2026-10-26).** tags is a set: a JSON array on the
+  document filtered by containment, never a comma string matched by
+  equality; indexed files get a GENERATED one-element array. The design
+  changes the schema analysis forced (database CHECKs behind the Java
+  allow-list after a mandatory allow-list-shaped sweep; GENERATED columns
+  for source_format and indexed-file tags and category, moving .8 and .23
+  to Phase 3; frecency with computed_at; backfill authorship by the full
+  row key with tombstoned owners and the last_written_at guard; one
+  manifest row for nexus-1nrcu; the .26 re-scope) are accepted as written.
 
 ### Critical Assumptions
 
@@ -623,9 +632,13 @@ extension (RF-11), so storing them would add a 3NF transitive dependency;
 they become GENERATED columns on `catalog_documents` (engine changeset),
 not meta keys. frecency_score depends on the document and the time it was
 computed (`frecency.py` uses now()), so its home carries a computed_at.
-tags needs a declared domain: a string matched by equality, or a set,
-which in 4NF is a child relation (document, tag) and in practice a JSON
-array filtered with containment. Two attributes travel under one name and
+tags is a set (Sam, 2026-10-26, RF-17): in 4NF a child relation
+(document, tag), in practice a JSON array on the document meta filtered
+with containment (`tags=arch` matches a note tagged arch and decision),
+which needs a containment filter in the catalog meta predicates and a GIN
+index on `catalog_documents.metadata`, both engine changesets in Phase 3;
+the comma string is legacy and the backfill splits it once. Two attributes
+travel under one name and
 are split in the key table: title (the document title for notes and PDFs;
 a per-position label for code, prose and repo PDFs) and indexed_at (the
 row's last client write; the catalog's last engine manifest write, heals
@@ -738,7 +751,7 @@ part of K, determines it.
 | bib_year, bib_authors, bib_venue, bib_citation_count, bib_semantic_scholar_id, bib_openalex_id, bib_doi | D | columns are NOT NULL with defaults; `bib_enriched_at` set means enriched | DOCUMENT, the bib columns, authoritative, no fallback | 6pfgb.28, .12 |
 | bib_enriched_by (proposed by .32) | D | absent = not enriched | DOCUMENT meta key beside `bib_enriched_at`; never a row key | 6pfgb.32 |
 | indexed_at | three attributes: the row's last client write; the catalog's last engine manifest write (heals included); the note's put_at | timestamp | DOCUMENT: display and `where=` read `catalog_documents.indexed_at` (row fallback while NULL); the note TTL clock is meta `put_at` (6pfgb.15); the row's own write time is the ROW column `last_written_at` | 6pfgb.13 |
-| tags | D; for indexed files computable from extension | string matched by equality today; a set wants a JSON array with containment or a child relation: a decision for Sam at gate | DOCUMENT: notes in meta (6pfgb.5 done); indexed files as a GENERATED column from file_path, not stored | 6pfgb.8 (re-scoped) |
+| tags | D; for indexed files computable from extension | a set (Sam, 2026-10-26, RF-17): a JSON array in the document meta, filtered by containment; a comma string is legacy and the backfill splits it once; absent = no tags | DOCUMENT: notes in meta (6pfgb.5 done, array form); indexed files as a GENERATED one-element array from file_path, not stored | 6pfgb.8 (re-scoped) |
 | category | D; for indexed files computable from content_type | one of code, prose, paper, or a note's own | DOCUMENT: notes in meta (done); indexed files GENERATED from content_type | 6pfgb.8 (re-scoped) |
 | ttl_days, put_at | D | ttl_days 0 or absent = permanent in meta (one encoding, 0 as the retraction sentinel); put_at present whenever ttl_days > 0 (CHECK) | DOCUMENT meta (6pfgb.5, .15 done) | done |
 | extraction_method, quality_gate_overridden, extraction_source | D | absent = unknown; explicit false for the override | DOCUMENT meta | 6pfgb.6, .16 |
@@ -817,7 +830,9 @@ per key, applied in the resolution: title has none (the catalog title
 always exists); content_type=pdf or markdown admits a document whose
 `source_format` is absent when any of its rows carries the row value (the
 same presence fallback as the stage, paid once per candidate document);
-meta keys fall back to the row the same way while the key is absent.
+meta keys fall back to the row the same way while the key is absent;
+`tags=` is a containment test on the document's tag array (RF-17), with
+the row fallback splitting the legacy comma string before the test.
 Labels, author, indexed_at and bib_* stay with the post-search stage,
 where they already are. Pins: `title=` in a collection larger than 1200
 chunks returns the document's hits; a dense filter (category=prose on a
@@ -1029,8 +1044,12 @@ diverged key table fails CI.
       physical_collection; chunk_index versus position; chash width;
       quarantine keys half present), counts recorded as research (RF-16,
       2026-10-27).
-- [ ] Sam's ruling on the tags domain (string matched by equality, or a
-      set) before 6pfgb.8 and the pre-filter land.
+- [x] Sam's ruling on the tags domain (string matched by equality, or a
+      set) before 6pfgb.8 and the pre-filter land: a set (2026-10-26,
+      RF-17). The design changes the schema analysis forced (CHECKs behind
+      the Java allow-list, GENERATED derived columns, frecency computed_at,
+      authorship by full row key, one manifest row for 1nrcu, the .26
+      re-scope) are accepted (Sam, 2026-10-26, RF-17).
 
 ### Minimum Viable Validation
 
