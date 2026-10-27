@@ -14,6 +14,7 @@ import structlog
 
 from typing import TYPE_CHECKING
 
+from nexus.aspect_readers import NOTE_URI_SCHEME
 from nexus.catalog.tombstones import (
     TombstoneGuardUnavailable,
     has_live_document,
@@ -603,7 +604,7 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
     help=(
         "Persistent URI identity (RDR-096 P3.1). Omit to derive "
         "'file://<abspath>' from --file-path automatically. Pass an "
-        "explicit URI (nx-note://, https://, nx-scratch://, "
+        f"explicit URI ({NOTE_URI_SCHEME}, https://, nx-scratch://, "
         "x-devonthink-item://) to store verbatim. Malformed URIs "
         "are rejected at register-time."
     ),

@@ -115,6 +115,7 @@ def require_note_uri_engine() -> None:
         return
 
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: config pulls the credential layer
+    from nexus.aspect_readers import NOTE_URI_SCHEME  # noqa: PLC0415 — deferred: aspect_readers imports nexus.db.limits, and this module lives in nexus.db
 
     if is_local_mode():
         remedy = "run `nx daemon restart-stale` to move the local engine onto the pinned version, then retry"
@@ -122,7 +123,7 @@ def require_note_uri_engine() -> None:
         remedy = "the managed engine has not been upgraded yet; retry once it is"
     raise NoteUriEngineTooOldError(
         f"the serving engine is {_fmt(serving)}, older than {_fmt(floor)}, the first version that can hold a "
-        f"note's nx-note:// source URI. The note was not written and nothing was registered: {remedy}.",
+        f"note's {NOTE_URI_SCHEME} source URI. The note was not written and nothing was registered: {remedy}.",
         serving=serving, floor=floor)
 
 
