@@ -50,8 +50,9 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
 
     A legacy ``chroma://`` spelling was ALSO the store_put-origin marker of
     ``knowledge__`` documents minted via ``nx store put`` / MCP ``store_put``
-    (now ``nx-note://``, RDR-231) — that usage is unrelated to the retired
-    ChromaDB dependency (RDR-155 P4b) and is left alone. This verb ONLY rewrites
+    (now ``nx-note://``, RDR-231). Those rows are legacy NOTES: the engine's
+    backfill rewrites them to ``nx-note://``, so this verb leaves them alone.
+    This verb ONLY rewrites
     rows whose PHYSICAL COLLECTION routes to ``file://`` in
     ``nexus.aspect_readers.uri_for`` (the ``rdr__``/``docs__``/``code__``
     prefixes, ``FILE_ROUTED_PREFIXES``): those rows carry a ``chroma://``
@@ -68,7 +69,7 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
 
     Always prints a per-collection census of EVERY ``chroma://`` row
     first — candidates (file-routed, rewritten under ``--apply``) vs.
-    store_put-origin markers (left alone) — regardless of ``--apply``,
+    legacy notes (left for the engine backfill) — regardless of ``--apply``,
     so the number is explained rather than eyeballed.
     """
     from collections import Counter  # noqa: PLC0415 — command-local
@@ -107,7 +108,7 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
             refused.append((d, f"parsed path is not absolute: {path!r}"))
             continue
         new_uri = uri_for(d.physical_collection, path)
-        if not new_uri or new_uri.startswith("chroma://"):
+        if not new_uri:
             refused.append((d, f"uri_for did not re-derive a file:// URI (got {new_uri!r})"))
             continue
         updates.append((d, new_uri))
@@ -136,7 +137,7 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     else:
         click.echo(f"chroma:// source_uri rows: {report['total_chroma_rows']}")
         for coll, info in census.items():
-            tag = "candidate" if info["candidate"] else "store_put-origin marker (left alone)"
+            tag = "candidate" if info["candidate"] else "legacy note (the engine backfill rewrites it to nx-note://)"
             click.echo(f"  {coll}: {info['count']}  [{tag}]")
         click.echo(
             f"Re-derivable: {report['rederivable']}, refused: {report['refused']}"

@@ -14,7 +14,7 @@ import pytest
 
 import nexus
 from nexus import aspect_readers
-from nexus.catalog.types import _KNOWN_URI_SCHEMES, _normalize_source_uri
+from nexus.catalog.types import _KNOWN_URI_SCHEMES
 from nexus.doc.catalog_links import _LINK_SAFE_SCHEMES
 from nexus.doctor_references import format_report, is_reference_only, stat_one
 from nexus.aspect_readers import (
@@ -80,14 +80,6 @@ class TestSchemeAllowlists:
     def test_link_safe_schemes_exclude_nx_note_by_name(self) -> None:
         assert "nx-note" not in _LINK_SAFE_SCHEMES
         assert "chroma" not in _LINK_SAFE_SCHEMES
-
-    def test_register_accepts_nx_note_and_refuses_chroma(self) -> None:
-        assert (
-            _normalize_source_uri("nx-note://knowledge__x/t", "")
-            == "nx-note://knowledge__x/t"
-        )
-        with pytest.raises(ValueError):
-            _normalize_source_uri("chroma://knowledge__x/t", "")
 
 
 class TestDoctorReferencesResidueRow:

@@ -6,7 +6,7 @@ The catalog is a Xanadu-inspired document registry that tracks *what* is indexed
 
 - **Tumbler** — hierarchical address (`1.2.5`) identifying a document. Every entry has one. `tumbler.py` provides depth, ancestors, lca, and JSONL readers (migration-source and recovery-bundle use only; the JSONL catalog is deleted).
 - **Owner** — the top-level tumbler segment. Repos use `owner_type='repo'` with a `repo_hash`; humans use `'curator'`. Repo owners without a hash are rejected (the shadow-registration bug class).
-- **Source URI** — persistent identity. Validated at register time against `_KNOWN_URI_SCHEMES = {file, nx-note, https, nx-scratch, x-devonthink-item, nx-orphan-backfill}`. Bare paths normalize to `file://<abspath>` (`types.py:_normalize_source_uri`).
+- **Source URI** — persistent identity. The ENGINE owns it at register time: it derives `file://<abspath>` from a bare path and canonicalizes a legacy `chroma://` note to `nx-note://` (RDR-231); the client does not validate or refuse at register. `_KNOWN_URI_SCHEMES = {file, nx-note, https, nx-scratch, x-devonthink-item, nx-orphan-backfill}` in `types.py` is the set of schemes the client has a reader or marker for; its consumer is the link-safe subset in `doc/catalog_links.py`.
 - **Link** — typed edge between documents. Built-in types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`, plus custom. Every link carries `created_by` provenance.
 
 ## Three link-creation paths
@@ -29,7 +29,7 @@ The `query` MCP tool has catalog-aware routing: `author`, `content_type`, `subtr
 | `http_catalog_client.py` | `HttpCatalogClient` — the catalog handle in every mode. Full read surface + whitelisted writes — including the RUNFENCE index-run fence ops `begin_index_run`/`complete_index_run`/`fail_index_run` (nexus-5xn3k.3) — over the engine's `/v1/catalog/*` routes. `manifest_verify`/`manifest_verify_all`/`manifest_orphans`/`manifest_backfill` client methods RETIRED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15) — the manifest-chunk FK makes the dangling state they diagnosed unreachable; `manifest_null_collection_report` (the FK's own explicit carve-out — NULL-collection rows are unenforced under `MATCH SIMPLE`) is the one census survivor. `nexus.manifest_verify(text)` itself is not dropped server-side (`CatalogRepository.completeIndexRun` depends on it internally), but this client no longer has a route onto it. |
 | `catalog_protocol.py` | `CatalogReader` / `CatalogWriter` Protocols + `CATALOG_WRITE_OPS` (the tooling-enforced write whitelist). Annotate consumers with these, never a concrete class. |
 | `factory.py` | `make_catalog_reader()` / `make_catalog_writer()` — the only sanctioned construction path (shared process-lifetime service client, nexus-5en9j). |
-| `types.py` | Substrate-neutral value types: `CatalogEntry`, `CatalogLink`, `ManifestRow`, `make_relative`, `_normalize_source_uri`, `_default_registry_path`. |
+| `types.py` | Substrate-neutral value types: `CatalogEntry`, `CatalogLink`, `ManifestRow`, `make_relative`, `_default_registry_path`. |
 | `tumbler.py` | `Tumbler` dataclass + `parse`, hierarchy helpers, JSONL readers with resilience (truncated rows, bad JSON); migration-source and recovery-bundle use only. |
 | `auto_linker.py` | Storage-boundary auto-linking from T1 scratch link-context. Hook firing site is `mcp/core.py`. |
 | `link_generator.py` | Post-hoc batch linkers (citation, RDR↔file-path, prose↔file-path, pdf same-as via shared file-content hash, never `head_hash`, which is the indexing commit for repo files: nexus-utkop). |

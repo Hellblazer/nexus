@@ -286,7 +286,7 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
         return Path(root) / fp, ""
 
     if source_uri.startswith("file://"):
-        # RDR-096 P3.1 (_normalize_source_uri, catalog/types.py): a
+        # RDR-096 P3.1 (the engine's deriveSourceUri at register time): a
         # file:// source_uri is already an absolute path — resolvable
         # exactly like file_path, cwd-independent by construction.
         return Path(source_uri[len("file://"):]), ""

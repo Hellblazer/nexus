@@ -513,7 +513,7 @@ def check_note_uri_floor_vs_pin() -> int:
     if pin < floor:
         print(
             f"NOTE URI FLOOR CHECK FAILED: REQUIRED_ENGINE_VERSION v{pin_s} is below "
-            f"NOTE_URI_MIN_ENGINE_VERSION v{floor_s}. This client mints nx-note:// source URIs, so a "
+            f"NOTE_URI_MIN_ENGINE_VERSION v{floor_s}. This client mints nx-note source URIs, so a "
             f"release pinning v{pin_s} would converge every local install to an engine that cannot hold "
             "them and every note write would be refused. "
             f"Remedy: bump REQUIRED_ENGINE_VERSION (src/nexus/engine_version.py) to v{floor_s} or newer "

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-poigc: ``nx catalog backfill-source-uri`` re-derives chroma://
 catalog source_uri values for filesystem-backed (file:// routed)
-collections, and leaves the knowledge__ store_put-origin marker
-population alone."""
+collections, and leaves the knowledge__ legacy-note population (the engine
+backfill rewrites those to nx-note://) alone."""
 from __future__ import annotations
 
 import json
@@ -122,3 +122,17 @@ def test_no_chroma_rows_is_a_clean_no_op(monkeypatch):
     result = _invoke(monkeypatch, docs, [])
     assert result.exit_code == 0, result.output
     assert "No file-routed chroma:// rows to backfill." in result.output
+
+
+def test_the_census_calls_a_non_file_routed_chroma_row_a_legacy_note_not_a_marker(monkeypatch):
+    """RDR-231 (nexus-bivz3.15): those rows are legacy notes the ENGINE backfill rewrites to nx-note://;
+    "store_put-origin marker (left alone)" described the retired identity model."""
+    docs = [
+        _FakeDoc("1.1.1", "rdr__x", "chroma://rdr__x//abs/rdr-1.md"),
+        _FakeDoc("1.1.2", "knowledge__x", "chroma://knowledge__x/Some Title"),
+    ]
+    result = _invoke(monkeypatch, docs, [])
+    assert result.exit_code == 0, result.output
+    assert "knowledge__x: 1  [legacy note (the engine backfill rewrites it to nx-note://)]" in result.output
+    assert "store_put-origin" not in result.output
+    assert "rdr__x: 1  [candidate]" in result.output

@@ -41,8 +41,8 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 # nexus-w715w round 2: single source of truth for which source_uri
-# schemes the catalog recognizes at all (register-boundary validation,
-# `_normalize_source_uri`). Reused here — never re-typed — to derive the
+# schemes the client recognizes at all (`catalog/types.py`'s
+# `_KNOWN_URI_SCHEMES`; the engine owns register-time validation). Reused here — never re-typed — to derive the
 # narrower "safe to emit as a clickable link" subset below.
 from nexus.catalog.types import _KNOWN_URI_SCHEMES
 from nexus.doc._common import iter_plain_lines

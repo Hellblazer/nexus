@@ -2525,6 +2525,14 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
             collection, limit=limit if limit > 0 else None,
         )
 
+    if scheme == "chroma":
+        # RDR-231: a note's source_uri is nx-note:// now; chroma:// survives only as residue under a
+        # file-routed collection. The filter still matches that residue literally, but an operator who
+        # typed the old scheme for a note would see an empty list and no reason.
+        click.echo(
+            "Note: a note's source_uri scheme is now 'nx-note' (RDR-231); 'chroma' matches only "
+            "legacy residue rows. Use --scheme nx-note for notes."
+        )
     if scheme:
         records = [
             r for r in records

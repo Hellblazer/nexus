@@ -79,6 +79,11 @@ _ALLOWED: dict[str, tuple[str, int]] = {
         "prefix; it builds a pattern to FIND residue, never an identity to store",
         6,
     ),
+    "src/nexus/commands/enrich.py": (
+        "`nx enrich list --scheme chroma` recognises the retired scheme name to print a hint to use nx-note "
+        "(nexus-bivz3.15); the hint mints nothing and the filter still compares schemes by plain equality",
+        1,
+    ),
     "src/nexus/catalog/recovery_bundle.py": (
         "the residue counter counts bundle rows still carrying the legacy chroma:// spelling under a "
         "file-routed collection; it recognises the spelling and mints nothing",
@@ -248,3 +253,12 @@ def test_a_directory_name_a_docstring_a_comment_and_a_bare_scheme_name_are_not_f
     mod.parent.mkdir(parents=True)
     mod.write_text(_CLEAN[name])
     assert _scan(tmp_path.resolve()) == (1, {}), name
+
+
+def test_no_script_spells_a_note_scheme() -> None:
+    """``scripts/`` (the spikes included) mints through ``note_uri`` too: the last ``chroma://`` mint outside
+    ``src/nexus`` was ``scripts/spikes/spike_rdr096_multichunk_reassembly.py`` (nexus-bivz3.15)."""
+    files = sorted((REPO / "scripts").rglob("*.py"))
+    assert len(files) >= 50, f"scanned only {len(files)} script files; the walk is broken"
+    offenders = {p.relative_to(REPO).as_posix(): sorted(_hit_lines(p)) for p in files if _hit_lines(p)}
+    assert not offenders, f"scripts that spell a note scheme (mint with aspect_readers.note_uri): {offenders}"

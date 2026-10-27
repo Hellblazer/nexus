@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import pytest
 
+from nexus import aspect_extractor as ae
+from nexus import aspect_readers as ar
 from nexus.aspect_readers import ReadFail, ReadOk
+from nexus.commands import enrich as enrich_cmd
 
 _COLLECTION = "knowledge__quote-pin"
 _PATH = "notes/a#b?c%d.md"
@@ -40,8 +43,6 @@ def rec() -> _Recorder:
 
 
 def test_read_indexed_text_encodes_the_path(rec: _Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
-    from nexus import aspect_extractor as ae
-
     monkeypatch.setattr(ae, "get_t3", lambda: object())
     monkeypatch.setattr(ae, "read_source", rec.read)
     assert ae.read_indexed_text(collection=_COLLECTION, source_path=_PATH) == "body"
@@ -49,8 +50,6 @@ def test_read_indexed_text_encodes_the_path(rec: _Recorder, monkeypatch: pytest.
 
 
 def test_read_indexed_text_encodes_the_lookup_path_when_one_is_given(rec: _Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
-    from nexus import aspect_extractor as ae
-
     monkeypatch.setattr(ae, "get_t3", lambda: object())
     monkeypatch.setattr(ae, "read_source", rec.read)
     ae.read_indexed_text(collection=_COLLECTION, source_path="ignored", lookup_path=_PATH)
@@ -58,8 +57,6 @@ def test_read_indexed_text_encodes_the_lookup_path_when_one_is_given(rec: _Recor
 
 
 def test_extract_aspects_batch_encodes_the_path_of_an_empty_content_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    from nexus import aspect_extractor as ae
-
     seen: list[str] = []
 
     def _read(uri, **_kw):
@@ -74,8 +71,6 @@ def test_extract_aspects_batch_encodes_the_path_of_an_empty_content_row(monkeypa
 
 
 def test_the_enrich_dry_run_prediction_encodes_the_path(rec: _Recorder, monkeypatch: pytest.MonkeyPatch) -> None:
-    from nexus.commands import enrich as enrich_cmd
-
     monkeypatch.setattr("nexus.mcp_infra.get_t3", lambda: object())
     monkeypatch.setattr("nexus.aspect_readers.read_source", rec.read)
     monkeypatch.setattr(enrich_cmd, "_build_catalog_doc_id_lookup", lambda: None)
@@ -90,8 +85,6 @@ def test_the_enrich_dry_run_prediction_encodes_the_path(rec: _Recorder, monkeypa
 
 
 def test_the_https_hint_encodes_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    from nexus import aspect_readers as ar
-
     seen: list[str] = []
 
     def _chroma(uri, **_kw):
