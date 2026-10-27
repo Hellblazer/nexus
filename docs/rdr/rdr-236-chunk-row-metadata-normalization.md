@@ -232,7 +232,7 @@ closed children; the conexus answer on external readers. Engine-stamped
 keys and position keys were censused for this RDR on 2026-10-26 against
 develop f14fe0148 (RF-4, RF-5); owner-resolution cost was traced and timed
 (RF-10). Each finding below is also a T2 record,
-`nexus_rdr/236-research-1` to `-13`, with its sources. The draft was
+`nexus_rdr/236-research-1` to `-16`, with its sources. The draft was
 critiqued once before Sam's gate decision (T2
 `nexus/critique-rdr236-draft-2026-10-26`); this revision answers it.
 
@@ -386,6 +386,26 @@ critiqued once before Sam's gate decision (T2
   0.09 to 0.23 s for 10 to 200 hashes; `docs_for_chashes` 0.2 to 1.05 s,
   because its flat document list forces a second `get_manifests` call. No
   local service numbers.
+- **RF-16 (Verified, live census 2026-10-27T00:45Z; T2 research-16).** The
+  six schema census queries, run read-only on the production database as
+  nexus_admin per tenant with every transaction rolled back, counts only.
+  Manifest rows 635140 (tenant nexus 518648, gate-xr789 116492, the other
+  three tenants 0). chunk_text_hash differs from the chash on 0 rows and 0
+  rows lack the key; 0 rows have a chash other than 32 bytes (no legacy
+  16-byte row is left); manifest collection differs from the document's
+  physical_collection on 0 rows and 0 manifest rows lack a document or a
+  physical_collection; chunk_index differs from position on 0 rows and is
+  null on 0. A chash repeated inside one document: 4976 (tenant, doc_id,
+  chash) manifest groups across 1752 documents, all in tenant nexus.
+  Quarantine keys: live collections 0 half-present either way; quarantine
+  collections 0 quarantined_by without quarantined_at and 158
+  quarantined_at without quarantined_by, which the client move explains
+  (`chunk_quarantine.py` writes no quarantined_by). Also observed: the
+  chunk-row counts (599799 rows) were identical under every tenant GUC
+  while the manifest counts were tenant-scoped, so `nexus.chunks` is not
+  row-filtered for the owner role under `SET LOCAL ROLE nexus_admin`
+  (cause unconfirmed); a direct-SQL sweep run as the owner sees every
+  tenant and must carry tenant_id in its batches.
 
 ### Critical Assumptions
 
@@ -645,7 +665,7 @@ the enforcement this RDR adds:
 | chunk metadata holds only CHUNK and ROW keys | CHECK `(metadata - allowed) = '{}'` with the bypass prefixes exempt, NOT VALID until the sweep, then VALIDATE; the Java allow-list in front of it | microseconds a row |
 | chunk_text_hash = encode(chash, 'hex') | CHECK | negligible |
 | metadata embedding_model = the column | CHECK | negligible |
-| the four quarantine keys appear together or not at all | CHECK (existing rows break it: gc restores drop two of four) | negligible |
+| quarantined_by implies quarantined_at (RF-16: 158 live client-moved rows carry quarantined_at alone, 0 rows the other way; a gc restore drops quarantined_at and leaves quarantined_by, so the restore drops all four before the CHECK is added) | CHECK | negligible |
 | manifest collection = the document's physical_collection | composite foreign key or trigger; documents with no physical_collection (RDR-191) need a rule | one index lookup a manifest row |
 | chunk_index = position | CHECK | negligible |
 | labels_written false means the labels are NULL | CHECK | negligible |
@@ -689,13 +709,17 @@ than the row's latest write; count a document whose rows disagree as
 residue (HAVING one distinct value); the sweep is allow-list shaped
 (keep only the allowed keys) in batches with the chash-length guard, and
 a direct UPDATE does not bump last_written_at; the CHECKs are added NOT
-VALID after the sweep and then VALIDATEd. Census queries to run on the
-live tenant before this RDR locks (none run yet): rows where
-chunk_text_hash differs from the chash; (tenant, doc_id, chash) groups
-with more than one manifest row; manifest rows whose collection differs
-from the document's physical_collection; manifest rows where chunk_index
-differs from position; rows whose chash is not 32 bytes; rows with
-quarantined_by but no quarantined_at.
+VALID after the sweep and then VALIDATEd. The six census queries ran
+read-only on the production database on 2026-10-27 (RF-16): every
+equality the CHECKs assert already holds on live data (chunk_text_hash
+equals the chash, chash is 32 bytes everywhere, manifest collection
+equals the document's physical_collection, chunk_index equals position),
+so each CHECK validates without a data fix; a chash recurs inside one
+document in 4976 manifest groups across 1752 documents, so the one
+manifest row rule (nexus-1nrcu) is load-bearing; and 158 quarantine rows
+carry quarantined_at without quarantined_by (the client move writes no
+quarantined_by), so the quarantine key CHECK is one-directional:
+quarantined_by implies quarantined_at, never all four or none.
 
 #### The key table
 
@@ -726,7 +750,7 @@ part of K, determines it.
 | section_title, section_type, page_number | Pn | absent = unknown; "" = none here, marked by labels_written | POSITION `catalog_document_chunks` (catalog-046) | tko2w, jz86a, 1nrcu (one manifest row, not one owner) |
 | line_start, line_end, chunk_start_char, chunk_end_char | Pn | integers | POSITION `catalog_document_chunks` line_start/line_end/char_start/char_end; the flattened search-row fields and file:line are re-pointed | 6pfgb.26 (re-scoped), .19 |
 | chunk_type (table_page) | none; dead | dropped by normalize before every write | none; writer removed | 6pfgb.27 |
-| quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at | the physical row; written only by the engine | all four present or none (CHECK; gc restores today drop two) | ROW; refused from a client write | stays; CHECK in Phase 4 |
+| quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at | the physical row; written only by the engine | quarantined_by implies quarantined_at (CHECK); quarantined_at alone is a client move (158 live rows, RF-16); gc restores today drop two | ROW; refused from a client write | stays; CHECK in Phase 4 |
 | last_written_at, retention, collection, embedding_model (columns) | the row | columns | ROW | stays |
 | `nexus.frecency` table (telemetry-001: frecency_score, ttl_days keyed by chunk) | a third home with no client writer found | engine-internal writers UNCONFIRMED | retire, or list its writer and reader | Phase 0 settles |
 | doc_id, chunk_index, chunk_count | legacy (RDR-108 Phase 3) | on old rows; `indexer.py` ~3375 still sets doc_id | LEGACY; swept; chunk_index lives on as the manifest column (CHECK equal to position) | sweep |
@@ -837,7 +861,8 @@ have written last); copy a value only when the row's `last_written_at` is
 no later than the document's indexed_at plus five minutes of clock skew; a
 document whose single-owner rows disagree on a value is residue, not
 filled. Position labels (nexus-1nrcu) copy only when the chash has exactly
-one manifest row in the tenant, not one live owner. tags, category and
+one manifest row in the tenant, not one live owner (RF-16: 4976 groups in
+1752 documents recur inside their own document). tags, category and
 source_format for indexed documents are not backfilled at all: they are
 GENERATED columns. The run asserts it examined at least one document; the
 first live run's counts go on the bead. The backfill, the expiry sweep and the export share the two
@@ -998,11 +1023,12 @@ diverged key table fails CI.
       are adjacent and keep their beads.
 - [ ] The dry run and the live run of the backfill (A7) read by Sam before
       Phase 4 Step 1.
-- [ ] The six census queries of the schema analysis run read-only on the
+- [x] The six census queries of the schema analysis run read-only on the
       live tenant before this RDR locks (chunk_text_hash versus chash;
       repeated chash within a document; manifest collection versus
       physical_collection; chunk_index versus position; chash width;
-      quarantine keys half present), counts recorded as research.
+      quarantine keys half present), counts recorded as research (RF-16,
+      2026-10-27).
 - [ ] Sam's ruling on the tags domain (string matched by equality, or a
       set) before 6pfgb.8 and the pre-filter land.
 
@@ -1155,7 +1181,9 @@ would leave any key nobody listed and the CHECK would then reject the
 row) over existing rows in batches, as a direct UPDATE that does not bump
 `last_written_at`, with the bypass prefixes exempt and the chash-length
 guard (a leftover 16-byte row fails the NOT VALID chash CHECK on any
-update). Dry run first, counts on the bead. Precondition: the doctor
+update; RF-16 found none on 2026-10-27), batched by tenant_id explicitly,
+because the owner role sees every tenant's chunk rows (RF-16). Dry run
+first, counts on the bead. Precondition: the doctor
 counts of legacy-label manifest rows, keyless notes and home-less
 documents are zero or each residue is accepted. The orphan audit's human
 label becomes a chunk text prefix before the sweep removes row titles.
@@ -1300,7 +1328,7 @@ to bead ids at lock.
   `nexus/rdr236-a3-owner-resolution-batching-2026-10-26`;
   `nexus/chunk-row-normalization-external-readers-2026-10-26`;
   `nexus/critique-rdr236-draft-2026-10-26`; `nexus_rdr/236-research-1`
-  to `-10`.
+  to `-16`.
 - `docs/agents/catalog-t3-split.md`; `docs/architecture.md`;
   `docs/wire-contract-pending.md`.
 - `service/src/main/resources/db/changelog/catalog-046-manifest-section-labels.xml`;
