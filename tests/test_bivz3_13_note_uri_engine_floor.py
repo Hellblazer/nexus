@@ -159,15 +159,6 @@ class TestGuard:
         assert served.probes == 0
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "nexus-bivz3.20 sets NOTE_URI_MIN_ENGINE_VERSION at the engine-tag push to develop. When it does, this "
-    "XPASSes and fails strict: delete this test in the same commit. Until then the guard is inert and every "
-    "note writer in the suite runs without the version check."))
-def test_the_note_uri_floor_is_set():
-    from nexus import engine_version as ev
-
-    assert ev.NOTE_URI_MIN_ENGINE_VERSION != (0, 0, 0)
-
 
 @pytest.mark.real_engine_probe
 class TestTheProbe:

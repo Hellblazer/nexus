@@ -759,11 +759,11 @@ DUAL_EMBEDDER_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 161)
 #: the backstop. This is the corrected form of RDR-231 Critical Assumption 2, whose "true by
 #: construction" holds only when the check fires.
 #:
-#: ``(0, 0, 0)`` means UNSET: the guard is inert (no probe, no refusal). The landing bead sets the
-#: real tag. Every script that stamps the gate jar stamps ``max(REQUIRED_ENGINE_VERSION,
+#: ``(0, 0, 0)`` would mean UNSET (the guard inert: no probe, no refusal). Set to
+#: engine-service-v0.1.166, the tag that carries note-uri-001-1 (nexus-bivz3.20). Every script that stamps the gate jar stamps ``max(REQUIRED_ENGINE_VERSION,
 #: NOTE_URI_MIN_ENGINE_VERSION)``, so a develop install pinned to an older engine refuses note writes
 #: until the engine tag, and the gate jar itself is never refused.
-NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 0, 0)
+NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 166)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
