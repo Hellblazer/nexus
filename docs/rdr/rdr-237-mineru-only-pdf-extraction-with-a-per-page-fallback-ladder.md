@@ -141,7 +141,7 @@ beads and T2 records named in each finding; none were re-run for this draft.
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
 | MinerU 3.1.11 `do_parse` | Yes | Takes `formula_enable` and `table_enable` per call (nexus's worker passes both, `pdf_extractor.py:137-138`). |
-| MinerU 3.1.11 `/file_parse` server | Yes | `formula_enable` is a per-request form field (`fast_api.py:839`, passed to the parse at :1023). Concurrent requests are capped by an `asyncio.Semaphore` whose size is 1 on macOS and `DEFAULT_MAX_CONCURRENT_REQUESTS` (3, `api_protocol.py:3`) elsewhere unless `MINERU_API_MAX_CONCURRENT_REQUESTS` is set (`fast_api.py:250-260`); the parse runs in `asyncio.to_thread(do_parse)` (`:1042`), which cannot be cancelled. |
+| MinerU 3.1.11 `/file_parse` server | Yes | `formula_enable` is a per-request form field (`fast_api.py:839`, passed to the parse at :1023). Concurrent requests are capped by an `asyncio.Semaphore` whose size is 1 on macOS whatever `MINERU_API_MAX_CONCURRENT_REQUESTS` says, and elsewhere that variable or, when it is unset, `DEFAULT_MAX_CONCURRENT_REQUESTS` (3, `api_protocol.py:3`) (`fast_api.py:250-260`); the parse runs in `asyncio.to_thread(do_parse)` (`:1042`), which cannot be cancelled. |
 | PyMuPDF | Yes | `page.get_text()` per page is what the formula screen and `_extract_normalized` already use. |
 
 ### Key Discoveries
@@ -339,7 +339,10 @@ The ladder, per page:
 
 A page descends a rung on a timeout, on `MineruMemoryError`, on any other
 `RuntimeError` from the worker, and on a dropped server connection
-(`httpx.ConnectError`, `ReadError`, `RemoteProtocolError`). `MineruMachineResourceError` (an `Exception`, not
+(`httpx.ConnectError`, `ConnectTimeout`, `ReadError`, `RemoteProtocolError`). A
+connect timeout or a dropped connection is a lost server, never a page timeout: the
+page's rung 1 is retried once on the subprocess path, with formulas on, before it
+descends, and it counts toward neither the restart rule in Bounds nor the breaker. `MineruMachineResourceError` (an `Exception`, not
 a `RuntimeError`), `MineruWorkerStopped` and every other `BaseException`, a
 cancelled run included, propagate and stop the document (RF-15).
 
@@ -352,9 +355,14 @@ attempt, `exit:<returncode>` plus the last non-empty line of the worker's stderr
 for a subprocess exit (the worker failure is given that line as an attribute,
 today only logged), `oom` for `MineruMemoryError`, and `http:<status>` for a
 server error. When `pdf.ladder_breaker` consecutive pages (default 3) fail with
-one class, the cause is the install or the machine: the document fails, nothing
-of it is indexed, and the failure names the class and the stderr line. Pages
-already extracted stay in the pipeline row for a resume. A document whose every
+one class, the cause is the install or the machine: the document fails, no catalog
+document or manifest is written for it, and the failure names the class and the
+stderr line. The pages before the failing window stay in the pipeline's kept
+buffer, and chunks of them that already reached T3 stay there, as an interrupted
+run's do; the pages counted toward the trip are held until the window resolves
+and are dropped, so none is stored as degraded text. A rerun after the install is
+repaired does not write the kept pages again, but MinerU still runs over every
+earlier page. A document whose every
 page is `unextracted` also fails with a named reason rather than indexing nothing.
 
 Docling is removed: code, dependency, configuration value, CLI choice, CI steps,
@@ -398,10 +406,10 @@ restarts), which is why the systemic-failure rule fails a document after three
 consecutive pages fail rungs 1 and 2 with one class.
 
 **Progress.** `PDFExtractor.extract` gains an `on_heartbeat` callback beside
-`on_page`. Both callers pass one: the streaming pipeline's extractor loop
-(`pipeline_stages.py`) re-sends the current `pages_extracted` through
-`update_progress`, which stamps the heartbeat (RF-13), and the batch path
-(`doc_indexer.py`) passes the same. The extractor calls it at the start of every
+`on_page`. The streaming pipeline's extractor loop (`pipeline_stages.py`) passes
+one, which re-sends the current `pages_extracted` through `update_progress` and so
+stamps the heartbeat (RF-13). The batch path (`doc_indexer.py`) passes none: it has
+no pipeline row to stamp. The extractor calls it at the start of every
 attempt and every 60 s during the two waits (Bounds); each page also writes
 progress when it settles. The longest silent interval is one attempt, at most
 240 s. This closes nexus-lqaq1 for the remaining extractor without an engine
@@ -485,7 +493,7 @@ PageOutcome(page: int, text: str, method: "mineru" | "mineru-no-formula"
 | Per-page MinerU run | `_extract_with_mineru`, `_mineru_run_isolated`, `_mineru_run_subprocess` (bisect to one page) | Reuse; the ladder wraps the single-page settle. |
 | Rung 2 | `_degrade_page_to_docling` (RDR-148 Gap 5) | Replace: same one-page shape, MinerU with formulas off. |
 | Rung 3 | `_extract_normalized` (whole-document PyMuPDF) | Extend to one page. |
-| Server timeout and recovery | `_mineru_run_via_server`, `_mineru_run_isolated`, `_restart_broken_mineru_server` | Extend: per-page timeout; a timed-out page leaves the server for the next rung and does not mark the server down; the restart rule in Bounds, through `_restart_broken_mineru_server` (cooldown and budget); the retained connection-error and server-error branches open every call with a progress write. With the budget spent or the cooldown held, the server is marked down as today. A restart ends peers' in-flight requests on the shared server; a peer whose request dies descends a rung for that page, since a dropped connection (`httpx.ReadError`, `ConnectError`, `RemoteProtocolError`) is added to the descend set. |
+| Server timeout and recovery | `_mineru_run_via_server`, `_mineru_run_isolated`, `_restart_broken_mineru_server` | Extend: per-page timeout; a timed-out page leaves the server for the next rung and does not mark the server down; the restart rule in Bounds, through `_restart_broken_mineru_server` (cooldown and budget); the retained connection-error and server-error branches open every call with a progress write. With the budget spent or the cooldown held, the server is marked down as today. A restart ends peers' in-flight requests on the shared server; a peer whose request dies descends a rung for that page, since a dropped connection (`httpx.ReadError`, `ConnectError`, `ConnectTimeout`, `RemoteProtocolError`) is a lost server, not a page timeout, and is added to the descend set. |
 | Missing-stack message | `pdf_stack.require` / `missing_message` | Reuse; drop Docling from `STACK_DISTS`/`STACK_MODULES`. |
 | Doctor | `health._check_pdf_support`, `_check_docling_importable` | Retarget the Docling row to MinerU's pipeline modules (`mineru`, `cv2`, `torch`, `torchvision`); it is the only `find_spec` check for `cv2` (`torch` and `torchvision` are also in `pdf_stack.STACK_MODULES`); reword the MinerU server row, which says "math PDFs". |
 | Quality gate | `PDFExtractor.extract` gate | Reuse; run per document as today. |
@@ -614,8 +622,8 @@ with a worker that fails to import.
 
 Server timeout from `mineru_page_timeout_s` × pages; a timed-out page goes to the
 next rung on the subprocess path; the restart rule through
-`_restart_broken_mineru_server`; the `on_heartbeat` callback, wired by both
-callers, called at the start of every attempt and every 60 s in the two waits;
+`_restart_broken_mineru_server`; the `on_heartbeat` callback, wired by the
+streaming caller (the batch path has no pipeline row and passes none), called at the start of every attempt and every 60 s in the two waits;
 the start-of-run check of `mineru_page_timeout_s` × `mineru_page_batch` against
 240 s and the `nx config set` warning.
 
@@ -688,7 +696,8 @@ None. Docling (`docling-slim` and its three companions) is removed.
   `pymupdf-text`, and the longest gap between progress writes stays under 240 s.
 - **Scenario**: three consecutive pages fail rungs 1 and 2 through the real
   subprocess path with a worker that fails to import — **Verify**: the document
-  fails, nothing of it is indexed, and the failure names the class and the import
+  fails with no catalog document, the failing window is dropped while the earlier
+  pages stay in the kept buffer, and the failure names the class and the import
   error line.
 - **Scenario**: three consecutive equation pages fail rung 1 with
   `MineruMemoryError` and settle on rung 2 — **Verify**: the breaker does not trip.
@@ -818,3 +827,4 @@ a candidate for trimming.
 - 2026-10-27: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); commit `ddacb282b`; critique `nexus_rdr/237-gate-critique-2026-10-27-r1`.
 - 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `e4fb19b83`; critique `nexus_rdr/237-gate-critique-2026-10-27-r2`.
 - 2026-10-27: Accept residual dispositions (gate record `nexus_rdr/237-gate-latest`): residual 1 nexus-489n1 (Sam's choice, Phase 1 Step 2); residuals 2 and 5 nexus-q6nw0 (Step 1); residuals 3 and 6 nexus-489n1 (Step 2); residual 4 nexus-tv1w3 (Step 3).
+- 2026-10-27: Amended by Sam's decision (beads nexus-q6nw0, nexus-489n1) to match the code: a breaker trip keeps the pages before the failing window and drops the window; the batch path passes no heartbeat; macOS is one MinerU slot whatever the environment says; a connect timeout or dropped connection is a lost server, not a page timeout.
