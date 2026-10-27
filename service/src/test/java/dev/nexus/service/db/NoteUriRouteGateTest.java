@@ -133,18 +133,18 @@ class NoteUriRouteGateTest {
                 + "the live-uri unique index holds); both values are already stored, no caller URI enters"),
         // ── MOVE ──────────────────────────────────────────────────────────
         exempt(CAT, "renameCollectionTxn", Cls.MOVE,
-            "rewrites stored chroma://X/ URIs to chroma://Y/ on catalog_documents, document_aspects and "
-                + "document_highlights; its spelling-aware rewrite is pinned by nexus-ql5m5"),
+            "rewrites stored note URIs naming X (either spelling) to name Y on catalog_documents, "
+                + "document_aspects and document_highlights; its spelling-aware rewrite is pinned by nexus-ql5m5"),
         exempt(CAT, "rehomeCollection", Cls.MOVE, "re-home: files a source collection's rows under a target; moves rows, takes no caller URI"),
         exempt(CAT, "moveScopedTable", Cls.MOVE, "re-home's per-table row mover, called by rehomeCollection"),
         exempt(CAT, "movableAtSource", Cls.MOVE, "re-home's per-table movability predicate, shared by moveScopedTable and rehomeStatus"),
         exempt(CAT, "rehomeStatus", Cls.MOVE, "re-home's remaining/stuck count read, polled after a re-home"),
         exempt(CAT, "completeMove", Cls.MOVE, "the re-embed move of one document and its satellites into the sibling collection (nexus-bivz3.4)"),
         exempt(CAT, "failureDetail", Cls.MOVE, "renders the per-document move failure; named so a source_uri mention added there is tolerated"),
-        exempt(CAT, "moveUriCollisions", Cls.MOVE, "the re-embed move's pre-check: which moving documents' rewritten URIs a live document holds (nexus-bivz3.4)"),
-        exempt(CAT, "noteUriMoveCollision", Cls.MOVE, "the rename and re-home pre-check on stored URIs; takes no caller URI (nexus-ql5m5)"),
+        exempt(CAT, "moveUriCollisions", Cls.MOVE, "the one move pre-check (re-embed, rename, re-home): which moving documents' rewritten URIs a live document holds (nexus-bivz3.4)"),
+        exempt(CAT, "requireCollectionUrisFree", Cls.MOVE, "the rename and re-home pre-check on stored URIs, over the shared moveUriCollisions; takes no caller URI (nexus-ql5m5)"),
         exempt(CAT, "noteUriColumn", Cls.MOVE, "maps a collection-scoped table to its source_uri column for the re-home rewrite (nexus-ql5m5)"),
-        exempt(CAT, "collectionMoves", Cls.MOVE, "picks the collection update's moves: a field map setting physical_collection without source_uri (nexus-bivz3.3)"),
+        exempt(CAT, "moveTarget", Cls.MOVE, "picks the collection update's move: a field map setting physical_collection without a non-null source_uri (nexus-bivz3.3)"),
         exempt(CAT, "refuseCollectionMoveCollisions", Cls.MOVE, "the collection update's pre-check on stored URIs; a caller's own source_uri is canonicalized in buildUpdateDocumentQuery (nexus-bivz3.3)"),
         // ── VECTORS ───────────────────────────────────────────────────────
         exempt(PGV, "sourceUrisByChash", Cls.VECTORS, "include_source_uri: reads the STORED catalog_documents.source_uri for a chunk"),

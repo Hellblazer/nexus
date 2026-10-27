@@ -312,6 +312,174 @@ class NoteUriMoveTest {
         assertThat(physicalCollection("un-file")).isEqualTo(b);
     }
 
+    // ── bivz3 fix round 1 ─────────────────────────────────────────────────────
+
+    /** Test Plan row 558: an aspect or highlight rename does not rewrite a note's URI (Gap 4). */
+    @Test
+    void aspectAndHighlightRename_leaveEveryUriByteIdentical() throws Exception {
+        String a = coll("ar-a");
+        String b = coll("ar-b");
+        register(a, b);
+        seedNote("ar-note", a, "nx-note://" + a + "/the-title");
+        seedAspect("ar-note", a, "notes/other-path.md", "nx-note://" + a + "/notes/other-path.md");
+        seedHighlight("ar-note", a, "nx-note://" + a + "/the-title");
+        String docBefore = docUri("ar-note");
+        String aspectBefore = aspectUri("ar-note");
+        String highlightBefore = highlightUri("ar-note");
+        assertThat(aspectBefore).as("fixture: the aspect URI is not the catalog URI").isNotEqualTo(docBefore);
+
+        assertThat(aspectRepo.renameAspectCollection(TENANT, a, b)).isEqualTo(1);
+        assertThat(aspectRepo.renameHighlightsCollection(TENANT, a, b)).isEqualTo(1);
+
+        assertThat(docUri("ar-note")).isEqualTo(docBefore);
+        assertThat(aspectUri("ar-note")).isEqualTo(aspectBefore);
+        assertThat(highlightUri("ar-note")).isEqualTo(highlightBefore);
+        assertThat(aspectCollection("ar-note")).as("the rename did run").isEqualTo(b);
+    }
+
+    /** Critique S7: a tombstoned mover is not a collision; catalog-016 constrains live rows only. */
+    @Test
+    void rename_aTombstonedMoverBesideALiveHolderMoves() throws Exception {
+        String oldName = coll("rt-old");
+        String newName = coll("rt-new");
+        String elsewhere = coll("rt-else");
+        register(oldName, elsewhere);
+        seedNote("rt-dead", oldName, "nx-note://" + oldName + "/t");
+        tombstone("rt-dead");
+        seedNote("rt-holder", elsewhere, "nx-note://" + newName + "/t");
+
+        catalogRepo.renameCollection(TENANT, oldName, newName);
+
+        assertThat(docUri("rt-dead")).isEqualTo("nx-note://" + newName + "/t");
+        assertThat(docUri("rt-holder")).isEqualTo("nx-note://" + newName + "/t");
+    }
+
+    @Test
+    void rehome_aTombstonedMoverBesideALiveHolderMoves() throws Exception {
+        String src = coll("rtd-src");
+        String dst = coll("rtd-dst");
+        register(src, dst);
+        seedNote("rtd-dead", src, "nx-note://" + src + "/t");
+        tombstone("rtd-dead");
+        seedNote("rtd-holder", dst, "nx-note://" + dst + "/t");
+
+        catalogRepo.rehomeCollection(TENANT, src, dst);
+
+        assertThat(docUri("rtd-dead")).isEqualTo("nx-note://" + dst + "/t");
+        assertThat(physicalCollection("rtd-dead")).isEqualTo(dst);
+    }
+
+    /** Item 6: two entries resolving to one target; a move in either one counts. */
+    @Test
+    void updateMany_aMoveInEitherEntryForOneTargetIsChecked() throws Exception {
+        String a = coll("ut-a");
+        String b = coll("ut-b");
+        register(a, b);
+        seedNote("ut-mover", a, "nx-note://" + a + "/t");
+        seedNote("ut-holder", b, "nx-note://" + b + "/t");
+
+        for (var entries : List.of(
+                List.<Map<String, Object>>of(
+                    Map.of("tumbler", "ut-mover", "physical_collection", b),
+                    Map.of("tumbler", "ut-mover", "title", "later")),
+                List.<Map<String, Object>>of(
+                    Map.of("tumbler", "ut-mover", "title", "earlier"),
+                    Map.of("tumbler", "ut-mover", "physical_collection", b)))) {
+            assertThatThrownBy(() -> catalogRepo.updateDocumentsMany(TENANT, entries))
+                .isInstanceOfSatisfying(CatalogRepository.SourceUriCollision.class,
+                    e -> assertThat(e.holder()).isEqualTo("ut-holder"));
+            assertThat(physicalCollection("ut-mover")).isEqualTo(a);
+            assertThat(docUri("ut-mover")).isEqualTo("nx-note://" + a + "/t");
+        }
+    }
+
+    /** Item 9: an explicit JSON null source_uri is absent: the move still rewrites and still checks. */
+    @Test
+    void update_aNullSourceUriIsAbsent_theMoveRewritesAndChecks() throws Exception {
+        String a = coll("nu-a");
+        String b = coll("nu-b");
+        register(a, b);
+        seedNote("nu-mover", a, "nx-note://" + a + "/t");
+        seedNote("nu-blocked", a, "nx-note://" + a + "/h");
+        seedNote("nu-holder", b, "nx-note://" + b + "/h");
+
+        Map<String, Object> move = new HashMap<>();
+        move.put("physical_collection", b);
+        move.put("source_uri", null);
+        catalogRepo.updateDocument(TENANT, "nu-mover", move);
+        assertThat(docUri("nu-mover")).isEqualTo("nx-note://" + b + "/t");
+
+        assertThatThrownBy(() -> catalogRepo.updateDocument(TENANT, "nu-blocked", new HashMap<>(move)))
+            .isInstanceOfSatisfying(CatalogRepository.SourceUriCollision.class,
+                e -> assertThat(e.holder()).isEqualTo("nu-holder"));
+        assertThat(physicalCollection("nu-blocked")).isEqualTo(a);
+
+        // update_many takes the same two paths.
+        seedNote("nu-many", a, "nx-note://" + a + "/m");
+        Map<String, Object> manyMove = new HashMap<>(move);
+        manyMove.put("tumbler", "nu-many");
+        catalogRepo.updateDocumentsMany(TENANT, List.of(manyMove));
+        assertThat(docUri("nu-many")).isEqualTo("nx-note://" + b + "/m");
+    }
+
+    /**
+     * Item 4: an update that does not move a collection resolves the alias once (the SET builder's own
+     * read), never a second time for the move pre-check; a move resolves it once too.
+     */
+    @Test
+    void update_resolvesTheAliasOnce_moveOrNot() throws Exception {
+        String a = coll("ac-a");
+        String b = coll("ac-b");
+        register(a, b);
+        seedNote("ac-doc", a, "nx-note://" + a + "/t");
+        List<String> sql = new ArrayList<>();
+        var recorded = new CatalogRepository(new TenantScope(recordingDataSource(svcDs, sql)));
+
+        recorded.updateDocument(TENANT, "ac-doc", Map.of("title", "retitled"));
+        assertThat(aliasSelects(sql)).as("a non-move update: the SET builder's one read").isEqualTo(1);
+
+        sql.clear();
+        recorded.updateDocument(TENANT, "ac-doc", Map.of("physical_collection", b));
+        assertThat(aliasSelects(sql)).as("a move: resolved once, shared with the SET builder").isEqualTo(1);
+        assertThat(docUri("ac-doc")).isEqualTo("nx-note://" + b + "/t");
+    }
+
+    private static long aliasSelects(List<String> sql) {
+        return sql.stream().filter(s -> s.startsWith("select") && s.contains("alias_of")).count();
+    }
+
+    /** A DataSource whose connections record the SQL text of every statement prepared on them. */
+    private static javax.sql.DataSource recordingDataSource(javax.sql.DataSource real, List<String> sink) {
+        return (javax.sql.DataSource) java.lang.reflect.Proxy.newProxyInstance(
+            NoteUriMoveTest.class.getClassLoader(), new Class<?>[] {javax.sql.DataSource.class}, (p, m, a) -> {
+                Object r = invoke(m, real, a);
+                if (m.getName().equals("getConnection") && r instanceof Connection c) {
+                    return java.lang.reflect.Proxy.newProxyInstance(
+                        NoteUriMoveTest.class.getClassLoader(), new Class<?>[] {Connection.class}, (p2, m2, a2) -> {
+                            if (m2.getName().startsWith("prepare") && a2 != null && a2.length > 0
+                                    && a2[0] instanceof String s) {
+                                sink.add(s.toLowerCase(java.util.Locale.ROOT).replace("\"", "").stripLeading());
+                            }
+                            return invoke(m2, c, a2);
+                        });
+                }
+                return r;
+            });
+    }
+
+    private static Object invoke(java.lang.reflect.Method m, Object target, Object[] args) throws Throwable {
+        try {
+            return m.invoke(target, args);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            throw e.getCause();
+        }
+    }
+
+    private String aspectCollection(String docId) {
+        return tenantScope.withTenant(TENANT, ctx -> ctx.select(DOCUMENT_ASPECTS.COLLECTION)
+            .from(DOCUMENT_ASPECTS).where(DOCUMENT_ASPECTS.DOC_ID.eq(docId)).fetchOne(0, String.class));
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     private String headHash(String tumbler) {
