@@ -376,7 +376,11 @@ listed under Critical Assumptions before gate.
   0.690). Lookup recall holds at 0.4 only when extraction supplies the kind;
   with first-pass kinds it halves. On 143 replayed real runs the gate removes
   the selected plan from 50%, 42% and 38% of runs with first-pass, Opus and
-  Haiku kinds. Not settled: the directional rule admits synthesis plans for
+  Haiku kinds. Plan reuse on broad requests (step 6): with first-pass kinds,
+  builtin reuse on broad-kind runs falls from 33 to 15 and grown reuse stays 0
+  to 0 (no grown plan was selected in the window, so it cannot move); with
+  Haiku kinds, 50 of 113 broad-kind runs lose their selected plan (synthesis
+  36 of 84, comparison 13 of 28, audit 1 of 1). Not settled: the directional rule admits synthesis plans for
   lookups, so the one held-out wrong-shape admission cannot be removed, and a
   live single-theorem lookup ran a synthesis plan for 1.64 USD.
   *Source: gate matrix, replay and live proof. T2: `nexus_rdr/232-research-22`,
@@ -386,8 +390,10 @@ listed under Critical Assumptions before gate.
   pass never assigned a wrong kind but abstains often out of sample: 11 of 29
   held-out requests exact, 18 unknown (in-sample 23 of 24); on real traffic it
   leaves 97 of 143 runs unknown. The structured step, now on by default with
-  Haiku, brings held-out agreement to 27 of 29 (both misses are requests
-  labelled unknown; the model does not abstain), with 0 of 112 calls failing,
+  Haiku, brings held-out agreement to 27 of 29: it reads H30 (labelled unknown)
+  as synthesis and leaves H23 (labelled audit) unknown, and it rightly leaves
+  H16 unknown, so Haiku does sometimes abstain (Opus never did: its misses are
+  H16 and H30). 0 of 112 calls failed across both models (56 each); Haiku costs
   about 0.002 USD and 4 s a call, on about two thirds of real requests. The
   active-project tier works live on the unmodified RDR-084 call: candidates for
   both documents from a Nexus session, ART's RDR-084 with an inferred owner
