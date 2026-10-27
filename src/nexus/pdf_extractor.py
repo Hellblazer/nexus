@@ -286,14 +286,19 @@ class MineruSystemicFailure(Exception):
         self.stderr_line = stderr_line
         self.pages = pages
         shown = f"; the worker's last stderr line: {stderr_line!r}" if stderr_line else ""
+        kept = (
+            "No page was kept, and a rerun starts from page 1, so repair the install first."
+            if pages[0] <= 1
+            else f"The pages before page {pages[0]} stay in the kept buffer, so a rerun "
+            f"does not write them again, but MinerU runs over them again, so repair "
+            f"the install first."
+        )
         super().__init__(
             f"MinerU failed on {len(pages)} consecutive pages of {file_name} "
             f"(pages {pages[0]}-{pages[-1]}), with and without formulas, "
             f"all with failure class {failure_class!r}{shown}. That points at the "
-            f"install or the machine, not at the pages: run `nx doctor`. The pages "
-            f"before page {pages[0]} stay in the kept buffer, so a rerun does not "
-            f"write them again, but MinerU runs over them again, so repair the "
-            f"install first. `pdf.ladder_breaker` sets how many pages stop a "
+            f"install or the machine, not at the pages: run `nx doctor`. {kept} "
+            f"`pdf.ladder_breaker` sets how many pages stop a "
             f"document (0 turns the check off)."
         )
 

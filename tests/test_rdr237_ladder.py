@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -37,6 +39,9 @@ from nexus.pipeline_stages import PipelineCancelled
 from tests._module_seam import patch_in
 
 pytestmark = pytest.mark.usefixtures("_quiet_progress")
+
+#: The real forced-timeout wait, taken at import, before the autouse fixture replaces it.
+_REAL_FAULT_WAIT = pdf_extractor._fault_wait
 
 
 @pytest.fixture
@@ -113,12 +118,14 @@ def run_ladder(
     subprocess_retry=None,
     delivered: list[tuple[int, str, dict]] | None = None,
     events: list[tuple] | None = None,
+    stop_on: tuple[int, BaseException] | None = None,
 ):
     """Run ``_extract_with_mineru`` over a real PDF; return (result, on_page calls, fake, ext).
 
     *delivered* (filled even when the run raises) collects the ``on_page`` calls; *events* gets
     every MinerU attempt (``("attempt", page, rung)``) and every delivery (``("deliver", index)``)
-    in the order they happened.
+    in the order they happened. *stop_on* ``(index, error)`` makes ``on_page`` raise *error*
+    instead of taking page *index*, as the pipeline's callback does on a cancel or a fence.
     """
     pdf = make_pdf(tmp_path / "doc.pdf", page_texts)
     fake = FakeMineru(plan, events)
@@ -126,6 +133,8 @@ def run_ladder(
     delivered = [] if delivered is None else delivered
 
     def on_page(i, t, m):
+        if stop_on is not None and i == stop_on[0]:
+            raise stop_on[1]
         delivered.append((i, t, m))
         if events is not None:
             events.append(("deliver", i))
@@ -601,6 +610,41 @@ def test_a_stop_in_the_middle_of_a_window_drops_the_held_pages(tmp_path: Path) -
     assert [i for i, _, _ in delivered] == [0], "the rerun redoes the window"
 
 
+@pytest.mark.parametrize("stop", ["fenced", "cancelled"])
+def test_a_stop_raised_while_the_window_is_flushed_ends_the_run_with_a_contiguous_buffer(
+    tmp_path: Path, stop: str,
+) -> None:
+    """Page 4 resolves the window (pages 2-3); the callback stops on page 3 mid-flush."""
+    error = (
+        PipelineRunFenced(
+            "stale", pipeline_id=1, content_hash="h", run_epoch=1, current_epoch=2, remedy="",
+        ) if stop == "fenced" else PipelineCancelled("pipeline cancelled")
+    )
+    plan = both_rungs([2, 3], A)
+    events: list = []
+    delivered: list = []
+    with pytest.raises(type(error)) as info:
+        run_ladder(
+            tmp_path, TEXTS, plan, breaker=3, delivered=delivered, events=events,
+            stop_on=(2, error),
+        )
+
+    assert info.value is error, "the stop arrives as itself, never wrapped"
+    assert [i for i, _, _ in delivered] == [0, 1], "a contiguous prefix: page 2 flushed, page 3 stopped"
+    assert ("attempt", 4, 1) in events, "the window was being flushed by page 4's success"
+    assert ("attempt", 5, 1) not in events, "the run ended at the stop"
+
+
+def test_a_trip_that_starts_on_page_1_says_no_page_was_kept() -> None:
+    first = MineruSystemicFailure("timeout", "", [1, 2, 3], "doc.pdf")
+    later = MineruSystemicFailure("timeout", "", [4, 5, 6], "doc.pdf")
+
+    assert "No page was kept" in str(first)
+    assert "before page 1" not in str(first)
+    assert "pages before page 4 stay in the kept buffer" in str(later)
+    assert "No page was kept" not in str(later)
+
+
 def test_a_breaker_of_zero_holds_nothing(tmp_path: Path) -> None:
     plan = both_rungs([1, 2, 3], A)
     events: list = []
@@ -1057,3 +1101,37 @@ def test_the_fault_grammar(raw, expected) -> None:
 def test_a_malformed_fault_spec_is_refused_not_ignored(raw) -> None:
     with pytest.raises(ValueError, match="NX_MINERU_FAULT_PAGES"):
         pdf_extractor._parse_fault_pages(raw)
+
+
+# ── the forced-timeout wait itself (every other test here replaces it) ──────
+
+
+def test_the_forced_timeout_wait_sleeps_out_its_budget_without_a_run_cancel() -> None:
+    pdf_extractor.bind_run_cancel(None)
+    with patch("nexus.pdf_extractor.time.sleep") as sleep:
+        _REAL_FAULT_WAIT(180.0)
+    sleep.assert_called_once_with(180.0)
+
+
+def test_the_forced_timeout_wait_returns_when_the_budget_passes_uncancelled() -> None:
+    cancel = threading.Event()
+    pdf_extractor.bind_run_cancel(cancel)
+    try:
+        started = time.monotonic()
+        _REAL_FAULT_WAIT(0.05)
+        assert time.monotonic() - started >= 0.04, "it waited out the budget"
+    finally:
+        pdf_extractor.bind_run_cancel(None)
+
+
+def test_a_cancel_ends_the_forced_timeout_wait_as_a_stop() -> None:
+    cancel = threading.Event()
+    cancel.set()
+    pdf_extractor.bind_run_cancel(cancel)
+    try:
+        started = time.monotonic()
+        with pytest.raises(MineruWorkerStopped, match="forced-timeout wait ended"):
+            _REAL_FAULT_WAIT(180.0)
+        assert time.monotonic() - started < 5.0, "the cancel ended the wait at once"
+    finally:
+        pdf_extractor.bind_run_cancel(None)
