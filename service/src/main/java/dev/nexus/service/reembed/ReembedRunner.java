@@ -89,7 +89,7 @@ public final class ReembedRunner {
      * RDR-231: the document's rewritten source_uri is held by a live document. The skip keeps the holder's id; the
      * document is left in the source, counted once, and reported with its holder.
      */
-    static final String REASON_URI_TAKEN = "source_uri_taken";
+    static final String REASON_URI_TAKEN = ReembedJobRepository.REASON_SOURCE_URI_TAKEN;
     /** The prefix of the engine's tombstone refusal message ({@code TombstonedDocumentException}). */
     private static final String ENGINE_TOMBSTONED_PREFIX = "move refused: document is tombstoned";
     private static final int LEFTOVER_PAGE = 500;

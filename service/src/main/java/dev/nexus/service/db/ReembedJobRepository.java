@@ -157,8 +157,18 @@ public final class ReembedJobRepository {
                               String cursor) {
     }
 
+    /** The one skip reason that names a holder: the document's rewritten source_uri is held by another document. */
+    public static final String REASON_SOURCE_URI_TAKEN = "source_uri_taken";
+
     /** A document the runner left in the source this pass, with the reason. */
     public record Skip(String docId, String reason, String holder) {
+
+        public Skip {
+            if (holder != null && !holder.isEmpty() && !REASON_SOURCE_URI_TAKEN.equals(reason)) {
+                throw new IllegalArgumentException("only a " + REASON_SOURCE_URI_TAKEN + " skip carries a holder: "
+                    + reason);
+            }
+        }
 
         public Skip(String docId, String reason) {
             this(docId, reason, null);
@@ -185,7 +195,8 @@ public final class ReembedJobRepository {
 
     /**
      * The documents the job skipped, in document order, at most {@link #SKIPPED_REPORT_LIMIT}: the job report's
-     * per-document listing. A reason recorded with a holder ({@link Skip#stored}) comes back split.
+     * per-document listing. A {@link #REASON_SOURCE_URI_TAKEN} reason recorded with a holder ({@link Skip#stored}) comes
+     * back split at the first separator; every other reason comes back whole.
      */
     public List<SkippedDocument> skippedDocuments(String tenant, UUID jobId) {
         return scope.withTenant(tenant, ctx -> ctx.select(REEMBED_JOB_MOVES.DOC_ID, REEMBED_JOB_MOVES.REASON)
@@ -197,10 +208,12 @@ public final class ReembedJobRepository {
             .limit(SKIPPED_REPORT_LIMIT)
             .fetch(r -> {
                 String stored = r.value2() == null ? "" : r.value2();
-                int sep = stored.indexOf(HOLDER_SEPARATOR);
-                return sep < 0
-                    ? new SkippedDocument(r.value1(), stored, null)
-                    : new SkippedDocument(r.value1(), stored.substring(0, sep), stored.substring(sep + 1));
+                // Only the holder-bearing reason is split: what follows its separator is the holder whole (a holder may
+                // contain the separator), and any other reason is kept whole (it may contain one too).
+                String prefix = REASON_SOURCE_URI_TAKEN + HOLDER_SEPARATOR;
+                return stored.startsWith(prefix)
+                    ? new SkippedDocument(r.value1(), REASON_SOURCE_URI_TAKEN, stored.substring(prefix.length()))
+                    : new SkippedDocument(r.value1(), stored, null);
             }));
     }
 
