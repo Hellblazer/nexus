@@ -304,6 +304,18 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
             if tumbler:
                 # doc_id and tumbler are identical in the catalog contract.
                 return tumbler
+            # _chroma_source_id_for_entry passes the absolute path from a
+            # file:// source_uri, but file_path is stored repo-relative, so
+            # the point-query misses a registered document. Match the row
+            # by its source_uri, in this collection only.
+            if source_id.startswith("/"):
+                from urllib.parse import quote  # noqa: PLC0415 — branch-local stdlib import
+                for uri in dict.fromkeys(
+                    (f"file://{source_id}", f"file://{quote(source_id)}"),
+                ):
+                    hit = cat.by_source_uri(uri)
+                    if hit is not None and hit.physical_collection == collection:
+                        return str(hit.tumbler)
             # Try title search as fallback.
             hits = cat.find_all(source_id)
             for hit in hits:
