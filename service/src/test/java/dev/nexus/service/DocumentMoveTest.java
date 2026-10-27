@@ -1044,11 +1044,14 @@ class DocumentMoveTest {
             .fetch(DOCUMENT_HIGHLIGHTS.SOURCE_URI));
     }
 
-    /** Points the document's aspect and highlight rows at {@code uri}, as the rows of a note carry its URI. */
-    void setSatelliteUris(String docId, String uri) {
-        su(ctx -> ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.SOURCE_URI, uri)
+    /**
+     * Points the document's aspect and highlight rows at their own URIs. They differ from the catalog row's
+     * and from each other, so each is checked against its own derivation, never against the document's.
+     */
+    void setSatelliteUris(String docId, String aspectUri, String highlightUri) {
+        su(ctx -> ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.SOURCE_URI, aspectUri)
             .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT)).and(DOCUMENT_ASPECTS.DOC_ID.eq(docId)).execute());
-        su(ctx -> ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, uri)
+        su(ctx -> ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, highlightUri)
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT)).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)).execute());
     }
 
@@ -1063,8 +1066,10 @@ class DocumentMoveTest {
         for (String d : List.of(note, legacy, file)) {
             seedAspect(fx.src(), d, "p/" + d + ".md", "v1");
             seedHighlight(fx.src(), d);
-            setSatelliteUris(d, sourceUri(d));
         }
+        setSatelliteUris(note, "nx-note://" + fx.src() + "/p/asp-note.md", "nx-note://" + fx.src() + "/hl-note");
+        setSatelliteUris(legacy, "chroma://" + fx.src() + "/p/asp-legacy.md", "chroma://" + fx.src() + "/hl-legacy");
+        setSatelliteUris(file, "file:///tmp/" + fx.tag() + "/asp-file.md", "file:///tmp/" + fx.tag() + "/hl-file.md");
 
         Map<String, Object> r = move(fx, List.of(note, legacy, file));
 
@@ -1076,9 +1081,16 @@ class DocumentMoveTest {
             .isEqualTo("file:///tmp/" + fx.tag() + "/plain.md");
         for (String d : List.of(note, legacy, file)) {
             assertThat(physical(d)).isEqualTo(fx.tgt());
-            assertThat(aspectUris(d)).as("the aspect row agrees with the document").containsExactly(sourceUri(d));
-            assertThat(highlightUris(d)).as("the highlight row agrees with the document").containsExactly(sourceUri(d));
         }
+        // each satellite row is checked against its own derivation: a different leaf than the document's
+        assertThat(aspectUris(note)).containsExactly("nx-note://" + fx.tgt() + "/p/asp-note.md");
+        assertThat(highlightUris(note)).containsExactly("nx-note://" + fx.tgt() + "/hl-note");
+        assertThat(aspectUris(legacy)).as("a legacy spelling keeps its scheme")
+            .containsExactly("chroma://" + fx.tgt() + "/p/asp-legacy.md");
+        assertThat(highlightUris(legacy)).containsExactly("chroma://" + fx.tgt() + "/hl-legacy");
+        assertThat(aspectUris(file)).as("a non-note URI is not touched")
+            .containsExactly("file:///tmp/" + fx.tag() + "/asp-file.md");
+        assertThat(highlightUris(file)).containsExactly("file:///tmp/" + fx.tag() + "/hl-file.md");
         // a re-put under the sibling (store_put with the same title) derives the new URI and finds the document
         String again = catalog.registerDocument(TENANT, "dm", Map.of("title", "my-title", "content_type", "knowledge",
             "corpus", "knowledge", "physical_collection", fx.tgt(), "source_uri", "nx-note://" + fx.tgt() + "/my-title"));
@@ -1125,6 +1137,24 @@ class DocumentMoveTest {
 
         assertThat(failedIds(r)).isEmpty();
         assertThat(sourceUri(doc)).isEqualTo("nx-note://" + fx.tgt() + "/was-deleted");
+    }
+
+    @Test
+    void aTombstonedMoverBesideALiveHolder_isNotReportedAsACollision_andIsRefusedAsTombstoned() {
+        // Pinned current behaviour (critique S4): the pre-check selects live movers only, so a tombstoned mover
+        // never reads as a collision; the move itself then refuses it with the typed tombstone reason.
+        Fx fx = pair("urtombmover");
+        String dead = seedNote(fx, "dead", "nx-note://" + fx.src() + "/clash", List.of("dead a " + fx.tag()));
+        String holder = seedHolder(fx, "holder", "nx-note://" + fx.tgt() + "/clash");
+        assertThat(catalog.deleteDocument(TENANT, dead)).isEqualTo(1);
+
+        assertThat(catalog.moveUriHolders(TENANT, fx.src(), fx.tgt(), List.of(dead))).isEmpty();
+        Map<String, Object> r = move(fx, List.of(dead));
+
+        assertThat(failedIds(r)).containsExactly(dead);
+        assertThat((String) failed(r).get(0).get("reason")).contains("tombstoned")
+            .doesNotContain(CatalogRepository.MOVE_SOURCE_URI_TAKEN);
+        assertThat(sourceUri(holder)).isEqualTo("nx-note://" + fx.tgt() + "/clash");
     }
 
     @Test

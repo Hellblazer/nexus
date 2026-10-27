@@ -2774,6 +2774,23 @@ class SchemaUpgradeRehearsalIntegrationTest {
     private static final List<String> NU_WITH_CHILDREN =
         List.of("1.1.401", "1.1.403", "1.1.404", "1.1.405", "1.1.406", "1.1.408");
 
+    /**
+     * A satellite row's own URI: the document's URI with its last path segment replaced, so the aspect
+     * (source_path {@code seed/note-uri-<t>.md}) and the highlight carry URIs that differ from the
+     * catalog row's and each is checked against its own derivation (critique Significant 8).
+     */
+    private static String sibling(String uri, String leaf) {
+        return uri.substring(0, uri.lastIndexOf('/') + 1) + leaf;
+    }
+
+    private static String aspectUriOf(String docUri, String tumbler) {
+        return sibling(docUri, "aspect-" + tumbler + ".md");
+    }
+
+    private static String highlightUriOf(String docUri, String tumbler) {
+        return sibling(docUri, "hl-" + tumbler);
+    }
+
     private static void seedNoteUriRows(Connection su) throws Exception {
         for (String coll : List.of(NU_K, NU_D, NU_R, NU_C)) {
             registerCollection(su, "t1", coll);
@@ -2787,11 +2804,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t1")).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.1.402")).execute();
         for (String tumbler : NU_WITH_CHILDREN) {
             String[] d = NU_DOCS.get(tumbler);
-            seedAspect(su, "t1", d[0], "seed/note-uri-" + tumbler + ".md", "note-uri rehearsal", d[1], tumbler);
+            seedAspect(su, "t1", d[0], "seed/note-uri-" + tumbler + ".md", "note-uri rehearsal",
+                aspectUriOf(d[1], tumbler), tumbler);
             dsl(su).insertInto(DOCUMENT_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.TENANT_ID, "t1")
                 .set(DOCUMENT_HIGHLIGHTS.DOC_ID, tumbler)
-                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, d[1])
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, highlightUriOf(d[1], tumbler))
                 .set(DOCUMENT_HIGHLIGHTS.COLLECTION, d[0])
                 .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, DSL.currentOffsetDateTime())
                 .execute();
@@ -2817,21 +2835,24 @@ class SchemaUpgradeRehearsalIntegrationTest {
             .as("the stale-collection note is rewritten by scheme only; its collection is not repaired")
             .isEqualTo(NU_K);
         for (String tumbler : NU_WITH_CHILDREN) {
-            String expected = NU_DOCS.get(tumbler)[2];
+            String expectedAspect = aspectUriOf(NU_DOCS.get(tumbler)[2], tumbler);
+            String expectedHighlight = highlightUriOf(NU_DOCS.get(tumbler)[2], tumbler);
             assertThat(c.select(DOCUMENT_ASPECTS.SOURCE_URI).from(DOCUMENT_ASPECTS)
                     .where(DOCUMENT_ASPECTS.TENANT_ID.eq("t1")).and(DOCUMENT_ASPECTS.DOC_ID.eq(tumbler))
                     .fetchOne(DOCUMENT_ASPECTS.SOURCE_URI))
-                .as("note-uri-001-1: document_aspects %s", tumbler).isEqualTo(expected);
+                .as("note-uri-001-1: document_aspects %s", tumbler).isEqualTo(expectedAspect);
             assertThat(c.select(DOCUMENT_HIGHLIGHTS.SOURCE_URI).from(DOCUMENT_HIGHLIGHTS)
                     .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq("t1")).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(tumbler))
                     .fetchOne(DOCUMENT_HIGHLIGHTS.SOURCE_URI))
-                .as("note-uri-001-1: document_highlights %s", tumbler).isEqualTo(expected);
+                .as("note-uri-001-1: document_highlights %s", tumbler).isEqualTo(expectedHighlight);
         }
         // The Critical-Assumption-1 sweep: after the backfill every chroma:// value left in any nexus
         // text, varchar or json column is file-routed residue, and only the three tables hold any.
         java.util.Set<String> residue = new java.util.TreeSet<>();
         for (String tumbler : List.of("1.1.404", "1.1.405", "1.1.406", "1.1.407")) {
             residue.add(NU_DOCS.get(tumbler)[2]);
+            residue.add(aspectUriOf(NU_DOCS.get(tumbler)[2], tumbler));
+            residue.add(highlightUriOf(NU_DOCS.get(tumbler)[2], tumbler));
         }
         assertThat(columnsHolding(su, "chroma://"))
             .as("the chroma:// sweep finds only the three source_uri columns, holding only residue")
