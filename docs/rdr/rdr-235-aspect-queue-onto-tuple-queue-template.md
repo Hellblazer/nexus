@@ -55,9 +55,28 @@ by document, with no owner or status check (Finding F2). The only lease is a
 reclaim window: rows `in_progress` longer than 300 s go back to `pending`.
 That window is shorter than one attempt's timeout for a batch of five (420 s,
 Finding F5). So a slow batch can be reclaimed while its worker is still
-extracting. A second worker then extracts the same document, and whichever
-finishes second overwrites or deletes the other's row. The daemon's own
+extracting. A second worker then extracts the same document, and each
+finisher writes the aspect row and deletes the queue row. The daemon's own
 comment records this race (`aspect_worker_daemon.py:77-83`).
+
+The harm today is small. Both writers upsert the aspect row
+(`.onConflict(DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
+DOCUMENT_ASPECTS.SOURCE_PATH).doUpdate()`, `AspectRepository.java:265-269`), so
+the later write replaces the earlier row with another extraction of the same
+document. `markDone` is `ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(
+ASPECT_EXTRACTION_QUEUE.DOC_ID.eq(docId))` with no status or owner test
+(`AspectRepository.java:1159-1161`), so the first finisher deletes the row the
+second worker holds and the second finisher's delete removes nothing. The
+daemon comment calls this "double-extraction + wasted quota"
+(`aspect_worker_daemon.py:81-83`). What is lost is the second extraction's
+model quota. A re-enqueue that lands during an extraction is a different case,
+covered by E4.
+
+The move closes the overwrite. Today the aspect write and the queue delete are
+two calls (`t2/__init__.py:846-847`), and a tuple `ack` alone would fence only
+the second. So the aspect write itself checks the claim, in the same
+transaction as the write (E5). The `renew` lease keeps a healthy slow batch
+from being reclaimed at all.
 
 #### Gap 2: A row whose worker dies every time is reclaimed forever
 
@@ -105,7 +124,7 @@ space and the PDF pipeline.
 | RDR-163 | Origin (backoff ladder) | Its rationale, that transient failures must survive a drain, still holds. The move has to keep the ladder, so the template needs delayed visibility (Gap 4). RDR-163 rejected a dead-letter table because the terminal `failed` state already is one; the tuple `dead` state is the same idea. |
 | RDR-173 | Origin (worker hosting) | Its per-tenant worker lease stays. Its 300 s backstop poll and the wake file are what this RDR replaces with a parked `in`. |
 | RDR-205 | Origin (tuple space), and the scope rule | The scope clause is why this RDR exists. Its audit row "Reuse the statement shape" (rdr-205 line 972) is the precedent that the claim fits. |
-| RDR-206 | Precedent | `renew` and the compare-and-swap `ack` on `claim_id` are the fencing Gap 1 needs. |
+| RDR-206 | Precedent | `renew` and the compare-and-swap `ack` on `claim_id` are the fencing Gap 1 needs for the claim. E5 carries the same check into the aspect write. |
 | RDR-211 | Origin (queue and lock templates) | It sized `queue/` at 1,000 tasks a day per queue. The aspect queue needs an aspect-specific template, not that template retuned (Proposed Solution, E3). It named no production consumer. |
 | RDR-120 | Precedent (rule) | Substrate first, consumers by their own RDR. This RDR follows it. |
 | RDR-184 | Adjacent (closed) | The dispatch ledger is the first named tuple consumer. There is no overlap with the aspect queue. |
@@ -148,11 +167,12 @@ design depends on. Each measured or configured value is stated once, here.
 | --- | --- | --- |
 | `AspectRepository` (Java) | Yes | `claimNext` claims under `FOR UPDATE SKIP LOCKED`, with no claim id. The mark calls are unfenced. `reclaimStale` doesn't count. |
 | `TupleRepository`, `TupleLimits`, `queue.yaml`, `lock.yaml` | Yes | There is no visibility column. The body cap is 4,096 bytes. The queue limits are 10,000 live rows and 48 h retention, with a 900 s lease ceiling and 3 attempts. Ack, nack, renew and release are compare-and-swaps on `claim_id`. |
-| `TupleWaitRegistry` | Yes | A 1 s re-query and a 25 s cap on a parked call. The park caps (16 global, 4 per claimant) are engine-wide, not per tenant (F19). |
+| `TupleWaitRegistry` | Yes | A 1 s re-query and a 25 s cap on a parked call. The park caps (default 16 global; the cloud measured 32, research-27; 4 per claimant) are engine-wide, not per tenant (F19). |
 | `TupleHandler` routes | Yes | There is no delete or purge route for a tuple (F22). |
 | `TemplateRegistry`, sweep, doctor checks | Yes | A new template can carry its own limits without changing other queues. The depth and dead-letter doctor row sees only `queue/` templates (F18). |
 | `PipelineRepository` | Yes | `run_epoch` is checked under the row's `FOR UPDATE` in every write route. Ownership comes from heartbeat age. |
-| `document_text(doc_id)` stored function | Yes | It returns rows, not one string, and no Java route or Python client calls it. For a note, joined in order, it equals the text enqueued today (F17). |
+| `document_text(doc_id)` stored function | Yes | It returns rows, not one string, and no Java route or Python client calls it. For a note, joined in order, it equals the text enqueued today (F17). The design does not use it (E2). |
+| `AspectHandler`, `AspectRepository.upsertAspect`, `liveClaimCondition` | Yes | The aspect write is one route whose repository method runs in a single transaction, and the claim check `ack` uses has no lease-time term, so the write can carry the same check (E5, research-28). |
 
 ### Key Discoveries
 
@@ -194,8 +214,14 @@ design depends on. Each measured or configured value is stated once, here.
   (note_write.py:989, :1022). `aspect_extraction_enqueue_hook` passes that
   content into `aspect_queue.enqueue` (aspect_worker.py:1558-1644, the call at
   :1640-1644), so the row's `content` column holds the whole document and
-  `source_path` is a doc_id, not a file. The docstring at :1586-1590 says the
-  CLI paths pass empty content and the worker reads from disk.
+  `source_path` is a doc_id, not a file. The docstring at :1586-1588 says the
+  CLI paths pass empty content, and :1599-1601 says the worker then falls back
+  to a file read. That docstring is stale. The code is `extract_aspects`: with
+  `content == ""` it builds a `chroma://` URI and `read_source` reassembles the
+  document from T3 chunks through the catalog manifest
+  (aspect_extractor.py:1518-1525). The source file is read only to put an RDR's
+  frontmatter back in front of the chunk text (:1526-1529). The reader joins the
+  chunks with a blank line (aspect_readers.py:517).
 - **F8 (Documented). Re-enqueue.** `enqueue` (:929) and `enqueueMany` (:976)
   build an upsert, `INSERT ... ON CONFLICT (tenant_id, collection, source_path)
   DO UPDATE`, that resets the row to `pending`, `retry_count` 0, and
@@ -294,11 +320,12 @@ the engine's budget for such calls.
   the tenant and aware of tombstones, so `string_agg(chunk_text, '' ORDER BY
   position)` equals the content. Caveats: (1) it returns rows, not one string,
   and no Java route or Python client calls it (the only match is a doctor
-  comment), so the worker needs a new engine route or must reassemble through
-  `store_get`; (2) this holds only for notes: `docs__` and `rdr__` file chunks
-  go through the markdown chunker, which prepends headings and overlaps, so for
-  a file source the worker must read from disk; (3) I did not read the engine
-  round trip of `chunk_text`. The test that settles (3) is an integration test
+  comment), so using it would need a new engine route or reassembly through
+  `store_get`; the design takes neither, because the worker already has a
+  reassembly of its own (E2, A2); (2) this holds only for notes: `docs__` and
+  `rdr__` file chunks go through the markdown chunker, which prepends headings
+  and overlaps, so for a file source `document_text` is not the original text;
+  (3) I did not read the engine round trip of `chunk_text`. The test that settles (3) is an integration test
   that `store_put`s a multi-piece note with leading and trailing whitespace,
   CRLF and a repeated paragraph, then compares the aggregate to the original.
   *Source: src/nexus/catalog/store_hook.py:163-201; src/nexus/chunker.py:226-266; src/nexus/catalog/note_write.py:247-290, :1022; tests/test_store_put_split.py:102,142; service/src/main/resources/db/changelog/vectors-005-repoint-functions-views.xml:722-750*
@@ -311,19 +338,26 @@ the engine's budget for such calls.
   shorten the engine default of 180 days, so a long retention needs a matching
   `claim_log_ttl_seconds`, up to 15,552,000 s. The name `aspects/<collection>`
   resolves, because the address-segment pattern admits double underscores, dots
-  and hyphens; a segment is capped at 256 bytes. The sweeps delete by each row's
+  and hyphens; a segment is capped at 256 bytes. A literal name (no `<param>`
+  segment) is looked up before any template (TemplateRegistry.java:204-222;
+  `isLiteral`, TemplateSchema.java:141-143), which the one `aspects` queue uses
+  (E3). The sweeps delete by each row's
   own `expires_at`, stamped at write from its template, and lapse leases with
   each row's own template `max_attempts`; none reads a global retention.
-  `max_live_rows` counts live rows per subspace, so per-collection templates
-  cap per collection. Doctor: `_check_tuple_queue_depth` keeps only templates
-  whose name starts with `queue/`, so `aspects/<c>` is invisible to the depth
+  `max_live_rows` counts live rows per subspace, so the one `aspects` queue
+  caps a tenant's backlog and dead rows together: a dead row is unconsumed, so
+  it counts as live until it expires (TupleRepository.java:2867, :2874, :665-671,
+  research-28). Doctor: `_check_tuple_queue_depth` keeps only templates
+  whose name starts with `queue/`, so `aspects` is invisible to the depth
   and dead-letter warning (a gap to fill, not a regression).
   `_check_tuple_unclaimed_age` applies to every take-enabled non-lock template
-  with a fixed 3,600 s threshold, so a bulk backlog on `aspects/<c>` older than
+  with a fixed 3,600 s threshold, so a bulk backlog on `aspects` older than
   an hour turns that row red. `park_slots` and `sweep_freshness` are global.
   *Source: service/src/main/java/dev/nexus/service/tuples/TemplateRegistry.java:86-93, :202, :224-240, :395-413; TemplateSchema.java:67-89; TupleLimits.java (MAX_FIELD_VALUE_BYTES); TupleRepository.java:653-671, :2514-2532, :2596-2606, :2644-2654; src/nexus/health.py:7672, :7801-7990, :8668, :8758*
-- **✅ Verified** (source search) — F19, A4a. The park caps are 16 global, 4 per
-  claimant and 25 s per call, as defaults with env knobs
+- **✅ Verified** (source search) — F19, A4a. The park caps default to 16 global,
+  4 per claimant and 25 s per call (`DEFAULT_PARK_CAP_GLOBAL = 16`,
+  TupleRepository.java:107); the cloud runs 32 global (research-27). Each has an
+  env knob
   (`NX_TUPLE_PARK_CAP_GLOBAL`, `NX_TUPLE_PARK_CAP_PER_CLAIMANT`,
   `NX_TUPLE_TIMEOUT_CAP_SECONDS`). They are engine-wide, not per tenant: there
   is one global counter and one per-claimant map keyed by the bare claimant
@@ -343,17 +377,20 @@ the engine's budget for such calls.
   MCP calls and `nx tuple rd`/`in` with `--timeout-s`. No daemon or library
   loop calls `in` with a park, so there is no mailbox or ledger `in` consumer;
   mailbox delivery is the `ChannelWaiter` wait. What the source does settle: the
-  doctor warns at 75 percent (12 of 16), and with 16 global slots shared by all
-  tenants, an engine with 12 or more live sessions has no room for a parked `in`
-  per tenant worker without raising `NX_TUPLE_PARK_CAP_GLOBAL`. To settle it,
-  read `GET /v1/tuples/park_stats` on the cloud engine at a busy hour
+  doctor warns at 75 percent (12 of the default 16), and on the default 16 slots
+  shared by all tenants, an engine with 12 or more live sessions has no room for
+  a parked `in` per tenant worker without raising `NX_TUPLE_PARK_CAP_GLOBAL`.
+  The cloud's cap is 32, not 16 (research-27: 9 of 32 slots in use, no refusal,
+  with nine live sessions on one box), so there the same arithmetic starts at 24
+  sessions. A busy-hour peak and the local engine's cap are not measured. To
+  settle it, read `GET /v1/tuples/park_stats` on the cloud engine at a busy hour
   (`global_in_use`, `refused_global`).
   *Source: src/nexus/mcp/channel.py:162, :1134-1187; src/nexus/mcp/core.py:7877; src/nexus/commands/tuple_cmd.py:239, :328; src/nexus/health.py:7691, :8574*
 - **✅ Verified** (source search) — F21, A4c. Per-collection queues with one
   parked `in` each do not fit. N collections parked at once cost N global and N
   claimant slots under one claimant id, so more than 4 collections per worker
   claimant is refused with `ParkCapExceededException`, and the N also count
-  against the 16 global. Two shapes fit. (a) One worker parks one announce-mode
+  against the global cap (default 16). Two shapes fit. (a) One worker parks one announce-mode
   `wait` over up to 34 `aspects/<collection>` subspaces (one global slot, no
   claimant slot) and claims with `inp`, which never parks; the subspace list
   comes from `subspace_list` with prefix `aspects/` and must be rebuilt when a
@@ -361,6 +398,10 @@ the engine's budget for such calls.
   with the collection in the body or dims; a parked `in` per tenant then costs 1
   global plus 1 claimant slot, and `in` cannot select by collection (F24), so the
   worker takes the oldest task of any collection, which is fine for this worker.
+  The design takes shape (b), as one queue named `aspects` per tenant (Sam, gate
+  round 1; E3): `claimNext` already takes any collection
+  (AspectRepository.java:1098-1102), and `claim_batch` workers handle a claim
+  that mixes prefixes (aspect_worker.py:601-610).
   *Source: service/src/main/java/dev/nexus/service/db/TupleWaitRegistry.java:757-772*
 - **✅ Verified** (source search) — F22, Q1. There is no tuple delete or
   purge-by-id route. The `/v1/tuples` routes are `out`, `rd`, `rdp`, `wait`,
@@ -398,7 +439,7 @@ the engine's budget for such calls.
   builds equality on the keys JSON only, never dims; `rd` and `rdp` match keys
   only too. A template that wants `in` to select by collection must put the
   collection in `keys`. Because the id comes from keys, nonce and `id_dims`, the
-  deterministic id this RDR wants (nonce = collection + doc_id) is reachable
+  deterministic id this RDR wants (nonce = doc_id) is reachable
   only by nonce, which `in` cannot filter on.
   *Source: service/src/main/resources/tuples/templates/queue.yaml:49-50; TupleRepository.java:1069-1077, :1850-1853, :1978-1985*
 
@@ -408,28 +449,40 @@ the engine's budget for such calls.
   (`available_at IS NULL OR available_at <= now()`) keeps the claim's index
   scan. **Status**: Unverified. **Method**: Spike (EXPLAIN on a seeded
   tenant). The spike is still to run.
-- [x] **A2**: `document_text(doc_id)` returns the same text the MCP
-  `store_put` path enqueues today. Then a task can carry a pointer instead of
-  the document. **Status**: Verified for notes, with caveats (F17): it returns
-  rows with no route to call it, and it does not hold for file sources.
-  **Method**: Source Search. An integration test over a stored note remains the
-  settling check for the engine round trip.
+- [ ] **A2**: A task can carry the document's identity instead of its text,
+  and the text the worker gets by the existing empty-content contract (the
+  document reassembled from T3 chunks through the catalog manifest, F7) is an
+  acceptable input for aspect extraction. **Status**: Re-scoped at gate round 1.
+  The contract is read in source (aspect_extractor.py:1518-1525), and it is
+  what a CLI-indexed document gets today, because the CLI paths pass empty
+  content (aspect_worker.py:1586-1588). What is not settled is the MCP path.
+  Why it enqueues the whole text at all is not stated in the code read. For a
+  note stored in several pieces the reassembled text joins the pieces with a
+  blank line (aspect_readers.py:517), while the MCP content is the pieces joined
+  with nothing (F17), so the model would see a different text from today's.
+  Inferred by comparing the two reads, not run. **Method**: Source Search. The
+  settling check is to extract a sample of multi-piece notes both ways and
+  compare the aspect rows; it has not run. `document_text(doc_id)` is not part
+  of this assumption any more (F17).
 - [x] **A3**: An aspect-specific template can have a larger `max_live_rows`,
   a longer retention and its own attempt cap, without changing the sweep or
   the doctor rows for other queues. **Status**: Verified (F18). The doctor's
-  depth and dead-letter row does not see `aspects/` templates, and its
+  depth and dead-letter row does not see the `aspects` template, and its
   unclaimed-age row would go red on a backlog older than an hour. **Method**:
   Source Search (template loader, sweep, doctor).
 - [ ] **A4**: A parked `in` loop (25 s calls) per tenant worker fits within the
   park-slot caps, alongside the existing parkers. **Status**: Split, three
-  parts. (a) The caps are verified: 16 global, 4 per claimant, 25 s, engine-wide
-  (F19). (b) Fit alongside the existing parkers is Assumed, pending
-  `park_stats` on the cloud engine at a busy hour (F20). The mailbox and ledger
-  have no parked `in` consumer; the standing parkers are the MCP `ChannelWaiter`
-  waits, one per live session. (c) Per-collection parked queues are verified not
-  to fit past 4 collections per claimant (F21); the design must use one
-  multi-subspace `wait` or one queue per tenant. **Method**: Source Search; the
-  runtime count of live parkers is still missing.
+  parts. (a) The caps are verified: default 16 global (the cloud measured 32,
+  research-27), 4 per claimant, 25 s, engine-wide (F19). (b) Fit alongside the
+  existing parkers is Assumed, pending `park_stats` on the cloud engine at a
+  busy hour (F20); one reading at nine live sessions found 9 of 32 in use
+  (research-27). The mailbox and ledger have no parked `in` consumer; the
+  standing parkers are the MCP `ChannelWaiter` waits, one per live session.
+  (c) Per-collection parked queues are verified not to fit past 4 collections
+  per claimant (F21); the design uses one `aspects` queue per tenant, so one
+  worker parks one `in`: 1 global slot and 1 of its claimant's 4 (E3).
+  **Method**: Source Search; the busy-hour count of live parkers is still
+  missing.
 
 ### Open Questions
 
@@ -445,16 +498,23 @@ Answered in the second pass:
   only (F24). Collection must be in `keys`, or the worker takes the oldest task
   of any collection.
 
+Decided at gate round 1 (Sam):
+
+- Which queue shape (F21 (a) or (b))? One `aspects` queue per tenant with the
+  collection in the task body (E3). The claim-time drop's key is the task's
+  `doc_id`, carried in the body.
+- How does a worker get a note's text? The task carries the identity, and the
+  worker uses the existing empty-content contract (E2, A2), not a
+  `document_text` route.
+
 Still open:
 
 - Plan-time (A1): does the `available_at` arm keep the claim's index scan on a
   seeded backlog? The EXPLAIN spike has not run.
 - Runtime (A4b): `park_stats` on the cloud engine at a busy hour.
-- No one has measured a bulk backlog depth (F1), so E3's limits are unset.
-- Which queue shape (F21 (a) or (b)) the design takes. This also decides the
-  claim-time drop's key, since `in` cannot filter by id.
-- How a worker gets a note's text: a new `document_text` route, or `store_get`
-  (F17).
+- No one has measured a bulk backlog depth (F1), so E3's `max_live_rows` is
+  unset.
+- A2: is the reassembled text an acceptable input for a multi-piece MCP note?
 
 ## Proposed Solution
 
@@ -462,48 +522,78 @@ Still open:
 
 Two decisions.
 
-**Decision 1: move the aspect queue onto the tuple space, behind four engine
-extensions, in phases.** The move closes Gaps 1 to 3 with mechanisms that
-already exist and are tested in the tuple space:
+**Decision 1: move the aspect queue onto the tuple space, behind five
+extensions, four of them engine changes, in phases.** The move closes Gaps 1 to 3 with mechanisms that
+already exist and are tested in the tuple space, plus one fence that is new:
 
-- a `claim_id` with a compare-and-swap `ack`, so a reclaimed worker's late
-  result is refused instead of overwriting;
+- a `claim_id` that the aspect write itself checks, in the same transaction as
+  the write (E5), so a worker whose claim another worker took over cannot
+  overwrite the new holder's result; the `ack` that follows is also a
+  compare-and-swap on `claim_id`;
 - a real lease with `renew`, so a batch longer than the lease is kept alive
   by its worker, not reclaimed under it;
 - attempts that count a lapsed lease, so a crash-looping document dead-letters;
 - a parked wait, so a cross-machine enqueue is seen in about 1 s.
 
 The move does not happen until the template can carry the queue (Gap 4). The
-four extensions are:
+five extensions are:
 
 - **E1. Delayed visibility.** A nullable `available_at` on `nexus.tuples`, one
   arm in the claim predicate, `out` with `delay_s`, and `nack` with
   `retry_after_s`. Both are stamped on the database clock, as RDR-163 stamps
   `next_retry_at`. The ladder's intervals stay worker-chosen.
-- **E2. Pointer-only task body.** The task body carries
-  `{collection, doc_id, content_hash, source}`, never document text. The
-  worker reads the text from disk when `source` is a file, and for a note
-  rebuilds it from `document_text(doc_id)` (A2, F17). That function returns
-  rows and has no route today, so the worker needs a new engine route or must
-  reassemble the text through `store_get`. The 4,096-byte cap then never binds,
-  and the cap itself stays as it is.
-- **E3. An aspect queue template.** A new `aspects/<collection>` template,
-  rather than retuning `queue/`, so the board, ledger and ad-hoc queues keep
-  RDR-211's sizing. Its own limits are sized from F1 and F5:
-  - `max_live_rows` large enough for a bulk index;
-  - retention long enough that no backlog expires before a worker reaches it;
-  - `max_attempts` equal to the ladder cap plus one;
-  - a `claim_log_ttl_seconds` longer than the retention plus the 21,600 s sweep
-    interval, up to 15,552,000 s, or the engine refuses to boot (F18).
-  The exact numbers come from a measured bulk backlog, which F1 says nobody
-  has yet. Measuring it is a prerequisite. The template file must also be added
-  to the loader's explicit classpath list, and the doctor's depth and
-  dead-letter row, which sees only `queue/` templates, must be widened to see
-  it (F18).
+- **E2. Identity-only task body.** The task body carries the queue row's own
+  identity columns, `{collection, source_path, doc_id, content_hash}`, never
+  document text (these are the fields `claimNext` returns, less `content`;
+  AspectRepository.java:1126-1134). The task carries the identity, and the
+  worker uses the contract it already has for a row with empty content: it
+  reassembles the document from T3 chunks through the catalog manifest, and for
+  an RDR it puts the source file's frontmatter back in front (A2, F7). That
+  needs no new engine route and no disk read for the text, so a worker on
+  another host reads what a laptop wrote. One consequence: for a note stored in
+  several pieces, the text the model sees is the reassembly, not the original
+  content (A2). The 4,096-byte cap then never binds, and the cap itself stays as
+  it is.
+- **E3. An aspect queue template.** A new literal template named `aspects`,
+  not a retune of `queue/`, so the board, ledger and ad-hoc queues keep
+  RDR-211's sizing. It is one queue per tenant (tenancy is the row-level
+  security of F12b), and the collection is a field of the task body, not part
+  of the queue name. A worker then parks one `in`, the template is sized once,
+  and a collection rename is a body rewrite (Technical Design). The registry
+  looks up a literal name before any template, but none of the seven shipped
+  templates is literal, so that the loader accepts a one-segment name is
+  inferred, not read; the fallback is `aspects/<name>` with one fixed name,
+  which changes nothing else here. Its own limits:
+  - `max_live_rows` large enough for a bulk index. It counts the tenant's
+    backlog and its dead tasks together, because a dead task is unconsumed
+    (F18);
+  - `retention_seconds: 7776000` (90 days). Retention is the lifetime of a
+    backlog task, of a dead task and of an acked row alike, so it is long
+    enough that no backlog expires before a worker reaches it, and a dead task
+    stays for 90 days. Today a failed row never ages out, so this is a
+    behaviour change (Dead tasks, below). The 90 days is chosen, not measured;
+  - `max_attempts` equal to the ladder cap plus one. One count serves both a
+    `nack` (a ladder retry) and a lapsed lease (a crash or a stalled worker),
+    because each adds 1 to it (F11). So a crash spends one of the retries the
+    ladder would have had;
+  - `claim_log_ttl_seconds: 8640000` (100 days). The boot check requires the
+    effective TTL to exceed retention plus the 21,600 s sweep interval, which
+    is 7,797,600 s for 90 days, and a template may only shorten the engine
+    default of 15,552,000 s, or the engine refuses to boot (F18).
+
+  `max_live_rows` is the one number that comes from a measured bulk backlog,
+  which F1 says nobody has yet. Measuring it is a prerequisite. The template
+  file must also be added to the loader's explicit classpath list, and the
+  doctor's depth and dead-letter row, which sees only `queue/` templates, must
+  be widened to see it (F18).
 - **E4. Re-enqueue.** An `out` mode `replace` for the document's deterministic
-  id (nonce = `collection + doc_id`):
-  - a consumed or dead row is reset to available, with the new body and
-    attempts at 0;
+  id (nonce = `doc_id`; the collection is not part of the id, so a rename or a
+  move never changes it):
+  - a consumed or dead row is reset to available, with the new body, attempts
+    at 0 and its retention clock restarted (`created_at` and `expires_at`),
+    because a refire is clamped to `created_at` plus retention
+    (TupleRepository.java:675-680), and an old dead row would otherwise expire
+    soon after its revival;
   - an available row gets the new body;
   - a claimed row is marked `dirty`, so its `ack` returns it to available
     instead of consuming it. This is new engine work. Today `ack` always
@@ -513,6 +603,24 @@ four extensions are:
 
   This keeps today's "the newest content wins" behaviour (F8) without the
   double extraction the current upsert causes on an `in_progress` row.
+- **E5. A claim-fenced aspect write.** The `POST /v1/aspects/upsert` route takes
+  an optional `claim_id` and `claimant`. When they are present, the route checks
+  the live claim in the same transaction as the `document_aspects` upsert, and
+  writes nothing if the check fails. The check is the one `ack` uses
+  (`liveClaimCondition`: claim state `claimed`, the same `claim_id`, not
+  consumed). A claim with no live holder answers 404, and a claim held by
+  another claimant answers 403, as `ack` does. The worker then `ack`s. The
+  upsert already runs in one transaction (`tenantScope.withTenant` in
+  `upsertAspect`, AspectRepository.java:225-226), so the check joins it. It
+  takes the claim row's lock (`FOR NO KEY UPDATE`, the level the claim path
+  takes and skips with `SKIP LOCKED`; F10), so a re-take skips the row until the
+  write commits. Callers with no claim (`nx enrich`, `nx aspects`) omit the
+  fields and behave as today. The check does not read `lease_until`. A claim
+  that another worker re-took, or that the sweep released, is refused. A lapsed
+  lease that nobody has taken is still accepted, as `ack` accepts it, and
+  rightly: no second worker is extracting. A crash between the write and the
+  `ack` lapses the claim, the task is re-taken with an attempt counted, and the
+  re-extraction upserts again, which is idempotent (`t2/__init__.py:829-830`).
 
 **Decision 2: the PDF pipeline row does not move, not even its ownership.**
 Design Rationale argues this from F13 to F16.
@@ -520,27 +628,68 @@ Design Rationale argues this from F13 to F16.
 ### Technical Design
 
 **Producer side.** `HttpAspectQueue.enqueue` and `enqueue_many` become `out`s
-to `aspects/<collection>` with the pointer body and `replace`. The hook sites
-(F1) do not change. The FK cascade (F9) has no tuple equivalent. A claim of a
-document the catalog no longer has is `ack`ed as dropped, with a log event
-(`aspect_task_dropped_missing_doc`). That claim-time check is the only way a
-purged document's task goes away: there is no tuple delete route (F22), so a
-catalog purge cannot remove the task, and a task stays queued until a worker
-claims it or retention ends it. A purge route would be a new engine extension.
+to the `aspects` queue with the identity body and `replace` (nonce = `doc_id`).
+The hook sites (F1) do not change. The FK cascade (F9) has no tuple equivalent.
+A claim of a document the catalog no longer has is `ack`ed as dropped, with a
+log event (`aspect_task_dropped_missing_doc`). For one deleted document that
+claim-time check is the only way its task goes away: there is no client tuple
+delete route (F22), so a document delete cannot remove the task, and a task
+stays queued until a worker claims it or retention ends it.
+
+**Collection rename, move and purge.** The collection is a field of the task
+body, so a rename is a body rewrite, not a queue rename. Every engine site that
+names the queue by collection or document today (the census is in research-28)
+gets its tuple form in the same transaction as its table form, while the table
+drains:
+
+| Site | Today | Tuple form |
+| --- | --- | --- |
+| `AspectRepository.renameQueueCollection` (:1334-1350), refused under a re-embed job | deletes new-side rows that collide, then sets `collection` | rewrite `collection` in the body of every unconsumed `aspects` task naming the old collection, under the same re-embed refusal. There is no collision step: the id comes from the `doc_id`, and one document has one tumbler. |
+| `CatalogRepository.completeMove` (:6418-6433), one document's re-embed move | the same delete-then-update, keyed on the document | rewrite `collection` in the body of that document's unconsumed task |
+| `CatalogRepository` collection purge (:8942) | deletes the collection's queue rows | delete the unconsumed `aspects` tasks whose body names the collection, inside the purge transaction. This is the one `deleteFrom` on `nexus.tuples` outside the sweep. It is an engine statement, not a client route, so F22 (no client-reachable delete) stands. |
+| `COLLECTION_SCOPED_TABLES` and `CROSS_MODEL_DISPOSITIONS` (:9350, :9400) | an entry on a `collection` column, with the REPOINT disposition | the registry is column based and tasks hold the collection in the body, so the `aspects` tasks need an entry of their own, REPOINT. The parity test (`CrossModelDispositionParityTest`) fails until each table has a disposition line. |
+| `ReembedSourceReader` residue and plan counts (:147-155, :377-379) | count queue rows naming the source collection | add the unconsumed `aspects` tasks whose body names the source |
+| FK cascade on a deleted document (F9) | deletes the queue row | the claim-time drop, above |
+
+A task held by a worker when a rename lands is rewritten too. Its worker's write
+then names the old collection, the same exposure an `in_progress` row has today:
+the table rename updates by collection whatever the row status
+(AspectRepository.java:1345-1348).
+
+**Dead tasks (a behaviour change).** Today a `failed` queue row stays until it
+is re-enqueued or its document or collection goes. The engine's deletes of queue
+rows are `markDone`, the rename and move collision defences and the collection
+purge, and none looks at age (research-28). A dead tuple expires with its row's
+retention, and until then it counts against `max_live_rows`. This RDR gives dead
+tasks no lifetime of their own: they get the template's 90-day retention (E3).
+After 90 days a dead task leaves the listing and `nx aspects requeue-failed`
+cannot revive it; its document has to be indexed again. `replace` on a dead task
+restarts its retention clock (E4).
 
 **Worker side.** The RDR-173 per-tenant daemon keeps its lease. Its loop
 becomes:
 
-1. Wait for work, then claim with a lease of 600 s. A parked `in` per
-   collection does not fit the park caps past 4 collections per worker (F21),
-   so the loop uses one of two shapes, not yet chosen. (a) One announce-mode
-   `wait` over up to 34 `aspects/<collection>` subspaces, 25 s per call, then
-   `inp` on the subspace that woke it. Announce mode matters: a plain `wait`
-   returns at once on rows another worker holds (F19). (b) One queue per tenant
-   and a parked `in` on it; `in` cannot select by collection (F24), so the
-   worker takes the oldest task of any collection.
-2. Extract, with a renewer thread that calls `renew` every 120 s.
-3. On success, write `document_aspects` and `ack`.
+1. Wait for work with one parked `in` on the `aspects` queue (25 s a call),
+   claiming with a lease of 600 s. One worker parks one `in`, which is 1 global
+   slot and 1 of its claimant's 4 (F19, F21), however many collections the
+   tenant has. `in` cannot select by collection (F24), so the worker takes the
+   oldest task of any collection, as `claimNext` does today
+   (AspectRepository.java:1098-1102), and reads the collection from the body.
+   The rest of a batch is claimed with `inp`, which never parks.
+2. Extract, with a renewer thread that calls `renew` every 120 s on every claim
+   in the batch, and only while the extraction call is inside its own deadline.
+   The worker computes that deadline from the extractor's limits. Each call gets
+   3 attempts, each timed out at 420 s for a batch of 5 (180 s for one
+   document), with sleeps of about 2 s and 5 s between attempts
+   (aspect_extractor.py:1206-1208, :1841), so one sub-batch is at worst about
+   1,270 s; a call over several sub-batches sums them. Past that deadline plus a
+   margin the renewer stops, the leases lapse within 600 s, and the tasks are
+   retried with an attempt counted. A wedged extraction therefore releases its
+   tasks; a renewer that ran on until retention would hold them for days.
+3. On success, write `document_aspects` with the task's `claim_id` and the
+   worker's claimant (E5), then `ack`. A refused write (404 or 403) means the
+   claim was taken over: the worker drops that result, writes nothing and does
+   not `ack`.
 4. On a retryable failure, `nack` with `retry_after_s` from the RDR-163 ladder.
 5. On a non-retryable failure, `nack` to dead. No such `nack` exists today:
    `nack` dead-letters only when the attempt count reaches `max_attempts`
@@ -549,40 +698,65 @@ becomes:
 6. On a self-fault stand-down (the worker is shutting down), `release`, which
    counts no attempt.
 
-A batch of 5 is five claims in sequence. There is no batch `in`, and RDR-205 says
-one lands only when a consumer asks. This RDR does not ask.
+A batch of 5 is five claims, the first by `in` and the rest by `inp`. There is
+no batch `in`, and RDR-205 says one lands only when a consumer asks. This RDR
+does not ask.
 
 **Signatures (illustrative; verify during implementation).**
 
 ```text
-out(template="aspects/<collection>", body={collection, doc_id, content_hash, source},
-    nonce=f"{collection}:{doc_id}", mode="replace", delay_s=0) -> {id, created|replaced|dirtied}
+out(template="aspects", body={collection, source_path, doc_id, content_hash},
+    nonce=doc_id, mode="replace", delay_s=0) -> {id, created|replaced|dirtied}
 nack(id, claim_id, retry_after_s: int | None, dead: bool = False) -> {state}
+POST /v1/aspects/upsert {<aspect fields>, claim_id?, claimant?} -> {written} | 404 | 403
 ```
 
-**Migration.** Engine first (E1 to E4, one Liquibase changeset and template
+**Migration.** Engine first (E1 to E5, one Liquibase changeset and template
 file per the engine-release rules), then a client release.
 
 - A flag `NX_ASPECT_QUEUE=tuples|table` selects the producer.
-- In `tuples` mode the worker still drains the old table first, until it is
-  empty, then only tuples.
-- An upgrade-ladder rung moves `pending` rows into tuples, keeping
-  `next_retry_at` as `available_at`.
-- `failed` rows become dead tuples, so `nx enrich` requeue-failed keeps working
-  through `replace`.
+- In `tuples` mode the worker alternates, one claim from the tuple queue and
+  then one `claim_batch` from the old table, for as long as the table has
+  pending rows, so neither side starves. An old-version client can keep
+  enqueuing to the table during a rolling upgrade (the table's enqueue route
+  stays registered; inferred, not read), and a rule of draining the table first
+  would hold the tuples behind it. The table side ends when the table is
+  drained.
+- An upgrade-ladder rung moves rows one at a time: `out` first, then delete the
+  table row, so a crash leaves a row in both places and never in neither. A
+  repeat is harmless because the id is the `doc_id` and `replace` takes a
+  repeat. `pending` rows move with `next_retry_at` as the `out` delay (E1).
+  `in_progress` rows move as `pending`: their claim is a table status with no
+  tuple claim behind it, so a live old-version worker that finishes one later
+  deletes nothing (`markDone` deletes by `doc_id`) and upserts the aspect
+  again, the double extraction of today.
+- A row that holds `content` (the MCP path) moves as an identity body. The rung
+  drops `content`, and the worker reassembles the text through the manifest
+  (E2, A2). A source that cannot be read drops the task, as `ExtractFail` does
+  today (aspect_worker.py:689-698).
+- `failed` rows do not move. `out` cannot create a dead task: a task becomes
+  dead at two code sites only, the lapsed-lease branch of the claim and
+  `releaseOrDeadLetter` (which `nack` and the sweep's lapse release go through;
+  research-28), and a third path would be new engine surface for a state that is
+  meant to be rare. They stay in the table.
+  `nx aspects requeue-failed` is extended to read the table's failed rows and
+  the dead tasks (reading dead tasks through `rd` is inferred, not read), and
+  re-enqueues each through `out` `replace`.
 
 Retiring the table is a separate, later changeset, after a release with no
-reader.
+reader and with no failed rows left.
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | Fenced claim, lease, renew, attempts, dead state | `TupleRepository` (RDR-205/206/211) | Reuse. |
+| Fenced aspect write | `AspectRepository.upsertAspect`, `liveClaimCondition` | Extend: the upsert checks the claim in its own transaction (E5). |
 | Delayed visibility | `AspectRepository` `next_retry_at` arm | Extend: port the arm into the tuple claim predicate (E1). |
-| Aspect template | `queue.yaml` | Extend: a new template file beside it, not a retune (E3). |
-| Content source for pointer bodies | `document_text(doc_id)` | Reuse for notes, behind a new route or `store_get`; files are read from disk (A2, F17). |
-| Wake | `aspect_wake` file, 300 s poll | Replace with a parked wait (F21). Keep the wake file only while the old table drains. |
+| Aspect template | `queue.yaml` | Extend: a new literal template file beside it, not a retune (E3). |
+| Content source for identity bodies | the worker's empty-content contract (`extract_aspects`, `read_source`) | Reuse as it is: reassembly from T3 chunks through the manifest (E2, A2, F7). `document_text` is not used. |
+| Wake | `aspect_wake` file, 300 s poll | Replace with one parked `in` (F21). Keep the wake file only while the old table drains. |
+| Collection rename, move, purge | `renameQueueCollection`, `completeMove`, collection purge, re-embed registry and counts | Extend each with its tuple form in the same transaction (Technical Design). |
 | Per-tenant worker lease | `aspect_worker_daemon.py` (RDR-173) | Reuse. |
 | Pipeline ownership | `PipelineRepository.create` heartbeat takeover | Keep (Decision 2). |
 
@@ -593,20 +767,24 @@ already has and tests: fencing (RDR-206), counting attempts (RDR-211) and
 cross-instance wake (RDR-205). Hardening the table in place (Alternative 1)
 would rebuild those mechanisms a second time, in a second repository, with a
 second set of tests and doctor rows. The cost of moving is concentrated in E1
-to E4. E1, E2 and E4 are generally useful to any future queue consumer: delay,
-pointer bodies and replace. E3 is a template file.
+to E5. E1 and E4 are generally useful to any future queue consumer: delay and
+replace. E2 needs no engine change, and E3 is a template file. E5 is specific
+to the aspect write route.
 
 **Why the PDF pipeline row stays.** A `lock/<resource>` tuple could replace one
 thing, the decision about who owns a run. It could replace nothing else, and
 keeping both would be worse than today:
 
-1. *The write fence cannot move.* `run_epoch` is checked under the pipeline
-   row's `FOR UPDATE`, in the same transaction as each page and chunk write
-   (F14). A tuple `claim_id` lives in another table and fences only tuple
-   operations. Moving ownership to a lock would keep `run_epoch` anyway, so the
-   run would have two ownership records. A crash between taking the lock and
-   bumping the epoch, or the reverse, leaves them disagreeing: the lock says A
-   and the epoch says B. Every write route would then need to check both.
+1. *The write fence would have to be built twice.* `run_epoch` is checked under
+   the pipeline row's `FOR UPDATE`, in the same transaction as each page and
+   chunk write (F14). A tuple `claim_id` fences another table's write only when
+   that write's route checks the claim in its own transaction, as E5 does for
+   the one aspect route. Moving ownership to a lock would still keep
+   `run_epoch`, because a takeover bumps it in the same UPDATE that claims the
+   row (F14), so the run would have two ownership records. A crash between
+   taking the lock and bumping the epoch, or the reverse, leaves them
+   disagreeing: the lock says A and the epoch says B. Every write route would
+   then need to check both.
 2. *The resume state cannot move.* The counters, `extraction_meta` and the
    WAL are the row (F13), and a tuple body is capped at 4,096 bytes (F11).
 3. *The key reintroduces a fixed defect.* `lock/<content_hash>` would
@@ -644,7 +822,7 @@ as an attempt, and add LISTEN/NOTIFY or a long-poll route for wake-up.
 - Each later hand-built queue would face the same choice again.
 
 **Reason for rejection**: This is the fallback. If Sam rejects the template
-extensions E1 to E4, it closes Gaps 1 to 3 at a lower immediate cost, and this
+extensions E1 to E5, it closes Gaps 1 to 3 at a lower immediate cost, and this
 RDR's Gap list carries over unchanged.
 
 ### Alternative 2: Move onto `queue/aspects` as it is
@@ -671,17 +849,26 @@ cannot hold MCP documents, the 10,000-row cap refuses a bulk index, and the
 
 ### Consequences
 
-- Positive: a reclaimed worker's late result is refused, which closes the
-  documented double extraction (Gap 1).
+- Positive: a worker whose claim another worker took over cannot write its
+  result, because the aspect write checks the claim (E5), and its `ack` is
+  refused too. That closes the overwrite in Gap 1. The `renew` lease keeps a
+  healthy slow batch from being reclaimed at all, which is what limits the
+  wasted second extraction.
 - Positive: a crash-looping document reaches a dead state (Gap 2).
 - Positive: a cross-machine enqueue is seen in about 1 s, instead of up to 300 s
   (Gap 3).
 - Positive: one substrate, and the tuple doctor rows cover the aspect queue
-  once the depth row is widened to see `aspects/` templates (F18). The
+  once the depth row is widened to see the `aspects` template (F18). The
   unclaimed-age row would already go red on a backlog older than an hour.
-- Negative: four engine extensions, an engine release, and a migration rung.
+- Negative: five extensions, four of them engine changes, an engine release,
+  and a migration rung.
 - Negative: the declarative FK cascade becomes a consumer-side check (E2,
-  producer side).
+  producer side), and a collection rename, move or purge needs a tuple form at
+  each engine site that names the queue (Technical Design).
+- Negative: dead tasks now expire after 90 days, where a failed row today never
+  ages out (Dead tasks).
+- Negative: for a note stored in several pieces, the text the model sees
+  changes from the original content to the reassembly (A2).
 - Negative: `rdr__*` documents, which are parsed with no model call, now pay a
   tuple round trip. That cost is negligible next to an engine write.
 
@@ -691,15 +878,21 @@ cannot hold MCP documents, the 10,000-row cap refuses a bulk index, and the
   tenant. **Mitigation**: A1's EXPLAIN spike on a seeded backlog of the
   measured size, before E1 lands.
 - **Risk**: A worker's renewer thread dies, and the lease lapses mid-extraction.
-  **Mitigation**: The late `ack` is refused (404), and the task is retried with
-  an attempt counted. That is the fenced form of today's silent overwrite.
-- **Risk**: Park slots are exhausted (A4). The 16 global slots are shared by
-  every tenant on the engine and the standing parkers are one per live Claude
-  session (F19, F20); an engine with 12 or more live sessions has no room for a
-  parked call per tenant worker. **Mitigation**: Read `park_stats` on the cloud
-  engine at a busy hour, and use one multi-subspace `wait` per worker (F21).
-  Fall back to unparked polling every 5 s, which is still 60× faster than the
-  backstop.
+  **Mitigation**: The late write and the late `ack` are refused (404), and the
+  task is retried with an attempt counted. That is the fenced form of today's
+  silent overwrite.
+- **Risk**: A wedged extraction keeps its claims alive. Today such a row is
+  reclaimed 300 s after the claim (F3). **Mitigation**: The renewer renews every
+  claim in the batch only while the extraction call is inside its own deadline,
+  and stops after it (Worker side, step 2). The leases then lapse within 600 s.
+- **Risk**: Park slots are exhausted (A4). The global slots (default 16; the
+  cloud measured 32, research-27) are shared by every tenant on the engine and
+  the standing parkers are one per live Claude session (F19, F20); on the default
+  16 an engine with 12 or more live sessions has no room for a parked call per
+  tenant worker. **Mitigation**: One `aspects` queue per tenant means one parked
+  `in` per worker, 1 slot of the global budget (F21). Read `park_stats` on the
+  cloud engine at a busy hour. Fall back to unparked polling every 5 s, which is
+  still 60× faster than the backstop.
 
 ### Failure Modes
 
@@ -707,22 +900,29 @@ cannot hold MCP documents, the 10,000-row cap refuses a bulk index, and the
   producer and logged with the collection. It never drops silently.
 - A task whose document vanished is acked as dropped, with
   `aspect_task_dropped_missing_doc`.
-- A dead task shows on `nx enrich` failed listings and, once the depth row is
-  widened to see `aspects/` templates (F18), on the tuple doctor row. The
+- A write refused for a lost claim (404 or 403) is dropped by its worker, with
+  no retry from that worker. The task's new holder, or the lease clock, decides
+  what happens next.
+- A dead task shows in `nx aspects requeue-failed --dry-run`, extended to read
+  dead tasks, and, once the depth row is widened to see the `aspects` template
+  (F18), on the tuple doctor row. It stays for the template's 90-day retention
+  and is then removed by the sweep, which failed table rows never were. The
   requeue path is `replace`.
-- Diagnosis: `tuple_list` / `tuple_stats` on `aspects/<collection>` show
-  available, claimed and dead counts. The claim log shows each attempt.
+- Diagnosis: `tuple_list` / `tuple_stats` on `aspects` show available, claimed
+  and dead counts. The claim log shows each attempt.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] Settle what is still open: run the A1 spike, read `park_stats` for A4b,
-  and choose the queue shape (F21). A2, A3 and A4a and c are verified by source.
+- [ ] Settle what is still open: run the A1 spike, read `park_stats` at a busy
+  hour for A4b (research-27 has one reading), and extract a sample of
+  multi-piece notes both ways for A2. A3, A4a and A4c are verified by source.
+  The queue shape is decided: one `aspects` queue per tenant (E3).
 - [ ] Measure a real bulk backlog. Index one large collection and record the
-  peak queue depth and the drain time. E3's limits are set from that, not
-  guessed.
-- [ ] The engine freeze is lifted. E1 to E4 follow the engine-release rules.
+  peak queue depth and the drain time. E3's `max_live_rows` is set from that,
+  not guessed.
+- [ ] E1 to E5 ship as one engine release by the engine-release procedure.
 
 ### Minimum Viable Validation
 
@@ -735,31 +935,43 @@ and to crash the worker on document 13.
   interval apart.
 - Document 13 dead-letters after the attempt cap.
 - A second worker started mid-run claims nothing already claimed.
-- A late `ack` from a killed worker is refused.
+- A worker whose claim a second worker took over writes nothing: its
+  `document_aspects` write answers 404 and changes no row, its `ack` answers 404,
+  and the row holds the second worker's extraction.
+- With the old table holding pending rows and the tuple queue holding tasks, both
+  drain, and neither is held back by the other.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: Engine extensions E1 to E4
+#### Step 1: Engine extensions E1 to E5
 
 - One changeset for `available_at`.
 - The claim predicate arm.
-- `out` `delay_s` and `mode=replace`.
+- `out` `delay_s` and `mode=replace`, which restarts the retention clock of a
+  consumed or dead row.
 - `nack` `retry_after_s`.
 - The `dirty` flag and the ack path that honours it (new, `release`-shaped; F23).
-- The `aspects/<collection>` template file, its entry in the loader's
-  classpath list, and the widened doctor depth row (F18).
-- A route or a client path for a note's text (F17).
+- The `aspects` template file, its entry in the loader's classpath list, and the
+  widened doctor depth row (F18).
+- `claim_id` and `claimant` on `POST /v1/aspects/upsert`, checked in the upsert's
+  transaction under the claim row's lock (E5).
+- The tuple forms of rename, move, purge, the re-embed registry entry and the
+  residue counts (Technical Design).
 
-Each comes with a Java test, plus a spike for A1.
+Each comes with a Java test, plus a spike for A1. The E5 test includes a
+re-take that races the check and the write.
 
 #### Step 2: Client producer and worker
 
 `HttpAspectQueue` is behind the flag. The worker loop and renewer are as in
-Technical Design. The old table drains first.
+Technical Design. The worker alternates between the tuple queue and the old
+table while the table has pending rows.
 
 #### Step 3: Migration rung
 
-An upgrade-ladder rung moves `pending` and `failed` rows to tuples.
+An upgrade-ladder rung moves `pending` and `in_progress` rows to tuples, as
+Technical Design describes. `failed` rows stay in the table until they are
+re-enqueued.
 
 ### Phase 2: Operational Activation
 
@@ -772,7 +984,8 @@ one managed-service tenant. Retiring the table is a later changeset.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| `aspects/<collection>` tuples | `tuple_list` (in scope) | `tuple_stats` (in scope) | `replace`, and the claim-time drop for a purged document (no purge route exists, F22) | Doctor row (in scope) | Postgres backup (existing) |
+| `aspects` tasks | `tuple_list` (in scope) | `tuple_stats` (in scope) | `replace`, the claim-time drop for a deleted document (no client delete route exists, F22), and the engine's own purge and rename statements for a collection | Doctor row (in scope) | Postgres backup (existing) |
+| Dead `aspects` tasks | `nx aspects requeue-failed --dry-run`, extended to read them | the claim log | removed by the sweep at 90 days | Doctor row (in scope) | Postgres backup (existing) |
 
 ### New Dependencies
 
@@ -783,21 +996,47 @@ None.
 - **Scenario**: A task is nacked with `retry_after_s=60`. **Verify**: it is not
   claimable at 59 s and is claimable at 60 s (database clock).
 - **Scenario**: A worker's lease lapses mid-extraction, and a second worker
-  claims the task. **Verify**: the first worker's `ack` answers 404 and writes
-  no `document_aspects` row.
+  claims the task. **Verify**: the first worker's `document_aspects` write
+  answers 404 and changes no row, its `ack` answers 404, and the row holds the
+  second worker's result.
+- **Scenario**: A worker's lease lapses and nobody takes the task. **Verify**:
+  its write and its `ack` are accepted, as `ack` accepts a lapsed claim today.
+- **Scenario**: A batch of 5 is extracted for longer than the 600 s lease but
+  inside the call's deadline. **Verify**: all 5 claims are renewed and none is
+  lost. Then hang the extraction past the deadline. **Verify**: renewing stops,
+  the leases lapse, and the tasks are retried with an attempt counted.
 - **Scenario**: A task's worker dies on every claim. **Verify**: it reaches
-  `dead` after the cap, and `nx enrich` requeue-failed revives it.
+  `dead` after the cap, and `nx aspects requeue-failed` revives it with a
+  restarted retention clock.
+- **Scenario**: A dead task passes its retention. **Verify**: the sweep removes
+  it, and it no longer counts against `max_live_rows`.
 - **Scenario**: Re-enqueue during extraction (`replace` on a claimed row).
   **Verify**: the `ack` returns it to available, and the next claim sees the
   new `content_hash`.
-- **Scenario**: An MCP-stored note is enqueued. **Verify**: the body is a
-  pointer under 4,096 bytes, and the worker's text equals today's `content`
-  (A2). Use a multi-piece note with leading and trailing whitespace, CRLF and
-  a repeated paragraph, and compare the rebuilt text byte for byte (F17).
-- **Scenario**: More collections than 4 are active for one worker. **Verify**:
-  no park is refused with `ParkCapExceededException` (F21).
-- **Scenario**: A catalog document is purged with a task queued. **Verify**: the
-  task is acked as dropped when a worker claims it (no purge route exists, F22).
+- **Scenario**: An MCP-stored note is enqueued. **Verify**: the body is an
+  identity body under 4,096 bytes with no document text, and the worker's text
+  is the manifest reassembly (A2). Use a multi-piece note with leading and
+  trailing whitespace, CRLF and a repeated paragraph, and record how the
+  reassembled text differs from the original (F17); a one-piece note matches
+  byte for byte.
+- **Scenario**: More than 4 collections are active for one worker. **Verify**:
+  no park is refused with `ParkCapExceededException` (F21), and the worker holds
+  one parked `in`.
+- **Scenario**: A catalog document is deleted with a task queued. **Verify**: the
+  task is acked as dropped when a worker claims it (no client delete route
+  exists, F22).
+- **Scenario**: A collection is renamed with one available and one claimed task
+  queued, and again with a re-embed move of one document. **Verify**: the next
+  claim of each carries the new collection, a re-enqueue after the rename
+  replaces the same task, and a rename under a re-embed job is refused as today.
+- **Scenario**: A collection is purged with tasks queued. **Verify**: its
+  unconsumed tasks are gone in the purge's own transaction and another
+  collection's tasks are untouched.
+- **Scenario**: The rung runs over pending, in-progress, failed and
+  content-carrying rows. **Verify**: pending and in-progress rows become tasks
+  once each, with `next_retry_at` as the delay; content-carrying rows become
+  identity bodies; failed rows stay in the table and `nx aspects requeue-failed`
+  re-enqueues them; a crash between `out` and the table delete leaves one task.
 - **Scenario**: Cross-instance enqueue to a parked worker. **Verify**: claimed
   within 2 s.
 - **Scenario**: A bulk index at the measured backlog size. **Verify**: no `out`
@@ -807,7 +1046,7 @@ None.
 
 ### Testing Strategy
 
-Java tests for E1 to E4 against the real Postgres container. Python tests for
+Java tests for E1 to E5 against the real Postgres container. Python tests for
 the producer and worker against the engine substrate the unit suite already
 boots, never against a fake queue. The MVV above is a scenario-journey test.
 
@@ -829,9 +1068,10 @@ adding a separate template, not by changing it.
 
 ### Assumption Verification
 
-A2, A3, A4a and A4c are verified by source reading. A1 (the EXPLAIN spike) and
-A4b (`park_stats` at a busy hour) are not, and remain prerequisites, listed
-above.
+A3, A4a and A4c are verified by source reading. A2 is re-scoped: its contract
+is read, and whether the reassembled text suits a multi-piece MCP note is not
+settled. A1 (the EXPLAIN spike) and A4b (`park_stats` at a busy hour) are not,
+and remain prerequisites, listed above.
 
 #### API Verification
 
@@ -839,7 +1079,9 @@ above.
 | --- | --- | --- |
 | `TupleRepository` claim, ack, nack, renew, release | nexus-service | Source Search |
 | `AspectRepository.claimNext`, `markRetry` | nexus-service | Source Search |
-| `document_text(doc_id)` | nexus-service (SQL) | Source Search (F17): returns rows, no route; true for notes only |
+| `document_text(doc_id)` | nexus-service (SQL) | Source Search (F17): returns rows, no route; true for notes only; not used by the design |
+| `POST /v1/aspects/upsert` with `claim_id`, `liveClaimCondition` | nexus-service | Source Search (research-28): one transaction, no lease-time term |
+| `extract_aspects` empty-content contract, `read_source` | nx | Source Search (F7, research-28) |
 | `/v1/tuples` routes, `TupleWaitRegistry` caps | nexus-service | Source Search (F19, F22) |
 
 ### Scope Verification
@@ -850,6 +1092,8 @@ The MVV is in scope for Phase 1 and runs before the default flip.
 
 - **Versioning**: Engine first, then a client gated on the engine version. The
   wire contract change is declared in the wire-contract ledger.
+- **Collection rename, move and purge**: each engine site that names the queue
+  by collection gets a tuple form in its own transaction (Technical Design).
 - **Build tool compatibility**: N/A
 - **Licensing**: N/A
 - **Deployment model**: Local and managed alike, since both run the same engine.
