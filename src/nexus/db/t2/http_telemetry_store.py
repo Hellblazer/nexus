@@ -543,7 +543,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     def _supports_nx_answer_run_summary(self) -> bool:
         """RDR-232 Phase 3 (nexus-jypmj.3.5): does the engine THIS store talks to keep a ``run_summary`` on
-        the run row (``GET /version``'s ``nx_answer_run_summary_supported``, engine-service 0.1.166+)?
+        the run row (``GET /version``'s ``nx_answer_run_summary_supported``, engine-service 0.1.167+)?
 
         The strict reading: only a JSON ``true`` counts. An absent flag, a non-boolean, a non-2xx response
         and a transport failure all read as unsupported, which is the safe direction because an engine that

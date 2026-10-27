@@ -5945,13 +5945,13 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   repair, cost and latency; no question text, and with `trace=False` no facet text
   or source hint) rides on the run's `/record` and `/complete` write, in the same
   row, and is sent only when the engine's `/version` advertises
-  `nx_answer_run_summary_supported` (engine-service-v0.1.166 and later).
+  `nx_answer_run_summary_supported` (engine-service-v0.1.167 and later).
   `persistence` is `persisted` (the run row was read back and carries a summary
   of the same version and a matching digest over canonical JSON), `dropped`
   (written, but the row came back without it, with another version or digest, or
   the write failed; `detail` says which, and a warning is logged), `unsupported`
   (the engine does not advertise the flag, so nothing was sent: the state on
-  every engine older than v0.1.166, and on the public edge until it allowlists the
+  every engine older than v0.1.167, and on the public edge until it allowlists the
   flag), `unverified` (sent, but no readback was asked for or the readback could
   not be read; a text call, `structured=False`, reads nothing back) or
   `not_recorded` (no record was written, or the summary could not be built).

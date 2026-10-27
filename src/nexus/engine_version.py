@@ -760,10 +760,10 @@ DUAL_EMBEDDER_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 161)
 #: construction" holds only when the check fires.
 #:
 #: ``(0, 0, 0)`` would mean UNSET (the guard inert: no probe, no refusal). Set to
-#: engine-service-v0.1.166, the tag that carries note-uri-001-1 (nexus-bivz3.20). Every script that stamps the gate jar stamps ``max(REQUIRED_ENGINE_VERSION,
+#: engine-service-v0.1.167, the tag that carries note-uri-001-1 (nexus-bivz3.20; v0.1.166 was tagged but never published, its mac-arm64 leg having failed on an already-pruned JDK). Every script that stamps the gate jar stamps ``max(REQUIRED_ENGINE_VERSION,
 #: NOTE_URI_MIN_ENGINE_VERSION)``, so a develop install pinned to an older engine refuses note writes
 #: until the engine tag, and the gate jar itself is never refused.
-NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 166)
+NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 167)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

@@ -111,9 +111,11 @@ public class NativeTrustStore {
                 fail("kept root " + alias + " (" + subject + ") is in the distrusted hierarchy: add it to DROP");
             }
         }
-        if (dropped == 0) {
-            fail("none of " + DROP + " is in the build JDK's cacerts: check the aliases against this JDK");
-        }
+        // A JDK whose cacerts was already pruned of these roots (the CVE-2026-91403 pool sweep, and
+        // patched GraalVM builds) carries none of them. That is the end state this step exists to
+        // reach, so it passes; the subject check above is what fails a build that keeps a root of
+        // the distrusted hierarchy under a name DROP does not list.
+        String absent = dropped == 0 ? " (already absent from this JDK)" : "";
         // Stored the way the JDK stores cacerts: certificates and MAC unprotected, so the builder
         // (and a run-time -Djavax.net.ssl.trustStore) reads every root with no password. A store
         // written with PKCS12's defaults loads with ZERO roots when no trustStorePassword is given.
@@ -123,8 +125,8 @@ public class NativeTrustStore {
         try (OutputStream os = new FileOutputStream(out.toFile())) {
             pruned.store(os, PASSWORD);
         }
-        System.out.printf("native trust store: %d roots from %s, %d of %d named roots dropped, written to %s%n",
-                pruned.size(), System.getProperty("java.home"), dropped, DROP.size(), out);
+        System.out.printf("native trust store: %d roots from %s, %d of %d named roots dropped%s, written to %s%n",
+                pruned.size(), System.getProperty("java.home"), dropped, DROP.size(), absent, out);
     }
 
     static void verify(KeyStore jdk, Path binary) throws GeneralSecurityException, IOException {
@@ -147,7 +149,14 @@ public class NativeTrustStore {
             }
         }
         if (checkedDrop == 0) {
-            problems.add("checked none of " + DROP + ": this JDK names them differently");
+            // This JDK no longer ships any of them (already pruned). Nothing named can be embedded;
+            // what could be is a root of the same hierarchy under another alias, so check by subject.
+            for (String alias : java.util.Collections.list(jdk.aliases())) {
+                String subject = ((X509Certificate) jdk.getCertificate(alias)).getSubjectX500Principal().getName();
+                if (DISTRUSTED_SUBJECT.matcher(subject).find()) {
+                    problems.add("this JDK carries distrusted root " + alias + " (" + subject + ") under a name DROP does not list");
+                }
+            }
         }
         if (!problems.isEmpty()) {
             fail(binary + " " + String.join("; ", problems));

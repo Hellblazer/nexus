@@ -3,7 +3,7 @@
 
 An in-process fake that behaves like the two engine generations the client meets:
 
-* **new** (engine-service 0.1.166+): ``/version`` advertises ``nx_answer_run_summary_supported``; the
+* **new** (engine-service 0.1.167+): ``/version`` advertises ``nx_answer_run_summary_supported``; the
   summary is stored on the run row and ``GET /query`` returns it per row (``null`` when none).
 * **old** (0.1.165, deployed): no flag, and the handler reads named fields only, so an unknown
   ``run_summary`` key is dropped with HTTP 200 and ``/query`` rows have no ``run_summary`` key at all.

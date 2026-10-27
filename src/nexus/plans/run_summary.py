@@ -83,7 +83,7 @@ _EXACT_INT_LIMIT = 2**53
 
 _COVERAGE_STATES = ("complete", "partial", "unavailable", "unassessed")
 
-#: ``unsupported`` is the normal answer on every engine that predates 0.1.166, so its warning is given once
+#: ``unsupported`` is the normal answer on every engine that predates 0.1.167, so its warning is given once
 #: per process rather than once per call (the envelope says it on every structured call). Tests reset it.
 _unsupported_warned = False
 
