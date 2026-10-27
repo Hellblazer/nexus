@@ -151,7 +151,7 @@ def _extraction_result(page_count: int = 1):
 
 
 def _extract_side_effect(page_count: int, result):
-    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
         for i in range(page_count):
             if on_page:
                 on_page(i, f"Page {i} 2t63u gate content.", {"page_number": i + 1})

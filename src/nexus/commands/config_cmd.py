@@ -56,6 +56,25 @@ def _echo_reembed_hint_if_profile_changed(before: str | None) -> None:
         click.echo(REEMBED_HINT)
 
 
+#: RDR-237: the two settings whose product is one MinerU attempt's longest silent stretch.
+_MINERU_BOUND_KEYS: frozenset[str] = frozenset({"pdf.mineru_page_timeout_s", "pdf.mineru_page_batch"})
+
+
+def _warn_if_mineru_bound_exceeded(key: str) -> None:
+    """After a change to a MinerU time limit, warn when the pair would make a PDF run refuse to start.
+
+    A warning and not a refusal: the value is stored, because the other half of the pair may be about
+    to change too (``nx config set`` takes one key at a time). ``PDFExtractor`` is where the pair is
+    enforced."""
+    if key not in _MINERU_BOUND_KEYS:
+        return
+    from nexus.config import mineru_attempt_bound_problem  # noqa: PLC0415 — deliberate function-scoped import (avoid circular import)
+
+    problem = mineru_attempt_bound_problem()
+    if problem is not None:
+        click.echo(f"Warning: {problem.rstrip('.')}. A MinerU PDF run will refuse to start until this is fixed.", err=True)
+
+
 def _get_config_value(dotted_key: str) -> str | None:
     """Look up a dotted key (e.g. ``pdf.mineru_server_url``) in the merged config.
 
@@ -179,6 +198,7 @@ def config_set(key_value: str, value: str | None, from_stdin: bool, from_file: P
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
     click.echo(f"Set {key}  →  {_global_config_path()}")
+    _warn_if_mineru_bound_exceeded(key)
     if inline and value.strip() and _is_secret(key):
         click.echo(
             f"Note: {key} was on the command line, where other processes can read "

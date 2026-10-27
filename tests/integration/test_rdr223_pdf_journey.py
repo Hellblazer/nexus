@@ -88,7 +88,7 @@ class _FakeExtractor:
     calls: list[str] = []
 
     def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
-                allow_degraded=False):
+                allow_degraded=False, on_heartbeat=None):
         self.calls.append(str(pdf_path))
         pos, bounds = 0, []
         for i, line in enumerate(self.lines):

@@ -65,6 +65,10 @@ _ENSURE_HEALTH_WAIT_S = 120.0
 
 _HEALTH_POLL_S = 2.0
 
+#: RDR-237: a caller's progress callback is called at most this often while a wait runs. A pipeline
+#: row goes stale after 300 s without a progress write, and the wait above is up to 120 s.
+HEARTBEAT_EVERY_S = 60.0
+
 #: NX_MINERU_AUTOSTART values that disable autostart (review H1: mirror the
 #: NX_ASPECT_WORKER_AUTOSTART allow-list so a stray "false" in a shell
 #: disables rather than silently force-enabling past an explicit config).
@@ -162,12 +166,20 @@ def ensure_mineru_running(
     _monotonic: Callable[[], float] = time.monotonic,
     _wall_time: Callable[[], float] = time.time,
     _sleep: Callable[[float], None] = time.sleep,
+    heartbeat: Callable[[], None] | None = None,
 ) -> str | None:
     """Return a healthy MinerU server URL, spawning one if permitted.
 
     ``None`` means "no server available" — the caller degrades exactly as
     it always has (the in-process fallback); this function only ever adds
     the recovery path, never a new failure mode.
+
+    *heartbeat* (RDR-237) is called when the health wait starts and then at
+    most every :data:`HEARTBEAT_EVERY_S` while it runs, so a caller that owns
+    a pipeline row keeps the row alive through a wait of up to two minutes. It
+    is called outside every ``try`` here: what it raises (a fenced run, a
+    cancel) ends the wait and reaches the caller, and is never read as the
+    lifecycle failing.
 
     ``_monotonic``/``_wall_time``/``_sleep`` are a test seam (nexus-dee61):
     production always uses the real ``time`` functions; tests can inject a
@@ -251,7 +263,13 @@ def ensure_mineru_running(
                 return None
             deadline = min(deadline, _monotonic() + remaining)
 
+    last_beat = _monotonic()
+    if heartbeat is not None:
+        heartbeat()
     while _monotonic() < deadline:
+        if heartbeat is not None and _monotonic() - last_beat >= HEARTBEAT_EVERY_S:
+            last_beat = _monotonic()
+            heartbeat()
         url = get_mineru_server_url()  # re-resolve: pid file has the port
         if _healthy(url):
             _clear_warming_marker()

@@ -69,7 +69,7 @@ def _er(page_count: int = 3) -> ExtractionResult:
 
 def _fx(n: int = 3, result: ExtractionResult | None = None, text_fn=None):
     r = result or _er(n)
-    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+    def extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
         for i in range(n):
             txt = text_fn(i) if text_fn else f"Page {i} content."
             if on_page:
@@ -281,7 +281,7 @@ class TestExtractorLoop:
         result = _er(3)
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
-            def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+            def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
                 for i in range(3):
                     if on_page:
                         on_page(i, f"Page {i} text content.",
@@ -296,7 +296,7 @@ class TestExtractorLoop:
     def test_cancel_raises_pipeline_cancelled(self, db: HttpPipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         cancel = threading.Event()
-        def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+        def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
             for i in range(10):
                 if on_page:
                     on_page(i, f"Page {i}", {"page_number": i + 1, "text_length": 6})
@@ -348,7 +348,7 @@ class TestExtractorLoop:
         """
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
-            def fail_mid(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+            def fail_mid(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
                 for i in range(10):
                     if i == 6:
                         raise RuntimeError("boom mid-extraction")
@@ -1683,7 +1683,7 @@ class TestPipelineIndexPdf:
         """
         pages_done: list[int] = []
 
-        def slow_extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+        def slow_extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
             for i in range(8):
                 time.sleep(0.05)
                 on_page(i, f"page {i} text.", {"page_number": i + 1, "text_length": 12})
@@ -2175,7 +2175,7 @@ class TestDoneSignalsMeanSuccess:
         six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
 
         def _extract_then_fail(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
-                               allow_degraded=False):
+                               allow_degraded=False, on_heartbeat=None):
             # Pages arrive over time, as a real extraction delivers them, so the chunker sees new
             # pages while extraction is still pending and chunks the stable prefix.
             for i in range(3):

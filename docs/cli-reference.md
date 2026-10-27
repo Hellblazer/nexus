@@ -222,12 +222,22 @@ Or add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global) direc
 pdf:
   extractor: mineru   # auto | docling | mineru
   mineru_page_batch: 1          # pages per MinerU subprocess (memory isolation)
-  mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range)
+  mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range); × mineru_page_batch must be at most 240
   mineru_memory_ceiling_mb: 0   # 0 = disabled; Linux-only RLIMIT_AS cap (see below)
   ladder_breaker: 3             # consecutive pages failing both MinerU rungs with one cause that stop a document; 0 = off
 ```
 
 The `--extractor` flag overrides the config when passed explicitly.
+
+**Time limit of one MinerU attempt (RDR-237).** `mineru_page_timeout_s` times
+`mineru_page_batch` is the longest one attempt runs without a progress write, and a
+streaming run's pipeline row is taken over after 300 s of silence. A MinerU run
+refuses to start when the product is above 240 s, naming both settings (the commands
+exit 1); the defaults (180 × 1) pass, and a batch of 4 pages needs 60 s or less per
+page. `nx config set` warns when a change would cross the limit. A server request that
+times out sends its page to the next rung on the subprocess path; the server is
+restarted after the first such timeout on a one-slot server (macOS) or after two
+consecutive pages on a server with more slots, and only a server nexus started itself.
 
 **MinerU OOM resilience (RDR-148, RDR-237).** Formula-dense pages can OOM-kill
 MinerU's formula model. The recovery ladder: a failed multi-page batch bisects

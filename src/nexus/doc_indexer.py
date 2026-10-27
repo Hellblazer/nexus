@@ -2362,6 +2362,11 @@ def _pdf_chunks(
     if git_meta is None:
         from nexus.indexer_utils import detect_git_metadata  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         git_meta = detect_git_metadata(pdf_path)
+    # RDR-237: no ``on_heartbeat`` here, on purpose. The heartbeat stamps a pipeline row's
+    # ``updated_at`` so a concurrent run does not take the row over, and this path has no
+    # pipeline row (it extracts, then chunks and embeds in memory). The RDR's Progress section
+    # says both callers pass one; the bead (nexus-tr1rj.2) records the decision that there is
+    # nothing to stamp.
     result = PDFExtractor().extract(
         pdf_path, extractor=extractor, on_formula_oom=on_formula_oom,
         allow_degraded=allow_degraded_extraction,

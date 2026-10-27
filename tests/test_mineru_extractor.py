@@ -207,6 +207,7 @@ class TestMineruOrchestration:
 
         with self._mock_pymupdf(12), self._mock_do_parse(), \
              patch("nexus.config.get_mineru_page_batch", return_value=5), \
+             patch("nexus.config.get_mineru_page_timeout_s", return_value=30), \
              patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso:
             result = extractor._extract_with_mineru(dummy_pdf)
 
@@ -226,6 +227,7 @@ class TestMineruOrchestration:
 
         with self._mock_pymupdf(4), self._mock_do_parse(), \
              patch("nexus.config.get_mineru_page_batch", return_value=2), \
+             patch("nexus.config.get_mineru_page_timeout_s", return_value=30), \
              patch.object(extractor, "_mineru_run_isolated", side_effect=[batch1, batch2]):
             result = extractor._extract_with_mineru(dummy_pdf)
 

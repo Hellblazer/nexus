@@ -374,6 +374,15 @@ def _is_registered_server_url(url: str, info: dict[str, Any]) -> bool:
     return parsed.port is not None and parsed.port == info.get("port")
 
 
+def is_registered_server_url(url: str | None, info: dict[str, Any] | None) -> bool:
+    """Whether *url* is the registered server's own address (the pid file's port on loopback).
+
+    An operator-pinned or remote server is not ours to restart; the timeout rule of RDR-237 asks
+    this before it replaces a server by pid, so a slow server it was only talking to is never the
+    one it kills."""
+    return bool(url) and bool(info) and _is_registered_server_url(url, info)  # type: ignore[arg-type]
+
+
 def server_is_broken(url: str, error_text: str, info: dict[str, Any] | None) -> bool:
     """Whether a task failure at *url* with *error_text* is the REGISTERED
     server being broken, as opposed to one bad request.

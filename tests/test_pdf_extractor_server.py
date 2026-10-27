@@ -619,6 +619,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(pages), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=batch),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso,
         ):
             extractor._extract_with_mineru(dummy_pdf)
@@ -656,6 +657,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(5), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
         ):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -677,6 +679,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(5), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
         ):
             extractor._extract_with_mineru(dummy_pdf)
@@ -726,6 +729,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(5), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated),
             patch("nexus.pdf_extractor._log") as mock_log,
         ):
@@ -744,6 +748,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(10), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
         ):
             result = extractor._extract_with_mineru(dummy_pdf)

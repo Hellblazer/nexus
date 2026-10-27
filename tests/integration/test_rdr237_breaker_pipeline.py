@@ -56,7 +56,7 @@ class _TrippingExtractor(_FakeExtractor):
     trip_after: int | None = None
 
     def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
-                allow_degraded=False):
+                allow_degraded=False, on_heartbeat=None):
         if self.trip_after is None:
             return super().extract(pdf_path, extractor=extractor, on_page=on_page)
         self.calls.append(str(pdf_path))

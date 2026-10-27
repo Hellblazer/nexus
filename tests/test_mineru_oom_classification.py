@@ -240,6 +240,8 @@ def test_multipage_batch_retry_degrades_only_oom_page() -> None:
         "pymupdf.open", return_value=mock_ctx,
     ), patch(
         "nexus.config.get_mineru_page_batch", return_value=2,
+    ), patch(
+        "nexus.config.get_mineru_page_timeout_s", return_value=30,
     ), patch.object(
         ext, "_mineru_run_isolated", side_effect=fake_isolated,
     ):
@@ -443,6 +445,8 @@ def test_failed_batch_bisects_before_per_page() -> None:
         "pymupdf.open", return_value=mock_ctx,
     ), patch(
         "nexus.config.get_mineru_page_batch", return_value=4,
+    ), patch(
+        "nexus.config.get_mineru_page_timeout_s", return_value=30,
     ), patch.object(ext, "_mineru_run_isolated", side_effect=fake_isolated):
         result = ext._extract_with_mineru(Path("/tmp/math.pdf"), formula_count=9)
 

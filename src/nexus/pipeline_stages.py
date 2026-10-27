@@ -113,6 +113,9 @@ def extractor_loop(
     """
     state = db.get_pipeline_state(content_hash)
     pages_extracted_at_start = state["pages_extracted"] if state else 0
+    # RDR-237: the counter the row held when this run began. The resume checks below can lower
+    # ``pages_extracted_at_start`` (a wiped buffer), but a heartbeat must never lower the row.
+    row_pages_extracted = pages_extracted_at_start
 
     # Resume fast path: if all pages already in buffer, skip extraction.
     if (state and state["total_pages"] is not None
@@ -170,6 +173,9 @@ def extractor_loop(
         # re-extract.
         pages_extracted_at_start = len(db.read_pages(content_hash))
 
+    #: Pages settled so far, as the counter counts them (a list so ``on_page`` can move it).
+    settled = [pages_extracted_at_start]
+
     def on_page(page_index: int, page_text: str, page_metadata: dict) -> None:
         if cancel.is_set():
             raise PipelineCancelled("pipeline cancelled")
@@ -177,12 +183,27 @@ def extractor_loop(
             return
         db.write_page(content_hash, page_index, page_text, metadata=page_metadata)
         db.update_progress(content_hash, pages_extracted=page_index + 1)
+        settled[0] = max(settled[0], page_index + 1)
+
+    def on_heartbeat() -> None:
+        # RDR-237: called by the extractor at the start of every MinerU attempt and during its two
+        # waits, so a long attempt (up to 240 s) does not let the row go stale (5 min). The
+        # ladder holds some pages back from ``on_page``, so ``on_page`` alone is too sparse.
+        # It re-sends the counter the row already has, never a lower one. How it reaches the
+        # row's ``updated_at``: ``update_progress`` flushes at once only when no page or chunk is
+        # pending; while a batch is pending the write rides the next flush, which the chunker
+        # triggers about every 0.5 s through ``read_pages_from``. A stop is checked first, like
+        # ``on_page`` does, so a cancel ends a long wait; what this raises (PipelineCancelled,
+        # PipelineRunFenced from the flush) stops the extraction and never moves a page down a rung.
+        if cancel.is_set():
+            raise PipelineCancelled("pipeline cancelled")
+        db.update_progress(content_hash, pages_extracted=max(row_pages_extracted, settled[0]))
 
     ext = PDFExtractor()
     try:
         result = ext.extract(
             pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
-            allow_degraded=allow_degraded_extraction,
+            allow_degraded=allow_degraded_extraction, on_heartbeat=on_heartbeat,
         )
     except PipelineCancelled:
         return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})

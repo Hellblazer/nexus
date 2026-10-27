@@ -57,7 +57,7 @@ def writer(monkeypatch):
     return install_streaming_writer(monkeypatch)
 
 
-def _extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+def _extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
     if on_page:
         on_page(0, "Page 0 content.", {"page_number": 1, "text_length": 15})
     return ExtractionResult(

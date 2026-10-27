@@ -227,8 +227,32 @@ def _coerce_ladder_breaker(value: Any) -> int:
     return _LADDER_BREAKER_FLOOR
 
 
+class PdfConfigError(ValueError):
+    """A ``[pdf]`` integer setting holds a value that is not an integer (RDR-237).
+
+    The message names the setting, which the bare ``ValueError`` of ``int("x")`` did not: a
+    run that stopped on it said ``invalid literal for int() with base 10: 'x'`` and nothing
+    about which key held it.
+    """
+
+
+def _pdf_int(pdf: dict, key: str, default: int, *, floor: int) -> int:
+    """``pdf[key]`` as an int of at least *floor*; a value that is no integer raises
+    :class:`PdfConfigError` naming ``pdf.<key>``. ``nx config set`` stores every value as a
+    string, so ``"180"`` parses."""
+    raw = pdf.get(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise PdfConfigError(f"pdf.{key} must be an integer, got {raw!r}") from exc
+    return max(floor, value)
+
+
 def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
-    """Load PDF config. Invalid ``extractor`` falls back to ``"auto"``."""
+    """Load PDF config. Invalid ``extractor`` falls back to ``"auto"``.
+
+    A ``[pdf]`` integer key that holds no integer raises :class:`PdfConfigError` (a
+    ``ValueError``) naming the key."""
     pdf = load_config(repo_root=repo_root).get("pdf", {})
     extractor = pdf.get("extractor", "auto")
     if extractor not in ("auto", "docling", "mineru"):
@@ -248,9 +272,9 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
             pdf.get("mineru_table_enable", True), key="pdf.mineru_table_enable", default=True,
             event="pdf_config_malformed",
         ),
-        mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
-        mineru_memory_ceiling_mb=max(0, int(pdf.get("mineru_memory_ceiling_mb", 0))),
-        mineru_page_timeout_s=max(1, int(pdf.get("mineru_page_timeout_s", 180))),
+        mineru_page_batch=_pdf_int(pdf, "mineru_page_batch", 1, floor=1),
+        mineru_memory_ceiling_mb=_pdf_int(pdf, "mineru_memory_ceiling_mb", 0, floor=0),
+        mineru_page_timeout_s=_pdf_int(pdf, "mineru_page_timeout_s", 180, floor=1),
         ladder_breaker=_coerce_ladder_breaker(pdf.get("ladder_breaker", _LADDER_BREAKER_FLOOR)),
     )
 
@@ -608,6 +632,38 @@ def get_mineru_page_timeout_s(repo_root: Path | None = None) -> int:
 def get_pdf_ladder_breaker(repo_root: Path | None = None) -> int:
     """RDR-237 systemic-failure threshold: 0 = off, else 3 or more."""
     return get_pdf_config(repo_root).ladder_breaker
+
+
+#: RDR-237: the longest one MinerU attempt may run without a progress write, in seconds. A pipeline
+#: row goes stale after 5 minutes without one (``STALE_THRESHOLD`` in ``db.http_pipeline_client``),
+#: and a concurrent run takes over a stale row, so the longest attempt, ``mineru_page_timeout_s``
+#: times ``mineru_page_batch``, keeps a 60 s margin under it.
+MINERU_ATTEMPT_BOUND_S: int = 240
+
+
+def mineru_attempt_bound_problem(repo_root: Path | None = None) -> str | None:
+    """Why the MinerU time limits cannot be used as set, or ``None`` when they can (RDR-237).
+
+    Two reasons, each naming the settings: one of ``pdf.mineru_page_timeout_s`` and
+    ``pdf.mineru_page_batch`` holds no integer, or their product exceeds
+    :data:`MINERU_ATTEMPT_BOUND_S`. The getters are read apart during a run and the loader falls
+    back rather than checking, so this is the one place the pair is judged; ``PDFExtractor``
+    calls it where a MinerU run starts and ``nx config set`` calls it after a change.
+    """
+    try:
+        timeout_s = get_mineru_page_timeout_s(repo_root)
+        batch = get_mineru_page_batch(repo_root)
+    except PdfConfigError as exc:
+        return str(exc)
+    if timeout_s * batch > MINERU_ATTEMPT_BOUND_S:
+        return (
+            f"pdf.mineru_page_timeout_s ({timeout_s} s) x pdf.mineru_page_batch ({batch}) "
+            f"= {timeout_s * batch} s, above the {MINERU_ATTEMPT_BOUND_S} s one MinerU attempt may "
+            f"run without a progress write (a pipeline row is taken over after 300 s of silence). "
+            f"Lower pdf.mineru_page_timeout_s or pdf.mineru_page_batch; the defaults are 180 x 1, "
+            f"and a batch of 4 pages needs a timeout of {MINERU_ATTEMPT_BOUND_S // 4} s or less."
+        )
+    return None
 
 
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
