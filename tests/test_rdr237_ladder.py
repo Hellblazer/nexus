@@ -1108,7 +1108,7 @@ def test_a_malformed_fault_spec_is_refused_not_ignored(raw) -> None:
 
 def test_the_forced_timeout_wait_sleeps_out_its_budget_without_a_run_cancel() -> None:
     pdf_extractor.bind_run_cancel(None)
-    with patch("nexus.pdf_extractor.time.sleep") as sleep:
+    with patch_in("nexus.pdf_extractor", "time.sleep") as sleep:
         _REAL_FAULT_WAIT(180.0)
     sleep.assert_called_once_with(180.0)
 
