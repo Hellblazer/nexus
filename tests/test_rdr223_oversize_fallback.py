@@ -186,6 +186,10 @@ def _run_pdf(tmp_path, monkeypatch, *, doc_id=_DOC, batcher="reject", db=None, h
             embedding_model=_MODEL, title="Big", tags="pdf", category="paper")
         prepared.append((h, text, meta))
     monkeypatch.setattr(di, "_pdf_chunks", lambda *a, **k: [(i, t, dict(m)) for i, t, m in prepared])
+    # RDR-237: the repo indexer records the extraction on the catalog document with one /update
+    # request. These tests are about the upload route, not that record (its own tests are
+    # tests/test_rdr237_repo_indexer_records.py), so it is stubbed out here.
+    monkeypatch.setattr("nexus.pipeline_stages.record_pdf_extraction_on_document", lambda *a, **k: None)
     b = _rejecting_batcher() if batcher == "reject" else batcher
     return _index_pdf_file(
         p, tmp_path, _CCE, _MODEL, None, db if db is not None else _http_db(), "", {}, _NOW, 0.0,

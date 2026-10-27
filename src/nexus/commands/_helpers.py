@@ -197,7 +197,7 @@ def t2_handle() -> Iterator[Any]:
 
 
 def emit_degraded_pages_summary(degraded: "list[tuple[str, dict[str, list[int]]]]") -> None:
-    """Echo, at the end of an index run, the pages the PDF ladder settled below MinerU's first
+    """Echo, at the end of an index run, the pages the PDF extractor settled below its first
     rung, one line per document: ``  paper.pdf: mineru-no-formula 3,7; pymupdf-text 12``
     (RDR-237). *degraded* is ``[(document name, extraction_pages)]``; silent when empty.
     ``nx index pdf`` and ``nx dt index`` share it, and ``nx store get`` prints the same
@@ -210,7 +210,7 @@ def emit_degraded_pages_summary(degraded: "list[tuple[str, dict[str, list[int]]]
         return
     click.echo(
         f"Degraded pages in {len(degraded)} document(s) "
-        "(MinerU fell back below its first rung; `nx store get` shows them per chunk):"
+        "(the extractor fell back below its first choice for these pages; `nx store get` shows them per chunk):"
     )
     for name, pages in degraded:
         click.echo(f"  {name}: {format_degraded_pages(pages)}")

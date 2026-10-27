@@ -1939,7 +1939,9 @@ def degraded_pages_for_chunk(
                 rows.append((tumbler, title, pages))
         return rows, len(holders)
     except Exception:  # noqa: BLE001 — a display line is best-effort
-        _log.debug("degraded_pages_lookup_failed", exc_info=True)
+        # Warning, not debug: a fault here leaves "Extractor: mineru+degraded" with no Degraded
+        # line, which reads like "clean" or "never recorded".
+        _log.warning("degraded_pages_lookup_failed", collection=collection, chash=chash, exc_info=True)
         return [], 0
 
 

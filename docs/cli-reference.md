@@ -344,7 +344,14 @@ chunk; `nx store get --json` adds a `degraded_pages` list, only when some docume
 any), and `nx index pdf` and `nx dt index` list the degraded pages per document after
 their summary. A run that cannot write the record (no reachable catalog, a refused
 ephemeral path, a catalog error) logs `catalog_pdf_extraction_not_recorded` naming the
-document. After a kept-buffer resume the record covers the pages already in the buffer.
+document. `nx index repo` records the map on the document it registered (right after
+extraction, before the upload), so a clean re-extract through it clears an old map too,
+and logs the same warning when it cannot. After a kept-buffer resume the record covers the
+pages already in the buffer. Limit: a buffered page written by an earlier build names no
+rung, so its rung cannot be known; such a resume logs `resume_provenance_unknown` (the
+document and the count of buffered pages with no rung) and keeps the method at
+`mineru+degraded` rather than claim a clean `mineru`, and the map lists only the pages
+whose rung is known.
 Chunks written before RDR-237 may
 carry `mineru+docling-degraded` (a page degraded to Docling by
 `--on-formula-oom docling`, a flag that is now accepted and ignored for one release). This is what makes an extractor

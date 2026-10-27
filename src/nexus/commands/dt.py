@@ -218,7 +218,7 @@ def _index_record(
     extractor: str = "auto",
     force: bool = False,
     force_re_embed: bool = False,
-) -> tuple[bool, int]:
+) -> tuple[bool, int] | tuple[bool, int, list[int] | None, dict[str, list[int]]]:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
     The caller (``index_cmd``) is responsible for filtering unsupported
@@ -244,8 +244,8 @@ def _index_record(
     relocations, and the file path returned by osascript at index time
     is not (DT moves files inside Files.noindex/ on its own schedule).
 
-    Returns ``(stamped, chunks, pages, degraded)``; the caller still accepts the older
-    ``(stamped, chunks)`` and ``(stamped, chunks, pages)`` shapes. ``degraded`` (RDR-237)
+    Returns ``(stamped, chunks, pages, degraded)``, except that a dry run returns the 2-tuple
+    ``(True, 0)``; the caller accepts that and the older ``(stamped, chunks, pages)`` shape. ``degraded`` (RDR-237)
     is the document's ``extraction_pages`` (rung to the 1-based pages that settled below
     MinerU's first rung), ``{}`` for a clean extraction, markdown, or an unchanged
     document. The first three, from nexus-5xn3k.6 AC4: before this, the

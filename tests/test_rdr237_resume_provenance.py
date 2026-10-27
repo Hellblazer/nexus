@@ -86,6 +86,12 @@ def test_page_rungs_reads_a_dict_a_json_string_and_a_batch() -> None:
     assert _page_rungs({"page_method": "mineru"}, 7) == {8: "mineru"}, "no page number: the row's index + 1"
 
 
+def test_page_rungs_does_not_read_a_bool_as_a_page_number() -> None:
+    """``True`` is an ``int`` to Python and would name page 1."""
+    assert _page_rungs({"page_numbers": [True, 2], "page_method": "mineru"}, 0) == {2: "mineru"}
+    assert _page_rungs({"page_number": True, "page_method": "mineru"}, 0) == {}
+
+
 @pytest.mark.parametrize("bad", [None, "", "not json", "[1]", {}, {"page_number": 1}, {"page_method": ""},
                                  {"page_number": 1, "page_method": 3}])
 def test_page_rungs_of_a_row_without_a_rung_is_empty(bad) -> None:
@@ -110,6 +116,15 @@ def test_the_merge_leaves_a_legacy_method_alone_and_does_nothing_without_buffere
     _merge_buffered_provenance(legacy, {}, {1: "mineru-no-formula"})
     assert legacy["extraction_method"] == "docling", "only the ladder's own methods are recomputed"
     assert legacy["extraction_pages"] == {"mineru-no-formula": [1]}
+    # The explicit pymupdf extractor (bead tr1rj.4) names its own method; a resume must not turn
+    # it into a MinerU one, with a known degraded buffered rung or an unknown buffered page.
+    for method in ("pymupdf", "pymupdf_normalized", "mineru+docling-degraded"):
+        current = {"extraction_method": method, "extraction_pages": {}}
+        _merge_buffered_provenance(current, {}, {1: "mineru-no-formula"}, [2])
+        assert current["extraction_method"] == method, f"{method} is not the ladder's to rewrite"
+        unknown_only = {"extraction_method": method, "extraction_pages": {}}
+        _merge_buffered_provenance(unknown_only, {}, {}, [2])
+        assert unknown_only == {"extraction_method": method, "extraction_pages": {}}, "nothing to merge for it"
     same = {"extraction_method": "mineru", "extraction_pages": {"unextracted": [4]}}
     _merge_buffered_provenance(same, {4: "unextracted"}, {})
     assert same == {"extraction_method": "mineru", "extraction_pages": {"unextracted": [4]}}, "no rung in the buffer: the run's own map stands"
@@ -144,6 +159,10 @@ def _resume(monkeypatch, db, run_rungs: list[str], metadata: dict) -> Extraction
 
     monkeypatch.setattr("nexus.pipeline_stages.PDFExtractor", Extractor)
     return extractor_loop(Path("/tmp/x.pdf"), _HASH, db, threading.Event())
+
+
+def _warnings(cap) -> list[dict]:
+    return [e for e in cap if e.get("event") == "resume_provenance_unknown"]
 
 
 def _stored(db: MagicMock) -> dict:
@@ -187,6 +206,71 @@ def test_a_resume_over_a_buffer_an_older_version_wrote_keeps_the_runs_own_map(mo
     assert result.metadata["extraction_method"] == "mineru+degraded"
 
 
+def test_a_clean_rerun_over_an_older_buffer_does_not_claim_a_clean_method(monkeypatch) -> None:
+    """The buffer's pages came from a build that recorded no rung, so the record cannot prove them
+    clean even though this run got every page from MinerU: the method stays ``mineru+degraded``, the
+    map lists only what is known (here nothing), and the run says why."""
+    from structlog.testing import capture_logs
+
+    db = _db([None, None, None])
+    with capture_logs() as cap:
+        result = _resume(
+            monkeypatch, db, ["mineru"] * 4,
+            {"extraction_method": "mineru", "extraction_pages": {}, "page_count": 4},
+        )
+    assert result.metadata["extraction_method"] == "mineru+degraded"
+    assert result.metadata["extraction_pages"] == {}
+    assert _stored(db) == result.metadata
+    (warning,) = _warnings(cap)
+    assert warning["file_path"] == "/tmp/x.pdf" and warning["content_hash"] == _HASH
+    assert warning["buffered_rows_without_a_rung"] == 3 and warning["buffered_rows_with_a_rung"] == 0
+    assert warning["log_level"] == "warning"
+
+
+def test_a_buffer_that_names_a_rung_for_some_pages_only_is_unproven_for_the_rest(monkeypatch) -> None:
+    """Mixed buffer: page 1 names rung 2, page 2 names none, page 3 names rung 1. The known rung
+    is recorded; page 2 is unknown, so the method is still not a clean ``mineru``."""
+    from structlog.testing import capture_logs
+
+    db = _db(["mineru-no-formula", None, "mineru"])
+    with capture_logs() as cap:
+        result = _resume(
+            monkeypatch, db, ["mineru"] * 5,
+            {"extraction_method": "mineru", "extraction_pages": {}, "page_count": 5},
+        )
+    assert result.metadata["extraction_pages"] == {"mineru-no-formula": [1]}
+    assert result.metadata["extraction_method"] == "mineru+degraded"
+    (warning,) = _warnings(cap)
+    assert warning["buffered_rows_without_a_rung"] == 1 and warning["buffered_rows_with_a_rung"] == 2
+
+
+def test_a_mixed_buffer_whose_known_pages_are_clean_is_still_unproven(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    db = _db(["mineru", None])
+    with capture_logs() as cap:
+        result = _resume(
+            monkeypatch, db, ["mineru"] * 3,
+            {"extraction_method": "mineru", "extraction_pages": {}, "page_count": 3},
+        )
+    assert result.metadata["extraction_pages"] == {}
+    assert result.metadata["extraction_method"] == "mineru+degraded", "page 2's rung is unknown"
+    assert len(_warnings(cap)) == 1
+
+
+def test_a_buffer_whose_rows_all_name_a_rung_logs_nothing(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    db = _db(["mineru", "mineru"])
+    with capture_logs() as cap:
+        result = _resume(
+            monkeypatch, db, ["mineru"] * 3,
+            {"extraction_method": "mineru", "extraction_pages": {}, "page_count": 3},
+        )
+    assert result.metadata["extraction_method"] == "mineru"
+    assert _warnings(cap) == []
+
+
 def test_a_first_run_is_untouched(monkeypatch) -> None:
     db = _db([])
     result = _resume(
@@ -206,10 +290,14 @@ def test_a_non_ladder_extractor_on_a_resume_is_untouched(monkeypatch) -> None:
                 on_page(i, f"text {i}", {"page_number": i + 1, "text_length": 6})
             return ExtractionResult(text="", metadata={"extraction_method": "pymupdf_normalized", "page_count": 3})
 
+    from structlog.testing import capture_logs
+
     monkeypatch.setattr("nexus.pipeline_stages.PDFExtractor", Extractor)
     db = _db([None, None])
-    result = extractor_loop(Path("/tmp/x.pdf"), _HASH, db, threading.Event())
+    with capture_logs() as cap:
+        result = extractor_loop(Path("/tmp/x.pdf"), _HASH, db, threading.Event())
     assert result.metadata == {"extraction_method": "pymupdf_normalized", "page_count": 3}
+    assert _warnings(cap) == [], "rows with no rung are the norm for a non-ladder extractor"
 
 
 def test_a_complete_row_whose_buffer_was_wiped_falls_through_and_still_merges(monkeypatch) -> None:
@@ -230,3 +318,47 @@ def test_a_complete_row_whose_buffer_was_wiped_falls_through_and_still_merges(mo
     assert [c.args[1] for c in db.write_page.call_args_list] == [2], "only the page the buffer lacked"
     assert result.metadata["extraction_pages"] == {"unextracted": [2]}
     assert result.metadata["extraction_method"] == "mineru+degraded"
+
+
+class _PageText(str):
+    """A page's text that can be weakly referenced, to see whether anything keeps it alive."""
+
+
+@pytest.mark.parametrize("state", [
+    {"pages_extracted": 3, "total_pages": None, "extraction_meta": None},
+    {"pages_extracted": 4, "total_pages": 4, "extraction_meta": "{}"},
+], ids=["interrupted-run", "complete-row-with-a-wiped-buffer"])
+def test_the_buffered_page_text_is_not_kept_alive_while_the_extraction_runs(monkeypatch, state) -> None:
+    """A resume reads the whole buffer, text included, but needs only each row's rung. Holding
+    the rows would keep every buffered page's text in memory for the whole (long) extraction."""
+    import gc
+    import weakref
+
+    refs: list[weakref.ref] = []
+
+    def read_pages(_hash):
+        rows = []
+        for i in range(3):
+            text = _PageText(f"page {i} " * 1000)
+            refs.append(weakref.ref(text))
+            rows.append({"page_index": i, "page_text": text,
+                         "metadata_json": json.dumps({"page_number": i + 1, "page_method": "mineru"})})
+        return rows
+
+    db = _db([None, None, None])
+    db.get_pipeline_state.return_value = state
+    db.read_pages.side_effect = read_pages
+    alive_during_extraction: list[bool] = []
+
+    class Extractor:
+        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+                    allow_degraded=False, on_heartbeat=None):
+            gc.collect()
+            alive_during_extraction.extend(r() is not None for r in refs)
+            return ExtractionResult(text="", metadata={"extraction_method": "mineru", "extraction_pages": {},
+                                                       "page_count": 3})
+
+    monkeypatch.setattr("nexus.pipeline_stages.PDFExtractor", Extractor)
+    extractor_loop(Path("/tmp/x.pdf"), _HASH, db, threading.Event())
+    assert len(alive_during_extraction) == 3, "the buffer was read"
+    assert not any(alive_during_extraction), "the rows were dropped once their rungs were read"

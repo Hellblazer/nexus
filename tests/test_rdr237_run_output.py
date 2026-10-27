@@ -169,3 +169,23 @@ def test_a_dispatcher_returning_the_older_shapes_still_works(runner, monkeypatch
     result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
     assert result.exit_code == 0, result.output
     assert "Indexed 1 record(s)" in result.output and "Degraded pages" not in result.output
+
+
+def test_the_summary_header_is_true_for_any_extractor(capsys) -> None:
+    """The explicit ``pymupdf`` extractor lists pages too; the header must not name MinerU."""
+    from nexus.commands._helpers import emit_degraded_pages_summary
+
+    emit_degraded_pages_summary([("a.pdf", {"pymupdf-text": [1, 2]})])
+    out = capsys.readouterr().out
+    assert out.startswith("Degraded pages in 1 document(s)")
+    assert "MinerU" not in out.splitlines()[0]
+    assert "  a.pdf: pymupdf-text 1,2" in out
+
+
+def test_index_record_s_annotation_names_the_four_tuple() -> None:
+    import inspect
+
+    from nexus.commands import dt
+
+    ret = str(inspect.signature(dt._index_record).return_annotation)
+    assert "dict[str, list[int]]" in ret, ret

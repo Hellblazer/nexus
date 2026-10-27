@@ -3317,10 +3317,12 @@ def _index_pdf_file(
         def _stage(_name: str):  # type: ignore[misc]
             return nullcontext()
 
+    _extraction_stats: dict = {}
     with _stage("chunking"):
         prepared = _pdf_chunks(
             file, content_hash_hex, target_model, now_iso, collection_name,
             chunk_chars=chunk_chars, collection_name=collection_name,
+            extraction_stats=_extraction_stats,
         )
     if not prepared:
         _log.debug("skipped PDF with no chunks", path=str(file))
@@ -3348,6 +3350,18 @@ def _index_pdf_file(
     # once per file. Empty string when no catalog handle exists;
     # ``normalize`` Step 4c drops the field on the way to T3.
     catalog_doc_id = doc_id_resolver(file) if doc_id_resolver is not None else ""
+
+    # RDR-237 (nexus-tr1rj.3): record the extraction method and the degraded-page map on the
+    # catalog document this run registered, so a clean re-extract here clears an old map and a
+    # degraded one is visible to ``nx store get``. Recorded when the extraction finishes, before
+    # the upload (the upload has three landing routes, and the record describes the extraction,
+    # not the upload; an upload that then fails is raised to the run as any failed file is, and
+    # the next run extracts and records again). Never raises; a run that cannot record it logs
+    # ``catalog_pdf_extraction_not_recorded``.
+    from nexus.pipeline_stages import extraction_record, record_pdf_extraction_on_document  # noqa: PLC0415 — deferred: pipeline_stages imports the indexers
+    record_pdf_extraction_on_document(
+        catalog_doc_id, file, collection_name, extraction_record(_extraction_stats),
+    )
 
     # Augment metadata with repo-indexer fields.
     # Filter empty/zero values from _pdf_chunks to stay under ChromaDB's

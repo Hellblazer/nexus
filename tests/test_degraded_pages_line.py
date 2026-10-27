@@ -255,3 +255,64 @@ def test_a_chunk_nobody_holds_prints_no_line_and_looks_the_holders_up_once(world
     out = _mcp_get()
     assert "Degraded:" not in out and "Extractor:  mineru+degraded" in out
     assert world.lookups == 1 and world.reader is None
+
+
+# ── fix round 1: edges the first round left unpinned ─────────────────────────
+
+
+def test_a_get_asked_by_title_still_prints_the_degraded_line(world) -> None:
+    """Asked by title the MCP has not looked the holders up (``holders`` is ``None``), so the helper
+    must do its own lookup; passing an empty list instead would drop the line silently."""
+    world.holders = {CHASH: [("1.1.1", "Some Paper")]}
+    world.metas = {"1.1.1": {"extraction_pages": DEGRADED}}
+    world.t3.find_ids_by_title = lambda name, title: [CHASH] if title == "Some Paper" else []
+    out = mcp_core.store_get(doc_id="Some Paper", collection="art")
+    assert "Extractor:  mineru+degraded" in out and "Title:      Some Paper" in out, out
+    assert LINE in out.splitlines()
+    assert world.lookups == 1, "the helper looked the holders up itself"
+
+
+def test_a_chunk_held_by_untitled_documents_is_labelled_by_tumbler(world) -> None:
+    world.holders = {CHASH: [("1.1.1", ""), ("1.1.2", "Paper B")]}
+    world.metas = {
+        "1.1.1": {"extraction_pages": {"mineru-no-formula": [3]}},
+        "1.1.2": {"extraction_pages": {"unextracted": [4]}},
+    }
+    expected = ["Degraded:   1.1.1: mineru-no-formula 3", "Degraded:   Paper B: unextracted 4"]
+    assert [x for x in _mcp_get().splitlines() if x.startswith("Degraded:")] == expected
+
+
+def test_the_catalog_reader_is_closed_after_the_lookup(world) -> None:
+    world.holders = {CHASH: [("1.1.1", "Some Paper")]}
+    world.metas = {"1.1.1": {"extraction_pages": DEGRADED}}
+    _mcp_get()
+    assert world.reader is not None and world.reader.resolved, "the lookup ran"
+    assert world.reader.closed
+
+
+def test_the_catalog_reader_is_closed_when_the_lookup_fails(world, monkeypatch) -> None:
+    world.holders = {CHASH: [("1.1.1", "Some Paper")]}
+
+    def fail(self, tumblers):
+        raise ConnectionError("catalog down")
+
+    monkeypatch.setattr(_StubReader, "resolve_many", fail)
+    assert "Degraded:" not in _mcp_get()
+    assert world.reader is not None and world.reader.closed
+
+
+def test_a_catalog_fault_is_logged_at_warning_naming_the_chunk(world, monkeypatch) -> None:
+    """A swallowed fault leaves ``Extractor: mineru+degraded`` with no Degraded line, which reads
+    like a clean document: the log is the only place it shows."""
+    from structlog.testing import capture_logs
+
+    world.holders = {CHASH: [("1.1.1", "Some Paper")]}
+
+    def boom():
+        raise ConnectionError("catalog down")
+
+    monkeypatch.setattr(catalog_factory, "make_catalog_reader", boom)
+    with capture_logs() as cap:
+        _mcp_get()
+    (event,) = [e for e in cap if e.get("event") == "degraded_pages_lookup_failed"]
+    assert event["log_level"] == "warning" and event["chash"] == CHASH and event["collection"] == world.t3.name

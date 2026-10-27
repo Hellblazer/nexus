@@ -109,8 +109,32 @@ def _page_rungs(page_metadata: Any, page_index: int) -> dict[int, str]:
     return {int(n): method for n in numbers if isinstance(n, int) and not isinstance(n, bool)}
 
 
+#: The document methods the ladder reports; the only ones a resume recomputes.
+_LADDER_METHODS = ("mineru", "mineru+degraded")
+
+
+def _buffer_provenance(rows: list[dict[str, Any]]) -> tuple[dict[int, str], list[int]]:
+    """``({1-based page: rung}, [pages with no rung])`` for the buffer rows a resume found.
+
+    Reads only ``page_index`` and ``metadata_json``, so a caller can drop the rows (page text
+    included) as soon as this returns. A page is *unknown* when its row carries no ``page_method``:
+    a buffer an older build wrote, or a non-ladder extractor's.
+    """
+    rungs: dict[int, str] = {}
+    unknown: list[int] = []
+    for row in rows:
+        index = int(row.get("page_index", 0))
+        found = _page_rungs(row.get("metadata_json"), index)
+        if found:
+            rungs.update(found)
+        else:
+            unknown.append(index + 1)
+    return rungs, unknown
+
+
 def _merge_buffered_provenance(
     metadata: dict[str, Any], run_rungs: dict[int, str], buffered_rungs: dict[int, str],
+    unknown_pages: list[int] | tuple[int, ...] = (),
 ) -> None:
     """Make a resumed run's ``extraction_pages`` and ``extraction_method`` describe the document.
 
@@ -118,10 +142,18 @@ def _merge_buffered_provenance(
     (``extractor_loop``'s ``on_page`` skip), so the chunks come from the BUFFER's text and the
     ladder's own map describes the current run's attempt, not what was indexed. The rung a page
     settled on is stored in its buffer row (``page_method``); that rung wins for a page the buffer
-    holds, the current run's for the rest. No-op when the buffer recorded no rung (a first run, a
-    non-ladder extractor, a buffer an older version wrote): the run's own map then stands.
+    holds, the current run's for the rest.
+
+    *unknown_pages* are buffered pages whose row names no rung (a buffer an older build wrote).
+    Their indexed text is the buffer's and the run's rung for them may not describe it, so the
+    record cannot prove them clean: the map still lists what is known, but a ladder run's method
+    stays ``mineru+degraded`` rather than claiming a clean ``mineru``. No-op when the buffer
+    recorded no rung and no page is unknown (a first run, a non-ladder extractor): the run's own
+    map then stands.
     """
-    if not buffered_rungs:
+    ladder = metadata.get("extraction_method") in _LADDER_METHODS
+    unknown = bool(unknown_pages) and ladder
+    if not buffered_rungs and not unknown:
         return
     from nexus.pdf_extractor import _DEGRADED_METHODS  # noqa: PLC0415 — module-private rung order, shared with the ladder
     rungs = {**run_rungs, **buffered_rungs}
@@ -131,8 +163,8 @@ def _merge_buffered_provenance(
         if any(r == method for r in rungs.values())
     }
     metadata["extraction_pages"] = pages
-    if metadata.get("extraction_method") in ("mineru", "mineru+degraded"):
-        metadata["extraction_method"] = "mineru+degraded" if pages else "mineru"
+    if ladder:
+        metadata["extraction_method"] = "mineru+degraded" if (pages or unknown) else "mineru"
 
 
 def extractor_loop(
@@ -162,9 +194,11 @@ def extractor_loop(
     # RDR-237: the counter the row held when this run began. The resume checks below can lower
     # ``pages_extracted_at_start`` (a wiped buffer), but a heartbeat must never lower the row.
     row_pages_extracted = pages_extracted_at_start
-    #: The buffer rows a resume found (RDR-237 provenance: each row carries the rung its page
-    #: settled on); empty on a first run.
-    buffered_rows: list[dict[str, Any]] = []
+    #: What a resume's buffer says about its pages (RDR-237 provenance: each row carries the rung
+    #: its page settled on); empty on a first run. Reduced as soon as the rows are read, so the
+    #: buffered page text is not kept alive for the whole extraction.
+    buffered_rungs: dict[int, str] = {}
+    unknown_pages: list[int] = []
 
     # Resume fast path: if all pages already in buffer, skip extraction.
     if (state and state["total_pages"] is not None
@@ -202,6 +236,8 @@ def extractor_loop(
             if extraction_done is not None:
                 extraction_done.set()
             return ExtractionResult(text="", metadata=stored_meta)
+        buffered_rungs, unknown_pages = _buffer_provenance(buffered_rows)
+        del buffered_rows
         # The claimed prefix isn't backed by real WAL data — the ENTIRE
         # claimed prefix is suspect (clear_orphan_wal is all-or-nothing
         # per content_hash), so fall through to a full re-extraction
@@ -226,6 +262,8 @@ def extractor_loop(
         # re-extract.
         buffered_rows = db.read_pages(content_hash)
         pages_extracted_at_start = len(buffered_rows)
+        buffered_rungs, unknown_pages = _buffer_provenance(buffered_rows)
+        del buffered_rows
 
     #: Pages settled so far, as the counter counts them (a list so ``on_page`` can move it).
     settled = [pages_extracted_at_start]
@@ -267,10 +305,14 @@ def extractor_loop(
 
     # RDR-237 provenance: a resumed run's pages came from the buffer, so the map and method
     # describe those pages' own rungs, not only this run's attempt (nexus-q6nw0 item 6).
-    buffered_rungs: dict[int, str] = {}
-    for row in buffered_rows:
-        buffered_rungs.update(_page_rungs(row.get("metadata_json"), int(row.get("page_index", 0))))
-    _merge_buffered_provenance(result.metadata, run_rungs, buffered_rungs)
+    if unknown_pages and result.metadata.get("extraction_method") in _LADDER_METHODS:
+        # A buffered page whose row names no rung cannot be proven clean: say so, and the merge
+        # keeps the method at ``mineru+degraded`` rather than claim a clean ``mineru``.
+        _log.warning(
+            "resume_provenance_unknown", file_path=str(pdf_path), content_hash=content_hash,
+            buffered_rows_without_a_rung=len(unknown_pages), buffered_rows_with_a_rung=len(buffered_rungs),
+        )
+    _merge_buffered_provenance(result.metadata, run_rungs, buffered_rungs, unknown_pages)
 
     page_count = result.metadata.get("page_count", 0)
     db.update_progress(content_hash, total_pages=page_count)
@@ -995,8 +1037,70 @@ def extraction_record(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     raw = meta.get("extraction_pages")
     pages: dict[str, list[int]] = {}
     if isinstance(raw, Mapping):
-        pages = {str(rung): sorted(int(p) for p in nums) for rung, nums in raw.items() if nums}
+        for rung, nums in raw.items():
+            kept: list[int] = []
+            for p in nums if isinstance(nums, (list, tuple, set, frozenset)) else ():
+                # A page is a real integer. The streaming caller runs this outside any try, after
+                # all the work is done, so a malformed entry is skipped and named, never raised.
+                if isinstance(p, int) and not isinstance(p, bool):
+                    kept.append(p)
+                else:
+                    _log.warning("extraction_record_skipped_a_malformed_page", rung=str(rung), page=repr(p))
+            if kept:
+                pages[str(rung)] = sorted(kept)
+            elif nums:
+                _log.warning("extraction_record_skipped_a_malformed_rung", rung=str(rung), pages=repr(nums))
     return {"extraction_method": str(meta.get("extraction_method") or ""), "extraction_pages": pages}
+
+
+def _catalog_extraction_meta(extraction: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``meta`` keys one extraction record writes: ``extraction_pages`` always (``{}`` when
+    clean), ``extraction_method`` only when the extractor named one."""
+    meta: dict[str, Any] = {"extraction_pages": dict(extraction.get("extraction_pages") or {})}
+    if extraction.get("extraction_method"):
+        meta["extraction_method"] = str(extraction["extraction_method"])
+    return meta
+
+
+def record_pdf_extraction_on_document(
+    doc_id: str, pdf_path: Path, collection_name: str, extraction: Mapping[str, Any],
+) -> None:
+    """Record an extraction on an already-registered catalog document (``nx index repo``, RDR-237).
+
+    The repo indexer registers every file, PDFs included, in its catalog pass before it chunks
+    anything, so unlike :func:`_catalog_pdf_hook` there is no row to find or register: *doc_id* is
+    the document's tumbler. The merge is the same ``meta`` update (``extraction_pages`` written
+    whole, ``{}`` included, so a clean re-extract clears an old map). It never raises: an empty
+    *doc_id* or a failed write logs ``catalog_pdf_extraction_not_recorded`` (``reason``
+    ``repo_indexer_no_document`` or ``repo_indexer_update_failed``) naming the file.
+    """
+    meta = _catalog_extraction_meta(extraction)
+
+    def _not_recorded(reason: str, **extra: Any) -> None:
+        _log.warning(
+            "catalog_pdf_extraction_not_recorded", reason=reason, file_path=str(pdf_path),
+            doc_id=doc_id, collection=collection_name,
+            extraction_method=meta.get("extraction_method", ""),
+            extraction_pages=meta["extraction_pages"], **extra,
+        )
+
+    if not doc_id:
+        _not_recorded("repo_indexer_no_document")
+        return
+    writer = None
+    try:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        writer = make_catalog_writer()
+        if writer is None:
+            _not_recorded("no_catalog_writer")
+            return
+        writer.update(doc_id, meta=meta)
+    except Exception as exc:  # noqa: BLE001 - best-effort: the PDF is indexed either way; named, not raised
+        _not_recorded("repo_indexer_update_failed", error=str(exc))
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 def _catalog_pdf_hook(
@@ -1029,6 +1133,10 @@ def _catalog_pdf_hook(
       RESIDUAL), and the warning is the net if that changes.
     - ``hook_failed``: any error in the hook; it is swallowed (the PDF is indexed either way).
 
+    ``nx index repo`` does not call this hook (the repo indexer registers its files in its own
+    catalog pass); it records through :func:`record_pdf_extraction_on_document`, whose own
+    warnings are ``repo_indexer_no_document`` and ``repo_indexer_update_failed``.
+
     The callers add their own: the streaming pipeline and ``index_pdf`` do not call the hook on a
     dry run, and ``index_pdf``'s batch-path wrapper logs ``register_in_catalog_raised``.
     """
@@ -1036,11 +1144,7 @@ def _catalog_pdf_hook(
     writer = None
     # Bound before the try so the except handler always has a name to log (resolve() can raise).
     file_path_str = str(pdf_path)
-    extraction_meta: dict[str, Any] | None = None
-    if extraction is not None:
-        extraction_meta = {"extraction_pages": dict(extraction.get("extraction_pages") or {})}
-        if extraction.get("extraction_method"):
-            extraction_meta["extraction_method"] = str(extraction["extraction_method"])
+    extraction_meta = _catalog_extraction_meta(extraction) if extraction is not None else None
 
     def _not_recorded(reason: str) -> None:
         if extraction_meta is not None:

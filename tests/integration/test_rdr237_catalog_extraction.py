@@ -255,3 +255,43 @@ def test_the_incremental_path_records_the_map_and_reports_the_extraction(tmp_pat
     expected = {"mineru-no-formula": [2], "unextracted": [101]}
     assert reports == [{"extraction_method": "mineru+degraded", "extraction_pages": expected}]
     assert _meta(path, marker)["extraction_pages"] == expected
+
+
+def test_a_streaming_run_that_filled_no_extraction_stats_reports_nothing(tmp_path, ladder, monkeypatch) -> None:
+    """``_report_extraction`` fires only for a run whose extraction filled the stats. Here the
+    pipeline completes but hands back no extraction record (the stats dict is dropped): the caller
+    must hear nothing, never a half-empty report. The guard is live, not dead code."""
+    import nexus.pipeline_stages as stages
+
+    name = "tr1rj3-nostats"
+    ladder.lines, ladder.rungs = _lines(name, 4), list(_RUNGS)
+    path = _write_pdf(tmp_path, name)
+    real = stages.pipeline_index_pdf
+
+    def without_stats(*args, **kwargs):
+        kwargs["extraction_stats"] = None
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(stages, "pipeline_index_pdf", without_stats)
+    assert _index_reporting(path, name, streaming="always") == []
+
+
+def test_the_repo_indexer_s_record_replaces_the_map_on_a_registered_document(tmp_path, ladder) -> None:
+    """``nx index repo`` writes through ``record_pdf_extraction_on_document`` onto the document its
+    catalog pass registered. Against the real engine: a degraded record lands, then a clean one
+    replaces the map whole (the engine's meta merge never removes a key)."""
+    from nexus.pipeline_stages import record_pdf_extraction_on_document
+
+    name = "tr1rj3-repo-record"
+    path = _write_pdf(tmp_path, name)
+    doc, _created = _register(path, name)
+
+    record_pdf_extraction_on_document(
+        str(doc), path, _COLLECTION, {"extraction_method": "mineru+degraded", "extraction_pages": _MAP})
+    meta = _meta(path, name)
+    assert meta["extraction_pages"] == _MAP and meta["extraction_method"] == "mineru+degraded"
+
+    record_pdf_extraction_on_document(
+        str(doc), path, _COLLECTION, {"extraction_method": "mineru", "extraction_pages": {}})
+    meta = _meta(path, name)
+    assert meta["extraction_pages"] == {} and meta["extraction_method"] == "mineru"

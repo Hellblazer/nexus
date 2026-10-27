@@ -571,3 +571,26 @@ class TestExtractionRecord:
             "extraction_method": "pymupdf_normalized", "extraction_pages": {}}
         assert extraction_record(None) == {"extraction_method": "", "extraction_pages": {}}
         assert extraction_record({"extraction_pages": "garbage"}) == {"extraction_method": "", "extraction_pages": {}}
+
+    @pytest.mark.parametrize("bad_pages", [["x", 3], [None, 3], [4.5, 3], [True, 3], "3,4"])
+    def test_a_malformed_map_is_skipped_and_named_never_raised(self, bad_pages):
+        """The streaming caller runs this outside any try, after all the work is done."""
+        from structlog.testing import capture_logs
+
+        from nexus.pipeline_stages import extraction_record
+
+        with capture_logs() as cap:
+            rec = extraction_record({
+                "extraction_method": "mineru+degraded",
+                "extraction_pages": {"mineru-no-formula": bad_pages, "pymupdf-text": [12]},
+            })
+        assert rec["extraction_method"] == "mineru+degraded"
+        assert rec["extraction_pages"].get("pymupdf-text") == [12], "the well-formed rung survives"
+        if isinstance(bad_pages, str):
+            assert "mineru-no-formula" not in rec["extraction_pages"]
+            events = {e["event"] for e in cap}
+            assert events == {"extraction_record_skipped_a_malformed_rung"}
+        else:
+            assert rec["extraction_pages"]["mineru-no-formula"] == [3]
+            assert {e["event"] for e in cap} == {"extraction_record_skipped_a_malformed_page"}
+        assert all(e["log_level"] == "warning" for e in cap)
