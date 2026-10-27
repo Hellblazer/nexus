@@ -99,6 +99,11 @@ public final class NoteUri {
             .otherwise(uri);
     }
 
+    /** True for a URI that {@link #moveTo} would rewrite out of {@code coll}, in either note spelling. */
+    public static Condition namesCollection(Field<String> uri, String coll) {
+        return startsWith(uri, DSL.val(NOTE + coll + "/")).or(startsWith(uri, DSL.val(LEGACY + coll + "/")));
+    }
+
     /** Postgres {@code starts_with}: a literal prefix test, unlike LIKE where '_' matches any char. */
     static Condition startsWith(Field<String> uri, Field<String> prefix) {
         return DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, uri, prefix));

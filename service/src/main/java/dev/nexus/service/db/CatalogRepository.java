@@ -44,6 +44,7 @@ import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Query;
 import org.jooq.Record;
+import org.jooq.Record3;
 import org.jooq.ResultQuery;
 import org.jooq.SelectField;
 import org.jooq.Table;
@@ -9674,9 +9675,34 @@ public final class CatalogRepository {
         return false;
     }
 
-    /** Postgres {@code starts_with}: a literal prefix test, unlike LIKE where '_' matches any char. */
-    private static Condition uriStartsWith(Field<String> uri, String prefix) {
-        return NoteUri.startsWith(uri, DSL.val(prefix));
+    /** The source_uri column of a collection-scoped table that carries one, else null. */
+    private static Field<String> noteUriColumn(CollectionScopedTable t) {
+        if (t.table() == CATALOG_DOCUMENTS) return CATALOG_DOCUMENTS.SOURCE_URI;
+        if (t.table() == DOCUMENT_ASPECTS) return DOCUMENT_ASPECTS.SOURCE_URI;
+        if (t.table() == DOCUMENT_HIGHLIGHTS) return DOCUMENT_HIGHLIGHTS.SOURCE_URI;
+        return null;
+    }
+
+    /**
+     * RDR-231: the first live document in {@code source} whose note URI, rewritten by
+     * {@link NoteUri#moveTo} to {@code target}, a different live document already holds, as
+     * (uri, holder tumbler, holder collection), or null. Only the collection's OWN documents
+     * move (physical_collection = source): a stale URI naming {@code source} on a document in
+     * another collection is not the move's to touch (critique of a11876053). Only live rows on
+     * both sides, because catalog-016 constrains only live rows.
+     */
+    private static Record3<String, String, String> noteUriMoveCollision(DSLContext ctx, String source, String target) {
+        var moving = CATALOG_DOCUMENTS.as("moving");
+        var holder = CATALOG_DOCUMENTS.as("holder");
+        return ctx.select(holder.SOURCE_URI, holder.TUMBLER, holder.PHYSICAL_COLLECTION)
+            .from(moving).join(holder).on(holder.SOURCE_URI.eq(NoteUri.moveTo(moving.SOURCE_URI, source, target)))
+            .where(moving.PHYSICAL_COLLECTION.eq(source))
+            .and(NoteUri.namesCollection(moving.SOURCE_URI, source))
+            .and(moving.DELETED_AT.isNull())
+            .and(holder.DELETED_AT.isNull())
+            .and(holder.TUMBLER.ne(moving.TUMBLER))
+            .limit(1)
+            .fetchOne();
     }
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
@@ -9795,25 +9821,11 @@ public final class CatalogRepository {
                 throw new CollectionMergeRefused("target collection already exists: " + newName);
             }
 
-            // nexus-sis0m.3: the chroma://X/ -> chroma://Y/ source_uri rewrite below must not
-            // land on a URI a live document already holds (the catalog-016 partial unique
-            // index would abort the transaction with an opaque 500). Checked here, in this
-            // transaction and before anything moves, so the refusal leaves X untouched.
-            String oldUriPrefix = "chroma://" + oldName + "/";
-            String newUriPrefix = "chroma://" + newName + "/";
-            var moving = CATALOG_DOCUMENTS.as("moving");
-            var holder = CATALOG_DOCUMENTS.as("holder");
-            // Only X's OWN documents move (physical_collection = X). A stale chroma://X/ URI on
-            // a document living in some other collection (left by a rename before this fix,
-            // then X's name reused) is not this rename's to touch (critique of a11876053).
-            var collision = ctx.select(holder.SOURCE_URI, holder.TUMBLER, holder.PHYSICAL_COLLECTION)
-                .from(moving).join(holder).on(holder.SOURCE_URI.eq(
-                    DSL.val(newUriPrefix).concat(DSL.substring(moving.SOURCE_URI, oldUriPrefix.length() + 1))))
-                .where(moving.PHYSICAL_COLLECTION.eq(oldName))
-                .and(uriStartsWith(moving.SOURCE_URI, oldUriPrefix))
-                .and(holder.DELETED_AT.isNull())
-                .limit(1)
-                .fetchOne();
+            // nexus-sis0m.3: the note source_uri rewrite below must not land on a URI a live
+            // document already holds (the catalog-016 partial unique index would abort the
+            // transaction with an opaque 500). Checked here, in this transaction and before
+            // anything moves, so the refusal leaves X untouched.
+            var collision = noteUriMoveCollision(ctx, oldName, newName);
             if (collision != null) {
                 throw new SourceUriCollision("renaming " + oldName + " to " + newName,
                     collision.value1(), collision.value2(), collision.value3());
@@ -9995,21 +10007,20 @@ public final class CatalogRepository {
             // retired collection name (see TombstoneFilterGateTest.TOMBSTONE_EXEMPT). Scoped to rows the re-home loop
             // above just moved to Y (the target held nothing before, per the emptiness check),
             // so a foreign row carrying a stale chroma://X/ URI is left alone.
+            // RDR-231: NoteUri.moveTo rewrites both note spellings (nx-note://X/ and chroma://X/)
+            // and leaves residue and every other value unchanged.
             counts.put("catalog_documents_source_uri", ctx.update(CATALOG_DOCUMENTS)
-                .set(CATALOG_DOCUMENTS.SOURCE_URI, DSL.val(newUriPrefix)
-                    .concat(DSL.substring(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, NoteUri.moveTo(CATALOG_DOCUMENTS.SOURCE_URI, oldName, newName))
                 .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(newName))
-                .and(uriStartsWith(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix)).execute());
+                .and(NoteUri.namesCollection(CATALOG_DOCUMENTS.SOURCE_URI, oldName)).execute());
             counts.put("document_aspects_source_uri", ctx.update(DOCUMENT_ASPECTS)
-                .set(DOCUMENT_ASPECTS.SOURCE_URI, DSL.val(newUriPrefix)
-                    .concat(DSL.substring(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_ASPECTS.SOURCE_URI, oldName, newName))
                 .where(DOCUMENT_ASPECTS.COLLECTION.eq(newName))
-                .and(uriStartsWith(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix)).execute());
+                .and(NoteUri.namesCollection(DOCUMENT_ASPECTS.SOURCE_URI, oldName)).execute());
             counts.put("document_highlights_source_uri", ctx.update(DOCUMENT_HIGHLIGHTS)
-                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, DSL.val(newUriPrefix)
-                    .concat(DSL.substring(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName, newName))
                 .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(newName))
-                .and(uriStartsWith(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix)).execute());
+                .and(NoteUri.namesCollection(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName)).execute());
 
             counts.put("catalog_collections_superseded",
                 ctx.update(CATALOG_COLLECTIONS)
@@ -10207,6 +10218,14 @@ public final class CatalogRepository {
                 // carrying reason=collection_model_mismatch, the contract the route documents.
                 throw new CollectionModelMismatchException(source, sourceModel, target, targetModel);
             }
+            // RDR-231: the move rewrites note URIs from source to target (moveScopedTable). If a live
+            // document would land on a URI a live document already holds, nothing moves: chunks and
+            // manifest rows move by table and are keyed by chash, so one document cannot be held back.
+            var collision = noteUriMoveCollision(ctx, source, target);
+            if (collision != null) {
+                throw new SourceUriCollision("re-homing " + source + " onto " + target,
+                    collision.value1(), collision.value2(), collision.value3());
+            }
 
             Map<String, Integer> moved = new LinkedHashMap<>();
             Map<String, Integer> leftBehind = new LinkedHashMap<>();
@@ -10355,7 +10374,13 @@ public final class CatalogRepository {
     private int moveScopedTable(DSLContext ctx, CollectionScopedTable t, String source,
                                 String target, Map<String, Integer> leftBehind) {
         Condition where = movableAtSource(ctx, t, source, target);
-        int movedRows = ctx.update(t.table()).set(t.collection(), target).where(where).execute();
+        var set = ctx.update(t.table()).set(t.collection(), target);
+        Field<String> uri = noteUriColumn(t);
+        if (uri != null) {
+            // RDR-231: a moved note's URI names its new collection, in the same UPDATE.
+            set = set.set(uri, NoteUri.moveTo(uri, source, target));
+        }
+        int movedRows = set.where(where).execute();
         // Whatever still names the source in a table we just moved is, by construction,
         // a row the collision predicate excluded. Count it so "done" can never be read
         // as "nothing was left behind".
