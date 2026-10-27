@@ -336,7 +336,7 @@ critiqued once before Sam's gate decision (T2
   `store_hook.note_manifest_metadata`), orphan backfill and manifest
   backfill send no label keys and leave their rows legacy, the last two
   deliberately, because the row's labels are the last writer's.
-- **RF-12 (Verified, source search of conexus HEAD 1ede4c1, 2026-10-26).**
+- **RF-12 (Verified, source search of the conexus repository head on 2026-10-26; its sha is in research-12).**
   No executable caller of `upsert-chunks`, `update-metadata` or the
   combined manifest writes exists in conexus. Direct SQL on
   `nexus.chunks`: `deploy/gate/etl_t3.py` (a live gate and migration copy
