@@ -190,7 +190,7 @@ Most PDFs work fine with the default (`auto`). You only need to think about this
 - Math-heavy PDFs get a `has_formulas: true` flag on their chunks (useful for filtering)
 - Formula regions are detected but not re-extracted with MinerU
 
-**Text only (`pymupdf`).** `--extractor pymupdf` (or `pdf.extractor: pymupdf`) reads each page's own text layer through PyMuPDF, a core dependency, so it installs, starts and probes nothing from the PDF stack. There is no layout, no table structure and no math. A page with no text layer (a scan) is recorded `unextracted`; a PDF with no text layer on any page fails. `auto` never chooses it. The run summary names the extractor and lists the unextracted pages; the catalog document records `extraction_method: pymupdf`, and a `pymupdf` rerun over pages a MinerU run left is recorded `mineru+degraded`, with its text-layer pages listed.
+**Text only (`pymupdf`).** `--extractor pymupdf` (or `pdf.extractor: pymupdf`) reads each page's own text layer through PyMuPDF, a core dependency, so it installs, starts and probes nothing from the PDF stack. There is no layout, no table structure and no math. A page with no text layer (a scan) is recorded `unextracted`; a PDF with no text layer on any page fails. `auto` never chooses it. The run summary of `nx index pdf` and `nx dt index` names the extractor and lists the unextracted pages (`nx index repo` and `nx collection reindex` print no extraction summary); the catalog document records `extraction_method: pymupdf`, and a `pymupdf` rerun over pages a MinerU run left is recorded `mineru+degraded`, with its text-layer pages listed.
 
 **What MinerU adds (optional):**
 - Superior LaTeX extraction for display and inline equations

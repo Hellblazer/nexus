@@ -1462,7 +1462,8 @@ def index_cmd(
                     )
                     if extractor == "pymupdf":
                         # An image page has no text layer, so the text-only extractor is expected to
-                        # leave it out; the stack's extractor is not what a user chose it to avoid.
+                        # leave it out; do not lead with the MinerU extractor, which this user chose
+                        # pymupdf to avoid.
                         detail += (
                             "--extractor pymupdf reads only a page's text layer, so an image page is "
                             "expected to be missing. Pass --allow-page-gap to accept, or OCR the PDF "
