@@ -99,6 +99,20 @@ public final class NoteUri {
             .otherwise(uri);
     }
 
+    /** {@link #moveTo(Field, String, String)} on one value, for a pre-check computed outside SQL. */
+    public static String moveTo(String uri, String oldColl, String newColl) {
+        if (uri == null) {
+            return null;
+        }
+        for (String scheme : List.of(NOTE, LEGACY)) {
+            String prefix = scheme + oldColl + "/";
+            if (uri.startsWith(prefix)) {
+                return scheme + newColl + "/" + uri.substring(prefix.length());
+            }
+        }
+        return uri;
+    }
+
     /** True for a URI that {@link #moveTo} would rewrite out of {@code coll}, in either note spelling. */
     public static Condition namesCollection(Field<String> uri, String coll) {
         return startsWith(uri, DSL.val(NOTE + coll + "/")).or(startsWith(uri, DSL.val(LEGACY + coll + "/")));

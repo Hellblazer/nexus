@@ -1905,6 +1905,8 @@ public final class CatalogRepository {
     public int updateDocument(String tenant, String tumbler, Map<String, Object> fields) {
         if (fields.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
+            refuseCollectionMoveCollisions(ctx, tenant,
+                collectionMoves(Map.of(aliasTarget(ctx, tenant, tumbler, fields, null), fields)));
             Query query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields);
             return query == null ? 0 : query.execute();
         });
@@ -1971,6 +1973,18 @@ public final class CatalogRepository {
             }
             Map<String, String> aliasTargets = batchAliasTargets(ctx, tenant, batchTumblers);
 
+            // RDR-231: every row's collection-move collision is checked before the batch is built;
+            // one refusal refuses the whole request (409) and nothing is written.
+            Map<String, Map<String, Object>> byTarget = new LinkedHashMap<>();
+            for (var upd : updates) {
+                if (upd.get("tumbler") instanceof String t && !t.isBlank()) {
+                    Map<String, Object> f = new LinkedHashMap<>(upd);
+                    f.remove("tumbler");
+                    byTarget.put(aliasTarget(ctx, tenant, t, f, aliasTargets), f);
+                }
+            }
+            refuseCollectionMoveCollisions(ctx, tenant, collectionMoves(byTarget));
+
             for (int i = 0; i < updates.size(); i++) {
                 var upd = updates.get(i);
                 Object tumblerObj = upd.get("tumbler");
@@ -2028,6 +2042,62 @@ public final class CatalogRepository {
      *                   {@link #batchAliasTargets}, or null to resolve
      *                   single-doc (one extra SELECT)
      */
+    /**
+     * RDR-231: the collection update's moves, target tumbler to new collection: a field map that
+     * sets physical_collection and carries no source_uri (a caller's own source_uri is stored
+     * as sent, canonicalized, and takes no part in the move check).
+     */
+    private static Map<String, String> collectionMoves(Map<String, Map<String, Object>> byTarget) {
+        Map<String, String> moves = new LinkedHashMap<>();
+        byTarget.forEach((target, fields) -> {
+            if (fields.get("physical_collection") instanceof String c && !c.isBlank()
+                    && !fields.containsKey("source_uri")) {
+                moves.put(target, c);
+            }
+        });
+        return moves;
+    }
+
+    /**
+     * RDR-231: refuse a collection update whose note URI rewrite would land on a URI a live
+     * document already holds, or on one another row of the same request rewrites to. A row whose
+     * URI the move leaves unchanged (file://, https://, nxexp://, a note already there) is skipped,
+     * so a document never collides with itself. Two reads for the whole request: the moving rows,
+     * then the holders of every rewritten URI.
+     */
+    private static void refuseCollectionMoveCollisions(DSLContext ctx, String tenant, Map<String, String> moves) {
+        if (moves.isEmpty()) return;
+        Map<String, String> rewrittenBy = new LinkedHashMap<>();  // rewritten URI -> moving tumbler
+        for (var r : ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_DOCUMENTS.TUMBLER.in(moves.keySet()))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch()) {
+            String newColl = moves.get(r.value1());
+            String rewritten = NoteUri.moveTo(r.value2(), r.value3(), newColl);
+            if (rewritten == null || rewritten.equals(r.value2())) continue;
+            String other = rewrittenBy.putIfAbsent(rewritten, r.value1());
+            if (other != null) {
+                throw new SourceUriCollision("moving document " + r.value1() + " to " + newColl,
+                    rewritten, other, newColl + " (moved by the same request)");
+            }
+        }
+        if (rewrittenBy.isEmpty()) return;
+        for (var h : ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_DOCUMENTS.SOURCE_URI.in(rewrittenBy.keySet()))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch()) {
+            String mover = rewrittenBy.get(h.value1());
+            if (!h.value2().equals(mover)) {
+                throw new SourceUriCollision("moving document " + mover + " to " + moves.get(mover),
+                    h.value1(), h.value2(), h.value3());
+            }
+        }
+    }
+
     private static String aliasTarget(DSLContext ctx, String tenant, String tumbler,
                                       Map<String, Object> fields, Map<String, String> prefetched) {
         if (fields.containsKey("alias_of")) return tumbler;
@@ -2145,6 +2215,14 @@ public final class CatalogRepository {
             more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
         }
         if (more == null) return null;
+        // RDR-231 collection update: a moved note's URI names its new collection. The old collection
+        // is the row's own physical_collection, read by the SET from the pre-UPDATE row, never a
+        // caller value. A caller-sent source_uri was stored above instead.
+        if (fields.get("physical_collection") instanceof String newColl && !newColl.isBlank()
+                && !fields.containsKey("source_uri")) {
+            more = more.set(CATALOG_DOCUMENTS.SOURCE_URI,
+                NoteUri.moveTo(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newColl));
+        }
         // nexus-e4gel / nexus-zq79 F4: when the caller does NOT name chunk_count,
         // re-derive it from the manifest — the manifest IS the count's source of
         // truth (nexus-b6enc F5, already enforced by writeManifestRows /

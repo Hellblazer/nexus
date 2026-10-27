@@ -207,7 +207,117 @@ class NoteUriMoveTest {
         assertThat(physicalCollection("rnc-mover")).isEqualTo(oldName);
     }
 
+    // ── collection update (Test Plan row 555, nexus-bivz3.3) ──────────────────
+
+    @Test
+    void update_movesANoteRewritingItsUri_andRefusesATakenOne() throws Exception {
+        String a = coll("up-a");
+        String b = coll("up-b");
+        register(a, b);
+        seedNote("up-note", a, "nx-note://" + a + "/x");
+        seedNote("up-legacy", a, "chroma://" + a + "/l");
+
+        catalogRepo.updateDocument(TENANT, "up-note", Map.of("physical_collection", b));
+        catalogRepo.updateDocument(TENANT, "up-legacy", Map.of("physical_collection", b));
+
+        assertThat(physicalCollection("up-note")).isEqualTo(b);
+        assertThat(docUri("up-note")).isEqualTo("nx-note://" + b + "/x");
+        assertThat(docUri("up-legacy")).isEqualTo("chroma://" + b + "/l");
+
+        seedNote("up-blocked", a, "nx-note://" + a + "/x");
+        assertThatThrownBy(() -> catalogRepo.updateDocument(TENANT, "up-blocked", Map.of("physical_collection", b)))
+            .isInstanceOfSatisfying(CatalogRepository.SourceUriCollision.class, e -> {
+                assertThat(e.holder()).isEqualTo("up-note");
+                assertThat(e.getMessage()).contains("up-blocked").contains("up-note");
+            });
+        assertThat(physicalCollection("up-blocked")).isEqualTo(a);
+        assertThat(docUri("up-blocked")).isEqualTo("nx-note://" + a + "/x");
+    }
+
+    @Test
+    void update_aCallerSourceUriIsStoredCanonical_andTheMoveDoesNotRewriteIt() throws Exception {
+        String a = coll("upc-a");
+        String b = coll("upc-b");
+        register(a, b);
+        seedNote("upc-note", a, "nx-note://" + a + "/x");
+
+        catalogRepo.updateDocument(TENANT, "upc-note",
+            Map.of("physical_collection", b, "source_uri", "chroma://" + b + "/renamed"));
+
+        assertThat(docUri("upc-note")).isEqualTo("nx-note://" + b + "/renamed");
+    }
+
+    @Test
+    void updateMany_oneTakenUri_refusesTheWholeRequest() throws Exception {
+        String a = coll("um-a");
+        String b = coll("um-b");
+        register(a, b);
+        seedNote("um-free", a, "nx-note://" + a + "/free");
+        seedNote("um-taken", a, "nx-note://" + a + "/t");
+        seedNote("um-hash", a, "nx-note://" + a + "/h");
+        seedNote("um-holder", b, "nx-note://" + b + "/t");
+
+        assertThatThrownBy(() -> catalogRepo.updateDocumentsMany(TENANT, List.of(
+                Map.of("tumbler", "um-free", "physical_collection", b),
+                Map.of("tumbler", "um-taken", "physical_collection", b),
+                Map.of("tumbler", "um-hash", "head_hash", "deadbeef"))))
+            .isInstanceOfSatisfying(CatalogRepository.SourceUriCollision.class,
+                e -> assertThat(e.holder()).isEqualTo("um-holder"));
+
+        assertThat(physicalCollection("um-free")).isEqualTo(a);
+        assertThat(docUri("um-free")).isEqualTo("nx-note://" + a + "/free");
+        assertThat(physicalCollection("um-taken")).isEqualTo(a);
+        assertThat(headHash("um-hash")).isNotEqualTo("deadbeef");
+    }
+
+    @Test
+    void updateMany_twoRowsRewritingToOneUri_areRefusedBeforeExecute() throws Exception {
+        String a = coll("ud-a");
+        String c = coll("ud-c");
+        String b = coll("ud-b");
+        register(a, c, b);
+        seedNote("ud-one", a, "nx-note://" + a + "/same");
+        seedNote("ud-two", c, "nx-note://" + c + "/same");
+
+        assertThatThrownBy(() -> catalogRepo.updateDocumentsMany(TENANT, List.of(
+                Map.of("tumbler", "ud-one", "physical_collection", b),
+                Map.of("tumbler", "ud-two", "physical_collection", b))))
+            .isInstanceOf(CatalogRepository.SourceUriCollision.class)
+            .hasMessageContaining("nx-note://" + b + "/same");
+
+        assertThat(physicalCollection("ud-one")).isEqualTo(a);
+        assertThat(physicalCollection("ud-two")).isEqualTo(c);
+    }
+
+    @Test
+    void update_aUriTheMoveLeavesUnchangedNeverCollidesWithItself() throws Exception {
+        String a = coll("un-a");
+        String b = coll("un-b");
+        register(a, b);
+        seedNote("un-file", a, "file:///papers/un.pdf");
+        seedNote("un-exp", a, "nxexp://" + b + "/nx-note://" + a + "/e");
+        seedNote("un-dead-holder", b, "nx-note://" + b + "/d");
+        tombstone("un-dead-holder");
+        seedNote("un-note", a, "nx-note://" + a + "/d");
+
+        catalogRepo.updateDocumentsMany(TENANT, List.of(
+            Map.of("tumbler", "un-file", "physical_collection", b),
+            Map.of("tumbler", "un-exp", "physical_collection", b),
+            Map.of("tumbler", "un-note", "physical_collection", b)));
+
+        assertThat(docUri("un-file")).isEqualTo("file:///papers/un.pdf");
+        assertThat(docUri("un-exp")).isEqualTo("nxexp://" + b + "/nx-note://" + a + "/e");
+        assertThat(docUri("un-note")).as("a tombstoned holder does not block")
+            .isEqualTo("nx-note://" + b + "/d");
+        assertThat(physicalCollection("un-file")).isEqualTo(b);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
+
+    private String headHash(String tumbler) {
+        return tenantScope.withTenant(TENANT, ctx -> ctx.select(CATALOG_DOCUMENTS.HEAD_HASH)
+            .from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).fetchOne(0, String.class));
+    }
 
     private static String coll(String slug) {
         return "knowledge__" + slug + "__minilm-l6-v2-384__v1";
