@@ -816,3 +816,4 @@ a candidate for trimming.
 - 2026-10-27: research RF-8 to RF-12; A2 reframed, so a server timeout no longer restarts the server unless it repeats.
 - 2026-10-27: Q1 answered by Sam: `--extractor pymupdf` added as an explicit text-only choice.
 - 2026-10-27: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); commit `ddacb282b`; critique `nexus_rdr/237-gate-critique-2026-10-27-r1`.
+- 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `e4fb19b83`; critique `nexus_rdr/237-gate-critique-2026-10-27-r2`.
