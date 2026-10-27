@@ -553,6 +553,41 @@ the engine's budget for such calls.
   note in the sample was paper-shaped). Nothing changes for the producer
   (3.2) or worker (3.3) beads.
   *Source: research-33; T2 nexus/rdr235-prerequisites; src/nexus/aspect_readers.py `_gather_chroma_chunks_by_field`; src/nexus/catalog/store_hook.py `note_pieces`*
+- **✅ Verified** (measurement, 2026-10-27, nexus-5r2sc.1.3) — F29, the bulk
+  backlog F1 said nobody had measured. Setup: a throwaway local engine on the
+  laptop (bge, onnx-local), one aspect worker daemon woken by the wake file
+  (claims landed within seconds, never the 300 s poll), a sampler reading the
+  queue table every 10 s. Run A: 1,200 RDR-shaped markdown pieces (3.3 MB, cut
+  from the repo's own docs) indexed by `nx index repo` into an `rdr__`
+  collection, extractor `rdr-frontmatter-v1` (deterministic, no model): index
+  wall 327 s, 505 flushes, 1,200 rows enqueued, 1,200 aspect records, 0
+  failed, 0 retries; peak depth 9 rows at 205 s, drained within 10 s of the
+  index end, because the parser outruns the producer and `markDone` deletes
+  the row. Producer (batched `enqueue_many`, loopback): 505 calls, 1.477 s
+  total, 2.9 ms per call (max 21.6 ms), 1.23 ms per document, 2.4 rows per
+  flush (max 6). Run B: 97 real prose files from `docs/` (2 to 40 KB) into a
+  `docs__` collection routed to `general-prose-v1` with the real model
+  (`claude -p`, worker batch 5): 20 model calls, 97 documents, 0 failures,
+  per batch 18.4 s min, 45.0 s mean, 72.4 s max, 9.27 s per document; the
+  producer there took 3.5 ms per document at 1.2 rows per flush. Derived from
+  those rates (not run): with a model-bound worker the live depth of a bulk
+  index is the whole corpus until the index ends (the producer is about four
+  orders faster than the consumer), so a 1,200-document index peaks near
+  1,170 rows at its end and drains in 2.7 to 4.1 hours (3.3 at the mean);
+  E3's 90-day retention is more than 600 times that drain. Two mechanics
+  found on the way: in onnx-local mode the ChunkBatcher flush holds at most
+  16 chunks, so documents longer than that go through the per-document
+  `fire_document` enqueue, not the batched path (38 of the 97 prose files);
+  and an over-cap `out` is refused inside a best-effort hook, so a document
+  past `max_live_rows` would lose its aspects silently unless the producer
+  bead surfaces the refusal. The `enqueue_many` docstring's 34.7 s per 250
+  documents was a remote link, not reproduced on loopback. Proposed
+  `max_live_rows`: 10,000, the measured peak of 1,200 times a headroom of 7
+  (an 8,000-document corpus, or several concurrent indexes of this size),
+  plus 1,600 for dead tasks that stay live until `requeue-failed` (a sizing
+  allowance, the measured terminal-failure rate was 0 of 1,297); it also
+  keeps `queue.yaml`'s figure, so the doctor depth row has one scale.
+  *Source: T2 nexus/rdr235-prerequisites (CSV paths); src/nexus/indexer.py `_fire_flush_grain_hooks`; src/nexus/db/t2/http_aspect_queue.py `enqueue_many`; src/nexus/db/http_vector_client.py per-collection chunk cap; src/nexus/aspect_worker.py `_DEFAULT_BATCH_SIZE`*
 
 ### Critical Assumptions
 
@@ -1541,3 +1576,4 @@ so the question is not reopened without new evidence.
 - 2026-10-27: A1 settled by the EXPLAIN spike (nexus-5r2sc.1.1): F26 added, A1 marked verified, E1 ships no index.
 - 2026-10-27: A4b settled by the busy-hour park-slot reading (nexus-5r2sc.1.2): F27 added, A4 (b) marked verified, no park-cap change before activation.
 - 2026-10-27: A2 settled by the two-way extraction sample (nexus-5r2sc.1.4): F28 added, A2 marked verified, the identity-only body stands.
+- 2026-10-27: the bulk backlog measured (nexus-5r2sc.1.3): F29 added; max_live_rows 10,000 proposed on the E3 bead. All four prerequisites settled.
