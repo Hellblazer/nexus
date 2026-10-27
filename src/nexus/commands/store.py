@@ -19,7 +19,7 @@ from nexus.corpus import (
 )
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
-from nexus.errors import PutOversizedError
+from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.ttl import parse_ttl
 
 
@@ -162,8 +162,9 @@ def put_cmd(
             category=category, session_id=session_id, source_agent=agent,
             ttl_days=ttl_days,
         )
-    except PutOversizedError as exc:
-        # put_note refuses an over-quota note before it mints a catalog row.
+    except (PutOversizedError, NoteUriEngineTooOldError) as exc:
+        # put_note refuses an over-quota note, or one the serving engine is too old to hold
+        # (RDR-231, nexus-bivz3.13), before it mints a catalog row.
         raise click.ClickException(str(exc)) from exc
     finally:
         file_heartbeat.disarm()

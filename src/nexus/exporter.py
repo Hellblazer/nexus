@@ -1498,6 +1498,13 @@ def import_collection(
         If the declared model's expected dimensionality doesn't match the
         actual vectors found in the file (a mislabeled pre-migration export).
     """
+    # RDR-231 (nexus-bivz3.13): an import registers owner documents (a title-only owner synthesizes an
+    # nx-note:// URI), so it is refused up front when the serving engine cannot hold one: before any
+    # register and before any T3 upsert. Once per import is enough. Aspect and highlight upserts and the
+    # reads are not covered (no unique key on source_uri; the backfill leaves nx-note:// rows as they are).
+    from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
+
+    require_note_uri_engine()
     t0 = time.monotonic()
     remaps = remaps or []
     if hooks is None:

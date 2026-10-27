@@ -5671,11 +5671,20 @@ def store_put(
         # the identity stamp it changed) so nx store put, nx memory promote
         # and the recovery import run the same sequence. This tool only words
         # the result.
-        outcome = put_note(
-            content=content, collection=col_name, title=title, tags=tags,
-            category=category, session_id=session_arg, source_agent=agent_arg,
-            ttl_days=ttl_days,
-        )
+        from nexus.errors import NoteUriEngineTooOldError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
+
+        try:
+            outcome = put_note(
+                content=content, collection=col_name, title=title, tags=tags,
+                category=category, session_id=session_arg, source_agent=agent_arg,
+                ttl_days=ttl_days,
+            )
+        except NoteUriEngineTooOldError as exc:
+            # RDR-231 (nexus-bivz3.13): the serving engine cannot hold a note's nx-note:// URI. Raised
+            # before the register and the write, so nothing changed; the message carries the remedy.
+            # An expected refusal, worded here, not an MCP tool fault with a traceback.
+            _log.warning("mcp_store_put_note_uri_engine_too_old", error=str(exc))
+            return _fail(f"Error: store_put: {exc}")
         pieces = outcome.pieces
         doc_id = outcome.doc_id
         catalog_doc_id = outcome.catalog_doc_id

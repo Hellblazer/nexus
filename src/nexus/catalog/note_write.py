@@ -651,7 +651,9 @@ def put_note(
        On any other exception: remove a minted row (or restore the stamp), ``_fence_fail``, re-raise.
 
     *collection* is the full T3 collection name. Raises ``PutOversizedError`` for an over-quota
-    note and ``ValueError`` for empty *content* or a bad ``ttl_days``, all before any side effect.
+    note, ``ValueError`` for empty *content* or a bad ``ttl_days``, and
+    :class:`~nexus.errors.NoteUriEngineTooOldError` when the serving engine is below
+    ``NOTE_URI_MIN_ENGINE_VERSION``, all before any side effect.
     """
     from nexus.catalog import store_hook as sh  # noqa: PLC0415 — module attribute lookup at call time: callers and tests patch these names
 
@@ -664,6 +666,17 @@ def put_note(
     pieces = sh.note_pieces(content, collection)
     first_chash, manifest_metadatas = sh.note_manifest_metadata(pieces)
     sh.raise_if_oversized(content, doc_id=first_chash, collection=collection)
+    # RDR-231 (nexus-bivz3.13): refuse a note write the serving engine cannot hold, BEFORE the register
+    # and the T3 write. Raised to the caller on purpose: the register below sits in an `except
+    # Exception` (and store_hook's own hook swallows every error into NO_CATALOG), so a check placed
+    # inside either would be turned into "could not catalog". Every note writer reaches this function
+    # (MCP store_put, nx store put, nx memory promote, the recovery-bundle import); the exporter's
+    # import_collection has its own check at its top. Not covered, on purpose: aspect and highlight
+    # upserts (no unique key on source_uri; the backfill leaves nx-note:// rows as they are and they join
+    # the note once it is backfilled) and reads (find_ids_by_title, aspect_sql), which write nothing.
+    from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
+
+    require_note_uri_engine()
     out = PutNoteOutcome(
         status=NO_CATALOG, collection=collection, pieces=pieces, manifest_metadatas=manifest_metadatas,
         chunk_ids=[m.get("chunk_text_hash", "") for m in manifest_metadatas])

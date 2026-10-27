@@ -536,6 +536,24 @@ class CatalogIdentityMissingError(NexusError):
     """
 
 
+class NoteUriEngineTooOldError(NexusError):
+    """A note write was refused because the serving engine is older than
+    ``engine_version.NOTE_URI_MIN_ENGINE_VERSION`` (RDR-231, nexus-bivz3.13).
+
+    The client mints ``nx-note://`` source URIs; an engine below that floor cannot hold one, so the
+    write is refused BEFORE the catalog register and the T3 write (nothing is registered, nothing is
+    written). The message names the remedy: ``nx daemon restart-stale`` for a local engine, or that
+    the managed engine has not been upgraded yet.
+
+    Attributes: ``serving`` (the version the engine reported) and ``floor``.
+    """
+
+    def __init__(self, message: str, *, serving: tuple[int, int, int], floor: tuple[int, int, int]) -> None:
+        super().__init__(message)
+        self.serving = serving
+        self.floor = floor
+
+
 class PutOversizedError(NexusError):
     """A ``put``-path write was refused because the document exceeds the
     T3 per-document byte quota (``QUOTAS.MAX_DOCUMENT_BYTES``, the

@@ -489,13 +489,21 @@ JAR="$REPO_ROOT/service/target/nexus-service-1.0-SNAPSHOT.jar"
 # RELEASE_PROPS is set once, above cleanup() (nexus-iws18); its byte
 # snapshot is taken later, inside the stamp step below, only once the
 # build lease is held and the guard has passed (nexus-iexvl).
+# max(REQUIRED_ENGINE_VERSION, NOTE_URI_MIN_ENGINE_VERSION) (RDR-231, nexus-bivz3.13): the gate jar must
+# not sit under the note-write floor. Either constant unparseable prints nothing and is fatal below.
 GATE_STAMP="$("$E2E_PYTHON" -c '
 import re, pathlib
 src = pathlib.Path("src/nexus/engine_version.py").read_text()
-m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src)
-print(".".join(m.groups()) if m else "")
+vals = []
+for name in ("REQUIRED_ENGINE_VERSION", "NOTE_URI_MIN_ENGINE_VERSION"):
+    m = re.search(r"^" + name + r"[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src, re.M)
+    if not m:
+        vals = []
+        break
+    vals.append(tuple(int(g) for g in m.groups()))
+print(".".join(map(str, max(vals))) if vals else "")
 ')"
-[ -n "$GATE_STAMP" ] || { echo "[gate] FATAL: could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
+[ -n "$GATE_STAMP" ] || { echo "[gate] FATAL: could not parse REQUIRED_ENGINE_VERSION / NOTE_URI_MIN_ENGINE_VERSION" >&2; exit 2; }
 GATE_BUILD_REF=""
 if [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
   JAR_SKIP_REASON="$(uv run python3 -c '

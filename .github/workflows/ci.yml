@@ -1560,13 +1560,15 @@ jobs:
         # fail-closes on a blank version, and tests/db/conftest.py FAILS them
         # in CI (nexus-ao29z). The shard matrix runs none of them; this job
         # selects four. Same remedy as the write-seam job's stamp step and
-        # scripts/build-gate-jar.sh: stamp REQUIRED_ENGINE_VERSION, so the
-        # probe sees a conformant engine and stays armed. Only this job's
+        # scripts/build-gate-jar.sh: stamp max(REQUIRED_ENGINE_VERSION,
+        # NOTE_URI_MIN_ENGINE_VERSION) (RDR-231, nexus-bivz3.13: the jar must
+        # not sit under the note-write floor), so the probe sees a
+        # conformant engine and stays armed. Only this job's
         # downloaded copy changes; the shared artifact does not.
         run: |
           set -euo pipefail
           jar_path="$PWD/service/target/nexus-service-1.0-SNAPSHOT.jar"
-          ver=$(python3 -c "import re,pathlib; s=pathlib.Path('src/nexus/engine_version.py').read_text(); m=re.search(r'REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s); assert m, 'REQUIRED_ENGINE_VERSION not parseable'; print('.'.join(m.groups()))")
+          ver=$(python3 -c "import re,sys,pathlib; s=pathlib.Path('src/nexus/engine_version.py').read_text(); g=lambda n: tuple(int(x) for x in (re.search(r'^'+n+r'[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s, re.M) or sys.exit(n+' not parseable — fix the regex before stamping')).groups()); print('.'.join(map(str, max(g('REQUIRED_ENGINE_VERSION'), g('NOTE_URI_MIN_ENGINE_VERSION')))))")
           work="$(mktemp -d)"
           mkdir -p "$work/META-INF/nexus"
           unzip -p "$jar_path" META-INF/nexus/release.properties | grep -v '^release_version=' > "$work/META-INF/nexus/release.properties"
@@ -2731,8 +2733,12 @@ jobs:
         # PINNED_SERVICE_TAG version (develop-tip is >= the pinned release) so the
         # gate exercises a CONFORMANT engine and the probe is satisfied
         # legitimately — no probe bypass, the hardening stays intact. Extracted
-        # from engine_version.py's REQUIRED_ENGINE_VERSION — the ONE floor
-        # constant — so it never drifts when the pin bumps. (Was extracted from
+        # from engine_version.py as max(REQUIRED_ENGINE_VERSION,
+        # NOTE_URI_MIN_ENGINE_VERSION) — never below the note-write floor
+        # (RDR-231, nexus-bivz3.13: a note write against an engine under
+        # that floor is refused, and the gate jar must stay writable); the
+        # floor is (0, 0, 0) while unset, so until it is set the stamp is
+        # REQUIRED_ENGINE_VERSION, which never drifts when the pin bumps. (Was extracted from
         # binary_install.py's PINNED_SERVICE_TAG literal until 2026-07-12, when
         # the nexus-b6qlf-class unification made that constant DERIVED from
         # REQUIRED_ENGINE_VERSION and the literal this regex matched ceased to
@@ -2741,7 +2747,7 @@ jobs:
         if: steps.changes.outputs.seam == 'true'
         run: |
           set -euo pipefail
-          ver=$(python -c "import re,pathlib; s=pathlib.Path('src/nexus/engine_version.py').read_text(); m=re.search(r'REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s); assert m, 'REQUIRED_ENGINE_VERSION not parseable — fix the regex before stamping'; print('.'.join(m.groups()))")
+          ver=$(python -c "import re,sys,pathlib; s=pathlib.Path('src/nexus/engine_version.py').read_text(); g=lambda n: tuple(int(x) for x in (re.search(r'^'+n+r'[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s, re.M) or sys.exit(n+' not parseable — fix the regex before stamping')).groups()); print('.'.join(map(str, max(g('REQUIRED_ENGINE_VERSION'), g('NOTE_URI_MIN_ENGINE_VERSION')))))")
           props="service/src/main/resources/META-INF/nexus/release.properties"
           test -f "$props" || { echo "release.properties missing at $props"; exit 1; }
           tmp="$(mktemp)"

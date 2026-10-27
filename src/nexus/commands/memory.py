@@ -588,15 +588,16 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             put_note,
             stamp_note,
         )
-        from nexus.errors import PutOversizedError  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
+        from nexus.errors import NoteUriEngineTooOldError, PutOversizedError  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
 
         try:
             outcome = put_note(
                 content=entry["content"], collection=collection, title=entry["title"],
                 tags=merged_tags, ttl_days=ttl_days,
             )
-        except PutOversizedError as exc:
-            # Raised before any catalog row or chunk exists.
+        except (PutOversizedError, NoteUriEngineTooOldError) as exc:
+            # Raised before any catalog row or chunk exists (an over-quota note; RDR-231: a serving
+            # engine below NOTE_URI_MIN_ENGINE_VERSION).
             raise click.ClickException(f"{exc} The T2 entry is unchanged.") from exc
 
         # One wording of every outcome that did not store (note_write.failure_message), the table
