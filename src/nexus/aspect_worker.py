@@ -30,7 +30,10 @@ Worker contract:
   30 s — nexus-59611; the idle poll is edge load, see the constant).
 * Reclaims rows stuck in ``in_progress`` for > ``stale_timeout``
   seconds (default 300 s) before each poll, so worker process
-  death does not wedge a row forever.
+  death does not wedge a row forever. A reclaim counts as an attempt
+  (engine ``AspectRepository.reclaimStale``, nexus-j67ix.2): it adds one to
+  ``retry_count`` and, from ``_RETRY_MAX_ATTEMPTS`` on, terminal-fails the row,
+  so a document that kills its worker every time is not reclaimed forever.
 
 Result handling:
 
@@ -47,7 +50,9 @@ Result handling:
   a bad document terminal-fails for triage; a SELF FAULT — this
   process's own environment is broken — writes no row state at
   all, stands the worker down, and leaves the claimed rows for
-  ``reclaim_stale``. Only the middle class is terminal, and it is
+  ``reclaim_stale``. The middle class is terminal, and so is a
+  reclaim of a row whose attempts have reached the cap (the engine's
+  ``reclaimStale`` counts each reclaim as an attempt); both stay
   terminal until manually re-enqueued.
 
 The hook function ``aspect_extraction_enqueue_hook`` is registered
@@ -93,7 +98,9 @@ _ENQUEUE_TENANT: str = "default"
 # A transient failure re-queues the row with a backoff interval the WORKER
 # chooses; the service stamps the absolute next_retry_at = now()+interval
 # server-side. retry_count is monotonic and is the cap's source of truth, so
-# termination is guaranteed even under the ±1 race of concurrent reclaim.
+# termination is guaranteed even under the ±1 race of concurrent reclaim. The
+# engine applies this same cap to a reclaim (AspectRepository.RETRY_MAX_ATTEMPTS,
+# pinned equal by tests/test_aspect_retry_cap_parity.py).
 _RETRY_MAX_ATTEMPTS: int = 5          # terminal mark_failed once retry_count >= cap
 _RETRY_BASE_SECONDS: float = 30.0     # interval = base * 2**retry_count, jittered
 _RETRY_JITTER_FRACTION: float = 0.2   # ±20% — spreads re-claims when a wide outage clears
@@ -725,8 +732,9 @@ class AspectExtractionWorker:
                     # single-row path's terminal ``mark_failed`` (it is not
                     # retryable there either) and go on with the rest of the
                     # batch. Letting it abort the loop left every later row
-                    # unmarked, and ``reclaim_stale`` resets those without touching
-                    # retry_count, so the extractor re-ran them indefinitely.
+                    # unmarked, and ``reclaim_stale`` reset those without touching
+                    # retry_count (it now counts the reclaim), so the extractor
+                    # re-ran them indefinitely.
                     _log.warning(
                         "aspect_worker_batch_row_superseded",
                         collection=row.collection,

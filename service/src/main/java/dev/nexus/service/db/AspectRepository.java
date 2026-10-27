@@ -41,6 +41,15 @@ import static org.jooq.impl.DSL.*;
  */
 public final class AspectRepository {
 
+    /**
+     * Retry budget of the aspect-extraction queue (RDR-163): a failure seen at
+     * {@code retry_count >= RETRY_MAX_ATTEMPTS} is terminal. The worker applies it before
+     * calling {@code markRetry}/{@code markFailed}; {@link #reclaimStale} applies the same
+     * rule to a reclaimed row. MUST equal {@code _RETRY_MAX_ATTEMPTS} in
+     * {@code src/nexus/aspect_worker.py} (pinned by tests/test_aspect_retry_cap_parity.py).
+     */
+    public static final int RETRY_MAX_ATTEMPTS = 5;
+
     private static final Logger log = LoggerFactory.getLogger(AspectRepository.class);
 
     static final DateTimeFormatter UTC_SECOND =
@@ -1218,15 +1227,43 @@ public final class AspectRepository {
         });
     }
 
+    /** last_error written to a row that a reclaim moves to the terminal failed state. */
+    static final String RECLAIM_CAP_ERROR = "reclaimed_stale_retry_cap_exhausted";
+
     /**
-     * Reclaim stale in_progress rows (worker died).
+     * Reclaim stale in_progress rows (worker died or hung).
+     *
+     * <p>A reclaim counts as an attempt (RDR-235 Gap 2, nexus-j67ix.2): without it a
+     * document that kills its worker every time (OOM, a kill) cycles pending ->
+     * in_progress -> pending forever and never reaches the terminal {@code failed}
+     * state RDR-163 defined. {@code retry_count} is incremented, and the row is
+     * decided by the worker's own rule: seen at {@code retry_count >= }
+     * {@link #RETRY_MAX_ATTEMPTS} it goes {@code failed} exactly as {@link #markFailed}
+     * leaves it (status, retry_count + 1, last_error; last_attempt_at and
+     * next_retry_at untouched); below the cap it returns to {@code pending} with the
+     * incremented count and last_attempt_at cleared, as before.
+     *
+     * <p>{@code next_retry_at} is never written by either outcome (RDR-163 invariant:
+     * clearing it would bypass the backoff, bumping it would punish a crash).
+     *
+     * @return rows reclaimed, whichever way they went
      */
     public int reclaimStale(String tenant, int timeoutSeconds) {
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(timeoutSeconds);
+            // Every right-hand side reads the row's pre-update values (SQL UPDATE semantics),
+            // so the cap test sees the count the worker saw at claim time.
+            var atCap = ASPECT_EXTRACTION_QUEUE.RETRY_COUNT.ge(RETRY_MAX_ATTEMPTS);
             return ctx.update(ASPECT_EXTRACTION_QUEUE)
-                .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
-                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
+                .set(ASPECT_EXTRACTION_QUEUE.STATUS,
+                    when(atCap, inline("failed")).otherwise(inline("pending")))
+                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    field("retry_count + 1", Integer.class))
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
+                    when(atCap, ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT)
+                        .otherwise(inline((OffsetDateTime) null)))
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,
+                    when(atCap, inline(RECLAIM_CAP_ERROR)).otherwise(ASPECT_EXTRACTION_QUEUE.LAST_ERROR))
                 .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress")
                     .and(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT.lt(cutoff)))
                 .execute();
