@@ -18,7 +18,7 @@ import pytest
 import nexus.catalog.factory as factory_mod
 from nexus.commands.enrich import _build_catalog_doc_id_lookup
 
-COLL = "rdr__1-1__voyage-context-3__v1"
+COLL = "rdr__1-1__test-embed__v1"
 ABS = "/repo/docs/rdr/rdr-127-surface.md"
 
 
@@ -68,5 +68,5 @@ def test_relative_path_still_resolves(use_catalog) -> None:
 
 
 def test_source_uri_row_in_another_collection_is_not_taken(use_catalog) -> None:
-    use_catalog([_row("1.9.5", coll="docs__1-1__voyage-context-3__v1")])
+    use_catalog([_row("1.9.5", coll="docs__1-1__test-embed__v1")])
     assert _build_catalog_doc_id_lookup()(COLL, ABS) == ""
