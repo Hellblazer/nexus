@@ -979,11 +979,34 @@ public final class TelemetryRepository {
                                   long durationMs,
                                   String createdAtIso,
                                   List<StepInput> steps) {
+        recordNxAnswerRun(tenant, question, planId, matchedConfidence, stepCount, finalText,
+            costUsd, durationMs, createdAtIso, steps, null);
+    }
+
+    /**
+     * {@link #recordNxAnswerRun(String, String, Long, Double, int, String, Double, long, String, List)}
+     * plus the optional {@code run_summary} (RDR-232 Phase 3, nexus-jypmj.3.4): the
+     * client-versioned summary as JSON object text, or {@code null}/blank for none
+     * (stored as SQL NULL). The handler has already checked that it is an object within
+     * the size cap; the repository stores it opaquely, as part of the same run-row
+     * INSERT, so it shares the steps' transaction.
+     */
+    public void recordNxAnswerRun(String tenant,
+                                  String question,
+                                  Long planId,
+                                  Double matchedConfidence,
+                                  int stepCount,
+                                  String finalText,
+                                  Double costUsd,
+                                  long durationMs,
+                                  String createdAtIso,
+                                  List<StepInput> steps,
+                                  String runSummary) {
         tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime createdAt = createdAtIso != null
                 ? parseTs(createdAtIso) : OffsetDateTime.now(ZoneOffset.UTC);
             insertRunAndSteps(ctx, tenant, question, planId, matchedConfidence, stepCount,
-                finalText, costUsd, durationMs, createdAt, steps);
+                finalText, costUsd, durationMs, createdAt, steps, runSummary);
             return null;
         });
     }
@@ -1019,7 +1042,8 @@ public final class TelemetryRepository {
                                           Double costUsd,
                                           long durationMs,
                                           OffsetDateTime createdAt,
-                                          List<StepInput> steps) {
+                                          List<StepInput> steps,
+                                          String runSummary) {
         Long runId = ctx.insertInto(NX_ANSWER_RUNS)
             .set(NX_ANSWER_RUNS.TENANT_ID, tenant)
             .set(NX_ANSWER_RUNS.QUESTION, question)
@@ -1030,6 +1054,9 @@ public final class TelemetryRepository {
             .set(NX_ANSWER_RUNS.COST_USD, costUsd)
             .set(NX_ANSWER_RUNS.DURATION_MS, durationMs)
             .set(NX_ANSWER_RUNS.CREATED_AT, createdAt)
+            // RDR-232 P3 (nexus-jypmj.3.4): part of the run row, so the composite's one
+            // transaction covers it; null/blank is SQL NULL, never an empty object.
+            .set(NX_ANSWER_RUNS.RUN_SUMMARY, jsonbOrNull(runSummary))
             .onConflictDoNothing()
             .returning(NX_ANSWER_RUNS.ID)
             .fetchOne(NX_ANSWER_RUNS.ID);
@@ -1116,9 +1143,31 @@ public final class TelemetryRepository {
                                           OffsetDateTime createdAt,
                                           List<StepInput> steps,
                                           boolean success) {
+        recordNxAnswerRunComplete(tenant, question, planId, matchedConfidence, stepCount, finalText,
+            costUsd, durationMs, createdAt, steps, null, success);
+    }
+
+    /**
+     * {@link #recordNxAnswerRunComplete(String, String, Long, Double, int, String, Double, long, OffsetDateTime, List, boolean)}
+     * plus the optional {@code run_summary} (RDR-232 Phase 3, nexus-jypmj.3.4). It is a
+     * column of the run row {@link #insertRunAndSteps} inserts, so it adds no write: the
+     * summary, the steps and both plan-counter updates still commit or roll back together.
+     */
+    public void recordNxAnswerRunComplete(String tenant,
+                                          String question,
+                                          Long planId,
+                                          Double matchedConfidence,
+                                          int stepCount,
+                                          String finalText,
+                                          Double costUsd,
+                                          long durationMs,
+                                          OffsetDateTime createdAt,
+                                          List<StepInput> steps,
+                                          String runSummary,
+                                          boolean success) {
         tenantScope.withTenant(tenant, ctx -> {
             Long runId = insertRunAndSteps(ctx, tenant, question, planId, matchedConfidence,
-                stepCount, finalText, costUsd, durationMs, createdAt, steps);
+                stepCount, finalText, costUsd, durationMs, createdAt, steps, runSummary);
             if (runId != null && planId != null && planId > 0) {
                 PlanRepository.incrementRunStartedIn(ctx, planId);
                 PlanRepository.incrementRunOutcomeIn(ctx, planId, success);
@@ -1148,6 +1197,25 @@ public final class TelemetryRepository {
                                      Double costUsd,
                                      long durationMs,
                                      String createdAtIso) {
+        importNxAnswerRunRow(tenant, question, planId, matchedConfidence, stepCount, finalText,
+            costUsd, durationMs, createdAtIso, null);
+    }
+
+    /**
+     * {@link #importNxAnswerRunRow(String, String, Long, Double, int, String, Double, long, String)}
+     * plus the source row's {@code run_summary} (RDR-232 Phase 3, nexus-jypmj.3.4), carried
+     * verbatim as JSON object text; {@code null}/blank imports as SQL NULL.
+     */
+    public void importNxAnswerRunRow(String tenant,
+                                     String question,
+                                     Long planId,
+                                     Double matchedConfidence,
+                                     int stepCount,
+                                     String finalText,
+                                     Double costUsd,
+                                     long durationMs,
+                                     String createdAtIso,
+                                     String runSummary) {
         OffsetDateTime createdAt = parseTsStrict(createdAtIso);  // STRICT: throws on blank/malformed
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(NX_ANSWER_RUNS)
@@ -1160,6 +1228,7 @@ public final class TelemetryRepository {
                 .set(NX_ANSWER_RUNS.COST_USD, costUsd)
                 .set(NX_ANSWER_RUNS.DURATION_MS, durationMs)
                 .set(NX_ANSWER_RUNS.CREATED_AT, createdAt)
+                .set(NX_ANSWER_RUNS.RUN_SUMMARY, jsonbOrNull(runSummary))
                 .onConflictDoNothing()
                 .execute();
             return null;
@@ -1287,7 +1356,8 @@ public final class TelemetryRepository {
                     NX_ANSWER_RUNS.FINAL_TEXT,
                     NX_ANSWER_RUNS.COST_USD,
                     NX_ANSWER_RUNS.DURATION_MS,
-                    NX_ANSWER_RUNS.CREATED_AT)
+                    NX_ANSWER_RUNS.CREATED_AT,
+                    NX_ANSWER_RUNS.RUN_SUMMARY)
                 .from(NX_ANSWER_RUNS)
                 .where(cond)
                 .orderBy(NX_ANSWER_RUNS.CREATED_AT.desc(), NX_ANSWER_RUNS.ID.desc())
@@ -1311,6 +1381,9 @@ public final class TelemetryRepository {
                     m.put("cost_usd",           r.value7());
                     m.put("duration_ms",        r.value8());
                     m.put("created_at",         utcIso(r.value9()));
+                    // RDR-232 P3 (nexus-jypmj.3.4): the stored object, or an explicit null for
+                    // a run that recorded none (an old client's row).
+                    m.put("run_summary",        parseRunSummary(r.value10()));
                     if (includeSteps) {
                         m.put("steps", stepsByRunId.getOrDefault(r.value1(), List.of()));
                     }
@@ -1329,6 +1402,29 @@ public final class TelemetryRepository {
             return out;
         });
     }
+
+    /**
+     * Parse the stored {@code run_summary} back to a tree the handler serialises as the
+     * object it was written as (PostgreSQL's jsonb normalises key order and whitespace,
+     * which is why a client compares digests of canonical JSON, not text). Floats are read
+     * as {@code BigDecimal} so a number round-trips without a binary-float rewrite. A READ
+     * path never throws: unparseable stored text is logged and returned as {@code null}.
+     */
+    private static com.fasterxml.jackson.databind.JsonNode parseRunSummary(JSONB raw) {
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return RUN_SUMMARY_MAPPER.readTree(raw.data());
+        } catch (Exception e) {
+            log.warn("event=run_summary_parse_failed error={}", e.toString());
+            return null;
+        }
+    }
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper RUN_SUMMARY_MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper()
+            .enable(com.fasterxml.jackson.databind.DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
     private static long bucketVal(org.jooq.Record agg, String key) {
         Object v = agg != null ? agg.get(key) : null;
@@ -2025,13 +2121,15 @@ public final class TelemetryRepository {
     }
 
     private static void importNxAnswerRunsBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
-        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
+        // 10 bind params per row since RDR-232 P3 added run_summary (was 9).
+        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 10);
         for (int start = 0; start < rows.size(); start += chunkSize) {
             var batch = rows.subList(start, Math.min(start + chunkSize, rows.size()));
             var insert = ctx.insertInto(NX_ANSWER_RUNS,
                     NX_ANSWER_RUNS.TENANT_ID, NX_ANSWER_RUNS.QUESTION, NX_ANSWER_RUNS.PLAN_ID,
                     NX_ANSWER_RUNS.MATCHED_CONFIDENCE, NX_ANSWER_RUNS.STEP_COUNT, NX_ANSWER_RUNS.FINAL_TEXT,
-                    NX_ANSWER_RUNS.COST_USD, NX_ANSWER_RUNS.DURATION_MS, NX_ANSWER_RUNS.CREATED_AT);
+                    NX_ANSWER_RUNS.COST_USD, NX_ANSWER_RUNS.DURATION_MS, NX_ANSWER_RUNS.CREATED_AT,
+                    NX_ANSWER_RUNS.RUN_SUMMARY);
             for (var r : batch) {
                 // cost_usd: optD (nullable, no default) — not optDd (RDR-196 .p1c-b,
                 // nexus-lme1s). Fidelity-preserving import must not coerce a source
@@ -2040,7 +2138,9 @@ public final class TelemetryRepository {
                 insert = insert.values(tenant, reqS(r, "question"), optL(r, "plan_id"),
                         optD(r, "matched_confidence"), optI(r, "step_count", 0), str(optS(r, "final_text")),
                         optD(r, "cost_usd"), optLd(r, "duration_ms", 0L),
-                        parseTsStrict(reqS(r, "created_at")));
+                        parseTsStrict(reqS(r, "created_at")),
+                        // RDR-232 P3: the handler has already validated it and put its JSON text here.
+                        jsonbOrNull(optS(r, "run_summary")));
             }
             insert.onConflictDoNothing().execute();
         }

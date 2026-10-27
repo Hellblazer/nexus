@@ -208,6 +208,54 @@ class NxAnswerRunCompleteTransactionTest {
         assertThat(sentinelRow.getFailureCount()).isEqualTo(0);
     }
 
+    // ── RDR-232 Phase 3 (nexus-jypmj.3.4): run_summary rides the one transaction ─
+
+    /**
+     * The summary is a column of the run row, written by the same INSERT that
+     * writes the run, so it commits and rolls back with the steps and the plan
+     * counters: no second write, no follow-up update. Reverting to a separate
+     * UPDATE after the composite leaves a run with no summary after a failure
+     * between the two, and the rollback half below stops holding.
+     */
+    @Test
+    @Order(6)
+    void runSummaryIsWrittenByTheCompositeInsertAndRollsBackWithIt() {
+        String summary = "{\"version\":1,\"coverage\":{\"covered\":[\"f1\"]}}";
+        long planId = newPlan("proj-complete-6", "complete summary plan " + System.nanoTime());
+        String ok = "complete-summary-ok-" + System.nanoTime();
+        OffsetDateTime createdAt = OffsetDateTime.now(ZoneOffset.UTC);
+
+        telemetryRepo.recordNxAnswerRunComplete(TENANT, ok, planId, null, 0, "text", 0.0, 1,
+            createdAt, List.of(), summary, true);
+
+        assertThat(fetchRunSummary(ok)).isNotNull();
+        assertThat(fetchRunSummary(ok).data()).contains("\"version\"").contains("\"f1\"");
+        assertThat(planRepo.getById(TENANT, planId).orElseThrow().getUseCount())
+            .as("the counters move in the same call").isEqualTo(1);
+
+        String bad = "complete-summary-bad-" + System.nanoTime();
+        List<TelemetryRepository.StepInput> badStep = List.of(
+            new TelemetryRepository.StepInput(0, "op", "not_a_real_source", null,
+                null, null, null, null, null, 1, true, List.of()));
+        assertThatThrownBy(() -> telemetryRepo.recordNxAnswerRunComplete(TENANT, bad, planId, null, 1,
+            "text", 0.0, 1, createdAt.plusSeconds(1), badStep, summary, true))
+            .isInstanceOf(RuntimeException.class);
+        assertThat(nxAnswerRunExists(bad))
+            .as("the run row and its summary roll back with the failed step").isFalse();
+        assertThat(planRepo.getById(TENANT, planId).orElseThrow().getUseCount())
+            .as("and so do the counters").isEqualTo(1);
+    }
+
+    @Test
+    @Order(7)
+    void aNullRunSummaryStoresSqlNullNotJsonNull() {
+        String q = "complete-null-summary-" + System.nanoTime();
+        telemetryRepo.recordNxAnswerRunComplete(TENANT, q, null, null, 0, "text", 0.0, 1,
+            OffsetDateTime.now(ZoneOffset.UTC), List.of(), null, true);
+        assertThat(fetchRunSummary(q)).as("SQL NULL, so an old-client row and this one read alike").isNull();
+        assertThat(nxAnswerRunExists(q)).isTrue();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private long newPlan(String project, String query) {
@@ -243,6 +291,13 @@ class NxAnswerRunCompleteTransactionTest {
             .fetchOne(NX_ANSWER_RUNS.ID));
         assertThat(id).as("run row must exist for question=" + question).isNotNull();
         return id;
+    }
+
+    private JSONB fetchRunSummary(String question) {
+        return tenantScope.withTenant(TENANT, ctx -> ctx.select(NX_ANSWER_RUNS.RUN_SUMMARY)
+            .from(NX_ANSWER_RUNS)
+            .where(NX_ANSWER_RUNS.TENANT_ID.eq(TENANT).and(NX_ANSWER_RUNS.QUESTION.eq(question)))
+            .fetchOne(NX_ANSWER_RUNS.RUN_SUMMARY));
     }
 
     private boolean nxAnswerRunExists(String question) {

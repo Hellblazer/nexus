@@ -90,7 +90,10 @@ migration_wal_bytes_per_worker = 11038000
 # 2139 -> 2140 (2026-10-26): vectors-039-1 (nexus-h4w9o, partition_copy_access skips BYPASSRLS grantees) adds one DDL
 # statement to a fresh migration: 1 CREATE OR REPLACE FUNCTION (CREATE OR REPLACE keeps the function's grants, so no
 # GRANT EXECUTE follows). Measured on chas (scoped substrate run of tests/test_scenario_journeys.py, ddl: migration=2140).
-migration_ddl_per_worker = 2140
+# 2140 -> 2141 (2026-10-27): telemetry-016-1 (nexus-jypmj.3.4, RDR-232 Phase 3, nx_answer_runs.run_summary) adds one ALTER
+# TABLE (one ADD COLUMN) to a fresh migration. Measured on chas (scoped substrate run of tests/test_scenario_journeys.py
+# and the answer-run telemetry tests, one worker, ddl: migration=2141).
+migration_ddl_per_worker = 2141
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

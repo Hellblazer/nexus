@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-jypmj.3.4 (RDR-232 Phase 3, engine half of step 3): nexus.nx_answer_runs gains one NULLABLE
+    JSONB column, run_summary.
+
+    WHAT. The per-run summary of the answer-shape and evidence-sufficiency work: the shape the planner chose,
+    the coverage the run reached (requested and covered facets, primary-source state, repair attempts,
+    residual gaps), as one JSON object the CLIENT versions (a "version" key inside the object). The engine
+    stores it opaquely: it checks that the value is a JSON object and that it fits a size cap
+    (TelemetryHandler.MAX_RUN_SUMMARY_BYTES), and reads no key of it. The shape is therefore free to change
+    on the client without another changeset, which is why the column ships ahead of the Phase 2 and 3 client
+    code that fills it.
+
+    WHY A COLUMN, NOT A TABLE OR A SECOND WRITE. The run row is written once, by POST /record or by RDR-203's
+    one-transaction POST /complete. A summary on the run row rides that write and that transaction; a child
+    table or a follow-up UPDATE would be a second write that can fail between the two and leave a run with no
+    summary. /record, /complete, the single and batch ETL imports and the /query readback all carry the
+    column.
+
+    NO BACKFILL, NO DATA EFFECT. Every existing row stays NULL, which is the true prior state: no run before
+    this change had a summary. A reader treats NULL as "no summary recorded" and never as an empty one, so
+    there is no default (a stored '{}' would claim a summary the run never made). ADD COLUMN only, one
+    statement (no UPDATE, no ALTER ... TYPE ... USING), so there is no DATA EFFECT line, matching
+    catalog-046-manifest-section-labels.xml and tuples-009-claimed-at.xml: scripts/data_effect_lint.py's own
+    scope excludes ADD COLUMN. A nullable column with no default is a catalog-only change in PostgreSQL 11 and
+    later (no table rewrite). No new table, so no RLS, grant or jOOQ reflection-registration change: the
+    existing tenant_isolation policy covers the whole row, and the grants-nexus-svc.xml sweep already holds
+    table-level DML on nx_answer_runs.
+
+    OLD ENGINE. An engine without this changeset ignores a run_summary key in a request body (the handler
+    reads named fields), so a client must not take HTTP 200 as evidence of persistence. GET /version
+    advertises nx_answer_run_summary_supported for that reason (VersionHandler).
+
+    Placed after vectors-039-partition-copy-access-skips-bypassrls.xml (the tail when this landed) and before
+    the grants-nexus-svc.xml runAlways block (the established late-append convention, D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="telemetry-016-1" author="nexus-jypmj.3.4">
+        <comment>Adds run_summary JSONB (NULL) to nexus.nx_answer_runs -- the client-versioned RDR-232 run summary (shape, coverage, repair), written with the run row by /record and /complete, carried by the ETL imports and returned by /query. An additive ADD COLUMN only (no data mutation of any existing row), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. NULL is the true prior state of every existing row; no backfill.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.nx_answer_runs
+    ADD COLUMN run_summary JSONB NULL;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.nx_answer_runs
+                    DROP COLUMN IF EXISTS run_summary;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

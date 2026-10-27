@@ -312,6 +312,17 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
+    void version_throughTheRealHandler_advertisesTheRunSummaryCapabilityBesideTheOlderTwo() throws Exception {
+        // RDR-232 P3 (nexus-jypmj.3.4): the fragment method is unit-tested in
+        // VersionHandlerReleaseVersionTest; this proves the handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("nx_answer_run_summary_supported").asBoolean()).isTrue();
+        assertThat(body.get("nx_answer_steps_supported").asBoolean()).isTrue();
+        assertThat(body.get("nx_answer_run_complete_supported").asBoolean()).isTrue();
+    }
+
+    @Test
     void theTwoRoutesRenderTheSameThreeKeys() throws Exception {
         EmbedPosture posture = posture(false, true, EmbeddingProfile.BGE);
         JsonNode status = get("/v1/status", new StatusHandler(router(null, "pa-key", EmbeddingProfile.BGE))
