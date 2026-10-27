@@ -102,6 +102,55 @@ def stack_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Trips:
     return trips
 
 
+#: The real gate, kept before ``stack_absent`` replaces it with a trip wire: the tests that show a
+#: non-pymupdf entry point still stopping put it back (:func:`_refuse_the_install`).
+_REAL_ENSURE = pdf_stack.ensure
+
+
+def _refuse_the_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Over ``stack_absent``: the REAL gate, with the install refused. An explicit re-patch of the
+    names the fixture changed. ``monkeypatch.undo()`` is not the way to get the real gate back:
+    it also reverts the fixture's own ``NEXUS_CONFIG_DIR`` and ``HOME`` sandbox and the
+    ``cloud_mode`` patches, so a refusal that records a skipped PDF writes into the real config
+    directory."""
+    monkeypatch.setattr(pdf_stack, "ensure", _REAL_ENSURE)
+    monkeypatch.setenv(pdf_stack.POLICY_ENV, pdf_stack.POLICY_REFUSE)
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "gone"))
+    monkeypatch.setattr(
+        pdf_stack, "install_plan", lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND),
+    )
+
+
+def _skipped_record_of(config_dir: Path) -> bytes | None:
+    record = config_dir / pdf_stack._SKIPPED_RECORD  # noqa: SLF001 — the file name is the stack module's
+    return record.read_bytes() if record.is_file() else None
+
+
+@pytest.fixture(autouse=True)
+def _nothing_is_written_outside_the_sandbox(tmp_path: Path):
+    """No refusal in this module records a held PDF anywhere but under the test's own tmp directory.
+    A refusal that holds a PDF writes ``pdf-stack-skipped.json`` into the configuration directory, and
+    ``nx doctor`` then reports a skipped PDF that never existed. The guard records the path every
+    ``_skipped_path()`` call resolves (the one place that file's location is decided) and fails the test
+    when one is outside ``tmp_path``. It is a ``patch`` of its own, not a ``monkeypatch``, so a test that
+    calls ``monkeypatch.undo()`` (which reverts the conftest's per-test ``HOME`` and config sandbox as well
+    as the fixtures' own) cannot undo the guard with it."""
+    from unittest.mock import patch
+
+    seen: list[Path] = []
+    real = pdf_stack._skipped_path  # noqa: SLF001
+
+    def spy() -> Path:
+        path = real()
+        seen.append(path)
+        return path
+
+    with patch.object(pdf_stack, "_skipped_path", spy):
+        yield
+    outside = [str(p) for p in seen if not p.is_relative_to(tmp_path)]
+    assert not outside, f"a held-PDF record would be written outside the test's sandbox: {outside}"
+
+
 @pytest.fixture(autouse=True)
 def _forget_the_stack_verdict():
     """``pdf_stack.require`` caches a positive verdict for the process; no test here leaves one."""
@@ -137,8 +186,18 @@ def test_text_pages_are_pymupdf_text_an_image_only_page_is_unextracted_and_the_m
     assert meta["extraction_pages"] == {"pymupdf-text": [1, 3], "unextracted": [2]}
     assert meta["page_count"] == 3
     assert meta["pages_with_text"] == [1, 3]
-    assert [b["page_number"] for b in meta["page_boundaries"]] == [1, 2, 3], "every page has a boundary"
     assert result.text == "\n".join([_P1, "", _P3])
+    # Every page has a boundary, and each one is its page's place in ``result.text`` (the page's text plus the
+    # "\n" that joins it to the next page; the last page has none): the chunker attributes chunks to pages by
+    # these offsets, so a wrong ``start_char`` moves every later chunk onto the wrong page.
+    assert meta["page_boundaries"] == [
+        {"page_number": 1, "start_char": 0, "page_text_length": len(_P1) + 1},
+        {"page_number": 2, "start_char": len(_P1) + 1, "page_text_length": 1},
+        {"page_number": 3, "start_char": len(_P1) + 2, "page_text_length": len(_P3)},
+    ]
+    for boundary, page_text in zip(meta["page_boundaries"], [_P1, "", _P3]):
+        start = boundary["start_char"]
+        assert result.text[start:start + boundary["page_text_length"]].rstrip("\n") == page_text
     assert stack_absent.calls == []
 
 
@@ -175,6 +234,188 @@ def test_a_document_with_no_text_layer_fails_the_way_the_ladder_fails_one(stack_
     assert delivered == ["unextracted", "unextracted"], "the pages were reported before the document failed"
 
 
+def test_a_damaged_page_is_unextracted_and_the_rest_of_the_document_is_still_read(
+    stack_absent, tmp_path, monkeypatch,
+) -> None:
+    """PyMuPDF raising on one page loses that page only: it settles ``unextracted`` and the next pages are read."""
+    from structlog.testing import capture_logs
+
+    pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, _P2, _P3])
+    real = pdfx._pymupdf_page_text
+    calls: list[int] = []
+
+    def damaged_second_page(page):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("bad xref on page 2")
+        return real(page)
+
+    monkeypatch.setattr(pdfx, "_pymupdf_page_text", damaged_second_page)
+    delivered: list[tuple[int, str]] = []
+
+    with capture_logs() as cap:
+        result = PDFExtractor().extract(
+            pdf, extractor="pymupdf", on_page=lambda i, t, m: delivered.append((i, m["page_method"])),
+        )
+
+    assert delivered == [(0, "pymupdf-text"), (1, "unextracted"), (2, "pymupdf-text")], "the third page was read"
+    assert result.metadata["extraction_pages"] == {"pymupdf-text": [1, 3], "unextracted": [2]}
+    assert result.text == "\n".join([_P1, "", _P3])
+    (warning,) = [e for e in cap if e["event"] == "pymupdf_page_text_layer_unreadable"]
+    assert warning["page"] == 2 and "bad xref on page 2" in warning["error"]
+
+
+def test_a_document_whose_every_page_pymupdf_cannot_read_is_not_told_to_be_ocred(
+    stack_absent, tmp_path, monkeypatch,
+) -> None:
+    pdf = _make_pdf(tmp_path / "broken.pdf", [_P1, _P2])
+
+    def unreadable(page):
+        raise RuntimeError("cannot parse the content stream")
+
+    monkeypatch.setattr(pdfx, "_pymupdf_page_text", unreadable)
+
+    with pytest.raises(UnextractableContentError) as err:
+        PDFExtractor().extract(pdf, extractor="pymupdf")
+
+    message = str(err.value)
+    assert "could not read any of the 2 page(s) of broken.pdf" in message and "cannot parse the content stream" in message
+    assert "repair or re-export" in message and "OCR the PDF first" not in message
+
+
+def test_a_password_protected_pdf_says_so_and_is_not_told_to_be_ocred(stack_absent, tmp_path) -> None:
+    plain = _make_pdf(tmp_path / "plain.pdf", [_P1])
+    locked = tmp_path / "locked.pdf"
+    with pymupdf.open(plain) as doc:
+        doc.save(str(locked), encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="owner", user_pw="user")
+    delivered: list[int] = []
+
+    with pytest.raises(UnextractableContentError) as err:
+        PDFExtractor().extract(locked, extractor="pymupdf", on_page=lambda i, t, m: delivered.append(i))
+
+    assert "locked.pdf is password-protected" in str(err.value) and "OCR" not in str(err.value)
+    assert delivered == [], "no page was reported"
+
+
+def test_a_pdf_with_no_pages_says_so_and_is_not_told_to_be_ocred(stack_absent, tmp_path, monkeypatch) -> None:
+    class _Empty:
+        needs_pass = False
+        metadata: dict = {}
+
+        def __len__(self) -> int:
+            return 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> None:
+            return None
+
+    pdf = tmp_path / "empty.pdf"
+    pdf.write_bytes(b"%PDF-1.4 x")
+    monkeypatch.setattr(pymupdf, "open", lambda *a, **k: _Empty())
+
+    with pytest.raises(UnextractableContentError) as err:
+        PDFExtractor().extract(pdf, extractor="pymupdf")
+
+    assert "empty.pdf has no pages" in str(err.value) and "OCR" not in str(err.value)
+
+
+@pytest.mark.parametrize(
+    ("method", "names_mineru_first"), [("pymupdf", False), ("docling", True), ("mineru", True)],
+)
+def test_the_quality_gate_remedy_does_not_send_a_pymupdf_user_to_the_stack_extractor_first(
+    method, names_mineru_first,
+) -> None:
+    from nexus.errors import ExtractionQualityError
+
+    garbage = pdfx.ExtractionResult(
+        text="x" * 400 + " " + "y" * 400, metadata={"extraction_method": method, "page_count": 1},
+    )
+
+    with pytest.raises(ExtractionQualityError) as err:
+        pdfx._enforce_extraction_quality(garbage, Path("g.pdf"), allow_degraded=False)
+
+    message = str(err.value)
+    assert f"extraction_method={method}" in message and "`--allow-degraded-extraction`" in message
+    if names_mineru_first:
+        assert "Remedy: retry with `--extractor mineru`" in message
+    else:
+        assert "Remedy: retry with" not in message
+        assert "needs the PDF stack" in message, "`--extractor mineru` is named, with its cost, after the usable option"
+
+
+_STACK_BLOCKER = """
+import importlib.abc, sys
+
+BLOCKED = ("docling", "mineru", "torch", "torchvision", "pdftext")
+
+
+class _Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in BLOCKED:
+            raise ImportError("BLOCKED stack import: " + name)
+        return None
+
+
+sys.meta_path.insert(0, _Block())
+if sys.argv[1] == "--import":
+    __import__(sys.argv[2])
+    sys.exit(0)
+from pathlib import Path
+
+from nexus.pdf_extractor import PDFExtractor
+
+result = PDFExtractor().extract(Path(sys.argv[1]), extractor="pymupdf")
+print("METHOD=" + result.metadata["extraction_method"] + " PAGES=" + str(result.metadata["page_count"]))
+"""
+
+
+def _run_blocked(tmp_path: Path, *args: str) -> tuple[int, str, str]:
+    """Run ``_STACK_BLOCKER`` in a fresh interpreter, in its own process group (stopped on a timeout)."""
+    import os
+    import subprocess
+    import sys
+
+    from tests._child_process import popen_in_group, stop_group
+
+    env = {
+        **os.environ, "NEXUS_CONFIG_DIR": str(tmp_path / "cfg"), "HOME": str(tmp_path), "NEXUS_NO_TELEMETRY": "1",
+    }
+    proc = popen_in_group(
+        [sys.executable, "-c", _STACK_BLOCKER, *args],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=120)
+    except subprocess.TimeoutExpired:
+        stop_group(proc)
+        raise
+    finally:
+        stop_group(proc)
+    return proc.returncode, out, err
+
+
+def test_the_pymupdf_path_imports_none_of_the_pdf_stack_even_where_it_is_installed(tmp_path) -> None:
+    """The in-process tests simulate an absent stack by patching ``pdf_stack.state``; the stack's packages
+    are still importable in this venv, so a stray ``import torch`` in the pymupdf path would pass them.
+    Here a fresh interpreter has a meta-path finder that refuses docling, mineru, torch, torchvision and
+    pdftext: importing the extractor module and extracting a PDF with ``pymupdf`` must not ask for any."""
+    pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, None, _P3])
+
+    code, out, err = _run_blocked(tmp_path, str(pdf))
+
+    assert code == 0, err[-2000:]
+    assert "METHOD=pymupdf PAGES=3" in out
+
+
+@pytest.mark.parametrize("module", ["docling", "mineru", "torch", "torchvision", "pdftext"])
+def test_the_stack_blocker_refuses_each_module_it_names(tmp_path, module) -> None:
+    """The control for the test above: a blocker that blocked nothing would let it pass over a stray import."""
+    code, _out, err = _run_blocked(tmp_path, "--import", module)
+    assert code != 0 and f"BLOCKED stack import: {module}" in err
+
+
 @pytest.mark.parametrize("extractor", ["auto", "mineru", "docling"])
 def test_an_extractor_that_needs_the_stack_fails_at_once_naming_both_fixes_and_extracts_no_page(
     stack_absent, tmp_path, extractor,
@@ -187,7 +428,9 @@ def test_an_extractor_that_needs_the_stack_fails_at_once_naming_both_fixes_and_e
 
     text = str(err.value)
     assert pdf_stack.repair_command() in text, "fix 1: install the PDF stack"
-    assert "--extractor pymupdf" in text, "fix 2: text only"
+    assert "extract with the `pymupdf` extractor" in text and "--extractor" not in text, (
+        "fix 2: text only, named for a library call (no flag or setting of its own)"
+    )
     assert pages == [], "no page was extracted, and nothing degraded to its text layer on its own"
     assert stack_absent.calls == []
 
@@ -259,23 +502,170 @@ def test_require_and_ensure_or_exit_let_pymupdf_by_with_the_stack_absent_and_ref
         with pytest.raises(PdfStackMissingError):
             pdf_stack.require("x", extractor=other)
     # control: the real ensure, with the install refused, still stops a non-pymupdf entry point
-    monkeypatch.undo()
-    monkeypatch.setenv(pdf_stack.POLICY_ENV, pdf_stack.POLICY_REFUSE)
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "gone"))
+    _refuse_the_install(monkeypatch)
     with pytest.raises(SystemExit) as exit_:
         pdf_stack.ensure_or_exit("x", extractor="mineru")
     assert exit_.value.code == pdf_stack.EXIT_REFUSED
 
 
-def test_every_refusal_names_the_text_only_way_out(monkeypatch) -> None:
+# The text-only sentence each class of entry point is given, spelled out here (not computed from the
+# stack module) so a wrong wording fails. A command can only be sent to a flag or a setting it reads.
+_FLAG_AND_SETTING = (
+    "For text only (no layout, tables or math), rerun with `--extractor pymupdf` "
+    "(or set `pdf.extractor: pymupdf`): that needs no PDF support."
+)
+_SETTING_ONLY = (
+    "For text only (no layout, tables or math), set `pdf.extractor: pymupdf` and rerun: "
+    "that needs no PDF support."
+)
+_FLAG_ONLY = (
+    "For text only (no layout, tables or math), rerun with `--extractor pymupdf`: that needs no PDF support."
+)
+_NO_SENTENCE = None  # `nx mineru start` starts the MinerU server: there is no extractor to choose
+
+_ENTRY_CLASSES = [
+    pytest.param("nx index pdf", _FLAG_AND_SETTING, id="flag-and-setting:index-pdf"),
+    pytest.param("nx index pdf --dir", _FLAG_AND_SETTING, id="flag-and-setting:index-pdf-dir"),
+    pytest.param("nx index repo", _SETTING_ONLY, id="setting-only:index-repo"),
+    pytest.param("nx collection reindex", _SETTING_ONLY, id="setting-only:collection-reindex"),
+    pytest.param("nx dt index", _FLAG_ONLY, id="flag-only:dt-index"),
+    pytest.param("nx dt capture", _FLAG_ONLY, id="flag-only:dt-capture"),
+    pytest.param("nx mineru start", _NO_SENTENCE, id="none:mineru-start"),
+]
+
+
+def _assert_names_the_way_out(message: str, expected: str | None) -> None:
+    if expected is None:
+        assert "pymupdf" not in message and "For text only" not in message, message
+    else:
+        assert message.count(expected) == 1 and message.count("For text only") == 1, message
+        if expected is _FLAG_ONLY:
+            assert "pdf.extractor" not in message, "`nx dt` does not read the setting"
+        if expected is _SETTING_ONLY:
+            assert "--extractor" not in message, "`nx index repo` and `nx collection reindex` have no flag"
+
+
+@pytest.fixture
+def refusal_bed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
+    """The REAL ``ensure``, ``require`` and ``_remedy`` over a box where the stack is absent and the install
+    would proceed; each refusal test then breaks one thing."""
+    import contextlib
+
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(pdf_stack.POLICY_ENV, pdf_stack.POLICY_INSTALL)
+    monkeypatch.delenv(pdf_stack.REEXEC_ENV, raising=False)
+    pdf_stack.reset_cache()
     monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "gone"))
     monkeypatch.setattr(
         pdf_stack, "install_plan", lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND),
     )
-    message = pdf_stack.missing_message("nx index pdf")
-    assert message is not None
-    assert pdf_stack.INSTALL_COMMAND in message and "--extractor pymupdf" in message
-    assert "pdf.extractor: pymupdf" in message, "the verbs with no flag read the setting"
+    monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: None)
+    monkeypatch.setattr(pdf_stack, "_install_lock", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(pdf_stack, "current_generation_has_stack", lambda: False)
+    monkeypatch.setattr(pdf_stack, "_current_generation_receipt", lambda: None)
+    return monkeypatch
+
+
+def _installer_fails(message: str):
+    def _raise(*_a, **_k):
+        raise RuntimeError(message)
+
+    return _raise
+
+
+def _newer_generation(mp: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    mp.setattr(pdf_stack, "_running_version", lambda: "1.0.0")
+    receipt = SimpleNamespace(version="9.9.9", source_kind="directory", source="/a/checkout", extras=())
+    mp.setattr(pdf_stack, "_current_generation_receipt", lambda: (Path("gen"), receipt))
+
+
+def _windows_gap_with_the_stack_present(mp: pytest.MonkeyPatch) -> None:
+    mp.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("present", ""))
+    mp.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("none", None))
+
+
+#: The ways ``ensure`` refuses or fails, each as a patch over ``refusal_bed``.
+_REFUSAL_KINDS = {
+    "stack-absent-and-the-install-refused": lambda mp: mp.setenv(pdf_stack.POLICY_ENV, pdf_stack.POLICY_REFUSE),
+    "install-not-automatic-here": lambda mp: mp.setattr(
+        pdf_stack, "install_plan", lambda: pdf_stack.InstallPlan("directory", False, "scripts/reinstall-tool.sh"),
+    ),
+    "windows-runtime-gap-before-an-install": lambda mp: mp.setattr(
+        pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("none", None),
+    ),
+    "windows-runtime-gap-over-an-installed-stack": _windows_gap_with_the_stack_present,
+    "newer-generation-built-from-a-checkout": _newer_generation,
+    "installer-network-failure": lambda mp: mp.setattr(
+        pdf_stack, "_install_generation", _installer_fails("tcp connect error: connection refused"),
+    ),
+    "installer-failure": lambda mp: mp.setattr(
+        pdf_stack, "_install_generation", _installer_fails("no solution found when resolving dependencies"),
+    ),
+    "reexec-guard": lambda mp: mp.setenv(pdf_stack.REEXEC_ENV, "1"),
+}
+
+
+def _refusal_message(entry: str) -> str:
+    with pytest.raises(pdf_stack.PdfStackError) as err:
+        pdf_stack.ensure(entry)
+    return str(err.value)
+
+
+@pytest.mark.parametrize("kind", list(_REFUSAL_KINDS))
+def test_every_kind_of_refusal_names_the_text_only_way_out_in_the_words_of_the_command_that_refused(
+    refusal_bed, kind,
+) -> None:
+    """The stack-absent message, the Windows runtime gap, the newer-generation refusal, the installer's
+    network and other failures and the re-exec guard: each carries the sentence, once, and not the
+    flag to a command that has none (or the setting to one that does not read it)."""
+    _REFUSAL_KINDS[kind](refusal_bed)
+
+    _assert_names_the_way_out(_refusal_message("nx index pdf"), _FLAG_AND_SETTING)
+    _assert_names_the_way_out(_refusal_message("nx index repo"), _SETTING_ONLY)
+    _assert_names_the_way_out(_refusal_message("nx dt capture"), _FLAG_ONLY)
+    _assert_names_the_way_out(_refusal_message("nx mineru start"), _NO_SENTENCE)
+
+
+@pytest.mark.parametrize(("entry", "expected"), _ENTRY_CLASSES)
+def test_each_class_of_entry_point_is_sent_to_the_flag_or_setting_it_reads(refusal_bed, entry, expected) -> None:
+    refusal_bed.setenv(pdf_stack.POLICY_ENV, pdf_stack.POLICY_REFUSE)
+    _assert_names_the_way_out(_refusal_message(entry), expected)
+    # the same sentence from the other two places the missing-stack text is built
+    _assert_names_the_way_out(pdf_stack.missing_message(entry) or "", expected)
+    with pytest.raises(PdfStackMissingError) as err:
+        pdf_stack.require(entry)
+    _assert_names_the_way_out(str(err.value), expected)
+
+
+def test_the_library_backstops_are_told_to_pass_the_extractor_by_name(refusal_bed) -> None:
+    """``index_pdf`` and ``PDFExtractor.extract`` are library calls: no flag, no setting of their own."""
+    for entry in ("index_pdf", "extracting doc.pdf", "PDF doc.pdf"):
+        with pytest.raises(PdfStackMissingError) as err:
+            pdf_stack.require(entry)
+        message = str(err.value)
+        assert "`extractor=\"pymupdf\"`" in message and "--extractor" not in message and "pdf.extractor" not in message
+
+
+def test_a_windows_gap_refusal_from_require_names_the_way_out_too(refusal_bed) -> None:
+    _windows_gap_with_the_stack_present(refusal_bed)
+    with pytest.raises(PdfStackMissingError) as err:
+        pdf_stack.require("nx dt index")
+    assert "Visual C++" in str(err.value)
+    _assert_names_the_way_out(str(err.value), _FLAG_ONLY)
+
+
+def test_every_cli_gate_names_an_entry_the_remedy_table_knows() -> None:
+    """The table that decides the wording is keyed on the ``entry`` string each gate passes. A gate that
+    renames its entry, or a new one, falls to the library wording and tells a CLI user to pass a keyword."""
+    from tests.test_pdf_stack_entry_point_census import _gate_calls
+
+    calls = _gate_calls()
+    cli = {label for _rel, _line, label, _aware in calls if label.startswith("nx ")}
+    assert cli == set(pdf_stack.ENTRY_EXTRACTOR_CHOICE), sorted(cli ^ set(pdf_stack.ENTRY_EXTRACTOR_CHOICE))
+    assert len(cli) >= 7
 
 
 # ── nx index pdf ─────────────────────────────────────────────────────────────
@@ -320,6 +710,51 @@ def test_index_pdf_with_pymupdf_installs_nothing_and_the_summary_names_the_extra
     assert stack_absent.calls == []
 
 
+#: A ``--extractor pymupdf`` rerun over pages a MinerU run left: the catalog records the mixture.
+_MIXTURE = {
+    "extraction_method": "mineru+degraded",
+    "extraction_pages": {"pymupdf-text": [3, 4, 5], "unextracted": [6]},
+}
+
+
+def test_the_summary_follows_the_recorded_method_so_a_mixture_is_never_called_text_only(
+    stack_absent, runner, tmp_path,
+) -> None:
+    """Asked for ``pymupdf``, recorded ``mineru+degraded``: the summary must not say "text layer only"."""
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF-1.4 x")
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_reporting(_MIXTURE)):
+        result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "pymupdf"])
+
+    assert result.exit_code == 0, result.output
+    assert "Extractor: pymupdf" not in result.output and "text layer only" not in result.output
+    assert "Degraded pages in 1 document(s)" in result.output
+    assert "  a.pdf: pymupdf-text 3,4,5; unextracted 6" in result.output, "the text-layer pages are listed"
+
+
+def test_a_directory_run_prints_each_form_for_the_documents_it_applies_to(stack_absent, runner, tmp_path) -> None:
+    d = tmp_path / "papers"
+    d.mkdir()
+    for name in ("clean.pdf", "mixed.pdf"):
+        (d / name).write_bytes(b"%PDF-1.4 x")
+    inner = _reporting(None)
+
+    def fake(path, **kwargs):
+        sink = kwargs.get("on_extraction")
+        sink(_MIXTURE if Path(path).name == "mixed.pdf" else _REPORT)
+        return inner(path, **kwargs)
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=fake):
+        result = runner.invoke(main, ["index", "pdf", "--dir", str(d), "--extractor", "pymupdf"])
+
+    assert result.exit_code == 0, result.output
+    assert "Extractor: pymupdf, text layer only (no layout, tables or math), 1 document(s)." in result.output
+    assert "  clean.pdf: no text layer, not extracted: page(s) 2" in result.output
+    assert "Degraded pages in 1 document(s)" in result.output
+    assert "  mixed.pdf: pymupdf-text 3,4,5; unextracted 6" in result.output
+    assert "clean.pdf: pymupdf-text" not in result.output, "the text-only document is not also listed as degraded"
+
+
 def test_index_pdf_with_the_config_set_to_pymupdf_and_no_flag_installs_nothing(
     stack_absent, runner, tmp_path, monkeypatch,
 ) -> None:
@@ -338,16 +773,14 @@ def test_index_pdf_with_the_config_set_to_pymupdf_and_no_flag_installs_nothing(
 def test_index_pdf_with_mineru_and_the_stack_missing_stops_and_names_both_fixes(
     stack_absent, runner, tmp_path, monkeypatch,
 ) -> None:
-    monkeypatch.undo()  # the real gate, the install refused
-    monkeypatch.setenv(pdf_stack.POLICY_ENV, pdf_stack.POLICY_REFUSE)
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "gone"))
-    monkeypatch.setattr(pdf_stack, "install_plan", lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND))
+    _refuse_the_install(monkeypatch)  # the real gate, the install refused
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF-1.4 x")
     with patch("nexus.doc_indexer.index_pdf") as index_pdf:
         result = runner.invoke(main, ["index", "pdf", str(pdf), "--extractor", "mineru"])
     assert result.exit_code == pdf_stack.EXIT_REFUSED, result.output
-    assert pdf_stack.INSTALL_COMMAND in result.output and "--extractor pymupdf" in result.output
+    assert pdf_stack.INSTALL_COMMAND in result.output
+    assert _FLAG_AND_SETTING in result.output, "`nx index pdf` has the flag and reads the setting"
     index_pdf.assert_not_called()
 
 
@@ -409,15 +842,51 @@ def test_dt_index_with_pymupdf_installs_nothing_and_the_summary_names_the_extrac
     assert stack_absent.calls == []
 
 
+def test_dt_index_summary_follows_the_recorded_method_too(stack_absent, runner, monkeypatch) -> None:
+    _isolate_dt(monkeypatch, [("U1", "/x/a.pdf")])
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_reporting(_MIXTURE)):
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--extractor", "pymupdf", "--allow-page-gap"])
+    assert result.exit_code == 0, result.output
+    assert "text layer only" not in result.output
+    assert "Degraded pages in 1 document(s)" in result.output
+    assert "  a.pdf (U1): pymupdf-text 3,4,5; unextracted 6" in result.output
+
+
+def test_dt_page_coverage_failure_for_pymupdf_says_an_image_page_is_expected_and_does_not_send_to_mineru(
+    stack_absent, runner, monkeypatch,
+) -> None:
+    _isolate_dt(monkeypatch, [("U1", "/x/a.pdf")])
+    monkeypatch.setattr("nexus.commands.dt._dt_record_facts", lambda uuid: {"name": "A", "page_count": 3})
+    monkeypatch.setattr("nexus.commands.dt._stamp_page_gap", lambda uuid, missing: None)
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_reporting(_REPORT)):
+        result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--extractor", "pymupdf"])
+        monkeypatch.setattr(pdf_stack, "ensure", lambda entry: pdf_stack.Outcome.PRESENT)  # control: the stack is there
+        control = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--extractor", "auto"])
+    assert "page coverage: 2 of 3 pages produced text" in result.output
+    assert "an image page is expected to be missing" in result.output and "--allow-page-gap" in result.output
+    assert "Re-run with --extractor mineru" not in result.output
+    assert "Re-run with --extractor mineru, or --allow-page-gap to accept." in control.output, "other extractors keep it"
+
+
 def test_dt_index_with_mineru_and_the_stack_missing_still_stops(stack_absent, runner, monkeypatch) -> None:
-    monkeypatch.undo()
-    monkeypatch.setenv(pdf_stack.POLICY_ENV, pdf_stack.POLICY_REFUSE)
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "gone"))
+    _refuse_the_install(monkeypatch)
     _isolate_dt(monkeypatch, [("U1", "/x/a.pdf")])
     with patch("nexus.doc_indexer.index_pdf") as index_pdf:
         result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--extractor", "mineru"])
     assert result.exit_code == pdf_stack.EXIT_REFUSED, result.output
+    assert _FLAG_ONLY in result.output and "pdf.extractor" not in result.output, "`nx dt` reads the flag only"
     index_pdf.assert_not_called()
+
+
+def test_mineru_start_with_the_stack_missing_stops_and_offers_no_text_only_way_out(
+    stack_absent, runner, monkeypatch,
+) -> None:
+    """The one gate with no extractor to choose: starting the MinerU server needs the stack."""
+    _refuse_the_install(monkeypatch)
+    result = runner.invoke(main, ["mineru", "start"])
+    assert result.exit_code == pdf_stack.EXIT_REFUSED, result.output
+    assert pdf_stack.INSTALL_COMMAND in result.output
+    assert "pymupdf" not in result.output and "For text only" not in result.output
 
 
 @pytest.fixture
@@ -541,23 +1010,20 @@ def test_index_repo_with_the_config_set_to_pymupdf_holds_nothing_installs_nothin
 
 
 def test_index_repo_without_the_setting_still_holds_the_pdf_when_the_stack_is_absent(
-    stack_absent, repo, monkeypatch,
+    stack_absent, repo, monkeypatch, tmp_path,
 ) -> None:
-    """The control: same repo and doubles, no ``pdf.extractor``, the install refused: the PDF is held."""
+    """The control: same repo and doubles, no ``pdf.extractor``, the install refused: the PDF is held,
+    and the record of the held PDF lands in the test's own config directory, not the real one."""
     from nexus.indexer import _run_index
 
-    monkeypatch.undo()
-    monkeypatch.setenv(pdf_stack.POLICY_ENV, pdf_stack.POLICY_REFUSE)
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "gone"))
-    monkeypatch.setattr(
-        pdf_stack, "install_plan", lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND),
-    )
+    _refuse_the_install(monkeypatch)
     config = {k: v for k, v in _REPO_CONFIG.items() if k != "pdf"}
     stack, mocks = _repo_doubles(config)
     with stack:
         stats = _run_index(repo, _registry())
     assert stats["pdf_stack_held"] == 1
     mocks["_index_pdf_file"].assert_not_called()
+    assert _skipped_record_of(tmp_path / "cfg") is not None, "the held PDF was recorded, inside the sandbox"
 
 
 def test_the_repo_gate_lets_pymupdf_by_without_probing_the_stack_or_recording_a_skip(stack_absent, tmp_path) -> None:
@@ -628,8 +1094,8 @@ _HASH = "h" * 64
 
 
 def test_the_merge_records_a_pymupdf_rerun_over_a_minerus_buffer_as_a_mixture() -> None:
-    """The RDR advises ``--extractor pymupdf`` after a breaker trip. Pages 1 and 2 are MinerU's (the
-    kept buffer), pages 3 to 5 are the text layer's: ``pymupdf`` would call the whole document text-only,
+    """A breaker trip keeps the buffer, so a ``--extractor pymupdf`` rerun meets pages that are MinerU's.
+    Pages 1 and 2 are MinerU's (the kept buffer), pages 3 to 5 are the text layer's: ``pymupdf`` would call the whole document text-only,
     so the method is the ladder's own ``mineru+degraded`` and the map lists the text-layer pages."""
     meta = {"extraction_method": "pymupdf", "extraction_pages": {"pymupdf-text": [1, 2, 3, 4, 5]}}
     run = {n: "pymupdf-text" for n in range(1, 6)}
@@ -661,9 +1127,12 @@ def test_the_merge_cannot_call_a_buffer_page_with_no_rung_text_only() -> None:
     assert meta["extraction_pages"] == {"pymupdf-text": [1, 3]}, "the unproven page is left out of the map"
 
 
-def test_the_merge_does_nothing_for_a_first_pymupdf_run() -> None:
+def test_the_merge_leaves_the_runs_own_map_alone_for_a_first_pymupdf_run() -> None:
+    """With nothing buffered the run's own record stands. The run's rungs here deliberately differ from its map
+    (page 2 is in the map but not in the rungs): a merge that recomputed the map from the rungs, which is what
+    dropping the early return does, would lose page 2, so this fails then. Equal inputs could not tell the two apart."""
     meta = {"extraction_method": "pymupdf", "extraction_pages": {"pymupdf-text": [1], "unextracted": [2]}}
-    _merge_buffered_provenance(meta, {1: "pymupdf-text", 2: "unextracted"}, {})
+    _merge_buffered_provenance(meta, {1: "pymupdf-text"}, {})
     assert meta == {"extraction_method": "pymupdf", "extraction_pages": {"pymupdf-text": [1], "unextracted": [2]}}
 
 

@@ -218,7 +218,7 @@ def _index_record(
     extractor: str = "auto",
     force: bool = False,
     force_re_embed: bool = False,
-) -> tuple[bool, int] | tuple[bool, int, list[int] | None, dict[str, list[int]]]:
+) -> tuple[bool, int] | tuple[bool, int, list[int] | None, dict[str, list[int]], str]:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
     The caller (``index_cmd``) is responsible for filtering unsupported
@@ -244,11 +244,12 @@ def _index_record(
     relocations, and the file path returned by osascript at index time
     is not (DT moves files inside Files.noindex/ on its own schedule).
 
-    Returns ``(stamped, chunks, pages, degraded)``, except that a dry run returns the 2-tuple
-    ``(True, 0)``; the caller accepts that and the older ``(stamped, chunks, pages)`` shape. ``degraded`` (RDR-237)
+    Returns ``(stamped, chunks, pages, degraded, method)``, except that a dry run returns the 2-tuple
+    ``(True, 0)``; the caller accepts that and the older 3- and 4-tuple shapes. ``degraded`` (RDR-237)
     is the document's ``extraction_pages`` (rung to the 1-based pages that settled below
     MinerU's first rung), ``{}`` for a clean extraction, markdown, or an unchanged
-    document. The first three, from nexus-5xn3k.6 AC4: before this, the
+    document; ``method`` is the ``extraction_method`` the run recorded for it (``""`` when
+    nothing was extracted), which the run summary keys on. The first three, from nexus-5xn3k.6 AC4: before this, the
     indexer's chunk count was discarded and the caller could only do
     ``indexed += 1`` unconditionally, so a no-op re-index of an unchanged
     document reported "Indexed 1 record(s)" identically to a real write).
@@ -313,6 +314,7 @@ def _index_record(
     dt_facts = _dt_record_facts(uuid)
     dt_title = (dt_facts or {}).get("name", "")
     degraded: dict[str, list[int]] = {}  # rung -> pages the ladder settled below rung 1 (RDR-237)
+    method = ""  # the extraction_method the run recorded (RDR-237)
     if ext == ".pdf":
         # nexus-pxxyn: thread the operator's --extractor choice through so the
         # documented MinerU-failure recovery ("rerun with --extractor docling")
@@ -329,6 +331,7 @@ def _index_record(
         )
         if extraction_reports:
             degraded = dict(extraction_reports[-1].get("extraction_pages") or {})
+            method = str(extraction_reports[-1].get("extraction_method") or "")
         if isinstance(raw, dict):
             chunks = int(raw.get("chunks", 0) or 0)
             # Pages the EXTRACTOR produced text for, never chunk starts
@@ -347,7 +350,7 @@ def _index_record(
         pages = None
 
     stamped = _stamp_dt_uri_on_entry(file_path, uuid, facts=dt_facts)
-    return stamped, chunks, pages, degraded
+    return stamped, chunks, pages, degraded, method
 
 
 def _dt_uri_is_catalogued(uuid: str) -> bool:
@@ -1114,7 +1117,8 @@ def index_cmd(
     skipped = 0
     stamp_failed = 0
     coverage_failed = 0
-    degraded_runs: list[tuple[str, dict[str, list[int]]]] = []  # RDR-237: shown at the end of the run
+    # RDR-237: shown at the end of the run: (record, the extraction method the catalog recorded, extraction_pages)
+    degraded_runs: list[tuple[str, str, dict[str, list[int]]]] = []
     coverage_unverified = 0
     unverified_no_pages = 0
     unverified_no_page_count = 0
@@ -1315,7 +1319,10 @@ def index_cmd(
                 force_re_embed=re_embed,
             )
             degraded_pages: dict[str, list[int]] = {}
-            if len(_result) == 4:
+            extraction_method = ""
+            if len(_result) == 5:
+                stamped, chunks, pages_seen, degraded_pages, extraction_method = _result
+            elif len(_result) == 4:
                 stamped, chunks, pages_seen, degraded_pages = _result
             elif len(_result) == 3:
                 stamped, chunks, pages_seen = _result
@@ -1420,7 +1427,7 @@ def index_cmd(
             indexed += 1
             touched_collections.add(resolved_collection)
             if degraded_pages:
-                degraded_runs.append((f"{Path(path).name} ({uuid})", degraded_pages))
+                degraded_runs.append((f"{Path(path).name} ({uuid})", extraction_method, degraded_pages))
         else:
             unchanged += 1
             # nexus-g276c: an unchanged record still belongs to the run's
@@ -1451,9 +1458,18 @@ def index_cmd(
                     detail = (
                         f"page coverage: {seen_n} of {facts['page_count']} pages produced text; "
                         f"missing pages {', '.join(str(n) for n in missing)} (DEVONthink pageCount vs "
-                        "the pages the extractor produced text for). Re-run with --extractor mineru, "
-                        "or --allow-page-gap to accept."
+                        "the pages the extractor produced text for). "
                     )
+                    if extractor == "pymupdf":
+                        # An image page has no text layer, so the text-only extractor is expected to
+                        # leave it out; the stack's extractor is not what a user chose it to avoid.
+                        detail += (
+                            "--extractor pymupdf reads only a page's text layer, so an image page is "
+                            "expected to be missing. Pass --allow-page-gap to accept, or OCR the PDF "
+                            "(--extractor mineru does, and needs the PDF stack)."
+                        )
+                    else:
+                        detail += "Re-run with --extractor mineru, or --allow-page-gap to accept."
                     if allow_page_gap:
                         page_gap_allowed += 1
                         click.echo(f"  page gap allowed: {uuid}\t{Path(path).name}: {detail}")
@@ -1523,7 +1539,7 @@ def index_cmd(
     if degraded_runs:
         from nexus.commands._helpers import emit_extraction_summary  # noqa: PLC0415 — deferred import, shared with `nx index pdf`
 
-        emit_extraction_summary(extractor, degraded_runs)
+        emit_extraction_summary(degraded_runs)
     if coverage_unverified:
         reasons = []
         unreachable = coverage_unverified - unverified_no_pages - unverified_no_page_count

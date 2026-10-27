@@ -1708,15 +1708,26 @@ def _enforce_extraction_quality(
         mean_token_len=report.mean_token_len,
         long_token_fraction=report.long_token_fraction,
     )
+    if method == "pymupdf":
+        # The text-only extractor needs no PDF stack and was chosen for that: suggesting the
+        # stack's extractor first would send a user who cannot run it to a refusal.
+        remedy = (
+            "Remedy: if you have reviewed the extracted text and it is acceptable, rerun with "
+            "`--allow-degraded-extraction` to index it anyway; `--extractor mineru` reads the "
+            "page images and needs the PDF stack."
+        )
+    else:
+        remedy = (
+            "Remedy: retry with `--extractor mineru` (formula-aware, often avoids the "
+            "corruption), or if this document is legitimately dense/unusual and you have "
+            "reviewed the extracted text, rerun with `--allow-degraded-extraction` to index "
+            "it anyway."
+        )
     raise ExtractionQualityError(
         f"PDF {pdf_path.name} failed the post-extraction quality gate "
         f"(extraction_method={method}): {reasons}. This is the "
         f"space-stripped-garbage failure mode (nexus-wi1uv) — the extracted "
-        f"text is likely unsearchable if indexed. Remedy: retry with "
-        f"`--extractor mineru` (formula-aware, often avoids the corruption), "
-        f"or if this document is legitimately dense/unusual and you have "
-        f"reviewed the extracted text, rerun with "
-        f"`--allow-degraded-extraction` to index it anyway."
+        f"text is likely unsearchable if indexed. {remedy}"
     )
 
 
@@ -3859,24 +3870,35 @@ class PDFExtractor:
 
         Raises :class:`UnextractableContentError` when no page has a text layer, the way the
         ladder fails a document whose every page is unextracted: indexing would write nothing.
+        A password-protected PDF, one with no pages and one whose every page PyMuPDF cannot read
+        each fail with a message of their own: none of them is an image-only document to OCR.
         """
         import pymupdf  # lazy  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
 
         fname = pdf_path.name
         parts: list[str] = []
         outcomes: dict[int, str] = {}
+        unreadable: list[str] = []  # the error of each page PyMuPDF raised on
         with pymupdf.open(pdf_path) as doc:
+            if doc.needs_pass:
+                raise UnextractableContentError(
+                    f"{fname} is password-protected: PyMuPDF cannot read its text layer without the "
+                    f"password. Remove the password, then index it again."
+                )
             total_pages = len(doc)
+            if total_pages == 0:
+                raise UnextractableContentError(f"{fname} has no pages, so there is nothing to extract.")
             doc_meta = doc.metadata or {}
             for index in range(total_pages):
                 started = time.monotonic()
                 try:
                     text = _pymupdf_page_text(doc[index])
                 except Exception as read_exc:  # noqa: BLE001 — a damaged page is unextracted; the rest of the document is still read
+                    error = f"{type(read_exc).__name__}: {read_exc}"
                     _log.warning(
-                        "pymupdf_page_text_layer_unreadable", page=index + 1, path=str(pdf_path),
-                        error=f"{type(read_exc).__name__}: {read_exc}",
+                        "pymupdf_page_text_layer_unreadable", page=index + 1, path=str(pdf_path), error=error,
                     )
+                    unreadable.append(error)
                     text = ""
                 method = "pymupdf-text" if text else "unextracted"
                 outcomes[index + 1] = method
@@ -3885,6 +3907,12 @@ class PDFExtractor:
                     on_page(index, text, {"page_number": index + 1, "text_length": len(text), "page_method": method})
                 _log.debug("pymupdf_page", page=index + 1, method=method, seconds=time.monotonic() - started)
 
+        if len(unreadable) == total_pages:
+            raise UnextractableContentError(
+                f"PyMuPDF could not read any of the {total_pages} page(s) of {fname} (the first error: "
+                f"{unreadable[0]}); the file is damaged or in a form it cannot open. OCR will not help: "
+                f"repair or re-export the PDF."
+            )
         if not any(m == "pymupdf-text" for m in outcomes.values()):
             raise UnextractableContentError(
                 f"every page of {fname} is unextracted: `--extractor pymupdf` reads only a PDF's own "

@@ -133,7 +133,7 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # DT-sourced chunks spend the extra key — file chunks stay under the cap.
     "extraction_source",
     # nexus-1oguj: which PDF-extraction BACKEND actually produced this
-    # chunk's text (``docling`` | ``mineru`` | ``pymupdf_normalized``, or
+    # chunk's text (``docling`` | ``mineru`` | ``pymupdf`` | ``pymupdf_normalized``, or
     # the honest degraded-aggregate ``mineru+degraded`` when any page settled
     # below the first rung of RDR-237's per-page ladder; documents indexed
     # before it carry ``mineru+docling-degraded`` for RDR-148 Gap 5's degrade
@@ -298,7 +298,7 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
         normalised.pop("extraction_source", None)
 
     # Step 2d: drop the nexus-1oguj extraction_method key when empty.
-    # Only PDF chunks pass a real value (docling / mineru /
+    # Only PDF chunks pass a real value (docling / mineru / pymupdf /
     # pymupdf_normalized / mineru+degraded / legacy mineru+docling-degraded);
     # markdown/code/prose chunks never set it and must not spend a metadata
     # slot on "".

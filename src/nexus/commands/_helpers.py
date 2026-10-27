@@ -237,13 +237,15 @@ def emit_text_only_summary(runs: "list[tuple[str, dict[str, list[int]]]]") -> No
             click.echo(f"  {name}: no text layer, not extracted: page(s) {','.join(str(p) for p in gone)}")
 
 
-def emit_extraction_summary(extractor: str, runs: "list[tuple[str, dict[str, list[int]]]]") -> None:
-    """The end-of-run extraction summary for *extractor*: the text-only form for ``pymupdf``,
-    otherwise the degraded-pages list. ``nx index pdf`` and ``nx dt index`` call this one."""
-    if extractor == "pymupdf":
-        emit_text_only_summary(runs)
-    else:
-        emit_degraded_pages_summary(runs)
+def emit_extraction_summary(runs: "list[tuple[str, str, dict[str, list[int]]]]") -> None:
+    """The end-of-run extraction summary. *runs* is ``[(document name, extraction_method,
+    extraction_pages)]`` for the documents this run extracted, with the method the catalog
+    RECORDED for each (not the extractor the run asked for): only ``pymupdf`` gets the text-only
+    form; anything else, a ``pymupdf`` rerun over a MinerU buffer included (``mineru+degraded``),
+    gets the degraded-pages list, which names its ``pymupdf-text`` pages. ``nx index pdf`` and
+    ``nx dt index`` call this one."""
+    emit_text_only_summary([(name, pages) for name, method, pages in runs if method == "pymupdf"])
+    emit_degraded_pages_summary([(name, pages) for name, method, pages in runs if method != "pymupdf"])
 
 
 def reset_identity_drop_collectors() -> None:

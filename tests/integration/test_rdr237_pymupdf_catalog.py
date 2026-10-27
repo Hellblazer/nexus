@@ -146,7 +146,7 @@ def test_store_get_calls_only_the_page_with_no_text_layer_degraded(tmp_path, hid
 
 def test_a_pymupdf_rerun_over_a_tripped_mineru_run_records_the_mixture(tmp_path, hidden_stack, monkeypatch) -> None:
     """Run 1 is a MinerU ladder that buffers pages 1 and 2 and trips its breaker, which keeps the buffer.
-    The rerun is ``--extractor pymupdf``, the RDR's advice after a trip: it writes only pages 3 to 5,
+    The rerun is ``--extractor pymupdf``: it writes only pages 3 to 5,
     and the catalog says the document is MinerU's pages 1-2 plus the text layer for the rest."""
     marker = "tr1rj4-resume"
     texts = _lines(marker, 5)

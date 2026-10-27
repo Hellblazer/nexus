@@ -3295,7 +3295,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         reconciled_total = 0
         # RDR-237: the pages the ladder settled below MinerU's first rung, per document, for
         # the end-of-run summary (index_pdf's on_extraction).
-        degraded_runs: list[tuple[str, dict[str, list[int]]]] = []
+        # (document name, the extraction method the catalog recorded, extraction_pages)
+        degraded_runs: list[tuple[str, str, dict[str, list[int]]]] = []
         # RDR-237: PDFs left unattempted after a MinerU breaker trip stopped the run.
         not_attempted = 0
         # nexus-s71lr: `nx index pdf --dir` echoes `[i/total] name…` with
@@ -3330,7 +3331,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                     elapsed = _time.monotonic() - t0
                     total_chunks += n
                     if file_extraction and file_extraction[-1].get("extraction_pages"):
-                        degraded_runs.append((pdf.name, file_extraction[-1]["extraction_pages"]))
+                        degraded_runs.append((
+                            pdf.name, file_extraction[-1].get("extraction_method", ""),
+                            file_extraction[-1]["extraction_pages"],
+                        ))
                     reconciled_total += get_reconciled_collections_count()
                     click.echo(f" — {n} chunks, {elapsed:.1f}s")
                     if emit_identity_drop_summary(indexed_count=1):
@@ -3405,7 +3409,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(summary_line)
         from nexus.commands._helpers import emit_extraction_summary, emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only when a retry/brake fired)
         emit_retry_summary()
-        emit_extraction_summary(extractor, degraded_runs)
+        emit_extraction_summary(degraded_runs)
         if failures:
             click.echo(f"  {len(failures)} failure(s):")
             for fp, err in failures:
@@ -3651,7 +3655,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     if extraction_holder and extraction_holder[-1].get("extraction_pages"):
         from nexus.commands._helpers import emit_extraction_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only a degraded or text-only extraction)
 
-        emit_extraction_summary(extractor, [(path.name, extraction_holder[-1]["extraction_pages"])])
+        emit_extraction_summary([(
+            path.name, extraction_holder[-1].get("extraction_method", ""), extraction_holder[-1]["extraction_pages"],
+        )])
     if fork_holder:
         # nexus-y8qtj: WARNING, not refusal — legitimate near-duplicates
         # exist. Full detail (other doc_id, shared_chunks) is in the log

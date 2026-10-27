@@ -157,9 +157,9 @@ def _merge_buffered_provenance(
 
     The explicit ``pymupdf`` extractor (RDR-237) is handled the same way, with one rule of its
     own: ``pymupdf`` names a document whose every indexed page is the PDF's text layer (or
-    nothing). The recommended recovery from a MinerU breaker trip is a ``--extractor pymupdf``
-    rerun over the kept buffer, whose pages are MinerU's; and a buffer page that names no rung
-    cannot be proven text-only. Either makes the document a mixture, so the method becomes
+    nothing). A ``pymupdf`` rerun over a kept buffer that a MinerU run left (a breaker trip keeps
+    it) holds pages that are MinerU's; and a buffer page that names no rung cannot be proven
+    text-only. Either makes the document a mixture, so the method becomes
     ``mineru+degraded`` (its pages below MinerU's first rung are in the map, MinerU's own pages
     are not). A buffer of text-layer rungs only (an interrupted ``pymupdf`` run) stays ``pymupdf``.
     """
