@@ -245,7 +245,7 @@ closed children; the conexus answer on external readers. Engine-stamped
 keys and position keys were censused for this RDR on 2026-10-26 against
 develop f14fe0148 (RF-4, RF-5); owner-resolution cost was traced and timed
 (RF-10). Each finding below is also a T2 record,
-`nexus_rdr/236-research-1` to `-21`, with its sources (RF-14, option B as
+`nexus_rdr/236-research-1` to `-23`, with its sources (RF-14, option B as
 implemented, and RF-15, the schema analysis record, are T2-only; their
 substance is in RF-8 and the Technical Design). The draft was
 critiqued once before Sam's gate decision (T2
@@ -301,9 +301,13 @@ critiqued once before Sam's gate decision (T2
   the engine reads doc_id and catalog_doc_id as the manifest-less census's
   forward attribution, and title and source_path for display in `/reapable`
   and the reaper's refusal audit (RF-19; moved by 6pfgb.39 before the
-  sweep). Hygiene note: a gc restore removes quarantined_at and
-  origin_collection but leaves quarantined_by and reaper_quarantined_at on
-  the live row (fixed by 6pfgb.40 before the quarantine CHECK lands).
+  sweep). Hygiene note: a gc restore INSERTs the quarantined row back into
+  its origin collection with its metadata minus quarantined_at and
+  origin_collection, leaving quarantined_by and reaper_quarantined_at on
+  the live row (fixed by 6pfgb.40 before the quarantine CHECK lands) and
+  carrying every other key the row had (RF-23), which is why the Step 3
+  sweep strips retired document keys inside the quarantine collections
+  too.
 - **RF-5 (Verified, same sweep).** `catalog_document_chunks` already has a
   column for every position field; the engine writes all of them on the
   manifest write, and the client builds the manifest row from the chunk
@@ -378,8 +382,9 @@ critiqued once before Sam's gate decision (T2
   indexer constant: category=paper (four, the DEVONthink papers
   collection), category=code (two), tags=js (one), category=prose (four),
   tags=pdf (one). None uses a user note value. Ten rewrite to catalog
-  content_type or the collection scope; the two tag filters need a file
-  extension predicate or `source_format`. The engine leg forwards the
+  content_type or the collection scope; the two tag filters read the
+  GENERATED tags column of indexed files (.8, decided after RF-17). The
+  engine leg forwards the
   clause unchanged (`run_gate.py` ~2029, `warmup.py` ~70) and the oracle
   is recaptured; the recall leg (`_where_clause_parts` ~3848, pool count
   ~4101) becomes a join through `catalog_document_chunks` on tenant,
@@ -452,9 +457,10 @@ critiqued once before Sam's gate decision (T2
 - **RF-18 (Verified, source search 2026-10-27).** Engine write modes:
   `upsert-chunks` and `update-metadata` merge; the combined manifest
   writes merge only when the client sends `metadata_merge` (the current
-  client's `note_write` sends it directly; `multi_batch_write` defaults it
-  off and every indexer path supplies it through `MetadataMergingCatalog`,
-  RF-22) and otherwise replace
+  client's `note_write`, `indexer.py` and the exporter send it directly;
+  `multi_batch_write` defaults it off and the pipeline, doc_indexer and
+  oversize paths supply it through `MetadataMergingCatalog`, RF-22) and
+  otherwise replace
   the row's metadata wholesale; their delete field is
   `metadata_delete_keys`. The identical-text re-write of a re-put bumps
   `last_written_at`.
@@ -468,9 +474,10 @@ critiqued once before Sam's gate decision (T2
   The reaper, the rdr192
   upgrade-ladder rung and `nx t3 census-manifest-less --require-zero`
   depend on the census's `legacy-unmanifested` bucket reading zero. The
-  gc restore functions (vectors-030, catalog-043) strip only
-  quarantined_at and origin_collection; `quarantine_restore_chunks`
-  strips all four.
+  gc restore functions (vectors-030; catalog-043's bodies are superseded)
+  strip only quarantined_at and origin_collection; `quarantine_restore_chunks`
+  strips all four; all three INSERT the row back into its origin
+  collection with the rest of its metadata intact (RF-23).
 - **RF-20 (Verified, source search 2026-10-27).** The note tag path
   stores a comma string end to end (CLI, MCP, `put_note`,
   `note_catalog_meta`, the recovery bundle); two keyless-note definitions
@@ -490,6 +497,30 @@ critiqued once before Sam's gate decision (T2
   through the stage (5000/N for a collection of N chunks; the 599799 of
   RF-16 is the whole database). Bead census 2026-10-27: 29 open children,
   .33, .35, .36 and .37 closed; nexus-p89h4 absorbed.
+- **RF-22 (Verified where this session re-read; the rest relayed from the
+  fix-check critics' worktree reads, marked in the record).**
+  `exactOnUnderReturn` fires on an empty page by design and records short
+  pages as its residual; hybrid's dispatch exposes its bound for tests;
+  `metadata_delete_keys` requires `metadata_merge`; `prose_indexer` routes
+  `.md` and `.markdown` alike; `catalog_ttl_stale` already compares the
+  row's `indexed_at` with the catalog clock; the ladder runs on every
+  install; `ChunkReaper` documents the no-owner blind spot; the stranded
+  note the rdr192 rung cannot heal; `hnsw.max_scan_tuples` is a limit, not
+  a signal; the four closed beads closed 2026-10-27 UTC.
+- **RF-23 (Verified, source search 2026-10-27).** rdr180-001 and
+  vectors-004 record that a boot-time VALIDATE of a chunk CHECK crash-loops
+  an un-rekeyed store, so `chunks_chash_octet_check` exists NOT VALID and
+  nothing has validated it since the chash-rekey rung retired; the three
+  gc restore functions INSERT a quarantined row back into its origin
+  collection with its metadata minus the quarantine keys, so a quarantined
+  row keeping legacy document keys would fail a validated allow-list CHECK
+  on restore; the `.nxexp` import writes no note keys to the catalog by
+  design; `orphan_backfill` derives a catalog content_type from the
+  collection prefix (`docs` among them); the indexers write tags as the
+  lower-cased, dot-stripped extension; the reaper refuses a collection
+  while `legacy-unmanifested` or `unclassified` is above zero; the scan
+  stops at `hnsw.max_scan_tuples` or the `work_mem` budget; catalog-001
+  indexes only two of the three bib ids.
 
 ### Critical Assumptions
 
@@ -539,8 +570,8 @@ critiqued once before Sam's gate decision (T2
   be rewritten against the catalog without changing what they measure —
   **Status**: Verified for the queries (RF-13): all twelve filter on
   indexer constants, ten rewrite to catalog content_type or the
-  collection scope, two (tags=js, tags=pdf) need a file extension
-  predicate or the GENERATED `source_format` column Phase 3 adds; the
+  collection scope, two (tags=js, tags=pdf) read the GENERATED tags
+  column Phase 3 adds (.8; `source_format` cannot express tags=js); the
   engine leg
   forwards the where clause unchanged and needs nothing; the recall leg
   becomes a manifest join. Not fully true for the findings SQL: its
@@ -568,7 +599,16 @@ critiqued once before Sam's gate decision (T2
   and frecency is recomputable from git — **Method**: Source Search and
   the .35 live census; the residue count comes from the backfill's dry run
   and live run, both before Phase 4 Step 1, which needs the keyless-note
-  count at zero.
+  count at zero or its residue accepted.
+
+- [ ] A8: an in-SQL EXISTS under `hnsw.iterative_scan` fills a page for a
+  filter the dense branch takes (about 1 percent of a collection) with a
+  query far from the filtered documents — **Status**: Assumed; RF-21
+  verifies the shape for hybrid's text gate only, and hybrid's own javadoc
+  marks that dispatch a heuristic (RF-22); the exact re-run on a short page
+  is the guard if it fails — **Method**: Spike on the live-engine fixture
+  before Phase 3's .25 lands (a 1 percent filter, a far query; full page,
+  or the re-run fires once), recorded as research.
 
 ## Proposed Solution
 
@@ -611,7 +651,8 @@ has exactly one other home, and the engine enforces the rule on write.
    one module allowed to do so is named in the key table's lint.
 4. **The engine answers filters from the homes on every route.** Labels,
    author, indexed_at and bib_* already go through the manifest stage on
-   route (a) (the id-valued bib keys leave it for the pre-filter below). The remaining DOCUMENT keys are selective (title names one
+   route (a) (author and the id-valued bib keys leave it for the pre-filter
+   below). The remaining DOCUMENT keys are selective (title names one
    document; content_type, tags and category can exclude most of a
    collection), and a stage that filters after the search is cut at 4x the
    limit cannot answer them without losing recall. So those keys are
@@ -622,13 +663,13 @@ has exactly one other home, and the engine enforces the rule on write.
    with the document predicate evaluated inside the search SQL (an EXISTS
    on the manifest joined to the catalog, under `hnsw.iterative_scan`, the
    shape hybrid's text gate already takes), never by the post-search
-   stage's cut; on that branch only, a page that comes back short because
-   the scan hit its budget is re-run exactly (nexus-bq06h's
-   `exactOnUnderReturn`, whose trigger today is an empty page, extended to
-   a starved one). A hit is reported under the qualifying owner. The
+   stage's cut; on that branch only, a page shorter than the limit is
+   re-run exactly (nexus-bq06h's `exactOnUnderReturn`, whose trigger today
+   is an empty page, extended to a short one there: more than the bound's
+   worth of chashes qualify on that branch, so a short page is starved by
+   construction). A hit is reported under the qualifying owner. The
    post-search stage keeps the span and source_uri re-pointing, the
-   negative label filters, and author, indexed_at and the non-id bib_*
-   keys; positive label filters, which under-fill through the same cut
+   negative label filters, and indexed_at and the non-id bib_* keys; positive label filters, which under-fill through the same cut
    today (nexus-p89h4), take the same EXISTS on the manifest without the
    catalog join, with the `labels_written` row fallback inside it. Route (b)'s SQL functions get the dispatch in their own bead after
    route (a) is deployed and measured (6pfgb.41). Route (c) callers select
@@ -639,8 +680,8 @@ has exactly one other home, and the engine enforces the rule on write.
    `update-metadata` and the three combined manifest writes (`append`,
    `append_many`, `write_many`), checked in the one service they share
    (`CombinedWriteService`) and in the upsert path. `delete_keys` is
-   never refused (it is how a client retracts a key it used to write, and
-   how the final sweep works). Position fields travel in the manifest rows,
+   never refused (it is how a client retracts a key it used to write; the
+   final sweep is a direct UPDATE, Step 3). Position fields travel in the manifest rows,
    which already have their columns; document fields travel on the catalog
    document. The check ships log-only first and enforces in a later paired
    cut, after the conexus gates read the catalog and the would-refuse log
@@ -654,7 +695,10 @@ has exactly one other home, and the engine enforces the rule on write.
    client's health report) counts zero legacy-label manifest rows, zero
    **keyless notes** (one definition, adopted here: a note whose catalog
    meta has no `put_at`, which every put since 6pfgb.15 stamps and which
-   the `.nxexp` import writes from `.18` on; the recovery bundle's
+   the `.nxexp` import stamps from `.18` on (`put_at` now and ttl_days 0 on
+   an entry with no note keys; an existing entry keeps its keys; the export
+   carries no TTL the catalog could keep true, RF-23); the recovery
+   bundle's
    any-of-five test and `note_ttl.has_own_keys` are re-pointed at `put_at`
    as part of 6pfgb.10, RF-20, which also stamps `put_at` and `ttl_days` 0
    for a note recovered as sole owner with no TTL anywhere, so the count
@@ -664,15 +708,21 @@ has exactly one other home, and the engine enforces the rule on write.
    install, RF-19), zero manifest rows whose span is NULL while their
    chunk row's span is not (A4) and zero indexed documents whose GENERATED
    columns come out NULL, or each residue is named and accepted by Sam at
-   the dry run, the `legacy-unmanifested` bucket included (a stranded note
-   the rung cannot heal, RF-22, is such a residue and the rung records the
-   acceptance). The engine's own row-key readers (6pfgb.39) change first:
-   the census drops its forward join once the bucket is zero and keeps the
-   reverse path, so a later legacy-shaped chunk reads `no-owner` (accepted:
-   only `legacy-unmanifested` and `unclassified` gate the reaper, RF-19);
-   `/reapable`, the reaper's refusal audit and the gc quarantine audit (the
-   orphan audit named above) label a row by a chunk text prefix and the
-   manifest owner's title where one exists.
+   the dry run; an accepted `legacy-unmanifested` residue blocks the sweep
+   for that collection (the reaper refuses a collection while the bucket is
+   above zero, RF-23, and a swept stranded note's chunk would read
+   `no-owner` and become reapable), so a stranded note the rung cannot heal
+   (RF-22) is healed by hand or its collection stays unswept. The engine's
+   own row-key readers (6pfgb.39) change first: the census drops its
+   forward join once the install's rdr192 ladder completion record exists
+   (read from `nexus.ladder_completions`; the bucket itself is not the
+   condition, since a dropped join would read it as zero vacuously), keeps
+   the reverse path, and updates the census SQL identity pin and the CLI
+   buckets, so a later legacy-shaped chunk reads `no-owner` (accepted: only
+   `legacy-unmanifested` and `unclassified` gate the reaper, RF-19);
+   `/reapable`, the reaper's refusal audit and the gc quarantine audit
+   label a row by a chunk text prefix and the manifest owner's title where
+   one exists.
 
 ### Technical Design
 
@@ -800,14 +850,15 @@ the enforcement this RDR adds:
 
 | Dependency | Enforcement | Write cost |
 | --- | --- | --- |
-| chunk metadata holds only CHUNK and ROW keys | CHECK `(metadata - allowed) = '{}'` with the bypass prefixes exempt, added NOT VALID after every tenant's sweep and then VALIDATEd through the table-wide routes (6pfgb.43), never in a startup changeset; the Java allow-list in front of it; the allowed-key array is rendered from the Python table into the route's DDL, and a key-table change re-adds the constraint through the same route (a Liquibase changeset is immutable, so none carries this array) | microseconds a row |
-| chunk_text_hash = encode(chash, 'hex') | CHECK | negligible |
+| chunk metadata holds only CHUNK and ROW keys | CHECK `(metadata - allowed) = '{}'` with the bypass prefixes (`taxonomy__*`, `quarantine-*`) exempt from the CHECK, while the sweep strips retired document keys inside `quarantine-*` rows too (keeping the four ROW keys), because every gc restore copies a quarantined row's metadata back into a live collection where the CHECK applies (RF-23); added NOT VALID after every tenant's sweep and then VALIDATEd through the table-wide routes (6pfgb.43), never in a startup changeset; the Java allow-list in front of it; the allowed-key array is rendered from the Python table into the route's DDL, and a key-table change re-adds the constraint through the same route (a Liquibase changeset is immutable, so none carries this array) | microseconds a row |
+| chunk_text_hash = encode(chash, 'hex') | CHECK, added NOT VALID by the add-constraint route after every tenant's sweep and VALIDATEd by the validate route (6pfgb.43); never a startup changeset | negligible |
+| octet_length(chash) = 32 | the existing NOT VALID CHECK `chunks_chash_octet_check` (vectors-004, re-created by vectors-030 and vectors-036; RF-23), left NOT VALID since the chash-rekey rung retired; VALIDATE only, by the validate route, after reading `pg_constraint.convalidated` | negligible |
 | metadata embedding_model = the column | CHECK; not censused by RF-16, counted by the Step 3 dry run first (6pfgb.42) | negligible |
-| quarantined_by implies quarantined_at (RF-16: 158 client-moved rows in the quarantine collections carry quarantined_at alone, 0 rows the other way, 0 half-present in live collections; a gc restore drops quarantined_at and leaves quarantined_by, so the restore drops all four before the CHECK is added: 6pfgb.40) | CHECK | negligible |
+| quarantined_by implies quarantined_at (RF-16: 158 rows in the quarantine collections, moved by the engine's `gc_quarantine_orphans` on the client's call, carry quarantined_at alone, 0 rows the other way, 0 half-present in live collections; a gc restore drops quarantined_at and leaves quarantined_by, so the restore drops all four before the CHECK is added: 6pfgb.40) | CHECK | negligible |
 | manifest collection = the document's physical_collection | composite foreign key or trigger; documents with no physical_collection (RDR-191) need a rule (6pfgb.42) | one index lookup a manifest row |
 | chunk_index = position | CHECK (6pfgb.42) | negligible |
 | labels_written false means the labels are NULL | CHECK; not censused by RF-16, counted by the Step 3 dry run first (6pfgb.42) | negligible |
-| ttl_days > 0 means put_at present | CHECK, NOT VALID until the backfill | negligible |
+| ttl_days > 0 means put_at present | CHECK on `catalog_documents` meta, counted at the .10 dry run, added NOT VALID after the backfill and VALIDATEd in its own step (6pfgb.44) | negligible |
 | derived document keys (source_format; indexed files' tags and category) | GENERATED columns | one regex a write |
 
 Why both the Java check and the CHECK: the Java check validates what a
@@ -821,7 +872,11 @@ session_replication_role. Two cautions: a CHECK failure prints the failing
 row, chunk text and vector included, so the Java check stays in front; and
 `mergeMetadata` never removes keys, so a CHECK enforced before the sweep
 would fail the next upsert of every legacy shared row. Hence the order in
-Phase 4: Java check in log mode, sweep, CHECK NOT VALID, VALIDATE.
+Phase 4: Java check in log mode, then enforce mode (Step 2c), sweep, CHECK
+NOT VALID, VALIDATE, the last two through the engine-admin routes and
+never a startup changeset (RF-23: rdr180-001 records a boot-time VALIDATE
+as the crash-loop shape, and vectors-004 left the width CHECK NOT VALID for
+that reason).
 
 **Denormalization decisions.**
 
@@ -834,7 +889,7 @@ Phase 4: Java check in log mode, sweep, CHECK NOT VALID, VALIDATE.
 | presence fallback (catalog value, else the row's) | kept while bounded | the row is already in hand; it reintroduces the update anomaly for any document whose home is still empty, so it ends when the doctor counts reach zero, and has one SQL definition shared by the stage, the pre-filter and the conexus recall SQL |
 | frecency_score on the row | removed | `resolve_many` already runs once per window (RF-10); refresh writes drop from one per chunk to one per file; a computed_at is stored |
 | span on the search row | already text-determined | `spanFromMeta` emits the chash form; what moves is the flattened line fields and file:line, one `chash_positions` call per window |
-| pre-filter | added | one catalog query plus a manifest fetch capped at 5000; no index exists today on `catalog_documents.metadata`, so the GENERATED columns carry btree indexes (source_format, category) and a GIN index on the generated tags array, the meta gets a GIN index (`jsonb_path_ops`) for the note tags containment test (6pfgb.38), and `title=` and the id-valued bib keys use the catalog's existing indexes, measured before Phase 3 |
+| pre-filter | added | one catalog query plus a manifest fetch capped at 5000; no index exists today on `catalog_documents.metadata`, so the GENERATED columns carry btree indexes (source_format, category) and a GIN index on the generated tags array, the meta gets a GIN index (`jsonb_path_ops`) for the note tags containment test (6pfgb.38), and `title=`, `source_author=` and the id-valued bib keys get btree indexes on (tenant_id, title), (tenant_id, author) and (tenant_id, bib_doi) in the Phase 3 changeset (catalog-001 indexes only the other two bib ids, RF-23), measured before Phase 3 |
 | stored source_format, tags, category for indexed files | removed | GENERATED columns cost nothing to read |
 
 **Transforms.** The analysis writes the backfill, the sweep and the
@@ -860,9 +915,11 @@ labels) and are counted by the Step 3 dry run before they are added
 (6pfgb.42). The census covers one production database; the CHECKs ship to
 every install, so each install's sweep rung re-counts the four censused
 equalities and the two uncensused ones before its add-constraint and
-validate steps (6pfgb.43), and only the two census-proved constraints
-(chunk_text_hash, chash width) sit in the startup changeset; a chash
-recurs inside one
+validate steps (6pfgb.43), and no chunk CHECK is added or validated in a
+startup changeset: chunk_text_hash is added NOT VALID by the add-constraint
+route after the sweep, and the existing width CHECK
+`chunks_chash_octet_check` is VALIDATEd by the validate route (RF-23); a
+chash recurs inside one
 document in 4976 manifest groups across 1752 documents, so the one
 manifest row rule (nexus-1nrcu) is load-bearing; and 158 quarantine rows
 carry quarantined_at without quarantined_by (the client move writes no
@@ -878,8 +935,8 @@ part of K, determines it.
 
 | Key | Determinant | Domain | Home after normalization | Moved by |
 | --- | --- | --- | --- | --- |
-| chunk_text_hash | chash (equal to its hex) | always present on new rows | CHUNK, kept for the wire shape, CHECKed equal to the column | Phase 4 CHECK |
-| embedding_model (metadata) | the column of the same name | always present | CHUNK, CHECKed equal to the column | Phase 4 CHECK |
+| chunk_text_hash | chash (equal to its hex) | always present on new rows | CHUNK, kept for the wire shape, CHECKed equal to the column | Phase 4 CHECK through the add-constraint and validate routes (6pfgb.43) |
+| embedding_model (metadata) | the column of the same name | always present | CHUNK, CHECKed equal to the column | Phase 4 CHECK through the routes (6pfgb.43) |
 | content_type (chunk vocabulary) | notes: the collection prefix; indexed files: the indexer path and extension | one of code, pdf, markdown, prose | DOCUMENT: `catalog_documents.content_type` for code/prose/paper/rdr/knowledge; the GENERATED `source_format` column for pdf/markdown (RF-7); row fallback while the column is absent | 6pfgb.23 (engine, generated column), .25 |
 | title | two attributes: D for notes and `nx index pdf`; Pn (the per-position label "rel:ls-le") for code, prose and repo PDFs | always present | DOCUMENT `catalog_documents.title` (RF-7); the per-position label is display text derived from the manifest spans and file_path, stored nowhere; the engine's `/reapable` listing and reaper audit display read the row title until 6pfgb.39 (RF-19) | 6pfgb.25, .27, .39 |
 | source_author | D | absent = unknown | DOCUMENT `catalog_documents.author`; row fallback while empty (markdown: 6pfgb.7) | 6pfgb.7 |
@@ -888,7 +945,7 @@ part of K, determines it.
 | indexed_at | three attributes: the row's last client write; the catalog's last engine manifest write (heals included); the note's put_at | timestamp | DOCUMENT: display and `where=` read `catalog_documents.indexed_at` (row fallback while NULL); the note TTL clock is meta `put_at` (6pfgb.15); the row's own write time is the ROW column `last_written_at` | 6pfgb.13 |
 | tags | D; for indexed files computable from extension | a set (Sam, 2026-10-26, RF-17): a JSON array in the document meta, filtered by containment; a comma string is legacy, converted once by 6pfgb.38; absent or `[]` = no tags | DOCUMENT: notes in meta (6pfgb.5 stores the comma string today, RF-20; 6pfgb.38 stores the array and converts existing strings); indexed files as a GENERATED one-element array from file_path, not stored | 6pfgb.38 (notes), 6pfgb.8 (re-scoped, indexed files) |
 | category | D; for indexed files computable from content_type | one of code, prose, paper, or a note's own | DOCUMENT: notes in meta (done); indexed files GENERATED from content_type | 6pfgb.8 (re-scoped) |
-| ttl_days, put_at | D | ttl_days 0 or absent = permanent in meta (one encoding, 0 as the retraction sentinel); put_at present whenever ttl_days > 0 (CHECK) | DOCUMENT meta (6pfgb.5, .15 done) | done |
+| ttl_days, put_at | D | ttl_days 0 or absent = permanent in meta (one encoding, 0 as the retraction sentinel); put_at present whenever ttl_days > 0 (CHECK, 6pfgb.44) | DOCUMENT meta (6pfgb.5, .15 done) | done; CHECK 6pfgb.44 |
 | extraction_method, quality_gate_overridden, extraction_source | D | absent = unknown; explicit false for the override | DOCUMENT meta | 6pfgb.6, .16 |
 | frecency_score | D and computation time (`frecency.py` uses now()) | float with a computed_at | DOCUMENT meta with computed_at; the scorer reads the attributed owner | 6pfgb.9 (re-scoped) |
 | source_agent | D | absent = unknown | DOCUMENT meta (notes done in .5) | 6pfgb.17 |
@@ -898,10 +955,10 @@ part of K, determines it.
 | section_title, section_type, page_number | Pn | absent = unknown; "" = none here, marked by labels_written | POSITION `catalog_document_chunks` (catalog-046) | tko2w, jz86a, 1nrcu (one manifest row, not one owner) |
 | line_start, line_end, chunk_start_char, chunk_end_char | Pn | integers | POSITION `catalog_document_chunks` line_start/line_end/char_start/char_end; the flattened search-row fields and file:line are re-pointed | 6pfgb.26 (re-scoped), .19 |
 | chunk_type (table_page) | none; dead | dropped by normalize before every write | none; writer removed | 6pfgb.27 |
-| quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at | the physical row; written only by the engine | quarantined_by implies quarantined_at (CHECK); quarantined_at alone is a gc orphan move (158 rows in the quarantine collections, RF-16); gc restores today drop two | ROW; refused from a client write; the bypass prefixes (`quarantine-*`) stay exempt from the allow-list; the 158 rows with quarantined_at alone were stamped by the engine's `gc_quarantine_orphans`, which `chunk_quarantine.py` calls and which writes two of the four keys (RF-22); the restore fix is 6pfgb.40 | stays; CHECK in Phase 4 |
+| quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at | the physical row; written only by the engine | quarantined_by implies quarantined_at (CHECK); quarantined_at alone is a gc orphan move (158 rows in the quarantine collections, RF-16); gc restores today drop two | ROW; refused from a client write; the bypass prefixes (`quarantine-*`) stay exempt from the allow-list; the 158 rows with quarantined_at alone were stamped by the engine's `gc_quarantine_orphans`, which `chunk_quarantine.py` calls and which writes two of the four keys (RF-22); the restore fix for the four keys is 6pfgb.40, and the Step 3 sweep strips retired document keys from quarantined rows too so a restore passes the validated CHECK (RF-23) | stays; CHECK in Phase 4 |
 | last_written_at, retention, collection, embedding_model (columns) | the row | columns | ROW | stays |
 | `nexus.frecency` table (telemetry-001: frecency_score, ttl_days keyed by chunk) | a third home with no client writer found | engine-internal writers UNCONFIRMED | retire, or list its writer and reader | 6pfgb.42 settles |
-| doc_id, chunk_index, chunk_count | legacy (RDR-108 Phase 3) | on old rows; `indexer.py` ~3375 still sets doc_id | LEGACY; read by the engine's manifest-less census forward join, the rdr192 rung and `manifest_backfill.py` to attribute a manifest-less chunk (RF-19) until the census bucket reads zero and 6pfgb.39 lands; then swept; chunk_index lives on as the manifest column (CHECK equal to position) | 6pfgb.39, sweep |
+| doc_id, chunk_index, chunk_count | legacy (RDR-108 Phase 3) | on old rows; `indexer.py` ~3375 still sets doc_id | LEGACY; read by the engine's manifest-less census forward join, the rdr192 rung and `manifest_backfill.py` to attribute a manifest-less chunk (RF-19) until the install's rdr192 completion record exists and 6pfgb.39 lands; then swept; chunk_index lives on as the manifest column (CHECK equal to position) | 6pfgb.39, sweep |
 | source_path | legacy (RDR-102 D2) | absent | LEGACY; its dead client reads are removed in Phase 2; the engine's `/reapable` and reaper audit display read it until 6pfgb.39 (RF-19) | 6pfgb.39, sweep |
 | store_type, corpus, git_meta, git_project_name, git_branch, git_commit_hash, git_remote_url | legacy (RDR-101 Phase 5c) | the repo PDF dict still sets the flat git keys | LEGACY; writer removed in Phase 0 | sweep |
 | RDR-222 fence fields, lifecycle_state, tumbler | D or the collection | catalog columns | not row keys; listed so no one looks for them on the row | n/a |
@@ -921,8 +978,12 @@ answers bib_openalex_id and bib_doi, which `ALLOWED_TOP_LEVEL` does not
 contain (the enrich writer sends them through `update-metadata`,
 unvalidated); and the table's bypass collections (`taxonomy__*`,
 `quarantine-*`, which `db/t3._BYPASS_SCHEMA_PREFIXES` exempts from
-normalize today) stay exempt from the allow-list, named as such in the
-table and the engine check.
+normalize today) stay exempt from the Java check and the CHECK, named as
+such in the table and the engine check; the Step 3 sweep still strips
+retired document keys from `quarantine-*` rows (not from `taxonomy__*`,
+whose rows are never restored into a live collection), because the three
+gc restore functions copy a quarantined row's metadata into its origin
+collection, where the CHECK applies (RF-23).
 
 #### Enforcement at the engine (Phase 4)
 
@@ -944,10 +1005,13 @@ without refusing, so the window before enforcement shows every writer the
 client census could not see. Behind it, after the sweep, the database
 CHECKs of the dependency-preservation table (allow-list on the metadata
 keys with the bypass prefixes exempt, chunk_text_hash equal to the chash,
-metadata embedding_model equal to the column, the quarantine keys
-together) are added NOT VALID and then VALIDATEd, so the property holds
-for every writer, direct SQL included. Precedent for a NOT VALID CHECK on
-this partitioned table: vectors-030 and vectors-036.
+metadata embedding_model equal to the column, quarantined_by implies
+quarantined_at) are added NOT VALID and then VALIDATEd through the
+add-constraint and validate routes of 6pfgb.43, never in a startup
+changeset (rdr180-001: a boot-time VALIDATE crash-loops an install whose
+rows differ from the measured one; RF-23), so the property holds for every
+writer, direct SQL included. Precedent for a NOT VALID CHECK on this
+partitioned table: vectors-030 and vectors-036.
 
 #### The pre-filter for selective document keys (Phase 3)
 
@@ -976,19 +1040,28 @@ pre-filter has two branches and neither uses the stage's cut: a set under
 the bound is ranked exactly by `chash = ANY`; a set over the bound runs the
 HNSW-first plan with the document predicate inside the SQL (an EXISTS on
 `catalog_document_chunks` joined to `catalog_documents` on tenant,
-collection and document, live owners only), and a page that comes back
-short because the scan exhausted its budget (`hnsw.max_scan_tuples`, the
-signal `PgSession` sets, RF-22) is re-run exactly, extending
-`exactOnUnderReturn` (nexus-bq06h) from an empty page to a starved one,
-its recorded residual; a page short because fewer rows match is the common
-case and is not re-run, and the exact branch is already exact and never
-re-runs (RF-22). Positive label filters take the same EXISTS on the
+collection and document, live owners only), and a page shorter than the
+limit is re-run exactly: the probe is collection-scoped, so on this branch
+more than the bound's worth of chashes qualify and a short page means the
+iterative scan stopped at `hnsw.max_scan_tuples` or the `work_mem` budget
+(RF-23; nothing signals the stop, the page size is the trigger). This
+extends `exactOnUnderReturn` (nexus-bq06h) from an empty page to a short
+one on this branch only, its recorded residual; the exact branch is
+already exact and never re-runs, and a legitimately short page is possible
+only there (RF-22). The re-run orders the collection without the index (a
+bitmap or sequential scan, then a sort), O(collection) per starved call,
+within the two statement_timeout bounds bq06h records, and is counted. Positive label filters take the same EXISTS on the
 manifest alone (nexus-p89h4, absorbed here), carrying the `labels_written`
 row fallback the stage applies today (a legacy manifest row matches on the
-row's label until re-index), and the stage still expands a hit per owning
-(document, position) to report the owner and labels; `category=` is one
-predicate over its two homes like `tags=` (the GENERATED column for
-indexed files, the meta key for notes). The
+row's label until re-index). The EXISTS only prunes: it admits a chunk,
+not an owner, so the stage then re-evaluates the document and label
+predicates per owning document over the admitted chunks (at the document's
+lowest passing position, as today) to name the qualifying owner and its
+labels, and the EXISTS carries the stage's full operator set (`$eq`,
+`$ne`, `$in`, `$nin`, numeric comparison on page_number). `category=` is
+one predicate over its two homes like `tags=` (the GENERATED column for
+indexed files, the meta key for notes). Whether a correlated EXISTS under
+`hnsw.iterative_scan` fills a page for a far query is A8. The
 pre-filter reuses hybrid's dispatch with the catalog as the gate: resolve
 the qualifying documents from `catalog_documents` and its meta, collect
 their manifest chashes up to the bound, and dispatch. The catalog resolve
@@ -1004,14 +1077,16 @@ the key is absent; `tags=` is one containment test over both tag homes
 (the meta array for notes, the GENERATED one-element array for indexed
 files; 6pfgb.38), so a note tagged arch and decision matches `tags=arch`;
 while a note's meta still holds a legacy comma string, or the row fallback
-applies, the string is split before the test. Author, indexed_at and the
-non-id bib_* keys stay with the post-search stage; the id-valued keys
-(`bib_doi`, `bib_openalex_id`, `bib_semantic_scholar_id`) name one
-document like `title=` and go through the pre-filter as well, because
-they under-fill through the stage's cut today where they ran in-index
-before 0.1.165 (the same class as .28's regression; pinned under .25).
-Pins: `title=` and `bib_doi=` in a collection larger than 1200 chunks
-return the document's hits (the exact branch at the default bound); a
+applies, the string is split before the test. indexed_at and the non-id
+bib_* keys (year, venue, citation count: range or dense filters) stay with
+the post-search stage; `source_author=` and the id-valued keys (`bib_doi`,
+`bib_openalex_id`, `bib_semantic_scholar_id`) name few documents like
+`title=` and go through the pre-filter as well, because they under-fill
+through the stage's cut today where they ran in-index before 0.1.165 (the
+same class as .28's regression; pinned under .25).
+Pins: `title=`, `source_author=` and `bib_doi=` in a collection larger
+than 1200 chunks return the document's hits (the exact branch at the
+default bound); a
 filter at about one chunk in ten of a 20000-chunk fixture collection
 returns a full page on the dense branch with the bound pinned to 500 (the
 dispatch exposes its bound for tests, RF-22; at the default 5000 that
@@ -1019,8 +1094,9 @@ filter is 2000 chashes and takes the exact branch, so the dense branch is
 unreachable on a fixture without the pinned bound); a dense filter
 (category=prose on a prose collection) returns the same page as no filter;
 a starved page on the dense branch (scan budget forced small) re-runs
-exactly once and the exact branch's counter never moves; a shared chunk is
-attributed to the qualifying owner. Cost: one catalog query and one
+exactly once (the global `exactFallbackCount` delta is one against a
+baseline, in a serial test) and an exact-branch page leaves it unchanged;
+a shared chunk is attributed to the qualifying owner. Cost: one catalog query and one
 manifest chash fetch before the search, bounded by `SELECTIVE_GATE_MAX`,
 and the in-SQL EXISTS against the plain HNSW plan, measured on the parity
 gate's twelve filtered queries, with the exact re-run counter read across
@@ -1048,9 +1124,13 @@ note as its sole live owner in its collection and which
 `note_ttl.row_may_give_tags` accepts (it refuses only a row whose stamp
 AND title both name another note: Sam's reading of option B on
 2026-10-26, which recovers renamed notes and `.nxexp` imports while a
-departed co-owner's write gives nothing); a note with neither is counted
-residue per key (on the live tenant, 2026-10-26, the 8 notes with no stamped row were
-all sole owners with no ttl_days, so option B recovers every one).
+departed co-owner's write gives nothing); a note recovered as sole owner
+with no ttl_days anywhere gets `put_at` from that row's indexed_at and
+ttl_days 0, the stamp Approach 6 names, so it leaves the keyless count; a
+note with neither is counted residue per key (on the live tenant,
+2026-10-26, the 8 notes with no stamped row were all sole owners with no
+ttl_days, so option B recovers every one and the stamp fills their
+`put_at`).
 Indexed documents: extraction_* and frecency_score are copied from a
 chunk with exactly one live owner; a document with none is counted
 residue. Fill-only: never overwrite an existing meta key, with one named
@@ -1202,16 +1282,18 @@ answers, so they move to the pre-filter too. The pre-filter is the remedy.
   whether selective (title, the id-valued bib keys) or in the mid-density
   band (RF-21). **Mitigation**: the pre-filter's two branches, neither
   using the cut (Alternative 4 rejected); the recall pins on `title=` in a
-  large collection and on a one-in-ten filter; the exact re-run on a short
-  page; the parity gate's filtered queries compared across the deploy.
+  large collection and on a one-in-ten filter; the exact re-run on a
+  starved dense-branch page; the parity gate's filtered queries compared
+  across the deploy.
 - **Risk**: a writer the client census cannot see (a subprocess, a shell
   script, a Java client) is refused at enforcement. **Mitigation**: the log
   mode window before enforcement (A5).
 - **Risk**: a note re-put by a new client that writes no row keys leaves
   the old put's TTL on the row, and `catalog_ttl_stale` then holds the note
   forever. **Mitigation**: the frozen-row rule in Phase 4 Step 1 ignores a
-  row whose `indexed_at` predates the catalog's `put_at`, and its pin uses
-  a single-owner note with a legacy-keyed row.
+  row whose `indexed_at` is not later than the catalog's `put_at` plus
+  `PUT_SKEW`, and its pin uses a single-owner note with a legacy-keyed
+  row.
 - **Risk**: a reader that still trusts the row survives the sweep
   undetected. **Mitigation**: the lint that forbids reading a non-CHUNK key
   from `metadata` outside the legacy-fallback module; the doctor row for
@@ -1241,7 +1323,8 @@ diverged key table fails CI.
       .27, .10 (fill-only with the tags conversion exempt; writes the tags
       it fills from row strings as arrays; stamps `put_at` for sole-owner
       notes with no TTL; re-points the two keyless tests at `put_at`), .18
-      (the import writes the note's TTL to the catalog meta, no row keys),
+      (the import writes no row keys and stamps `put_at` now with ttl_days
+      0 on a keyless entry; an entry's existing keys win),
       .32, .43 (the three routes and the one order), nexus-p89h4 (absorbed
       into .25's manifest EXISTS).
 - [ ] The dry run and the live run of the backfill (A7) read by Sam before
@@ -1279,8 +1362,9 @@ lapsed owner and keeps the chunk (green since .15; kept); a re-put of A by
 a client that writes no row keys, changing its TTL, still expires on time
 (red after Phase 4 Step 1 without the lifecycle fix). Pair 2b, one note
 as the sole owner of its row, which carries the legacy stamp, title and
-ttl_days 7: a new-client re-put to 30 days expires at 30, because the
-row's `indexed_at` predates the new `put_at` and the rule ignores it.
+ttl_days 7 and an `indexed_at` from the first put: a new-client re-put to
+30 days expires at 30, because the row's `indexed_at` is not later than
+the new `put_at` plus `PUT_SKEW`, so the rule ignores it.
 
 Refusal legs: an `upsert-chunks` carrying `title` is refused with 422
 naming the key and its home; the same content with `title` on the catalog
@@ -1295,7 +1379,8 @@ document owns; the backfill dry run reports counts and stamps nothing. A
 pin fails when `VectorHandler` or `CatalogHandler` gains a route that
 accepts `chunks` or `metadata` (a body field the handler reads into chunk
 metadata) outside the check's route list. All red on develop today except
-the two delete-key acceptances and the route-list pin.
+the two delete-key acceptances, the accepted CHUNK-only positive control
+and the route-list pin.
 
 ### Phase 0: The key table
 
@@ -1329,8 +1414,11 @@ this lands.
   Expressions, written from the indexers' constants (RF-11) and the
   register values (RF-20), pinned by a test comparing the generated values
   with what each indexer writes on a fixture that holds every case below,
-  the extension deciding before content_type (the catalog content_types
-  are code, prose, rdr, pdf, paper and knowledge; RF-20): `source_format`
+  the extension deciding before content_type (the register sites write
+  the catalog content_types code, prose, rdr, pdf, paper and knowledge,
+  RF-20; `orphan_backfill` derives one from the collection prefix for a
+  synthesized document, `docs` among them, RF-23; a value outside the
+  rules below yields NULL and is counted): `source_format`
   is `pdf` for the pdf extension or content_type pdf or paper, `markdown`
   for the md or markdown extension (`prose_indexer` routes both to the
   markdown chunker, RF-22) whatever the content_type, so an rdr or
@@ -1340,8 +1428,10 @@ this lands.
   pdf (the repo PDF path's constant), prose and rdr, NULL for knowledge;
   `tags` is `["markdown"]` for the md or markdown extension, `["pdf"]` for
   the pdf extension or content_type pdf or paper, otherwise the one-element
-  array of the extension for code and prose (rdr files are `.md`, so the
-  markdown rule covers them), NULL for knowledge. A document with no
+  array of the lower-cased, dot-stripped extension for code and prose (what
+  `code_indexer` and `prose_indexer` write, RF-23; rdr files are `.md`, so
+  the markdown rule covers them), NULL for knowledge and for a file with no
+  extension. A document with no
   extension to read (DEVONthink records keep their on-disk file_path,
   RF-20, so they have one) comes out NULL and is counted by the Step 3
   precondition before the row fallback goes.
@@ -1366,7 +1456,11 @@ this lands.
 - `title=` and `content_type=` by the pre-filter under Sam's rulings (.25,
   re-scoped from the post-search stage its text names to the pre-filter,
   both dispatch branches with the in-SQL predicate and the exact re-run on
-  a short page, the id-valued bib keys included; ledger entry naming both
+  a starved dense-branch page, `source_author=` and the id-valued bib keys
+  included, the new SQL function variants per dimension (a document-gated
+  exact rank and the EXISTS-carrying HNSW-first form; `plain_search_<dim>`
+  takes only `p_where` today, RF-23) and the btree indexes on
+  (tenant_id, title) and (tenant_id, bib_doi); ledger entry naming both
   behaviour changes); positive label filters by the same manifest EXISTS
   (nexus-p89h4, absorbed); the tags containment predicate over both tag
   homes and the GIN index (.38, engine half); the flattened line fields
@@ -1428,14 +1522,21 @@ stamps at the catalog write (RF-20). The rule: a row's TTL sign counts
 only when the row's `indexed_at` is later than `put_at` plus `PUT_SKEW`
 (five minutes; `catalog_ttl_stale` already compares `indexed_at` with the
 catalog clock as its second sign, RF-22); a row whose `indexed_at` is not
-later than `put_at` is ignored whatever its TTL or `last_written_at`. So
-a new-client TTL-only re-put, whose merge leaves the single-owner row's
-old `ttl_days` and old `indexed_at` in place, is not held: the row
-predates `put_at`. An old-client re-put stamps `indexed_at` now, later
-than `put_at`, and is caught as before. The `.nxexp` import stops being a
-case: `.18` makes the import write the note's TTL to the catalog meta and
-no row keys, so an import that makes a note permanent is permanent in the
-catalog. An entry with no `put_at` is never treated as newer than its
+later than `put_at` plus `PUT_SKEW` is ignored whatever its TTL or
+`last_written_at`; that one threshold holds at every site. So a new-client
+TTL-only re-put, whose merge leaves the single-owner row's old `ttl_days`
+and old `indexed_at` in place, is not held: the row's `indexed_at` is not
+later than `put_at` plus `PUT_SKEW`. An old-client re-put stamps `indexed_at` now, later
+than `put_at` plus `PUT_SKEW`, and is caught as before. The `.nxexp`
+import stops being a case: from `.18` the import writes no row keys and stamps `put_at` now
+with ttl_days 0 on an entry that has no note keys (the export carries no
+TTL the catalog could keep true, RF-23; an entry with keys keeps them), so
+an imported note is permanent in the catalog unless its entry already said
+otherwise. Notes held today by a pre-`.18` import's permanent row (the row
+TTL differs from the catalog's and the row `indexed_at` is not later than
+`put_at` plus skew) are counted by the .10 dry run and stamped permanent
+before Step 1 flips the rule, so the rule retires nothing an import holds
+today. An entry with no `put_at` is never treated as newer than its
 rows. Pins: new-client TTL change on a single-owner note with a
 legacy-keyed row expires on time; import that makes a note permanent is
 not retired (through the catalog); old-client re-put is still caught; a
@@ -1460,10 +1561,12 @@ in the deploy order of RDR-223 Phase 3.
 An allow-list-shaped sweep (keep only the CHUNK and ROW keys; a deny-list
 would leave any key nobody listed and the CHECK would then reject the
 row) over existing rows in batches, as a direct UPDATE that does not bump
-`last_written_at`, with the bypass prefixes exempt and the chash-length
-guard (a leftover 16-byte row would fail the chash width CHECK the Step 2c
-changeset carries on any update; RF-16 found none on 2026-10-27), batched
-by tenant_id explicitly,
+`last_written_at`, with the bypass prefixes exempt from the CHECK but
+`quarantine-*` rows included in the sweep (their retired document keys go,
+the four ROW keys stay, so a later gc restore passes the validated CHECK,
+RF-23) and the chash-length guard (a leftover 16-byte row would fail the existing NOT VALID
+`chunks_chash_octet_check` on any update, RF-23; RF-16 found none on
+2026-10-27), batched by tenant_id explicitly,
 because the owner role sees every tenant's chunk rows (RF-16). Vehicle
 (6pfgb.43), in one order: sweep every tenant, then add the allow-list
 CHECK NOT VALID, then VALIDATE. Three engine-admin routes carry it: a
@@ -1477,17 +1580,29 @@ one tenant's rung cannot validate while another is unswept) and naming
 the tenant. On a single-tenant local install the rung runs all three; on
 the cloud the two table-wide steps are an operator verb (`nx t3
 retire-keys --add-check`, `--validate`) run once every tenant's rung has
-completed. No CHECK that legacy rows can fail ships in a startup
-changeset: the Step 2c cut carries only the constraints the census proved
-on live data (chunk_text_hash equal to the chash; chash width), added NOT
-VALID and VALIDATEd in the changeset because they hold (RF-16); the
-allow-list CHECK, the two uncensused CHECKs (6pfgb.42) and the quarantine
-CHECK (after 6pfgb.40's data fix) go through the routes after the sweep.
-A tenant whose client never upgrades keeps working: the Java check in
-enforce mode already refuses new non-CHUNK keys from Step 2c, so its
-legacy rows only shrink, and only the table-wide steps wait on it. Pin: a
-legacy-keyed row is still upserted after the Step 2c cut and before the
-sweep. Dry run first, counts on the bead. Precondition, counted by the rung on each install: the
+completed, or by an operator per tenant (`nx t3 retire-keys --tenant
+<id>`) for a tenant with no ladder-running client, such as a gate tenant.
+No chunk CHECK is added or validated in a startup changeset (RF-23:
+rdr180-001 and vectors-004 record why, a boot-time VALIDATE crash-loops an
+install whose rows differ from the measured one, and RF-16 measured one
+database): the Step 2c cut carries no CHECK changeset; after the sweep the
+add-constraint route adds the allow-list CHECK, the chunk_text_hash CHECK,
+the two uncensused CHECKs (6pfgb.42) and the quarantine CHECK (after
+6pfgb.40) NOT VALID, and the validate route VALIDATEs them and the existing
+width CHECK `chunks_chash_octet_check` (reading `pg_constraint.convalidated`
+first; nothing has validated it since the chash-rekey rung retired,
+RF-23). The two routes carry chunk-table constraints only; the
+catalog-table CHECKs (6pfgb.42's manifest rules; 6pfgb.44's ttl_days
+implies put_at) are counted and added in their own beads. A tenant whose
+client never upgrades: its reads keep working and its writes are refused
+with 422 after Step 2c (not-additive, Consequences); its legacy rows stay
+until the operator sweep runs for it, and only the table-wide steps wait on
+it. The sweep batches 1000 rows; a direct UPDATE of metadata on a row that
+carries a 3 KB or larger vector rewrites the row and, when the update is
+not HOT, its HNSW index entry (inferred from the schema, not measured), so
+the dry run reports rows per tenant and the measured cost of one live
+batch before the full run. Pin: a legacy-keyed row is still upserted after
+the Step 2c cut and before the sweep. Dry run first, counts on the bead. Precondition, counted by the rung on each install: the
 doctor counts of legacy-label manifest rows, keyless notes (no `put_at`),
 home-less documents, NULL-span manifest rows and indexed documents whose
 GENERATED columns are NULL are zero or each residue is accepted; the
@@ -1495,29 +1610,34 @@ engine's manifest-less census reads zero `legacy-unmanifested` (`nx t3
 census-manifest-less --all --require-zero legacy-unmanifested`), because
 the census's forward join, the rdr192 rung and `manifest_backfill.py`
 attribute a manifest-less chunk by the row's `catalog_doc_id` or `doc_id`
-(RF-19) and lose that after the sweep; the two uncensused equalities of
-the dependency table count zero violations. The rdr192 rung refuses to run
+(RF-19) and lose that after the sweep, and an accepted residue in that
+bucket blocks the sweep for its collection; the two uncensused equalities
+of the dependency table count zero violations; every Phase 3 bead is
+closed and deployed, .41 and u9dc5 included, because route (b) evaluates
+`c.metadata @> p_where` on the row until then (RF-3). The rdr192 rung
+refuses to run
 once the sweep has completed on the install (pin), and the engine's own
-row-key readers (6pfgb.39) and the orphan audit's human label have moved
-to the manifest and a chunk text prefix before the sweep removes row
-titles and ids. Then the remaining CHECKs of the dependency-preservation
+row-key readers (6pfgb.39), the gc quarantine audit's row-title label
+included, have moved to the manifest and a chunk text prefix before the
+sweep removes row titles and ids. Then the remaining CHECKs of the dependency-preservation
 table are added NOT VALID and VALIDATEd through the two table-wide routes
 (concurrent writes allowed). A doctor row counts rows still carrying
 retired keys, not-applicable on a virgin box.
 
-### Phase 5: External readers (conexus repository, after the Phase 1 backfill and the .29 deploy, before Phase 4 Step 1)
+### Phase 5: External readers (conexus repository, after the engine cut carrying .8, .23 and .25 is deployed, before Phase 4 Step 1)
 
 conexus-wd1q (filed 2026-10-26, gated ahead of the engine redeploy that
-follows Step 1). Lower bound: the catalog must hold tags and category for
-every document the gate's queries can hit, so Phase 5 lands after the
-backfill has run on the gated tenant and the .29 engine is deployed; its
-recall SQL applies the same presence fallback as the engine (row value
-while the meta key is absent). Parity gate: the engine leg keeps its where strings (route
+follows Step 1). Lower bound: the gate's twelve queries filter on indexer
+constants of indexed files (RF-13), whose tags and category are the
+GENERATED columns of .8 and .23, never backfilled and never absent, so
+Phase 5 lands after the engine cut carrying .8, .23 and .25 is deployed on
+the gated tenant; its recall SQL reads the generated columns and needs no
+presence fallback. Parity gate: the engine leg keeps its where strings (route
 (a) answers them from the catalog after Phase 3); the recall leg's raw SQL
 joins `catalog_document_chunks` and `catalog_documents` for category and
 tags, counting chunks through the manifest since chashes recur across
-collections; the two tag filters use a file extension predicate or
-`source_format`. `livec_findings.sql` reads the catalog title or file_path
+collections; the two tag filters read the generated tags column.
+`livec_findings.sql` reads the catalog title or file_path
 in place of the regexp-stripped row title; its superseded-residue
 predicate on indexed_at is redesigned over the manifest join (which side
 supplies the older value is conexus-wd1q's decision). `etl_t3.py` strips
@@ -1543,8 +1663,8 @@ None.
 ## Test Plan
 
 - **Scenario**: pair 1, filter on tags and title under each owner —
-  **Verify**: only the satisfying owner's hit, on routes (a) and (b); red
-  today.
+  **Verify**: only the satisfying owner's hit, on route (a) (.25) and, once
+  .41 lands, on route (b); red today.
 - **Scenario**: `title=` in a collection of more than 1200 chunks —
   **Verify**: the document's hits are returned (the pre-filter); red under
   Alternative 4.
@@ -1562,16 +1682,21 @@ None.
   unchanged.
 - **Scenario**: pair 2 and pair 2b, re-put by a new client changing the
   TTL — **Verify**: expires on time; `catalog_ttl_stale` ignores the row
-  whose `indexed_at` predates `put_at` even though its `last_written_at`
-  is later than `put_at` (the engine bump of RF-18, asserted against a
-  live engine); an old-client re-put (row `indexed_at` later than
-  `put_at`) is still held.
+  whose `indexed_at` is not later than `put_at` plus `PUT_SKEW` even though
+  its `last_written_at` is later than `put_at` (the engine bump of RF-18,
+  asserted against a live engine); an old-client re-put (row `indexed_at`
+  later than `put_at` plus `PUT_SKEW`) is still held.
 - **Scenario**: `upsert-chunks`, `update-metadata` and each combined route
   (`append`, `append_many`, `write_many`) with a non-CHUNK key, in log mode
   and enforced — **Verify**: log row, then 422 naming key and home;
   `delete_keys` and `metadata_delete_keys` accepted in both modes; a
-  bypass-prefix collection unaffected; a pin fails when a handler route
+  `taxonomy__*` collection unaffected; a pin fails when a handler route
   accepting `chunks` or `metadata` is outside the check's route list.
+- **Scenario**: a legacy-keyed `quarantine-*` row before and after the
+  sweep — **Verify**: the sweep removes its document keys and keeps its
+  four quarantine keys; `gc_restore_rereferenced` restores it into the live
+  collection after the allow-list CHECK is VALIDATEd (red without the
+  quarantine rows in the sweep).
 - **Scenario**: two tenants hold the same chunk text with retired keys; a
   pre-filtered search and a Step 3 sweep run under one tenant — **Verify**:
   the pre-filter's catalog resolve and manifest fetch read that tenant's
@@ -1586,9 +1711,9 @@ None.
   1200 chunks — **Verify**: the document's hits are returned; red through
   the stage since 0.1.165.
 - **Scenario**: a starved page on the dense branch (scan budget forced
-  small) — **Verify**: the exact re-run fires once (`exactFallbackCount`
-  moves by one) and fills the page; a page short because fewer rows match,
-  and any exact-branch page, leave the counter unchanged.
+  small) — **Verify**: the exact re-run fires once (the global
+  `exactFallbackCount` delta is one against a baseline, serial test) and
+  fills the page; an exact-branch page leaves the counter unchanged.
 - **Scenario**: a positive label filter against a legacy manifest row
   (`labels_written` false) and a `category=` filter against a note —
   **Verify**: the legacy row matches on its row label; the note matches on
@@ -1645,11 +1770,15 @@ pre-filter section, Gap 4, A6, Alternative 4, Phase 3, the Test Plan); the
 sweep's order, vehicle and preconditions (the dependency table,
 Enforcement, Transforms, Approach 6, Step 3, Cross-Cutting Concerns,
 RF-19); the keyless-note definition and the 432 count (Approach 6, RF-8,
-RF-11, A7, Step 1, Step 3); the frozen-row rule's clock (Risks, MVV
-pair 2b, Step 1, the Test Plan). The fix check on the first fix
-(`nexus_rdr/236-fix-check-fe55f7efc`) found the sweep order and the
-frozen-row clock still disagreeing across sites; this revision is the one
-further fix the check allows.
+RF-11, A7, Step 1, Step 3); the frozen-row rule's clock and its one
+threshold (Risks, MVV pair 2b, Step 1, the Test Plan); CHECK placement (no
+chunk CHECK in a startup changeset: the dependency table, the order
+sentence, Transforms, Enforcement, Step 3, Cross-Cutting Concerns); the
+quarantine rows in the sweep (RF-4, RF-19, the dependency table, the key
+table, the bypass paragraph, Step 3, the Test Plan, Scope). Round 2
+(`nexus_rdr/236-gate-critique-2026-10-27-r2`) found the last two
+disagreeing across sites after the fix checks had closed; this revision
+swept them.
 
 ### Assumption Verification
 
@@ -1676,8 +1805,10 @@ frecency residue measured by the backfill runs.
 The MVV is the Phase 4 integration module and is not deferred. Work the
 analysis surfaced that is not on the five Gaps' path has a bead and a
 phase: the manifest redundancy constraints and `nexus.frecency` (6pfgb.42,
-the Phase 4 cut or after), the gc restore fix (6pfgb.40), route (b)'s
-dispatch (6pfgb.41). nexus-p89h4 is absorbed into Phase 3.
+the Phase 4 cut or after), the gc restore four-key fix (6pfgb.40; the
+restore of legacy-keyed quarantined rows is covered by the sweep including
+`quarantine-*`), route (b)'s dispatch (6pfgb.41), the ttl_days CHECK
+(6pfgb.44). nexus-p89h4 is absorbed into Phase 3.
 
 ### Cross-Cutting Concerns
 
@@ -1695,8 +1826,8 @@ dispatch (6pfgb.41). nexus-p89h4 is absorbed into Phase 3.
 - **Local-mode installs**: the engine routes and the sweep reach every
   install through the Phase 4 cut and its upgrade-ladder rung (6pfgb.43);
   RF-16 measured one production database, so each install counts its own
-  preconditions before its add-constraint and validate steps, and no CHECK
-  a legacy row can fail ships in a startup changeset.
+  preconditions before its add-constraint and validate steps, and no chunk
+  CHECK is added or validated in a startup changeset (RF-23).
 
 ### Proportionality
 
@@ -1719,7 +1850,8 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   `nexus/rdr236-a3-owner-resolution-batching-2026-10-26`;
   `nexus/chunk-row-normalization-external-readers-2026-10-26`;
   `nexus/critique-rdr236-draft-2026-10-26`; `nexus_rdr/236-research-1`
-  to `-21`; `nexus_rdr/236-gate-critique-2026-10-27-r1`.
+  to `-23`; `nexus_rdr/236-gate-critique-2026-10-27-r1` and `-r2`;
+  `nexus_rdr/236-fix-check-fe55f7efc` and `-9628991be`.
 - `docs/agents/catalog-t3-split.md`; `docs/architecture.md`;
   `docs/wire-contract-pending.md`.
 - `service/src/main/resources/db/changelog/catalog-046-manifest-section-labels.xml`;
@@ -1755,6 +1887,21 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   route (b); the backfill applies option B per key; plus the import case of
   the frozen-row rule, Phase 5's lower bound, the `update-metadata` overlay
   writers in Step 1, and register terms.
+- 2026-10-27: Gate round 2 — BLOCKED (2 Critical, 14 Significant, 2 ship-blocker(s)); commit `9628991be`; critique `nexus_rdr/236-gate-critique-2026-10-27-r2`.
+- 2026-10-27: fix round after gate round 2 (RF-23): no chunk CHECK is
+  added or validated in a startup changeset (the existing width CHECK is
+  VALIDATE-only through the route); the sweep strips retired document
+  keys inside `quarantine-*` rows so the gc restore passes the validated
+  CHECK; Phase 5 gated on the cut carrying .8, .23 and .25 with the
+  generated tags column; an accepted `legacy-unmanifested` residue blocks
+  its collection's sweep and .39's condition is the ladder record; the
+  starved-page trigger defined and one wording; the EXISTS prunes and the
+  stage attributes, with A8 added; the verb stamps `put_at` for sole-owner
+  notes; title, author and bib_doi indexes; GENERATED set and extension
+  form; `.18` stamps a keyless entry and pre-`.18` imports are counted;
+  one frozen-row threshold; 6pfgb.44 for the ttl_days CHECK; route (b)
+  ordered before the sweep; `source_author=` to the pre-filter; the
+  operator per-tenant sweep and batch cost; wording corrections.
 - 2026-10-27: Gate round 1 — BLOCKED (3 Critical, 13 Significant, 3 ship-blocker(s)); commit `b67783a25`; critique `nexus_rdr/236-gate-critique-2026-10-27-r1`.
 - 2026-10-27: fix-check round (T2 `nexus_rdr/236-fix-check-fe55f7efc`,
   RF-22): Step 3 gets one order (sweep every tenant, add the allow-list
