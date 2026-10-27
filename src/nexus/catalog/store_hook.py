@@ -1934,7 +1934,13 @@ def degraded_pages_for_chunk(
         rows: list[tuple[str, str, dict[str, list[int]]]] = []
         for tumbler, title in holders:
             entry = entries.get(tumbler)
-            pages = _clean_extraction_pages((getattr(entry, "meta", None) or {}).get("extraction_pages"))
+            meta = getattr(entry, "meta", None) or {}
+            pages = _clean_extraction_pages(meta.get("extraction_pages"))
+            if meta.get("extraction_method") == "pymupdf":
+                # The explicit text-only extractor's map lists every page under its rung, so its
+                # ``pymupdf-text`` pages are its normal output, not a fall-back. Only the pages with
+                # no text layer are worth a "Degraded:" line. A mixture (mineru+degraded) keeps them.
+                pages.pop("pymupdf-text", None)
             if pages:
                 rows.append((tumbler, title, pages))
         return rows, len(holders)

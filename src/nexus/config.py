@@ -259,11 +259,14 @@ def _pdf_int(pdf: dict, key: str, default: int, *, floor: int) -> int:
 def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
     """Load PDF config. Invalid ``extractor`` falls back to ``"auto"``.
 
+    ``pymupdf`` (RDR-237) is the explicit text-only extractor; it is only ever set here or with
+    ``--extractor``, never chosen for the user.
+
     A ``[pdf]`` integer key that holds no integer raises :class:`PdfConfigError` (a
     ``ValueError``) naming the key."""
     pdf = load_config(repo_root=repo_root).get("pdf", {})
     extractor = pdf.get("extractor", "auto")
-    if extractor not in ("auto", "docling", "mineru"):
+    if extractor not in ("auto", "docling", "mineru", "pymupdf"):
         _log.warning("invalid pdf.extractor config", value=extractor)
         extractor = "auto"
     return PDFConfig(

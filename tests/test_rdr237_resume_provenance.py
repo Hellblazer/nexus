@@ -116,9 +116,11 @@ def test_the_merge_leaves_a_legacy_method_alone_and_does_nothing_without_buffere
     _merge_buffered_provenance(legacy, {}, {1: "mineru-no-formula"})
     assert legacy["extraction_method"] == "docling", "only the ladder's own methods are recomputed"
     assert legacy["extraction_pages"] == {"mineru-no-formula": [1]}
-    # The explicit pymupdf extractor (bead tr1rj.4) names its own method; a resume must not turn
-    # it into a MinerU one, with a known degraded buffered rung or an unknown buffered page.
-    for method in ("pymupdf", "pymupdf_normalized", "mineru+docling-degraded"):
+    # The legacy methods are not the ladder's to rewrite, with a known degraded buffered rung or an
+    # unknown buffered page. The explicit pymupdf extractor (bead tr1rj.4) is NOT in this list: a
+    # resume over a buffer another extractor left is a mixture, recorded as ``mineru+degraded``
+    # (tests/test_rdr237_pymupdf_extractor.py pins that decision and its limits).
+    for method in ("pymupdf_normalized", "mineru+docling-degraded"):
         current = {"extraction_method": method, "extraction_pages": {}}
         _merge_buffered_provenance(current, {}, {1: "mineru-no-formula"}, [2])
         assert current["extraction_method"] == method, f"{method} is not the ladder's to rewrite"

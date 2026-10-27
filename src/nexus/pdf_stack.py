@@ -75,6 +75,25 @@ EXIT_REFUSED = 69
 EXIT_INSTALLER = 70
 EXIT_NETWORK = 75
 
+#: The one extractor that reads a PDF with PyMuPDF alone (a core dependency): text layer only,
+#: no layout, tables or math. It needs none of the stack (RDR-237).
+TEXT_ONLY_EXTRACTOR = "pymupdf"
+
+#: The second way out of a missing stack, named by every refusal. A command with no
+#: ``--extractor`` flag (``nx index repo``, ``nx collection reindex``) reads the same choice from
+#: the ``pdf.extractor`` setting, so the sentence names both.
+TEXT_ONLY_REMEDY = (
+    "For text only (no layout, tables or math), rerun with `--extractor pymupdf` "
+    "(or set `pdf.extractor: pymupdf`): that needs no PDF support."
+)
+
+
+def needs_stack(extractor: str = "") -> bool:
+    """Whether *extractor* needs the PDF stack. False only for the explicit ``pymupdf``
+    extractor; an empty or unknown name needs it, so a gate that was not given the extractor
+    stays as strict as it always was."""
+    return extractor != TEXT_ONLY_EXTRACTOR
+
 #: The command that installs the stack now, on a GENERATION install. Every other
 #: layout refuses ``--extras`` ("this nx is not running from one"), so a message a
 #: non-generation install can reach names :func:`repair_command`, never this.
@@ -483,7 +502,7 @@ def _remedy(entry: str, st: StackState, plan: InstallPlan | None) -> str:
     why = plan.why[:1].upper() + plan.why[1:] if plan.why else ""
     return (
         f"{head}: {entry} needs docling and MinerU, and nothing was written. "
-        f"{why + '. ' if why else ''}Run: {plan.command}"
+        f"{why + '. ' if why else ''}Run: {plan.command}\n{TEXT_ONLY_REMEDY}"
     )
 
 
@@ -495,12 +514,13 @@ def missing_message(entry: str = "PDF extraction") -> str | None:
     return None if st.present else _remedy(entry, st, None)
 
 
-def require(entry: str = "PDF extraction") -> None:
+def require(entry: str = "PDF extraction", *, extractor: str = "") -> None:
     """Raise :class:`PdfStackMissingError` unless the stack is present. Never
     installs: the library-level guard (``PDFExtractor.extract``) and any caller
-    that must not start a download. The positive verdict is cached."""
+    that must not start a download. The positive verdict is cached. An *extractor* that
+    needs no stack (:func:`needs_stack`) returns at once, without reading the state."""
     global _present_cache
-    if _present_cache:
+    if not needs_stack(extractor) or _present_cache:
         return
     st = state()
     if st.present:
@@ -843,6 +863,7 @@ def _fail(exc: PdfStackError, *, hint: str = "") -> NoReturn:
 
 def ensure_or_exit(
     entry: str, *, hold_on_refuse: bool = False, defer_rerun: bool = False, quiet_refusal: bool = False,
+    extractor: str = "",
 ) -> bool:
     """The CLI form of :func:`ensure`. Returns True to go on. Exits the process
     with the right status on a failure, or with the child's status after a
@@ -852,7 +873,10 @@ def ensure_or_exit(
     *defer_rerun*, an install raises :class:`RerunRequired` for the CLI command
     to catch after it has released its locks, instead of re-running here. With
     *quiet_refusal*, a held refusal says nothing (the caller already printed it
-    once this run)."""
+    once this run). An *extractor* that needs no stack (:func:`needs_stack`, the explicit
+    ``pymupdf``) returns True at once: nothing is checked, installed or refused."""
+    if not needs_stack(extractor):
+        return True
     try:
         outcome = ensure(entry)
     except PdfStackMissingError as exc:

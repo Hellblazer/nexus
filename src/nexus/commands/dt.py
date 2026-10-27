@@ -976,14 +976,16 @@ def dt() -> None:
 )
 @click.option(
     "--extractor",
-    type=click.Choice(["auto", "docling", "mineru"], case_sensitive=False),
+    type=click.Choice(["auto", "docling", "mineru", "pymupdf"], case_sensitive=False),
     default="auto",
     show_default=True,
     help=(
         "PDF extraction backend for file-backed records. ``mineru`` is "
         "formula-aware but OOM-fails on some formula-dense pages; the recovery "
         "is ``--extractor docling`` (formula-stripped, but always completes). "
-        "``auto`` picks mineru when formulas are detected, else docling."
+        "``auto`` picks mineru when formulas are detected, else docling. "
+        "``pymupdf`` reads only each page's text layer (no layout, tables or math) "
+        "and needs no PDF support; it is never chosen automatically."
     ),
 )
 @click.option(
@@ -1105,7 +1107,7 @@ def index_cmd(
     if any(Path(p).suffix.lower() == ".pdf" for _uuid, p in records):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
-        pdf_stack.ensure_or_exit("nx dt index")
+        pdf_stack.ensure_or_exit("nx dt index", extractor=extractor)
 
     indexed = 0
     unchanged = 0
@@ -1519,9 +1521,9 @@ def index_cmd(
     summary += ")."
     click.echo(summary)
     if degraded_runs:
-        from nexus.commands._helpers import emit_degraded_pages_summary  # noqa: PLC0415 — deferred import, shared with `nx index pdf`
+        from nexus.commands._helpers import emit_extraction_summary  # noqa: PLC0415 — deferred import, shared with `nx index pdf`
 
-        emit_degraded_pages_summary(degraded_runs)
+        emit_extraction_summary(extractor, degraded_runs)
     if coverage_unverified:
         reasons = []
         unreachable = coverage_unverified - unverified_no_pages - unverified_no_page_count
@@ -1948,10 +1950,11 @@ def _capture_is_pdf(url: str | None, doi: str | None, file_path: str | None, cap
 @click.option("--enrich", "enrich", is_flag=True, default=False,
               help="After indexing, run DT-CrossRef bib gap-fill over the collection (Layer C).")
 @click.option("--extractor",
-              type=click.Choice(["auto", "docling", "mineru"], case_sensitive=False),
+              type=click.Choice(["auto", "docling", "mineru", "pymupdf"], case_sensitive=False),
               default="auto", show_default=True,
               help="PDF extraction backend for the index step (docling = formula-stripped "
-                   "recovery when mineru OOM-fails on formula-dense PDFs).")
+                   "recovery when mineru OOM-fails on formula-dense PDFs; pymupdf = text layer "
+                   "only, needs no PDF support).")
 @click.pass_context
 def capture_cmd(
     ctx: click.Context,
@@ -2007,7 +2010,7 @@ def capture_cmd(
     if _capture_is_pdf(url, doi, file_path, capture_type):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
-        pdf_stack.ensure_or_exit("nx dt capture")
+        pdf_stack.ensure_or_exit("nx dt capture", extractor=extractor)
 
     if url:
         # pdf AND markdown captures are stored by DT as on-disk files (.pdf /

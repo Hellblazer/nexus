@@ -112,6 +112,9 @@ def _page_rungs(page_metadata: Any, page_index: int) -> dict[int, str]:
 #: The document methods the ladder reports; the only ones a resume recomputes.
 _LADDER_METHODS = ("mineru", "mineru+degraded")
 
+#: The rungs the explicit ``pymupdf`` extractor produces; a buffered page on any other rung is MinerU's.
+_TEXT_LAYER_RUNGS = ("pymupdf-text", "unextracted")
+
 
 def _buffer_provenance(rows: list[dict[str, Any]]) -> tuple[dict[int, str], list[int]]:
     """``({1-based page: rung}, [pages with no rung])`` for the buffer rows a resume found.
@@ -151,9 +154,19 @@ def _merge_buffered_provenance(
     ``mineru+degraded`` rather than claiming a clean ``mineru``. No-op when the buffer
     recorded no rung and no page is unknown (a first run, a non-ladder extractor): the run's own
     map then stands.
+
+    The explicit ``pymupdf`` extractor (RDR-237) is handled the same way, with one rule of its
+    own: ``pymupdf`` names a document whose every indexed page is the PDF's text layer (or
+    nothing). The recommended recovery from a MinerU breaker trip is a ``--extractor pymupdf``
+    rerun over the kept buffer, whose pages are MinerU's; and a buffer page that names no rung
+    cannot be proven text-only. Either makes the document a mixture, so the method becomes
+    ``mineru+degraded`` (its pages below MinerU's first rung are in the map, MinerU's own pages
+    are not). A buffer of text-layer rungs only (an interrupted ``pymupdf`` run) stays ``pymupdf``.
     """
-    ladder = metadata.get("extraction_method") in _LADDER_METHODS
-    unknown = bool(unknown_pages) and ladder
+    method = metadata.get("extraction_method")
+    ladder = method in _LADDER_METHODS
+    text_only = method == "pymupdf"
+    unknown = bool(unknown_pages) and (ladder or text_only)
     if not buffered_rungs and not unknown:
         return
     from nexus.pdf_extractor import _DEGRADED_METHODS  # noqa: PLC0415 — module-private rung order, shared with the ladder
@@ -167,6 +180,8 @@ def _merge_buffered_provenance(
     metadata["extraction_pages"] = pages
     if ladder:
         metadata["extraction_method"] = "mineru+degraded" if (pages or unknown) else "mineru"
+    elif text_only and (unknown or any(r not in _TEXT_LAYER_RUNGS for r in buffered_rungs.values())):
+        metadata["extraction_method"] = "mineru+degraded"
 
 
 def extractor_loop(
@@ -307,9 +322,10 @@ def extractor_loop(
 
     # RDR-237 provenance: a resumed run's pages came from the buffer, so the map and method
     # describe those pages' own rungs, not only this run's attempt (nexus-q6nw0 item 6).
-    if unknown_pages and result.metadata.get("extraction_method") in _LADDER_METHODS:
+    if unknown_pages and result.metadata.get("extraction_method") in (*_LADDER_METHODS, "pymupdf"):
         # A buffered page whose row names no rung cannot be proven clean: say so, and the merge
-        # keeps the method at ``mineru+degraded`` rather than claim a clean ``mineru``.
+        # keeps the method at ``mineru+degraded`` rather than claim a clean ``mineru`` (or, for
+        # the text-only extractor, claim ``pymupdf`` for text that may be another extractor's).
         _log.warning(
             "resume_provenance_unknown", file_path=str(pdf_path), content_hash=content_hash,
             buffered_rows_without_a_rung=len(unknown_pages), buffered_rows_with_a_rung=len(buffered_rungs),

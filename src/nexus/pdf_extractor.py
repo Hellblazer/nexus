@@ -1789,6 +1789,10 @@ class PDFExtractor:
           formulas found, try MinerU then fall back to PyMuPDF normalized.
         - ``"docling"`` — Docling with PyMuPDF normalized fallback.
         - ``"mineru"`` — MinerU directly (no fallback).
+        - ``"pymupdf"`` (RDR-237) — the explicit text-only extractor: every page's own
+          text layer through PyMuPDF (the ladder's rung 3), no layout, tables or math. It
+          needs none of the PDF stack, so it is the one choice that neither requires nor
+          installs it, and it never starts or probes MinerU. Never chosen by ``"auto"``.
 
         *on_formula_oom* (RDR-148 Gap 5) is accepted and IGNORED for one release
         (RDR-237, nexus-tr1rj.12): a page whose MinerU attempt fails now walks the
@@ -1825,9 +1829,9 @@ class PDFExtractor:
         degraded output deliberately for a specific document (surfaced as
         ``--allow-degraded-extraction`` on the CLI).
         """
-        if extractor not in ("auto", "docling", "mineru"):
+        if extractor not in ("auto", "docling", "mineru", "pymupdf"):
             raise ValueError(
-                f"extractor must be 'auto', 'docling', or 'mineru'; got {extractor!r}"
+                f"extractor must be 'auto', 'docling', 'mineru', or 'pymupdf'; got {extractor!r}"
             )
         if on_formula_oom not in ("fail", "docling"):
             raise ValueError(
@@ -1849,7 +1853,7 @@ class PDFExtractor:
         # of meeting an ImportError halfway through a document.
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import
 
-        pdf_stack.require(f"extracting {pdf_path.name}")
+        pdf_stack.require(f"extracting {pdf_path.name}", extractor=extractor)
 
         # nexus-i0cwh: every backend fires on_page per page (or per MinerU
         # batch, which then names its pages in ``page_numbers``) with
@@ -1897,6 +1901,10 @@ class PDFExtractor:
         point instead of gating each of this method's several ``return``
         statements individually.
         """
+        if extractor == "pymupdf":
+            _progress(f"  PyMuPDF (text layer only): extracting {pdf_path.name}…")
+            return self._extract_pymupdf(pdf_path, on_page=on_page)
+
         if extractor == "docling":
             _progress(f"  Docling: extracting {pdf_path.name}…")
             try:
@@ -3831,6 +3839,95 @@ class PDFExtractor:
                 return text
 
         return ""
+
+    def _extract_pymupdf(
+        self,
+        pdf_path: Path,
+        *,
+        on_page: Callable[[int, str, dict], None] | None = None,
+    ) -> ExtractionResult:
+        """The explicit ``pymupdf`` extractor (RDR-237): every page's own text layer, nothing else.
+
+        Runs the ladder's one-page rung-3 read (:func:`_pymupdf_page_text`) on every page,
+        never the whole-document :meth:`_extract_normalized`. A page with a text layer settles
+        ``pymupdf-text``; a page without one (an image-only page, or one PyMuPDF cannot read)
+        settles ``unextracted``. Like the MinerU ladder, ``on_page`` fires for EVERY page, an
+        unextracted one with ``""``, each carrying ``page_method`` so the pipeline buffer can
+        rebuild the document's ``extraction_pages`` on a resume, and every page has a page
+        boundary. The document's ``extraction_method`` is ``pymupdf``; ``extraction_pages`` lists
+        every page under its rung. It needs no PDF stack and never starts or probes MinerU.
+
+        Raises :class:`UnextractableContentError` when no page has a text layer, the way the
+        ladder fails a document whose every page is unextracted: indexing would write nothing.
+        """
+        import pymupdf  # lazy  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+
+        fname = pdf_path.name
+        parts: list[str] = []
+        outcomes: dict[int, str] = {}
+        with pymupdf.open(pdf_path) as doc:
+            total_pages = len(doc)
+            doc_meta = doc.metadata or {}
+            for index in range(total_pages):
+                started = time.monotonic()
+                try:
+                    text = _pymupdf_page_text(doc[index])
+                except Exception as read_exc:  # noqa: BLE001 — a damaged page is unextracted; the rest of the document is still read
+                    _log.warning(
+                        "pymupdf_page_text_layer_unreadable", page=index + 1, path=str(pdf_path),
+                        error=f"{type(read_exc).__name__}: {read_exc}",
+                    )
+                    text = ""
+                method = "pymupdf-text" if text else "unextracted"
+                outcomes[index + 1] = method
+                parts.append(text)
+                if on_page is not None:
+                    on_page(index, text, {"page_number": index + 1, "text_length": len(text), "page_method": method})
+                _log.debug("pymupdf_page", page=index + 1, method=method, seconds=time.monotonic() - started)
+
+        if not any(m == "pymupdf-text" for m in outcomes.values()):
+            raise UnextractableContentError(
+                f"every page of {fname} is unextracted: `--extractor pymupdf` reads only a PDF's own "
+                f"text layer, and none of its {total_pages} page(s) has one. OCR the PDF first, or "
+                f"index it with `--extractor mineru` (needs the PDF stack)."
+            )
+
+        extraction_pages = {
+            method: [page for page, m in outcomes.items() if m == method]
+            for method in _DEGRADED_METHODS
+            if any(m == method for m in outcomes.values())
+        }
+        # "pymupdf-text" is in _DEGRADED_METHODS (it is a rung below MinerU's), so the map above
+        # already lists every page under its rung: text pages and unextracted ones alike.
+        page_boundaries: list[dict] = []
+        pos = 0
+        for i, text in enumerate(parts):
+            # +1 for the "\n" separator of the join below, except the last page (as the MinerU build).
+            length = len(text) + (1 if i < total_pages - 1 else 0)
+            page_boundaries.append({"page_number": i + 1, "start_char": pos, "page_text_length": length})
+            pos += length
+
+        return ExtractionResult(
+            text="\n".join(parts),
+            metadata={
+                "extraction_method": "pymupdf",
+                "extraction_pages": extraction_pages,
+                "page_count": total_pages,
+                "format": "normalized",
+                "page_boundaries": page_boundaries,
+                "table_regions": [],
+                "docling_title": "",
+                "pdf_title": doc_meta.get("title", ""),
+                "pdf_author": doc_meta.get("author", ""),
+                "pdf_subject": doc_meta.get("subject", ""),
+                "pdf_keywords": doc_meta.get("keywords", ""),
+                "pdf_creator": doc_meta.get("creator", ""),
+                "pdf_producer": doc_meta.get("producer", ""),
+                "pdf_creation_date": doc_meta.get("creationDate", ""),
+                "pdf_mod_date": doc_meta.get("modDate", ""),
+                "formula_count": 0,
+            },
+        )
 
     def _extract_normalized(
         self,

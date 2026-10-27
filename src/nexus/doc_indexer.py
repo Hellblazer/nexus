@@ -2345,7 +2345,7 @@ def _pdf_chunks(
     for offline/air-gapped environments or bulk indexing.
 
     *extractor* selects the PDF extraction backend (``"auto"``, ``"docling"``,
-    or ``"mineru"``).
+    ``"mineru"``, or the explicit text-only ``"pymupdf"``).
 
     *allow_degraded_extraction* (nexus-wi1uv) forwarded to
     :meth:`PDFExtractor.extract` — bypasses the post-extraction quality
@@ -2764,7 +2764,8 @@ def index_pdf(
     # (pdf_stack.ensure_or_exit) leaves nothing to roll back. Never installs.
     from nexus import pdf_stack  # noqa: PLC0415 — circular-dep avoidance, deferred
 
-    pdf_stack.require("index_pdf")
+    # The explicit ``pymupdf`` extractor (RDR-237) needs none of it: PyMuPDF is a core dependency.
+    pdf_stack.require("index_pdf", extractor=extractor)
     content_hash = _sha256(pdf_path)
     # RDR-152 Seam B: resolve the write client BEFORE the collection-name
     # fallback below (moved up, nexus-o5x2c) — see _index_document /

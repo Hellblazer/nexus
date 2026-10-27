@@ -3037,13 +3037,16 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
                    "Off by default. Use 'nx enrich <collection>' for bulk backfill.")
 @click.option(
     "--extractor",
-    type=click.Choice(["auto", "docling", "mineru"]),
+    type=click.Choice(["auto", "docling", "mineru", "pymupdf"]),
     default=None,
     help=(
         "PDF extraction backend (default: from .nexus.yml pdf.extractor, or 'auto'). "
         "'auto' detects formulas via Docling and switches to MinerU when found. "
         "'docling' forces Docling (formula-stripped — opt-out of math handling). "
-        "'mineru' forces MinerU."
+        "'mineru' forces MinerU. "
+        "'pymupdf' reads only each page's own text layer (no layout, tables or math; an "
+        "image-only page is not extracted) and needs no PDF support: the choice for a host "
+        "that cannot run MinerU. It is never chosen automatically."
     ),
 )
 @click.option(
@@ -3173,9 +3176,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # BEFORE any catalog or T3 write: installed now (and this command re-run in
     # the new generation), or the command stops with exit 69/75/70 and the exact
     # command to run. Never a quiet fallback to a plainer extractor. A --dir run
-    # asks after it knows there is at least one PDF to index.
+    # asks after it knows there is at least one PDF to index. The explicit
+    # ``--extractor pymupdf`` (RDR-237) needs none of it: the gate returns at once.
     if dir_path is None:
-        pdf_stack.ensure_or_exit("nx index pdf")
+        pdf_stack.ensure_or_exit("nx index pdf", extractor=extractor)
 
     # ── Batch mode (--dir) ──────────────────────────────────────────────
     if dir_path is not None:
@@ -3219,7 +3223,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         if skipped:
             click.echo(f"Filtered {skipped} PDF(s) via gitignore/.nexus.yml patterns")
 
-        pdf_stack.ensure_or_exit("nx index pdf --dir")
+        pdf_stack.ensure_or_exit("nx index pdf --dir", extractor=extractor)
 
         if collection is not None:
             # nexus-hmxi note: this call site intentionally does NOT
@@ -3239,7 +3243,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         total_chunks = 0
         failures: list[tuple[Path, str]] = []
 
-        # Check if MinerU server is available for batch performance
+        # Check if MinerU server is available for batch performance. The probe can START a
+        # server (PDFExtractor._mineru_server_available autostarts), so the text-only
+        # ``pymupdf`` extractor (RDR-237) stays out of it: MinerU is never probed or started.
         if extractor in ("auto", "mineru"):
             from nexus.pdf_extractor import PDFExtractor  # noqa: PLC0415 — deliberate function-local import (heavy PDF-extractor dep deferred; rare branch)
             _extractor = PDFExtractor()
@@ -3397,9 +3403,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                 f"WARNINGs above"
             )
         click.echo(summary_line)
-        from nexus.commands._helpers import emit_degraded_pages_summary, emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only when a retry/brake fired)
+        from nexus.commands._helpers import emit_extraction_summary, emit_retry_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only when a retry/brake fired)
         emit_retry_summary()
-        emit_degraded_pages_summary(degraded_runs)
+        emit_extraction_summary(extractor, degraded_runs)
         if failures:
             click.echo(f"  {len(failures)} failure(s):")
             for fp, err in failures:
@@ -3643,9 +3649,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     else:
         click.echo(f"{result_label} {n} chunk(s).")
     if extraction_holder and extraction_holder[-1].get("extraction_pages"):
-        from nexus.commands._helpers import emit_degraded_pages_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only a degraded extraction)
+        from nexus.commands._helpers import emit_extraction_summary  # noqa: PLC0415 — deliberate function-local import (rare branch: only a degraded or text-only extraction)
 
-        emit_degraded_pages_summary([(path.name, extraction_holder[-1]["extraction_pages"])])
+        emit_extraction_summary(extractor, [(path.name, extraction_holder[-1]["extraction_pages"])])
     if fork_holder:
         # nexus-y8qtj: WARNING, not refusal — legitimate near-duplicates
         # exist. Full detail (other doc_id, shared_chunks) is in the log

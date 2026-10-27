@@ -216,6 +216,36 @@ def emit_degraded_pages_summary(degraded: "list[tuple[str, dict[str, list[int]]]
         click.echo(f"  {name}: {format_degraded_pages(pages)}")
 
 
+def emit_text_only_summary(runs: "list[tuple[str, dict[str, list[int]]]]") -> None:
+    """The run summary of the explicit ``pymupdf`` extractor (RDR-237): it names the extractor, so
+    the result is never mistaken for a MinerU extraction, and lists the pages with no text layer.
+
+    *runs* is ``[(document name, extraction_pages)]`` for the documents this run extracted;
+    silent when empty (a run that extracted nothing, every document fresh). Every page of such a
+    document settled on the text layer, so ``pymupdf-text`` is the extractor's normal output and
+    is not listed; only the ``unextracted`` pages are."""
+    import click  # noqa: PLC0415 — deferred: CLI-only dependency, avoids import cost for non-CLI callers of this module
+
+    if not runs:
+        return
+    click.echo(
+        f"Extractor: pymupdf, text layer only (no layout, tables or math), {len(runs)} document(s)."
+    )
+    for name, pages in runs:
+        gone = pages.get("unextracted") or []
+        if gone:
+            click.echo(f"  {name}: no text layer, not extracted: page(s) {','.join(str(p) for p in gone)}")
+
+
+def emit_extraction_summary(extractor: str, runs: "list[tuple[str, dict[str, list[int]]]]") -> None:
+    """The end-of-run extraction summary for *extractor*: the text-only form for ``pymupdf``,
+    otherwise the degraded-pages list. ``nx index pdf`` and ``nx dt index`` call this one."""
+    if extractor == "pymupdf":
+        emit_text_only_summary(runs)
+    else:
+        emit_degraded_pages_summary(runs)
+
+
 def reset_identity_drop_collectors() -> None:
     """Zero the post-store-hook failure collectors for a fresh run.
 
