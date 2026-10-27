@@ -10272,6 +10272,7 @@ async def _nx_answer_request_coverage(
         ExtractionReport,
         derive_request_coverage,
         extraction_enabled,
+        extraction_model,
         extraction_timeout,
         log_fields,
         structured_extract,
@@ -10295,7 +10296,8 @@ async def _nx_answer_request_coverage(
             # whole call to the timeout and lets dispatch's own kill path end the claude -p tree.
             own = time.monotonic() + timeout
             return await claude_dispatch(
-                prompt, schema, timeout=timeout, usage_sink=usage_sink, model=_pin_default_model(None),
+                prompt, schema, timeout=timeout, usage_sink=usage_sink,
+                model=_pin_default_model(extraction_model(_os.environ)),
                 operator="request_coverage_extract", deadline=own if deadline is None else min(own, deadline),
             )
 

@@ -446,6 +446,14 @@ def real_questions(
     return questions, runs
 
 
+def model_report(environ: Mapping[str, str], captured: Mapping[str, Sequence[Any]]) -> dict[str, Any]:
+    """Which model the calls asked for (the setting) and which each call's own usage says answered it."""
+    from nexus.plans.request_coverage import extraction_model  # noqa: PLC0415 — deferred; keeps module import cheap
+
+    seen = Counter(str(getattr(u, "model", None)) for usage in captured.values() for u in usage)
+    return {"requested": extraction_model(environ), "canonical_models": dict(sorted(seen.items()))}
+
+
 def refuse_prod_write_opt_in(environ: Mapping[str, str]) -> None:
     """The measurement is read-only: an ambient write opt-in is a reason to stop, not to proceed."""
     from nexus.db.service_endpoint import PROD_WRITE_OPT_IN_ENV  # noqa: PLC0415 — the one name of the opt-in
@@ -495,6 +503,7 @@ async def _run(args: argparse.Namespace) -> int:
         report = labelled_report(args.set, queries, probes, facts)
     report["generated_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     report["dry_run"] = bool(args.dry_run)
+    report["extract_model"] = model_report(os.environ, captured)
     if args.show_questions:
         for key, text in questions.items():
             p = probes[key]

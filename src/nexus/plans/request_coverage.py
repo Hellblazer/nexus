@@ -1239,6 +1239,9 @@ EXTRACT_ENV = "NX_ANSWER_STRUCTURED_EXTRACT"
 #: Seconds the structured step may take, from the environment, bounded to [1, 60].
 EXTRACT_TIMEOUT_ENV = "NX_ANSWER_STRUCTURED_EXTRACT_TIMEOUT"
 DEFAULT_EXTRACT_TIMEOUT_S = 20.0
+#: The model the structured call asks for: an alias (haiku, sonnet, opus) or a model id, passed to the
+#: ``--model`` flag as given. Unset or blank leaves the call on the default operator pin.
+EXTRACT_MODEL_ENV = "NX_ANSWER_STRUCTURED_EXTRACT_MODEL"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -1246,6 +1249,11 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 def extraction_enabled(environ: Mapping[str, str]) -> bool:
     """Whether the structured step is switched on in *environ* (off by default)."""
     return str(environ.get(EXTRACT_ENV, "")).strip().lower() in _TRUTHY
+
+
+def extraction_model(environ: Mapping[str, str]) -> str | None:
+    """The model the structured call is asked to use, or None for the default pin (unset or blank)."""
+    return str(environ.get(EXTRACT_MODEL_ENV, "")).strip() or None
 
 
 def extraction_timeout(environ: Mapping[str, str]) -> float:

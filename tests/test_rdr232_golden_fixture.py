@@ -844,6 +844,136 @@ def _measure_eligibility(library, queries, with_clone_selections) -> dict:
     return {"rows": rows, "off": off, "on": on}
 
 
+#: nexus-jypmj.2.8. The gate-on matrix: each golden set (golden_v1, in-sample; the held-out set, blind) read with
+#: three sources of request kinds (the deterministic first pass; the kinds the Opus and the Haiku structured
+#: extraction produced, per request id, from the reports of ``bench.rdr232_extract_measure``), gate off and on.
+#: It runs only when ``$NX_RDR232_GATE_MATRIX_OUT`` is set (and then needs ``$NX_RDR232_GATE_MATRIX_REPORTS``, a
+#: directory holding ``rdr232-extract-<set>.json`` for Opus and ``rdr232-extract-haiku-<set>.json``, set being
+#: ``golden`` or ``heldout``), so the shipped journey costs what it did. No model call: the kinds are read from
+#: the reports, and the selections are the matcher over the seeded library, as in ``_measure_eligibility``.
+MATRIX_OUT_ENV = "NX_RDR232_GATE_MATRIX_OUT"
+MATRIX_REPORTS_ENV = "NX_RDR232_GATE_MATRIX_REPORTS"
+_MATRIX_SETS = (("golden_v1", g.GOLDEN_V1_PATH, "golden"), ("heldout_v1", g.HELDOUT_PATH, "heldout"))
+_MATRIX_SOURCES = ("deterministic", "opus", "haiku")
+
+
+def _gate_matrix_inputs() -> dict:
+    from bench import rdr232_gate_matrix as gm
+    from nexus.plans.request_coverage import derive_request_coverage
+
+    root = os.environ.get(MATRIX_REPORTS_ENV)
+    assert root, f"{MATRIX_OUT_ENV} needs {MATRIX_REPORTS_ENV}, the directory of the extraction reports"
+    sets: dict[str, dict] = {}
+    for name, path, stem in _MATRIX_SETS:
+        queries = load_golden_set(path)
+        qids = {q.qid for q in queries}
+        reports = {
+            "opus": json.loads((Path(root) / f"rdr232-extract-{stem}.json").read_text(encoding="utf-8")),
+            "haiku": json.loads((Path(root) / f"rdr232-extract-haiku-{stem}.json").read_text(encoding="utf-8")),
+        }
+        first_pass: dict[str, dict] = {}
+        extracted: dict[str, dict] = {}
+        for source, report in reports.items():
+            first_pass[source], extracted[source] = gm.kinds_from_report(report)
+            assert set(extracted[source]) == qids, (name, source, "the report does not cover this set's requests")
+        det = {}
+        for q in queries:
+            sc, _bd = g.request_call_shape(q)
+            cov = derive_request_coverage(q.text, scope=sc)
+            det[q.qid] = (cov.answer_kind, cov.kind_decision)
+        sets[name] = {
+            "queries": queries,
+            "kinds": {"deterministic": det, **extracted},
+            # the extraction reports read the first pass with no scope; this run reads it with the request's scope
+            "first_pass_differs_from_report": {s: gm.kind_disagreements(det, first_pass[s]) for s in reports},
+        }
+    return sets
+
+
+def _gate_matrix_pass(library, inputs: dict) -> dict:
+    """For each set: the gate-off selection of every request and the gate-on selection under each kind source."""
+    from nexus.plans import eligibility as el
+
+    out: dict[str, dict] = {}
+    for name, data in inputs.items():
+        queries = data["queries"]
+
+        def observed(q, **kw) -> dict:
+            sc, bd = g.request_call_shape(q)
+            sel = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd, **kw)
+            return {"selected": sel.selected, "candidates": list(sel.candidates)}
+
+        off = {q.qid: observed(q) for q in queries}
+        on_by_kind: dict[tuple[str, str], dict] = {}  # the verdict depends on the kind only, not the decision label
+        on: dict[str, dict] = {}
+        for source in _MATRIX_SOURCES:
+            on[source] = {}
+            for q in queries:
+                kind, decision = data["kinds"][source][q.qid]
+                if (q.qid, kind) not in on_by_kind:
+                    on_by_kind[(q.qid, kind)] = observed(q, eligibility=el.EligibilityFilter(kind, decision, enforce=True))
+                on[source][q.qid] = on_by_kind[(q.qid, kind)]
+        out[name] = {"off": off, "on": on}
+    return out
+
+
+def _gate_matrix_report(inputs: dict, floor: dict, with_clone: dict) -> dict:
+    from bench import rdr232_gate_matrix as gm
+    from nexus.plans.request_coverage import normalize_kind
+
+    rows: list[dict] = []
+    for name, data in inputs.items():
+        queries = data["queries"]
+        states = [("builtins_only", floor)]
+        if name == "golden_v1":
+            states.append(("with_grown_473_clone", with_clone))
+        for state, taken in states:
+            for source in _MATRIX_SOURCES:
+                kinds = data["kinds"][source]
+                cell = gm.cell(queries, taken[name]["off"], taken[name]["on"][source], kinds)
+                rows.append({
+                    "set": name, "plan_library": state, "kind_source": source, **cell,
+                    "kinds_wrong_against_label": sorted(
+                        q.qid for q in queries
+                        if kinds[q.qid][0] not in (normalize_kind(q.answer_kind) or q.answer_kind, "unknown")),
+                    "kinds_unknown": sorted(q.qid for q in queries if kinds[q.qid][0] == "unknown"),
+                    "per_request": [
+                        {"qid": q.qid, "label": q.answer_kind, "kind_used": kinds[q.qid][0],
+                         "selected_off": taken[name]["off"][q.qid]["selected"],
+                         "selected_on": taken[name]["on"][source][q.qid]["selected"]}
+                        for q in queries],
+                })
+    heldout = inputs["heldout_v1"]["queries"]
+    moved_sel, moved_cand = g.selection_drift(floor["heldout_v1"]["off"], with_clone["heldout_v1"]["off"])
+    return {
+        "tree_sha": g.head_sha(), "tree_dirty": g.tree_is_dirty(), "golden_set_version": GOLDEN_SET_VERSION,
+        "requests": {name: len(d["queries"]) for name, d in inputs.items()},
+        "first_pass_differs_from_report": {name: d["first_pass_differs_from_report"] for name, d in inputs.items()},
+        "grown_clone_on_heldout": {
+            "selection_changed": moved_sel, "candidate_set_changed": moved_cand,
+            "selected_the_clone": sorted(
+                q.qid for q in heldout if with_clone["heldout_v1"]["off"][q.qid]["selected"] == g.GROWN_473_KEY),
+        },
+        "notes": [
+            "gate off is the unfiltered matcher (a shadow filter selects the same plans, pinned by _measure_eligibility); "
+            "gate on is the enforcing filter built for the kind the source gives the request",
+            "golden_v1 is IN-SAMPLE: the first pass was written with it in view, so its figures are floors, not rates; "
+            "the held-out set is blind and out-of-sample",
+            "the grown clone of plan 473 is keyed to G06's text (selected only for a verbatim repeat), so it exists only in "
+            "golden_v1's with_grown_473_clone rows; held-out rows use the builtins-only library, and "
+            "grown_clone_on_heldout shows the clone changing no held-out selection or candidate set. The held-out "
+            "unacceptable_plans lists name grown:hybrid-factual-lookup-473 wherever they name the lookup builtin; "
+            "that key is inert there",
+            "eligible_plan_recall is a blacklist reading: a request counts when some candidate is not labelled unacceptable; "
+            "it cannot say the candidate is the right shape",
+            "the Opus and Haiku kind sources are the kinds from the extraction reports, applied per request id; no model "
+            "call is made here. first_pass_differs_from_report lists requests whose first-pass kind differs between "
+            "this run (with the request's scope) and the report (no scope)",
+        ],
+        "rows": rows,
+    }
+
+
 def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, production) -> dict:
     """Emit the report and return the measures. Asserts non-vacuity only.
 
@@ -870,6 +1000,9 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
     # The plan cache is process-global and refills from the library only every 90 s: start from none,
     # so the floor does not depend on what an earlier test left in it, and leave none behind.
     reset_plan_cache_for_tests()
+    matrix_out = os.environ.get(MATRIX_OUT_ENV)
+    matrix_inputs = _gate_matrix_inputs() if matrix_out else None
+    matrix_floor = matrix_clone = None
     try:
         observations: list[RunObservation] = []
         selections: dict[str, dict] = {}
@@ -883,9 +1016,14 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
             ))
         measures = compute_measures(queries, observations)
         assert tuple(measures) == MEASURE_NAMES
+        matrix_floor = _gate_matrix_pass(library, matrix_inputs) if matrix_inputs else None
         grown = _measure_with_grown_473_clone(library, queries, art, observations, selections)
+        matrix_clone = _gate_matrix_pass(library, matrix_inputs) if matrix_inputs else None
     finally:
         reset_plan_cache_for_tests()
+    if matrix_out:
+        Path(matrix_out).write_text(
+            json.dumps(_gate_matrix_report(matrix_inputs, matrix_floor, matrix_clone), indent=2) + "\n", encoding="utf-8")
 
     # The ART request, scored on the reducer-input view as well (what the model is handed): once on the
     # secondary streams alone (the hydrated contents of the cut run), once on the production request,
@@ -989,7 +1127,9 @@ def _assert_measures_follow_containment(measures: dict, secondary_only: dict, pr
 
 def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> None:
     queries = load_golden_set(g.GOLDEN_PATH)
-    art = next(q for q in queries if q.qid == ART_REQUEST_QID)
+    art = next((q for q in queries if q.qid == ART_REQUEST_QID), None)
+    assert art is not None, (
+        f"the journey needs the {ART_REQUEST_QID} request; {g.GOLDEN_PATH_ENV} names a set without it ({g.GOLDEN_PATH})")
 
     fx = g.build_rdr084_fixture()
     reader = _assert_fixture_loads(fx)

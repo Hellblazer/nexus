@@ -355,11 +355,21 @@ def test_a_write_opt_in_in_the_environment_is_refused() -> None:
         em.refuse_prod_write_opt_in({PROD_WRITE_OPT_IN_ENV: "a reason"})
 
 
+def test_model_report_names_the_requested_setting_and_the_models_that_answered() -> None:
+    from nexus.plans.request_coverage import EXTRACT_MODEL_ENV
+
+    captured = {"a": [SimpleNamespace(model="claude-haiku-4-5")], "b": [SimpleNamespace(model="claude-haiku-4-5"), SimpleNamespace(model=None)]}
+    rep = em.model_report({EXTRACT_MODEL_ENV: " haiku "}, captured)
+    assert rep == {"requested": "haiku", "canonical_models": {"None": 1, "claude-haiku-4-5": 2}}
+    assert em.model_report({}, {}) == {"requested": None, "canonical_models": {}}
+
+
 def test_dry_run_main_writes_a_report_without_any_model_call(tmp_path, capsys) -> None:
     out = tmp_path / "r.json"
     assert em.main(["--set", "golden", "--dry-run", "--out", str(out)]) == 0
     rep = json.loads(out.read_text(encoding="utf-8"))
     assert rep["dry_run"] is True and rep["extraction"]["calls_made"] == 0
+    assert rep["extract_model"]["canonical_models"] == {}
     assert rep["questions"] == 24 and rep["in_sample"] is True
     assert rep["extraction"]["send_classes"]["kind_unknown"] + rep["extraction"]["send_classes"]["facets_uncertain"] > 0
     from bench.schema import load_golden_set

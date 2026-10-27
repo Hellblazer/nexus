@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,27 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 BUILTIN_PLANS = REPO / "conexus" / "plans" / "builtin"
-GOLDEN_PATH = REPO / "bench" / "queries" / "golden_v1.yaml"
+GOLDEN_V1_PATH = REPO / "bench" / "queries" / "golden_v1.yaml"
+#: The blind out-of-sample set (nexus-jypmj.2.8), in the golden_v1 format.
+HELDOUT_PATH = REPO / "bench" / "queries" / "golden_heldout_v1.yaml"
+#: Names another golden set for the harness to read (absolute, or relative to the repository root); unset or
+#: blank is golden_v1. The ART RDR-084 journey needs that set's G06 request, so it fails on a set without it.
+GOLDEN_PATH_ENV = "NX_RDR232_GOLDEN_PATH"
+
+
+def golden_path(environ: "Mapping[str, str] | None" = None) -> Path:
+    """The golden set the harness reads: golden_v1 unless *environ* (default ``os.environ``) names another."""
+    raw = str((os.environ if environ is None else environ).get(GOLDEN_PATH_ENV, "")).strip()
+    if not raw:
+        return GOLDEN_V1_PATH
+    path = Path(raw)
+    path = path if path.is_absolute() else REPO / path
+    if not path.is_file():
+        raise FileNotFoundError(f"{GOLDEN_PATH_ENV} names {raw!r}, which is not a file ({path})")
+    return path
+
+
+GOLDEN_PATH = golden_path()
 
 #: The model token of the collections the fixture writes (the local posture's embedder).
 MODEL_TOKEN = "bge-base-en-v15-768__v1"

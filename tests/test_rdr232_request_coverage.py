@@ -1021,6 +1021,50 @@ def test_nx_answer_gives_dispatch_a_deadline_inside_its_own_timeout(monkeypatch)
     assert env["request_coverage"]["extraction"]["timeout_s"] == 3.0
 
 
+def test_the_extraction_model_setting_is_unset_by_default_and_trimmed() -> None:
+    assert rc.EXTRACT_MODEL_ENV == "NX_ANSWER_STRUCTURED_EXTRACT_MODEL"
+    assert rc.extraction_model({}) is None
+    assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: ""}) is None
+    assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: "   "}) is None
+    assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: " haiku "}) == "haiku"
+    assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: "claude-haiku-4-5"}) == "claude-haiku-4-5"
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_nx_answer_extraction_model_is_the_strong_default_when_the_setting_is_unset_or_empty(
+    monkeypatch, value,
+) -> None:
+    """Unset or empty is today's behaviour exactly: the dispatch gets what ``_pin_default_model(None)`` gives."""
+    from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS
+
+    fake = _Dispatch({"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []})
+    _extract_env(monkeypatch, fake)
+    if value is None:
+        monkeypatch.delenv(rc.EXTRACT_MODEL_ENV, raising=False)
+    else:
+        monkeypatch.setenv(rc.EXTRACT_MODEL_ENV, value)
+    _drive("Tell me about plan matching.")
+    assert fake.extra[0]["model"] == STRONG_DEFAULT_ALIAS == _core()._pin_default_model(None)
+    fake.extra.clear()
+    monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+    _drive("Tell me about plan matching.")
+    assert fake.extra[0]["model"] is None, "the tiering kill switch still restores bare dispatch when no model is set"
+
+
+@pytest.mark.parametrize("value,expected", [("haiku", "haiku"), (" sonnet ", "sonnet"), ("claude-haiku-4-5", "claude-haiku-4-5")])
+def test_nx_answer_passes_the_extraction_model_setting_to_the_dispatch(monkeypatch, value, expected) -> None:
+    fake = _Dispatch({"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []})
+    _extract_env(monkeypatch, fake)
+    monkeypatch.setenv(rc.EXTRACT_MODEL_ENV, value)
+    _drive("Tell me about plan matching.")
+    assert fake.extra[0]["model"] == expected
+    assert fake.extra[0]["operator"] == "request_coverage_extract"
+    fake.extra.clear()
+    monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
+    _drive("Tell me about plan matching.")
+    assert fake.extra[0]["model"] == expected, "a caller-supplied model wins over the kill switch, as for every dispatch"
+
+
 def test_the_real_dispatch_signature_accepts_the_call_nx_answer_makes(monkeypatch) -> None:
     from nexus.operators.dispatch import claude_dispatch
 
