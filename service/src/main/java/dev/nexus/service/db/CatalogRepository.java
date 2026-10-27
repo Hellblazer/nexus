@@ -9435,10 +9435,21 @@ public final class CatalogRepository {
      * nexus-sis0m.3: the rename would rewrite a document's {@code chroma://<old>/...}
      * source_uri onto one a LIVE document elsewhere already holds. The live-URI index
      * (catalog-016) would reject the UPDATE as a 500; this names the URI instead, and the
-     * handler maps it to 409. Nothing has moved when it is thrown.
+     * handler maps it to 409. Nothing has moved when it is thrown. RDR-231: every move (rename,
+     * re-home, collection update, re-embed move) throws it; {@code holder} is the live holder's
+     * tumbler and the message names the operation.
      */
     public static final class SourceUriCollision extends RuntimeException {
-        public SourceUriCollision(String message) { super(message); }
+        private final String holder;
+
+        public SourceUriCollision(String operation, String uri, String holder, String holderCollection) {
+            super(operation + " would rewrite a document's source_uri to " + uri + ", which live document "
+                + holder + " in " + holderCollection + " already holds. Delete or re-title that document, then "
+                + "try again.");
+            this.holder = holder;
+        }
+
+        public String holder() { return holder; }
     }
 
     /**
@@ -9656,7 +9667,7 @@ public final class CatalogRepository {
 
     /** Postgres {@code starts_with}: a literal prefix test, unlike LIKE where '_' matches any char. */
     private static Condition uriStartsWith(Field<String> uri, String prefix) {
-        return DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, uri, DSL.val(prefix)));
+        return NoteUri.startsWith(uri, DSL.val(prefix));
     }
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
@@ -9795,10 +9806,8 @@ public final class CatalogRepository {
                 .limit(1)
                 .fetchOne();
             if (collision != null) {
-                throw new SourceUriCollision(
-                    "renaming " + oldName + " to " + newName + " would rewrite a document's source_uri to "
-                    + collision.value1() + ", which live document " + collision.value2() + " in "
-                    + collision.value3() + " already holds. Delete or re-title that document, then rename again.");
+                throw new SourceUriCollision("renaming " + oldName + " to " + newName,
+                    collision.value1(), collision.value2(), collision.value3());
             }
             // nexus-sis0m.3: Y's content_type and owner_id are the client's, derived from Y's
             // name (see the 6-arg renameCollection); absent, they are X's. Copying X's

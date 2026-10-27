@@ -235,10 +235,20 @@ class CollectionParseGateTest {
      * rather than deriving them from name-routing literals. No entry
      * survives for this file; a file at zero carries no entry, per this
      * gate's own reduce-only rule.
+     *
+     * <p>{@code db/NoteUri.java} declares 3 (RDR-231, nexus-bivz3.1): its
+     * {@code FILE_ROUTED_PREFIXES} ({@code rdr__}, {@code docs__},
+     * {@code code__}). It classifies a source_uri STRING, not a live
+     * collection: a note URI's collection segment can name a collection that
+     * was renamed or never registered, so a {@link
+     * dev.nexus.service.db.CollectionRegistry} lookup cannot answer it. The
+     * list mirrors the client's {@code aspect_readers.FILE_ROUTED_PREFIXES}
+     * and the backfill predicate, and {@code NoteUriCorpusTest} pins all
+     * three to one corpus file.
      */
-    private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of();
+    private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of("dev/nexus/service/db/NoteUri.java", 3);
 
-    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 0;
+    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 3;
 
     /**
      * Per-file declared count of {@link #countSplitDunderCalls} — the
