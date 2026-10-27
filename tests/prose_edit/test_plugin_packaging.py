@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tests.prose_edit.conftest import ROOT, SCRIPT, Prose, git
+from tests.prose_edit.conftest import ROOT, SCRIPT, SITE_PAGE_REL, Prose, git
 from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok, run_brief, seed
 from tests.prose_edit.test_review import DOC, E1, E2, review_ok, start
 
@@ -105,6 +105,7 @@ def test_a_relative_path_still_means_the_directory_the_session_started_in(
 def test_a_repository_without_a_site_page_builds_a_how_to_brief_with_no_site_layer(
     prose: Prose,
 ) -> None:
+    git(prose.cwd, "rm", "-q", str(SITE_PAGE_REL))
     assert not (prose.cwd / ".claude").exists()
     out = brief_ok(prose, "build", "docs/x.md", "--genre", "how-to", "--work")
     work = dict(line.split("=", 1) for line in out.split("\n\n", 1)[0].splitlines())[
@@ -118,6 +119,7 @@ def test_a_repository_without_a_site_page_builds_a_how_to_brief_with_no_site_lay
 def test_setup_lists_what_no_genre_reaches_as_keys_a_genre_map_entry_takes(
     prose: Prose,
 ) -> None:
+    git(prose.cwd, "rm", "-q", str(SITE_PAGE_REL))
     (prose.cwd / "notes").mkdir()
     (prose.cwd / "notes" / "a.md").write_text("a\n", encoding="utf-8")
     (prose.cwd / "notes" / "b.md").write_text("b\n", encoding="utf-8")

@@ -594,7 +594,8 @@ def anchor_of(arg: str | None) -> Path | None:
         return None
     for cand in (raw, *raw.parents):
         if cand.is_dir():
-            return cand
+            # a path in no repository keeps the session's, so it is reported as outside it
+            return cand if _git(["rev-parse", "--show-toplevel"], cwd=cand).returncode == 0 else None
     return None
 
 
@@ -1443,7 +1444,7 @@ def cmd_viewer(ctx: Ctx, a: argparse.Namespace) -> None:
     _emit({"viewer": (rec or {}).get("viewer")})
 
 
-def cmd_status(ctx: Ctx, a: argparse.Namespace) -> None:
+def cmd_status(ctx: Ctx, _a: argparse.Namespace) -> None:
     """What setup needs to know: the repository's projects, its genre_map entries at each level, and how many
     exemplars each genre holds. Reading the user style sheet first is the T2 check: an unreachable T2 exits 3."""
     user = _record(ctx.t2.get_json(ctx.user_project, "stylesheet", "sheet"))

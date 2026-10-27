@@ -34,12 +34,20 @@ def git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+# The site-page style sheet a repository keeps at this path is the site layer of a how-to or essay brief. The
+# skill ships as a plugin (nexus-scmcs) and reads the sheet from the repository, so every test repository carries
+# nexus's own, as the nexus checkout does; a test of a repository without one removes it.
+SITE_PAGE_REL = Path(".claude") / "skills" / "site-page" / "SKILL.md"
+
+
 def make_repo(root: Path) -> Path:
     root.mkdir()
     git(root, "init", "-q", "-b", "main")
     (root / "docs").mkdir()
     (root / "docs" / "x.md").write_text("one\ntwo\nthree\nfour\nfive\n")
-    git(root, "add", "docs/x.md")
+    (root / SITE_PAGE_REL).parent.mkdir(parents=True)
+    (root / SITE_PAGE_REL).write_bytes((ROOT / SITE_PAGE_REL).read_bytes())
+    git(root, "add", "docs/x.md", str(SITE_PAGE_REL))
     git(root, "commit", "-q", "-m", "init")
     return root
 
