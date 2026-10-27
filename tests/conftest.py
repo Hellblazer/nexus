@@ -2889,6 +2889,29 @@ def _no_mcp_search_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NX_MCP_SEARCH_WARMUP", "0")
 
 
+#: What the stubbed serving-engine probe reports: far above any note-URI floor, so the guard clears.
+_STUBBED_SERVING_ENGINE_VERSION = (999, 0, 0)
+
+
+@pytest.fixture(autouse=True)
+def _stub_serving_engine_probe(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Keep the RDR-231 note-write guard off the network in every test that is not about it (nexus-bivz3.15/.16).
+
+    Once ``NOTE_URI_MIN_ENGINE_VERSION`` is set, ``put_note`` and ``import_collection`` probe the serving
+    engine, which reaches ``put_note`` from 138 test files. The probe answers a version above any floor
+    here and the guard's process cache is reset around each test. A test that is about the probe or the
+    guard opts out: ``tests/test_bivz3_13_note_uri_engine_floor.py`` replaces the probe in its own
+    fixture, and a test that needs the real HTTP probe carries ``@pytest.mark.real_engine_probe``.
+    """
+    from nexus.db import serving_engine_version as sev
+
+    sev.reset_note_uri_guard_for_tests()
+    if request.node.get_closest_marker("real_engine_probe") is None:
+        monkeypatch.setattr(sev, "probe_serving_engine_version", lambda: _STUBBED_SERVING_ENGINE_VERSION)
+    yield
+    sev.reset_note_uri_guard_for_tests()
+
+
 @pytest.fixture(autouse=True)
 def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     """nx_answer's structured request extraction is ON by default (nexus-jypmj.2.8) and makes one `claude -p`

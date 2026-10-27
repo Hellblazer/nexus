@@ -126,7 +126,6 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
-from nexus._log_safe_url import scrub_transport_error
 from nexus.db.limits import MAX_QUERY_RESULTS
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
@@ -646,29 +645,13 @@ def _probe_serving_engine_version() -> tuple[int, int, int] | None:
     `run()`, which is already an independent asyncio task by the time it
     executes) and never a cloud-mode session (no lease to wait on there).
     """
-    try:
-        from nexus.db.service_endpoint import (  # noqa: PLC0415 — rare/branch-local: one call per waiter lifetime
-            resolve_service_endpoint_with_evidence_gate,
-        )
-        base_url, _token = resolve_service_endpoint_with_evidence_gate()
-    except Exception as exc:  # noqa: BLE001 — best-effort: an unresolvable endpoint means "don't know", not a crash
-        _log.debug("channel_waiter_version_probe_endpoint_unresolvable", error=str(exc))
-        return None
+    from nexus.db.serving_engine_version import (  # noqa: PLC0415 — rare/branch-local: one call per waiter lifetime
+        probe_serving_engine_version,
+    )
 
-    try:
-        resp = httpx.get(f"{base_url.rstrip('/')}/version", timeout=5.0)
-        resp.raise_for_status()
-        body = resp.json()
-    except Exception as exc:  # noqa: BLE001 — best-effort: a transport blip or a pre-/version engine means "don't know"
-        _log.debug("channel_waiter_version_probe_failed", error=scrub_transport_error(exc, base_url))
-        return None
-
-    if not isinstance(body, dict):
-        return None
-
-    from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — leaf module, rare/branch-local path
-
-    return parse_engine_version(body.get("release_version"))
+    # One implementation, shared with RDR-231's note-write guard (nexus-bivz3.15/.16). This name stays the
+    # waiter's test seam (``engine_version_probe`` defaults to it).
+    return probe_serving_engine_version()
 
 
 class ChannelWaiter:

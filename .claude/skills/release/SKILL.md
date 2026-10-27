@@ -95,7 +95,10 @@ aborting on the first red -- it reports every failure it finds, so one cycle
 surfaces the whole fix list. The checks:
 
 - `wire-contract-ledger` -- `check_engine_release_floor.py --ledger-only`, which
-  is MERGE-BLOCKING on every PR to main, not just at tag time;
+  is MERGE-BLOCKING on every PR to main, not just at tag time. It also fails when
+  `REQUIRED_ENGINE_VERSION` is below `NOTE_URI_MIN_ENGINE_VERSION` (RDR-231: a
+  release must pin an engine that can hold `nx-note://`; the floor leads the pin
+  on develop, which no develop run checks);
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under

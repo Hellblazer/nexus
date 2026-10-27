@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The version of the engine THIS process is talking to, and the note-write floor built on it.
 
-:func:`probe_serving_engine_version` is the public form of the channel waiter's probe
-(nexus-6konb.15); ``nexus.mcp.channel`` keeps its own private copy and tests patch that name, so
-nothing here is imported from there.
+:func:`probe_serving_engine_version` is the one probe (nexus-6konb.15). ``nexus.mcp.channel._probe_serving_engine_version`` delegates
+to it and stays the channel waiter's test seam, so nothing here is imported from there.
 
 :func:`require_note_uri_engine` is RDR-231's note-write refusal (nexus-bivz3.13, critique
 Significant 4): a note write against an engine older than
@@ -117,7 +116,12 @@ def require_note_uri_engine() -> None:
     from nexus.config import is_local_mode  # noqa: PLC0415 — deferred: config pulls the credential layer
     from nexus.aspect_readers import NOTE_URI_SCHEME  # noqa: PLC0415 — deferred: aspect_readers imports nexus.db.limits, and this module lives in nexus.db
 
-    if is_local_mode():
+    if ev.REQUIRED_ENGINE_VERSION < floor:
+        # The client is ahead of its own pin (develop between the engine-tag push and the paired client
+        # release): `nx daemon restart-stale` converges to the pin, which is below the floor, so it would loop.
+        remedy = (f"this client is ahead of its pinned engine ({_fmt(ev.REQUIRED_ENGINE_VERSION)}): note writes "
+                  f"resume when engine {_fmt(floor)} ships and the client's pin moves to it")
+    elif is_local_mode():
         remedy = "run `nx daemon restart-stale` to move the local engine onto the pinned version, then retry"
     else:
         remedy = "the managed engine has not been upgraded yet; retry once it is"

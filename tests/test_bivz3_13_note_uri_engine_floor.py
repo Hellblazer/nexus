@@ -17,6 +17,7 @@ The probe is the test seam: no test here talks to a network.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,6 +47,7 @@ def served(monkeypatch: pytest.MonkeyPatch):
     from nexus import engine_version as ev
 
     monkeypatch.setattr(ev, "NOTE_URI_MIN_ENGINE_VERSION", _FLOOR)
+    monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", _FLOOR)  # the release shape: pin at the floor
     sev.reset_note_uri_guard_for_tests()
     state = _Served()
 
@@ -95,6 +97,27 @@ class TestGuard:
         assert "has not been upgraded yet" in text
         assert "restart-stale" not in text
 
+    @pytest.mark.parametrize("local", [True, False])
+    def test_a_pin_below_the_floor_does_not_send_the_user_round_the_restart_loop(self, served, monkeypatch, local):
+        """restart-stale converges to REQUIRED_ENGINE_VERSION; when that is below the floor it can never help."""
+        from nexus import engine_version as ev
+
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", _BELOW)
+        with patch("nexus.config.is_local_mode", return_value=local), pytest.raises(NoteUriEngineTooOldError) as err:
+            sev.require_note_uri_engine()
+        text = str(err.value)
+        assert "restart-stale" not in text and "has not been upgraded yet" not in text
+        assert "ahead of its pinned engine" in text
+        assert "0.1.199" in text and "0.1.200" in text  # the pin and the floor are both named
+
+    def test_a_pin_at_the_floor_keeps_the_restart_advice(self, served, monkeypatch):
+        from nexus import engine_version as ev
+
+        monkeypatch.setattr(ev, "REQUIRED_ENGINE_VERSION", _FLOOR)
+        with patch("nexus.config.is_local_mode", return_value=True), pytest.raises(NoteUriEngineTooOldError) as err:
+            sev.require_note_uri_engine()
+        assert "nx daemon restart-stale" in str(err.value) and "ahead of its pinned" not in str(err.value)
+
     def test_below_then_at_the_floor_in_one_process_the_second_write_passes(self, served):
         with pytest.raises(NoteUriEngineTooOldError):
             sev.require_note_uri_engine()
@@ -136,6 +159,17 @@ class TestGuard:
         assert served.probes == 0
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "nexus-bivz3.20 sets NOTE_URI_MIN_ENGINE_VERSION at the engine-tag push to develop. When it does, this "
+    "XPASSes and fails strict: delete this test in the same commit. Until then the guard is inert and every "
+    "note writer in the suite runs without the version check."))
+def test_the_note_uri_floor_is_set():
+    from nexus import engine_version as ev
+
+    assert ev.NOTE_URI_MIN_ENGINE_VERSION != (0, 0, 0)
+
+
+@pytest.mark.real_engine_probe
 class TestTheProbe:
     """``probe_serving_engine_version`` is the public form of the channel waiter's probe."""
 
@@ -274,12 +308,23 @@ class TestEveryWriterRefuses:
 
 _REPO = Path(__file__).resolve().parent.parent
 _ENGINE_VERSION_SRC = (_REPO / "src" / "nexus" / "engine_version.py").read_text()
-_UNSET = "NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 0, 0)"
+_FLOOR_LINE = re.compile(r"^NOTE_URI_MIN_ENGINE_VERSION[^=\n]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)[^\n]*$", re.M)
+_PIN_LINE = re.compile(r"^REQUIRED_ENGINE_VERSION[^=\n]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", re.M)
+
+
+def _version_in(pattern: re.Pattern[str]) -> tuple[int, int, int]:
+    found = pattern.search(_ENGINE_VERSION_SRC)
+    assert found, f"engine_version.py no longer matches {pattern.pattern!r}: update this pin's regex"
+    return tuple(int(part) for part in found.groups())  # type: ignore[return-value]
+
+
+def _with_floor(version: tuple[int, int, int] | None) -> str:
+    """The real engine_version.py with its floor line rewritten (``None`` removes it)."""
+    line = "" if version is None else f"NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = {version!r}"
+    return _FLOOR_LINE.sub(line, _ENGINE_VERSION_SRC, count=1)
 
 
 def _ci_stamp_commands() -> list[str]:
-    import re
-
     text = (_REPO / ".github" / "workflows" / "ci.yml").read_text()
     return re.findall(r"ver=\$\((python3? -c \"import re,sys.*?)\)\n", text)
 
@@ -302,18 +347,16 @@ def _run_stamp(tmp_path: Path, argv: list[str], engine_version_text: str) -> tup
 
 
 def _stamp_cases(tmp_path: Path, argv: list[str]) -> None:
-    assert _UNSET in _ENGINE_VERSION_SRC, "the constant moved: update this pin with the landing bead"
-    import re
-
-    required = ".".join(re.search(
-        r"^REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", _ENGINE_VERSION_SRC, re.M).groups())
+    """Value-agnostic: the real constants are read, never the placeholder, so setting the floor at the landing bead needs no edit here."""
+    pin, floor = _version_in(_PIN_LINE), _version_in(_FLOOR_LINE)
+    expect = ".".join(map(str, max(pin, floor)))
     rc, out, err = _run_stamp(tmp_path, argv, _ENGINE_VERSION_SRC)
-    assert (rc, out) == (0, required), err
-    rc, out, err = _run_stamp(tmp_path, argv, _ENGINE_VERSION_SRC.replace(_UNSET, _UNSET.replace("(0, 0, 0)", "(0, 1, 9999)")))
+    assert (rc, out) == (0, expect), "the stamp is max(pin, floor) of the tree as it is: " + err
+    rc, out, err = _run_stamp(tmp_path, argv, _with_floor((0, 1, 9999)))
     assert (rc, out) == (0, "0.1.9999"), "a floor above the pin must be what the gate jar is stamped with: " + err
-    rc, out, err = _run_stamp(tmp_path, argv, _ENGINE_VERSION_SRC.replace(_UNSET, _UNSET.replace("(0, 0, 0)", "(0, 1, 1)")))
-    assert (rc, out) == (0, required), "a floor below the pin leaves the pin"
-    rc, out, err = _run_stamp(tmp_path, argv, _ENGINE_VERSION_SRC.replace(_UNSET, ""))
+    rc, out, err = _run_stamp(tmp_path, argv, _with_floor((0, 0, 1)))
+    assert (rc, out) == (0, ".".join(map(str, pin))), "a floor below the pin leaves the pin"
+    rc, out, err = _run_stamp(tmp_path, argv, _with_floor(None))
     assert rc != 0 or out == "", "a missing floor constant must not stamp"
 
 

@@ -1738,6 +1738,7 @@ class TestWaiterSupersession:
         assert sender.calls == []
 
 
+@pytest.mark.real_engine_probe
 class TestProbeServingEngineVersion:
     """Direct tests of `channel._probe_serving_engine_version` -- nexus-6konb.15
     fix round (both reviewers): the earlier round only exercised this probe
@@ -1752,6 +1753,13 @@ class TestProbeServingEngineVersion:
             side_effect=RuntimeError("no lease"),
         ):
             assert channel._probe_serving_engine_version() is None  # noqa: SLF001
+
+    def test_it_is_the_one_probe_not_a_second_copy(self) -> None:
+        """RDR-231 (nexus-bivz3.15/.16): the waiter's probe delegates to
+        ``nexus.db.serving_engine_version.probe_serving_engine_version``; a second HTTP implementation drifts."""
+        with patch("nexus.db.serving_engine_version.probe_serving_engine_version", return_value=(7, 8, 9)) as one:
+            assert channel._probe_serving_engine_version() == (7, 8, 9)  # noqa: SLF001
+        one.assert_called_once_with()
 
     def test_returns_none_on_transport_error(self) -> None:
         with patch(
