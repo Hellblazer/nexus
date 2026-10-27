@@ -2,12 +2,12 @@
 title: "MinerU-Only PDF Extraction with a Per-Page Fallback Ladder"
 id: RDR-237
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-10-27
-accepted_date:
+accepted_date: 2026-10-27
 related_issues: [nexus-kh7zj, nexus-73pvi, nexus-lqaq1]
 related_rdrs: [RDR-021, RDR-044, RDR-048, RDR-148]
 supersedes: [RDR-044]
@@ -817,3 +817,4 @@ a candidate for trimming.
 - 2026-10-27: Q1 answered by Sam: `--extractor pymupdf` added as an explicit text-only choice.
 - 2026-10-27: Gate round 1 — BLOCKED (2 Critical, 6 Significant, 2 ship-blocker(s)); commit `ddacb282b`; critique `nexus_rdr/237-gate-critique-2026-10-27-r1`.
 - 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `e4fb19b83`; critique `nexus_rdr/237-gate-critique-2026-10-27-r2`.
+- 2026-10-27: Accept residual dispositions (gate record `nexus_rdr/237-gate-latest`): residual 1 nexus-489n1 (Sam's choice, Phase 1 Step 2); residuals 2 and 5 nexus-q6nw0 (Step 1); residuals 3 and 6 nexus-489n1 (Step 2); residual 4 nexus-tv1w3 (Step 3).
