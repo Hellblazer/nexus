@@ -1228,7 +1228,7 @@ public final class AspectRepository {
     }
 
     /** last_error written to a row that a reclaim moves to the terminal failed state. */
-    static final String RECLAIM_CAP_ERROR = "reclaimed_stale_retry_cap_exhausted";
+    public static final String RECLAIM_CAP_ERROR = "reclaimed_stale_retry_cap_exhausted";
 
     /**
      * Reclaim stale in_progress rows (worker died or hung).

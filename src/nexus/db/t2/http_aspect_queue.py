@@ -356,9 +356,12 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         }, idempotent=False)
 
     def reclaim_stale(self, timeout_seconds: int = 300) -> int:
-        """Reset in_progress rows older than timeout back to 'pending'.
+        """Reclaim in_progress rows older than timeout: each goes back to
+        'pending' with retry_count + 1, or to 'failed' when it was already at
+        the retry cap (the engine's reclaimStale counts a reclaim as an
+        attempt, nexus-j67ix.2).
 
-        Returns the number of rows reclaimed.
+        Returns the number of rows reclaimed, whichever way they went.
 
         ``idempotent=False`` (nexus-ll31n sibling): an age-predicate sweep
         over a discovered population, the same shape as ``mark_retry``

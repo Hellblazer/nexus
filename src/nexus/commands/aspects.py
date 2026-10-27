@@ -252,7 +252,9 @@ def aspects_requeue_failed(
     """Bulk re-enqueue terminal-``failed`` aspect-queue rows (nexus-2c51v).
 
     A row reaches ``failed`` after exhausting the backoff-retry ladder
-    (RDR-163) or on a non-retryable error. Once the operator fixes the
+    (RDR-163), on a non-retryable error, or when a stale reclaim finds it
+    already at the retry cap (``last_error`` ``reclaimed_stale_retry_cap_exhausted``,
+    nexus-j67ix.2). Once the operator fixes the
     root cause (restored API quota, repaired source identity), this verb
     re-enqueues each failed row at its ``(collection, source_path)`` key,
     resetting it to ``pending`` with ``retry_count=0`` (the exhaustion depth
@@ -273,7 +275,8 @@ def aspects_requeue_failed(
 
     \b
     Operator note: single-operator recovery verb. It only touches ``failed``
-    rows (a terminal state no worker writes), so it is safe to re-run; but do
+    rows (a terminal state written by markFailed and the capped reclaim,
+    never by a claim), so it is safe to re-run; but do
     not run two instances concurrently — the read-snapshot / per-row-write
     split has no cross-row transaction, so concurrent runs could redundantly
     re-enqueue the same rows.

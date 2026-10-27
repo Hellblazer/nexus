@@ -852,7 +852,10 @@ class AspectExtractionWorker:
         the lease is relinquished and the next enqueue spawns a daemon with a
         fresh environment. A persistent host fault (a full disk) therefore
         becomes a respawn loop rather than a silent one. That is the intended
-        trade: loud and non-destructive over quiet and destructive.
+        trade: loud and non-destructive over quiet and destructive. One
+        cost (nexus-j67ix.2): every reclaim of the rows this worker leaves
+        behind spends one attempt, so a respawn loop that keeps claiming the
+        same head-of-queue rows terminal-fails them after the cap.
         """
         with self._self_fault_lock:
             first = self._self_fault is None

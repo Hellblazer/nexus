@@ -1489,7 +1489,9 @@ class AspectRepositoryTest {
         assertThat(row.status()).as("a reclaim at the cap is terminal").isEqualTo("failed");
         assertThat(row.retryCount()).as("retry_count + 1, exactly as markFailed")
             .isEqualTo(AspectRepository.RETRY_MAX_ATTEMPTS + 1);
-        assertThat(row.lastError()).as("failed rows carry a reason").isNotBlank();
+        assertThat(row.lastError()).as("the reason names the reclaim cap, so an operator can tell it from a worker-reported failure")
+            .isEqualTo(AspectRepository.RECLAIM_CAP_ERROR);
+        assertThat(row.lastAttemptAt()).as("last_attempt_at is kept at the cap, as markFailed leaves it").isNotNull();
         assertThat(repo.claimNext(tenant)).as("a failed row is never claimed again").isEmpty();
         assertThat(repo.pendingCount(tenant)).isZero();
     }
