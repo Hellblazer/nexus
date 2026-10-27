@@ -181,14 +181,14 @@ class TestRegisterAndShow:
             "--title", "Aleph",
             "--owner", "1.1",
             "--type", "paper",
-            "--source-uri", "chroma://knowledge__delos//papers/aleph.pdf",
+            "--source-uri", "nx-note://knowledge__delos//papers/aleph.pdf",
         ])
         assert result.exit_code == 0, result.output
         # Verify via show.
         show = runner.invoke(main, ["catalog", "show", "1.1.1"])
         assert show.exit_code == 0
         assert "URI:" in show.output
-        assert "chroma://knowledge__delos//papers/aleph.pdf" in show.output
+        assert "nx-note://knowledge__delos//papers/aleph.pdf" in show.output
 
     @_needs_diagnosis_nexus_02avu
     def test_register_rejects_malformed_uri(
@@ -879,7 +879,7 @@ class TestMergeCommand:
         runner = CliRunner()
         runner.invoke(main, [
             "catalog", "register", "--title", "Duplicate", "--owner", "1.1",
-            "--source-uri", "chroma://knowledge__delos//papers/dup.pdf",
+            "--source-uri", "nx-note://knowledge__delos//papers/dup.pdf",
         ])
         runner.invoke(main, [
             "catalog", "register", "--title", "Canonical", "--owner", "1.1",
@@ -899,7 +899,7 @@ class TestMergeCommand:
 
         show_canon = runner.invoke(main, ["catalog", "show", "1.1.2", "--json"])
         canon_data = json.loads(show_canon.stdout)
-        assert canon_data["source_uri"] == "chroma://knowledge__delos//papers/dup.pdf"
+        assert canon_data["source_uri"] == "nx-note://knowledge__delos//papers/dup.pdf"
 
     @pytest.mark.t2_tenant
     def test_merge_refuses_self_merge_cleanly(

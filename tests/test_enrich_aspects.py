@@ -1498,7 +1498,7 @@ class TestDay2Ops:
 
         _, db_path, _ = env
         with T2Database(db_path) as db:
-            # knowledge__delos with chroma:// URI (paper-shape).
+            # knowledge__delos with nx-note:// URI (paper-shape).
             db.document_aspects.upsert(_make_record(
                 source_path="/papers/aleph.pdf",
             ))
@@ -1524,15 +1524,15 @@ class TestDay2Ops:
         # nexus-6xp2: post-ocu9.11, upsert auto-derives source_uri via
         # uri_for() when the writer omits it, so the legacy ``[-]``
         # rendering is no longer reachable for knowledge__ rows. Both
-        # rows now carry the chroma scheme.
-        assert "[chroma" in result.output
+        # rows now carry the nx-note scheme.
+        assert "[nx-note" in result.output
         # Sanity: the URI scheme matches what uri_for produces.
-        assert uri_for("knowledge__delos", "/papers/aleph.pdf").startswith("chroma://")
+        assert uri_for("knowledge__delos", "/papers/aleph.pdf").startswith("nx-note://")
 
     def test_list_filter_by_scheme(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """RDR-096 P3.2: ``--scheme=chroma`` filters to only chroma
+        """RDR-096 P3.2: ``--scheme=nx-note`` filters to only nx-note
         URI rows. file:// + legacy entries are excluded.
         """
         from datetime import UTC, datetime
@@ -1562,12 +1562,12 @@ class TestDay2Ops:
 
         runner = CliRunner()
         result = runner.invoke(
-            enrich, ["list", "knowledge__delos", "--scheme", "chroma"],
+            enrich, ["list", "knowledge__delos", "--scheme", "nx-note"],
         )
         assert result.exit_code == 0, result.output
         assert "/papers/aleph.pdf" in result.output
         assert "/local.md" not in result.output
-        assert "matching scheme='chroma'" in result.output
+        assert "matching scheme='nx-note'" in result.output
 
         # Filter by file:// — opposite slice.
         result2 = runner.invoke(
@@ -1599,8 +1599,8 @@ class TestDay2Ops:
         )
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.stdout)
-        assert parsed["source_uri"].startswith("chroma://knowledge__delos/")
-        assert parsed["scheme"] == "chroma"
+        assert parsed["source_uri"].startswith("nx-note://knowledge__delos/")
+        assert parsed["scheme"] == "nx-note"
 
     def test_info_missing_row_prints_notice(self, env) -> None:
         runner = CliRunner()

@@ -77,7 +77,7 @@ class TestPlanSourceUriBackfill:
 
     def test_a_row_that_already_has_a_uri_is_left_alone(self) -> None:
         """Idempotency: a second run must be a no-op, not a rewrite."""
-        row = _row(source_uri="chroma://knowledge__delos__model-ctx__v1/" + "a" * 64)
+        row = _row(source_uri="nx-note://knowledge__delos__model-ctx__v1/" + "a" * 64)
         plan = plan_source_uri_backfill([row])
         assert not plan.updates
         assert plan.already_attributed == 1
@@ -142,7 +142,7 @@ class TestPlanSourceUriBackfill:
         rows = [
             _row(source_path="a" * 64),
             _row(source_path="b" * 64),
-            _row(source_path="c" * 64, source_uri="chroma://x/y"),
+            _row(source_path="c" * 64, source_uri="nx-note://x/y"),
             _row(source_path=""),
             _row(source_path="d" * 64, confidence=0.1),
         ]

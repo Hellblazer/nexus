@@ -34,10 +34,8 @@ _BANNED = re.compile(r"chroma|fts5", re.IGNORECASE)
 
 #: (file basename, function name) -> reason.
 _ALLOWLIST: dict[tuple[str, str], str] = {
-    # ``chroma`` here is a LIVE source_uri SCHEME value (chroma:// rows,
-    # RDR-096 P3.2), not a claim about the storage substrate — the flag
-    # genuinely filters rows whose persistent URI carries that scheme.
-    ("enrich.py", "enrich_aspects_list"): "chroma:// is a live source_uri scheme",
+    # enrich_aspects_list's entry RETIRED with RDR-231 (nexus-bivz3.11): the
+    # ``--scheme`` help now names ``nx-note``, so it no longer says "chroma".
     # aspects_without_catalog_cmd's entry RETIRED alongside the command
     # itself (hygiene-001, nexus-tk070.p6a follow-on): the census it
     # documented can no longer find anything once document_aspects.doc_id

@@ -592,7 +592,7 @@ class AspectExtractionWorker:
 
         Each row's content was captured at enqueue time when in
         scope. CLI rows with empty content are sourced via
-        ``chroma://`` URI inside ``extract_aspects_batch`` (RDR-096
+        ``nx-note://`` URI inside ``extract_aspects_batch`` (RDR-096
         P5.1 / nexus-8g79.34 — the batch path now mirrors the
         single-doc extractor's read contract).
         """

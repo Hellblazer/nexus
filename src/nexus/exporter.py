@@ -640,7 +640,7 @@ def _locate_owner_group(
       (``{"source_uri", "title", "content_type", "position"}``,
       nexus-wbfpw.31). ``source_uri`` is the group key; an owner with no
       ``source_uri`` (title-only identity, RDR-192 design) synthesizes
-      one via the SAME ``chroma://<collection>/<title>`` convention
+      one via the SAME ``nx-note://<collection>/<title>`` convention
       ``catalog_store_hook_tracked`` already uses for a title-only
       knowledge note, so a later re-import (or re-put through the
       ordinary knowledge write path) converges onto the same document

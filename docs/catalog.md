@@ -387,7 +387,7 @@ The guard skips:
 
 - Curator owners (legitimately span sources: papers, mirrored docs, etc.).
 - Pre-RDR-060 repo owners with empty `repo_root` (back-compat).
-- Non-`file://` URIs (`chroma://`, `https://`, `x-devonthink-item://`). They have no filesystem identity to compare.
+- Non-`file://` URIs (`nx-note://`, `https://`, `x-devonthink-item://`). They have no filesystem identity to compare.
 - Empty `source_uri`. Synthesized records with no path identity.
 
 `nx catalog backfill` rebuilds catalog entries from T3 metadata after data recovery. Backfill goes through the same `register()` boundary as live indexing, so the guard fires on the disaster-recovery path as well: an `rdr__*` collection whose suffix matches a registered repo is attributed to that repo's owner (not a curator), and any source path outside the owner's `repo_root` is rejected.

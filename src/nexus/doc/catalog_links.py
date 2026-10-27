@@ -273,8 +273,8 @@ def scan_and_resolve_catalog_links(
 #: Schemes safe to emit as a clickable link target. A strict SUBSET of
 #: `_KNOWN_URI_SCHEMES` (the catalog's full register-boundary allowlist):
 #: excludes ``file`` (a host-local path — the very thing this helper
-#: exists to never leak), ``chroma`` (retired substrate, RDR-155 P4b —
-#: nothing resolves it), ``nx-orphan-backfill`` (an internal marker with
+#: exists to never leak), ``nx-note`` (a note's stored identity,
+#: RDR-231 — it names a T3 note, nothing a reader's browser follows), ``nx-orphan-backfill`` (an internal marker with
 #: nothing to follow — see `_KNOWN_URI_SCHEMES`'s own comment), and
 #: ``nx-scratch`` (code-review round: T1 scratch is SESSION-scoped —
 #: a ``nx-scratch://`` URI is unresolvable by anyone outside the
@@ -283,7 +283,7 @@ def scan_and_resolve_catalog_links(
 #: function's own contract; entries carrying only a scratch source get
 #: the file_path fallback or no link, same as any other unsafe source).
 _LINK_SAFE_SCHEMES: frozenset[str] = _KNOWN_URI_SCHEMES - {
-    "file", "chroma", "nx-orphan-backfill", "nx-scratch",
+    "file", "nx-note", "nx-orphan-backfill", "nx-scratch",
 }
 
 #: A Windows drive-letter absolute path (``C:\...`` or ``C:/...``).
@@ -399,7 +399,7 @@ def safe_link_target(
         is_file_like = scheme == "file" or source_uri.lower().startswith("file:")
         if not is_file_like and scheme in _LINK_SAFE_SCHEMES:
             return SafeLinkTarget(text=source_uri, is_link=True)
-        # Any other scheme (file://, chroma://, unknown/unparseable) —
+        # Any other scheme (file://, nx-note://, unknown/unparseable) —
         # never emitted as a link; fall through to the file_path leg.
 
     file_path = entry.file_path or ""

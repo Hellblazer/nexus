@@ -78,7 +78,7 @@ def test_knowledge_collection_owner_is_not_rewritten_to_its_documents_tumbler(t2
     writer.register_collection(name, content_type="knowledge", owner_id=subject, embedding_model=_CTX_MODEL)
     writer.register(
         owner=curator, title="raft note", content_type="knowledge", physical_collection=name,
-        source_uri=f"chroma://{name}/raft-note",
+        source_uri=f"nx-note://{name}/raft-note",
     )
     assert owner_segment_for_tumbler(str(curator)), "guard: the document has an owner segment to derive"
     assert reader.get_collection(name)["owner_id"] == subject

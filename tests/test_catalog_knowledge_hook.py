@@ -453,7 +453,7 @@ class TestStorePutHook:
         )
         entry = cat.resolve(result)
         assert entry.source_uri == uri_for("knowledge__format", "URI Format Check")
-        assert entry.source_uri == "chroma://knowledge__format/URI Format Check"
+        assert entry.source_uri == "nx-note://knowledge__format/URI Format Check"
 
     def test_ghost_reconciliation_scoped_to_knowledge_owner(
         self, tmp_path, monkeypatch,

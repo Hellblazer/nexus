@@ -392,11 +392,11 @@ class TestDualRead:
         assert len(match) == 1
         # Writer populated source_uri at upsert time (RDR-096 P2.1).
         # paxos.pdf is in knowledge__delos which routes through
-        # ``chroma://`` per uri_for. Note: source_path /papers/paxos.pdf
+        # ``nx-note://`` per uri_for. Note: source_path /papers/paxos.pdf
         # round-trips verbatim because the path is the URI's path
         # component.
         assert match[0]["source_uri"] == (
-            "chroma://knowledge__delos//papers/paxos.pdf"
+            "nx-note://knowledge__delos//papers/paxos.pdf"
         )
 
 

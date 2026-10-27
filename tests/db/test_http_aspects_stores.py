@@ -79,7 +79,7 @@ def _make_aspect(**kwargs) -> AspectRecord:
         "extracted_at": "2025-01-01T00:00:00.000000Z",
         "model_version": "claude-haiku-v1",
         "extractor_name": "scholarly-paper-v1",
-        "source_uri": "chroma://test-coll/doc.pdf",
+        "source_uri": "nx-note://test-coll/doc.pdf",
         "doc_id": "1.2.3",
         "salient_sentences": ["sentence one"],
     }

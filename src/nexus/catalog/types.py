@@ -67,8 +67,9 @@ def make_relative(abs_path: str | Path, repo_root: Path) -> str:
 # corresponds to a reader registered in ``nexus.aspect_readers``;
 # adding a new scheme is gated on landing the reader first so
 # register-time validation can't silently allow URIs that have no
-# downstream consumer. ``file`` and ``chroma`` ship in Phase 1
-# (RDR-096); ``https`` and ``nx-scratch`` are reserved for Phase 4.
+# downstream consumer. ``file`` and ``chroma`` shipped in Phase 1
+# (RDR-096; ``chroma`` was renamed ``nx-note`` by RDR-231, and the
+# legacy spelling is no longer accepted at register time); ``https`` and ``nx-scratch`` are reserved for Phase 4.
 # ``http`` is intentionally excluded — Phase 4's https reader does
 # NOT cover plain http; users with http URIs must upgrade to https
 # or wait for a dedicated reader. ``x-devonthink-item`` (nexus-bqda)
@@ -77,7 +78,7 @@ def make_relative(abs_path: str | Path, repo_root: Path) -> str:
 # the reader gates on ``sys.platform == 'darwin'`` and surfaces a
 # clear error elsewhere.
 _KNOWN_URI_SCHEMES: frozenset[str] = frozenset({
-    "file", "chroma", "https", "nx-scratch", "x-devonthink-item",
+    "file", "nx-note", "https", "nx-scratch", "x-devonthink-item",
     # ``nx-orphan-backfill://<collection>/<title|chash/<hash>>`` is a
     # marker scheme used by ``nx catalog orphan-backfill synthetic`` to
     # register catalog Documents for T3 chunks that have no recoverable
@@ -226,7 +227,7 @@ class CatalogEntry:
     alias_of: str = ""
     # RDR-096 P3.1: persistent URI identity. Populated at register
     # time — bare paths normalize to ``file://<abspath>``; explicit
-    # URIs (chroma://, https://, etc.) are stored verbatim. ''
+    # URIs (nx-note://, https://, etc.) are stored verbatim. ''
     # only on legacy entries that predate P2.1's column migration.
     source_uri: str = ""
     # nexus-rzqto: bibliographic enrichment surfaced from catalog_documents

@@ -1875,10 +1875,8 @@ def _dry_run_predict_skips(
     distinct source_uri scheme+host pairs, surfacing contamination
     even when individual lines are truncated to the first 20.
     """
-    from urllib.parse import quote  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
-
     try:
-        from nexus.aspect_readers import ReadFail, read_source  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+        from nexus.aspect_readers import ReadFail, note_uri, read_source  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
         from nexus.mcp_infra import get_t3  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
         t3 = get_t3()
     except Exception as exc:  # noqa: BLE001 — best-effort T3 setup for dry-run; any failure surfaced to operator and prediction skipped
@@ -1916,7 +1914,7 @@ def _dry_run_predict_skips(
         sp = _chroma_source_id_for_entry(entry)
         if not sp:
             continue
-        uri = f"chroma://{collection}/{quote(sp, safe='/')}"
+        uri = note_uri(collection, sp, quote_rest=True)
         try:
             result = read_source(
                 uri, t3=t3,
@@ -2501,7 +2499,7 @@ async def _verify(claim_json: str, evidence: str) -> dict:
     default="",
     help=(
         "Filter to rows whose source_uri scheme matches (RDR-096 "
-        "P3.2). Common values: 'file', 'chroma', 'https', "
+        "P3.2). Common values: 'file', 'nx-note', 'https', "
         "'nx-scratch'. Use '' (default) for no filter; rows with "
         "empty / NULL source_uri are excluded when --scheme is set."
     ),
@@ -2514,7 +2512,7 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     ``<scheme>:<source_path>  <fields_populated>/5  <model_version>``
     so an operator can spot null-fields rows AND identify which URI
     scheme each row will dispatch to. The ``--scheme`` flag pre-
-    filters to a single scheme (e.g., ``--scheme=chroma`` lists only
+    filters to a single scheme (e.g., ``--scheme=nx-note`` lists only
     chunk-reassembly-backed rows).
     """
     from urllib.parse import urlparse  # noqa: PLC0415 — stdlib deferred to call site (startup cost)

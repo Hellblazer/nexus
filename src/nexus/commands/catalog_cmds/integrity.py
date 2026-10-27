@@ -620,7 +620,7 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
 
     ``rdr145_exempt`` population is LEGACY-ONLY going forward (nexus-sdp0u):
     since that fix, every non-empty-title ``store_put`` / ``memory promote``
-    document is registered with a synthesized ``chroma://<collection>/
+    document is registered with a synthesized ``nx-note://<collection>/
     <title>`` ``source_uri``, so a post-fix document can no longer satisfy
     ``not e.source_uri`` here — it is deliberately left to fall through to
     ``unclassified`` (and, in ``nx catalog reconcile-stale``, to

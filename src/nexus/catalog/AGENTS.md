@@ -6,7 +6,7 @@ The catalog is a Xanadu-inspired document registry that tracks *what* is indexed
 
 - **Tumbler** — hierarchical address (`1.2.5`) identifying a document. Every entry has one. `tumbler.py` provides depth, ancestors, lca, and JSONL readers (migration-source and recovery-bundle use only; the JSONL catalog is deleted).
 - **Owner** — the top-level tumbler segment. Repos use `owner_type='repo'` with a `repo_hash`; humans use `'curator'`. Repo owners without a hash are rejected (the shadow-registration bug class).
-- **Source URI** — persistent identity. Validated at register time against `_KNOWN_URI_SCHEMES = {file, chroma, https, nx-scratch, x-devonthink-item, nx-orphan-backfill}`. Bare paths normalize to `file://<abspath>` (`types.py:_normalize_source_uri`).
+- **Source URI** — persistent identity. Validated at register time against `_KNOWN_URI_SCHEMES = {file, nx-note, https, nx-scratch, x-devonthink-item, nx-orphan-backfill}`. Bare paths normalize to `file://<abspath>` (`types.py:_normalize_source_uri`).
 - **Link** — typed edge between documents. Built-in types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `relates`, plus custom. Every link carries `created_by` provenance.
 
 ## Three link-creation paths

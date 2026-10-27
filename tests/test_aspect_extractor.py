@@ -370,7 +370,7 @@ class TestContentSourcing:
         assert isinstance(result, ExtractFail)
         assert result.reason == "empty"
         assert "ghost-source" in result.uri or result.uri.endswith("/ghost-source")
-        assert result.uri.startswith("chroma://knowledge__delos/")
+        assert result.uri.startswith("nx-note://knowledge__delos/")
 
     def test_sources_via_read_source_when_content_empty_and_chroma_hit(
         self, monkeypatch,
@@ -409,7 +409,7 @@ class TestContentSourcing:
         assert hasattr(record, "problem_formulation")
         assert record.problem_formulation == "Sharded WAL bottleneck."
         # URI was constructed from (collection, source_path).
-        assert captured_uris == ["chroma://knowledge__delos//missing/on/disk.pdf"]
+        assert captured_uris == ["nx-note://knowledge__delos//missing/on/disk.pdf"]
 
     def test_strips_embedded_null_bytes_from_content(self, monkeypatch) -> None:
         """Some PDF extractors emit \\x00 bytes. Strip them before
@@ -494,7 +494,7 @@ class TestReadIndexedText:
         )
         # Null bytes stripped; same identity-URI shape the extractor builds.
         assert text == "OCR PROSE from chunks"
-        assert captured == ["chroma://knowledge__delos//scanned/paper.pdf"]
+        assert captured == ["nx-note://knowledge__delos//scanned/paper.pdf"]
 
     def test_lookup_path_overrides_source_path_in_uri(self, monkeypatch) -> None:
         from nexus.aspect_extractor import read_indexed_text
@@ -512,7 +512,7 @@ class TestReadIndexedText:
             source_path="relative/p.pdf",
             lookup_path="/abs/p.pdf",
         )
-        assert captured == ["chroma://knowledge__delos//abs/p.pdf"]
+        assert captured == ["nx-note://knowledge__delos//abs/p.pdf"]
 
     def test_returns_none_on_read_fail(self, monkeypatch) -> None:
         from nexus.aspect_extractor import read_indexed_text
@@ -638,7 +638,7 @@ class TestUriDispatch:
 
         assert isinstance(result, ExtractFail)
         assert result.reason == "empty"
-        assert result.uri == "chroma://knowledge__ghost/ghost-source-not-in-collection"
+        assert result.uri == "nx-note://knowledge__ghost/ghost-source-not-in-collection"
 
     def test_percent_encodes_source_path_with_anchor_or_query(
         self, monkeypatch,
@@ -669,7 +669,7 @@ class TestUriDispatch:
         # Anchor + query characters are percent-encoded; ``/`` is preserved.
         assert "%23" in captured[0]
         assert "%3F" in captured[0]
-        assert captured[0].startswith("chroma://rdr__corpus/docs/notes")
+        assert captured[0].startswith("nx-note://rdr__corpus/docs/notes")
 
     def test_returns_extract_fail_on_infra_unavailable(
         self, monkeypatch,
@@ -699,7 +699,7 @@ class TestUriDispatch:
         self, monkeypatch,
     ) -> None:
         """Verifies the URI shape passed to ``read_source``: the
-        scheme is always ``chroma://`` for empty-content calls in
+        scheme is always ``nx-note://`` for empty-content calls in
         Phase 1, and ``<collection>/<source_path>`` is the path.
         """
         from nexus.aspect_extractor import extract_aspects
@@ -719,7 +719,7 @@ class TestUriDispatch:
             source_path="docs/rdr/rdr-090.md",
             collection="rdr__corpus",
         )
-        assert captured == ["chroma://rdr__corpus/docs/rdr/rdr-090.md"]
+        assert captured == ["nx-note://rdr__corpus/docs/rdr/rdr-090.md"]
 
 
 # ── Retry behavior (audit F8) ────────────────────────────────────────────────

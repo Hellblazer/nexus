@@ -215,7 +215,7 @@ def test_reimport_is_idempotent_against_the_real_engine(cat, pg_instance, tmp_pa
     a = cat.register(
         know_owner, "recovery-note-a", content_type="knowledge",
         physical_collection=know_col,
-        source_uri="chroma://knowledge/recovery-note-a",
+        source_uri="nx-note://knowledge/recovery-note-a",
     )
     b = cat.register(
         repo_owner, "beta.py", content_type="code",

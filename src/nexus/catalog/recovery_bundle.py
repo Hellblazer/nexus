@@ -53,7 +53,7 @@ from typing import Any, Callable, Iterable
 
 import structlog
 
-from nexus.aspect_readers import FILE_ROUTED_PREFIXES, uri_for
+from nexus.aspect_readers import FILE_ROUTED_PREFIXES, NOTE_URI_SCHEME, uri_for
 from nexus.catalog.note_ttl import row_may_give_tags, row_written_by
 from nexus.catalog.types import CatalogEntry
 
@@ -77,12 +77,14 @@ def classify_store_put_origin(entry: CatalogEntry) -> str | None:
     if entry.file_path:
         return None  # file-backed always wins
     if entry.physical_collection.startswith(FILE_ROUTED_PREFIXES):
-        # uri_for's own docstring is the single source of truth: chroma://
+        # uri_for's own docstring is the single source of truth: nx-note://
         # identity is minted for everything OUTSIDE the file-routed
         # prefixes; a chroma:// URI under one of them is residue.
         return None
     source_uri = entry.source_uri or ""
-    if source_uri.startswith("chroma://"):
+    # RDR-231: a note is nx-note:// now; a row still carrying the legacy
+    # chroma:// spelling is the same note until the engine rewrites it.
+    if source_uri.startswith((NOTE_URI_SCHEME, "chroma://")):
         return "chroma_uri"
     if not source_uri:
         return "knowledge_no_path"
@@ -688,9 +690,12 @@ def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:
     collection under the target (``target_collection_for``), and retry
     with the re-derived identity."""
     entry = reader.by_source_uri(uri)
-    if entry is not None or not uri.startswith("chroma://"):
+    scheme = next(
+        (sch for sch in (NOTE_URI_SCHEME, "chroma://") if uri.startswith(sch)), None,
+    )
+    if entry is not None or scheme is None:
         return entry
-    rest = uri[len("chroma://"):]
+    rest = uri[len(scheme):]
     collection, sep, title = rest.partition("/")
     if not sep or not title:
         return None

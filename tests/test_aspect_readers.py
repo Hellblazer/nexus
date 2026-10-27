@@ -102,10 +102,8 @@ class TestNoteUriMint:
         from nexus.aspect_readers import note_uri, uri_for
 
         stored = uri_for("knowledge__nexus", self._REST)
-        assert stored == f"chroma://knowledge__nexus/{self._REST}"
-        assert note_uri("knowledge__nexus", self._REST) == stored.replace(
-            "chroma://", "nx-note://", 1
-        )
+        assert stored == f"nx-note://knowledge__nexus/{self._REST}"
+        assert note_uri("knowledge__nexus", self._REST) == stored
 
     def test_transient_form_quotes_rest_modulo_scheme(self) -> None:
         from nexus.aspect_readers import note_uri
@@ -198,21 +196,21 @@ class TestUriFor:
             # relative with no root is refused, never guessed at
             assert uri_for(collection, "src/cli.py") is None
 
-    def test_knowledge_collection_returns_chroma_uri(self):
+    def test_knowledge_collection_returns_note_uri(self):
         from nexus.aspect_readers import uri_for
 
         assert uri_for("knowledge__delos", "/papers/aleph.pdf") == (
-            "chroma://knowledge__delos//papers/aleph.pdf"
+            "nx-note://knowledge__delos//papers/aleph.pdf"
         )
         assert uri_for("knowledge__knowledge", "decision-x") == (
-            "chroma://knowledge__knowledge/decision-x"
+            "nx-note://knowledge__knowledge/decision-x"
         )
 
-    def test_unknown_prefix_returns_chroma_uri(self):
-        """Future prefixes default to chroma:// — same as the migration."""
+    def test_unknown_prefix_returns_note_uri(self):
+        """Future prefixes default to nx-note:// (RDR-231; chroma:// before)."""
         from nexus.aspect_readers import uri_for
 
-        assert uri_for("future__x", "src") == "chroma://future__x/src"
+        assert uri_for("future__x", "src") == "nx-note://future__x/src"
 
     def test_empty_source_path_returns_none(self):
         """``None`` matches the migration's NULL-on-empty backfill
@@ -225,12 +223,12 @@ class TestUriFor:
 
     def test_file_routed_prefix_never_yields_chroma_scheme(self):
         """nexus-poigc acceptance criterion 4: no write path can mint a
-        chroma:// source_uri for a collection whose prefix routes to
+        nx-note:// source_uri for a collection whose prefix routes to
         file://. Exercises every value in FILE_ROUTED_PREFIXES (the
         single source of truth ``uri_for`` itself, and the poigc backfill
         verb's candidate filter, both key on) across absolute, relative-
         with-root, relative-without-root, and empty source_path shapes —
-        none of them may ever produce a chroma:// result."""
+        none of them may ever produce a nx-note:// result."""
         from nexus.aspect_readers import FILE_ROUTED_PREFIXES, uri_for
 
         for prefix in FILE_ROUTED_PREFIXES:
@@ -242,7 +240,7 @@ class TestUriFor:
                 ("", None),
             ):
                 result = uri_for(collection, source_path, repo_root=repo_root)
-                assert result is None or not result.startswith("chroma://"), (
+                assert result is None or not result.startswith(("chroma://", "nx-note://")), (
                     f"{collection!r}, {source_path!r}, repo_root={repo_root!r} "
                     f"yielded {result!r}"
                 )
@@ -340,7 +338,7 @@ class TestReadFileUri:
         assert result.reason == "unreachable"
 
 
-# ── chroma:// reader fixtures ────────────────────────────────────────────────
+# ── nx-note:// reader fixtures ────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -379,7 +377,7 @@ def _seed_chunks(
     return coll
 
 
-# ── chroma:// reader ─────────────────────────────────────────────────────────
+# ── nx-note:// reader ─────────────────────────────────────────────────────────
 
 
 class TestReadChromaUri:
@@ -396,11 +394,11 @@ class TestReadChromaUri:
             chunks=[(0, "First and only chunk text.")],
         )
         result = _read_chroma_uri(
-            f"chroma://knowledge__t1/{title}", t3=t3_client,
+            f"nx-note://knowledge__t1/{title}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.text == "First and only chunk text."
-        assert result.metadata["scheme"] == "chroma"
+        assert result.metadata["scheme"] == "nx-note"
         assert result.metadata["collection"] == "knowledge__t1"
         assert result.metadata["source_id"] == title
         assert result.metadata["identity_field"] == "title"
@@ -419,7 +417,7 @@ class TestReadChromaUri:
             chunks=[(0, "RDR body text.")],
         )
         result = _read_chroma_uri(
-            f"chroma://rdr__t2/{sp}", t3=t3_client,
+            f"nx-note://rdr__t2/{sp}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.text == "RDR body text."
@@ -444,7 +442,7 @@ class TestReadChromaUri:
             ],
         )
         result = _read_chroma_uri(
-            f"chroma://knowledge__t3/{title}", t3=t3_client,
+            f"nx-note://knowledge__t3/{title}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.text == "first\n\nsecond\n\nthird"
@@ -498,7 +496,7 @@ class TestReadChromaUri:
             return "1.99.1"
 
         result = _read_chroma_uri(
-            f"chroma://{col_name}/anything",
+            f"nx-note://{col_name}/anything",
             t3=t3_client,
             doc_id_lookup=doc_id_lookup,
             manifest_lookup=manifest_lookup,
@@ -552,7 +550,7 @@ class TestReadChromaUri:
             return "1.99.2"
 
         result = _read_chroma_uri(
-            f"chroma://{col_name}/anything",
+            f"nx-note://{col_name}/anything",
             t3=t3_client,
             doc_id_lookup=doc_id_lookup,
             manifest_lookup=manifest_lookup,
@@ -633,7 +631,7 @@ class TestReadChromaUri:
             chunks=[(0, "noise")],
         )
         result = _read_chroma_uri(
-            "chroma://knowledge__t4/missing-doc", t3=t3_client,
+            "nx-note://knowledge__t4/missing-doc", t3=t3_client,
         )
         assert isinstance(result, ReadFail)
         assert result.reason == "empty"
@@ -647,7 +645,7 @@ class TestReadChromaUri:
         except Exception:
             pass
         result = _read_chroma_uri(
-            "chroma://knowledge__nope/anything", t3=t3_client,
+            "nx-note://knowledge__nope/anything", t3=t3_client,
         )
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"
@@ -655,13 +653,13 @@ class TestReadChromaUri:
     def test_no_t3_client_returns_read_fail(self):
         from nexus.aspect_readers import ReadFail, _read_chroma_uri
 
-        result = _read_chroma_uri("chroma://knowledge__x/y", t3=None)
+        result = _read_chroma_uri("nx-note://knowledge__x/y", t3=None)
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"
 
     @pytest.mark.parametrize(
         "uri",
-        ["chroma:///source-id-only", "chroma://knowledge__t5/"],
+        ["nx-note:///source-id-only", "nx-note://knowledge__t5/"],
         ids=["missing_collection", "missing_source_id"],
     )
     def test_malformed_uri_returns_read_fail_unreachable(self, t3_client, uri):
@@ -696,7 +694,7 @@ class TestReadChromaUri:
             metadatas=[{"title": title, "chunk_index": 0}],
         )
         result = _read_chroma_uri(
-            f"chroma://knowledge__fallback/{title}", t3=t3_client,
+            f"nx-note://knowledge__fallback/{title}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.text == "slug-shaped knowledge note text."
@@ -726,11 +724,11 @@ class TestReadChromaUri:
             metadatas=[{"source_path": sp, "title": "unrelated", "chunk_index": 0}],
         )
         # Production constructs the URI as
-        # ``f"chroma://{collection}/{quote(source_path, safe='/')}"``
+        # ``f"nx-note://{collection}/{quote(source_path, safe='/')}"``
         # — when source_path starts with ``/``, that yields a
         # ``//``-separator URI. Mirror that here.
         result = _read_chroma_uri(
-            f"chroma://knowledge__paper/{sp}", t3=t3_client,
+            f"nx-note://knowledge__paper/{sp}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.metadata["identity_field"] == "source_path"
@@ -758,7 +756,7 @@ class TestReadChromaUri:
             metadatas=[{"title": title}, {"title": title}],
         )
         result = _read_chroma_uri(
-            f"chroma://knowledge__t7/{title}", t3=t3_client,
+            f"nx-note://knowledge__t7/{title}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.metadata["chunk_count"] == 2
@@ -773,13 +771,13 @@ class TestReadChromaUri:
         [
             # Cloud-shaped source_paths are absolute filesystem paths
             # like ``/Users/.../paper.pdf``. The URI is then
-            # ``chroma://collection//Users/.../paper.pdf`` (double-slash
+            # ``nx-note://collection//Users/.../paper.pdf`` (double-slash
             # separator). ``parsed.path.removeprefix('/')`` strips
             # exactly one leading slash, preserving the second to
             # recover the absolute path.
             ("knowledge__abs", "/Users/me/papers/aleph-bft.pdf"),
             # rdr__/docs__/code__ source paths typically contain ``/``;
-            # the URI ``chroma://<collection>/<source-identifier>``
+            # the URI ``nx-note://<collection>/<source-identifier>``
             # carries them in the path component without percent-
             # encoding. ``urlparse`` returns the slashes verbatim and
             # ``.lstrip('/')`` removes only the single leading
@@ -800,7 +798,7 @@ class TestReadChromaUri:
         )
         # ``//`` separator after netloc preserves the leading slash.
         result = _read_chroma_uri(
-            f"chroma://{collection}/{sp}", t3=t3_client,
+            f"nx-note://{collection}/{sp}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.metadata["source_id"] == sp
@@ -823,7 +821,7 @@ class TestReadChromaUri:
             chunks=[(i, f"c{i}") for i in range(n)],
         )
         result = _read_chroma_uri(
-            f"chroma://knowledge__t6/{title}", t3=t3_client,
+            f"nx-note://knowledge__t6/{title}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.metadata["chunk_count"] == n
@@ -833,7 +831,7 @@ class TestReadChromaUri:
         assert parts[-1] == f"c{n - 1}"
 
 
-# ── chroma:// reader: doc_id_lookup plumbing (nexus-o6aa.10.1) ───────────────
+# ── nx-note:// reader: doc_id_lookup plumbing (nexus-o6aa.10.1) ───────────────
 
 
 class TestReadChromaUriDocIdLookup:
@@ -878,7 +876,7 @@ class TestReadChromaUriDocIdLookup:
             return "ART-deadbeef"
 
         result = _read_chroma_uri(
-            "chroma://knowledge__lookup//abs/path/paper.pdf",
+            "nx-note://knowledge__lookup//abs/path/paper.pdf",
             t3=t3_client, doc_id_lookup=lookup,
         )
         assert isinstance(result, ReadOk)
@@ -906,7 +904,7 @@ class TestReadChromaUriDocIdLookup:
             return ""
 
         result = _read_chroma_uri(
-            "chroma://docs__nodocid/orphan.md",
+            "nx-note://docs__nodocid/orphan.md",
             t3=t3_client, doc_id_lookup=lookup,
         )
         assert isinstance(result, ReadFail)
@@ -950,7 +948,7 @@ class TestReadChromaUriDocIdLookup:
 
         # No manifest_lookup wired — simulates catalog gap.
         result = _read_chroma_uri(
-            "chroma://knowledge__phase3//abs/path/paper.pdf",
+            "nx-note://knowledge__phase3//abs/path/paper.pdf",
             t3=t3_client, doc_id_lookup=lookup,
         )
         assert isinstance(result, ReadFail)
@@ -982,7 +980,7 @@ class TestReadChromaUriDocIdLookup:
             return "ART-single"
 
         result = _read_chroma_uri(
-            "chroma://knowledge__phase3_single//abs/p.pdf",
+            "nx-note://knowledge__phase3_single//abs/p.pdf",
             t3=t3_client, doc_id_lookup=lookup,
         )
         assert isinstance(result, ReadOk)
@@ -1006,7 +1004,7 @@ class TestReadChromaUriDocIdLookup:
         )
         # No doc_id_lookup → legacy ``(source_path, title)`` probe.
         result = _read_chroma_uri(
-            f"chroma://knowledge__legacy/{title}", t3=t3_client,
+            f"nx-note://knowledge__legacy/{title}", t3=t3_client,
         )
         assert isinstance(result, ReadOk)
         assert result.text == "legacy chunk"
@@ -1053,7 +1051,7 @@ class TestReadChromaUriDocIdLookup:
             return "1.2.3"  # tumbler-shaped doc_id
 
         result = _read_chroma_uri(
-            "chroma://knowledge__transitional/decision-x-pre-backfill",
+            "nx-note://knowledge__transitional/decision-x-pre-backfill",
             t3=t3_client, doc_id_lookup=lookup,
         )
         # Strict-doc_id query returns empty; legacy fallback probes on
@@ -1207,7 +1205,7 @@ class _StubHttpClient:
 
 class TestReadHttpsUri:
     """RDR-096 P4.2: ``https://`` scheme reader. Default behavior
-    prefers a chroma:// equivalent (no network round-trip) when a
+    prefers a nx-note:// equivalent (no network round-trip) when a
     ``chroma_hint`` is provided and the chunk exists in T3; falls
     back to httpx fetch otherwise. ``force_refresh=True`` bypasses
     the chroma-first preference.
@@ -1311,7 +1309,7 @@ class TestReadHttpsUri:
         )
         assert isinstance(result, ReadOk)
         assert result.text == "cached page body from chroma"
-        assert result.metadata["served_from"] == "chroma"
+        assert result.metadata["served_from"] == "nx-note"
         assert result.metadata["https_uri"] == "https://docs.bito.ai/ingest"
         # Network NOT touched.
         assert client.calls == []
@@ -1393,7 +1391,7 @@ class TestReadSourceDispatch:
             source_id=title,
             chunks=[(0, "ok")],
         )
-        result = read_source(f"chroma://knowledge__d1/{title}", t3=t3_client)
+        result = read_source(f"nx-note://knowledge__d1/{title}", t3=t3_client)
         assert isinstance(result, ReadOk)
         assert result.text == "ok"
 

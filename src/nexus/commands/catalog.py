@@ -603,7 +603,7 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
     help=(
         "Persistent URI identity (RDR-096 P3.1). Omit to derive "
         "'file://<abspath>' from --file-path automatically. Pass an "
-        "explicit URI (chroma://, https://, nx-scratch://, "
+        "explicit URI (nx-note://, https://, nx-scratch://, "
         "x-devonthink-item://) to store verbatim. Malformed URIs "
         "are rejected at register-time."
     ),

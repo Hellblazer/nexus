@@ -59,7 +59,7 @@ def test_catalog_import_prints_summary_and_exits_nonzero_when_a_note_failed(
         links_merged=1,
         unresolvable_links=[
             {
-                "from_source_uri": "chroma://k/a",
+                "from_source_uri": "nx-note://k/a",
                 "to_source_uri": "file:///gone.py",
                 "link_type": "cites",
                 "missing": "to",

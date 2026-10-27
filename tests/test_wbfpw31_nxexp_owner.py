@@ -172,7 +172,7 @@ def test_locate_owner_group_position_and_uri_synthesis():
     assert groups["file:///a"] is group
     assert group["content_type"] == "knowledge"
 
-    # Title-only owner (no source_uri): synthesizes the SAME chroma://
+    # Title-only owner (no source_uri): synthesizes the SAME nx-note://
     # convention catalog_store_hook_tracked uses for a title-only note.
     group, position = _locate_owner_group(groups, {"title": "B"}, **kw)
     synthesized = uri_for(target, "B")

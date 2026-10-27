@@ -247,12 +247,12 @@ def test_an_untitled_put_never_reconciles_onto_an_untitled_document_that_has_a_s
     """nexus-6pfgb.33: an untitled document carrying a source_uri (a path-keyed import) is that path's
     document, not an earlier untitled put: an untitled put of the same text mints its own untitled
     document sharing the chunk (RDR-108) and leaves the import's source_uri and keys alone."""
-    a = cat.seed("", source_uri="chroma://elsewhere/doc")
+    a = cat.seed("", source_uri="nx-note://elsewhere/doc")
 
     tumbler, created = _put("", ttl_days=1)
 
     assert created and tumbler != a
-    assert cat.docs[a].source_uri == "chroma://elsewhere/doc"
+    assert cat.docs[a].source_uri == "nx-note://elsewhere/doc"
     assert "ttl_days" not in cat.docs[a].meta
     assert all(u[0] != a for u in cat.updates), "the import's document was not written"
 
@@ -260,7 +260,7 @@ def test_an_untitled_put_never_reconciles_onto_an_untitled_document_that_has_a_s
 def test_an_untitled_put_reconciles_onto_the_untitled_put_beside_a_path_keyed_untitled_document(cat):
     """With both an import's untitled document (lower tumbler) and an earlier untitled put of the text,
     the put reuses its own document: the import never takes part in the lowest-tumbler pick."""
-    imported = cat.seed("", source_uri="chroma://elsewhere/doc", tumbler="1.1.3")
+    imported = cat.seed("", source_uri="nx-note://elsewhere/doc", tumbler="1.1.3")
     earlier = cat.seed("", source_uri="", tumbler="1.1.7")
 
     tumbler, created = _put("", ttl_days=1)

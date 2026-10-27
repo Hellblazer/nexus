@@ -98,13 +98,13 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 import structlog
 
 from nexus import pdeathsig as _pdeathsig
-from nexus.aspect_readers import ReadFail, ReadOk, read_source, uri_for
+from nexus.aspect_readers import ReadFail, ReadOk, note_uri, read_source, uri_for
 from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
 from nexus.operators.dispatch import _write_prompt_file
@@ -1320,7 +1320,7 @@ def read_indexed_text(
 
     This is the SAME evidence :func:`extract_aspects` consumes: the
     document reassembled from its indexed T3 chunks via
-    :func:`nexus.aspect_readers.read_source` over the ``chroma://`` URI and
+    :func:`nexus.aspect_readers.read_source` over the ``nx-note://`` URI and
     the catalog ``document_chunks`` manifest. Use it to verify an extracted
     claim against what the extractor actually saw — NOT the raw source file.
 
@@ -1336,7 +1336,7 @@ def read_indexed_text(
     indeterminate sample to skip, not a verification failure.
     """
     uri_identity = lookup_path or source_path
-    uri = f"chroma://{collection}/{quote(uri_identity, safe='/')}"
+    uri = note_uri(collection, uri_identity, quote_rest=True)
     try:
         t3 = get_t3()
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
@@ -1517,7 +1517,7 @@ def extract_aspects(
 
     * ``content`` non-empty → used directly.
     * ``content == ""`` → construct
-      ``chroma://<collection>/<lookup_path or source_path>`` and
+      ``nx-note://<collection>/<lookup_path or source_path>`` and
       dispatch through :func:`nexus.aspect_readers.read_source`. The
       chroma reader reassembles the document from T3 chunks via the
       ``CHROMA_IDENTITY_FIELD`` dispatch table (``title`` for
@@ -1564,7 +1564,7 @@ def extract_aspects(
         # separators intact (``safe='/'``) and avoids ``#``/``?``
         # being parsed as URI fragments / queries by the reader.
         uri_identity = lookup_path or source_path
-        uri = f"chroma://{collection}/{quote(uri_identity, safe='/')}"
+        uri = note_uri(collection, uri_identity, quote_rest=True)
         try:
             t3 = get_t3()
         except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
@@ -1664,7 +1664,7 @@ def extract_aspects_batch(
       retried up to 3 times internally.
     * ``ExtractFail`` (RDR-096 P5.1) — typed read-failure sentinel
       when an empty-content row could not be sourced via
-      ``chroma://`` URI. Mirrors the single-doc path's
+      ``nx-note://`` URI. Mirrors the single-doc path's
       ``ExtractFail`` contract so the worker can ``mark_done`` and
       move on without writing a row.
     * ``None`` — collection has no registered extractor (the caller
@@ -1690,7 +1690,7 @@ def extract_aspects_batch(
     Empty-content sourcing (RDR-096 P5.1, nexus-8g79.34): rows with
     ``content=""`` route through
     :func:`nexus.aspect_readers.read_source` with a
-    ``chroma://<collection>/<source_path>`` URI — the same path the
+    ``nx-note://<collection>/<source_path>`` URI — the same path the
     single-doc ``extract_aspects`` takes. Read failures land as
     ``ExtractFail`` in the corresponding slot of the output list.
     Pre-P5.1 the worker pre-fetched content via the deprecated
@@ -1739,7 +1739,7 @@ def extract_aspects_batch(
     t3_handle: Any = None  # lazy: only construct when we actually need to read
     for idx, collection, source_path, content, queue_doc_id in indexed_inputs:
         if not content:
-            uri = f"chroma://{collection}/{quote(source_path, safe='/')}"
+            uri = note_uri(collection, source_path, quote_rest=True)
             if t3_handle is None:
                 try:
                     t3_handle = get_t3()

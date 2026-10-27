@@ -74,7 +74,7 @@ class TestStalenessSignal:
     def test_fresh_when_no_scheme_mtime(self) -> None:
         """StatOk(current_mtime=None) → fresh for schemes without mtime.
 
-        Applies to chroma:// (content-addressed), nx-scratch:// (no per-entry mtime),
+        Applies to nx-note:// (content-addressed), nx-scratch:// (no per-entry mtime),
         and https:// in Phase A (deferred — can't check → treat as fresh).
         """
         result = staleness_signal(1_000_000.0, StatOk(current_mtime=None))
@@ -392,19 +392,19 @@ class TestStatScratchUri:
         assert result.reason == "error"
 
 
-# ── chroma:// tests ───────────────────────────────────────────────────────────
+# ── nx-note:// tests ───────────────────────────────────────────────────────────
 
 
 class TestStatChromaUri:
-    """chroma:// is content-addressed — always StatOk(current_mtime=None) → fresh."""
+    """nx-note:// is content-addressed — always StatOk(current_mtime=None) → fresh."""
 
     def test_chroma_uri_returns_statok_none_mtime(self) -> None:
-        result = stat_source("chroma://tenant1/collection1/deadbeef01234567deadbeef01234567")
+        result = stat_source("nx-note://tenant1/collection1/deadbeef01234567deadbeef01234567")
         assert isinstance(result, StatOk)
         assert result.current_mtime is None
 
     def test_chroma_is_always_fresh(self) -> None:
-        result = stat_source("chroma://t/col/abc123abc123abc123abc123abc12312")
+        result = stat_source("nx-note://t/col/abc123abc123abc123abc123abc12312")
         signal = staleness_signal(0.0, result)
         assert signal == "fresh"
 
@@ -957,7 +957,7 @@ class TestCaptureHttpsEtag:
 
     def test_non_https_scheme_returns_empty_without_network(self) -> None:
         assert capture_https_etag("file:///tmp/x") == ""
-        assert capture_https_etag("chroma://col/doc") == ""
+        assert capture_https_etag("nx-note://col/doc") == ""
         assert capture_https_etag("") == ""
 
     def test_returns_etag_header_verbatim(self, https_stat_server) -> None:

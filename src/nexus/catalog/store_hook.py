@@ -919,7 +919,7 @@ def catalog_store_hook_tracked(
     nexus-bm8dd, so the reader's knowledge-collection identity field is
     *title* — this reuses that exact convention rather than forking a
     second one). Empty *title* synthesizes nothing (``source_uri=None``):
-    a title-less ``chroma://<collection>/`` URI would collapse every
+    a title-less ``nx-note://<collection>/`` URI would collapse every
     untitled document under one identity, which is worse than today's
     unlimited-duplicate behavior for that one case — so it is left
     exactly as before (nexus-39upx: legacy-duplicate collapse is a
@@ -986,7 +986,7 @@ def catalog_store_hook_tracked(
             return "", False
 
         # nexus-sdp0u: stable, collection-scoped identity for this document.
-        # Reuses aspect_readers.uri_for's exact chroma:// convention (the
+        # Reuses aspect_readers.uri_for's exact nx-note:// convention (the
         # knowledge-collection identity field the reader already resolves
         # by is *title*, since these single-chunk callers carry no
         # source_path in chunk metadata post-RDR-102 D2) — one URI format,

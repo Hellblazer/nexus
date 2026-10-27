@@ -245,6 +245,9 @@ def _entry(**kw: Any) -> CatalogEntry:
 
 def test_classifier_legs():
     assert classify_store_put_origin(_entry(source_uri="chroma://knowledge/x")) == "chroma_uri"
+    # RDR-231: a note's stored identity is nx-note:// (the legacy row above is
+    # the same note until the engine rewrites it).
+    assert classify_store_put_origin(_entry(source_uri="nx-note://knowledge/x")) == "chroma_uri"
     assert classify_store_put_origin(_entry(source_uri="")) == "knowledge_no_path"
     # round-2 bug pin: chroma:// under a file-routed prefix is residue.
     assert classify_store_put_origin(
@@ -266,7 +269,7 @@ def test_link_identity_uri_derives_for_legacy_docs():
     the empty string."""
     legacy = _entry(title="legacy-note", source_uri="")
     derived = link_identity_uri(legacy)
-    assert derived.startswith("chroma://")
+    assert derived.startswith("nx-note://")
     assert "legacy-note" in derived
     normal = _entry(source_uri="chroma://knowledge/x")
     assert link_identity_uri(normal) == "chroma://knowledge/x"
@@ -492,7 +495,7 @@ def test_bundle_is_plain_jsonl(fake_catalog, tmp_path):
     assert links and all("from_source_uri" in l and "tumbler" not in json.dumps(l) for l in links)
     # the legacy doc's link endpoint carries the DERIVED identity
     derived = [l for l in links if l["link_type"] == "relates"]
-    assert derived and derived[0]["from_source_uri"].startswith("chroma://")
+    assert derived and derived[0]["from_source_uri"].startswith("nx-note://")
 
 
 # ── import ──────────────────────────────────────────────────────────────────

@@ -157,10 +157,10 @@ def test_fresh_box_service_mode_registers(fake_client):
     assert reg["content_type"] == "knowledge"
     assert reg["physical_collection"] == _COLLECTION
     assert {k: v for k, v in reg["meta"].items() if k != "put_at"} == {"doc_id": _DOC_ID}  # put_at: nexus-6pfgb.15
-    # nexus-sdp0u: the synthesized identity — same chroma:// convention as
+    # nexus-sdp0u: the synthesized identity — same nx-note:// convention as
     # aspect_readers.uri_for — must reach the wire so the engine's
     # upsert-on-source_uri identity can match a later re-put.
-    assert reg["source_uri"] == f"chroma://{_COLLECTION}/fresh-box-note"
+    assert reg["source_uri"] == f"nx-note://{_COLLECTION}/fresh-box-note"
 
 
 def test_fresh_box_service_mode_dedups_by_doc_id(fake_client, monkeypatch):
@@ -222,7 +222,7 @@ def test_fresh_box_service_mode_reconciles_reput_by_source_uri(fake_client, monk
 
     monkeypatch.setattr(
         _FakeHttpCatalogClient, "by_source_uri",
-        lambda self, uri: _Existing() if uri == f"chroma://{_COLLECTION}/fresh-box-note" else None,
+        lambda self, uri: _Existing() if uri == f"nx-note://{_COLLECTION}/fresh-box-note" else None,
     )
     tumbler = catalog_store_hook(
         title="fresh-box-note",
