@@ -200,11 +200,11 @@ def put_cmd(
         click.echo(superseded)
 
 
-# nexus-8g79.10 (V1): catalog_store_hook moved to
-# ``nexus.catalog.store_hook`` (lower layer) so MCP infra can invoke
-# without the MCP layer reaching up into this CLI module. Re-exported
-# here under the legacy private name for back-compat.
-from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook  # noqa: E402
+# nexus-8g79.10 (V1): catalog_store_hook moved to ``nexus.catalog.store_hook``
+# (lower layer) so MCP infra can invoke without the MCP layer reaching up into
+# this CLI module. The legacy private re-export (``_catalog_store_hook``) is
+# gone (RDR-231, nexus-bivz3.15): it registered a note without the serving-engine
+# floor check, and nothing in ``src/`` called it.
 # nexus-spujb: ``get_cmd`` reads a split note back whole.
 from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa: E402
 # RDR-223 P2.6 (nexus-z0o2p.16): ``put_cmd`` writes through

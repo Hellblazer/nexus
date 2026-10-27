@@ -4,14 +4,15 @@
 A note's ``source_uri`` is ``nx-note://<collection>/<title>``, minted by ``aspect_readers.note_uri`` and
 recognised by ``is_note_uri`` / ``canonical_note_uri``. The legacy spelling ``chroma://`` survives only
 where something reads or repairs old rows. This lint stops a new site from spelling either scheme
-itself (RDR Risks and Mitigations: "nothing else spells a scheme"). It complements
-``tests/test_rdr231_client_mints.py``, whose ``f"chroma://`` census was the interim guard (see
-``test_the_interim_mint_census_is_a_subset_of_this_lint``).
+itself (RDR Risks and Mitigations: "nothing else spells a scheme"). It replaced the interim
+``f"chroma://`` line census that ``tests/test_rdr231_client_mints.py`` carried until nexus-bivz3.14.
 
 What is flagged, by AST walk over every ``*.py`` under ``src/nexus``:
 
 * a string that builds ``chroma://`` or ``nx-note://``: a ``Constant``, an f-string, or a ``+``
   concatenation, folded so ``"chro" + "ma://"`` and ``"nx-note" + "://"`` read as the scheme;
+* a string that names either scheme with a colon after it, however much regex punctuation sits between
+  (nexus-bivz3.15, code review S1): ``r"^(?:chroma|nx-note)://"``, ``startswith("chroma:")``;
 * a ``Constant`` exactly equal to ``"chroma"`` (a scheme key: dict key, set member, ``== "chroma"``,
   ``"scheme": "chroma"``) unless it is an operand of ``/`` (``config_dir / "chroma"`` is a directory
   name: ``config.py``, ``stranded_install.py``, ``db/minilm_direct.py``).
@@ -32,8 +33,10 @@ What is not flagged, and why:
   lightweight ``types`` module import ``aspect_readers`` for no protection. The bead's requirement
   names only the legacy ``"chroma"`` key; the legacy spelling must not resurface as a key.
 
-Allowlist entries are per FILE, each with a reason, and a file with no remaining hit fails the
-stale-entry test. The counts (files scanned, hits, allowlisted hits) are in the assertion message of
+Allowlist entries are per FILE, each with a reason AND the number of hit lines the file has today
+(nexus-bivz3.15): a new mint inside an allowlisted file changes the count and fails
+``test_the_allowlisted_files_hold_exactly_their_pinned_hits``, so the allowlist cannot become a licence
+for the whole file. A file with no remaining hit fails the stale-entry test. The counts (files scanned, hits, allowlisted hits) are in the assertion message of
 ``test_every_scheme_literal_is_in_an_allowlisted_file`` when it fails; ``python -c "from tests.test_rdr231_note_scheme_literals_lint import _scan; print(_scan())"``
 prints them on a green tree.
 """
@@ -54,23 +57,32 @@ _SRC_REL = Path("src") / "nexus"
 _UNKNOWN = "\x00"
 
 _SCHEME = re.compile(r"(?:chroma|nx-note)://")
+#: The scheme name followed by a colon, with up to six punctuation characters between (a regex group's
+#: closing paren, a quote, a bracket): ``(?:chroma|nx-note)://``, ``chroma:``. Prose that merely
+#: contains the word has no colon straight after it and is not matched.
+_SCHEME_COLON = re.compile(r"(?:chroma|nx-note)[^\w\s]{0,6}:")
 _LEGACY_KEY = "chroma"
 
 #: Fewer files than this means the walk found the wrong directory.
 _MIN_FILES_SCANNED = 300
 
-_ALLOWED: dict[str, str] = {
+#: path -> (reason, hit lines in that file today). Re-measure with
+#: ``python -c "from tests.test_rdr231_note_scheme_literals_lint import _scan; print(_scan())"``.
+_ALLOWED: dict[str, tuple[str, int]] = {
     "src/nexus/aspect_readers.py": (
         "owns the definitions: NOTE_URI_SCHEME, the legacy chroma:// spelling canonical_note_uri still "
-        "accepts on input, and the reader and stat registries keyed by the scheme"
+        "accepts on input, and the reader and stat registries keyed by the scheme",
+        2,
     ),
     "src/nexus/commands/catalog_cmds/backfill.py": (
         "`nx catalog backfill` finds and repairs stored chroma:// rows under file-routed collections by "
-        "prefix; it builds a pattern to FIND residue, never an identity to store"
+        "prefix; it builds a pattern to FIND residue, never an identity to store",
+        6,
     ),
     "src/nexus/catalog/recovery_bundle.py": (
         "the residue counter counts bundle rows still carrying the legacy chroma:// spelling under a "
-        "file-routed collection; it recognises the spelling and mints nothing"
+        "file-routed collection; it recognises the spelling and mints nothing",
+        1,
     ),
 }
 
@@ -124,7 +136,7 @@ def _hit_lines(path: Path) -> set[int]:
             continue
         if isinstance(n, (ast.Constant, ast.BinOp)):
             folded = _fold(n)
-            if folded is not None and _SCHEME.search(folded):
+            if folded is not None and (_SCHEME.search(folded) or _SCHEME_COLON.search(folded)):
                 lines.add(n.lineno)
         if isinstance(n, ast.Constant) and n.value == _LEGACY_KEY:
             up = parent.get(id(n))
@@ -159,11 +171,20 @@ def test_every_scheme_literal_is_in_an_allowlisted_file() -> None:
     )
 
 
+def test_the_allowlisted_files_hold_exactly_their_pinned_hits() -> None:
+    """A new scheme literal inside an allowlisted file is a new mint site the per-file allowlist would
+    otherwise wave through (code review S1, nexus-bivz3.15). Re-measure and edit the pin only for a literal
+    that recognises or repairs residue, with the reason in the entry."""
+    _, found = _scan()
+    drift = {f: (found.get(f, 0), pinned) for f, (_reason, pinned) in _ALLOWED.items() if found.get(f, 0) != pinned}
+    assert not drift, f"allowlisted files whose scheme-literal line count moved (now, pinned): {drift}"
+
+
 def test_the_allowlist_has_no_stale_entries_and_every_reason_is_real() -> None:
     _, found = _scan()
     stale = sorted(set(_ALLOWED) - set(found))
     assert not stale, f"allowlisted files with no scheme literal left (remove the entry): {stale}"
-    for path, reason in _ALLOWED.items():
+    for path, (reason, _pinned) in _ALLOWED.items():
         assert (REPO / path).is_file(), f"{path}: allowlisted file does not exist"
         assert len(reason.strip()) > 40, f"{path}: reason too short to be a justification"
 
@@ -193,6 +214,10 @@ _PLANTS = {
     "set_member": 'SCHEMES = frozenset({"file", "chroma"})\n',
     "compare": 'def u(s):\n    return s == "chroma"\n',
     "scheme_value": 'ROW = {"scheme": "chroma"}\n',
+    "regex_alternation": 'import re\nR = re.compile(r"^(?:chroma|nx-note)://")\n',
+    "regex_alternation_reversed": 'import re\nR = re.compile(r"(?:nx-note|chroma)://")\n',
+    "prefix_test_with_a_colon": 'def u(s):\n    return s.startswith("chroma:")\n',
+    "nx_note_prefix_test_with_a_colon": 'def u(s):\n    return s.startswith("nx-note:")\n',
     "startswith_in_a_message": 'def u(log):\n    log.info("row is chroma://c/x")\n',
 }
 
@@ -223,18 +248,3 @@ def test_a_directory_name_a_docstring_a_comment_and_a_bare_scheme_name_are_not_f
     mod.parent.mkdir(parents=True)
     mod.write_text(_CLEAN[name])
     assert _scan(tmp_path.resolve()) == (1, {}), name
-
-
-def test_the_interim_mint_census_is_a_subset_of_this_lint() -> None:
-    """``tests/test_rdr231_client_mints.py::TestNoSourceMintsChromaNoteUri`` greps lines for ``f"chroma://``
-    and exempts ``backfill.py``. Every line it could flag is an f-string chroma:// literal, which this
-    lint flags too (the planted ``chroma_fstring`` case), and its one exemption is allowlisted here. So
-    this lint owns the check; the census is redundant and may be deleted by whoever next edits that file."""
-    assert "src/nexus/commands/catalog_cmds/backfill.py" in _ALLOWED
-    census = re.compile(r"""f["']chroma://""")
-    src = REPO / _SRC_REL
-    _, found = _scan()
-    for p in sorted(src.rglob("*.py")):
-        rel = p.relative_to(REPO).as_posix()
-        if census.search(p.read_text(encoding="utf-8")):
-            assert rel in found, f"{rel} has an f-string chroma:// the census sees and this lint does not"
