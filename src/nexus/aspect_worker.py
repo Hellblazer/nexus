@@ -30,10 +30,13 @@ Worker contract:
   30 s — nexus-59611; the idle poll is edge load, see the constant).
 * Reclaims rows stuck in ``in_progress`` for > ``stale_timeout``
   seconds (default 300 s) before each poll, so worker process
-  death does not wedge a row forever. A reclaim counts as an attempt
-  (engine ``AspectRepository.reclaimStale``, nexus-j67ix.2): it adds one to
-  ``retry_count`` and, from ``_RETRY_MAX_ATTEMPTS`` on, terminal-fails the row,
-  so a document that kills its worker every time is not reclaimed forever.
+  death does not wedge a row forever. The age-based reclaim counts as an
+  attempt (engine ``AspectRepository.reclaimStale``, nexus-j67ix.2): it adds
+  one to ``retry_count`` and, from ``_RETRY_MAX_ATTEMPTS`` on, terminal-fails
+  the row, so a document that kills its worker every time is not reclaimed
+  forever. The daemon's final sweep at a graceful stop does not count
+  (``count_attempt=False``, nexus-j67ix.3): rows a stopping worker leaves
+  behind did nothing wrong.
 
 Result handling:
 
@@ -50,8 +53,8 @@ Result handling:
   a bad document terminal-fails for triage; a SELF FAULT — this
   process's own environment is broken — writes no row state at
   all, stands the worker down, and leaves the claimed rows for
-  ``reclaim_stale``. The middle class is terminal, and so is a
-  reclaim of a row whose attempts have reached the cap (the engine's
+  ``reclaim_stale``. The middle class is terminal, and so is an
+  age-based reclaim of a row whose attempts have reached the cap (the engine's
   ``reclaimStale`` counts each reclaim as an attempt); both stay
   terminal until manually re-enqueued.
 
@@ -853,9 +856,12 @@ class AspectExtractionWorker:
         fresh environment. A persistent host fault (a full disk) therefore
         becomes a respawn loop rather than a silent one. That is the intended
         trade: loud and non-destructive over quiet and destructive. One
-        cost (nexus-j67ix.2): every reclaim of the rows this worker leaves
-        behind spends one attempt, so a respawn loop that keeps claiming the
-        same head-of-queue rows terminal-fails them after the cap.
+        cost (nexus-j67ix.2) is bounded by nexus-j67ix.3: the stopping
+        daemon's own sweep (``reclaim_stale(0, count_attempt=False)``) returns
+        the rows this worker leaves behind without spending an attempt, so a
+        respawn loop on a persistent fault does not terminal-fail them. A row
+        that stays ``in_progress`` until the periodic age-based sweep reclaims
+        it (the daemon died without stopping) still spends one.
         """
         with self._self_fault_lock:
             first = self._self_fault is None

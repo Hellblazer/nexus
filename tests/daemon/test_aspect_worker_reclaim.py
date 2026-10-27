@@ -51,7 +51,7 @@ class _FakeQueue:
         self.closed = 0
         self._reclaimed = 0
 
-    def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
         self.reclaim_calls.append(timeout_seconds)
         return self._reclaimed
 
@@ -76,6 +76,42 @@ def test_daemon_reclaims_on_interval_with_stale_window(tmp_path: Path) -> None:
         assert q.reclaim_calls[0] == 60
     finally:
         d.stop()
+
+
+class _ArgsQueue(_FakeQueue):
+    """Records whether each reclaim spent an attempt (the fake's default is the
+    real signature's: counted unless the caller says otherwise)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reclaims: list[tuple[int, bool]] = []
+
+    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
+        self.reclaims.append((timeout_seconds, count_attempt))
+        return 0
+
+
+def test_periodic_sweep_counts_and_the_stop_sweep_does_not(tmp_path: Path) -> None:
+    """nexus-j67ix.3: only the age-based sweep spends a retry attempt. The final
+    sweep at a graceful stop (and so the self-fault stand-down, which ends in the
+    same stop) returns abandoned rows to pending without charging them."""
+    q = _ArgsQueue()
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="default",
+        worker_factory=_FakeWorker, queue_factory=lambda: q,
+        reclaim_interval=0.05, stale_timeout_seconds=60,
+    )
+    d.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not q.reclaims:
+            time.sleep(0.02)
+        assert q.reclaims, "daemon did not run the periodic sweep"
+    finally:
+        d.stop()
+    assert all(r == (60, True) for r in q.reclaims[:-1]), q.reclaims
+    assert q.reclaims[0] == (60, True), "the periodic sweep must count"
+    assert q.reclaims[-1] == (0, False), "the stop sweep must not count"
 
 
 def test_daemon_closes_reclaim_queue_on_stop(tmp_path: Path) -> None:
@@ -105,7 +141,7 @@ def test_reclaim_failure_does_not_kill_the_loop(tmp_path: Path) -> None:
     """A transient reclaim error must be swallowed (logged) so the loop keeps
     running — a stranded row gets another chance on the next interval."""
     class _FlakyQueue(_FakeQueue):
-        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
             self.reclaim_calls.append(timeout_seconds)
             if len(self.reclaim_calls) == 1:
                 raise RuntimeError("service blip")
@@ -142,7 +178,7 @@ def test_reclaim_failure_evicts_and_rebuilds_queue(tmp_path: Path) -> None:
             super().__init__()
             self._fail = fail
 
-        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
             self.reclaim_calls.append(timeout_seconds)
             if self._fail:
                 raise RuntimeError("401 Unauthorized (stale token)")
@@ -246,7 +282,7 @@ def test_daemon_backs_off_while_the_service_is_down(tmp_path: Path) -> None:
     the 30s base forever (nexus-g5rz5): 2,880 failed attempts a day against a
     service that is not there."""
     class _Down:
-        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
             raise ConnectionError("engine is down")
 
         def close(self) -> None: ...

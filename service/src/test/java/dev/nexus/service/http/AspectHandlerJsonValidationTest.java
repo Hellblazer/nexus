@@ -136,6 +136,34 @@ class AspectHandlerJsonValidationTest {
         assertThat(ex.status).as("malformed extras JSON must 400 on /import too").isEqualTo(400);
     }
 
+    // ── nexus-j67ix.3: reclaim_stale's optional boolean count_attempt. A non-boolean
+    //    400s before the repository is reached (null DataSource here). ───────────
+
+    @Test
+    void reclaimStale_nonBooleanCountAttempt_returns400() throws Exception {
+        for (String bad : new String[]{"\"false\"", "0", "null", "{}"}) {
+            CapturingExchange ex = post("/v1/aspects/queue/reclaim_stale",
+                "{\"timeout_seconds\":0,\"count_attempt\":" + bad + "}");
+            handleWithTenant(ex);
+            assertThat(ex.status).as("count_attempt=" + bad + " must 400").isEqualTo(400);
+            assertThat(ex.bodyString()).contains("count_attempt").contains("boolean");
+        }
+    }
+
+    @Test
+    void reclaimStale_booleanOrAbsentCountAttempt_doesNotFailValidation() throws Exception {
+        for (String body : new String[]{
+                "{\"timeout_seconds\":0,\"count_attempt\":true}",
+                "{\"timeout_seconds\":0,\"count_attempt\":false}",
+                "{\"timeout_seconds\":0}"}) {
+            CapturingExchange ex = post("/v1/aspects/queue/reclaim_stale", body);
+            handleWithTenant(ex);
+            // Fails downstream against the null DataSource; any status but 400 proves
+            // the request cleared the count_attempt gate.
+            assertThat(ex.status).as(body).isNotEqualTo(400);
+        }
+    }
+
     // ── Helpers (mirrors AspectHandlerEnqueueErrorTest's CapturingExchange) ──────
 
     private void handleWithTenant(CapturingExchange ex) throws Exception {

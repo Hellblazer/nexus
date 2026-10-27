@@ -53,7 +53,7 @@ import java.util.Optional;
  *   POST  /v1/aspects/queue/mark_done             delete row on success
  *   POST  /v1/aspects/queue/mark_failed           mark as failed
  *   POST  /v1/aspects/queue/mark_retry            reset to pending
- *   POST  /v1/aspects/queue/reclaim_stale         reclaim stale in_progress rows
+ *   POST  /v1/aspects/queue/reclaim_stale         reclaim stale in_progress rows; timeout_seconds= (default 300) and optional boolean count_attempt= (default true: each reclaim spends one retry attempt and a row at the cap fails; false: rows go back to pending untouched, the daemon's graceful-stop sweep, nexus-j67ix.3; a non-boolean value is a 400 naming the field)
  *   GET   /v1/aspects/queue/pending_count         count pending rows
  *   GET   /v1/aspects/queue/is_drained            check drained
  *   GET   /v1/aspects/queue/list_pending          list pending (limit= optional)
@@ -613,7 +613,19 @@ public final class AspectHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         int timeoutSec = body.containsKey("timeout_seconds")
             ? ((Number) body.get("timeout_seconds")).intValue() : 300;
-        int n = repo.reclaimStale(tenant, timeoutSec);
+        // nexus-j67ix.3: absent means true (the counted age-based sweep, so an older
+        // client is unchanged). A present value must be a JSON boolean: a string,
+        // number, null or object is a caller bug, and silently counting would spend
+        // the very attempt the caller asked to keep.
+        boolean countAttempt = true;
+        if (body.containsKey("count_attempt")) {
+            if (!(body.get("count_attempt") instanceof Boolean b)) {
+                HttpUtil.send(ex, 400, "{\"error\":\"count_attempt must be a boolean\"}");
+                return;
+            }
+            countAttempt = b;
+        }
+        int n = repo.reclaimStale(tenant, timeoutSec, countAttempt);
         HttpUtil.send(ex, 200, "{\"reclaimed\":" + n + "}");
     }
 

@@ -541,6 +541,28 @@ class TestHttpAspectQueue:
         store = self._queue({"/v1/aspects/queue/reclaim_stale": {"reclaimed": 3}})
         assert store.reclaim_stale(300) == 3
 
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({}, True),
+            ({"count_attempt": True}, True),
+            ({"count_attempt": False}, False),
+        ],
+    )
+    def test_reclaim_stale_posts_count_attempt(self, kwargs, expected):
+        # nexus-j67ix.3: the body always carries both keys; the stop sweep passes
+        # count_attempt=False so only the age-based sweep spends an attempt.
+        captured = {}
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"reclaimed": 2})
+
+        store = HttpAspectQueue(base_url="http://test", _token="tok")
+        store._client = httpx.Client(transport=httpx.MockTransport(handle_request))
+        assert store.reclaim_stale(0, **kwargs) == 2
+        assert captured["body"] == {"timeout_seconds": 0, "count_attempt": expected}
+
     def test_pending_count(self):
         store = self._queue({"/v1/aspects/queue/pending_count": {"count": 7}})
         assert store.pending_count() == 7

@@ -355,7 +355,7 @@ class _FakeHostedWorker:
 
 
 class _NoopQueue:
-    def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
         return 0
 
     def close(self) -> None:
@@ -390,6 +390,39 @@ def test_the_daemon_stands_down_when_its_worker_reports_a_self_fault(tmp_path: P
         assert events[0]["log_level"] == "error"
     finally:
         d.stop()
+
+
+class _CountingQueue(_NoopQueue):
+    def __init__(self) -> None:
+        self.reclaims: list[tuple[int, bool]] = []
+
+    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
+        self.reclaims.append((timeout_seconds, count_attempt))
+        return 0
+
+
+def test_the_stand_down_stop_returns_rows_without_spending_an_attempt(tmp_path: Path) -> None:
+    """nexus-j67ix.3: a persistent host fault (a full disk) respawns this daemon in
+    a loop, and each cycle ends in the stop sweep. That sweep must not charge the
+    rows it frees, or the loop terminal-fails the same head-of-queue rows after the
+    retry cap: the collateral kill nexus-yg70j exists to prevent."""
+    from nexus.daemon.aspect_worker_daemon import AspectWorkerDaemon
+
+    hosted = _FakeHostedWorker()
+    q = _CountingQueue()
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="tenant-A",
+        worker_factory=lambda: hosted, queue_factory=lambda: q,
+    )
+    d.start()
+    try:
+        hosted.handler("host_resource_exhausted (ENOSPC)")
+        assert d._stop.is_set() is True
+        assert d.is_fenced() is False, "the stand-down path must reach the unfenced stop sweep"
+    finally:
+        d.stop()
+    assert q.reclaims, "the stop sweep never ran"
+    assert q.reclaims[-1] == (0, False), q.reclaims
 
 
 def test_the_real_worker_exposes_the_hook_the_daemon_attaches() -> None:

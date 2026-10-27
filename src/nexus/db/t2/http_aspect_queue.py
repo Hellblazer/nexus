@@ -355,11 +355,21 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "interval_seconds": interval_seconds,
         }, idempotent=False)
 
-    def reclaim_stale(self, timeout_seconds: int = 300) -> int:
-        """Reclaim in_progress rows older than timeout: each goes back to
-        'pending' with retry_count + 1, or to 'failed' when it was already at
-        the retry cap (the engine's reclaimStale counts a reclaim as an
-        attempt, nexus-j67ix.2).
+    def reclaim_stale(
+        self, timeout_seconds: int = 300, *, count_attempt: bool = True,
+    ) -> int:
+        """Reclaim in_progress rows older than timeout.
+
+        ``count_attempt=True`` (default, the age-based sweep): each row goes
+        back to 'pending' with retry_count + 1, or to 'failed' when it was
+        already at the retry cap (the engine's reclaimStale counts a reclaim as
+        an attempt, nexus-j67ix.2).
+
+        ``count_attempt=False`` (the daemon's graceful-stop sweep, nexus-j67ix.3):
+        every stale row goes back to 'pending' with retry_count and last_error
+        unchanged, and is never failed, because the rows a stopping worker
+        abandons did nothing wrong. An engine older than that change ignores the
+        key and counts, as it always did.
 
         Returns the number of rows reclaimed, whichever way they went.
 
@@ -371,7 +381,11 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         done nothing (RDR-173's shutdown-observability warning line
         reads this count).
         """
-        r = self._post("/reclaim_stale", {"timeout_seconds": timeout_seconds}, idempotent=False)
+        r = self._post(
+            "/reclaim_stale",
+            {"timeout_seconds": timeout_seconds, "count_attempt": count_attempt},
+            idempotent=False,
+        )
         return int(r.get("reclaimed", 0))
 
     def pending_count(self, *, timeout: float | None = None) -> int:

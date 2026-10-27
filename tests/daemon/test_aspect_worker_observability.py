@@ -133,7 +133,7 @@ def test_reclaim_reset_emits_structured_signal(tmp_path: Path, monkeypatch) -> N
     carrying the tenant + count so self-healing is observable (item 2). Driven
     via the _reclaim_once seam in the main thread."""
     class _ResettingQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
             return 3   # reset 3 rows
 
         def close(self) -> None: ...
@@ -159,7 +159,7 @@ def test_reclaim_silent_when_nothing_stranded(tmp_path: Path, monkeypatch) -> No
     """A healthy sweep that resets nothing emits no reclaimed_stale event (the
     signal means 'self-healing happened', not 'loop is alive')."""
     class _EmptyQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
             return 0
 
         def close(self) -> None: ...
@@ -221,7 +221,7 @@ def test_stop_with_undrained_rows_signals(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(awd, "_log", cap)
 
     class _UndrainedQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
             return 2   # the final sweep finds 2 abandoned in_progress rows
 
         def close(self) -> None: ...
@@ -255,7 +255,7 @@ def test_started_log_carries_a_phase_timing_breakdown(tmp_path: Path, monkeypatc
     monkeypatch.setattr(awd, "_log", cap)
 
     class _NoopQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
             return 0
 
         def close(self) -> None: ...
@@ -304,7 +304,7 @@ def test_started_log_carries_process_age(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(awd, "_process_age_ms", lambda: 1234.5)
 
     class _NoopQueue:
-        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+        def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
             return 0
 
         def close(self) -> None: ...

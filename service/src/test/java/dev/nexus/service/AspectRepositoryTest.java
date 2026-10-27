@@ -1554,6 +1554,81 @@ class AspectRepositoryTest {
             .isEqualTo(backoff.toInstant());
     }
 
+    // ── uncounted reclaim (nexus-j67ix.3): the daemon's stop sweep does not spend an attempt ──
+
+    @Test @Order(49)
+    void reclaimStale_uncounted_belowCap_leavesRetryCountAndLastErrorAlone() throws Exception {
+        String tenant = "reclaim-nocount-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-nc-below.pdf", 2);
+        setLastError(tenant, "rc-nc-below.pdf", "earlier worker failure");
+
+        int reclaimed = repo.reclaimStale(tenant, 0, false);
+
+        assertThat(reclaimed).as("the one stale row is reclaimed").isEqualTo(1);
+        var row = readQueueRow(tenant, "rc-nc-below.pdf");
+        assertThat(row.status()).isEqualTo("pending");
+        assertThat(row.retryCount()).as("an uncounted reclaim spends no attempt").isEqualTo(2);
+        assertThat(row.lastAttemptAt()).as("pending reclaim clears last_attempt_at").isNull();
+        assertThat(row.lastError()).as("last_error is untouched").isEqualTo("earlier worker failure");
+        assertThat(repo.claimNext(tenant)).as("the row claims again").isPresent();
+    }
+
+    @Test @Order(49)
+    void reclaimStale_uncounted_atCap_returnsRowToPending_neverFailed() throws Exception {
+        String tenant = "reclaim-nocount-cap-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-nc-cap.pdf", AspectRepository.RETRY_MAX_ATTEMPTS);
+
+        int reclaimed = repo.reclaimStale(tenant, 0, false);
+
+        assertThat(reclaimed).isEqualTo(1);
+        var row = readQueueRow(tenant, "rc-nc-cap.pdf");
+        assertThat(row.status()).as("an uncounted reclaim is never the row's fault: pending even at the cap")
+            .isEqualTo("pending");
+        assertThat(row.retryCount()).isEqualTo(AspectRepository.RETRY_MAX_ATTEMPTS);
+        assertThat(row.lastError()).as("no RECLAIM_CAP_ERROR is written").isNull();
+        assertThat(row.lastAttemptAt()).isNull();
+    }
+
+    @Test @Order(49)
+    void reclaimStale_uncounted_leavesNextRetryAtAlone_andFreshRowsInProgress() throws Exception {
+        String tenant = "reclaim-nocount-nra-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-nc-nra.pdf", 1);
+        OffsetDateTime backoff = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10)
+            .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        setNextRetryAt(tenant, "rc-nc-nra.pdf", backoff);
+
+        assertThat(repo.reclaimStale(tenant, 300, false))
+            .as("a row claimed just now is inside a 300 s window and is not reclaimed").isZero();
+        assertThat(readQueueRow(tenant, "rc-nc-nra.pdf").status()).isEqualTo("in_progress");
+
+        assertThat(repo.reclaimStale(tenant, 0, false)).isEqualTo(1);
+        assertThat(readNextRetryAt(tenant, "rc-nc-nra.pdf").toInstant())
+            .as("neither mode writes next_retry_at").isEqualTo(backoff.toInstant());
+    }
+
+    @Test @Order(49)
+    void reclaimStale_twoArgOverload_stillCounts() throws Exception {
+        String tenant = "reclaim-overload-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-ov.pdf", 0);
+
+        assertThat(repo.reclaimStale(tenant, 0)).isEqualTo(1);
+
+        assertThat(readQueueRow(tenant, "rc-ov.pdf").retryCount())
+            .as("the two-arg overload delegates with countAttempt=true").isEqualTo(1);
+    }
+
+    private void setLastError(String tenant, String sourcePath, String err) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            int rows = DSL.using(su, SQLDialect.POSTGRES)
+                .update(ASPECT_EXTRACTION_QUEUE)
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR, err)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+                .execute();
+            assertThat(rows).as("setLastError must update exactly one row").isEqualTo(1);
+        }
+    }
+
     /** Enqueue one row, give it {@code retryCount}, and claim it into in_progress. */
     private void enqueueAndClaim(String tenant, String sourcePath, int retryCount) throws SQLException {
         registerFixtureDoc(tenant, "rc-doc");

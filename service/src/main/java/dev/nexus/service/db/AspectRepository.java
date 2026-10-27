@@ -1231,9 +1231,19 @@ public final class AspectRepository {
     public static final String RECLAIM_CAP_ERROR = "reclaimed_stale_retry_cap_exhausted";
 
     /**
+     * Reclaim stale in_progress rows (worker died or hung), counting each as an
+     * attempt. Equivalent to {@link #reclaimStale(String, int, boolean)} with
+     * {@code countAttempt = true}: the periodic age-based sweep.
+     */
+    public int reclaimStale(String tenant, int timeoutSeconds) {
+        return reclaimStale(tenant, timeoutSeconds, true);
+    }
+
+    /**
      * Reclaim stale in_progress rows (worker died or hung).
      *
-     * <p>A reclaim counts as an attempt (RDR-235 Gap 2, nexus-j67ix.2): without it a
+     * <p>{@code countAttempt = true} (the age-based sweep): a reclaim counts as an
+     * attempt (RDR-235 Gap 2, nexus-j67ix.2): without it a
      * document that kills its worker every time (OOM, a kill) cycles pending ->
      * in_progress -> pending forever and never reaches the terminal {@code failed}
      * state RDR-163 defined. {@code retry_count} is incremented, and the row is
@@ -1243,14 +1253,30 @@ public final class AspectRepository {
      * next_retry_at untouched); below the cap it returns to {@code pending} with the
      * incremented count and last_attempt_at cleared, as before.
      *
-     * <p>{@code next_retry_at} is never written by either outcome (RDR-163 invariant:
+     * <p>{@code countAttempt = false} (the daemon's graceful-stop sweep and the
+     * self-fault stand-down that ends in it, nexus-j67ix.3): the rows a stopping
+     * worker abandons did nothing wrong, so every stale row returns to
+     * {@code pending} with {@code retry_count} and {@code last_error} unchanged and
+     * {@code last_attempt_at} cleared. A row already at the cap goes to
+     * {@code pending}, never {@code failed}: this reclaim is not the row's fault.
+     *
+     * <p>{@code next_retry_at} is never written by any outcome (RDR-163 invariant:
      * clearing it would bypass the backoff, bumping it would punish a crash).
      *
      * @return rows reclaimed, whichever way they went
      */
-    public int reclaimStale(String tenant, int timeoutSeconds) {
+    public int reclaimStale(String tenant, int timeoutSeconds, boolean countAttempt) {
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(timeoutSeconds);
+            var stale = ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress")
+                .and(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT.lt(cutoff));
+            if (!countAttempt) {
+                return ctx.update(ASPECT_EXTRACTION_QUEUE)
+                    .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
+                    .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
+                    .where(stale)
+                    .execute();
+            }
             // Every right-hand side reads the row's pre-update values (SQL UPDATE semantics),
             // so the cap test sees the count the worker saw at claim time.
             var atCap = ASPECT_EXTRACTION_QUEUE.RETRY_COUNT.ge(RETRY_MAX_ATTEMPTS);
@@ -1264,8 +1290,7 @@ public final class AspectRepository {
                         .otherwise(inline((OffsetDateTime) null)))
                 .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,
                     when(atCap, inline(RECLAIM_CAP_ERROR)).otherwise(ASPECT_EXTRACTION_QUEUE.LAST_ERROR))
-                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress")
-                    .and(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT.lt(cutoff)))
+                .where(stale)
                 .execute();
         });
     }
