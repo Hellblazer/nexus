@@ -2892,12 +2892,35 @@ def _no_mcp_search_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     """nx_answer's structured request extraction is ON by default (nexus-jypmj.2.8) and makes one `claude -p`
-    call for a request the deterministic pass leaves open. No unit test may spend that call: it is off here, and
-    a test about the extraction setting (tests/test_rdr232_request_coverage.py, tests/test_rdr232_gate_defaults.py)
-    deletes the variable itself and fakes the dispatch. The gate's kill switch is cleared so a developer's
-    exported NX_ANSWER_KIND_ELIGIBILITY=0 cannot change what a test sees."""
-    monkeypatch.setenv("NX_ANSWER_STRUCTURED_EXTRACT", "0")
+    call for a request the deterministic pass leaves open. No unit test may spend that call, and none may switch
+    the setting off to avoid it: with the setting off the eligibility gate runs in shadow (``extraction_disabled``),
+    which would hide the gate from every test that drives ``nx_answer``. So the setting stays at its default and
+    the dispatch refuses the extraction operator (``request_coverage_extract``): the call fails the way a
+    per-request failure does (outcome ``error``, the gate keeps enforcing) and every other operator reaches the
+    real ``claude_dispatch``. A test about the extraction patches ``nexus.operators.dispatch.claude_dispatch``
+    itself, which replaces this guard for the test. The switches are cleared so a developer's exported
+    ``NX_ANSWER_KIND_ELIGIBILITY=0`` or ``NX_ANSWER_STRUCTURED_EXTRACT=0`` cannot change what a test sees, and the
+    process-wide memos of the gate (library check, warnings) start empty."""
+    import functools  # noqa: PLC0415 — test-only import
+
+    from nexus.operators import dispatch as _dispatch  # noqa: PLC0415 — test-only import
+    from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — test-only import
+    from nexus.plans import switches as _switches  # noqa: PLC0415 — test-only import
+
+    monkeypatch.delenv("NX_ANSWER_STRUCTURED_EXTRACT", raising=False)
     monkeypatch.delenv("NX_ANSWER_KIND_ELIGIBILITY", raising=False)
+    real = _dispatch.claude_dispatch
+
+    @functools.wraps(real)
+    async def _guarded(*args, **kwargs):
+        if kwargs.get("operator") == "request_coverage_extract":
+            raise RuntimeError("a unit test must not make the live structured extraction call; patch claude_dispatch")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(_dispatch, "claude_dispatch", _guarded)
+    _eligibility.reset_library_memo()
+    _eligibility._warned_libraries.clear()
+    _switches.reset_warned()
 
 
 @pytest.fixture(autouse=True)

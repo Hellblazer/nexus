@@ -54,13 +54,20 @@ blank or anything else enforces), over the default :data:`ANSWER_KIND_ELIGIBILIT
 gate WOULD exclude, but :meth:`EligibilityFilter.admit` keeps every candidate and the matcher's output,
 metrics and over-fetch are identical to a call that passed no filter.
 
-The gate is not enforced against a library that still holds a builtin without its declaration (RDR-232
-section 1: such a builtin reads as unattested until a reseed, and the gate is not enabled before every
-builtin carries its declaration). ``nx_answer`` checks that per request from the plan cache's last
-population and calls :meth:`EligibilityFilter.degrade_to_shadow`; the envelope then says
-``shadow_reason`` ``library_not_reseeded`` with the count of undeclared builtin rows. The upgrade ladder's
-plan-library axis reconciles builtins (``seed_plan_templates(reconcile=True)``) on upgrade, which writes
-the declarations, so an upgraded install enforces.
+The gate is not enforced in two cases that are not the setting (RDR-232 section 1: such a builtin reads as
+unattested until a reseed, and the gate is not enabled before every builtin carries its declaration; the
+measured failing regime is the gate with deterministic kinds only). ``nx_answer`` degrades the request's filter
+to shadow, with :meth:`EligibilityFilter.degrade_to_shadow`, when (1) the structured request extraction is
+switched off (``extraction_disabled``; a per-request extraction failure keeps the gate enforcing), or (2) the
+plan library holds a builtin template, a row a reseed can fix, with no declaration
+(``library_not_reseeded``). The library check counts only builtin-tagged rows of the global tier whose
+dimensions match a shipped template (or a retired one, which a reseed deletes), so an orphan the seed loader
+leaves in place cannot hold the library in shadow for good, and it reports how many such rows it examined
+(``builtins_checked``): a library with none enforces, and ``builtins_checked`` of 0 says the check had nothing
+to examine. The upgrade ladder's plan-library axis reconciles builtins (``seed_plan_templates(reconcile=True)``)
+on upgrade, which writes the declarations, so an upgraded install enforces. Precedence when several apply:
+``disabled_by_setting``, then ``extraction_disabled``, then ``library_not_reseeded`` (a filter already in shadow
+is not checked against the library).
 
 The matcher calls :meth:`EligibilityFilter.admit` last on each branch, after every other drop (unmet
 binding, scope conflict, always-failing, FTS literal drop), so a branch's ``excluded`` count is
@@ -74,13 +81,16 @@ under the binding drop and never reaches ``examined``.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import structlog
 
 from nexus.plans.answer_kind import PlanAnswerKind, decode_declaration
+from nexus.plans.switches import OFF_VALUES, warn_unrecognised
 
 _log = structlog.get_logger(__name__)
 
@@ -90,19 +100,26 @@ __all__ = [
     "BRANCHES",
     "BUILTIN_TAG",
     "GROWN_TAG",
+    "LIBRARY_CHECKS",
+    "LIBRARY_CHECK_TTL_S",
+    "PROTECTED_TAGS",
     "REASONS",
     "SHADOW_REASONS",
     "TRUSTED_ROUTES",
+    "BuiltinCheck",
     "EligibilityFilter",
     "PlanStanding",
     "Verdict",
     "classify_plan",
     "coerce_kind",
-    "count_undeclared_builtins",
+    "check_builtins",
     "eligibility",
     "eligibility_enforced",
     "eligible_matches",
     "fallback_reason",
+    "memoized_library_check",
+    "reseedable_dimensions",
+    "reset_library_memo",
     "warn_library_not_reseeded",
 ]
 
@@ -115,38 +132,54 @@ ANSWER_KIND_ELIGIBILITY_ENABLED: bool = True
 #: The kill switch. ``0``, ``false``, ``off`` or ``no`` (any case) means shadow; unset, blank or any other
 #: value defers to :data:`ANSWER_KIND_ELIGIBILITY_ENABLED` (enforce).
 ANSWER_KIND_ELIGIBILITY_ENV = "NX_ANSWER_KIND_ELIGIBILITY"
-_OFF_VALUES = frozenset({"0", "false", "off", "no"})
 
-#: ``shadow_reason`` values the envelope reports: the setting turned the gate off, or the library still
-#: holds builtins without their declaration.
-SHADOW_REASONS: frozenset[str] = frozenset({"disabled_by_setting", "library_not_reseeded"})
+#: ``shadow_reason`` values the envelope reports (and the only ones :meth:`EligibilityFilter.degrade_to_shadow`
+#: accepts): the setting turned the gate off, the structured request extraction is switched off, or the
+#: library still holds builtins without their declaration.
+SHADOW_REASONS: frozenset[str] = frozenset({"disabled_by_setting", "extraction_disabled", "library_not_reseeded"})
+
+#: ``library_check`` values the envelope reports: ``checked`` (the library was read and counted) or
+#: ``unreadable`` (it was not: no count in the cache and the listing failed). ``null`` means no check ran
+#: (the filter was already in shadow, or no plan match ran).
+LIBRARY_CHECKS: frozenset[str] = frozenset({"checked", "unreadable"})
+
+#: At most this many undeclared rows are named in the envelope and in the warning.
+_MAX_LISTED_NAMES = 8
 
 
 def eligibility_enforced(environ: Mapping[str, str]) -> bool:
     """Whether the answer-kind gate enforces for a request, decided now from *environ*.
 
     Unset or blank: :data:`ANSWER_KIND_ELIGIBILITY_ENABLED` (``True``). An off value (``0``, ``false``,
-    ``off``, ``no``): shadow. Anything else: enforce.
+    ``off``, ``no``): shadow. Anything else: enforce, and a value outside both vocabularies logs one warning
+    per process (nexus-jypmj.2.8).
     """
     raw = str(environ.get(ANSWER_KIND_ELIGIBILITY_ENV, "")).strip().lower()
     if not raw:
         return ANSWER_KIND_ELIGIBILITY_ENABLED
-    return raw not in _OFF_VALUES
+    if raw in OFF_VALUES:
+        return False
+    warn_unrecognised(ANSWER_KIND_ELIGIBILITY_ENV, raw)
+    return True
 
 
-_warned_counts: set[int] = set()
+_warned_libraries: set[tuple[int, tuple[str, ...]]] = set()
 
 
-def warn_library_not_reseeded(undeclared: int) -> None:
-    """Log the not-reseeded warning once per process for each distinct count (it recurs on every request)."""
-    if undeclared in _warned_counts:
+def warn_library_not_reseeded(check: "BuiltinCheck") -> None:
+    """Log the not-reseeded warning once per process for each distinct (count, names) (it recurs on every request)."""
+    key = (check.undeclared, check.undeclared_names)
+    if key in _warned_libraries:
         return
-    _warned_counts.add(undeclared)
+    _warned_libraries.add(key)
     _log.warning(
         "answer_kind_gate_shadowed_library_not_reseeded",
-        undeclared_builtins=undeclared,
+        undeclared_builtins=check.undeclared,
+        builtins_checked=check.checked,
+        undeclared_builtin_names=list(check.undeclared_names),
         remedy="nx plan reseed",
     )
+
 
 #: The row tags provenance reads. ``BUILTIN_TAG`` is ``matcher._CATEGORY_PLAN_TAG``; a test pins that.
 BUILTIN_TAG = "builtin-template"
@@ -259,23 +292,130 @@ def classify_plan(tags: str | None, plan_json: Any) -> PlanStanding:
     return PlanStanding(_U, "unattested", "undeclared_builtin" if BUILTIN_TAG in tokens else None)
 
 
-def count_undeclared_builtins(rows: Iterable[Mapping[str, Any]]) -> int:
-    """How many of *rows* are builtin templates that carry no valid answer-kind declaration.
+@dataclass(frozen=True)
+class BuiltinCheck:
+    """What the library precondition found: builtin rows a reseed can fix, and how many lack their declaration.
 
-    The same judgement :func:`classify_plan` makes (``undeclared_builtin``), so what the library check counts
-    is what the filter would refuse under that reason. A row that cannot be read counts as zero.
+    ``checked`` is the number of such rows examined (declared or not), so a count of zero with ``checked`` of 0
+    reads as "nothing to examine", not "examined and clean". ``undeclared_names`` are at most
+    :data:`_MAX_LISTED_NAMES` names (the row's name, else ``id <n>``) of the undeclared ones.
     """
-    total = 0
+
+    checked: int
+    undeclared: int
+    undeclared_names: tuple[str, ...] = ()
+
+
+#: Tags that make a row user-grown: the seed loader's reconcile refuses to rewrite one
+#: (``seed_loader._GROWN_TAGS``; a test pins that these are the same).
+PROTECTED_TAGS: frozenset[str] = frozenset({GROWN_TAG, "ad-hoc"})
+
+_reseedable: frozenset[str] | None = None
+
+
+def reseedable_dimensions() -> frozenset[str] | None:
+    """The canonical dimensions a reseed writes or deletes at the global tier; ``None`` if they cannot be read.
+
+    The shipped builtin templates (read from the directory ``nx plan reseed`` itself loads, the same way
+    ``nx doctor --check-plan-library`` reads it, scope forced to ``global``) plus the retired templates the
+    reconcile deletes (``seed_loader.RETIRED_TEMPLATE_DIMENSIONS``). A builtin-tagged row at any other
+    dimensions is an orphan: the seed loader leaves it in place, so a reseed cannot give it a declaration.
+    Read once per process; a failure is not remembered.
+    """
+    global _reseedable
+    if _reseedable is not None:
+        return _reseedable
+    try:
+        import yaml  # noqa: PLC0415 — deferred; only the library check needs the templates
+
+        from nexus.commands.catalog import _resolve_plugin_root  # noqa: PLC0415 — deferred; same resolver the reseed uses
+        from nexus.indexer_utils import find_repo_root  # noqa: PLC0415 — deferred, as above
+        from nexus.plans.schema import canonical_dimensions_json  # noqa: PLC0415 — deferred, as above
+        from nexus.plans.seed_loader import RETIRED_TEMPLATE_DIMENSIONS  # noqa: PLC0415 — deferred, as above
+
+        repo_root = find_repo_root(Path.cwd()) or Path.cwd()
+        directory = _resolve_plugin_root(repo_root) / "plans" / "builtin"
+        dims: set[str] = set()
+        for path in sorted(directory.iterdir()):
+            if not (path.is_file() and path.suffix in (".yml", ".yaml")):
+                continue
+            template = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            own = dict(template.get("dimensions") or {})
+            own["scope"] = "global"  # the global tier's scope override
+            dims.add(canonical_dimensions_json(own))
+    except Exception as exc:  # noqa: BLE001 — the library check degrades to "unreadable", it never fails a request
+        _log.warning("answer_kind_gate_shipped_templates_unreadable", error=f"{type(exc).__name__}: {exc}"[:200])
+        return None
+    if not dims:
+        _log.warning("answer_kind_gate_shipped_templates_unreadable", error="no templates found")
+        return None
+    _reseedable = frozenset(dims) | RETIRED_TEMPLATE_DIMENSIONS
+    return _reseedable
+
+
+def check_builtins(rows: Iterable[Mapping[str, Any]]) -> BuiltinCheck | None:
+    """Examine the builtin rows of *rows* that a reseed can fix, and count those without a valid declaration.
+
+    A row is examined when it carries the builtin tag, no grown tag, sits at the global tier (empty project) and
+    its dimensions are a shipped or retired template's (:func:`reseedable_dimensions`). It is undeclared when
+    :func:`classify_plan` flags it ``undeclared_builtin``, the judgement the filter itself makes. A row that
+    cannot be read is not examined. ``None`` when the shipped templates cannot be read (the check is unknown).
+    """
+    fixable = reseedable_dimensions()
+    if fixable is None:
+        return None
+    checked = 0
+    undeclared = 0
+    names: list[str] = []
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        try:
-            standing = classify_plan(row.get("tags"), row.get("plan_json"))
-        except Exception:  # noqa: BLE001 — an unreadable row is counted nowhere; the filter reports it as judge_error
+        tags = row.get("tags")
+        tokens = {t.strip() for t in tags.split(",") if t.strip()} if isinstance(tags, str) else set()
+        if BUILTIN_TAG not in tokens or tokens & PROTECTED_TAGS:
             continue
+        if (row.get("project") or "") != "" or row.get("dimensions") not in fixable:
+            continue
+        try:
+            standing = classify_plan(tags, row.get("plan_json"))
+        except Exception:  # noqa: BLE001 — an unreadable row is examined nowhere; the filter reports it as judge_error
+            continue
+        checked += 1
         if standing.flag == "undeclared_builtin":
-            total += 1
-    return total
+            undeclared += 1
+            if len(names) < _MAX_LISTED_NAMES:
+                names.append(str(row.get("name") or f"id {row.get('id')}"))
+    return BuiltinCheck(checked, undeclared, tuple(names))
+
+
+#: How long a library check made without the plan cache is reused. The cache refreshes on a 90 s bound; a
+#: process without one lists the library at most this often instead of on every request.
+LIBRARY_CHECK_TTL_S = 90.0
+
+_memo: tuple[float, BuiltinCheck | None] | None = None
+
+
+def memoized_library_check(
+    read: Callable[[], BuiltinCheck | None], *, now: Callable[[], float] = time.monotonic,
+) -> BuiltinCheck | None:
+    """``read()``, reused for :data:`LIBRARY_CHECK_TTL_S` seconds; an unreadable result (``None``) is reused too.
+
+    Two requests that both find the memo stale both read and the later write wins: harmless, the result is a
+    bounded-staleness count either way. The memo is process-wide state; :func:`reset_library_memo` clears it.
+    """
+    global _memo
+    memo = _memo
+    if memo is not None and now() - memo[0] < LIBRARY_CHECK_TTL_S:
+        return memo[1]
+    result = read()
+    _memo = (now(), result)
+    return result
+
+
+def reset_library_memo() -> None:
+    """Forget the memoized library check (a test hook; a reseed is seen within the bound without it)."""
+    global _memo
+    _memo = None
 
 
 def eligibility(request_kind: PlanAnswerKind, plan_kind: PlanAnswerKind, provenance: str) -> Verdict:
@@ -344,8 +484,14 @@ class EligibilityFilter:
         self.request_kind = coerce_kind(request_kind)
         self.decision = decision
         self.enforce = enforce
+        if shadow_reason is not None and shadow_reason not in SHADOW_REASONS:
+            raise ValueError(f"shadow_reason {shadow_reason!r} is not one of {sorted(SHADOW_REASONS)}")
         self.shadow_reason = shadow_reason
+        # The library precondition's result (note_library); None until a check has run.
+        self.library_check: str | None = None
+        self.builtins_checked: int | None = None
         self.undeclared_builtins: int | None = None
+        self.undeclared_builtin_names: list[str] = []
         self._branches: dict[str, dict[str, Any]] = {
             b: {"examined": 0, "excluded": 0, "reasons": {}} for b in BRANCHES
         }
@@ -408,12 +554,26 @@ class EligibilityFilter:
     def set_fallback(self, reason: str | None) -> None:
         self._fallback = reason
 
-    def degrade_to_shadow(self, reason: str, undeclared_builtins: int | None = None) -> None:
-        """Stop enforcing for this request and say why; judging and counting go on (call before the matcher runs)."""
+    def degrade_to_shadow(self, reason: str) -> None:
+        """Stop enforcing for this request and say why; judging and counting go on (call before the matcher runs).
+
+        *reason* must be in :data:`SHADOW_REASONS`: the envelope's vocabulary is a closed set, and a reason
+        nobody listed would reach the wire unreviewed.
+        """
+        if reason not in SHADOW_REASONS:
+            raise ValueError(f"shadow_reason {reason!r} is not one of {sorted(SHADOW_REASONS)}")
         self.enforce = False
         self.shadow_reason = reason
-        if undeclared_builtins is not None:
-            self.undeclared_builtins = undeclared_builtins
+
+    def note_library(self, check: BuiltinCheck | None) -> None:
+        """Record the library precondition's result: the counts, or ``unreadable`` when there was none."""
+        if check is None:
+            self.library_check = "unreadable"
+            return
+        self.library_check = "checked"
+        self.builtins_checked = check.checked
+        self.undeclared_builtins = check.undeclared
+        self.undeclared_builtin_names = list(check.undeclared_names)
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -421,7 +581,10 @@ class EligibilityFilter:
             "kind_decision": self.decision,
             "enforced": self.enforce,
             "shadow_reason": self.shadow_reason,
+            "library_check": self.library_check,
+            "builtins_checked": self.builtins_checked,
             "undeclared_builtins": self.undeclared_builtins,
+            "undeclared_builtin_names": list(self.undeclared_builtin_names),
             "branches": {b: {**c, "reasons": dict(c["reasons"])} for b, c in self._branches.items()},
             "excluded_total": self.excluded_total,
             "excluded_plan_ids": self._excluded_ids[:_MAX_LISTED_IDS],

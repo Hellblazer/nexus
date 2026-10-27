@@ -10260,9 +10260,11 @@ async def _nx_answer_request_coverage(
 ) -> "RequestCoverage":
     """Build the request's :class:`~nexus.plans.request_coverage.RequestCoverage` before ``plan_match``.
 
-    RDR-232 Phase 2 (nexus-jypmj.2.2), **shadow mode**: the result is reported (envelope, evidence
-    diagnostics, one log event) and decides only whether the T2 lifecycle stream is read; it does not gate
-    plan selection (nexus-jypmj.2.3). The deterministic first pass runs in-process and is timed on its own.
+    RDR-232 Phase 2 (nexus-jypmj.2.2): the result is reported (envelope, evidence diagnostics, one log event),
+    decides whether the T2 lifecycle stream is read, and its answer kind is the request kind the answer-kind
+    eligibility gate judges plan candidates by (nexus-jypmj.2.3; enforcing by default since nexus-jypmj.2.8, in
+    shadow when ``NX_ANSWER_KIND_ELIGIBILITY=0`` or the extraction below is off). The deterministic first pass
+    runs in-process and is timed on its own.
     The structured extraction (``NX_ANSWER_STRUCTURED_EXTRACT``, on by default, ``0`` turns it off) makes at most one
     direct dispatch under its own timeout, inside *deadline*, with its latency and cost in the coverage's
     ``extraction`` report. Never raises: a failure leaves the first-pass result.
@@ -10410,42 +10412,53 @@ def _nx_answer_settle_inference(request: EvidenceRequest, named: "NamedSourceRes
     return replace(request, owner=OwnerResolution("none"), active_project=tier)
 
 
-def _nx_answer_undeclared_builtins(cache: Any) -> "int | None":
-    """How many builtin templates the plan library holds without an answer-kind declaration; ``None`` if unknown.
+def _nx_answer_library_check(cache: Any) -> "Any":
+    """The plan library's builtin check (a ``BuiltinCheck``), or ``None`` when it cannot be known.
 
-    The rows are already in hand: the T1 plan cache counted them when it last populated (at most 90 s ago), so
-    a request costs no T2 call. Only a request with no cache (T1 unreachable, the matcher then reads FTS5)
-    lists the active plans once, to count them.
+    The rows are normally already in hand: the T1 plan cache examined them when it last populated (at most
+    90 s ago), so a request costs no T2 call. A request with no check from the cache (T1 unreachable, the
+    matcher then reads FTS5; or a cache that has not populated) lists the active plans, and that result is
+    reused for ``LIBRARY_CHECK_TTL_S`` (an unreadable one too), so a process without a cache does not list the
+    library on every request.
     """
-    from nexus.plans.eligibility import count_undeclared_builtins  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.eligibility import BuiltinCheck, check_builtins, memoized_library_check  # noqa: PLC0415 — deferred; matches this module's convention
 
-    count = getattr(cache, "undeclared_builtins", None)
-    if isinstance(count, int) and not isinstance(count, bool):
-        return count
-    rows = _t2_index_write(lambda db: db.plans.list_active_plans(), op="plan_library_precondition")
-    if not isinstance(rows, list):
-        return None
-    return count_undeclared_builtins(rows)
+    check = getattr(cache, "library_check", None)
+    if isinstance(check, BuiltinCheck):
+        return check
+
+    def _list_and_check() -> "Any":
+        try:
+            rows = _t2_index_write(lambda db: db.plans.list_active_plans(), op="plan_library_precondition")
+        except Exception as exc:  # noqa: BLE001 — a library that cannot be listed is "unreadable", and that is reused for the bound too
+            structlog.get_logger().warning("nx_answer_library_check_unreadable", error=type(exc).__name__)
+            return None
+        return check_builtins(rows) if isinstance(rows, list) else None
+
+    return memoized_library_check(_list_and_check)
 
 
 def _nx_answer_library_precondition(filt: Any, cache: Any) -> None:
     """Run the answer-kind gate in shadow when the library holds a builtin without its declaration.
 
     RDR-232 section 1: a builtin seeded before declarations existed is unattested until a reseed, and the gate
-    is not enabled before every builtin carries its declaration. Only an enforcing request is checked. A
-    library that cannot be read leaves the gate enforcing (the cost of an unreadable library is recall, not a
-    wrong-shape answer). Never raises. The upgrade ladder reconciles builtins on upgrade
-    (``upgrade_ladder.preconditions._plan_library_report``), so an upgraded install does not trip this.
+    is not enabled before every builtin carries its declaration. Only an enforcing request is checked (a filter
+    already in shadow keeps its own ``shadow_reason`` and costs no lookup). Only builtin rows a reseed can fix
+    count, so an orphan the seed loader leaves in place cannot hold the library in shadow. A library that cannot
+    be read leaves the gate enforcing (the cost of an unreadable library is recall, not a wrong-shape answer)
+    and the envelope says ``library_check`` ``unreadable``. Never raises. The upgrade ladder reconciles builtins
+    on upgrade (``upgrade_ladder.preconditions._plan_library_report``), so an upgraded install does not trip this.
     """
     from nexus.plans.eligibility import warn_library_not_reseeded  # noqa: PLC0415 — deferred; matches this module's convention
 
     if not filt.enforce:
         return
-    count = _nx_answer_isolated("library_precondition", None, _nx_answer_undeclared_builtins, cache)
-    if not count:
+    check = _nx_answer_isolated("library_precondition", None, _nx_answer_library_check, cache)
+    filt.note_library(check)
+    if check is None or not check.undeclared:
         return
-    filt.degrade_to_shadow("library_not_reseeded", count)
-    warn_library_not_reseeded(count)
+    filt.degrade_to_shadow("library_not_reseeded")
+    warn_library_not_reseeded(check)
 
 
 def _nx_answer_isolated(stage: str, default: Any, fn: "Callable[..., Any]", /, *args: Any, **kwargs: Any) -> Any:
@@ -11805,6 +11818,7 @@ async def nx_answer(
         get_cached_price_table,
     )
     from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so a test's patch of the constant is honored (RDR-232 nexus-jypmj.2.3)
+    from nexus.plans.request_coverage import extraction_enabled as _extraction_enabled  # noqa: PLC0415 — deferred; the gate follows the extraction switch (nexus-jypmj.2.8)
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.verb_infer import infer_verb as _infer_verb  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -11953,10 +11967,11 @@ async def nx_answer(
     )
     # nexus-jypmj.1.18: an explicit owner also narrows the secondary streams (vector corpus, traversal).
     _caller_run.update(_nx_answer_owner_binding(_evidence_request))
-    # RDR-232 Phase 2 (nexus-jypmj.2.2), shadow mode: what the request asks for, derived BEFORE plan_match
-    # in a stage of its own. A caller's answer-kind hint rides in `dimensions` and is taken out here, since
-    # `dimensions` is a hard filter over plans and none carries that key. Reported in the envelope and the
-    # evidence diagnostics; the only plan-visible use is the lifecycle-stream read below.
+    # RDR-232 Phase 2 (nexus-jypmj.2.2): what the request asks for, derived BEFORE plan_match in a stage of
+    # its own. A caller's answer-kind hint rides in `dimensions` and is taken out here, since `dimensions` is a
+    # hard filter over plans and none carries that key. Reported in the envelope and the evidence diagnostics.
+    # Its answer kind is the request kind the eligibility gate judges plans by (below); the other plan-visible
+    # use is the lifecycle-stream read.
     dimensions, _kind_hint = _nx_answer_split_kind_hint(dimensions)
     _request_coverage = await _nx_answer_request_coverage(
         question=question, scope=scope, evidence_request=_evidence_request, explicit_kind=_kind_hint,
@@ -12009,12 +12024,18 @@ async def nx_answer(
     # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
     # plan_match, which asks it of every branch's candidates; enforcing unless NX_ANSWER_KIND_ELIGIBILITY turns
     # the gate off (nexus-jypmj.2.8; shadow: the filter counts what it would exclude and excludes nothing).
-    # A library that still holds undeclared builtins degrades it to shadow just before plan_match (below).
+    # The gate also runs in shadow while the structured extraction is switched off (the measured failing regime
+    # is the gate on deterministic kinds alone; a per-request extraction failure keeps enforcing), and a library
+    # that still holds undeclared builtins degrades it just before plan_match (below). The reason that applies
+    # first wins: disabled_by_setting, extraction_disabled, library_not_reseeded.
     # Reported in the envelope as `plan_eligibility`, always present.
     _gate_on = _eligibility.eligibility_enforced(_os.environ)
+    _extract_on = _extraction_enabled(_os.environ)
     _plan_eligibility = _eligibility.EligibilityFilter(
-        _request_coverage.answer_kind, _request_coverage.kind_decision, enforce=_gate_on,
-        shadow_reason=None if _gate_on else "disabled_by_setting",
+        _request_coverage.answer_kind, _request_coverage.kind_decision, enforce=_gate_on and _extract_on,
+        shadow_reason=(
+            "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
+        ),
     )
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.
@@ -12329,11 +12350,12 @@ async def nx_answer(
             # {status, tumbler, contributions, detail}}. Always present,
             # None when no reserved binding was passed.
             "evidence_request": _evidence_request.to_wire(),
-            # RDR-232 Phase 2 (nexus-jypmj.2.2), shadow mode: what the request asks for, derived before
+            # RDR-232 Phase 2 (nexus-jypmj.2.2): what the request asks for, derived before
             # plan_match: {answer_kind, kind_decision, facets, constraints, named_sources, source_origin,
             # source_hints, explicit_scope, current_code_requested, ambiguities, wants_lifecycle_stream,
-            # extraction: {outcome, calls, timeout_s, latency_ms, cost_usd}, derive_ms}. Reported only; it
-            # does not choose a plan. Always present.
+            # extraction: {outcome, calls, timeout_s, latency_ms, cost_usd}, derive_ms}. Its answer kind is
+            # the request kind the eligibility gate (below) judges plans by; the rest is reported only.
+            # Always present.
             "request_coverage": _request_coverage.to_wire(),
             # RDR-232 Phase 2 (nexus-jypmj.2.3): answer-kind eligibility of the plan candidates: {request_kind,
             # kind_decision, enforced, branches: {cosine, category_route, fts: {examined, excluded, reasons}},

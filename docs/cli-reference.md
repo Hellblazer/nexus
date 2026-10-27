@@ -5655,10 +5655,12 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   gate, lifecycle or status facet (see `request_coverage`), or when the clause
   structure is uncertain and the request names an RDR source, bound or read from the question (it fails open);
   a request about something else leaves it `null` even for a named RDR.
-- `request_coverage` (nexus-jypmj.2.2, RDR-232 Phase 2, shadow mode): what the
-  request asks for, derived before plan matching without a model call. It is
-  reported and does not choose a plan; the one plan-visible use is the
-  lifecycle-stream gate above. `{answer_kind, kind_decision, facets,
+- `request_coverage` (nexus-jypmj.2.2, RDR-232 Phase 2): what the request asks
+  for, derived before plan matching: a first pass with no model call, then at most one
+  structured model call for what it leaves open (on by default since nexus-jypmj.2.8,
+  see `extraction`). Its `answer_kind` is the request kind `plan_eligibility` judges
+  plans by, so it does choose among plans when the gate enforces; the rest is
+  reported, and the other plan-visible use is the lifecycle-stream gate above. `{answer_kind, kind_decision, facets,
   constraints, named_sources, named_source_count, source_origin, source_hints,
   source_hint_count, source_ranges, subject, explicit_scope, current_code_requested,
   ambiguities, wants_lifecycle_stream, facets_certain, active_project_tier,
@@ -5695,8 +5697,8 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
 - `plan_eligibility` (nexus-jypmj.2.3, RDR-232 Phase 2): whether each plan the matcher
   considered may serve the request's answer kind, from the compatibility matrix in
   RDR-232 section 1. `{request_kind, kind_decision, enforced, shadow_reason,
-  undeclared_builtins, branches, excluded_total, excluded_plan_ids, returned, selected,
-  fallback_reason}`.
+  library_check, builtins_checked, undeclared_builtins, undeclared_builtin_names, branches,
+  excluded_total, excluded_plan_ids, returned, selected, fallback_reason}`.
   `request_kind` and `kind_decision` are those of `request_coverage`. `branches` has
   `cosine`, `category_route` (the below-floor category route) and `fts` (the FTS5
   fallback), each `{examined, excluded, reasons}`; a reason is `kind_mismatch`,
@@ -5712,10 +5714,22 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   eligibility". The gate is on by default (nexus-jypmj.2.8; `NX_ANSWER_KIND_ELIGIBILITY=0`,
   `false`, `off` or `no` turns it off). In shadow mode `enforced` is `false`, nothing is
   excluded, and the object reports what the gate would exclude; `shadow_reason` says why:
-  `disabled_by_setting`, or `library_not_reseeded` when the plan library holds builtin
-  templates with no answer-kind declaration (`undeclared_builtins` counts them; run
-  `nx plan reseed`, or upgrade, which reconciles them). Both are `null` when the gate
-  enforces.
+  `disabled_by_setting` (`NX_ANSWER_KIND_ELIGIBILITY` is off), `extraction_disabled`
+  (`NX_ANSWER_STRUCTURED_EXTRACT` is off: the gate on first-pass kinds alone is the
+  regime that failed the held-out lookup measurement; one request's extraction that
+  times out or errors does not do this, that request keeps enforcing on the first
+  pass's kind) or `library_not_reseeded`. When several apply the first in that order
+  wins. `library_not_reseeded` means the plan library holds builtin templates with no
+  answer-kind declaration: `library_check` is `checked`, `builtins_checked` is how
+  many builtin rows a reseed can fix were examined, `undeclared_builtins` how many
+  of them lack the declaration and `undeclared_builtin_names` names up to 8 (run
+  `nx plan reseed`, or upgrade, which reconciles them). A builtin-tagged orphan that
+  no shipped template describes is not counted: the seed loader leaves it in place, so
+  a reseed could not fix it. A library with no such row enforces and says
+  `builtins_checked` 0. `library_check` is `unreadable` (and the gate keeps enforcing)
+  when the library could not be read, and `null`, with the other three keys `null`
+  or empty, when no check ran (the gate was already in shadow, or no plan match ran).
+  `shadow_reason` is `null` when the gate enforces.
   With the gate enforcing, ineligible plans are removed from every branch and from the inline
   planner's few-shot examples, and a call left with no candidate plans inline with
   `fallback_reason` `all_candidates_ineligible`. `returned` is `{total, eligible}` for

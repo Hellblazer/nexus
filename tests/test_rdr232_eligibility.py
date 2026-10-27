@@ -642,9 +642,12 @@ def test_the_filter_wire_shape() -> None:
     _, filt = _match([LOOKUP_473, SYNTH_12], [(473, 0.1), (12, 0.4)], S)
     wire = filt.to_wire()
     assert set(wire) == {
-        "request_kind", "kind_decision", "enforced", "shadow_reason", "undeclared_builtins", "branches",
+        "request_kind", "kind_decision", "enforced", "shadow_reason", "library_check", "builtins_checked",
+        "undeclared_builtins", "undeclared_builtin_names", "branches",
         "excluded_total", "excluded_plan_ids", "returned", "selected", "fallback_reason",
     }
+    assert wire["shadow_reason"] is None and wire["library_check"] is None and wire["builtins_checked"] is None
+    assert wire["undeclared_builtins"] is None and wire["undeclared_builtin_names"] == []
     assert wire["request_kind"] == "synthesis" and wire["kind_decision"] == "heuristic"
     assert set(wire["branches"]) == {"cosine", "category_route", "fts"}
     assert wire["branches"]["fts"] == {"examined": 0, "excluded": 0, "reasons": {}}

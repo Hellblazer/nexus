@@ -5056,6 +5056,10 @@ class TestContinuationGoLive:
         claude_dispatch_calls: list = []
 
         async def spy_claude_dispatch(prompt, schema, **kwargs):
+            if kwargs.get("operator") == "request_coverage_extract":
+                # nexus-jypmj.2.8: the request-coverage extraction is on by default and is not the operator
+                # path under test; it fails (outcome "error") and is not counted as an operator dispatch.
+                raise RuntimeError("the structured extraction is not under test")
             claude_dispatch_calls.append(prompt)
             return {"items": [], "rationale": []}
 

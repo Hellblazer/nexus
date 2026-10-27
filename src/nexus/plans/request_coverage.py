@@ -6,8 +6,9 @@
 the answer kind the question asks for, the facets that need evidence, the constraints that govern how
 the answer treats it, the sources it names, the caller's explicit scope, and whether it asks about
 current code. ``nx_answer`` builds it before plan matching, in a stage measured on its own, and
-reports it in the envelope and in ``evidence_diagnostics``. **It does not gate anything yet**: eligibility
-filtering is nexus-jypmj.2.3. The one plan-visible use today is :attr:`RequestCoverage.wants_lifecycle_stream`,
+reports it in the envelope and in ``evidence_diagnostics``. Its ``answer_kind`` is the request kind the
+answer-kind eligibility gate (``plans/eligibility.py``, nexus-jypmj.2.3) judges plan candidates by, and the gate
+enforces by default (nexus-jypmj.2.8). The other plan-visible use is :attr:`RequestCoverage.wants_lifecycle_stream`,
 which decides whether the T2 lifecycle stream (nexus-jypmj.1.7) is read.
 
 **The measured numbers are in-sample.** The first-pass patterns were written with the 24 golden requests
@@ -62,6 +63,7 @@ Pure: stdlib, ``structlog`` and the RDR-232 evidence value types. No catalog or 
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -72,6 +74,7 @@ import structlog
 
 from nexus.plans.answer_kind import GOLDEN_LABEL_TO_KIND, PlanAnswerKind
 from nexus.plans.evidence import EvidenceRequest, OwnerResolution, ScopeConstraint, SourceRange, SourceRef
+from nexus.plans.switches import OFF_VALUES, warn_unrecognised
 
 _log = structlog.get_logger(__name__)
 
@@ -1248,12 +1251,16 @@ EXTRACT_MODEL_ENV = "NX_ANSWER_STRUCTURED_EXTRACT_MODEL"
 #: dispatch that names none) does not change it; a set ``EXTRACT_MODEL_ENV`` wins.
 DEFAULT_EXTRACT_MODEL = "haiku"
 
-_OFF_VALUES = frozenset({"0", "false", "off", "no"})
-
-
 def extraction_enabled(environ: Mapping[str, str]) -> bool:
-    """Whether the structured step is switched on in *environ* (on by default; ``0``/``false``/``off``/``no`` is off)."""
-    return str(environ.get(EXTRACT_ENV, "")).strip().lower() not in _OFF_VALUES
+    """Whether the structured step is switched on in *environ* (on by default; ``0``/``false``/``off``/``no`` is off).
+
+    A non-empty value outside both vocabularies reads as on and logs one warning per process (nexus-jypmj.2.8).
+    """
+    raw = str(environ.get(EXTRACT_ENV, "")).strip().lower()
+    if raw in OFF_VALUES:
+        return False
+    warn_unrecognised(EXTRACT_ENV, raw)
+    return True
 
 
 def extraction_model(environ: Mapping[str, str]) -> str:
@@ -1262,9 +1269,12 @@ def extraction_model(environ: Mapping[str, str]) -> str:
 
 
 def extraction_timeout(environ: Mapping[str, str]) -> float:
+    """Seconds the structured call may take: the setting clamped to [1, 60]; the default for a value that is not a finite number."""
     try:
         value = float(environ.get(EXTRACT_TIMEOUT_ENV, DEFAULT_EXTRACT_TIMEOUT_S))
     except (TypeError, ValueError):
+        return DEFAULT_EXTRACT_TIMEOUT_S
+    if not math.isfinite(value):  # nan passes min/max untouched, and inf would be a 60 s wait nobody asked for
         return DEFAULT_EXTRACT_TIMEOUT_S
     return min(max(value, 1.0), 60.0)
 

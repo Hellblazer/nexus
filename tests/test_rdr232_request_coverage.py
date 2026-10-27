@@ -464,7 +464,8 @@ def test_coverage_is_built_before_plan_match_and_reported_in_the_envelope_and_th
     wire = env["request_coverage"]
     assert wire["answer_kind"] == "synthesis" and len(wire["facets"]) == 6 and len(wire["constraints"]) == 3
     assert wire["wants_lifecycle_stream"] is True and wire["derive_ms"] is not None
-    assert wire["extraction"]["outcome"] == "disabled" and wire["extraction"]["calls"] == 0
+    # nexus-jypmj.2.8: extraction is on by default; this question's kind is settled by the first pass, so no call
+    assert wire["extraction"]["outcome"] == "not_needed" and wire["extraction"]["calls"] == 0
     summary = env["evidence_diagnostics"]["request_coverage"]
     assert summary["facets"] == 6 and summary["answer_kind"] == "synthesis"
     assert "text" not in json.dumps(summary) and "gate" not in json.dumps(summary).replace("wants_lifecycle", "")
