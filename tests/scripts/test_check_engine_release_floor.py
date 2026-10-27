@@ -33,6 +33,13 @@ _TEST_URL = "https://example.test"
 
 
 @pytest.fixture(autouse=True)
+def _note_uri_floor_at_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The release shape: the note-URI floor equal to the pin (nexus-bivz3.20 set the floor on develop,
+    where it leads the pin until the paired client release). Tests of the floor check set their own."""
+    monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
+
+
+@pytest.fixture(autouse=True)
 def _data_effect_relay_passes_by_default():
     """check_data_effect_relay does real git-tag + filesystem I/O against the
     checkout; only TestCheckDataEffectRelay (which shadows this fixture) and the

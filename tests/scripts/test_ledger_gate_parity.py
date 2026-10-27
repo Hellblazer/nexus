@@ -20,6 +20,13 @@ import pytest
 import check_engine_release_floor as floor
 import check_wire_contract_pairing as ledger_mod
 
+
+@pytest.fixture(autouse=True)
+def _note_uri_floor_at_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The release shape: the note-URI floor equal to the pin, so ``--ledger-only`` judges the ledger alone
+    (nexus-bivz3.20 set the floor on develop, where it leads the pin until the paired client release)."""
+    monkeypatch.setattr(floor._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", floor._engine_version.REQUIRED_ENGINE_VERSION)
+
 _TOKENLESS = (
     "- `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` -- bead nexus-fake -- "
     "engine tag `engine-service-v9.9.9` -- test fixture\n"
