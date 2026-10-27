@@ -38,6 +38,7 @@ def home_with_pdf_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _assert_clean_failure(result, setting: str) -> None:
     assert result.exit_code == 1, result.output
     assert f"pdf.{setting}" in result.output, "the message names the setting"
+    assert f"nx config set pdf.{setting}=<integer>" in result.output, "the remedy names it too"
     assert "Traceback" not in result.output
     assert not isinstance(result.exception, ValueError), (
         f"the PdfConfigError reached the process as {result.exception!r}, not as a CLI error"

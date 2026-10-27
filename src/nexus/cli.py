@@ -141,7 +141,7 @@ class _StorageBackendGuardGroup(click.Group):
             # reads the pdf config (nx index pdf, nx dt index, nx dt capture, nx doctor) gets
             # here; the message names the setting, a traceback buried it.
             raise click.ClickException(
-                f"{exc}. Set it with `nx config set pdf.<setting>=<integer>`."
+                f"{exc}. Set it with `nx config set pdf.{exc.key}=<integer>`."
             ) from exc
 
 

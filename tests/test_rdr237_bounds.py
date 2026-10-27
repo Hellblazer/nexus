@@ -1369,3 +1369,35 @@ def test_a_boolean_or_a_fractional_number_is_not_an_integer_setting(key, bad) ->
 def test_an_integral_number_is_an_integer_setting(value, expected) -> None:
     with _config_with(mineru_page_timeout_s=value):
         assert get_pdf_config().mineru_page_timeout_s == expected
+
+
+class _PastTheRefusal(Exception):
+    """Raised by the first step after the refusal check, so the control stops there."""
+
+
+@pytest.mark.parametrize("refused_by", ["budget", "policy"])
+def test_a_direct_restart_that_is_refused_takes_no_step_and_spends_no_budget(
+    monkeypatch, refused_by: str,
+) -> None:
+    """The lost-connection path calls _restart_mineru_server directly; its own refusal must hold."""
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "0" if refused_by == "policy" else "1")
+    ext = PDFExtractor()
+    if refused_by == "budget":
+        ext._mineru_server_restarts = ext._MINERU_MAX_RESTARTS
+    spent = ext._mineru_server_restarts
+    with patch.object(ext, "_beat", side_effect=_PastTheRefusal) as beat:
+        assert ext._restart_mineru_server() is False
+
+    beat.assert_not_called()
+    assert ext._mineru_server_restarts == spent, "a refused restart spends no budget"
+
+
+def test_a_direct_restart_that_is_allowed_goes_past_the_refusal() -> None:
+    """Non-vacuity for the test above: budget and policy open, the restart reaches its first beat."""
+    ext = PDFExtractor()
+    with patch.dict("os.environ", {"NX_MINERU_AUTOSTART": "1"}), \
+            patch.object(ext, "_beat", side_effect=_PastTheRefusal) as beat, \
+            pytest.raises(_PastTheRefusal):
+        ext._restart_mineru_server()
+
+    beat.assert_called_once()

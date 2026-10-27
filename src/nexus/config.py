@@ -232,8 +232,12 @@ class PdfConfigError(ValueError):
 
     The message names the setting, which the bare ``ValueError`` of ``int("x")`` did not: a
     run that stopped on it said ``invalid literal for int() with base 10: 'x'`` and nothing
-    about which key held it.
+    about which key held it. *key* is the setting's own name, without the ``pdf.`` prefix.
     """
+
+    def __init__(self, message: str, *, key: str) -> None:
+        super().__init__(message)
+        self.key = key
 
 
 def _pdf_int(pdf: dict, key: str, default: int, *, floor: int) -> int:
@@ -244,11 +248,11 @@ def _pdf_int(pdf: dict, key: str, default: int, *, floor: int) -> int:
     # A YAML boolean is an int to Python and 2.5 truncates to 2: neither is what the operator
     # meant, so both are refused by name. An integral float (180.0) is a whole number.
     if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
-        raise PdfConfigError(f"pdf.{key} must be an integer, got {raw!r}")
+        raise PdfConfigError(f"pdf.{key} must be an integer, got {raw!r}", key=key)
     try:
         value = int(raw)
     except (TypeError, ValueError) as exc:
-        raise PdfConfigError(f"pdf.{key} must be an integer, got {raw!r}") from exc
+        raise PdfConfigError(f"pdf.{key} must be an integer, got {raw!r}", key=key) from exc
     return max(floor, value)
 
 
