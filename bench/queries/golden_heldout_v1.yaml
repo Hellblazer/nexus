@@ -24,12 +24,17 @@
 # measure of a recorded observation set bumps golden_set_version, and adding a request changes
 # the set's size, so it bumps too.
 #
-# Kind mix: lookup 5, synthesis 4, discovery 4, comparison 4, audit 4, debug 5, unknown 3.
+# Kind mix: lookup 5, synthesis 4, discovery 4, comparison 4, audit 5, debug 5, unknown 2.
 #
 # H08 ("plan matching", unknown) was removed before any measurement: it repeats golden_v1's
 # G22 ("Tell me about plan matching."), so it was not held out. The author did not see G22;
 # the overlap check against golden_v1 found it. No replacement was written, since anyone who
 # has read the classifier would break the blindness rules above. 29 requests.
+#
+# Sam's spot-check (2026-10-27), before any measurement: H23 relabelled from unknown to audit
+# (it asks for a paper's claim to be checked against evidence), with the other audit requests'
+# unacceptable_plans list. This relabel is Sam's, not the blind author's; every other label
+# stands as the author wrote it.
 golden_set_version: 1
 queries:
   - qid: H01
@@ -381,11 +386,16 @@ queries:
   - qid: H23
     category: compositional
     text: "is the pgvector paper right about HNSW"
-    answer_kind: unknown
+    answer_kind: audit
     required_sources: ["The Case Against pgvector", "RDR-227"]
     required_facets: ["hnsw-claims"]
     allowed_corpora: ["knowledge", "rdr", "docs"]
-    unacceptable_plans: []
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
 
   - qid: H24
     category: compositional
