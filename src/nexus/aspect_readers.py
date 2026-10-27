@@ -37,7 +37,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import structlog
 
@@ -55,6 +55,7 @@ __all__ = [
     "HTTPS_STAT_MAX_ATTEMPTS",
     "HTTPS_STAT_RETRY_DELAYS_S",
     "HTTPS_STAT_TIMEOUT_S",
+    "NOTE_URI_SCHEME",
     "NX_REFERENCE_ETAG_CAPTURE_ENV",
     "ReadFail",
     "ReadFailReason",
@@ -64,7 +65,10 @@ __all__ = [
     "StatFail",
     "StatOk",
     "StatResult",
+    "canonical_note_uri",
     "capture_https_etag",
+    "is_note_uri",
+    "note_uri",
     "read_source",
     "record_https_etag",
     "staleness_signal",
@@ -95,6 +99,74 @@ HTTPS_ETAG_META_KEY = "https_etag"
 #: backfill candidate filter, nexus-r0kum's aspect-writer attribution
 #: guard) cannot silently diverge from each other.
 FILE_ROUTED_PREFIXES: tuple[str, ...] = ("rdr__", "docs__", "code__")
+
+
+#: RDR-231: the stored scheme of a note ``source_uri``. A note is
+#: ``nx-note://<collection>/<rest>`` where ``<collection>`` is not
+#: file-routed; the legacy ``chroma://`` spelling is still accepted on
+#: input (see :func:`canonical_note_uri`). The engine twin is
+#: ``dev.nexus.service.db.NoteUri``; both read
+#: ``service/src/test/resources/note-uri-corpus.json``.
+NOTE_URI_SCHEME: str = "nx-note://"
+
+_LEGACY_NOTE_SCHEME: str = "chroma://"
+_EXPORT_SCHEME: str = "nxexp://"
+
+
+def _collection_is_file_routed(after_scheme: str) -> bool:
+    """True when the first path segment of ``after_scheme`` (the text after
+    the scheme) starts with a :data:`FILE_ROUTED_PREFIXES` entry."""
+    segment = after_scheme.split("/", 1)[0]
+    return segment.startswith(FILE_ROUTED_PREFIXES)
+
+
+def is_note_uri(uri: str) -> bool:
+    """True for a stored-form note URI: ``nx-note://`` whose collection
+    segment is not file-routed. ``nx-note://docs__...`` is not a note.
+
+    Answers for the stored spelling only; a legacy ``chroma://`` value is
+    a note once :func:`canonical_note_uri` has rewritten it (the shared
+    corpus's ``is_note`` is ``is_note_uri(canonical_note_uri(u))``).
+    """
+    if not uri.startswith(NOTE_URI_SCHEME):
+        return False
+    return not _collection_is_file_routed(uri[len(NOTE_URI_SCHEME):])
+
+
+def note_uri(collection: str, rest: str, *, quote_rest: bool = False) -> str:
+    """Mint ``nx-note://<collection>/<rest>`` (RDR-231).
+
+    ``quote_rest=True`` percent-encodes ``rest`` with ``safe='/'``, the
+    form the transient read mints use; the stored mint keeps ``rest``
+    verbatim, as :func:`uri_for` does.
+    """
+    tail = quote(rest, safe="/") if quote_rest else rest
+    return f"{NOTE_URI_SCHEME}{collection}/{tail}"
+
+
+def canonical_note_uri(uri: str) -> str:
+    """The stored spelling of a note URI (RDR-231).
+
+    A legacy ``chroma://<c>/...`` with ``<c>`` not file-routed becomes
+    ``nx-note://<c>/...``; the same inside an export identity,
+    ``nxexp://<target>/chroma://<c>/...``. Everything else comes back
+    unchanged: file-routed ``chroma://rdr__...`` residue, ``nx-note://``,
+    ``file://``, ``https://`` and the empty string.
+    """
+    if uri.startswith(_LEGACY_NOTE_SCHEME):
+        rest = uri[len(_LEGACY_NOTE_SCHEME):]
+        if _collection_is_file_routed(rest):
+            return uri
+        return NOTE_URI_SCHEME + rest
+    if uri.startswith(_EXPORT_SCHEME):
+        slash = uri.find("/", len(_EXPORT_SCHEME))
+        if slash >= 0:
+            inner = uri[slash + 1:]
+            if inner.startswith(_LEGACY_NOTE_SCHEME):
+                rest = inner[len(_LEGACY_NOTE_SCHEME):]
+                if not _collection_is_file_routed(rest):
+                    return uri[: slash + 1] + NOTE_URI_SCHEME + rest
+    return uri
 
 
 _unanchored_relative_warned: set[str] = set()

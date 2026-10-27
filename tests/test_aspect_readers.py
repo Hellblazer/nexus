@@ -18,12 +18,148 @@ Coverage:
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from urllib.parse import quote
 
 import pytest
 from tests.conftest import make_vector_test_client
 from tests._module_seam import setattr_in
+
+
+# ── Note-URI helpers (RDR-231, nexus-bivz3.10) ───────────────────────────────
+
+_NOTE_URI_CORPUS = (
+    Path(__file__).resolve().parents[1]
+    / "service/src/test/resources/note-uri-corpus.json"
+)
+
+
+def _note_uri_corpus() -> dict:
+    return json.loads(_NOTE_URI_CORPUS.read_text(encoding="utf-8"))
+
+
+class TestNoteUriCorpus:
+    """The shared corpus pins ``NoteUri`` (engine) and these helpers to the
+    same answers. ``is_note`` in the corpus means "a note in either
+    spelling", so the client check is ``is_note_uri(canonical_note_uri(u))``.
+    """
+
+    def test_prefix_list_matches_engine_corpus(self) -> None:
+        from nexus.aspect_readers import FILE_ROUTED_PREFIXES
+
+        corpus = _note_uri_corpus()
+        assert list(FILE_ROUTED_PREFIXES) == corpus["file_routed_prefixes"]
+
+    def test_corpus_has_rows_and_a_residue_row_per_prefix(self) -> None:
+        # Non-vacuity: a truncated or emptied corpus must not pass silently.
+        corpus = _note_uri_corpus()
+        rows = corpus["rows"]
+        assert len(rows) >= 15
+        for prefix in corpus["file_routed_prefixes"]:
+            assert any(
+                f"chroma://{prefix}" in r["uri"] and not r["is_note"] for r in rows
+            ), prefix
+        assert any(r["is_note"] for r in rows)
+        assert any(not r["is_note"] for r in rows)
+
+    def test_every_row_canonical_and_is_note(self) -> None:
+        from nexus.aspect_readers import canonical_note_uri, is_note_uri
+
+        for row in _note_uri_corpus()["rows"]:
+            uri = row["uri"]
+            canon = canonical_note_uri(uri)
+            assert canon == row["canonical"], uri
+            assert is_note_uri(canon) is row["is_note"], uri
+
+    def test_canonical_is_idempotent(self) -> None:
+        from nexus.aspect_readers import canonical_note_uri
+
+        for row in _note_uri_corpus()["rows"]:
+            once = canonical_note_uri(row["uri"])
+            assert canonical_note_uri(once) == once, row["uri"]
+
+    def test_scheme_constant(self) -> None:
+        from nexus.aspect_readers import NOTE_URI_SCHEME
+
+        assert NOTE_URI_SCHEME == "nx-note://"
+
+    def test_new_symbols_exported(self) -> None:
+        import nexus.aspect_readers as m
+
+        for name in ("NOTE_URI_SCHEME", "is_note_uri", "note_uri", "canonical_note_uri"):
+            assert name in m.__all__, name
+
+
+class TestNoteUriMint:
+    """RDR Test Plan row 563: ``note_uri`` reproduces today's stored
+    (``uri_for``) and transient (``quote(x, safe='/')``) strings apart from
+    the scheme."""
+
+    _REST = "dir/a b#c%d/é.md"
+
+    def test_stored_form_matches_uri_for_modulo_scheme(self) -> None:
+        from nexus.aspect_readers import note_uri, uri_for
+
+        stored = uri_for("knowledge__nexus", self._REST)
+        assert stored == f"chroma://knowledge__nexus/{self._REST}"
+        assert note_uri("knowledge__nexus", self._REST) == stored.replace(
+            "chroma://", "nx-note://", 1
+        )
+
+    def test_transient_form_quotes_rest_modulo_scheme(self) -> None:
+        from nexus.aspect_readers import note_uri
+
+        today = f"chroma://knowledge__nexus/{quote(self._REST, safe='/')}"
+        got = note_uri("knowledge__nexus", self._REST, quote_rest=True)
+        assert got == today.replace("chroma://", "nx-note://", 1)
+        assert "%20" in got and "%23" in got and "%25" in got
+        assert got.count("/") == 2 + 1 + self._REST.count("/")  # rest slashes stay literal
+
+    def test_minted_note_uri_is_a_note(self) -> None:
+        from nexus.aspect_readers import is_note_uri, note_uri
+
+        assert is_note_uri(note_uri("knowledge__nexus", self._REST))
+        assert is_note_uri(note_uri("knowledge__nexus", self._REST, quote_rest=True))
+        assert not is_note_uri(note_uri("docs__1-1__voyage-context-3__v1", "x.md"))
+
+
+class TestCanonicalNoteUriExport:
+    """``nxexp://<target>/chroma://<c>/<rest>`` (critique Significant 6)."""
+
+    def test_note_routed_export_wrapped(self) -> None:
+        from nexus.aspect_readers import canonical_note_uri
+
+        assert (
+            canonical_note_uri("nxexp://T/chroma://knowledge__x/a b")
+            == "nxexp://T/nx-note://knowledge__x/a b"
+        )
+
+    def test_file_routed_export_unchanged(self) -> None:
+        from nexus.aspect_readers import canonical_note_uri
+
+        for p in ("rdr__", "docs__", "code__"):
+            uri = f"nxexp://T/chroma://{p}1-1__m__v1/x.md"
+            assert canonical_note_uri(uri) == uri
+
+    def test_already_nx_note_export_unchanged(self) -> None:
+        from nexus.aspect_readers import canonical_note_uri
+
+        uri = "nxexp://T/nx-note://knowledge__x/a"
+        assert canonical_note_uri(uri) == uri
+
+    def test_export_without_inner_slash_unchanged(self) -> None:
+        from nexus.aspect_readers import canonical_note_uri
+
+        assert canonical_note_uri("nxexp://T") == "nxexp://T"
+
+    def test_only_first_scheme_occurrence_rewritten(self) -> None:
+        from nexus.aspect_readers import canonical_note_uri
+
+        assert (
+            canonical_note_uri("chroma://knowledge__x/chroma://y")
+            == "nx-note://knowledge__x/chroma://y"
+        )
 
 
 # ── CHROMA_IDENTITY_FIELD dispatch ───────────────────────────────────────────
