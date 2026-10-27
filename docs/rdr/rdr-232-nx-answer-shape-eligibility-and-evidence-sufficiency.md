@@ -518,8 +518,8 @@ taxonomy.
 
 | Shape | Meaning | Typical evidence requirement |
 | --- | --- | --- |
-| `lookup` | A specific fact or small set of facts | Best direct evidence; optional graph context |
-| `synthesis` | A unified account of multiple requested aspects | Coverage of each requested facet |
+| `lookup` | A specific fact or small set of facts, including several connected facts from one passage of one source | Best direct evidence; optional graph context |
+| `synthesis` | A unified account of multiple requested aspects across sections, sources or history | Coverage of each requested facet |
 | `discovery/listing` | A bounded inventory or corpus-coverage result | Complete, attributable result set within the declared bounds |
 | `comparison` | Relative treatment of two or more subjects | Comparable evidence for every subject and axis |
 | `audit` | Findings against a criterion or implementation | Inspectable evidence for each claimed finding |
@@ -616,6 +616,15 @@ enter inline planning with eligibility diagnostics. There is no existing
 no-model generic synthesis fallback to reuse; adding one would be separate
 work.
 
+The directional rule is a measured limit, kept for the first enabled release
+(Sam, 2026-10-27). "When its operators are suitable" is not checked: any
+synthesis-capable plan is admitted for a lookup. So the gate cannot remove a
+synthesis plan the labels call wrong for a lookup (held-out H09), and a live
+single-theorem lookup ran a synthesis plan for 1.64 USD where the lookup plan
+costs about 0.13 (proof run 737). In the other direction it removed one plan
+the labels accept (held-out H18). A tightened rule is measured after the
+release (nexus-jypmj.11).
+
 Apply eligibility to ordinary cosine candidates, below-floor category-route
 candidates, and FTS fallback candidates before cost choice. Wrong-shape plans
 must also be excluded from the inline planner's few-shot examples, or they can
@@ -631,8 +640,13 @@ when `trace=False`.
 `RequestCoverage` is built **before** `plan_match`, in a separately measured
 stage with its own timeout and cost accounting. Explicit caller parameters and
 bindings take precedence over question text. The implementation uses a
-deterministic first pass and an optional single structured-extraction call only
-when the first pass cannot establish the required shape.
+deterministic first pass and a single structured-extraction call only when the
+first pass cannot establish the required shape. The call is on by default with
+Haiku (Sam, 2026-10-27): the first pass leaves about two thirds of real
+requests unknown or facet-uncertain, and the call costs about 0.002 USD and
+4 s. `NX_ANSWER_STRUCTURED_EXTRACT=0` turns it off, and the eligibility gate
+then runs in shadow, because the gate on first-pass kinds failed the
+lookup-recall threshold (held-out lookup recall 0.4 to 0.2).
 
 | Field | Extraction | On failure |
 | --- | --- | --- |
@@ -1236,14 +1250,16 @@ more context is useful.
 ### Consequences
 
 - More requests may fall through to inline planning when the only similar saved
-  plan has the wrong answer shape. That is an intended precision/latency trade,
-  and its size is unknown until Phase 2 measures it: an `unknown` request
-  can use only curated synthesis or unknown plans, plan 473 is the only
+  plan has the wrong answer shape. That is an intended precision/latency trade.
+  Phase 2 measured its size: replayed over 143 real runs, the gate removes the
+  selected plan from 50% of runs with first-pass kinds, 42% with Opus and 38%
+  with Haiku extraction (the shipped configuration). Plan 473 is the only
   `lookup` builtin, and every existing grown plan decodes to `unknown`.
 - Source reservation gives less space to secondary evidence. It should improve
   source-grounded answers but may reduce broad contextual discovery unless the
   caller asks for it.
-- Coverage extraction and repair add model and retrieval work on some calls.
+- Coverage extraction and repair add model and retrieval work. Request
+  extraction runs on about two thirds of real requests (one Haiku call each).
   The one-repair bound and existing call budgets prevent an open-ended loop.
 - Explicit answer-kind declarations add a small authoring obligation to builtin
   plans. Unknown grown plans remain supported rather than forcing a migration
@@ -1443,6 +1459,15 @@ first phase that claims the complete motivating behavior.
    be excluded. The thresholds are set from the baseline measurement before
    the gate is enabled. All grown plans decode to `unknown` today, so report
    the drop in plan reuse on broad requests as its own number.
+   As run (2026-10-27): the thresholds were set after the gate-on measurement,
+   not before it. The golden baseline is in-sample, since the classifier was
+   written with those requests in view, so a threshold drawn from it bounds
+   nothing out of sample. A blind held-out set was written first, then all
+   three kind sources were measured gate-off and gate-on, then the thresholds
+   were set; three of them sit at the measured values (T2
+   `nexus/rdr232-phase2-thresholds`). The only measured fall in wrong-shape
+   admission is in-sample (golden 4 of 24 to 0, one of them a synthetic clone
+   of plan 473); on the held-out set it is 1 of 29 before and after.
 7. Build and verify the active-project tier of source resolution (A5).
 
 ### Phase 3: Bounded repair and quality reporting
@@ -1628,8 +1653,9 @@ measurement exists.
 ### Performance Expectations
 
 Containment should reduce hydrated context and secondary evidence on crowded
-runs. Request extraction is deterministic-first; the optional single structured
-call has separately measured cost and timeout. Facet assessment is grouped per
+runs. Request extraction is deterministic-first; the single structured call
+(on by default, Haiku) has separately measured cost and timeout: about
+0.002 USD, p50 4 s and p95 7 s, 0 of 112 calls failed in measurement. Facet assessment is grouped per
 evidence stream, with the repair and reassessment bounded to one cycle. Measure
 invocation rates, facets per call, incremental latency, and cost against the
 current run records. No throughput target is asserted without a baseline.
@@ -1801,3 +1827,4 @@ remain coherent without it.
   rule for secondary streams (nexus-jypmj.1.18), approved by Sam.
 - 2026-10-26: Section 2a replaces the subtree forwarding sentence with the shipped subtree-filter rule (nexus-jypmj.1.16), approved by Sam.
 - 2026-10-26: Section 1 states how the active-project tier decides (reliability, the project-name and title veto, the fallback notice, question-text sources, the range disclosure) and the Phase 2 proof states what "otherwise" means for the unmodified call (nexus-jypmj.2.4), approved by Sam.
+- 2026-10-27: Phase 2 measured and enabled (nexus-jypmj.2.8, nexus-jypmj.12), approved by Sam. Section 1: a lookup includes several connected facts from one passage of one source; the directional rule is recorded as a measured limit; request extraction is on by default with Haiku and turning it off puts the gate in shadow. Trade-offs and Performance Expectations carry the measured fall-through and extraction cost. Phase 2 step 6 records that the thresholds were set after measuring, and why.
