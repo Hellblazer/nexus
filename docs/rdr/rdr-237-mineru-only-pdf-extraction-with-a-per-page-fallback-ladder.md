@@ -362,7 +362,9 @@ buffer, and chunks of them that already reached T3 stay there, as an interrupted
 run's do; the pages counted toward the trip are held until the window resolves
 and are dropped, so none is stored as degraded text. A rerun after the install is
 repaired does not write the kept pages again, but MinerU still runs over every
-earlier page. A document whose every
+earlier page. Under `nx index pdf --dir` a trip stops the whole run, since every later PDF
+would trip it again after its own timeouts: the remaining PDFs are listed as not
+attempted and the run exits non-zero. A document whose every
 page is `unextracted` also fails with a named reason rather than indexing nothing.
 
 Docling is removed: code, dependency, configuration value, CLI choice, CI steps,
@@ -828,3 +830,4 @@ a candidate for trimming.
 - 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `e4fb19b83`; critique `nexus_rdr/237-gate-critique-2026-10-27-r2`.
 - 2026-10-27: Accept residual dispositions (gate record `nexus_rdr/237-gate-latest`): residual 1 nexus-489n1 (Sam's choice, Phase 1 Step 2); residuals 2 and 5 nexus-q6nw0 (Step 1); residuals 3 and 6 nexus-489n1 (Step 2); residual 4 nexus-tv1w3 (Step 3).
 - 2026-10-27: Amended by Sam's decision (beads nexus-q6nw0, nexus-489n1) to match the code: a breaker trip keeps the pages before the failing window and drops the window; the batch path passes no heartbeat; macOS is one MinerU slot whatever the environment says; a connect timeout or dropped connection is a lost server, not a page timeout.
+- 2026-10-27: By Sam's decision (nexus-q6nw0), a breaker trip stops the whole `nx index pdf --dir` run; the remaining PDFs are listed as not attempted.

@@ -2758,9 +2758,36 @@ def test_pdf_dir_stops_the_whole_run_when_mineru_fails_systemically(runner, home
 
     assert seen == ["a.pdf", "b.pdf"], "no PDF after the trip is attempted"
     assert result.exit_code != 0, result.output
-    assert "Stopped: MinerU failed systemically on b.pdf; 2 remaining PDF(s) not attempted." in result.output
-    assert "c.pdf: not attempted" in result.output and "d.pdf: not attempted" in result.output
+    assert "Stopped: MinerU failed systemically on b.pdf (failure class exit:1:ImportError: libGL.so.1); " \
+        "2 remaining PDF(s) not attempted. Repair the install (`nx doctor`), then rerun." in result.output
+    assert "c.pdf: not attempted (the run stopped at b.pdf)" in result.output
+    assert "d.pdf: not attempted (the run stopped at b.pdf)" in result.output
+    assert "Summary: 4 PDFs (2 not attempted)" in result.output
     assert "3 of 4 file(s) failed" in result.output, result.output
+
+
+def test_pdf_dir_trip_on_the_last_pdf_prints_no_stopped_line(runner, home):
+    """Nothing is left to stop: the trip is a failure like any other, with no Stopped line and no
+    not-attempted count."""
+    from nexus.pdf_extractor import MineruSystemicFailure
+
+    d = home / "pdfs"
+    d.mkdir()
+    for name in ("a.pdf", "b.pdf"):
+        (d / name).write_bytes(b"fake pdf")
+
+    def _fake_index_pdf(path, **kwargs):
+        if path.name == "b.pdf":
+            raise MineruSystemicFailure("timeout", "", [1, 2, 3], path.name)
+        return 2
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_fake_index_pdf):
+        result = runner.invoke(main, ["index", "pdf", "--dir", str(d)])
+
+    assert result.exit_code != 0, result.output
+    assert "Stopped:" not in result.output
+    assert "not attempted" not in result.output
+    assert "1 of 2 file(s) failed" in result.output, result.output
 
 
 def test_pdf_dir_continues_past_an_ordinary_per_file_failure(runner, home):

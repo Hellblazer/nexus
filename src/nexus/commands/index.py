@@ -3290,6 +3290,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         # RDR-237: the pages the ladder settled below MinerU's first rung, per document, for
         # the end-of-run summary (index_pdf's on_extraction).
         degraded_runs: list[tuple[str, dict[str, list[int]]]] = []
+        # RDR-237: PDFs left unattempted after a MinerU breaker trip stopped the run.
+        not_attempted = 0
         # nexus-s71lr: `nx index pdf --dir` echoes `[i/total] name…` with
         # nl=False and only completes the line AFTER index_pdf returns — a
         # single slow PDF (the bead's own complaint class) is silence between
@@ -3359,20 +3361,19 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                         # not attempted so the summary and the exit code say so.
                         remaining = pdfs[i:]
                         for rest in remaining:
-                            failures.append((
-                                rest,
-                                f"not attempted: the run stopped after MinerU failed "
-                                f"systemically on {pdf.name} (repair the install, see "
-                                f"`nx doctor`, then rerun)",
-                            ))
+                            failures.append((rest, f"not attempted (the run stopped at {pdf.name})"))
+                        not_attempted += len(remaining)
                         _log.warning(
                             "batch_index_stopped_on_systemic_failure", path=str(pdf),
                             failure_class=exc.failure_class, not_attempted=len(remaining),
                         )
-                        click.echo(
-                            f"Stopped: MinerU failed systemically on {pdf.name}; "
-                            f"{len(remaining)} remaining PDF(s) not attempted."
-                        )
+                        if remaining:
+                            click.echo(
+                                f"Stopped: MinerU failed systemically on {pdf.name} "
+                                f"(failure class {exc.failure_class}); {len(remaining)} "
+                                f"remaining PDF(s) not attempted. Repair the install "
+                                f"(`nx doctor`), then rerun."
+                            )
                         break
                 finally:
                     file_heartbeat.touch(f"{i}/{total} PDF(s), {total_chunks:,} chunks")
@@ -3381,8 +3382,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
         batch_elapsed = _time.monotonic() - batch_start
         summary_line = (
-            f"\nSummary: {total} PDFs, {total_chunks} chunks, "
-            f"{batch_elapsed:.1f}s total"
+            f"\nSummary: {total} PDFs"
+            + (f" ({not_attempted} not attempted)" if not_attempted else "")
+            + f", {total_chunks} chunks, {batch_elapsed:.1f}s total"
         )
         # nexus-2t63u round 2 (substantive-critic observation 4): surface a
         # mass mistaken --collection retarget IN the batch summary, not
