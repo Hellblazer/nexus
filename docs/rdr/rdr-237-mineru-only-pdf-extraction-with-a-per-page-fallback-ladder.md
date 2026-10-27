@@ -195,6 +195,20 @@ code raises.
 installed, 792 MB is used only by MinerU, Docling and torch together. Docling's
 own share was not measured; MinerU also needs torch.
 
+**RF-8 (Verified, source; T2 `nexus_rdr/237-research-1`).** `_extract_normalized`
+already reads and normalizes each page on its own (`page.get_text(sort=True)`
+in a per-page loop over `pymupdf.open`), so the last rung for one page is the
+same call on one page.
+
+**RF-9 (Verified, source; T2 `nexus_rdr/237-research-2`).** Walking `uv.lock` from
+the conexus root with every extra and dev group, 14 packages are reachable only
+through `docling-slim`: accelerate, doclang, docling-core, docling-ibm-models,
+docling-parse, docling-slim, jsonref, langcodes, latex2mathml, psutil, rtree,
+shellingham, tabulate, typer. No module in `src/nexus`, `scripts`, `tests` or
+`conexus` imports any of them. pypdfium2, pillow and torch stay, through
+MinerU. The pillow cap, whose stated reason is `docling-slim`, may become
+relaxable once it is gone.
+
 ### Critical Assumptions
 
 - [ ] A1: MinerU honours `formula_enable=false` per request on the server path
@@ -207,12 +221,12 @@ own share was not measured; MinerU also needs torch.
   retrieval as Docling's. RF-1 covers one scanned math paper only. —
   **Status**: Unverified — **Method**: Spike (retrieval comparison on non-math
   PDFs).
-- [ ] A4: PyMuPDF can return the text layer of one page of a PDF in isolation,
-  quickly, for use as the last rung. — **Status**: Unverified — **Method**:
+- [x] A4: PyMuPDF can return the text layer of one page of a PDF in isolation,
+  quickly, for use as the last rung. — **Status**: Verified (RF-8) — **Method**:
   Source Search.
-- [ ] A5: Removing `docling-slim` removes nothing another part of nexus imports
+- [x] A5: Removing `docling-slim` removes nothing another part of nexus imports
   (pillow and pypdfium2 pins, `cross_encoder` comment). — **Status**:
-  Unverified — **Method**: Source Search (`uv tree --invert`).
+  Verified (RF-9) — **Method**: Source Search (a reachability walk of `uv.lock`).
 
 ## Proposed Solution
 
