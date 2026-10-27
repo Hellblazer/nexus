@@ -188,6 +188,9 @@ class PDFConfig:
 #: Lowest ``pdf.ladder_breaker`` other than 0 that is honoured.
 _LADDER_BREAKER_FLOOR = 3
 
+#: ``repr`` of every malformed ``pdf.ladder_breaker`` value already warned about (tests clear it).
+_LADDER_BREAKER_WARNED: set[str] = set()
+
 
 def _coerce_ladder_breaker(value: Any) -> int:
     """``pdf.ladder_breaker`` as an int: 0 (off) or 3 and up; else warn and use 3.
@@ -209,13 +212,18 @@ def _coerce_ladder_breaker(value: Any) -> int:
             parsed = None
     if parsed is not None and (parsed == 0 or parsed >= _LADDER_BREAKER_FLOOR):
         return parsed
-    _log.warning(
-        "pdf_config_malformed",
-        key="pdf.ladder_breaker",
-        value=value,
-        fell_back_to=_LADDER_BREAKER_FLOOR,
-        reason="must be 0 (off) or an integer of 3 or more",
-    )
+    # The accessors re-read the config on every call, so a malformed value would warn on every
+    # page of every document. Warn once per distinct value per process.
+    seen = repr(value)
+    if seen not in _LADDER_BREAKER_WARNED:
+        _LADDER_BREAKER_WARNED.add(seen)
+        _log.warning(
+            "pdf_config_malformed",
+            key="pdf.ladder_breaker",
+            value=value,
+            fell_back_to=_LADDER_BREAKER_FLOOR,
+            reason="must be 0 (off) or an integer of 3 or more",
+        )
     return _LADDER_BREAKER_FLOOR
 
 

@@ -1387,9 +1387,10 @@ def _release_systemic_failure(db: HttpPipelineDB, content_hash: str, failure: Mi
     The failure says the install or the machine is failing, which says nothing about the
     document, so the exit is :func:`_release_interrupted_run`'s and not
     :func:`_mark_failed_and_reset_wal`'s: the row moves to ``failed``, the pipeline buffer is
-    not wiped, and the next run (after the install is repaired) resumes from the pages already
-    extracted. Chunks of earlier pages that already reached T3 stay there, as an interrupted
-    run's do; no catalog manifest is written for the document because the run never reaches the
+    not wiped, and the next run (after the install is repaired) does not write the buffered pages
+    again; MinerU still re-extracts every earlier page, so the buffer spares only the writes.
+    Chunks of earlier pages that already reached T3 stay there, as an interrupted run's do; no
+    catalog manifest is written for the document because the run never reaches the
     tail. The recorded error names the failure class and the worker's last stderr line (the
     exception's message). Never raises. Returns True when the engine fenced the write."""
     try:
@@ -1861,8 +1862,9 @@ def pipeline_index_pdf(
                 fenced = _release_interrupted_run(db, content_hash, interrupt, stage_error=first_exc)
             elif isinstance(first_exc, MineruSystemicFailure):
                 # RDR-237: the MinerU install or machine is failing, not this document. Keep the
-                # buffer (a rerun resumes from the pages already extracted); wiping it would restart
-                # a 300-page book at page 1 for a cause the PDF did not have.
+                # buffer (a rerun skips the writes of the pages already buffered, though MinerU
+                # re-extracts them); wiping it would also redo those writes for a cause the PDF
+                # did not have.
                 fenced = _release_systemic_failure(db, content_hash, first_exc)
             else:
                 fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)

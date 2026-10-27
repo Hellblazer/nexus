@@ -3051,10 +3051,9 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
     type=click.Choice(["fail", "docling"]),
     default="fail",
     help=(
-        "What to do when a single page reproducibly OOM-kills MinerU's formula "
-        "model (RDR-148 Gap 5). 'fail' (default) aborts the document, preserving "
-        "the no-silent-fallback-for-formulas guarantee. 'docling' degrades only "
-        "THAT page to docling (formula-stripped) and continues."
+        "Accepted and ignored for one release (RDR-237). A page whose MinerU "
+        "attempt fails is retried without formulas, then taken from its PyMuPDF "
+        "text layer, whatever the value; the document no longer aborts for it."
     ),
 )
 @click.option(
@@ -3113,8 +3112,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
         UnchunkableContentError,
+        UnextractableContentError,
         CatalogIdentityMissingError,
     )
+    from nexus.pdf_extractor import MineruSystemicFailure  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
 
     # Local wrapper: convert the typed credential/identity errors into a
     # Click exception so the CLI shows a friendly message + exits non-zero
@@ -3456,7 +3457,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"Indexing {path}…")
         try:
             n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, on_formula_oom=on_formula_oom, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True)
-        except (ImportError, RuntimeError, ExtractionQualityError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -3552,7 +3553,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # completion stamp. Clean fail-loud ClickException, never
             # folded into a success summary.
             raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "", corpus=corpus)) from e
-        except (ImportError, RuntimeError, ExtractionQualityError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -3579,7 +3580,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
             # the identical rationale on the monitor branch above.
             raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "", corpus=corpus)) from e
-        except (ImportError, RuntimeError, ExtractionQualityError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user

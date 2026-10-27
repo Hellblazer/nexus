@@ -43,6 +43,8 @@ pytestmark = pytest.mark.usefixtures("_quiet_progress")
 def _quiet_progress(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("NEXUS_PDF_PROGRESS_QUIET", "1")
     monkeypatch.delenv("NX_MINERU_FAULT_PAGES", raising=False)
+    # pdf.ladder_breaker warns once per process per bad value; each test starts with none warned.
+    monkeypatch.setattr("nexus.config._LADDER_BREAKER_WARNED", set())
     # A forced timeout waits out the real per-page budget (180 s by default); no test here may
     # ever really wait, so the wait is a recorder the timeout test reads.
     with patch("nexus.pdf_extractor._fault_wait") as wait:
@@ -83,13 +85,19 @@ class FakeMineru:
     """Stands in for ``_mineru_run_isolated``. *plan* maps ``(page, rung)`` (page 1-based,
     rung 1 = formulas on, 2 = formulas off) to an exception to raise; anything else succeeds."""
 
-    def __init__(self, plan: dict[tuple[int, int], BaseException] | None = None) -> None:
+    def __init__(
+        self, plan: dict[tuple[int, int], BaseException] | None = None,
+        events: list[tuple] | None = None,
+    ) -> None:
         self.plan = plan or {}
         self.calls: list[tuple[int, int]] = []
+        self.events = events
 
     def __call__(self, pdf_path, start, end, formula_enable=True):
         page, rung = start + 1, 1 if formula_enable else 2
         self.calls.append((page, rung))
+        if self.events is not None:
+            self.events.append(("attempt", page, rung))
         exc = self.plan.get((page, rung))
         if exc is not None:
             raise exc
@@ -103,12 +111,25 @@ def run_ladder(
     *,
     breaker: int = 3,
     subprocess_retry=None,
+    delivered: list[tuple[int, str, dict]] | None = None,
+    events: list[tuple] | None = None,
 ):
-    """Run ``_extract_with_mineru`` over a real PDF; return (result, on_page calls, fake, ext)."""
+    """Run ``_extract_with_mineru`` over a real PDF; return (result, on_page calls, fake, ext).
+
+    *delivered* (filled even when the run raises) collects the ``on_page`` calls; *events* gets
+    every MinerU attempt (``("attempt", page, rung)``) and every delivery (``("deliver", index)``)
+    in the order they happened.
+    """
     pdf = make_pdf(tmp_path / "doc.pdf", page_texts)
-    fake = FakeMineru(plan)
+    fake = FakeMineru(plan, events)
     ext = PDFExtractor()
-    delivered: list[tuple[int, str, dict]] = []
+    delivered = [] if delivered is None else delivered
+
+    def on_page(i, t, m):
+        delivered.append((i, t, m))
+        if events is not None:
+            events.append(("deliver", i))
+
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("nexus.pdf_extractor.do_parse", object()))
         stack.enter_context(patch("nexus.config.get_mineru_page_batch", return_value=1))
@@ -116,9 +137,7 @@ def run_ladder(
         stack.enter_context(patch.object(ext, "_mineru_run_isolated", side_effect=fake))
         if subprocess_retry is not None:
             stack.enter_context(patch.object(ext, "_mineru_run_subprocess", subprocess_retry))
-        result = ext._extract_with_mineru(
-            pdf, on_page=lambda i, t, m: delivered.append((i, t, m)),
-        )
+        result = ext._extract_with_mineru(pdf, on_page=on_page)
     return result, delivered, fake, ext
 
 
@@ -376,7 +395,14 @@ def test_three_consecutive_pages_failing_both_rungs_with_one_class_trip_the_brea
     assert exc.failure_class == "exit:1:ImportError: libGL.so.1"
     assert "exit:1:ImportError: libGL.so.1" in str(exc)
     assert "ImportError: libGL.so.1" in str(exc)
-    assert delivered == [0, 1, 2], "pages before the trip are delivered; the tripping page is not"
+    text = str(exc)
+    assert "pages before page 2 stay in the kept buffer" in text
+    assert "MinerU runs over them again" in text, "a rerun reruns MinerU; the buffer spares only the writes"
+    assert "resumes" not in text
+    assert delivered == [0], (
+        "only the page before the window is delivered: pages 2 and 3 were counted toward the trip "
+        "and are held, page 4 tripped it, and a rerun redoes all three with MinerU"
+    )
 
 
 def test_a_class_that_changes_restarts_the_count_at_one(tmp_path: Path) -> None:
@@ -439,6 +465,236 @@ def test_a_breaker_of_four_needs_four_pages(tmp_path: Path) -> None:
         run_ladder(tmp_path, TEXTS[:5], plan, breaker=4)
 
 
+def test_a_page_rung_1_settles_resets_the_count(tmp_path: Path) -> None:
+    """Two counted pages, a clean page, two more: a healthy install with sporadic bad pages."""
+    plan = both_rungs([1, 2, 4, 5], lambda: worker_exit(1, "ImportError: a"))
+    result, _, _, _ = run_ladder(tmp_path, TEXTS, plan, breaker=3)
+
+    assert result.metadata["extraction_pages"] == {"pymupdf-text": [1, 2, 4, 5]}
+
+
+def test_a_dropped_connection_retry_that_succeeds_resets_the_count(tmp_path: Path) -> None:
+    retry = MagicMock(return_value=("SUBPROCESS page 3", [], [{"page_idx": 0}]))
+    plan = both_rungs([1, 2, 4, 5], lambda: worker_exit(1, "ImportError: a"))
+    plan[(3, 1)] = httpx.ReadError("reset")
+    result, _, _, _ = run_ladder(tmp_path, TEXTS, plan, breaker=3, subprocess_retry=retry)
+
+    retry.assert_called_once()
+    assert result.metadata["extraction_pages"] == {"pymupdf-text": [1, 2, 4, 5]}
+
+
+# ── the breaker window is held, then flushed in order or dropped ─────────────
+
+A = lambda: worker_exit(1, "ImportError: a")  # noqa: E731 — the failing class most tests count
+B = lambda: worker_exit(2, "OSError: b")  # noqa: E731 — a different class
+
+
+def _texts(delivered) -> list[tuple[int, str]]:
+    return [(i, t) for i, t, _ in delivered]
+
+
+def test_a_window_that_a_clean_page_resolves_is_delivered_in_order_before_that_page(
+    tmp_path: Path,
+) -> None:
+    plan = both_rungs([2, 3], A)  # page 4 settles on rung 1
+    delivered: list = []
+    result, _, _, _ = run_ladder(tmp_path, TEXTS[:4], plan, breaker=3, delivered=delivered)
+
+    assert _texts(delivered) == [
+        (0, "MINERU r1 page 1"), (1, "bravo two"), (2, "charlie three"), (3, "MINERU r1 page 4"),
+    ]
+    assert result.text.split("\n") == [
+        "MINERU r1 page 1", "bravo two", "charlie three", "MINERU r1 page 4",
+    ]
+    assert result.metadata["extraction_pages"] == {"pymupdf-text": [2, 3]}
+
+
+def test_a_window_that_a_rung_2_page_resolves_is_delivered_in_order_before_that_page(
+    tmp_path: Path,
+) -> None:
+    plan = both_rungs([2, 3], A)
+    plan[(4, 1)] = worker_exit(1, "boom")  # page 4 fails rung 1 only
+    delivered: list = []
+    run_ladder(tmp_path, TEXTS[:4], plan, breaker=3, delivered=delivered)
+
+    assert _texts(delivered) == [
+        (0, "MINERU r1 page 1"), (1, "bravo two"), (2, "charlie three"), (3, "MINERU r2 page 4"),
+    ]
+
+
+def test_a_window_that_a_dropped_connection_retry_resolves_is_delivered_in_order(
+    tmp_path: Path,
+) -> None:
+    retry = MagicMock(return_value=("SUBPROCESS page 4", [], [{"page_idx": 0}]))
+    plan = both_rungs([2, 3], A)
+    plan[(4, 1)] = httpx.ReadError("reset")
+    delivered: list = []
+    run_ladder(tmp_path, TEXTS[:4], plan, breaker=3, delivered=delivered, subprocess_retry=retry)
+
+    assert _texts(delivered) == [
+        (0, "MINERU r1 page 1"), (1, "bravo two"), (2, "charlie three"), (3, "SUBPROCESS page 4"),
+    ]
+
+
+def test_a_class_change_delivers_the_old_window_and_holds_the_page_that_changed_it(
+    tmp_path: Path,
+) -> None:
+    plan = {**both_rungs([2, 3], A), **both_rungs([4], B)}  # page 5 is clean
+    events: list = []
+    delivered: list = []
+    run_ladder(tmp_path, TEXTS, plan, breaker=3, delivered=delivered, events=events)
+
+    assert _texts(delivered) == [
+        (0, "MINERU r1 page 1"), (1, "bravo two"), (2, "charlie three"), (3, "delta four"),
+        (4, "MINERU r1 page 5"),
+    ]
+    at = {e: n for n, e in enumerate(events)}
+    # The old window is flushed when page 4 shows the class changed, after page 4's attempts...
+    assert at[("attempt", 4, 2)] < at[("deliver", 1)] < at[("deliver", 2)] < at[("attempt", 5, 1)]
+    # ...and page 4 itself, now the window, waits for page 5 to resolve it.
+    assert at[("attempt", 5, 1)] < at[("deliver", 3)] < at[("deliver", 4)]
+
+
+def test_a_page_whose_two_rungs_fail_differently_delivers_the_window_and_itself(
+    tmp_path: Path,
+) -> None:
+    plan = both_rungs([2, 3], A)
+    plan[(4, 1)] = A()
+    plan[(4, 2)] = worker_timeout()  # two classes: page 4 is not counted
+    events: list = []
+    delivered: list = []
+    run_ladder(tmp_path, TEXTS, plan, breaker=3, delivered=delivered, events=events)
+
+    at = {e: n for n, e in enumerate(events)}
+    assert at[("attempt", 4, 2)] < at[("deliver", 1)] < at[("deliver", 2)] < at[("deliver", 3)]
+    assert at[("deliver", 3)] < at[("attempt", 5, 1)], "page 4 went straight through"
+    assert [i for i, _, _ in delivered] == [0, 1, 2, 3, 4]
+
+
+def test_a_window_still_open_at_the_end_of_the_document_is_delivered_in_order(
+    tmp_path: Path,
+) -> None:
+    plan = both_rungs([3, 4], A)  # two counted pages, a breaker of 3, then no more pages
+    events: list = []
+    delivered: list = []
+    result, _, _, _ = run_ladder(
+        tmp_path, TEXTS[:4], plan, breaker=3, delivered=delivered, events=events,
+    )
+
+    assert _texts(delivered) == [
+        (0, "MINERU r1 page 1"), (1, "MINERU r1 page 2"), (2, "charlie three"), (3, "delta four"),
+    ]
+    at = {e: n for n, e in enumerate(events)}
+    assert at[("attempt", 4, 2)] < at[("deliver", 2)], "held until the document ended"
+    assert result.metadata["extraction_pages"] == {"pymupdf-text": [3, 4]}
+    assert result.metadata["page_count"] == 4
+    assert [b["page_number"] for b in result.metadata["page_boundaries"]] == [1, 2, 3, 4]
+
+
+def test_a_stop_in_the_middle_of_a_window_drops_the_held_pages(tmp_path: Path) -> None:
+    plan = both_rungs([2, 3], A)
+    plan[(4, 1)] = MineruMachineResourceError("no semaphores left")
+    delivered: list = []
+    with pytest.raises(MineruMachineResourceError):
+        run_ladder(tmp_path, TEXTS[:4], plan, breaker=3, delivered=delivered)
+
+    assert [i for i, _, _ in delivered] == [0], "the rerun redoes the window"
+
+
+def test_a_breaker_of_zero_holds_nothing(tmp_path: Path) -> None:
+    plan = both_rungs([1, 2, 3], A)
+    events: list = []
+    run_ladder(tmp_path, TEXTS[:4], plan, breaker=0, events=events)
+
+    at = {e: n for n, e in enumerate(events)}
+    assert at[("deliver", 0)] < at[("attempt", 2, 1)], "page 1 reached the buffer before page 2 began"
+    assert at[("deliver", 1)] < at[("attempt", 3, 1)]
+
+
+def test_a_page_that_never_counts_is_never_held(tmp_path: Path) -> None:
+    """Two rungs that fail without worker facts are 'unclassified': the breaker ignores them."""
+    plan = both_rungs([1, 2], lambda: RuntimeError("MinerU produced no output"))
+    events: list = []
+    run_ladder(tmp_path, TEXTS[:3], plan, breaker=3, events=events)
+
+    at = {e: n for n, e in enumerate(events)}
+    assert at[("deliver", 0)] < at[("attempt", 2, 1)]
+
+
+# ── the default extractor=auto path keeps the ladder's outcomes typed ────────
+
+
+def _auto_extract(tmp_path: Path, page_texts: list[str], plan, *, breaker=3, on_page=None):
+    """``PDFExtractor.extract(extractor="auto")`` over a formula-routed PDF and the fake MinerU."""
+    pdf = make_pdf(tmp_path / "doc.pdf", page_texts)
+    ext = PDFExtractor()
+    with patch("nexus.pdf_extractor._has_formulas_quick", return_value=10), \
+         patch("nexus.pdf_extractor.do_parse", object()), \
+         patch("nexus.config.get_mineru_page_batch", return_value=1), \
+         patch("nexus.config.get_pdf_ladder_breaker", return_value=breaker), \
+         patch.object(ext, "_mineru_run_isolated", side_effect=FakeMineru(plan)):
+        return ext.extract(pdf, extractor="auto", on_page=on_page)
+
+
+def test_the_auto_path_raises_the_breaker_unwrapped_with_the_window_dropped(tmp_path: Path) -> None:
+    """The pipeline reads the TYPE to keep the buffer; a RuntimeError here wiped it."""
+    delivered: list[int] = []
+    plan = both_rungs([2, 3, 4], A)
+    with pytest.raises(MineruSystemicFailure) as info:
+        _auto_extract(tmp_path, TEXTS, plan, on_page=lambda i, t, m: delivered.append(i))
+
+    assert info.value.failure_class == "exit:1:ImportError: a"
+    assert delivered == [0]
+
+
+def test_the_auto_path_raises_all_unextracted_as_unextractable_content(tmp_path: Path) -> None:
+    plan = both_rungs([1, 2], A)
+    with pytest.raises(pdf_extractor.UnextractableContentError, match="every page.*unextracted"):
+        _auto_extract(tmp_path, ["", ""], plan, breaker=0)
+
+
+@pytest.mark.parametrize("stop", ["fenced", "cancelled"])
+def test_the_auto_path_does_not_wrap_a_stop_raised_by_the_callback(tmp_path: Path, stop: str) -> None:
+    error = (
+        PipelineRunFenced(
+            "stale", pipeline_id=1, content_hash="h", run_epoch=1, current_epoch=2, remedy="",
+        ) if stop == "fenced" else PipelineCancelled("pipeline cancelled")
+    )
+
+    def on_page(index, text, meta):
+        raise error
+
+    with pytest.raises(type(error)) as info:
+        _auto_extract(tmp_path, TEXTS[:2], {}, on_page=on_page)
+    assert info.value is error
+
+
+def test_the_auto_path_wraps_any_other_failure_and_does_not_advise_docling(tmp_path: Path) -> None:
+    pdf = make_pdf(tmp_path / "doc.pdf", TEXTS[:2])
+    ext = PDFExtractor()
+    with patch("nexus.pdf_extractor._has_formulas_quick", return_value=10), \
+         patch.object(ext, "_extract_with_mineru", side_effect=ValueError("page rewrite failed")):
+        with pytest.raises(RuntimeError) as info:
+            ext.extract(pdf, extractor="auto")
+
+    msg = str(info.value)
+    assert "MinerU extraction failed: ValueError: page rewrite failed" in msg
+    assert "nx doctor" in msg
+    assert "--extractor docling" not in msg
+
+
+# ── the stderr line a failure class carries ──────────────────────────────────
+
+
+def test_a_stderr_line_is_cut_to_the_cap_and_its_edges_are_stripped() -> None:
+    cap = pdf_extractor._STDERR_LINE_CAP
+    assert pdf_extractor._last_stderr_line("noise\n" + "y" * (cap + 200) + "\n\n") == "y" * cap
+    assert pdf_extractor._last_stderr_line("z" * cap) == "z" * cap, "a line of exactly the cap is whole"
+    assert pdf_extractor._last_stderr_line("z" * (cap + 1)) == "z" * cap
+    assert pdf_extractor._last_stderr_line("  padded  \n") == "padded"
+    assert pdf_extractor._last_stderr_line(" \n\n") == ""
+
+
 # ── pdf.ladder_breaker ───────────────────────────────────────────────────────
 
 
@@ -462,12 +718,25 @@ def test_ladder_breaker_accepts_zero_and_three_or_more(value, expected) -> None:
     assert warnings == []
 
 
-@pytest.mark.parametrize("value", [1, 2, -1, "2", "x", "", 2.5, True, None, [3]])
+@pytest.mark.parametrize("value", [1, 2, -1, "2", "x", "", 2.5, True, False, None, [3]])
 def test_ladder_breaker_below_three_or_not_an_integer_warns_and_becomes_three(value) -> None:
     got, warnings = _breaker_from(value)
     assert got == 3
     assert len(warnings) == 1, warnings
     assert "ladder_breaker" in str(warnings[0])
+
+
+def test_a_malformed_ladder_breaker_warns_once_per_process_per_value() -> None:
+    """The accessor re-reads the config on every call (once per document), so a bad value that
+    warned each time would repeat the same line for every PDF indexed."""
+    first = _breaker_from("x")
+    second = _breaker_from("x")
+    other = _breaker_from("y")
+
+    assert first[0] == second[0] == other[0] == 3
+    assert len(first[1]) == 1
+    assert second[1] == [], "the same value does not warn again"
+    assert len(other[1]) == 1, "a different bad value is a different mistake"
 
 
 def test_the_accessor_reads_the_config() -> None:

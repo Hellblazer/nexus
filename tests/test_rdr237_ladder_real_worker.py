@@ -67,6 +67,8 @@ def test_three_pages_failing_both_rungs_in_a_real_worker_trip_the_breaker(
     assert MARKER in exc.failure_class, exc.failure_class
     assert "ImportError" in exc.failure_class, exc.failure_class
     assert exc.failure_class in str(exc) and MARKER in str(exc)
-    assert delivered == [0, 1], (
-        "pages 1 and 2 settled on their text layer; page 3 tripped the rule before its rung 3"
+    assert delivered == [], (
+        "pages 1 and 2 counted toward the trip and were held, page 3 tripped the rule: none of "
+        "them reaches the buffer, so a rerun after the repair redoes them with MinerU instead "
+        "of keeping their text-layer text labelled clean"
     )

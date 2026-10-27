@@ -897,6 +897,73 @@ def test_index_pdf_monitor_quality_gate_failure_exits_nonzero(runner, fake_pdf):
     assert "Traceback (most recent call last)" not in result.output
 
 
+class _TtyStdout:
+    """``sys.stdout`` as a terminal: ``isatty`` is True, everything else is the real stream."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def isatty(self) -> bool:
+        return True
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _SysWithTtyStdout:
+    """The ``sys`` module with a terminal ``stdout``. CliRunner is never a tty, and it installs
+    its stream after any patch of the real ``sys.stdout``, so the module the command looks the
+    stream up on is replaced instead."""
+
+    def __getattr__(self, name):
+        import sys as real_sys  # noqa: PLC0415 — test-local import
+
+        return _TtyStdout(real_sys.stdout) if name == "stdout" else getattr(real_sys, name)
+
+
+@pytest.mark.parametrize("mode", ["plain", "monitor", "dry-run", "tty"])
+@pytest.mark.parametrize("failure", ["breaker", "all-unextracted"])
+def test_index_pdf_mineru_ladder_failures_exit_nonzero_without_a_traceback(
+    runner, fake_pdf, mode, failure,
+):
+    """RDR-237 (nexus-tr1rj.1): the breaker's MineruSystemicFailure (an Exception, not a
+    RuntimeError) and the all-unextracted UnextractableContentError (a NexusError) reach
+    ``nx index pdf`` from three call sites (a dry run; piped or ``--monitor``; an interactive
+    terminal, which CliRunner reaches only through the ``tty`` mode). Each prints the operator-written message as a
+    ClickException; a raw traceback buried it."""
+    from nexus.errors import UnextractableContentError
+    from nexus.pdf_extractor import MineruSystemicFailure
+
+    error = (
+        MineruSystemicFailure("timeout", "", [4, 5, 6], "doc.pdf") if failure == "breaker"
+        else UnextractableContentError("every page of doc.pdf is unextracted: run `nx doctor`")
+    )
+    flags = {"plain": [], "monitor": ["--monitor"], "dry-run": ["--dry-run"], "tty": []}[mode]
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch("nexus.doc_indexer.index_pdf", side_effect=error))
+        if mode == "tty":
+            stack.enter_context(patch("nexus.commands.index.sys", _SysWithTtyStdout()))
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), *flags])
+
+    assert result.exit_code != 0, result.output
+    assert "nx doctor" in result.output
+    assert "Traceback (most recent call last)" not in result.output
+    assert isinstance(result.exception, SystemExit), "a ClickException exits; it is not re-raised"
+
+
+def test_index_pdf_on_formula_oom_help_says_it_is_ignored(runner):
+    """RDR-237: the flag is accepted and ignored for one release; its help must not promise
+    that 'fail' aborts the document or that 'docling' degrades a page."""
+    result = runner.invoke(main, ["index", "pdf", "--help"])
+    flat = " ".join(result.output.split())
+
+    assert "--on-formula-oom" in flat
+    assert "Accepted and ignored for one release" in flat
+    assert "aborts the document" not in flat
+    assert "degrades only THAT page" not in flat
+
+
 def test_index_md_force_flag(runner, fake_md):
     with patch("nexus.doc_indexer.index_markdown", return_value=MD_RESULT) as m:
         result = runner.invoke(main, ["index", "md", str(fake_md), "--force"])

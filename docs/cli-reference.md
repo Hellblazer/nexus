@@ -169,7 +169,7 @@ catalog identity.
 | `--dir DIR` | Index all PDFs in a directory (mutually exclusive with `PATH`) |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
 | `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `pdf.extractor` from `.nexus.yml`, else `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
-| `--on-formula-oom [fail\|docling]` | What to do when a single page reproducibly OOM-kills MinerU's formula model (default: `fail`). `fail` aborts the document (preserves the no-silent-fallback-for-formulas guarantee). `docling` degrades only that page to docling (formula-stripped) and continues |
+| `--on-formula-oom [fail\|docling]` | Accepted and ignored for one release (RDR-237). A page whose MinerU attempt fails is retried without formulas, then taken from its PyMuPDF text layer, whatever the value; the document no longer aborts for it (see the MinerU ladder below) |
 | `--dry-run` | Preview extraction and chunking only — nothing is embedded, stored, or written (no API keys needed). Prints a chunk preview. Also registers no catalog document (nexus-uxg4u) — a preview never mints a Document row a subsequent refusal would leave behind. A real (non-dry) run that fails after registering a brand-new document rolls that registration back automatically; re-indexing a pre-existing document is left exactly as the completion fence marked it |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs: pages and chunks are staged on the engine as they are produced, so a killed run (even a hard kill) is resumed by the next run without extracting the PDF again and without embedding anything twice (the rerun re-sends the document from its first chunk through a fresh write; the engine skips chunks it already holds), and a run that finished uploading and died before the completion stamp sends only the stamp; `never` forces the in-process path (extract and chunk the whole document first, then write it in batches with the same chunk-plus-owner write; a killed run restarts from the first chunk, extracts again, and re-embeds nothing) |
 | `--allow-degraded-extraction` | Accept extracted text that fails the post-extraction quality gate (nexus-wi1uv, see [Post-Extraction Quality Gate](#post-extraction-quality-gate) below) instead of failing the run |
@@ -236,11 +236,14 @@ error, a dropped server connection) is retried without formulas
 (`formula_enable=false`, recorded `mineru-no-formula`), then read from the PDF's
 own text layer (`pymupdf-text`), then recorded `unextracted`; the document
 finishes and `extraction_method` reads `mineru+degraded`, with the pages by rung
-in `extraction_pages`. `--on-formula-oom` no longer changes this. When
+in `extraction_pages`. `--on-formula-oom` is accepted and ignored for one
+release, and no longer changes this. When
 `pdf.ladder_breaker` consecutive pages (default 3) fail both MinerU attempts with
 the same cause (a timeout, or the same worker exit and stderr line) the install or
-the machine is failing, not the PDF: the document stops, naming the cause, with
-its extracted pages kept for a rerun. On **Linux** you can additionally set
+the machine is failing, not the PDF: the document stops, naming the cause. The
+pages before that window stay in the kept buffer, so a rerun does not write them
+again, but MinerU runs over every earlier page again (the buffer only spares the
+writes), so repair the install first. On **Linux** you can additionally set
 `mineru_memory_ceiling_mb` to cap the worker's address space (RLIMIT_AS) so a
 runaway page fails fast and catchably instead of thrashing; macOS does not honour
 RLIMIT_AS (the knob logs a warning and is ignored there). Note RLIMIT_AS caps
@@ -319,8 +322,10 @@ nx search "" --corpus docs --where quality_gate_overridden=true --files
 **Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every
 PDF chunk's metadata carries which backend actually produced its text:
 `docling` | `mineru` | `pymupdf_normalized`, or the honest mixed aggregate
-`mineru+docling-degraded` when `--on-formula-oom docling` degraded at least
-one page of an otherwise-MinerU document. This is what makes an extractor
+`mineru+degraded` when a page settled below the first MinerU attempt (RDR-237;
+the pages by rung are in the extraction result's `extraction_pages`). Chunks written before RDR-237 may
+carry `mineru+docling-degraded` (a page degraded to Docling by
+`--on-formula-oom docling`, a flag that is now accepted and ignored for one release). This is what makes an extractor
 regression scopeable after the fact (e.g. "which documents did MinerU
 extract, so I can re-index just those").
 

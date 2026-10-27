@@ -174,6 +174,10 @@ def _mineru_extractor_for_one_page() -> PDFExtractor:
 def _patch_one_page_pdf():
     mock_doc = MagicMock()
     mock_doc.__len__.return_value = 1
+    # The page's text layer is empty. Left a MagicMock, get_text() hands the normaliser a
+    # non-string and the TypeError is swallowed by rung 3's broad except, so a test passes
+    # for a reason that is not the page having no text.
+    mock_doc.__getitem__.return_value.get_text.return_value = ""
     mock_ctx = MagicMock()
     mock_ctx.__enter__.return_value = mock_doc
     mock_ctx.__exit__.return_value = False
@@ -252,11 +256,15 @@ def test_single_page_oom_on_both_rungs_is_no_longer_a_document_failure() -> None
     """RDR-237: a page that OOMs with and without formulas used to fail the document
     (``on_formula_oom="fail"``). It now walks on to the text layer, and a lone page
     with none ends the document with a named reason instead. Docling is not on the path."""
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local import
+
     from nexus.errors import UnextractableContentError
 
     ext = _mineru_extractor_for_one_page()
-    with patch("nexus.pdf_extractor.do_parse", object()), patch(
-        "pymupdf.open", return_value=_patch_one_page_pdf(),
+    pdf = _patch_one_page_pdf()
+    page = pdf.__enter__.return_value.__getitem__.return_value
+    with capture_logs() as logs, patch("nexus.pdf_extractor.do_parse", object()), patch(
+        "pymupdf.open", return_value=pdf,
     ), patch(
         "nexus.config.get_mineru_page_batch", return_value=1,
     ), patch.object(
@@ -270,6 +278,10 @@ def test_single_page_oom_on_both_rungs_is_no_longer_a_document_failure() -> None
                 Path("/tmp/math.pdf"), formula_count=9, on_formula_oom="fail",
             )
     mock_docling.assert_not_called()
+    page.get_text.assert_called_once()  # rung 3 read the page's text layer, and it was empty
+    assert not [e for e in logs if e.get("event") == "mineru_page_text_layer_unreadable"], (
+        "the page ended unextracted because it has no text, not because reading it raised"
+    )
 
 
 # ── Gap 6: RLIMIT_AS ceiling (Linux-gated) + per-page timeout ────────

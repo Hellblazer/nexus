@@ -290,10 +290,11 @@ class MineruSystemicFailure(Exception):
             f"MinerU failed on {len(pages)} consecutive pages of {file_name} "
             f"(pages {pages[0]}-{pages[-1]}), with and without formulas, "
             f"all with failure class {failure_class!r}{shown}. That points at the "
-            f"install or the machine, not at the pages: run `nx doctor`. Pages "
-            f"already extracted stay in the pipeline buffer and a rerun resumes from "
-            f"them. `pdf.ladder_breaker` sets how many pages stop a document "
-            f"(0 turns the check off)."
+            f"install or the machine, not at the pages: run `nx doctor`. The pages "
+            f"before page {pages[0]} stay in the kept buffer, so a rerun does not "
+            f"write them again, but MinerU runs over them again, so repair the "
+            f"install first. `pdf.ladder_breaker` sets how many pages stop a "
+            f"document (0 turns the check off)."
         )
 
 
@@ -349,6 +350,13 @@ def _is_run_fence(exc: BaseException) -> bool:
     from nexus.db.http_pipeline_client import PipelineRunFenced  # noqa: PLC0415 — deferred import — avoids import-time cost / circular deps
 
     return isinstance(exc, PipelineRunFenced)
+
+
+def _is_pipeline_cancel(exc: BaseException) -> bool:
+    """True for ``PipelineCancelled``: the pipeline stopping this stage, never a page failure."""
+    from nexus.pipeline_stages import PipelineCancelled  # noqa: PLC0415 — deferred import — avoids import-time cost / circular deps
+
+    return isinstance(exc, PipelineCancelled)
 
 
 class _SystemicFailureCounter:
@@ -1690,13 +1698,11 @@ class PDFExtractor:
         - ``"docling"`` — Docling with PyMuPDF normalized fallback.
         - ``"mineru"`` — MinerU directly (no fallback).
 
-        *on_formula_oom* (RDR-148 Gap 5) governs what happens when a *single*
-        page reproducibly OOM-kills MinerU's formula model (page-content-specific
-        exhaustion the 1-page-batch floor cannot mitigate):
-        - ``"fail"`` (default) — re-raise the formula-aware error; preserves the
-          no-silent-fallback-for-formulas guarantee.
-        - ``"docling"`` — degrade THAT page to docling (formula-stripped) and
-          continue, so one pathological page doesn't fail the whole document.
+        *on_formula_oom* (RDR-148 Gap 5) is accepted and IGNORED for one release
+        (RDR-237, nexus-tr1rj.12): a page whose MinerU attempt fails now walks the
+        per-page ladder (rung 2 retries it without formulas, rung 3 takes its
+        PyMuPDF text layer) whatever the value, so ``"fail"`` no longer aborts the
+        document. The value is still validated (``"fail"`` or ``"docling"``).
 
         *on_page* — optional streaming callback fired per extracted page (or
         per MinerU batch when ``mineru_page_batch > 1``):
@@ -1940,10 +1946,17 @@ class PDFExtractor:
                 f"{ways}. To bypass formula "
                 f"extraction entirely, rerun with `--extractor docling`."
             ) from exc
-        except MineruMachineResourceError:
-            # The machine, not this PDF: say so plainly, unwrapped (nexus-x3m8e).
+        except (MineruMachineResourceError, MineruSystemicFailure, UnextractableContentError):
+            # The machine or the install, not this PDF (nexus-x3m8e), and the two RDR-237
+            # ladder outcomes: all re-raised unwrapped. The pipeline decides what to do with
+            # the row from the type (MineruSystemicFailure keeps the buffer), and the CLI
+            # prints the operator-written message as it stands.
             raise
         except Exception as exc:
+            if _is_run_fence(exc) or _is_pipeline_cancel(exc):
+                # A stop signal raised by the on_page callback, not a MinerU failure: the
+                # pipeline reads the type to release the row, so it must arrive as it was raised.
+                raise
             # MinerU is installed but extraction failed — subprocess timeout,
             # OOM kill, mineru-api server error, etc. Do NOT advise reinstall;
             # the install is fine and the failure is operational.
@@ -1958,8 +1971,7 @@ class PDFExtractor:
             raise RuntimeError(
                 f"PDF {pdf_path.name} contains formulas (detected {formula_count}) "
                 f"but MinerU extraction failed: {type(exc).__name__}: {sanitized_msg}. "
-                f"To bypass formula extraction and accept formula-stripped "
-                f"output for this PDF, rerun with `--extractor docling`."
+                f"Run `nx doctor` to check the MinerU install."
             ) from exc
 
     # ── internal extraction methods ───────────────────────────────────────────
@@ -2204,8 +2216,11 @@ class PDFExtractor:
         calls sit inside a ``try``, never ``on_page``. When ``pdf.ladder_breaker``
         consecutive pages fail both rungs with one failure class, the install or
         the machine is failing and :class:`MineruSystemicFailure` stops the
-        document. *on_formula_oom* has no effect here: rung 2 replaced the
-        docling degrade.
+        document. The pages counted toward that rule are held back from ``on_page``
+        until the window resolves: a trip drops them (so the kept buffer holds no
+        degraded text for a rerun to keep), anything else delivers them in page
+        order before the page that resolved it. *on_formula_oom* has no effect here:
+        rung 2 replaced the docling degrade.
 
         *on_page* fires once per batch (default batch size is 1 page via
         ``mineru_page_batch`` config).  The callback receives the batch start
@@ -2321,6 +2336,22 @@ class PDFExtractor:
                 extra = 1 if offset < remainder else 0
                 per_page_lengths.append((s + offset, per_page + extra))
 
+        # RDR-237 breaker window: a page that failed both rungs with the class the breaker is
+        # counting is held here, NOT delivered, until the window resolves. A trip drops the held
+        # pages (the buffer then ends at the last page before the window, and the rerun redoes
+        # them with MinerU); anything else flushes them, in page order, before the page that
+        # resolved it. Delivering them at once would leave their rung-3 text in the kept buffer,
+        # where a rerun skips the writes and the degraded text persists labelled clean.
+        held: list[tuple[int, str, PageOutcome]] = []
+
+        def _flush_held(keep: frozenset[int] | set[int] = frozenset()) -> None:
+            # Deliver the held pages, oldest first, up to the first one *keep* still counts
+            # (1-based page numbers; the counted pages are always the newest).
+            while held and held[0][2].page not in keep:
+                s, text, outcome = held.pop(0)
+                _append_page(s, text, [], [])
+                outcomes[s] = outcome
+
         def _attempt(s: int, e: int | None, rung: int) -> tuple[str, list[dict], list[dict]]:
             # One MinerU attempt on pages [s, e): rung 1 is today's call
             # (formulas on, unchanged arguments), rung 2 the same call with
@@ -2414,8 +2445,9 @@ class PDFExtractor:
                         raise
                     rung1_exc = retry_exc
                 else:
-                    _accept(s, rng_end, *retried, "mineru", started, None)
                     breaker.settled()
+                    _flush_held()
+                    _accept(s, rng_end, *retried, "mineru", started, None)
                     return
             class1 = _failure_class(rung1_exc)
             _log.warning("mineru_page_rung_failed", page=page, rung=1, failure_class=class1,
@@ -2429,17 +2461,23 @@ class PDFExtractor:
                     raise
                 rung2_exc = caught
             else:
-                _accept(s, rng_end, *retried, "mineru-no-formula", started, class1)
                 breaker.settled()
+                _flush_held()
+                _accept(s, rng_end, *retried, "mineru-no-formula", started, class1)
                 return
             class2 = _failure_class(rung2_exc)
             _log.warning("mineru_page_rung_failed", page=page, rung=2, failure_class=class2,
                          path=str(pdf_path))
             tripped = breaker.failed(page, class1, class2)
             if tripped is not None:
+                # The held window is dropped, never flushed: it stays out of the kept buffer.
                 raise MineruSystemicFailure(
                     tripped, getattr(rung2_exc, "stderr_last_line", ""), list(breaker.pages), fname,
                 ) from rung2_exc
+            # The pages the breaker is counting stay held; any held page it stopped counting
+            # (the class changed, or this page reset it) is delivered first, in order.
+            counting = set(breaker.pages) if breaker.threshold else set()
+            _flush_held(counting)
             # Rung 3: this page's own text layer. A page PyMuPDF cannot read is rung 4
             # like a page with no text (the failure is recorded, not raised).
             try:
@@ -2449,11 +2487,15 @@ class PDFExtractor:
                              error=f"{type(read_exc).__name__}: {read_exc}")
                 text = ""
             method = "pymupdf-text" if text else "unextracted"
-            _append_page(s, text, [], [])
-            outcomes[s] = PageOutcome(
+            outcome = PageOutcome(
                 page, text, method, time.monotonic() - started,
                 f"rung 1: {class1}; rung 2: {class2}",
             )
+            if page in counting:
+                held.append((s, text, outcome))
+            else:
+                _append_page(s, text, [], [])
+                outcomes[s] = outcome
             _progress(f"  MinerU page {page}/{total_pages} settled as {method} ({fname})")
 
         def _extract_range(s: int, e: int | None) -> None:
@@ -2473,8 +2515,9 @@ class PDFExtractor:
                     raise
                 failure = exc
             if failure is None:
-                _accept(s, rng_end, *attempted, "mineru", started, None)
                 breaker.settled()
+                _flush_held()
+                _accept(s, rng_end, *attempted, "mineru", started, None)
                 return
             if span <= 1:
                 _settle_page(s, e, failure, started)
@@ -2503,6 +2546,7 @@ class PDFExtractor:
         if batches:
             _progress(f"  MinerU: {total_pages}/{total_pages} done ({fname})")
 
+        _flush_held()  # a window still open at the end of the document never tripped
         extraction_pages = {
             method: sorted(o.page for o in outcomes.values() if o.method == method)
             for method in _DEGRADED_METHODS
