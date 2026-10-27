@@ -223,14 +223,29 @@ def test_a_title_after_the_id_vetoes_an_inference_from_a_nexus_session(tmp_path:
 HUGE = "".join(f"Compare RDR-{i % 900:03d} to RDR-{(i + 1) % 900:03d} in the nexus project. " for i in range(16_000))[:750_000]
 
 
+def _best_scan_seconds(question: str) -> float:
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        derive_request_coverage(question, scope="rdr")
+        project_name_candidates(question)
+        best = min(best, time.perf_counter() - started)
+    return best
+
+
 def test_a_750_kb_question_is_scanned_in_bounded_time() -> None:
+    """The scan cost stops growing at MAX_SCAN_CHARS. Measured against the same question cut to the limit,
+    on the same host and load, rather than against a wall-clock bound: an unbounded scan costs about 12x
+    the cut one at 750 KB, a bounded one about the same, and a fixed 1.0 s ceiling failed at 1.02 s on a
+    busy CI runner (develop 2bb124e98, shard 6)."""
     assert len(HUGE) == 750_000
-    started = time.perf_counter()
+    capped = HUGE[:MAX_SCAN_CHARS]
+    huge_s, capped_s = _best_scan_seconds(HUGE), _best_scan_seconds(capped)
+    assert huge_s < 3 * capped_s + 0.05, (
+        f"{huge_s:.3f}s against {capped_s:.3f}s at the limit: the scans must not grow with the question "
+        f"past {MAX_SCAN_CHARS} characters")
     cov = derive_request_coverage(HUGE, scope="rdr")
-    names = project_name_candidates(HUGE)
-    elapsed = time.perf_counter() - started
-    assert elapsed < 1.0, f"{elapsed:.2f}s: the scans must not grow with the question past {MAX_SCAN_CHARS} characters"
-    assert names and cov.named_sources
+    assert project_name_candidates(HUGE) and cov.named_sources
     assert "scan_limit" in {a.code for a in cov.ambiguities}, "the unread tail is disclosed"
 
 
