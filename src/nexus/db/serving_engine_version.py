@@ -137,3 +137,14 @@ def reset_note_uri_guard_for_tests() -> None:
     with _lock:
         _cleared_version = None
         _warned_unknown = False
+
+
+def require_note_uri_engine_for(source_uri: str) -> None:
+    """:func:`require_note_uri_engine` for a caller-supplied ``source_uri``: only a note URI, in either
+    spelling, can mint the nx-note:// twin the floor exists to prevent, so any other URI passes without
+    a probe. For the register paths that take the caller's URI (``nx catalog register --source-uri``
+    and the MCP ``catalog_register`` tool)."""
+    from nexus.aspect_readers import canonical_note_uri, is_note_uri  # noqa: PLC0415 — deferred: keeps this module's import light
+
+    if source_uri and is_note_uri(canonical_note_uri(source_uri)):
+        require_note_uri_engine()

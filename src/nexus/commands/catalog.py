@@ -605,8 +605,8 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
         "Persistent URI identity (RDR-096 P3.1). Omit to derive "
         "'file://<abspath>' from --file-path automatically. Pass an "
         f"explicit URI ({NOTE_URI_SCHEME}, https://, nx-scratch://, "
-        "x-devonthink-item://) to store verbatim. Malformed URIs "
-        "are rejected at register-time."
+        "x-devonthink-item://) to store; the engine "
+        f"stores a legacy note URI in the {NOTE_URI_SCHEME} spelling."
     ),
 )
 @click.option("--corpus", default="")
@@ -672,6 +672,15 @@ def register_cmd(
             f"worktree/tempdir, register the owner with that repo_root "
             f"first so the exception applies."
         )
+
+    # RDR-231: a caller's note URI is refused below the note-URI engine floor, before the register.
+    from nexus.db.serving_engine_version import require_note_uri_engine_for  # noqa: PLC0415 — deferred import; rare/branch-local path
+    from nexus.errors import NoteUriEngineTooOldError  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+    try:
+        require_note_uri_engine_for(source_uri)
+    except NoteUriEngineTooOldError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     try:
         tumbler = writer.register(

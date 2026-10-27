@@ -434,3 +434,46 @@ class TestTheGateJarStampSites:
 
     def test_local_service_gate_stamp_is_the_max_of_the_pin_and_the_floor(self, tmp_path: Path):
         _stamp_cases(tmp_path, ["@PY", "-c", _local_gate_stamp_program()])
+
+
+class TestExplicitUriRegisterRefuses:
+    """The two register paths that take a caller's source_uri (critique of fdcbce198): a note URI is refused
+    below the floor before the register; any other URI registers without a probe."""
+
+    _NOTE = "nx-note://knowledge__bivz3-13__bge-base-en-v15-768__v1/bivz3-13-explicit"
+
+    def _writer(self, monkeypatch: pytest.MonkeyPatch, module: str):
+        from unittest.mock import MagicMock
+
+        writer = MagicMock()
+        writer.register.return_value = "1.1.1"
+        monkeypatch.setattr(f"{module}._get_catalog_writer", lambda: writer)
+        monkeypatch.setattr(f"{module}._get_catalog", lambda: MagicMock(), raising=False)
+        return writer
+
+    @pytest.mark.parametrize("uri", [_NOTE, "chroma://knowledge__bivz3-13__bge-base-en-v15-768__v1/legacy"])
+    def test_nx_catalog_register_refuses_a_note_uri(self, served, monkeypatch, uri):
+        writer = self._writer(monkeypatch, "nexus.commands.catalog")
+        result = CliRunner().invoke(main, ["catalog", "register", "--title", "t", "--owner", "1.1",
+                                           "--source-uri", uri])
+        assert result.exit_code != 0, result.output
+        assert "restart-stale" in result.output or "has not been upgraded yet" in result.output
+        writer.register.assert_not_called()
+        assert served.probes == 1
+
+    def test_nx_catalog_register_of_a_non_note_uri_does_not_probe(self, served, monkeypatch):
+        writer = self._writer(monkeypatch, "nexus.commands.catalog")
+        result = CliRunner().invoke(main, ["catalog", "register", "--title", "t", "--owner", "1.1",
+                                           "--source-uri", "x-devonthink-item://ABC"])
+        assert result.exit_code == 0, result.output
+        writer.register.assert_called_once()
+        assert served.probes == 0
+
+    def test_mcp_catalog_register_refuses_a_note_uri(self, served, monkeypatch):
+        from nexus.mcp.catalog import catalog_register
+
+        writer = self._writer(monkeypatch, "nexus.mcp.catalog")
+        out = catalog_register(title="t", owner="1.1", source_uri=self._NOTE)
+        assert "error" in str(out), out
+        assert "restart-stale" in str(out) or "has not been upgraded yet" in str(out)
+        writer.register.assert_not_called()

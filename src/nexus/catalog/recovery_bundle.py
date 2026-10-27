@@ -751,7 +751,9 @@ def import_bundle(
     """Import a bundle. Docs first (the bundle writes them first), then
     links resolved by source_uri. FAIL-LOUD SUMMARY, not abort: every
     failure class is enumerated on the returned summary; a partial import
-    completes the resolvable records. Idempotent by construction — the
+    completes the resolvable records. One exception aborts: a
+    NoteUriEngineTooOldError (RDR-231) is raised on the first note, since every
+    later note would be refused the same way. Idempotent by construction — the
     store_put chain reconciles per sdp0u, and the engine merges duplicate
     links (``co_discovered_by``)."""
     _header, records = read_bundle(path)

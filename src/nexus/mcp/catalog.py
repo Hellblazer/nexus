@@ -438,6 +438,10 @@ def catalog_register(
         return _fail({"error": err})
     writer = _get_catalog_writer()
     try:
+        # RDR-231: a caller's note URI is refused below the note-URI engine floor, before any catalog read or the register.
+        from nexus.db.serving_engine_version import require_note_uri_engine_for  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        require_note_uri_engine_for(source_uri)
         import json as _json  # noqa: PLC0415 — deliberate function-local import
         from pathlib import Path as _Path  # noqa: PLC0415 — deliberate function-local import
 
