@@ -1457,7 +1457,7 @@ def cmd_tmpdir() -> str:
     sentinel, then renamed into place, so no `prose-edit-<8>` directory ever exists without one."""
     sweep_stale_work()
     path = Path(tempfile.mkdtemp(prefix=WORK_BUILDING_PREFIX)).resolve()
-    proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, encoding="utf-8")
     if proc.returncode == 0 and proc.stdout.strip():
         root = Path(proc.stdout.strip()).resolve()
         if path == root or root in path.parents:
