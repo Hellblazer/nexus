@@ -282,4 +282,55 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
 
         assertThat(aspects.importQueueBatch(TENANT, List.of(queueImportBody(f, "imported-b.pdf")))).isEqualTo(1);
     }
+
+    // ── reclaim_stale count_attempt: the handler-to-repository hop (nexus-j67ix.3) ──
+
+    /**
+     * nexus-j67ix.3: the repository tests call {@code reclaimStale(t, 0, false)} directly and the JSON
+     * validation test stops at the 400, so nothing else pins the one line that carries the parsed flag
+     * into the repository. This drives the route against the real database: {@code count_attempt:false}
+     * leaves {@code retry_count} alone, {@code true} and an absent key each spend one attempt. Forcing
+     * the handler to pass {@code true}, or dropping the argument, turns the first assertion red.
+     */
+    @Test
+    void reclaimStale_countAttemptFalse_reachesTheRepository_andSpendsNoAttempt() throws Exception {
+        Fx f = fixture("as-rc");
+        assertThat(post("/queue/enqueue", queueBody(f, "stop-sweep.pdf")).status()).isEqualTo(200);
+
+        claimUntilInProgress(f, "stop-sweep.pdf");
+        Resp uncounted = post("/queue/reclaim_stale", Map.of("timeout_seconds", 0, "count_attempt", false));
+        assertThat(uncounted.status()).as(uncounted.body()).isEqualTo(200);
+        assertThat(uncounted.json().get("reclaimed").asInt()).isGreaterThanOrEqualTo(1);
+        assertThat(retryCountOf(f, "stop-sweep.pdf")).as("the stop sweep spends no attempt").isZero();
+
+        claimUntilInProgress(f, "stop-sweep.pdf");
+        Resp counted = post("/queue/reclaim_stale", Map.of("timeout_seconds", 0, "count_attempt", true));
+        assertThat(counted.status()).as(counted.body()).isEqualTo(200);
+        assertThat(retryCountOf(f, "stop-sweep.pdf")).as("the age sweep spends one attempt").isEqualTo(1);
+
+        claimUntilInProgress(f, "stop-sweep.pdf");
+        Resp absent = post("/queue/reclaim_stale", Map.of("timeout_seconds", 0));
+        assertThat(absent.status()).as(absent.body()).isEqualTo(200);
+        assertThat(retryCountOf(f, "stop-sweep.pdf")).as("an absent key means counted, as an old client sends").isEqualTo(2);
+    }
+
+    /** The tenant is shared by every test in this class, so claim until THIS row is the one in progress. */
+    private void claimUntilInProgress(Fx f, String sourcePath) {
+        for (int i = 0; i < 64; i++) {
+            var claimed = aspects.claimNext(TENANT);
+            assertThat(claimed).as("setup: a pending row claims").isPresent();
+            if (f.collection().equals(claimed.get().get("collection")) && sourcePath.equals(claimed.get().get("source_path"))) {
+                return;
+            }
+        }
+        throw new AssertionError("setup: " + sourcePath + " never claimed in 64 tries");
+    }
+
+    private int retryCountOf(Fx f, String sourcePath) {
+        return aspects.listPending(TENANT, 0).stream()
+            .filter(m -> f.collection().equals(m.get("collection")) && sourcePath.equals(m.get("source_path")))
+            .map(m -> ((Number) m.get("retry_count")).intValue())
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(sourcePath + " is not pending after the reclaim"));
+    }
 }

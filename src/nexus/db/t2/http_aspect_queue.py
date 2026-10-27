@@ -368,8 +368,9 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ``count_attempt=False`` (the daemon's graceful-stop sweep, nexus-j67ix.3):
         every stale row goes back to 'pending' with retry_count and last_error
         unchanged, and is never failed, because the rows a stopping worker
-        abandons did nothing wrong. An engine older than that change ignores the
-        key and counts, as it always did.
+        abandons did nothing wrong. An engine without this change ignores the key:
+        every released engine through 0.1.165 never counted a reclaim, and a
+        develop build that carries only nexus-j67ix.2 counts.
 
         Returns the number of rows reclaimed, whichever way they went.
 

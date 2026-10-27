@@ -561,6 +561,9 @@ class AspectWorkerDaemon:
             except Exception as exc:  # noqa: BLE001 - shutdown diagnostic is best-effort
                 _log.warning("aspect_worker_daemon.final_reclaim_failed", tenant=self._tenant, error=str(exc))
         elif self._reclaim_queue is not None:
+            # A fenced loser skips the sweep, so the rows it held wait for the
+            # successor's periodic age sweep, which counts them (nexus-j67ix.3):
+            # one attempt per row in a rare lease overlap, by design.
             _log.info("aspect_worker_daemon.reclaim_skipped_fenced", tenant=self._tenant)
         if self._reclaim_queue is not None:
             try:

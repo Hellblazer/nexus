@@ -1603,7 +1603,7 @@ class AspectRepositoryTest {
 
         assertThat(repo.reclaimStale(tenant, 0, false)).isEqualTo(1);
         assertThat(readNextRetryAt(tenant, "rc-nc-nra.pdf").toInstant())
-            .as("neither mode writes next_retry_at").isEqualTo(backoff.toInstant());
+            .as("the uncounted mode leaves next_retry_at alone (the counted mode is pinned by reclaimStale_leavesNextRetryAtUnchanged_andRowImmediatelyClaimable)").isEqualTo(backoff.toInstant());
     }
 
     @Test @Order(49)
