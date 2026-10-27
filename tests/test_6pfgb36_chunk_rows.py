@@ -8,7 +8,9 @@ The engine-backed happy path is ``tests/integration/test_6pfgb36_recovery_bundle
 from __future__ import annotations
 
 import pytest
+from structlog.testing import capture_logs
 
+import nexus.db.http_vector_client as hvc
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 
 _COLLECTION = "knowledge__1-1__bge-base-en-v15-768__v1"
@@ -75,10 +77,6 @@ def test_a_store_get_with_no_count_warns_once_and_still_returns_the_rows(wire, m
     """nexus-6pfgb.33: an engine that predates the store-get ``count`` field (nexus-hdx2u E3) cannot
     tell these reads that rows were dropped; they go on, as the collection stub does, and say so once
     per process with the stub's own warning."""
-    from structlog.testing import capture_logs
-
-    import nexus.db.http_vector_client as hvc
-
     monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", False)
     _calls, state = wire
     state["rows"] = {"a" * 64: {"doc": "x", "meta": {"title": "t"}}}
@@ -92,10 +90,6 @@ def test_a_store_get_with_no_count_warns_once_and_still_returns_the_rows(wire, m
 
 
 def test_a_store_get_that_reports_its_count_does_not_warn(wire, monkeypatch):
-    from structlog.testing import capture_logs
-
-    import nexus.db.http_vector_client as hvc
-
     monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", False)
     real_post = hvc._post
 
