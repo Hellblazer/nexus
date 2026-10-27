@@ -381,6 +381,106 @@ next. Once `nx daemon service status` is green, re-run whatever was
 interrupted — the ETL paths are idempotent and re-converge on
 `(tenant, collection, chash)`.
 
+## If the RDR-231 note-URI backfill halts startup
+
+**Symptom.** The new engine does not come up. Its log
+(`~/.config/nexus/logs/storage_service_native.log` on a local install, the
+deployment's engine log in the cloud) ends with:
+
+```text
+RDR-231 note-URI backfill halted and nothing was changed: N live chroma:// note row(s) have a live nx-note:// twin. ...
+```
+
+**What it means.** Changeset `note-uri-001-1` rewrites the stored `source_uri` of
+every note from `chroma://<collection>/<title>` to `nx-note://<collection>/<title>`
+(and, inside an export identity, `nxexp://<target>/chroma://...` to
+`nxexp://<target>/nx-note://...`), in `catalog_documents`, `document_aspects`
+and `document_highlights`. It stops when one note is stored under both spellings
+as two live catalog documents (a pair): the rewrite would give both the same
+`source_uri`, which `ux_catalog_documents_live_source_uri` forbids, and RDR-231
+does not let a changeset merge documents on its own. `N` counts the
+`chroma://` side of each pair.
+
+**Nothing was changed.** The changeset runs in one transaction. The halt rolled
+it back whole: no row changed, and row-level security is still forced on all
+three tables. Because Liquibase runs before the HTTP server binds, the halted
+engine serves nothing, so it cannot run the merge itself. The merge runs on the
+previous engine, which still serves the unchanged database. Starting the
+previous engine here is allowed: RDR-231 Decision 1 forbids running an engine
+below the release over rows the backfill has rewritten, and an aborted backfill
+rewrote none. (Changesets of the same engine tag that sit before
+`note-uri-001-1` did commit. The previous engine starts over that schema and is
+used only to merge, then stopped.)
+
+**1. List the pairs.** Run this as a role that bypasses row-level security: the
+`postgres` superuser of the nx-managed cluster locally, the operator's
+diagnostic role in the cloud. It is the guard's own test, one row per pair:
+
+```sql
+WITH o AS (
+  SELECT tenant_id, tumbler, source_uri,
+         CASE WHEN starts_with(source_uri, 'chroma://')
+              THEN 'nx-note://' || substr(source_uri, 10)
+              ELSE regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') END AS new_uri,
+         CASE WHEN starts_with(source_uri, 'chroma://')
+              THEN split_part(substr(source_uri, 10), '/', 1)
+              ELSE substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)') END AS coll
+    FROM nexus.catalog_documents
+   WHERE deleted_at IS NULL
+     AND (starts_with(source_uri, 'chroma://') OR source_uri ~ '^nxexp://[^/]*/chroma://'))
+SELECT o.tenant_id, o.tumbler AS chroma_row, t.tumbler AS nx_note_row, o.source_uri
+  FROM o
+  JOIN nexus.catalog_documents t
+    ON t.tenant_id = o.tenant_id AND t.deleted_at IS NULL AND t.source_uri = o.new_uri
+ WHERE NOT (starts_with(o.coll, 'rdr__') OR starts_with(o.coll, 'docs__') OR starts_with(o.coll, 'code__'))
+ ORDER BY o.tenant_id, o.tumbler;
+```
+
+**2. Merge each pair on the previous engine.** For each row pick the one to
+keep (the canonical; usually the `nx_note_row`, which already has the new
+spelling) and merge the other (the duplicate) into it, in the tenant that owns
+both. The merge frees the duplicate's `source_uri`, aliases it to the canonical
+and moves its links, in one transaction. The CLI call is
+`nx catalog merge <duplicate> <canonical>` and the engine route is
+`POST /v1/catalog/merge` with `{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`.
+Run the query again: it must return no rows.
+
+**3. Restart on the new engine.** The backfill then passes.
+
+### Cloud
+
+1. Keep, or put back, the previous engine release (`engine-service-vX.Y.Z`, the
+   tag the cloud ran before this deploy) serving the tenants. A deploy that
+   halted at the changeset never replaced it if the old instance was kept until
+   the new one reported healthy; otherwise redeploy the previous tag.
+2. Run the query from step 1, then step 2 per tenant with that tenant's token
+   from a cloud-mode box. The pre-tag census counts these pairs ahead of the
+   deploy, so a halt in production means the census was skipped or the data
+   changed since.
+3. Deploy the new engine tag again and run the cloud gate.
+
+### Local install
+
+A local install has no operator and no census; the client's pinned engine
+(`REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`) is the new one, so
+the previous engine is the tag your install ran before the upgrade. Its tag is
+in the previous client release's changelog entry (`engine-service-v0.1.165` for
+the client release before RDR-231).
+
+```bash
+nx daemon service stop                                   # stops the supervisor retrying the halted engine
+nx daemon service install-binary engine-service-v0.1.165 # the PREVIOUS engine tag
+nx daemon service start                                  # previous engine, same database
+# step 1: list the pairs (psql against the nx-managed cluster, see "Restoring a pg_dump" for its socket)
+nx catalog merge <duplicate> <canonical>                 # step 2, once per pair
+nx daemon service stop
+nx daemon service install-binary <the new engine tag>    # the tag in the new client release's changelog entry
+nx daemon service start                                  # the backfill passes; check logs/storage_service_native.log
+```
+
+Do not run `nx daemon restart-stale` or any upgrade step between the two
+`install-binary` calls: they would put the pinned engine back before the merge.
+
 ## Restoring a `pg_dump` into a scratch cluster
 
 For a ROUTINE local reinstall you should not need any of this: run
