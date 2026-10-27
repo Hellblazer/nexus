@@ -68,3 +68,44 @@ def test_a_response_without_documents_gives_empty_content(wire):
     state["rows"] = {"a" * 64: {"doc": "ignored", "meta": {}}}
     state["drop_documents"] = True
     assert _client().chunk_rows(_COLLECTION, ["a" * 64])["a" * 64]["content"] == ""
+
+
+@pytest.mark.parametrize("read", ["chunk_rows", "_note_rows"])
+def test_a_store_get_with_no_count_warns_once_and_still_returns_the_rows(wire, monkeypatch, read):
+    """nexus-6pfgb.33: an engine that predates the store-get ``count`` field (nexus-hdx2u E3) cannot
+    tell these reads that rows were dropped; they go on, as the collection stub does, and say so once
+    per process with the stub's own warning."""
+    from structlog.testing import capture_logs
+
+    import nexus.db.http_vector_client as hvc
+
+    monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", False)
+    _calls, state = wire
+    state["rows"] = {"a" * 64: {"doc": "x", "meta": {"title": "t"}}}
+    with capture_logs() as logs:
+        first = getattr(_client(), read)(_COLLECTION, ["a" * 64])
+        getattr(_client(), read)(_COLLECTION, ["a" * 64])
+    assert "a" * 64 in first
+    events = [e for e in logs if e["event"] == "store_get_count_unreported"]
+    assert len(events) == 1 and events[0]["log_level"] == "warning"
+    assert events[0]["collection"] == _COLLECTION
+
+
+def test_a_store_get_that_reports_its_count_does_not_warn(wire, monkeypatch):
+    from structlog.testing import capture_logs
+
+    import nexus.db.http_vector_client as hvc
+
+    monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", False)
+    real_post = hvc._post
+
+    def _with_count(path, body, **kw):
+        out = real_post(path, body, **kw)
+        return {**out, "count": len(out["ids"])}
+
+    monkeypatch.setattr(hvc, "_post", _with_count)
+    _calls, state = wire
+    state["rows"] = {"a" * 64: {"doc": "x", "meta": {}}}
+    with capture_logs() as logs:
+        _client().chunk_rows(_COLLECTION, ["a" * 64])
+    assert [e for e in logs if e["event"] == "store_get_count_unreported"] == []

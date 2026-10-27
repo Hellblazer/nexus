@@ -243,16 +243,30 @@ def test_a_titled_put_keeps_the_ambiguity_and_reaches_its_note_by_source_uri(cat
     assert cat.docs[legacy].source_uri == "" and "ttl_days" not in cat.docs[legacy].meta
 
 
-def test_an_untitled_put_never_blanks_the_source_uri_of_the_untitled_document_it_reconciles_onto(cat):
-    """A non-empty source_uri on an untitled document (a path-keyed import) is not overwritten with ''."""
+def test_an_untitled_put_never_reconciles_onto_an_untitled_document_that_has_a_source_uri(cat):
+    """nexus-6pfgb.33: an untitled document carrying a source_uri (a path-keyed import) is that path's
+    document, not an earlier untitled put: an untitled put of the same text mints its own untitled
+    document sharing the chunk (RDR-108) and leaves the import's source_uri and keys alone."""
     a = cat.seed("", source_uri="chroma://elsewhere/doc")
 
     tumbler, created = _put("", ttl_days=1)
 
-    assert (tumbler, created) == (a, False)
+    assert created and tumbler != a
     assert cat.docs[a].source_uri == "chroma://elsewhere/doc"
-    assert cat.docs[a].meta["ttl_days"] == 1
-    assert all(u[1]["source_uri"] != "" for u in cat.updates), "no update wrote an empty source_uri"
+    assert "ttl_days" not in cat.docs[a].meta
+    assert all(u[0] != a for u in cat.updates), "the import's document was not written"
+
+
+def test_an_untitled_put_reconciles_onto_the_untitled_put_beside_a_path_keyed_untitled_document(cat):
+    """With both an import's untitled document (lower tumbler) and an earlier untitled put of the text,
+    the put reuses its own document: the import never takes part in the lowest-tumbler pick."""
+    imported = cat.seed("", source_uri="chroma://elsewhere/doc", tumbler="1.1.3")
+    earlier = cat.seed("", source_uri="", tumbler="1.1.7")
+
+    tumbler, created = _put("", ttl_days=1)
+
+    assert (tumbler, created) == (earlier, False)
+    assert "ttl_days" not in cat.docs[imported].meta and cat.docs[earlier].meta["ttl_days"] == 1
 
 
 def test_the_store_put_wire_text_states_the_untitled_contract():

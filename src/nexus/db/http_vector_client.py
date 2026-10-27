@@ -6447,7 +6447,8 @@ class HttpVectorClient:
     def _store_get_pages(self, collection: str, chashes: list[str]) -> Iterator[tuple[str, str, dict]]:
         """``(id, document, metadata)`` for each live row of *collection* named by *chashes*, 300 ids
         per ``/v1/vectors/store-get`` request. Raises :class:`VectorServiceError` on any service
-        failure and when the engine reports more matched rows than it returned."""
+        failure and when the engine reports more matched rows than it returned; an engine that sends no
+        ``count`` gets the once-per-process ``store_get_count_unreported`` warning instead."""
         page = 300
         for start in range(0, len(chashes), page):
             batch = chashes[start:start + page]
@@ -6469,6 +6470,10 @@ class HttpVectorClient:
                     f"store-get for collection '{collection}': engine reports {reported} matched-live rows "
                     f"for this batch but returned only {len(ids)} (batch size {len(batch)})."
                 )
+            if "count" not in result:
+                # nexus-6pfgb.33: an engine before nexus-hdx2u E3 sends no count, so a dropped row is
+                # invisible here; say so once per process, as the collection stub does.
+                _warn_store_get_count_unreported(collection)
             for i, (doc_id, meta) in enumerate(zip(ids, metas)):
                 if isinstance(meta, dict):
                     yield doc_id, (docs[i] if i < len(docs) and docs[i] is not None else ""), meta

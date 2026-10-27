@@ -611,7 +611,8 @@ def resolve_knowledge_doc_for_chash(
     whose ``title`` equals it, BEFORE the ambiguity count (nexus-6pfgb.31).
     The put path passes it: a note's identity is (collection, title), so a put
     reconciles only onto the note it names, and an untitled put only onto an
-    untitled one. Without it a put adopted whatever note held the text, rewrote
+    untitled one with an empty ``source_uri`` (an untitled document that has one
+    is a path-keyed import's, nexus-6pfgb.33). Without it a put adopted whatever note held the text, rewrote
     its source_uri and stamped its own ``ttl_days`` on it; with the filter after the count,
     a titled note sharing the text would hide the put's own note as ambiguous.
 
@@ -698,6 +699,9 @@ def resolve_knowledge_doc_for_chash(
             and entry.content_type == "knowledge"
             and not entry.file_path
             and (title is None or entry.title == title)
+            # nexus-6pfgb.33: an untitled put reconciles only onto an earlier untitled put, which writes
+            # no source_uri; an untitled document that has one (a path-keyed import) is that path's.
+            and (title != "" or not entry.source_uri)
             and (collection is None or entry.physical_collection == collection)
             and (
                 owner_collection is None
