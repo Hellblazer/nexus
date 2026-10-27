@@ -2,7 +2,7 @@
 
 The independent plugin channel of RDR-197 (anchored `plugin-vX.Y.Z-n` tags, a cut script, a verify-only tag workflow) was retired on 2026-10-26 (nexus-rbmja.8). It could not carry forward wheel references (nexus-konsk, nexus-semdv). RDR-197 stays as the record.
 
-Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `.claude-plugin/marketplace.json`) now ships ahead of `src/` work as a patch release on the normal client tag form: the plugin-only fast lane. The `release` skill's "Plugin-only fast lane" section is the only description of the steps. The pieces it uses:
+Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `prose-edit/`, `.claude-plugin/marketplace.json`) now ships ahead of `src/` work as a patch release on the normal client tag form: the plugin-only fast lane. The `release` skill's "Plugin-only fast lane" section is the only description of the steps. The pieces it uses:
 
 - `scripts/check_plugin_only_eligibility.py` refuses a diff that leaves the plugin surface, reusing the allowlist in `scripts/plugin_channel.py`, and refuses a release whose picked commits name a bead with another commit on `origin/develop` since the tag that touches a refused path.
 - `tests/e2e/release-battery.sh --plugin-only` runs the legs a plugin-only diff can change and reports the rest as skipped.

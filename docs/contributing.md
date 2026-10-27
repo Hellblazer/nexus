@@ -292,7 +292,7 @@ What the skill walks, in order: the engine-freshness gate (`scripts/check_engine
 
 ### Plugin-only releases
 
-Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `.claude-plugin/marketplace.json`) that must ship while `develop` carries `src/` work goes out as a patch client release cut off the last client tag, with the plugin commits cherry-picked from `develop`. The procedure is the `release` skill's "Plugin-only fast lane" section; this page does not repeat it. The anchored `plugin-vX.Y.Z-n` channel of RDR-197 was retired on 2026-10-26 (nexus-rbmja.8).
+Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `prose-edit/`, `.claude-plugin/marketplace.json`) that must ship while `develop` carries `src/` work goes out as a patch client release cut off the last client tag, with the plugin commits cherry-picked from `develop`. The procedure is the `release` skill's "Plugin-only fast lane" section; this page does not repeat it. The anchored `plugin-vX.Y.Z-n` channel of RDR-197 was retired on 2026-10-26 (nexus-rbmja.8).
 
 ### Schema/data-migration releases (conditional)
 
@@ -336,10 +336,11 @@ This is exactly the v7.7.0 sequence (2026-08-14, commit `62da4273b`): the first 
 | `uv.lock` | auto-updated by `uv sync` — **must be committed** |
 | `CHANGELOG.md` | move Unreleased → `[X.Y.Z]`, add empty Unreleased |
 | `conexus/CHANGELOG.md` | add `[X.Y.Z]` entry |
-| `.claude-plugin/marketplace.json` | bump `plugins[].version` for every plugin listed (conexus, sn, conexus-tool-spill) **and every `plugins[].source.ref` to `vX.Y.Z`** (parity-tested) |
+| `.claude-plugin/marketplace.json` | bump `plugins[].version` for every plugin listed (conexus, sn, conexus-tool-spill, conexus-prose-edit) **and every `plugins[].source.ref` to `vX.Y.Z`** (parity-tested) |
 | `conexus/.claude-plugin/plugin.json` | bump `"version"` to match — **controls nx cache refresh** |
 | `sn/.claude-plugin/plugin.json` | bump `"version"` to match — **controls sn cache refresh** |
 | `tool-spill/.claude-plugin/plugin.json` | bump `"version"` to match — **controls conexus-tool-spill cache refresh** |
+| `prose-edit/.claude-plugin/plugin.json` | bump `"version"` to match, which controls the conexus-prose-edit cache refresh |
 | `docs/cli-reference.md` | new/changed CLI flags and subcommands |
 | `docs/architecture.md` | new/changed modules |
 | `docs/repo-indexing.md` | indexing pipeline changes |

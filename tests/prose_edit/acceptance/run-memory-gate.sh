@@ -46,7 +46,7 @@ cd "$WT" || exit 1
 runner_sweep_stale
 mkdir -p "$DIR" && runner_track "$DIR"
 git status --short > "$OUT/$LABEL-repo-status-before.txt"
-python3 .claude/skills/prose-edit/scripts/memory.py viewer --set Typora > "$OUT/$LABEL-seed-viewer.json" || exit 1
+python3 prose-edit/skills/prose-edit/scripts/memory.py viewer --set Typora > "$OUT/$LABEL-seed-viewer.json" || exit 1
 wc -l < "$SOURCE" > "$OUT/$LABEL-source-lines.txt"
 cp "$SOURCE" "$OUT/$LABEL-source.txt"
 

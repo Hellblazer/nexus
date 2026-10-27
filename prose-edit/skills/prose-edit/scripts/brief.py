@@ -16,6 +16,8 @@ Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) 
                                  absolute path of INPUT, REPLY, FILTERED, REASONS, ENTRY and CARD inside it
   brief.py site-layer [--site-page FILE] [--genre G]
                                  the site-page section 3 layer memory.py `read` takes
+  brief.py setup                 what a first run here needs, as JSON: Nexus and T2, the two allow rules, the genre
+                                 map and exemplars, and the repository's documents no genre reaches
 
 TARGET is PATH, PATH:START-END or "-" (a stdin run; --file names the saved text).
 
@@ -51,8 +53,8 @@ user). The site-page section 3 rules are the genre layer; an entry two layers ho
 Section 2 (the voice card) holds the document's saved author-approved card, when memory.py has one stored for it
 (`voice-card`), as the anchor the editor uses and returns unchanged; without one it asks the editor to write the card.
 
-`build` reads site-page section 3 from the sibling skill at run time for how-to and
-exploration-essay. Which section 3 rules are ignored, query-only or note-only comes from
+`build` reads site-page section 3 from the repository's own .claude/skills/site-page/SKILL.md (or --site-page) at
+run time for how-to and exploration-essay; a repository without that file has no site layer. Which section 3 rules are ignored, query-only or note-only comes from
 the repo style sheet lists site_page_section3_ignored, _query_only and _note_only, each
 entry starting with the rule's opening words in quotes; a document's own record (`memory.py add-entry --level
 doc`) can carry the same three lists, and for a rule both treat the document's wins, so one essay can ignore or
@@ -94,8 +96,10 @@ Obj = dict[str, Any]
 
 HERE = Path(__file__).resolve().parent
 MEMORY = HERE / "memory.py"
-DEFAULT_SITE_PAGE = HERE.parents[1] / "site-page" / "SKILL.md"
-COMMANDS = ("parse", "build", "filter", "tmpdir", "rmtmp", "site-layer")
+# The site-page style sheet a repository keeps for its how-to pages and essays; a repository without one has no
+# site layer (nexus-scmcs: the skill ships as a plugin, so the sheet is the repository's, not a sibling skill).
+SITE_PAGE_IN_REPO = Path(".claude") / "skills" / "site-page" / "SKILL.md"
+COMMANDS = ("parse", "build", "filter", "tmpdir", "rmtmp", "site-layer", "setup")
 SITE_GENRES = ("how-to", "exploration-essay")
 # Section 3 bullets that apply to some site genres only (nexus-ger02.23): the bullet's opening words, and the
 # genres it is dropped for. "No semicolons" is for web/ how-to pages; a docs/exploration essay may use them.
@@ -283,6 +287,10 @@ def parse_invocation(tokens: list[str]) -> Obj:
         return _parse_rejections(tokens[1:])
     if tokens[0] == "exemplar":
         return _parse_exemplar(tokens[1:])
+    if tokens[0] == "setup":
+        if len(tokens) > 1:
+            raise _user("setup takes no arguments")
+        return {"mode": "setup"}
     return _parse_edit(tokens)
 
 
@@ -330,7 +338,7 @@ def treatments_from_lists(lists: Obj) -> dict[str, list[str]]:
     return out
 
 
-MEMORY_CMD = "python3 .claude/skills/prose-edit/scripts/memory.py"  # the allowlisted prefix, as the skill writes it
+MEMORY_CMD = f"python3 {MEMORY}"  # the prefix the skill's allowed-tools rule matches, with the plugin root filled in
 
 
 def _remove_cmd(where: str, kind: str, entry: str) -> str:
@@ -426,6 +434,14 @@ def _site_page_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
         raise _user(f"site-page skill unreadable at {path}: {exc}") from exc
+
+
+def site_page_for(given: str | None, root: Path) -> Path | None:
+    """--site-page when given (unreadable stops the run), else the repository's own sheet, else None."""
+    if given:
+        return Path(given)
+    page = root / SITE_PAGE_IN_REPO
+    return page if page.is_file() else None
 
 
 def site_layer(site_page: Path, target: str | None = None, genre: str | None = None) -> Obj:
@@ -554,7 +570,12 @@ def render_brief(read: Obj, budget: int, input_file: str | None, input_text: str
         out.append(f"Input: the text under \"Text to edit\" below (a stdin run, saved at {input_file}; "
                    "no repository path, no document record). Edit only this text.")
     else:
-        out.append(f"Document: {read['path']}")
+        root = read.get("root")
+        # the editor's Read and Grep run in the session's directory, which need not be this repository
+        # (a worktree, another checkout): it gets the full path, and every other path is relative to Repository
+        out.append(f"Document: {Path(str(root)) / str(read['path']) if root else read['path']}")
+        if root:
+            out.append(f"Repository: {root} (every other path in this brief is relative to it)")
     if rng:
         out.append(f"Propose edits only inside lines {rng['start']}-{rng['end']}. "
                    + ("The voice card is the whole file's." if card else "Build the voice card from the whole file."))
@@ -750,11 +771,13 @@ def cmd_build(a: argparse.Namespace) -> str:
             )
     read_args = ["read", a.target, "--genre", genre]
     layer_file: Path | None = None
+    root = Path(str(memory_json(["repo"] if stdin else ["repo", a.target])["root"]))
+    site_page = site_page_for(a.site_page, root)
     try:
-        if genre in SITE_GENRES:
+        if genre in SITE_GENRES and site_page is not None:
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as fh:
                 layer_file = Path(fh.name)
-                json.dump(site_layer(Path(a.site_page), a.target, genre), fh)
+                json.dump(site_layer(site_page, a.target, genre), fh)
             read_args += ["--site-layer", str(layer_file)]
         read = memory_json(read_args)
     finally:
@@ -766,7 +789,6 @@ def cmd_build(a: argparse.Namespace) -> str:
             text = Path(a.file).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             raise _user(f"cannot read --file {a.file} as UTF-8 text: {exc}") from exc
-    root = Path(str(memory_json(["repo"])["root"]))
     listed = _run_git(root, ["ls-files", "-co", "--exclude-standard", "-z"]).stdout
     files = [f for f in listed.split("\0") if f]
     rel = None if stdin else cast("str | None", read.get("path"))
@@ -1370,6 +1392,60 @@ def sweep_stale_work(now: float | None = None) -> list[str]:
     return gone
 
 
+def allow_rules() -> list[str]:
+    """The two user-settings rules that let the skill and the line-editor read and write a work directory."""
+    real = os.path.realpath(tempfile.gettempdir()).lstrip("/")
+    return [f"Read(//{real}/prose-edit-*/**)", f"Edit(//{real}/prose-edit-*/**)"]
+
+
+def _settings_allow() -> list[str] | None:
+    """permissions.allow of the user settings, or None when the file is absent or unreadable. Only the rule list is
+    read; nothing else in the file is printed."""
+    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    try:
+        data = json.loads((base / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    allow = ((data or {}).get("permissions") or {}).get("allow") if isinstance(data, dict) else None
+    return [str(x) for x in allow] if isinstance(allow, list) else []
+
+
+def cmd_setup() -> Obj:
+    """Everything a first run in this repository depends on, checked and reported; setup changes nothing itself."""
+    nx = os.environ.get("PROSE_EDIT_NX", "nx")
+    out: Obj = {"nexus": {"command": nx, "found": shutil.which(shlex.split(nx)[0]) is not None}}
+    try:
+        status = memory_json(["status"])
+        out["t2"] = {"reachable": True}
+    except Passthrough as exc:
+        if exc.code != 3:
+            raise
+        out["t2"] = {"reachable": False, "detail": str(exc)}
+        status = cast(Obj, memory_json(["repo"]))
+    needed = allow_rules()
+    present = _settings_allow()
+    out["allow_rules"] = {
+        "settings_found": present is not None,
+        "missing": [rule for rule in needed if rule not in (present or [])],
+        "json": {"permissions": {"allow": needed}},
+    }
+    root = Path(str(status["root"]))
+    out["repo"], out["root"] = status["repo"], str(root)
+    out["site_page"] = (root / SITE_PAGE_IN_REPO).is_file()
+    if out["t2"]["reachable"]:
+        out["genre_map"], out["exemplars"] = status["genre_map"], status["exemplars"]
+        maps = cast(Obj, status["genre_map"])
+        override = [list(maps.get("user") or []), list(maps.get("repo") or []), [], []]
+        listed = _run_git(root, ["ls-files", "-co", "--exclude-standard", "-z", "--", "*.md", "*.html"]).stdout
+        unmapped: dict[str, int] = {}
+        for f in (f for f in listed.split("\0") if f):
+            if _MEM.genre_for(f, override) is None:
+                folder = Path(f).parent.as_posix()
+                unmapped[folder] = unmapped.get(folder, 0) + 1
+        out["no_genre"] = dict(sorted(unmapped.items(), key=lambda kv: (-kv[1], kv[0])))
+    return out
+
+
 def cmd_tmpdir() -> str:
     """A fresh work directory. It is built under a name that is not a work directory's, given its
     sentinel, then renamed into place, so no `prose-edit-<8>` directory ever exists without one."""
@@ -1414,7 +1490,7 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--file")
     b.add_argument("--work", action="store_true",
                    help="path run: make the work directory now and name it on the first line (WORK=<dir>)")
-    b.add_argument("--site-page", default=str(DEFAULT_SITE_PAGE))
+    b.add_argument("--site-page")
     f = sub.add_parser("filter", help="the agent's reply on stdin to filtered proposal JSON")
     f.add_argument("target")
     f.add_argument("--budget", default=str(DEFAULT_BUDGET))
@@ -1426,8 +1502,9 @@ def _parser() -> argparse.ArgumentParser:
                    help="print WORK=<dir> and the absolute path of each file the skill writes into it")
     r = sub.add_parser("rmtmp", help="delete a work directory made by tmpdir")
     r.add_argument("path")
+    sub.add_parser("setup", help="what a first run in this repository needs, checked and reported as JSON")
     s = sub.add_parser("site-layer", help="the site-page section 3 layer")
-    s.add_argument("--site-page", default=str(DEFAULT_SITE_PAGE))
+    s.add_argument("--site-page")
     s.add_argument("--genre", choices=SITE_GENRES, default=None,
                    help="drop the rules that do not apply to this genre (default: keep every rule)")
     return p
@@ -1461,10 +1538,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "tmpdir":
             made = cmd_tmpdir()
             sys.stdout.write(f"WORK={made}\n" + ready_paths(made, list(READY_FILES)) if args.ready else made + "\n")
+        elif args.cmd == "setup":
+            sys.stdout.write(json.dumps(cmd_setup(), ensure_ascii=False, indent=1) + "\n")
         elif args.cmd == "rmtmp":
             cmd_rmtmp(args.path)
         else:
-            layer = site_layer(Path(args.site_page), genre=args.genre)
+            page = site_page_for(args.site_page, Path(str(memory_json(["repo"])["root"])))
+            if page is None:
+                raise _user(f"no site-page style sheet: {SITE_PAGE_IN_REPO} is not in this repository; pass --site-page")
+            layer = site_layer(page, genre=args.genre)
             sys.stdout.write(json.dumps(layer, ensure_ascii=False, indent=1) + "\n")
     except Passthrough as exc:
         sys.stderr.write(f"{exc}\n")

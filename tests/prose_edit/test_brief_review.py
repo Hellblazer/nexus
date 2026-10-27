@@ -463,7 +463,7 @@ def test_the_skill_is_explicit_only_deletes_work_on_every_stop_and_splits_stdin_
     assert "A successful apply has already deleted WORK" in text  # the copy lives in WORK until the author answers
     assert "The flags are the first line. The text is everything after the first newline." in text
     assert "For a stdin run pass only `-` and the flags to `parse`." in text
-    assert "| `-- <path>` or `./<path>` | A file named `rejections` or `exemplar`. |" in text
+    assert "| `-- <path>` or `./<path>` | A file named `rejections`, `exemplar` or `setup`. |" in text
 
 
 FIXTURES = Path(__file__).parent / "fixtures"

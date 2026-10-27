@@ -26,7 +26,6 @@ from tests.prose_edit.test_acceptance_tools import ACC, _verdicts
 from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok, run_brief, seed
 from tests.prose_edit.test_fix_round1 import _step
 from tests.prose_edit.test_fix_round3 import ESSAY, PLAIN_ENGLISH_RULE, STALE_OPEN, _treat
-from tests.prose_edit.test_fix_round4 import _allowlist
 from tests.prose_edit.test_fix_round5 import GUARD, _bash, _plant_holder, box  # noqa: F401  (box is a fixture)
 
 AGENT_TEXT = AGENT.read_text(encoding="utf-8")
@@ -236,8 +235,12 @@ def _remedy(stderr: str) -> str:
     return stderr.split(" with: ", 1)[1].strip().splitlines()[0]
 
 
+# The prefix a session types once the plugin root is filled in: here, the plugin as this checkout holds it.
+LOADED_MEMORY = f"python3 {ROOT.resolve() / 'prose-edit' / 'skills' / 'prose-edit' / 'scripts' / 'memory.py'}"
+
+
 def _on_the_allowlist(command: str) -> bool:
-    return any(command.startswith(prefix + " ") for prefix in _allowlist())
+    return command.startswith(LOADED_MEMORY + " ") and _verdicts().is_allowed_bash(command)
 
 
 def test_the_stale_entry_message_prints_the_full_allowlisted_command(prose: Prose) -> None:
@@ -245,7 +248,7 @@ def test_the_stale_entry_message_prints_the_full_allowlisted_command(prose: Pros
     proc = run_brief(prose, "build", ESSAY, "--genre", "exploration-essay")
     assert proc.returncode == 1
     command = _remedy(proc.stderr)
-    assert command.startswith("python3 .claude/skills/prose-edit/scripts/memory.py entries ")
+    assert command.startswith(LOADED_MEMORY + " entries ")
     assert _on_the_allowlist(command), command
     assert "--level doc" in command and "--remove-item" in command
 

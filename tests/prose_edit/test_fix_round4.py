@@ -55,12 +55,16 @@ from tests.prose_edit.test_teach_acceptance import (
 )
 
 SKILL_TEXT = SKILL.read_text(encoding="utf-8")
-MEMORY_PY = ROOT / ".claude" / "skills" / "prose-edit" / "scripts" / "memory.py"
+MEMORY_PY = ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts" / "memory.py"
 PREFIXES = {
-    "BRIEF": "python3 .claude/skills/prose-edit/scripts/brief.py",
-    "MEMORY": "python3 .claude/skills/prose-edit/scripts/memory.py",
-    "REVIEW": "python3 .claude/skills/prose-edit/scripts/review.py",
+    "BRIEF": "python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/brief.py",
+    "MEMORY": "python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/memory.py",
+    "REVIEW": "python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/review.py",
 }
+# What the prefixes read once loaded: Claude Code fills in the plugin root, and run-scenario.sh loads the plugin from
+# $PWD/prose-edit (nexus-scmcs). Both sides are compared with the same checkout.
+CHECKOUT = "/Users/x/nexus"
+LOADED = {name: p.replace("${CLAUDE_PLUGIN_ROOT}", CHECKOUT + "/prose-edit") for name, p in PREFIXES.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +75,7 @@ PREFIXES = {
 def _allowlist() -> set[str]:
     """The command prefixes run-scenario.sh pre-approves: the text inside each Bash(<prefix>:*) rule."""
     sh = (ACC / "run-scenario.sh").read_text(encoding="utf-8")
-    return {m for m in re.findall(r'"Bash\(([^)]*?):\*\)"', sh) if "prose-edit" in m}
+    return {m.replace("$PWD", CHECKOUT) for m in re.findall(r'"Bash\(([^)]*?):\*\)"', sh) if "prose-edit" in m}
 
 
 def _command_spans(text: str) -> list[str]:
@@ -82,15 +86,15 @@ def _command_spans(text: str) -> list[str]:
 def _expand(span: str, work: str = "/private/var/folders/ab/T/prose-edit-ab12cd34") -> str:
     """What the model types for a command form of the skill: the row's prefix text, then the arguments."""
     name, _, rest = span.partition(" ")
-    return f"{PREFIXES[name]} {rest.replace('WORK', work)}"
+    return f"{LOADED[name]} {rest.replace('WORK', work)}"
 
 
 def test_the_skill_table_prefixes_are_the_exact_text_the_runner_allows_and_the_verdicts_count_as_on_list() -> None:
     v = _verdicts()
     rows = dict(re.findall(r"^\| (BRIEF|MEMORY|REVIEW) \| `([^`]+)` \|$", SKILL_TEXT, re.MULTILINE))
     assert rows == PREFIXES
-    assert _allowlist() == set(PREFIXES.values()) == set(v.ALLOWED_BASH)
-    for prefix in PREFIXES.values():
+    assert _allowlist() == set(LOADED.values())
+    for prefix in LOADED.values():
         assert v.is_allowed_bash(f"{prefix} parse 'x.md'")
 
 
@@ -110,18 +114,20 @@ def test_every_command_form_the_skill_tells_the_model_to_run_matches_the_allowli
 def test_the_shapes_the_exit_batch_saw_are_outside_the_allowlist_and_off_list_in_the_verdicts() -> None:
     v = _verdicts()
     allow = _allowlist()
-    ok = "python3 .claude/skills/prose-edit/scripts/brief.py parse 'x.md'"
+    ok = f"{LOADED['BRIEF']} parse 'x.md'"
     assert v.is_allowed_bash(ok) and any(ok.startswith(p + " ") for p in allow)
-    for seen in ("python3 '.claude/skills/prose-edit/scripts/brief.py' parse 'x.md'",
-                 "python3 './.claude/skills/prose-edit/scripts/brief.py' parse 'x.md'",
-                 "cd '/Users/x/wt' && python3 .claude/skills/prose-edit/scripts/brief.py parse 'x.md'"):
+    script = LOADED["BRIEF"].removeprefix("python3 ")
+    for seen in (f"python3 '{script}' parse 'x.md'",
+                 "python3 './prose-edit/skills/prose-edit/scripts/brief.py' parse 'x.md'",
+                 "python3 ./prose-edit/skills/prose-edit/scripts/brief.py parse 'x.md'",
+                 f"cd '/Users/x/wt' && {LOADED['BRIEF']} parse 'x.md'"):
         assert not v.is_allowed_bash(seen), seen
         assert not any(seen.startswith(p + " ") for p in allow), seen
     events = [_use("a", "Bash", {"command": seen}) for seen in ("cd '/x' && " + ok,)]
     assert v.compliance(events, None)["off_list_bash"] == ["cd '/x' && " + ok]
 
 
-def test_the_skill_writes_the_prefix_unquoted_relative_and_forbids_cd_and_a_leading_dot_slash() -> None:
+def test_the_skill_writes_the_prefix_unquoted_from_the_plugin_root_and_forbids_cd_and_a_leading_dot_slash() -> None:
     head = SKILL_TEXT[:SKILL_TEXT.index("## Invocation")]
     assert "put each token and each path in single quotes" not in SKILL_TEXT  # the rule that broke the batch
     assert "Never run `cd`" in head
@@ -129,6 +135,7 @@ def test_the_skill_writes_the_prefix_unquoted_relative_and_forbids_cd_and_a_lead
     assert "exactly as it is shown" in head or "exactly as shown" in head
     assert "only the arguments" in head.lower()
     assert "the directory this session started in" in head
+    assert "${CLAUDE_PLUGIN_ROOT}" in head
     assert re.search(r"\bBRIEF\b.*\bMEMORY\b.*\bREVIEW\b.*prefix", head, re.DOTALL)
     assert not NAMES_A_REPAIR.search(SKILL_TEXT)
     for span in re.findall(r"`([^`]+)`", SKILL_TEXT):

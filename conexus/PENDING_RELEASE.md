@@ -47,6 +47,14 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `prose-edit/.claude-plugin/plugin.json` (nexus-scmcs): the new opt-in conexus-prose-edit plugin's manifest; /prose-edit moves out of the nexus repo's .claude/skills so it can run in any repository.
+- `prose-edit/agents/line-editor.md` (nexus-scmcs): the line-editor agent, moved from .claude/agents and dispatched as conexus-prose-edit:line-editor; a brief's Repository line roots every relative path it gives.
+- `prose-edit/skills/prose-edit/SKILL.md` (nexus-scmcs): the skill, moved from .claude/skills: script prefixes under ${CLAUDE_PLUGIN_ROOT} pre-approved by allowed-tools, an absolute path edits the checkout that holds it, and a `setup` run (Nexus and T2, the two temp-dir allow rules, genre map, exemplars).
+- `prose-edit/skills/prose-edit/scripts/brief.py` (nexus-scmcs): `setup` report; the brief names the document by absolute path with a Repository line; the site-page layer comes from the repository's own .claude/skills/site-page and is skipped when absent.
+- `prose-edit/skills/prose-edit/scripts/memory.py` (nexus-scmcs): an absolute path argument picks the repository (a worktree document was refused as outside the repository); `status` for setup.
+- `prose-edit/skills/prose-edit/scripts/review.py` (nexus-scmcs): moved from .claude/skills/prose-edit; unchanged.
+- `conexus/hooks/scripts/version_lockstep_hook.py` (nexus-scmcs): the no-marketplace fallback plugin list names conexus-prose-edit.
+
 ## Deferred to the next client release
 
 ONE PATH PER BULLET, on the bullet's FIRST line.

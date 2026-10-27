@@ -138,7 +138,7 @@ _ACTION = _SCRIPTS_DIR / "version_lockstep_action.py"
 #: file's own last edit. Never a silent skip: a fallback is always
 #: ``debug()``-logged, so a stale fallback disagreeing with a live
 #: marketplace.json is discoverable (NX_HOOK_DEBUG=1), never swallowed.
-_FALLBACK_PLUGINS: tuple[str, ...] = ("conexus", "sn", "conexus-tool-spill")
+_FALLBACK_PLUGINS: tuple[str, ...] = ("conexus", "sn", "conexus-tool-spill", "conexus-prose-edit")
 #: Same env-var names as ``nexus.plugin_lockstep`` (its ``REGISTRY_ENV`` /
 #: ``MARKETPLACES_ENV``) so this hook's no-network probe and ``nx
 #: upgrade``'s own network-refreshed confirm read the identical files, and

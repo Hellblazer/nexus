@@ -38,9 +38,10 @@ fi
 python3 tests/e2e/lib/claude_credentials.py run -- "${CLAUDE_BIN:-claude}" -p "$PROMPT" ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
   --output-format stream-json --verbose \
   --permission-mode dontAsk \
-  --allowedTools "Bash(python3 .claude/skills/prose-edit/scripts/brief.py:*)" \
-                 "Bash(python3 .claude/skills/prose-edit/scripts/memory.py:*)" \
-                 "Bash(python3 .claude/skills/prose-edit/scripts/review.py:*)" Read Write Agent \
+  --plugin-dir "$PWD/prose-edit" \
+  --allowedTools "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/brief.py:*)" \
+                 "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/memory.py:*)" \
+                 "Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/review.py:*)" Read Write Agent \
   --disallowedTools "Bash(nx:*)" "Bash(uv:*)" "Bash(bd:*)" "Bash(curl:*)" \
   --add-dir "$TMPDIR" \
   --max-turns 40 > "$OUT/$NAME.jsonl" 2> "$OUT/$NAME.err"

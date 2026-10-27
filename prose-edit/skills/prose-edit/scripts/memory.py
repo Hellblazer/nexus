@@ -28,6 +28,7 @@ Usage (all commands run inside the repo, from any subdirectory or worktree):
   memory.py genre-put NAME [--replace]         # {"exemplars": [...], "notes": [...]} on stdin
   memory.py exemplar-add GENRE PATH:START-END [--rev SHA]
   memory.py viewer [--set V]
+  memory.py status                             # projects, genre_map entries, exemplars per genre
 
 Site-page section 3 treatments (what a repo or one document does with a rule of the site-page style sheet):
 add-entry --level repo|doc (--path P for doc) takes a list under one of three keys, each entry the rule's opening
@@ -572,8 +573,8 @@ def _git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProces
         raise UserError(f"cannot run git: {exc}") from exc
 
 
-def _git_out(args: list[str]) -> str:
-    proc = _git(args)
+def _git_out(args: list[str], cwd: Path | None = None) -> str:
+    proc = _git(args, cwd=cwd)
     if proc.returncode != 0:
         raise UserError(
             "not inside a git repository (git rev-parse failed): " + proc.stderr.strip()
@@ -581,11 +582,27 @@ def _git_out(args: list[str]) -> str:
     return proc.stdout.strip()
 
 
+def anchor_of(arg: str | None) -> Path | None:
+    """The directory whose repository an absolute path argument names (its nearest existing
+    ancestor), or None for a relative path, `-` or no argument. A document in a worktree or another
+    repository is then edited there, not in the checkout the session started in (nexus-scmcs)."""
+    if not arg or arg == "-":
+        return None
+    path, _ = split_range(arg)
+    raw = Path(path)
+    if not raw.is_absolute():
+        return None
+    for cand in (raw, *raw.parents):
+        if cand.is_dir():
+            return cand
+    return None
+
+
 class Repo:
-    def __init__(self) -> None:
-        self.common = Path(_git_out(["rev-parse", "--path-format=absolute", "--git-common-dir"]))
+    def __init__(self, anchor: Path | None = None) -> None:
+        self.common = Path(_git_out(["rev-parse", "--path-format=absolute", "--git-common-dir"], anchor))
         self.name = self.common.parent.name
-        self.root = Path(_git_out(["rev-parse", "--show-toplevel"]))
+        self.root = Path(_git_out(["rev-parse", "--show-toplevel"], anchor))
 
     def rel(self, path: str) -> str:
         """Repo-relative posix path. Relative input is taken from the repo root first,
@@ -776,8 +793,8 @@ class Target(NamedTuple):
 
 
 class Ctx:
-    def __init__(self, prefix: str) -> None:
-        self.repo = Repo()
+    def __init__(self, prefix: str, anchor: Path | None = None) -> None:
+        self.repo = Repo(anchor)
         self.t2 = T2()
         self.user_project, self.repo_project = projects(prefix, self.repo.name)
         self.now = _now()
@@ -954,7 +971,7 @@ def cmd_read(ctx: Ctx, a: argparse.Namespace) -> None:
     if layers["site-page"] is not None:
         shown["site-page"] = layers["site-page"]
     _emit({
-        "repo": ctx.repo.name, "path": tgt.rel, "range": tgt.range,
+        "repo": ctx.repo.name, "root": str(ctx.repo.root), "path": tgt.rel, "range": tgt.range,
         "genre": genre, "genre_source": source, "precedence": PRECEDENCE,
         "layers": shown, "merged": merged, "genre_record": genre_record,
     })
@@ -1426,6 +1443,23 @@ def cmd_viewer(ctx: Ctx, a: argparse.Namespace) -> None:
     _emit({"viewer": (rec or {}).get("viewer")})
 
 
+def cmd_status(ctx: Ctx, a: argparse.Namespace) -> None:
+    """What setup needs to know: the repository's projects, its genre_map entries at each level, and how many
+    exemplars each genre holds. Reading the user style sheet first is the T2 check: an unreachable T2 exits 3."""
+    user = _record(ctx.t2.get_json(ctx.user_project, "stylesheet", "sheet"))
+    repo = _record(ctx.t2.get_json(ctx.repo_project, "stylesheet", "sheet"))
+    exemplars: Obj = {}
+    for genre in GENRES:
+        rec = ctx.t2.get_json(ctx.repo_project, f"genre/{genre}", "genre")
+        exemplars[genre] = len((rec or {}).get("exemplars") or [])
+    _emit({
+        "repo": ctx.repo.name, "root": str(ctx.repo.root),
+        "projects": {"user": ctx.user_project, "repo": ctx.repo_project},
+        "genre_map": {"user": _genre_entries(user), "repo": _genre_entries(repo)},
+        "exemplars": exemplars,
+    })
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1504,6 +1538,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("where", metavar="PATH:START-END")
     sp.add_argument("--rev", help="read the passage from this revision (git show REV:PATH)")
     add("viewer", cmd_viewer).add_argument("--set")
+    add("status", cmd_status)
     return p
 
 
@@ -1515,7 +1550,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "reject" and not args.from_stdin and (args.old is None or args.new is None):
             raise UserError("reject needs --old and --new, or --from-stdin")
-        args.fn(Ctx(args.prefix), args)
+        anchor = anchor_of(getattr(args, "path", None) or getattr(args, "where", None))
+        args.fn(Ctx(args.prefix, anchor), args)
     except UserError as exc:
         sys.stderr.write(f"memory.py: {exc}\n")
         return 1

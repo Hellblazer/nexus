@@ -7,6 +7,7 @@ paths:
   - "conexus/.claude-plugin/**"
   - "sn/.claude-plugin/**"
   - "tool-spill/.claude-plugin/**"
+  - "prose-edit/.claude-plugin/**"
   - "CHANGELOG.md"
   - "conexus/PENDING_RELEASE.md"
   - "service/**"
@@ -34,7 +35,7 @@ Full text: [release-cadence](../../docs/agents/release-cadence.md).
 
 ## Plugin-only releases (fast lane)
 
-Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `.claude-plugin/marketplace.json`) ships ahead of `src/` work as a patch client release cut off the last client tag with the plugin commits cherry-picked from `develop`; the `release` skill's "Plugin-only fast lane" section is the procedure, and `scripts/check_plugin_only_eligibility.py` refuses anything that leaves the plugin surface. The anchored `plugin-vX.Y.Z-n` channel of RDR-197 is retired. Never cut while a release PR is open.
+Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `prose-edit/`, `.claude-plugin/marketplace.json`) ships ahead of `src/` work as a patch client release cut off the last client tag with the plugin commits cherry-picked from `develop`; the `release` skill's "Plugin-only fast lane" section is the procedure, and `scripts/check_plugin_only_eligibility.py` refuses anything that leaves the plugin surface. The anchored `plugin-vX.Y.Z-n` channel of RDR-197 is retired. Never cut while a release PR is open.
 
 ## Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
 

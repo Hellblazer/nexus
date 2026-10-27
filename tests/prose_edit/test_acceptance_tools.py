@@ -41,9 +41,10 @@ def _res(tid: str, text: str) -> dict:
 def test_the_runner_allows_only_the_three_scripts_and_denies_nx_uv_bd_curl() -> None:
     text = (ACC / "run-scenario.sh").read_text()
     assert "--permission-mode dontAsk" in text
-    for allowed in ('"Bash(python3 .claude/skills/prose-edit/scripts/brief.py:*)"',
-                    '"Bash(python3 .claude/skills/prose-edit/scripts/memory.py:*)"',
-                    '"Bash(python3 .claude/skills/prose-edit/scripts/review.py:*)"'):
+    assert '--plugin-dir "$PWD/prose-edit"' in text
+    for allowed in ('"Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/brief.py:*)"',
+                    '"Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/memory.py:*)"',
+                    '"Bash(python3 $PWD/prose-edit/skills/prose-edit/scripts/review.py:*)"'):
         assert allowed in text
     assert "Read Write Agent" in text
     for denied in ('"Bash(nx:*)"', '"Bash(uv:*)"', '"Bash(bd:*)"', '"Bash(curl:*)"'):
@@ -56,7 +57,7 @@ def test_the_fake_nx_reports_an_unavailable_service_the_way_memory_py_reads_it()
     proc = subprocess.run([sys.executable, str(ACC / "fake_nx_unavailable.py")], capture_output=True, text=True)
     assert proc.returncode == 1 and "T2 storage service unavailable" in proc.stderr
     mem_spec = importlib.util.spec_from_file_location(
-        "mem_for_acc", ACC.parents[2] / ".claude" / "skills" / "prose-edit" / "scripts" / "memory.py")
+        "mem_for_acc", ACC.parents[2] / "prose-edit" / "skills" / "prose-edit" / "scripts" / "memory.py")
     assert mem_spec and mem_spec.loader
     mem = importlib.util.module_from_spec(mem_spec)
     sys.modules[mem_spec.name] = mem

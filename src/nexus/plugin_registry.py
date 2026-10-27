@@ -71,7 +71,7 @@ MARKETPLACE_NAME = "nexus-plugins"
 
 #: The set this module ships with, used ONLY when no marketplace.json is
 #: reachable by any route above -- see the module docstring.
-FALLBACK_PLUGINS: tuple[str, ...] = ("conexus", "sn", "conexus-tool-spill")
+FALLBACK_PLUGINS: tuple[str, ...] = ("conexus", "sn", "conexus-tool-spill", "conexus-prose-edit")
 
 
 def _plugin_names(data: object) -> tuple[str, ...] | None:

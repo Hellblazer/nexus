@@ -19,7 +19,7 @@ import pytest
 from nexus.commands._helpers import t2_handle
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / ".claude" / "skills" / "prose-edit" / "scripts" / "memory.py"
+SCRIPT = ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts" / "memory.py"
 SPY = Path(__file__).with_name("nxspy.py")
 PREFIX = "pt_"
 REPO_NAME = "proj-x"
