@@ -631,6 +631,75 @@ done
 wait
 if [[ "$(_ev_lines "$ev13")" == 20 && "$(grep -c -E '^ts=[0-9T:Z-]+ lease=service name=conc host=[^ ]+ pid=[0-9]+ waited_s=0 outcome=conc holder_pid=[0-9]+ holder_label="label [0-9]+"$' "$ev13")" == 20 ]]; then ok "20 concurrent writers: 20 whole lines"; else bad "concurrent: lines=$(_ev_lines "$ev13") whole=$(grep -c -E 'holder_label="label [0-9]+"$' "$ev13")"; fi
 
+# ── Test 14: a holder caught between its pid create and its populate ─────
+# Develop CI 40568573750 (ed5d8475c) shard 6: Test 2's contender read the holder
+# after its exclusive pid create and before its label write, and the refusal said
+# "label=unknown, acquired=unknown, command: unknown". The claim is the pid; the
+# label, ts and command follow, so a contender that finds a LIVE pid without the
+# populate's last file (command) waits for it, a bounded 2 s, before it reads.
+echo "Test 14: a refusal names a holder that is still populating its lease"
+repo14="$WORKDIR/repo14"
+_fake_repo "$repo14"
+lib14="$repo14/scripts/lib/build-lease.sh"
+root14="$repo14/service/.build-lease"
+sleep 60 & live14=$!
+# Stand up the window by hand: pid (the claim) now, the rest later, in populate's order.
+_stage14() {   # <name> <delay-s|never> — the claim now, the populate after <delay-s>
+    local d="$root14/$1"
+    mkdir -p "$d"
+    printf '%s\n' "$live14" > "$d/pid"
+    if [[ "$2" != never ]]; then
+        (
+            sleep "$2"
+            printf '%s\n' "2026-01-02T03:04:05Z" > "$d/ts"
+            printf '%s\n' "late-label" > "$d/label"
+            printf '%s\n' "late-command arg" > "$d/command"
+        ) &
+    fi
+}
+_stage14 popwin 0.6
+out14="$(bash -c "source '$lib14'; build_lease_acquire popwin" 2>&1)"
+rc14=$?
+if [[ $rc14 -eq 75 ]]; then ok "14a: the contender is refused (rc 75)"; else bad "14a: rc $rc14: $out14"; fi
+if [[ "$out14" == *"label=late-label"* ]]; then ok "14a: the refusal names the label written after the pid"; else bad "14a: label not named: $out14"; fi
+if [[ "$out14" == *"acquired=2026-01-02T03:04:05Z"* && "$out14" == *"command: late-command arg"* ]]; then ok "14a: acquired and command are named too"; else bad "14a: ts or command missing: $out14"; fi
+sleep 1     # the staged writer has finished before the next case reuses the directory
+# 14b: the events log reads the same populated lease (the held-event reader)
+ev14="$WORKDIR/ev14.log"
+rm -rf "${root14:?}/popwin"
+_stage14 popwin 0.6
+NX_LEASE_EVENTS_LOG="$ev14" bash -c "source '$lib14'; build_lease_acquire_wait popwin 0" >/dev/null 2>&1
+if grep -q ' holder_label=late-label' "$ev14" 2>/dev/null; then ok "14b: the events log names the label of a holder that was populating"; else bad "14b: events log: $(cat "$ev14" 2>&1)"; fi
+sleep 1
+# 14c: a live holder that never populates costs the contender a bounded wait, then the old text
+rm -rf "${root14:?}/popwin"
+_stage14 popwin never
+t14=$(date +%s)
+out14c="$(_BUILD_LEASE_POPULATE_POLLS=6 bash -c "source '$lib14'; build_lease_acquire popwin" 2>&1)"
+rc14c=$?
+d14=$(( $(date +%s) - t14 ))
+if [[ $rc14c -eq 75 && "$out14c" == *"label=unknown"* && $d14 -le 2 ]]; then ok "14c: a holder that never populates is still refused, after a bounded wait (${d14}s)"; else bad "14c: rc $rc14c after ${d14}s: $out14c"; fi
+# 14d: a DEAD holder with an unpopulated lease is reclaimed without the wait
+rm -rf "${root14:?}/popwin"
+( exit 0 ) & dead14=$!
+wait "$dead14" 2>/dev/null
+mkdir -p "$root14/popwin"
+printf '%s\n' "$dead14" > "$root14/popwin/pid"
+t14=$(date +%s)
+out14d="$(bash -c "source '$lib14'; build_lease_acquire popwin" 2>&1)"
+rc14d=$?
+d14=$(( $(date +%s) - t14 ))
+if [[ $rc14d -eq 0 && "$out14d" == *WARNING* && $d14 -le 1 ]]; then ok "14d: a dead holder's unpopulated lease is reclaimed at once (${d14}s)"; else bad "14d: rc $rc14d after ${d14}s: $out14d"; fi
+# 14e: an uncontended acquire never reaches the wait (no pid file to wait on)
+rm -rf "${root14:?}/popwin"
+t14=$(date +%s)
+bash -c "source '$lib14'; build_lease_acquire popwin" >/dev/null 2>&1
+rc14e=$?
+d14=$(( $(date +%s) - t14 ))
+if [[ $rc14e -eq 0 && $d14 -le 1 ]]; then ok "14e: an uncontended acquire adds no wait (${d14}s)"; else bad "14e: rc $rc14e after ${d14}s"; fi
+kill -9 "$live14" 2>/dev/null
+wait "$live14" 2>/dev/null
+
 echo
 echo "build-lease_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

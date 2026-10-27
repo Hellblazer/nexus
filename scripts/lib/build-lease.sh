@@ -231,11 +231,40 @@ _build_lease_log_event() {
     return 0
 }
 
+# Bound on _build_lease_await_populated: POLLS sleeps of POLL_S seconds (2 s).
+_BUILD_LEASE_POPULATE_POLLS="${_BUILD_LEASE_POPULATE_POLLS:-40}"
+_BUILD_LEASE_POPULATE_POLL_S="${_BUILD_LEASE_POPULATE_POLL_S:-0.05}"
+
+# _build_lease_await_populated <dir> — before a contender reads a holder's label,
+# ts and command, let a holder that is mid-populate finish writing them.
+#
+# The claim is the exclusive create of `pid`; _build_lease_populate writes worktree,
+# ts, label and command AFTER it, so a contender that loses the claim can read the
+# holder in that gap and report label, acquired and command as `unknown` (develop CI
+# 40568573750, build-lease_test.sh Test 2). `command` is populate's last write and
+# every populate writes it non-empty, so a non-empty `command` means the others are
+# there. This waits, in POLL_S steps up to POLLS of them, only while ALL of these
+# hold: a pid file exists, `command` is not yet non-empty, no `pgid` is recorded
+# (build_lease_track_pid writes it after populate), and the pid is not known dead.
+# The claim and the uncontended path never call it; a dead holder, a populated
+# lease and a lease with no pid return at once; a live holder that never populates
+# costs the bound once and the reader then reads what is there (unknown included).
+_build_lease_await_populated() {
+    local dir="$1" n pid
+    for (( n = 0; n < _BUILD_LEASE_POPULATE_POLLS; n++ )); do
+        [[ -e "$dir/pid" && ! -s "$dir/command" && ! -e "$dir/pgid" ]] || return 0
+        pid="$(cat "$dir/pid" 2>/dev/null || true)"
+        if [[ "$pid" =~ ^[0-9]+$ ]] && ! _build_lease_pid_alive "$pid"; then return 0; fi
+        sleep "$_BUILD_LEASE_POPULATE_POLL_S" 2>/dev/null || sleep 1
+    done
+}
+
 # _build_lease_log_held_event <name> <outcome> <waited_s> — as above, naming the
 # lease's CURRENT holder as the lease directory records it.
 _build_lease_log_held_event() {
     local name="$1" outcome="$2" waited="${3:-0}" dir
     dir="$(_build_lease_dir "$name")"
+    _build_lease_await_populated "$dir"
     _build_lease_log_event "$name" "$outcome" "$waited" "$(cat "$dir/pid" 2>/dev/null || true)" "$(cat "$dir/label" 2>/dev/null || true)"
 }
 
@@ -474,6 +503,7 @@ build_lease_acquire() {
     # priority over the plain `pid`: it reflects the real build process,
     # not just the wrapper that called build_lease_acquire.
     local existing_pid existing_ts existing_label existing_cmd existing_pgid
+    _build_lease_await_populated "$dir"   # a holder mid-populate is named, not "unknown"
     existing_pid="$(cat "$dir/pid" 2>/dev/null || true)"
     existing_ts="$(cat "$dir/ts" 2>/dev/null || echo unknown)"
     existing_label="$(cat "$dir/label" 2>/dev/null || echo unknown)"
@@ -587,6 +617,7 @@ build_lease_acquire_wait() {
             echo "build_lease_acquire_wait: build lease '$name' is held — waiting (${waited}s of ${max}s). $err" >&2
             announced=1
         fi
+        _build_lease_await_populated "$(_build_lease_dir "$name")"
         seen_pid="$(cat "$(_build_lease_dir "$name")/pid" 2>/dev/null || true)"
         seen_label="$(cat "$(_build_lease_dir "$name")/label" 2>/dev/null || true)"
         sleep 5
