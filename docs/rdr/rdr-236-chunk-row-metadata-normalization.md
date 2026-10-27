@@ -2,12 +2,12 @@
 title: "Chunk-row metadata normalization: document fields on the catalog document, position fields on the manifest, the chunk row keeps only what its text determines"
 id: RDR-236
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-10-26
-accepted_date:
+accepted_date: 2026-10-27
 related_issues: [nexus-6pfgb, nexus-x54wv, nexus-tko2w, nexus-u9dc5, nexus-3ajpd, nexus-j67ix, nexus-p89h4]
 related_rdrs: [RDR-108, RDR-180, RDR-192, RDR-222, RDR-223, RDR-231, RDR-232]
 ---
@@ -1966,6 +1966,7 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   route (b); the backfill applies option B per key; plus the import case of
   the frozen-row rule, Phase 5's lower bound, the `update-metadata` overlay
   writers in Step 1, and register terms.
+- 2026-10-27: accepted; residual dispositions (gate record `nexus_rdr/236-gate-latest`): the carried BLOCKS-PLANNING residual to nexus-6pfgb.40 (author disposition, bead); S1 and S2 to nexus-6pfgb.43; S3 to nexus-6pfgb.8; S4 to nexus-6pfgb.41; S5, S6, S7, S8 and S9 to nexus-6pfgb.25; no file change, so no fix check.
 - 2026-10-27: Gate round 3 — PASSED (0 Critical, 9 Significant, 0 ship-blocker(s)); commit `d12733801`; critique `nexus_rdr/236-gate-critique-2026-10-27-r3`.
 - 2026-10-27: fix-check round on the round 2 fix (T2
   `nexus_rdr/236-fix-check-2874ec21d`, RF-24): no plain btree on title or
