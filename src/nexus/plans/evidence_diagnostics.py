@@ -55,6 +55,7 @@ __all__ = [
     "ReducerInputRecorder",
     "active_recorder",
     "build_evidence_diagnostics",
+    "capture_reducer_input",
     "log_evidence_diagnostics",
     "note_reducer_input",
     "plan_tools",
@@ -134,11 +135,35 @@ def set_recorder_step(index: int | None) -> None:
         rec.set_step(index)
 
 
+_CAPTURE: ContextVar[list[list[str]] | None] = ContextVar("nexus_reducer_input_capture", default=None)
+
+
+@contextlib.contextmanager
+def capture_reducer_input() -> Iterator[list[list[str]]]:
+    """Collect, in order, every list the runner's hydration reports through :func:`note_reducer_input`
+    inside the block (nexus-jypmj.3.1).
+
+    The coverage boundary hydrates the terminal reduction's input itself and needs the final list, with
+    the reserved stream merged and the cap applied, before the operator joins it into one string. This
+    is independent of the active :class:`ReducerInputRecorder` (which keeps only the first consumer's
+    input) and of nesting: the capture sits beside the recorder, it does not replace it.
+    """
+    sink: list[list[str]] = []
+    token = _CAPTURE.set(sink)  # type: ignore[arg-type]
+    try:
+        yield sink
+    finally:
+        _CAPTURE.reset(token)
+
+
 def note_reducer_input(items: Sequence[Any]) -> None:
-    """No-op without a recorder."""
+    """No-op without a recorder or a capture."""
     rec = _ACTIVE.get()
     if rec is not None:
         rec.note(items)
+    sink = _CAPTURE.get()
+    if sink is not None:
+        sink.append([i for i in items if isinstance(i, str)])
 
 
 def plan_tools(plan_json: Any) -> list[str]:

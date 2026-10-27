@@ -49,6 +49,7 @@ import os as _os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace as _dc_replace
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
@@ -59,6 +60,7 @@ from nexus.plans.match import Match
 from nexus.plans.owner_narrowing import OWNERS_BINDING
 
 if TYPE_CHECKING:
+    from nexus.plans.coverage_ledger import CoverageBoundary, CoverageResult
     from nexus.plans.evidence import CorpusNarrowing
     from nexus.plans.owner_narrowing import OwnerNarrowing
 
@@ -541,6 +543,11 @@ class PlanResult:
     #: RDR-232 (nexus-jypmj.1.6): what the reserved primary stream did in this run
     #: (:meth:`ReservedStream.report`); ``None`` when no stream was passed.
     reserved_report: dict[str, Any] | None = None
+    #: RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary's result for the terminal reduction --
+    #: the ledger, ``coverage.state`` and whether generation was skipped. ``None`` when no
+    #: ``coverage_boundary`` was passed, or the run never reached a terminal operator segment (a retrieval-only
+    #: plan, a continuation cut, a budget stop).
+    coverage: CoverageResult | None = None
 
 
 # ── Embedding-domain mapping ────────────────────────────────────────────────
@@ -680,6 +687,7 @@ from nexus.plans.bundle import DEFERRED_REF_KEY as _DEFERRED_REF_KEY, _extract_t
 import nexus.operators.dispatch as _dispatch_mod  # noqa: E402
 from nexus.plans.evidence_diagnostics import (  # noqa: E402
     active_recorder,
+    capture_reducer_input,
     note_reducer_input,
     set_recorder_step,
 )
@@ -690,6 +698,20 @@ from nexus.plans.reserved_stream import (  # noqa: E402
     reserved_scope,
     set_reserved_step,
 )
+
+#: RDR-232 Phase 3 (nexus-jypmj.3.1). A dispatcher carrying this attribute runs :func:`_hydrate_operator_args`
+#: itself (the default dispatcher does). The coverage boundary has to read the terminal reduction's hydrated
+#: input before the reduction runs, so for such a dispatcher the runner hydrates ONCE, hands over the prepared
+#: args and sets :data:`_PREHYDRATED` for that one dispatch; the dispatcher then skips its own hydration. A
+#: second hydration would fetch twice and merge the reserved stream twice. A dispatcher without the
+#: attribute never hydrates (a test fake): it is handed the resolved args as it always was.
+_HYDRATES_ATTR: str = "hydrates_operator_args"
+_PREHYDRATED: ContextVar[bool] = ContextVar("nexus_operator_args_prehydrated", default=False)
+
+
+def operator_args_prehydrated() -> bool:
+    """Whether the dispatch in progress was handed args the runner already hydrated."""
+    return _PREHYDRATED.get()
 
 
 def _is_operator_error(exc: BaseException) -> bool:
@@ -1792,6 +1814,59 @@ def _drop_step_ids_from_evidence(
     return kept
 
 
+#: The text of the terminal output when the coverage boundary skips the terminal reduction
+#: (RDR-232 Phase 3, nexus-jypmj.3.1). The shape, the notice and the counters are nexus-jypmj.3.3's; the
+#: marker key is what they key on.
+_COVERAGE_SKIPPED_TEXT: str = "[generation skipped: no required facet has supporting evidence]"
+
+
+def _coverage_skipped_output() -> dict[str, Any]:
+    return {"text": _COVERAGE_SKIPPED_TEXT, "coverage_skipped": True}
+
+
+def _hydrate_capturing(
+    tool: str, args: dict[str, Any], *, capture: bool,
+) -> tuple[str, dict[str, Any], list[list[str]]]:
+    """:func:`_hydrate_operator_args`, and the lists its hydration reported when *capture* is set."""
+    if not capture:
+        resolved_tool, prepared = _hydrate_operator_args(tool, args)
+        return resolved_tool, prepared, []
+    with capture_reducer_input() as captured:
+        resolved_tool, prepared = _hydrate_operator_args(tool, args)
+    return resolved_tool, prepared, captured
+
+
+def _boundary_evidence(args: dict[str, Any], captured: list[list[str]]) -> tuple[list[str], bool]:
+    """``(texts, observed)``: what an operator step is handed as evidence, for the coverage boundary.
+
+    The last list the step's hydration reported (:func:`~nexus.plans.evidence_diagnostics.capture_reducer_input`)
+    is the exact input, reserved stream merged and cap applied. With none (a dispatcher that does not
+    hydrate, or an arg the hydration does not handle) the evidence args are read as they stand: a list of
+    texts, a JSON list of texts or items, or one text (a condensed earlier output). A deferred bundle ref
+    and a chunk id are not evidence. ``observed`` is False only when the step has no evidence arg at all.
+    """
+    if captured:
+        return list(captured[-1]), True
+    texts: list[str] = []
+    observed = False
+    for key in _RESERVED_EVIDENCE_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.lstrip().startswith("["):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                value = [p.get("text") if isinstance(p, dict) else p for p in parsed]
+        if isinstance(value, list):
+            observed = True
+            texts.extend(v for v in value if isinstance(v, str) and v and not isinstance(v, _StepId))
+        elif isinstance(value, str) and value.strip() and not isinstance(value, _StepId):
+            observed = True
+            texts.append(value)
+    return texts, observed
+
+
 #: nexus-mm5tx follow-up (code-review T2 [24199]): fixed, machine-
 #: recognisable prefix for the short-circuit result text emitted when
 #: an operator's hydrated evidence filters to zero items (either the
@@ -2530,8 +2605,12 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     """
     from nexus.mcp import core as mcp_core  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    # Auto-hydration + arg normalization: shared with the bundle path.
-    resolved_tool, args = _hydrate_operator_args(tool, args)
+    # Auto-hydration + arg normalization: shared with the bundle path. Skipped when the runner already
+    # hydrated this terminal step for the coverage boundary (nexus-jypmj.3.1): once only.
+    if _PREHYDRATED.get():
+        resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+    else:
+        resolved_tool, args = _hydrate_operator_args(tool, args)
 
     # nexus-mm5tx follow-up (code-review T2 [24199]): an explicit
     # store_get_many step with tumbler-shaped ids was resolved via the
@@ -2799,6 +2878,7 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
 # identity), so wrapping the dispatcher doesn't silently disable bundling.
 # (substantive-critic Obs D)
 setattr(_default_dispatcher, _SUPPORTS_BUNDLING_ATTR, True)
+setattr(_default_dispatcher, _HYDRATES_ATTR, True)
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
@@ -2813,6 +2893,7 @@ async def _plan_run_impl(
     deadline: float | None = None,
     budget_usd_remaining: float | None = None,
     continuation_cut_at_step: int | None = None,
+    coverage_boundary: CoverageBoundary | None = None,
 ) -> PlanResult:
     """Execute the steps in *match* and return the captured outputs.
 
@@ -2906,6 +2987,18 @@ async def _plan_run_impl(
     budget before ever reaching the cut point, or when the plan simply
     has fewer segments than the cut index — in either case nothing was
     withheld that would otherwise have run).
+
+    ``coverage_boundary`` (RDR-232 Phase 3, nexus-jypmj.3.1): ``None`` (the default) changes nothing.
+    When set, the runner stops at the LAST dispatch segment if it is an operator segment (an isolated
+    operator step, or a fused operator bundle), reads the input that segment's first evidence-consuming
+    step will be handed (hydrated once; see ``_HYDRATES_ATTR``), and calls
+    :meth:`~nexus.plans.coverage_ledger.CoverageBoundary.evaluate` on it BEFORE dispatching the segment.
+    The result is :attr:`PlanResult.coverage`. When it says ``skip_generation`` the segment is not
+    dispatched: its slots get the bundle-intermediate sentinel and, for the terminal slot,
+    ``{"text": ..., "coverage_skipped": True}``, so a later ``$stepN`` reference still resolves and no
+    ``StepRecord`` is invented. The plan prefix is never re-run. The assessment calls are ``StepRecord``s
+    numbered past the plan's own step indices and count against ``deadline`` and ``budget_usd_remaining``.
+    A boundary failure never fails the run.
 
     **Validation is WHOLE-PLAN and PRE-DISPATCH (nexus-pucte), which
     runs BEFORE either budget check above ever executes.** Required
@@ -3116,6 +3209,77 @@ async def _plan_run_impl(
         supports_bundling=getattr(dispatch, _SUPPORTS_BUNDLING_ATTR, False),
     )
 
+    # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary sits before the LAST segment when that is an
+    # operator segment. Assessment calls are numbered past the plan's own step indices ((run_id, step_index)
+    # is the primary key of nx_answer_steps) and ride the existing "llm" step source.
+    _terminal_seg = segments[-1] if segments else None
+    coverage_result: CoverageResult | None = None
+    _coverage_calls = 0
+
+    def _at_boundary(seg: Any) -> bool:
+        if coverage_boundary is None or seg is not _terminal_seg:
+            return False
+        if isinstance(seg, OperatorBundleSlice):
+            return True
+        return isinstance(seg, IsolatedStep) and is_operator_tool(_extract_tool(seg.step))
+
+    def _remaining_seconds() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    def _remaining_usd() -> float | None:
+        if budget_usd_remaining is None:
+            return None
+        return budget_usd_remaining - sum(r.cost_usd for r in step_records if r.cost_usd is not None)
+
+    async def _coverage_check(args: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        """One assessment call through the run's own dispatcher, accounted as a ``StepRecord``."""
+        nonlocal _coverage_calls
+        from nexus.plans.coverage_ledger import ASSESSMENT_OPERATOR  # noqa: PLC0415 — deferred; the ledger module imports this one's neighbours
+
+        step_index = len(steps) + _coverage_calls
+        _coverage_calls += 1
+        started = time.monotonic()
+        usage: list[Any] = []
+        try:
+            with _dispatch_mod.ambient_usage_sink(usage):
+                raw = dispatch(ASSESSMENT_OPERATOR, {**args, "timeout": timeout})
+                result = await raw if inspect.iscoroutine(raw) else raw
+            if not isinstance(result, dict):
+                raise PlanRunStepRefError(
+                    ref=ASSESSMENT_OPERATOR,
+                    reason=f"returned {type(result).__name__}; expected dict",
+                )
+        except Exception:
+            _record_step(
+                step_index=step_index, operator=ASSESSMENT_OPERATOR, source="llm",
+                elapsed_ms=int((time.monotonic() - started) * 1000), ok=False, usage=_rollup_step_usage(usage),
+            )
+            raise
+        _, result = _step_source(ASSESSMENT_OPERATOR, result)
+        _record_step(
+            step_index=step_index, operator=ASSESSMENT_OPERATOR, source="llm",
+            elapsed_ms=int((time.monotonic() - started) * 1000), ok=True, usage=_rollup_step_usage(usage),
+        )
+        return result
+
+    async def _run_coverage_boundary(texts: list[str], observed: bool, terminal_index: int) -> CoverageResult | None:
+        """Evaluate the boundary on the terminal input; a failure is logged and leaves the run alone."""
+        nonlocal coverage_result
+        from nexus.plans.coverage_ledger import BoundaryView  # noqa: PLC0415 — deferred, as above
+
+        assert coverage_boundary is not None
+        try:
+            coverage_result = await coverage_boundary.evaluate(BoundaryView(
+                evidence_texts=texts, observed=observed, step_outputs=list(step_outputs),
+                tools=[_extract_tool(s) for s in steps], scope_diagnostics=list(scope_diagnostics),
+                resolved_args=list(resolved_step_args), check=_coverage_check,
+                remaining_seconds=_remaining_seconds, remaining_usd=_remaining_usd, terminal_step=terminal_index,
+            ))
+        except Exception as exc:  # noqa: BLE001 — the boundary never fails an answer
+            _log.warning("nx_answer_coverage_boundary_failed", error=type(exc).__name__, detail=str(exc)[:200])
+            coverage_result = None
+        return coverage_result
+
     try:
         for seg in segments:
             # nexus-h33x8.6 a4: hard budget check BEFORE dispatching this
@@ -3220,6 +3384,9 @@ async def _plan_run_impl(
                 # ── Bundle path: ≥2 contiguous operator steps → single dispatch ──
                 deferred_indices = set(seg.plan_indices)
                 bundle_steps: list[OperatorBundleStep] = []
+                _bundle_at_boundary = _at_boundary(seg)
+                _boundary_texts: list[str] = []
+                _boundary_observed = False
                 for bi in seg.plan_indices:
                     bstep = steps[bi]
                     btool = _extract_tool(bstep)
@@ -3243,7 +3410,11 @@ async def _plan_run_impl(
                     # Operators skip _check_embedding_domain / scope / caller-
                     # scope injection — those are retrieval-tool concerns.
                     _mark_reserved_step(bi, steps)
-                    _, b_prepared = _hydrate_operator_args(btool, b_resolved)
+                    _, b_prepared, _bundle_captured = _hydrate_capturing(btool, b_resolved, capture=_bundle_at_boundary)
+                    if _bundle_at_boundary:
+                        _step_texts, _step_observed = _boundary_evidence(b_prepared, _bundle_captured)
+                        _boundary_texts.extend(_step_texts)
+                        _boundary_observed = _boundary_observed or _step_observed
                     # RDR-093 S-1: strip the runner-internal truncation
                     # marker so it never leaks into the bundled prompt.
                     # Surface-on-bundle is out of scope for this RDR
@@ -3274,6 +3445,20 @@ async def _plan_run_impl(
                         source_collections=source_collections,
                     ))
                 bundle = OperatorBundle(steps=tuple(bundle_steps))
+
+                # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary, on the bundle's hydrated input,
+                # before the one fused dispatch. A skip leaves one output per plan step.
+                if _bundle_at_boundary:
+                    _cov = await _run_coverage_boundary(_boundary_texts, _boundary_observed, seg.plan_indices[0])
+                    if _cov is not None and _cov.skip_generation:
+                        for _ in range(len(seg.plan_indices) - 1):
+                            step_outputs.append(dict(BUNDLED_INTERMEDIATE))
+                        step_outputs.append(_coverage_skipped_output())
+                        _log.info(
+                            "nx_answer_coverage_generation_skipped", kind="bundle",
+                            step_indices=_seg_indices, reason=_cov.reason,
+                        )
+                        continue
 
                 # Pre-dispatch size guard. If the composite prompt would
                 # blow past the bundle budget, fall back to per-step
@@ -3648,6 +3833,30 @@ async def _plan_run_impl(
                     **({"subtree": resolved["subtree"]} if resolved.get("subtree") else {}),
                 })
 
+            # RDR-232 Phase 3 (nexus-jypmj.3.1): the coverage boundary, on the terminal step's input,
+            # BEFORE the timeout below is computed (the assessment spends part of the deadline) and before
+            # the step dispatches. A dispatcher that hydrates (the default one) is handed the args this
+            # hydration produced, once; any other is handed the resolved args as before.
+            _prehydrated = False
+            if _at_boundary(seg):
+                _captured: list[list[str]] = []
+                if getattr(dispatch, _HYDRATES_ATTR, False):
+                    try:
+                        _, _hydrated_args, _captured = _hydrate_capturing(tool, resolved, capture=True)
+                        resolved, _prehydrated = _hydrated_args, True
+                    except Exception as exc:  # noqa: BLE001 — leave it to the dispatch below, which raises where it always did
+                        _log.warning("nx_answer_coverage_prehydration_failed", error=type(exc).__name__)
+                        _captured = []
+                _step_texts, _step_observed = _boundary_evidence(resolved, _captured)
+                _cov = await _run_coverage_boundary(_step_texts, _step_observed, index)
+                if _cov is not None and _cov.skip_generation:
+                    step_outputs.append(_coverage_skipped_output())
+                    _log.info(
+                        "nx_answer_coverage_generation_skipped", kind="isolated",
+                        step_indices=_seg_indices, reason=_cov.reason,
+                    )
+                    continue
+
             # nexus-h33x8.6 a4: an active deadline threads the REMAINING
             # budget into an operator step's own ``timeout`` kwarg (dropped
             # harmlessly by the dispatcher for non-operator tools that don't
@@ -3676,6 +3885,7 @@ async def _plan_run_impl(
             # persistent operator pool's pipes.
             _cut_retrieval = deadline is not None and not is_operator_tool(tool)
             _deadline_token = call_deadline.set_deadline(deadline) if _cut_retrieval else None
+            _prehydrated_token = _PREHYDRATED.set(True) if _prehydrated else None
             try:
                 with _dispatch_mod.ambient_usage_sink(_step_usage):
                     raw = dispatch(tool, resolved)
@@ -3781,6 +3991,8 @@ async def _plan_run_impl(
             finally:
                 if _deadline_token is not None:
                     call_deadline.reset(_deadline_token)
+                if _prehydrated_token is not None:
+                    _PREHYDRATED.reset(_prehydrated_token)
             if not isinstance(result, dict):
                 # Tool authors must follow the documented output contract;
                 # surface non-dict returns explicitly rather than letting
@@ -3853,6 +4065,7 @@ async def _plan_run_impl(
         resolved_step_args=resolved_step_args,
         dropped_reduce_steps=_dropped_reduce_steps,
         scope_diagnostics=scope_diagnostics,
+        coverage=coverage_result,
     )
 
 
@@ -3866,6 +4079,7 @@ async def plan_run(
     budget_usd_remaining: float | None = None,
     continuation_cut_at_step: int | None = None,
     reserved_stream: ReservedStream | None = None,
+    coverage_boundary: CoverageBoundary | None = None,
 ) -> PlanResult:
     """Execute *match*'s steps; see :func:`_plan_run_impl` for every parameter but one.
 
@@ -3884,7 +4098,7 @@ async def plan_run(
         result = await _plan_run_impl(
             match, bindings, dispatcher=dispatcher, bundle_operators=bundle_operators,
             deadline=deadline, budget_usd_remaining=budget_usd_remaining,
-            continuation_cut_at_step=continuation_cut_at_step,
+            continuation_cut_at_step=continuation_cut_at_step, coverage_boundary=coverage_boundary,
         )
     if reserved_stream is not None:
         result = _dc_replace(result, reserved_report=reserved_stream.report())
