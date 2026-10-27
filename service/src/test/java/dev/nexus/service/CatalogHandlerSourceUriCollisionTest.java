@@ -15,7 +15,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -72,8 +71,7 @@ class CatalogHandlerSourceUriCollisionTest {
         http = HttpClient.newHttpClient();
         // The tenant's first request runs the once-per-process ghost sweep, which deletes registered-but-chunkless
         // collections; burn it before any collection is registered (see CatalogHandlerRenameTest).
-        http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + TOKEN).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
@@ -153,8 +151,7 @@ class CatalogHandlerSourceUriCollisionTest {
     }
 
     private HttpResponse<String> post(String path, String json) throws Exception {
-        return http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json)).build(), HttpResponse.BodyHandlers.ofString());
