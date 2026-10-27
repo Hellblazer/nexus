@@ -26,9 +26,8 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
-from nexus.commands.enrich import _ASPECT_CONFIDENCE_FLOOR, _PER_PAPER_COST_USD, enrich
+from nexus.commands.enrich import _PER_PAPER_COST_USD, enrich
 from nexus.db.t2 import T2Database
-from nexus.operators.llm_backend import NO_BACKEND_MESSAGE, NoBackendAvailableError
 from tests._catalog_fixture_ops import ActiveCatalog, register_real_doc_id
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
@@ -170,7 +169,6 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     # default_db_path is imported lazily inside the CLI; patch the
     # canonical location.
-    import nexus.commands._helpers as h
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
 
     # RDR-128 P3: the `enrich aspects delete` command now routes through
@@ -1576,27 +1574,14 @@ class TestDay2Ops:
         assert result2.exit_code == 0
         assert "/local.md" in result2.output
         assert "/papers/aleph.pdf" not in result2.output
-
-    def test_list_scheme_chroma_says_the_note_scheme_is_nx_note(
-        self, env, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """RDR-231 (nexus-bivz3.15): ``--scheme chroma`` used to list a note's rows; it now matches only
-        legacy residue, so an empty answer names the scheme to use instead of staying silent."""
-        from nexus.db.t2 import T2Database
-
-        _, db_path, _ = env
-        with T2Database(db_path) as db:
-            db.document_aspects.upsert(_make_record(source_path="/papers/aleph.pdf"))
-
-        runner = CliRunner()
-        result = runner.invoke(enrich, ["list", "knowledge__delos", "--scheme", "chroma"])
-        assert result.exit_code == 0, result.output
-        assert "--scheme nx-note" in result.output
-        assert "/papers/aleph.pdf" not in result.output
-        # The hint is for the retired spelling only.
-        quiet = runner.invoke(enrich, ["list", "knowledge__delos", "--scheme", "nx-note"])
-        assert "--scheme nx-note for notes" not in quiet.output
-        assert "/papers/aleph.pdf" in quiet.output
+        # nx-note hint on the retired spelling only (RDR-231, nexus-bivz3.15): --scheme chroma now matches
+        # only legacy residue, so an empty answer names the scheme to use instead of staying silent. Folded
+        # into this test so it shares its tenant (tests/storage_touch_ceiling.toml).
+        result3 = runner.invoke(enrich, ["list", "knowledge__delos", "--scheme", "chroma"])
+        assert result3.exit_code == 0, result3.output
+        assert "--scheme nx-note" in result3.output
+        assert "/papers/aleph.pdf" not in result3.output
+        assert "--scheme nx-note for notes" not in result.output
 
     def test_info_includes_source_uri_and_scheme(
         self, env, monkeypatch: pytest.MonkeyPatch,

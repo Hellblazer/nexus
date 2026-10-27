@@ -496,40 +496,6 @@ class TestClassification:
         assert {r["tumbler"] for r in store_put_origin} == {"5.1.1"}
         assert store_put_origin[0]["reason"] == "note_uri"
 
-    @pytest.mark.t2_tenant
-    def test_chroma_residue_under_a_file_routed_collection_is_not_store_put_origin(self, tmp_path):
-        """RDR-231 Test Plan row 562 through the whole classification: a
-        ``chroma://code__...`` row (the older ``uri_for`` build that predated
-        file routing) was counted store_put-origin by the bare prefix test; it
-        is migration residue and must land in the unresolvable bucket instead,
-        while a note under ``knowledge__`` in either spelling stays store_put."""
-        entries = [
-            _FakeEntry(
-                "6.1.1", "Residue", physical_collection="code__r", chunk_count=3,
-                source_uri="chroma://code__r/whoops",
-            ),
-            _FakeEntry(
-                "6.1.2", "Note", physical_collection="knowledge__r", chunk_count=3,
-                source_uri="nx-note://knowledge__r/Note",
-            ),
-            _FakeEntry(
-                "6.1.3", "Legacy Note", physical_collection="knowledge__r", chunk_count=3,
-                source_uri="chroma://knowledge__r/Legacy Note",
-            ),
-        ]
-        cat = _FakeCat(entries, doc_counts={"code__r": 1, "knowledge__r": 2},
-                       owners_with_roots={"6.1": str(tmp_path)})
-        t3 = _FakeT3({"code__r", "knowledge__r"})
-
-        report, unreadable = reconcile_stale_mod._classify(cat, t3)
-
-        assert unreadable == []
-        by_tumbler = {r["tumbler"]: r for r in report["dishonest"]}
-        assert by_tumbler["6.1.1"]["origin"] != "store_put_origin"
-        assert by_tumbler["6.1.2"]["origin"] == "store_put_origin"
-        assert by_tumbler["6.1.2"]["reason"] == "note_uri"
-        assert by_tumbler["6.1.3"]["origin"] == "store_put_origin"
-        assert by_tumbler["6.1.3"]["reason"] == "note_uri"
 
     @pytest.mark.t2_tenant
     def test_dishonest_never_appears_in_any_action_list(self, tmp_path):

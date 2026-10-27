@@ -196,7 +196,6 @@ class TestTheProbe:
             assert sev.probe_serving_engine_version() is None
 
 
-@pytest.mark.t2_tenant
 class TestEveryWriterRefuses:
     """Each note writer, below the floor: refused with the remedy, nothing registered, nothing written."""
 
@@ -217,6 +216,7 @@ class TestEveryWriterRefuses:
             put_note(content="", collection="knowledge__bivz3-13__bge-base-en-v15-768__v1")
         assert served.probes == 0
 
+    @pytest.mark.t2_tenant  # the command layer resolves the collection before put_note refuses
     def test_mcp_store_put(self, served, writes):
         from nexus.mcp.core import store_put
 
@@ -225,6 +225,7 @@ class TestEveryWriterRefuses:
         assert "nx daemon restart-stale" in out or "has not been upgraded yet" in out
         assert writes == []
 
+    @pytest.mark.t2_tenant  # the command layer resolves the collection before put_note refuses
     def test_nx_store_put(self, served, writes):
         result = CliRunner().invoke(
             main, ["store", "put", "-", "--title", "bivz3-13-cli", "-c", "bivz3-13-subject"],
@@ -233,6 +234,7 @@ class TestEveryWriterRefuses:
         assert "restart-stale" in result.output or "has not been upgraded yet" in result.output
         assert writes == []
 
+    @pytest.mark.t2_tenant  # the command layer resolves the collection before put_note refuses
     def test_nx_memory_promote_keeps_the_t2_entry(self, served, writes, tmp_path: Path):
         from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
         from nexus.db.t2 import T2Database
@@ -305,6 +307,7 @@ class TestEveryWriterRefuses:
         assert "DOC FAILURES" not in result.output
         assert served.probes == 1
 
+    @pytest.mark.t2_tenant
     def test_the_spy_sees_a_write_when_the_engine_is_at_the_floor(self, served, writes):
         """Positive control for every ``writes == []`` above: the same spy records the register and the
         write once the guard passes, so an empty list means the guard stopped them, not that the spy is blind."""

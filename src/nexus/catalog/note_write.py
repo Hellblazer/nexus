@@ -663,11 +663,9 @@ def put_note(
             "— ttl_days must be a positive integer number of days (0 does NOT mean permanent; None does)")
     if not content:
         raise ValueError("put_note: 'content' is required (an empty note has nothing to store)")
-    pieces = sh.note_pieces(content, collection)
-    first_chash, manifest_metadatas = sh.note_manifest_metadata(pieces)
-    sh.raise_if_oversized(content, doc_id=first_chash, collection=collection)
-    # RDR-231 (nexus-bivz3.13): refuse a note write the serving engine cannot hold, BEFORE the register
-    # and the T3 write. Raised to the caller on purpose: the register below sits in an `except
+    # RDR-231 (nexus-bivz3.13): refuse a note write the serving engine cannot hold, BEFORE any engine
+    # call: the piece split and the size check resolve the collection row, and the register and the
+    # T3 write follow. Raised to the caller on purpose: the register below sits in an `except
     # Exception` (and store_hook's own hook swallows every error into NO_CATALOG), so a check placed
     # inside either would be turned into "could not catalog". Every note writer reaches this function
     # (MCP store_put, nx store put, nx memory promote, the recovery-bundle import); the exporter's
@@ -677,6 +675,9 @@ def put_note(
     from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
 
     require_note_uri_engine()
+    pieces = sh.note_pieces(content, collection)
+    first_chash, manifest_metadatas = sh.note_manifest_metadata(pieces)
+    sh.raise_if_oversized(content, doc_id=first_chash, collection=collection)
     out = PutNoteOutcome(
         status=NO_CATALOG, collection=collection, pieces=pieces, manifest_metadatas=manifest_metadatas,
         chunk_ids=[m.get("chunk_text_hash", "") for m in manifest_metadatas])
