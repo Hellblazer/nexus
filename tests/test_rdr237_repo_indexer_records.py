@@ -128,3 +128,41 @@ def test_an_unnamed_method_is_not_written_but_the_map_is(extraction) -> None:
     with patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
         record_pdf_extraction_on_document("1.1.7", Path("/x/p.pdf"), "docs__repo", extraction)
     assert writer.updates == [("1.1.7", {"meta": {"extraction_pages": {}}})]
+
+
+def test_the_record_lands_before_the_chunks_are_embedded_and_uploaded(tmp_path) -> None:
+    """Recorded after extraction and before embed and upload: a failed upload leaves the file
+    unindexed (the next run re-extracts and re-records); a record after a landed upload could fail
+    and never be retried, since staleness would then call the file current."""
+    events: list[str] = []
+
+    class _OrderedWriter(_Writer):
+        def update(self, tumbler, **fields) -> None:
+            events.append("record")
+            super().update(tumbler, **fields)
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pdf = repo / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+    col = MagicMock()
+    col.get.return_value = {"metadatas": [], "ids": []}
+    db = MagicMock()
+    db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
+
+    def embed(texts):
+        events.append("embed")
+        return [[0.1] * 3 for _ in texts]
+
+    with patch("nexus.doc_indexer._pdf_chunks", side_effect=_chunks_filling("mineru+degraded", DEGRADED)), \
+            patch("nexus.doc_indexer._fence_begin"), \
+            patch("nexus.catalog.factory.make_catalog_reader", return_value=None), \
+            patch("nexus.catalog.factory.make_catalog_writer", return_value=_OrderedWriter()):
+        _index_pdf_file(
+            pdf, repo, "docs__repo", "voyage-context-3", col, db, "fake-key", git_meta={},
+            now_iso="2026-01-01T00:00:00", score=1.0, embed_fn=embed,
+            doc_id_resolver=lambda p: "1.1.7", hooks=MagicMock(),
+        )
+    assert "embed" in events, "non-vacuity: the chunks were embedded"
+    assert events.index("record") < events.index("embed")

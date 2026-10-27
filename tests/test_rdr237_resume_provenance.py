@@ -196,13 +196,15 @@ def test_a_resume_does_not_record_a_degradation_the_buffer_does_not_hold(monkeyp
     assert result.metadata["extraction_method"] == "mineru+degraded"
 
 
-def test_a_resume_over_a_buffer_an_older_version_wrote_keeps_the_runs_own_map(monkeypatch) -> None:
+def test_a_resume_over_a_buffer_an_older_version_wrote_lists_no_rung_for_its_pages(monkeypatch) -> None:
+    """Pages 1-3 are buffered with no rung: the run's rung for page 2 does not describe its
+    indexed (buffered) text, so the map leaves it out and the method stays degraded."""
     db = _db([None, None, None])
     result = _resume(
         monkeypatch, db, ["mineru", "mineru-no-formula", "mineru", "mineru"],
         {"extraction_method": "mineru+degraded", "extraction_pages": {"mineru-no-formula": [2]}, "page_count": 4},
     )
-    assert result.metadata["extraction_pages"] == {"mineru-no-formula": [2]}
+    assert result.metadata["extraction_pages"] == {}
     assert result.metadata["extraction_method"] == "mineru+degraded"
 
 
@@ -362,3 +364,22 @@ def test_the_buffered_page_text_is_not_kept_alive_while_the_extraction_runs(monk
     extractor_loop(Path("/tmp/x.pdf"), _HASH, db, threading.Event())
     assert len(alive_during_extraction) == 3, "the buffer was read"
     assert not any(alive_during_extraction), "the rows were dropped once their rungs were read"
+
+
+def test_an_unknown_buffered_page_is_never_given_the_reruns_rung(monkeypatch) -> None:
+    """Pages 1-2 are buffered with no rung; the rerun degraded page 2 and page 3. Page 2's indexed
+    text is the buffer's, so the run's rung does not describe it: only page 3 is listed, and the
+    warning names the unknown pages."""
+    from structlog.testing import capture_logs
+
+    db = _db([None, None])
+    with capture_logs() as cap:
+        result = _resume(
+            monkeypatch, db, ["mineru", "pymupdf-text", "pymupdf-text"],
+            {"extraction_method": "mineru+degraded", "extraction_pages": {"pymupdf-text": [2, 3]},
+             "page_count": 3},
+        )
+    assert result.metadata["extraction_pages"] == {"pymupdf-text": [3]}
+    assert result.metadata["extraction_method"] == "mineru+degraded"
+    (warning,) = _warnings(cap)
+    assert warning["first_pages_without_a_rung"] == [1, 2]

@@ -146,8 +146,9 @@ def _merge_buffered_provenance(
 
     *unknown_pages* are buffered pages whose row names no rung (a buffer an older build wrote).
     Their indexed text is the buffer's and the run's rung for them may not describe it, so the
-    record cannot prove them clean: the map still lists what is known, but a ladder run's method
-    stays ``mineru+degraded`` rather than claiming a clean ``mineru``. No-op when the buffer
+    record cannot prove them clean: the map lists only the pages whose rung is known (an unknown
+    page is left out, never given the run's rung), and a ladder run's method stays
+    ``mineru+degraded`` rather than claiming a clean ``mineru``. No-op when the buffer
     recorded no rung and no page is unknown (a first run, a non-ladder extractor): the run's own
     map then stands.
     """
@@ -156,7 +157,8 @@ def _merge_buffered_provenance(
     if not buffered_rungs and not unknown:
         return
     from nexus.pdf_extractor import _DEGRADED_METHODS  # noqa: PLC0415 — module-private rung order, shared with the ladder
-    rungs = {**run_rungs, **buffered_rungs}
+    unproven = set(unknown_pages) if unknown else set()
+    rungs = {**{n: r for n, r in run_rungs.items() if n not in unproven}, **buffered_rungs}
     pages = {
         method: sorted(n for n, r in rungs.items() if r == method)
         for method in _DEGRADED_METHODS
@@ -311,6 +313,7 @@ def extractor_loop(
         _log.warning(
             "resume_provenance_unknown", file_path=str(pdf_path), content_hash=content_hash,
             buffered_rows_without_a_rung=len(unknown_pages), buffered_rows_with_a_rung=len(buffered_rungs),
+            first_pages_without_a_rung=sorted(unknown_pages)[:10],
         )
     _merge_buffered_provenance(result.metadata, run_rungs, buffered_rungs, unknown_pages)
 

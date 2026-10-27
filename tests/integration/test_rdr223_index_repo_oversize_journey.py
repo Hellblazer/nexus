@@ -392,6 +392,8 @@ def test_full_run_equals_one_combined_write_of_the_file(env: _Env) -> None:
     # stamp, and (a PDF only, RDR-237) the one /update that records the extraction on the catalog document.
     assert {p for p, _, _ in log if p not in _DATA_PATHS} <= {
         "/index-run/begin", "/index-run/complete", "/collections/upsert", "/update"}
+    updates = [p for p, _, _ in log if p == "/update"]
+    assert len(updates) == (1 if env.kind == "pdf" else 0), "one extraction record, and only for a PDF"
 
     ctl = env.control_write(rows, chunks)
     assert _manifest(env.doc_id) == _manifest(ctl) != []
