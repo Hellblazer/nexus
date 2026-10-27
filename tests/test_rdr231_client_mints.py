@@ -8,7 +8,6 @@ file pins that the SITES use them. Each pin fails when its site is put back.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -19,7 +18,6 @@ from nexus.catalog.types import _KNOWN_URI_SCHEMES, _normalize_source_uri
 from nexus.doc.catalog_links import _LINK_SAFE_SCHEMES
 from nexus.doctor_references import format_report, is_reference_only, stat_one
 from nexus.aspect_readers import (
-    NOTE_URI_SCHEME,
     ReadFail,
     StatFail,
     read_source,
@@ -122,33 +120,3 @@ class TestDoctorReferencesResidueRow:
         lines, ok = format_report([r], total_candidates=1, sample=10, seed=1)
         assert ok is True
         assert any("1 unknown" in ln for ln in lines)
-
-
-class TestNoSourceMintsChromaNoteUri:
-    """No Python source under src/nexus mints a ``chroma://`` note URI.
-
-    Strings that REWRITE or RECOGNISE the legacy spelling (a ``startswith``,
-    a canonicaliser constant, a ``replace``) are fine; an f-string or a
-    concatenation that BUILDS ``chroma://<collection>/...`` is a mint. The
-    literal lint (nexus-bivz3.14) generalises this; this census keeps the
-    sites .11 owns from regressing in the meantime.
-    """
-
-    _MINT = re.compile(r"""f["']chroma://""")
-    #: ``nx catalog backfill`` matches stored legacy residue by prefix (it
-    #: repairs ``chroma://`` rows under file-routed collections); it builds a
-    #: pattern to FIND residue, never an identity to store.
-    _RESIDUE_REPAIR = {"commands/catalog_cmds/backfill.py"}
-
-    def test_no_f_string_builds_a_chroma_uri(self) -> None:
-        offenders = []
-        examined = 0
-        for path in sorted(_SRC.rglob("*.py")):
-            if path.relative_to(_SRC).as_posix() in self._RESIDUE_REPAIR:
-                continue
-            examined += 1
-            for n, line in enumerate(path.read_text().splitlines(), 1):
-                if self._MINT.search(line):
-                    offenders.append(f"{path.relative_to(_SRC)}:{n}: {line.strip()}")
-        assert examined > 100, "non-vacuity: the scan walked src/nexus"
-        assert not offenders, "\n".join(offenders)
