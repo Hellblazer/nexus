@@ -268,7 +268,7 @@ public final class AspectRepository {
                     // against a caller that omits it (was a silent NULL write
                     // before this migration, matching CatalogRepository's own
                     // nne()-guarded NOT NULL text columns).
-                    nne((String) body.get("source_uri")),
+                    NoteUri.canonical(nne((String) body.get("source_uri"))),
                     jsonbOrNull((String) body.get("salient_sentences")),
                     docId)
                 .onConflict(
@@ -593,7 +593,7 @@ public final class AspectRepository {
                             // "" would satisfy NOT NULL but violate the FK to
                             // catalog_documents(tumbler); a blank doc_id here is a
                             // genuine caller error, same as the live upsert path.
-                            nne((String) body.get("source_uri")),
+                            NoteUri.canonical(nne((String) body.get("source_uri"))),
                             jsonbOrNull((String) body.get("salient_sentences")),
                             nullIfBlank((String) body.get("doc_id")));
                 }
@@ -665,7 +665,7 @@ public final class AspectRepository {
                     (String) body.get("extractor_name"),
                     // hygiene-001: source_uri is NOT NULL now (see importAspectsBatch's
                     // identical comment for why doc_id stays nullIfBlank).
-                    nne((String) body.get("source_uri")),
+                    NoteUri.canonical(nne((String) body.get("source_uri"))),
                     jsonbOrNull((String) body.get("salient_sentences")),
                     nullIfBlank((String) body.get("doc_id")))
                 .onConflict(
@@ -725,7 +725,7 @@ public final class AspectRepository {
                     docId,
                     // hygiene-001 (nexus-tk070.p6a follow-on): source_uri/collection
                     // are NOT NULL now.
-                    nne((String) body.get("source_uri")),
+                    NoteUri.canonical(nne((String) body.get("source_uri"))),
                     nne((String) body.get("collection")),
                     highlightsMd,
                     mentionsMd,
@@ -776,7 +776,7 @@ public final class AspectRepository {
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
                 .from(DOCUMENT_HIGHLIGHTS)
-                .where(DOCUMENT_HIGHLIGHTS.SOURCE_URI.eq(sourceUri))
+                .where(DOCUMENT_HIGHLIGHTS.SOURCE_URI.eq(NoteUri.canonical(sourceUri)))  // RDR-231
                 .limit(1)
                 .fetch();
             if (rows.isEmpty()) return Optional.empty();
@@ -873,7 +873,7 @@ public final class AspectRepository {
                     insert = insert.values(
                             tenant,
                             (String) body.get("doc_id"),
-                            nne((String) body.get("source_uri")),
+                            NoteUri.canonical(nne((String) body.get("source_uri"))),
                             nne((String) body.get("collection")),
                             (String) body.getOrDefault("highlights_md", ""),
                             (String) body.getOrDefault("mentions_md", ""),
@@ -913,7 +913,7 @@ public final class AspectRepository {
                 .values(
                     tenant,
                     docId,
-                    nne((String) body.get("source_uri")),
+                    NoteUri.canonical(nne((String) body.get("source_uri"))),
                     nne((String) body.get("collection")),
                     (String) body.getOrDefault("highlights_md", ""),
                     (String) body.getOrDefault("mentions_md", ""),
@@ -1778,12 +1778,13 @@ public final class AspectRepository {
     public List<String> filterBySourceUris(
             String tenant, List<String> sourceUris, String field, String predicate) {
         if (sourceUris == null || sourceUris.isEmpty()) return List.of();
+        List<String> uris = sourceUris.stream().map(NoteUri::canonical).distinct().toList();  // RDR-231
         validateField(field);
         String fieldExpr = fieldExpression(field);
 
         List<String> result = new ArrayList<>();
-        for (int start = 0; start < sourceUris.size(); start += 300) {
-            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+        for (int start = 0; start < uris.size(); start += 300) {
+            List<String> batch = uris.subList(start, Math.min(start + 300, uris.size()));
             // fieldExpr is validated by fieldExpression() which only emits:
             //   - a bare column name (from ALLOWED_ASPECT_COLUMNS, no injection risk)
             //   - COALESCE(extras,'{}')::json#>>'{...}' (keys validated to [A-Za-z0-9_.]+)
@@ -1824,12 +1825,13 @@ public final class AspectRepository {
      */
     public Map<String, String> groupByField(String tenant, List<String> sourceUris, String field) {
         if (sourceUris == null || sourceUris.isEmpty()) return Map.of();
+        List<String> uris = sourceUris.stream().map(NoteUri::canonical).distinct().toList();  // RDR-231
         validateField(field);
         String fieldExpr = fieldExpression(field);
 
         Map<String, String> result = new java.util.LinkedHashMap<>();
-        for (int start = 0; start < sourceUris.size(); start += 300) {
-            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+        for (int start = 0; start < uris.size(); start += 300) {
+            List<String> batch = uris.subList(start, Math.min(start + 300, uris.size()));
             // fieldExpr validated by fieldExpression() — safe to embed in DSL.field()
             Field<String> fExpr = field(fieldExpr, String.class);
 
@@ -1871,6 +1873,7 @@ public final class AspectRepository {
      */
     public Double confidenceAggregate(String tenant, List<String> sourceUris, String reducerKind) {
         if (sourceUris == null || sourceUris.isEmpty()) return null;
+        List<String> uris = sourceUris.stream().map(NoteUri::canonical).distinct().toList();  // RDR-231
 
         String aggFunc = switch (reducerKind) {
             case "avg_confidence" -> "AVG";
@@ -1886,8 +1889,8 @@ public final class AspectRepository {
         Double minAcc = null;
         Double maxAcc = null;
 
-        for (int start = 0; start < sourceUris.size(); start += 300) {
-            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+        for (int start = 0; start < uris.size(); start += 300) {
+            List<String> batch = uris.subList(start, Math.min(start + 300, uris.size()));
 
             final double[] localSum = {0.0};
             final long[]   localCnt = {0L};

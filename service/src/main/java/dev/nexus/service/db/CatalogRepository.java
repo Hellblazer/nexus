@@ -808,7 +808,7 @@ public final class CatalogRepository {
             // a fresh INSERT at a new tumbler carrying an already-live source_uri, and an
             // insert whose PK conflict is cleanly HANDLED and whose DO UPDATE arm then
             // moves that source_uri onto a second live row. Both reproduce on PG 17.
-            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
+            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
             ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -820,7 +820,7 @@ public final class CatalogRepository {
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
                        nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
-                       nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
+                       nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
                        ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
@@ -888,7 +888,9 @@ public final class CatalogRepository {
      * owner-scoped file_path idempotency, unguarded — the honest residual).
      */
     public static String deriveSourceUri(String sourceUri, String filePath, String repoRoot) {
-        if (!sourceUri.isEmpty() || filePath.isEmpty()) return sourceUri;
+        // RDR-231: a legacy chroma:// note URI is stored as nx-note://, so the idempotency
+        // lookup, the insert and the race-loser lookup all see the stored spelling.
+        if (!sourceUri.isEmpty() || filePath.isEmpty()) return NoteUri.canonical(sourceUri);
         java.nio.file.Path p = java.nio.file.Paths.get(filePath);
         if (!p.isAbsolute()) {
             if (repoRoot == null || repoRoot.isEmpty()) return "";
@@ -2131,6 +2133,12 @@ public final class CatalogRepository {
                                        : more.set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT, ts);
                 continue;
             }
+            if ("source_uri".equals(e.getKey())) {
+                // RDR-231: the caller's URI in its stored spelling.
+                String uri = NoteUri.canonical(String.valueOf(e.getValue()));
+                more = (more == null) ? step.set(CATALOG_DOCUMENTS.SOURCE_URI, uri) : more.set(CATALOG_DOCUMENTS.SOURCE_URI, uri);
+                continue;
+            }
             @SuppressWarnings("unchecked")
             Field<Object> f = (Field<Object>) DSL.field(DSL.name("catalog_documents", e.getKey()));
             more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
@@ -3200,7 +3208,8 @@ public final class CatalogRepository {
             String tenant, String uri, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(NoteUri.canonical(uri))  // RDR-231
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .limit(limit > 0 ? limit : NO_LIMIT)
                .offset(offset)
@@ -11444,13 +11453,13 @@ public final class CatalogRepository {
                 for (var d : batch) {
                     String metaJson = jsonOrNull(d.get("metadata"));
                     // Same identity guard as doImportDocument (nexus-0ehwe arbiter class).
-                    guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
+                    guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
                     insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                             nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                             nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
                             nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                             jsonbVal(metaJson),
-                            nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
+                            nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
                             ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                             nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                             nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
@@ -11492,7 +11501,7 @@ public final class CatalogRepository {
         {
             // nexus-0ehwe arbiter class: address-arbitrated, and the DO UPDATE arm sets
             // source_uri — so both arms are exposed to ux_catalog_documents_live_source_uri.
-            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
+            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
             ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -11504,7 +11513,7 @@ public final class CatalogRepository {
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
                        nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
-                       nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
+                       nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
                        ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
@@ -12277,6 +12286,9 @@ public final class CatalogRepository {
 
     /** Non-null empty: returns "" if null. */
     private static String nne(String v) { return v != null ? v : ""; }
+
+    /** RDR-231: a caller's document source_uri in its stored spelling (a legacy note URI becomes nx-note://). */
+    private static String sourceUriOf(Map<String, Object> d) { return NoteUri.canonical(nne(s(d, "source_uri"))); }
 
     /**
      * nexus-4j80w: {@code upsertLink}'s created_at default. The client never

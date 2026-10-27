@@ -113,8 +113,10 @@ class Catalog016SourceUriUniqueTest {
         // never resolve against its own CWD (nexus-3e4s class).
         assertEquals("", CatalogRepository.deriveSourceUri("", "docs/a.md", ""));
         assertEquals("", CatalogRepository.deriveSourceUri("", "docs/a.md", "relative-root"));
-        // Explicit source_uri always passes through untouched.
-        assertEquals("chroma://x", CatalogRepository.deriveSourceUri("chroma://x", "docs/a.md", "/r"));
+        // Explicit source_uri wins over file_path; a legacy note URI is stored as nx-note:// (RDR-231).
+        assertEquals("nx-note://x", CatalogRepository.deriveSourceUri("chroma://x", "docs/a.md", "/r"));
+        assertEquals("file:///elsewhere/a.md",
+            CatalogRepository.deriveSourceUri("file:///elsewhere/a.md", "docs/a.md", "/r"));
         assertEquals("", CatalogRepository.deriveSourceUri("", "", "/repo/root"));
     }
 
@@ -173,8 +175,11 @@ class Catalog016SourceUriUniqueTest {
 
     @Test
     void deriveSourceUri_nonFileSchemes_passThrough() {
-        assertEquals("chroma://x",
+        // RDR-231: a legacy note URI is canonicalized; file-routed residue keeps its spelling.
+        assertEquals("nx-note://x",
             CatalogRepository.deriveSourceUri("chroma://x", "", "/repo/root", "repo", false));
+        assertEquals("chroma://rdr__1-1__voyage-context-3__v1/docs/a.md",
+            CatalogRepository.deriveSourceUri("chroma://rdr__1-1__voyage-context-3__v1/docs/a.md", "", "/repo/root", "repo", false));
         assertEquals("https://example.com/doc",
             CatalogRepository.deriveSourceUri("https://example.com/doc", "", "/repo/root", "repo", false));
     }
