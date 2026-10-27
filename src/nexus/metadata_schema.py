@@ -134,9 +134,10 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     "extraction_source",
     # nexus-1oguj: which PDF-extraction BACKEND actually produced this
     # chunk's text (``docling`` | ``mineru`` | ``pymupdf_normalized``, or
-    # the honest degraded-aggregate ``mineru+docling-degraded`` when
-    # RDR-148 Gap 5's per-page OOM-degrade fired at least once for this
-    # document). Load-bearing for retroactively scoping extractor
+    # the honest degraded-aggregate ``mineru+degraded`` when any page settled
+    # below the first rung of RDR-237's per-page ladder; documents indexed
+    # before it carry ``mineru+docling-degraded`` for RDR-148 Gap 5's degrade
+    # to docling). Load-bearing for retroactively scoping extractor
     # regressions (e.g. nexus-gtltb's mineru-corruption blast radius) —
     # previously produced at extraction time and asserted in tests but
     # discarded before storage. Empty for non-PDF content_types
@@ -298,8 +299,9 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
 
     # Step 2d: drop the nexus-1oguj extraction_method key when empty.
     # Only PDF chunks pass a real value (docling / mineru /
-    # pymupdf_normalized / mineru+docling-degraded); markdown/code/prose
-    # chunks never set it and must not spend a metadata slot on "".
+    # pymupdf_normalized / mineru+degraded / legacy mineru+docling-degraded);
+    # markdown/code/prose chunks never set it and must not spend a metadata
+    # slot on "".
     if not normalised.get("extraction_method", ""):
         normalised.pop("extraction_method", None)
 

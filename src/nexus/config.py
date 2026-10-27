@@ -178,6 +178,45 @@ class PDFConfig:
     # replacing the old fixed batch-level 180s. The effective subprocess timeout
     # is this value times the number of pages in the range.
     mineru_page_timeout_s: int = 180
+    #: RDR-237: how many consecutive pages that fail both MinerU rungs with one
+    #: failure class stop the document as a failing install or machine. 0 turns
+    #: the rule off; anything else below 3 (or not an integer) becomes 3, so the
+    #: breaker never preempts the server restart.
+    ladder_breaker: int = 3
+
+
+#: Lowest ``pdf.ladder_breaker`` other than 0 that is honoured.
+_LADDER_BREAKER_FLOOR = 3
+
+
+def _coerce_ladder_breaker(value: Any) -> int:
+    """``pdf.ladder_breaker`` as an int: 0 (off) or 3 and up; else warn and use 3.
+
+    Its own coercion, not the bare ``int(...)`` the other ``[pdf]`` keys use: a
+    value of 1 or 2 would trip the rule on a single equation-dense page, and
+    ``nx config set`` stores every value as a string, so ``"3"`` must parse
+    while ``"x"`` and ``2.5`` must not crash the loader.
+    """
+    parsed: int | None = None
+    if isinstance(value, bool):
+        parsed = None
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            parsed = None
+    if parsed is not None and (parsed == 0 or parsed >= _LADDER_BREAKER_FLOOR):
+        return parsed
+    _log.warning(
+        "pdf_config_malformed",
+        key="pdf.ladder_breaker",
+        value=value,
+        fell_back_to=_LADDER_BREAKER_FLOOR,
+        reason="must be 0 (off) or an integer of 3 or more",
+    )
+    return _LADDER_BREAKER_FLOOR
 
 
 def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
@@ -204,6 +243,7 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
         mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
         mineru_memory_ceiling_mb=max(0, int(pdf.get("mineru_memory_ceiling_mb", 0))),
         mineru_page_timeout_s=max(1, int(pdf.get("mineru_page_timeout_s", 180))),
+        ladder_breaker=_coerce_ladder_breaker(pdf.get("ladder_breaker", _LADDER_BREAKER_FLOOR)),
     )
 
 
@@ -556,6 +596,10 @@ def get_mineru_memory_ceiling_mb(repo_root: Path | None = None) -> int:
 
 def get_mineru_page_timeout_s(repo_root: Path | None = None) -> int:
     return get_pdf_config(repo_root).mineru_page_timeout_s
+
+def get_pdf_ladder_breaker(repo_root: Path | None = None) -> int:
+    """RDR-237 systemic-failure threshold: 0 = off, else 3 or more."""
+    return get_pdf_config(repo_root).ladder_breaker
 
 
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
@@ -1161,6 +1205,7 @@ _DEFAULTS: dict[str, Any] = {
         "mineru_server_url": "http://127.0.0.1:8010",
         "mineru_table_enable": True,
         "mineru_page_batch": 1,
+        "ladder_breaker": 3,
     },
     "taxonomy": {
         # Glob patterns for collections to exclude from auto-discover

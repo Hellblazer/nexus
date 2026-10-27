@@ -40,7 +40,13 @@ import structlog
 from nexus.embed_window import window_for_collection
 from nexus.errors import UploadStalledError
 from nexus.pdf_chunker import PDFChunker
-from nexus.pdf_extractor import ExtractionResult, PDFExtractor, bind_run_cancel, stop_mineru_workers
+from nexus.pdf_extractor import (
+    ExtractionResult,
+    MineruSystemicFailure,
+    PDFExtractor,
+    bind_run_cancel,
+    stop_mineru_workers,
+)
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.retry import _vector_with_retry
 from nexus.util.termination import TerminationRequested, sigterm_raises
@@ -1375,6 +1381,37 @@ def _release_interrupted_run(
     return False
 
 
+def _release_systemic_failure(db: HttpPipelineDB, content_hash: str, failure: MineruSystemicFailure) -> bool:
+    """Give the pipeline row back after the MinerU breaker tripped (RDR-237), buffer KEPT.
+
+    The failure says the install or the machine is failing, which says nothing about the
+    document, so the exit is :func:`_release_interrupted_run`'s and not
+    :func:`_mark_failed_and_reset_wal`'s: the row moves to ``failed``, the pipeline buffer is
+    not wiped, and the next run (after the install is repaired) resumes from the pages already
+    extracted. Chunks of earlier pages that already reached T3 stay there, as an interrupted
+    run's do; no catalog manifest is written for the document because the run never reaches the
+    tail. The recorded error names the failure class and the worker's last stderr line (the
+    exception's message). Never raises. Returns True when the engine fenced the write."""
+    try:
+        db.mark_failed(content_hash, error=str(failure))
+    except PipelineRunFenced as fenced:
+        _log.warning(
+            "pipeline_run_fenced_at_systemic_failure",
+            content_hash=content_hash, pipeline_id=fenced.pipeline_id,
+            run_epoch=fenced.run_epoch, current_epoch=fenced.current_epoch,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — boundary catch: the failure must propagate, not a /fail transport error
+        _log.warning("pipeline_systemic_failure_release_failed", content_hash=content_hash, exc_info=True)
+        return False
+    _log.warning(
+        "pipeline_run_released_on_systemic_failure",
+        content_hash=content_hash, failure_class=failure.failure_class,
+        stderr_line=failure.stderr_line, buffer="kept",
+    )
+    return False
+
+
 def _extractor_loop_bound_to_cancel(
     pdf_path: Path, content_hash: str, db: HttpPipelineDB, cancel: threading.Event, **kwargs: Any,
 ) -> ExtractionResult:
@@ -1822,6 +1859,11 @@ def pipeline_index_pdf(
                 # deterministic failure is wiped by the next run, which fails the same way with
                 # every stage stopped.
                 fenced = _release_interrupted_run(db, content_hash, interrupt, stage_error=first_exc)
+            elif isinstance(first_exc, MineruSystemicFailure):
+                # RDR-237: the MinerU install or machine is failing, not this document. Keep the
+                # buffer (a rerun resumes from the pages already extracted); wiping it would restart
+                # a 300-page book at page 1 for a cause the PDF did not have.
+                fenced = _release_systemic_failure(db, content_hash, first_exc)
             else:
                 fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)
             # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation

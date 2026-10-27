@@ -224,15 +224,23 @@ pdf:
   mineru_page_batch: 1          # pages per MinerU subprocess (memory isolation)
   mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range)
   mineru_memory_ceiling_mb: 0   # 0 = disabled; Linux-only RLIMIT_AS cap (see below)
+  ladder_breaker: 3             # consecutive pages failing both MinerU rungs with one cause that stop a document; 0 = off
 ```
 
 The `--extractor` flag overrides the config when passed explicitly.
 
-**MinerU OOM resilience (RDR-148).** Formula-dense pages can OOM-kill MinerU's
-formula model. The recovery ladder: a failed multi-page batch bisects toward
-single pages; a single page that still OOMs either aborts the document
-(`--on-formula-oom fail`, the default) or degrades only that page to docling
-(`--on-formula-oom docling`). On **Linux** you can additionally set
+**MinerU OOM resilience (RDR-148, RDR-237).** Formula-dense pages can OOM-kill
+MinerU's formula model. The recovery ladder: a failed multi-page batch bisects
+toward single pages; a single page that still fails (a timeout, an OOM, a worker
+error, a dropped server connection) is retried without formulas
+(`formula_enable=false`, recorded `mineru-no-formula`), then read from the PDF's
+own text layer (`pymupdf-text`), then recorded `unextracted`; the document
+finishes and `extraction_method` reads `mineru+degraded`, with the pages by rung
+in `extraction_pages`. `--on-formula-oom` no longer changes this. When
+`pdf.ladder_breaker` consecutive pages (default 3) fail both MinerU attempts with
+the same cause (a timeout, or the same worker exit and stderr line) the install or
+the machine is failing, not the PDF: the document stops, naming the cause, with
+its extracted pages kept for a rerun. On **Linux** you can additionally set
 `mineru_memory_ceiling_mb` to cap the worker's address space (RLIMIT_AS) so a
 runaway page fails fast and catchably instead of thrashing; macOS does not honour
 RLIMIT_AS (the knob logs a warning and is ignored there). Note RLIMIT_AS caps
