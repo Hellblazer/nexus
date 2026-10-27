@@ -254,12 +254,33 @@ public final class ReembedHandler implements HttpHandler {
         List<Map<String, Object>> rows = new java.util.ArrayList<>();
         for (Job j : jobs.listAll(tenant)) {
             Map<String, Object> m = row(j);
+            m.put("skipped_documents", skippedDocuments(tenant, j));
             if (withCounts) {
                 m.put("delete_counts", deleteCounts(tenant, j));
             }
             rows.add(m);
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(orderedMap("jobs", rows)));
+    }
+
+    /**
+     * The documents the job left in the source, each with its reason and (RDR-231: a taken source_uri) the holder's
+     * document id, so the report names what was skipped and why. Empty without a query when nothing was skipped; the
+     * list stops at {@link ReembedJobRepository#SKIPPED_REPORT_LIMIT} and {@code documents_skipped} is the full count.
+     */
+    private List<Map<String, Object>> skippedDocuments(String tenant, Job j) {
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        if (j.documentsSkipped() <= 0) {
+            return out;
+        }
+        for (ReembedJobRepository.SkippedDocument s : jobs.skippedDocuments(tenant, j.jobId())) {
+            Map<String, Object> d = new LinkedHashMap<>();
+            d.put("doc_id", s.docId());
+            d.put("reason", s.reason());
+            d.put("holder", s.holder());
+            out.add(d);
+        }
+        return out;
     }
 
     /** The jobs whose source still exists and whose delete has not happened: the ones {@code delete_counts} describes. */

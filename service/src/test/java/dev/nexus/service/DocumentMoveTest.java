@@ -1003,4 +1003,145 @@ class DocumentMoveTest {
         assertThat(physical(inTarget)).isEqualTo(fx.tgt());
         assertThat(physical(elsewhere)).isEqualTo(other.src());
     }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // RDR-231 step 4: the move rewrites a note's source_uri; a taken URI refuses that document alone
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    /** Registers a document in the source whose source_uri is {@code uri}, written straight so a legacy spelling survives. */
+    String seedNote(Fx fx, String name, String uri, List<String> texts) {
+        String docId = seedDoc(fx, name, texts);
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, uri)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId)).execute());
+        return docId;
+    }
+
+    /** A live document in the target that holds {@code uri}; returns its tumbler. */
+    String seedHolder(Fx fx, String name, String uri) {
+        String docId = "dm." + fx.tag() + "." + name;
+        catalog.upsertDocument(TENANT, Map.of("tumbler", docId, "title", "title-" + docId, "content_type", "knowledge",
+            "corpus", "knowledge", "physical_collection", fx.tgt(), "chunk_count", 0));
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, uri)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId)).execute());
+        return docId;
+    }
+
+    String sourceUri(String docId) {
+        return su(ctx -> ctx.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+            .fetchOne(CATALOG_DOCUMENTS.SOURCE_URI));
+    }
+
+    List<String> aspectUris(String docId) {
+        return su(ctx -> ctx.select(DOCUMENT_ASPECTS.SOURCE_URI).from(DOCUMENT_ASPECTS)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT)).and(DOCUMENT_ASPECTS.DOC_ID.eq(docId))
+            .fetch(DOCUMENT_ASPECTS.SOURCE_URI));
+    }
+
+    List<String> highlightUris(String docId) {
+        return su(ctx -> ctx.select(DOCUMENT_HIGHLIGHTS.SOURCE_URI).from(DOCUMENT_HIGHLIGHTS)
+            .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT)).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId))
+            .fetch(DOCUMENT_HIGHLIGHTS.SOURCE_URI));
+    }
+
+    /** Points the document's aspect and highlight rows at {@code uri}, as the rows of a note carry its URI. */
+    void setSatelliteUris(String docId, String uri) {
+        su(ctx -> ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.SOURCE_URI, uri)
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT)).and(DOCUMENT_ASPECTS.DOC_ID.eq(docId)).execute());
+        su(ctx -> ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, uri)
+            .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT)).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)).execute());
+    }
+
+    @Test
+    void reembedMoveOfANote_theUriNamesTheSibling_aspectsAndHighlightsMatch_andARePutUnderTheSiblingFindsIt() {
+        // RDR-231 Test Plan row 553.
+        Fx fx = pair("noteuri");
+        String note = seedNote(fx, "note", "nx-note://" + fx.src() + "/my-title",
+            List.of("note a " + fx.tag(), "note b " + fx.tag()));
+        String legacy = seedNote(fx, "legacy", "chroma://" + fx.src() + "/old-title", List.of("legacy a " + fx.tag()));
+        String file = seedNote(fx, "file", "file:///tmp/" + fx.tag() + "/plain.md", List.of("file a " + fx.tag()));
+        for (String d : List.of(note, legacy, file)) {
+            seedAspect(fx.src(), d, "p/" + d + ".md", "v1");
+            seedHighlight(fx.src(), d);
+            setSatelliteUris(d, sourceUri(d));
+        }
+
+        Map<String, Object> r = move(fx, List.of(note, legacy, file));
+
+        assertThat(failedIds(r)).isEmpty();
+        assertThat(sourceUri(note)).isEqualTo("nx-note://" + fx.tgt() + "/my-title");
+        assertThat(sourceUri(legacy)).as("a legacy spelling keeps its scheme")
+            .isEqualTo("chroma://" + fx.tgt() + "/old-title");
+        assertThat(sourceUri(file)).as("a non-note URI is not touched")
+            .isEqualTo("file:///tmp/" + fx.tag() + "/plain.md");
+        for (String d : List.of(note, legacy, file)) {
+            assertThat(physical(d)).isEqualTo(fx.tgt());
+            assertThat(aspectUris(d)).as("the aspect row agrees with the document").containsExactly(sourceUri(d));
+            assertThat(highlightUris(d)).as("the highlight row agrees with the document").containsExactly(sourceUri(d));
+        }
+        // a re-put under the sibling (store_put with the same title) derives the new URI and finds the document
+        String again = catalog.registerDocument(TENANT, "dm", Map.of("title", "my-title", "content_type", "knowledge",
+            "corpus", "knowledge", "physical_collection", fx.tgt(), "source_uri", "nx-note://" + fx.tgt() + "/my-title"));
+        assertThat(again).isEqualTo(note);
+    }
+
+    @Test
+    void reembedMoveWhereTheRewrittenUriIsTaken_refusesThatDocumentAlone_namingTheHolder_theOthersMove() {
+        // RDR-231 Test Plan row 554 at the engine: the race backstop in completeMove, with no pre-check in front of it.
+        Fx fx = pair("urtaken");
+        String taken = seedNote(fx, "taken", "nx-note://" + fx.src() + "/clash",
+            List.of("taken a " + fx.tag(), "taken b " + fx.tag()));
+        String fine = seedNote(fx, "fine", "nx-note://" + fx.src() + "/free", List.of("fine a " + fx.tag()));
+        seedAspect(fx.src(), taken, "p/t.md", "v1");
+        seedHighlight(fx.src(), taken);
+        String holder = seedHolder(fx, "holder", "nx-note://" + fx.tgt() + "/clash");
+
+        Map<String, Object> r = move(fx, List.of(taken, fine));
+
+        assertThat(failedIds(r)).containsExactly(taken);
+        String reason = (String) failed(r).get(0).get("reason");
+        assertThat(reason).isEqualTo(CatalogRepository.MOVE_SOURCE_URI_TAKEN + holder)
+            .doesNotContain("internal error");
+        assertThat(r.get("docs")).isEqualTo(1);
+        assertThat(physical(taken)).isEqualTo(fx.src());
+        assertThat(sourceUri(taken)).isEqualTo("nx-note://" + fx.src() + "/clash");
+        assertThat(manifestCollections(taken)).containsExactly(fx.src());
+        assertThat(aspectRows(taken)).containsExactly(fx.src() + "|p/t.md|v1");
+        assertThat(highlightCollections(taken)).containsExactly(fx.src());
+        assertThat(physical(fine)).isEqualTo(fx.tgt());
+        assertThat(sourceUri(fine)).isEqualTo("nx-note://" + fx.tgt() + "/free");
+        assertThat(sourceUri(holder)).as("the holder is untouched").isEqualTo("nx-note://" + fx.tgt() + "/clash");
+    }
+
+    @Test
+    void aTombstonedDocumentHoldingTheUri_doesNotBlockTheMove() {
+        Fx fx = pair("urtomb");
+        String doc = seedNote(fx, "doc", "nx-note://" + fx.src() + "/was-deleted", List.of("doc a " + fx.tag()));
+        String dead = seedHolder(fx, "dead", "nx-note://" + fx.tgt() + "/was-deleted");
+        assertThat(catalog.deleteDocument(TENANT, dead)).isEqualTo(1);
+
+        assertThat(catalog.moveUriHolders(TENANT, fx.src(), fx.tgt(), List.of(doc))).isEmpty();
+        Map<String, Object> r = move(fx, List.of(doc));
+
+        assertThat(failedIds(r)).isEmpty();
+        assertThat(sourceUri(doc)).isEqualTo("nx-note://" + fx.tgt() + "/was-deleted");
+    }
+
+    @Test
+    void moveUriHolders_namesTheLiveHolderOfEachRewrittenUri_andNothingForFreeNonNoteOrOwnUris() {
+        Fx fx = pair("urholders");
+        String taken = seedNote(fx, "taken", "nx-note://" + fx.src() + "/a", List.of("h a " + fx.tag()));
+        String legacy = seedNote(fx, "legacy", "chroma://" + fx.src() + "/b", List.of("h b " + fx.tag()));
+        String free = seedNote(fx, "free", "nx-note://" + fx.src() + "/c", List.of("h c " + fx.tag()));
+        String file = seedNote(fx, "file", "file:///tmp/" + fx.tag() + "/f.md", List.of("h f " + fx.tag()));
+        String h1 = seedHolder(fx, "h1", "nx-note://" + fx.tgt() + "/a");
+        String h2 = seedHolder(fx, "h2", "chroma://" + fx.tgt() + "/b");
+
+        Map<String, String> holders =
+            catalog.moveUriHolders(TENANT, fx.src(), fx.tgt(), List.of(taken, legacy, free, file));
+
+        assertThat(holders).containsOnlyKeys(taken, legacy);
+        assertThat(holders).containsEntry(taken, h1).containsEntry(legacy, h2);
+        assertThat(catalog.moveUriHolders(TENANT, fx.src(), fx.tgt(), List.of())).isEmpty();
+    }
 }

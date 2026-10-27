@@ -241,6 +241,38 @@ abstract class ReembedFixture {
         return ids;
     }
 
+    /** The note URI a seeded note carries in the source: {@code nx-note://<source>/<name>}. */
+    static String noteUri(String collection, String name) {
+        return "nx-note://" + collection + "/" + name;
+    }
+
+    /** {@link #seedDoc} for a note: the document's source_uri is {@code nx-note://<source>/<name>}. */
+    String seedNote(Fx fx, String name, List<String> texts) {
+        String docId = seedDoc(fx, name, texts);
+        setSourceUri(fx, docId, noteUri(fx.src(), name));
+        return docId;
+    }
+
+    void setSourceUri(Fx fx, String docId, String uri) {
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, uri)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant())).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId)).execute());
+    }
+
+    String sourceUri(Fx fx, String docId) {
+        return su(ctx -> ctx.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(fx.tenant())).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+            .fetchOne(CATALOG_DOCUMENTS.SOURCE_URI));
+    }
+
+    /** A live document homed in the target that holds {@code uri}; returns its tumbler. */
+    String seedHolder(Fx fx, String name, String uri) {
+        String docId = "rr." + fx.tag() + "." + name;
+        catalog.upsertDocument(fx.tenant(), Map.of("tumbler", docId, "title", "title-" + docId,
+            "content_type", CONTENT_TYPE, "corpus", CONTENT_TYPE, "physical_collection", fx.tgt(), "chunk_count", 0));
+        setSourceUri(fx, docId, uri);
+        return docId;
+    }
+
     // ── jobs and runners ─────────────────────────────────────────────────────
 
     Job startJob(Fx fx, Long tokenCap, boolean keepSource) {

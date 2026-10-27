@@ -4937,6 +4937,14 @@ public final class CatalogRepository {
     public static final String MOVE_PRECONDITION_FAILED = "move_precondition_failed";
 
     /**
+     * RDR-231 step 4: the stable prefix of the {@code reason} a re-embed move reports when the document's rewritten
+     * {@code source_uri} is held by another live document ({@link SourceUriCollision}, passed through by {@link
+     * #failureDetail}). The holder's tumbler follows the prefix; the re-embed runner maps the prefix to a per-document
+     * skip that keeps the holder.
+     */
+    public static final String MOVE_SOURCE_URI_TAKEN = "move refused: source_uri taken by ";
+
+    /**
      * RDR-210 Phase 6 Step 1: a document move was refused because the document is no longer what the
      * caller read: its manifest chashes changed, or its manifest no longer names the source collection
      * (a client re-indexed it, deleted it or wrote it elsewhere since). Typed, and listed in {@link
@@ -6478,8 +6486,12 @@ public final class CatalogRepository {
      */
     private static void completeMove(DSLContext ctx, String tenant, String docId, String target, String source,
                                      int[] counts) {
+        // RDR-231 step 4: the pre-check in the re-embed runner keeps a taken URI from reaching here at all; this is
+        // the backstop for a holder that appeared since. Before any UPDATE, so nothing has moved when it throws.
+        requireMoveUriFree(ctx, tenant, docId, source, target);
         int pointed = ctx.update(CATALOG_DOCUMENTS)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, target)
+            .set(CATALOG_DOCUMENTS.SOURCE_URI, NoteUri.moveTo(CATALOG_DOCUMENTS.SOURCE_URI, source, target))
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
@@ -6499,6 +6511,7 @@ public final class CatalogRepository {
             .execute();
         counts[0] = ctx.update(DOCUMENT_ASPECTS)
             .set(DOCUMENT_ASPECTS.COLLECTION, target)
+            .set(DOCUMENT_ASPECTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_ASPECTS.SOURCE_URI, source, target))
             .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
                    .and(DOCUMENT_ASPECTS.COLLECTION.eq(source))
                    .and(DOCUMENT_ASPECTS.DOC_ID.eq(docId)))
@@ -6521,10 +6534,69 @@ public final class CatalogRepository {
             .execute();
         counts[4] = ctx.update(DOCUMENT_HIGHLIGHTS)
             .set(DOCUMENT_HIGHLIGHTS.COLLECTION, target)
+            .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_HIGHLIGHTS.SOURCE_URI, source, target))
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
                    .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
                    .and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)))
             .execute();
+    }
+
+    /**
+     * RDR-231 step 4, the single-document check of a re-embed move: when the document's {@code source_uri} would
+     * be rewritten onto one a LIVE document already holds, throw {@link SourceUriCollision} (holder = that
+     * document's tumbler) before anything moves. Only live holders count, because catalog-016 constrains only live
+     * rows; a tombstoned holder does not block. A tombstoned moving document is not checked here: the first
+     * UPDATE refuses it with its own typed exception.
+     */
+    private static void requireMoveUriFree(DSLContext ctx, String tenant, String docId, String source,
+                                           String target) {
+        var hit = moveUriCollisions(ctx, tenant, source, target, List.of(docId)).stream().findFirst().orElse(null);
+        if (hit != null) {
+            throw new SourceUriCollision("re-embedding " + source + " into " + target, hit.value2(), hit.value3(),
+                hit.value4());
+        }
+    }
+
+    /**
+     * Live documents whose {@code source_uri} the move of {@code docIds} from {@code source} to {@code target}
+     * would rewrite onto a URI another live document holds: (moving tumbler, the URI, holder tumbler, holder's
+     * collection). A document whose URI is not rewritten (not a note of {@code source}) never appears.
+     */
+    private static org.jooq.Result<org.jooq.Record4<String, String, String, String>> moveUriCollisions(
+            DSLContext ctx, String tenant, String source, String target, java.util.Collection<String> docIds) {
+        var moving = CATALOG_DOCUMENTS.as("moving");
+        var holder = CATALOG_DOCUMENTS.as("holder");
+        Field<String> rewritten = NoteUri.moveTo(moving.SOURCE_URI, source, target);
+        return ctx.select(moving.TUMBLER, holder.SOURCE_URI, holder.TUMBLER, holder.PHYSICAL_COLLECTION)
+            .from(moving).join(holder).on(holder.TENANT_ID.eq(tenant).and(holder.SOURCE_URI.eq(rewritten)))
+            .where(moving.TENANT_ID.eq(tenant))
+            .and(moving.TUMBLER.in(docIds))
+            .and(moving.DELETED_AT.isNull())
+            .and(rewritten.ne(moving.SOURCE_URI))
+            .and(holder.DELETED_AT.isNull())
+            .and(holder.TUMBLER.ne(moving.TUMBLER))
+            .orderBy(moving.TUMBLER)
+            .fetch();
+    }
+
+    /**
+     * RDR-231 step 4, the re-embed runner's check before it embeds: for each of {@code docIds} whose rewritten
+     * {@code source_uri} a live document holds, the holder's tumbler. One query for the batch. A document whose
+     * URI is free, is not a note of {@code source}, or is tombstoned is absent. {@link #completeMove} repeats the
+     * check per document as a backstop for a holder that appears after this read.
+     */
+    public Map<String, String> moveUriHolders(String tenant, String source, String target,
+                                              java.util.Collection<String> docIds) {
+        if (docIds.isEmpty()) {
+            return Map.of();
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, String> out = new LinkedHashMap<>();
+            for (var r : moveUriCollisions(ctx, tenant, source, target, docIds)) {
+                out.putIfAbsent(r.value1(), r.value3());
+            }
+            return out;
+        });
     }
 
     /**
@@ -6932,6 +7004,13 @@ public final class CatalogRepository {
         // (case "23503" -> "foreign key violation (doc_id not registered?)")
         // before catalog_document_chunks.collection went NOT NULL; the
         // message here says the same thing in our own words instead.
+        // RDR-231 step 4: a re-embed move whose rewritten source_uri a live document holds. The reason is a stable
+        // prefix and the holder's tumbler (schema metadata, not the driver message), which the re-embed runner turns
+        // into a per-document skip that names the holder.
+        if (e instanceof SourceUriCollision collision && collision.holder() != null) {
+            out.put("reason", MOVE_SOURCE_URI_TAKEN + collision.holder());
+            return out;
+        }
         if ((e instanceof IllegalArgumentException || e instanceof TombstonedDocumentException
                 || e instanceof DocumentNotFoundException || e instanceof MovePreconditionFailedException)
                 && e.getMessage() != null) {

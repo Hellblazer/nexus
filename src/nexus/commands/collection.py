@@ -1884,6 +1884,12 @@ def _job_line(job: dict) -> str:
     )
     if job.get("last_error"):
         line += f"\n    last error: {job['last_error']}"
+    # RDR-231: each skipped document with its reason; a source_uri the sibling already holds names the holder.
+    for skipped in job.get("skipped_documents") or ():
+        holder = skipped.get("holder")
+        line += f"\n    skipped {skipped.get('doc_id')}: {skipped.get('reason')}" + (
+            f" (source_uri held by {holder})" if holder else ""
+        )
     counts = job.get("delete_counts")
     if isinstance(counts, dict):
         line += (

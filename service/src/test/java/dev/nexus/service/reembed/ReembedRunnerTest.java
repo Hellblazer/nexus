@@ -233,6 +233,101 @@ class ReembedRunnerTest extends ReembedFixture {
         assertThat(deletes).hasValue(0);
     }
 
+    // ── RDR-231 step 4: the move rewrites a note's source_uri; a taken URI is a per-document skip ─────────
+
+    private List<String> threeNotes(Fx fx) {
+        List<String> docs = new ArrayList<>();
+        for (int d = 0; d < 3; d++) {
+            List<String> texts = new ArrayList<>();
+            for (int k = 0; k < 3; k++) texts.add("note " + fx.tag() + " d" + d + " chunk " + k + " lorem ipsum");
+            docs.add(seedNote(fx, String.format("d%03d", d), texts));
+        }
+        return docs;
+    }
+
+    @Test
+    void aNoteMovesWithItsUriRewritten_toTheSibling() {
+        // RDR-231 Test Plan row 553 through the runner.
+        Fx fx = pair("noteuri");
+        List<String> docs = threeNotes(fx);
+        Job started = startJob(fx, null, false);
+
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).isEqualTo(DONE);
+        for (int d = 0; d < 3; d++) {
+            assertThat(sourceUri(fx, docs.get(d))).isEqualTo(noteUri(fx.tgt(), String.format("d%03d", d)));
+            assertThat(physical(fx, docs.get(d))).isEqualTo(fx.tgt());
+        }
+        assertThat(jobs.skippedDocuments(fx.tenant(), done.jobId())).isEmpty();
+    }
+
+    @Test
+    void aTakenUri_isCheckedBeforeEmbedding_theDocumentIsSkippedWithItsHolder_theOthersMove_theJobDoesNotFail() {
+        // RDR-231 Test Plan row 554 through the runner. The holder exists before the job starts, so the
+        // pre-check catches it and the colliding document is embedded zero times.
+        Fx fx = pair("uritaken");
+        List<String> docs = threeNotes(fx);
+        String holder = seedHolder(fx, "holder", noteUri(fx.tgt(), "d001"));
+        Job started = startJob(fx, null, false);
+        int embeddedBefore = tgtEmbed.calls.get();
+
+        runner(fx, ONE_DOC_PER_BATCH).tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).as("a taken URI is a skip, never a failed job").isEqualTo(DONE_WITH_SKIPS);
+        assertThat(done.failureReason()).isNull();
+        assertThat(done.documentsMoved()).isEqualTo(2);
+        assertThat(done.documentsSkipped()).as("the document counts once across every pass").isEqualTo(1);
+        assertThat(done.passNumber()).as("a skip leaves a candidate, so the passes run to the bound").isEqualTo(3);
+        assertThat(tgtEmbed.calls.get() - embeddedBefore)
+            .as("the two moved documents' six chunks; the colliding document is embedded zero times").isEqualTo(6);
+        assertThat(chunkCount(fx, fx.tgt())).isEqualTo(6);
+        assertThat(moves(fx, done.jobId())).containsEntry(docs.get(1), "skipped:" + ReembedRunner.REASON_URI_TAKEN + ":" + holder)
+            .containsEntry(docs.get(0), "moved").containsEntry(docs.get(2), "moved");
+        assertThat(physical(fx, docs.get(1))).isEqualTo(fx.src());
+        assertThat(sourceUri(fx, docs.get(1))).isEqualTo(noteUri(fx.src(), "d001"));
+        assertThat(sourceUri(fx, docs.get(0))).isEqualTo(noteUri(fx.tgt(), "d000"));
+        assertThat(catalog.getCollection(fx.tenant(), fx.src())).as("nothing is deleted under a skip").isNotNull();
+        // the job report names the document and its holder
+        assertThat(jobs.skippedDocuments(fx.tenant(), done.jobId())).containsExactly(
+            new dev.nexus.service.db.ReembedJobRepository.SkippedDocument(docs.get(1), ReembedRunner.REASON_URI_TAKEN, holder));
+    }
+
+    @Test
+    void aUriTakenAfterThePreCheck_theEngineBackstopIsASkipWithTheHolder_notAFailedBatch() {
+        // The holder appears between the runner's pre-check and the move (the before_move seam). completeMove's own
+        // check throws SourceUriCollision; failureDetail passes it through as the stable prefix and the holder, and
+        // the runner records a skip, so the batch is not failed and the other documents commit.
+        Fx fx = pair("urirace");
+        List<String> docs = threeNotes(fx);
+        Job started = startJob(fx, null, false);
+        ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
+        AtomicInteger moves = new AtomicInteger();
+        AtomicReference<String> holder = new AtomicReference<>();
+        runner.setPhaseHookForTests(p -> {
+            if (p.equals("before_move") && moves.incrementAndGet() == 2) {
+                holder.set(seedHolder(fx, "late", noteUri(fx.tgt(), "d001")));
+            }
+        });
+
+        runner.tick();
+
+        Job done = job(fx, started.jobId());
+        assertThat(done.state()).isEqualTo(DONE_WITH_SKIPS);
+        assertThat(done.failureReason()).isNull();
+        assertThat(done.documentsMoved()).isEqualTo(2);
+        assertThat(done.documentsSkipped()).isEqualTo(1);
+        assertThat(moves(fx, done.jobId())).containsEntry(docs.get(1),
+            "skipped:" + ReembedRunner.REASON_URI_TAKEN + ":" + holder.get());
+        assertThat(physical(fx, docs.get(1))).isEqualTo(fx.src());
+        assertThat(sourceUri(fx, docs.get(1))).isEqualTo(noteUri(fx.src(), "d001"));
+        assertThat(physical(fx, docs.get(0))).isEqualTo(fx.tgt());
+        assertThat(physical(fx, docs.get(2))).isEqualTo(fx.tgt());
+        assertThat(jobs.skippedDocuments(fx.tenant(), done.jobId())).hasSize(1);
+    }
+
     @Test
     void aDocumentWhoseSourceChunkHasNoText_isASkip_leftBehindAfterThreePasses_andTheSourceIsKept() {
         Fx fx = pair("notext");
