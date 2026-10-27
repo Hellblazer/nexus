@@ -45,7 +45,8 @@
     release tag over rows this backfill rewrote; an aborted backfill rewrote none, so the previous engine binary
     can start, merge each pair with POST /v1/catalog/merge, and stop; the new engine is then started again and
     the backfill passes. The steps for cloud and local installs are in docs/migration-runbook.md, section "If the
-    RDR-231 note-URI backfill halts startup", and the RAISE text names it.
+    RDR-231 note-URI backfill halts startup", and the RAISE text cites that section by its published URL (a PyPI
+    install has no repo-relative path to open); NoteUriBackfillPredicateParityTest checks the anchor resolves.
 
     SHAPE. aspects-004-1's NO FORCE / FORCE layout (the migration owner is not BYPASSRLS, so under FORCE RLS with
     no tenant GUC an untoggled statement sees zero rows and the backfill would silently do nothing) and
@@ -91,7 +92,7 @@ BEGIN
        AND (starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__'))
             OR o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')));
     IF n &gt; 0 THEN
-        RAISE EXCEPTION 'RDR-231 note-URI backfill halted and nothing was changed: % live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: docs/migration-runbook.md, section "If the RDR-231 note-URI backfill halts startup".', n;
+        RAISE EXCEPTION 'RDR-231 note-URI backfill halted and nothing was changed: % live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup', n;
     END IF;
 END $$;
 

@@ -144,24 +144,28 @@ class NoteUriBackfillMigrationTest {
                         .isEqualTo("nx-note://knowledge__nb5/tw");
                     assertThat(after.get(T1 + "/1.1.10")).as("the tombstoned twin is untouched")
                         .isEqualTo("nx-note://knowledge__nb5/tw");
+                    assertThat(after.get(T1 + "/1.1.11")).as("a tombstoned note beside a live twin is rewritten, not a halt")
+                        .isEqualTo("nx-note://knowledge__nb5/dead");
+                    assertThat(after.get(T1 + "/1.1.12")).as("the live twin of a tombstoned note is untouched")
+                        .isEqualTo("nx-note://knowledge__nb5/dead");
                     assertThat(after.get(T2 + "/1.1.1")).as("another tenant's row is untouched")
                         .isEqualTo("nx-note://knowledge__nb5/n1");
 
                     var asp = aspectUris(c);
-                    assertThat(asp.get("p1")).isEqualTo("nx-note://knowledge__nb5/n1");
-                    assertThat(asp.get("p2")).as("aspect residue").isEqualTo("chroma://docs__nb5/f.md");
-                    assertThat(asp.get("p3")).isEqualTo("nxexp://knowledge__imp/nx-note://knowledge__nb5/n3");
+                    assertThat(asp.get("p1")).isEqualTo("nx-note://knowledge__nb5/p1");
+                    assertThat(asp.get("p2")).as("aspect residue").isEqualTo("chroma://docs__nb5/p2");
+                    assertThat(asp.get("p3")).isEqualTo("nxexp://knowledge__imp/nx-note://knowledge__nb5/p3");
                     assertThat(asp.get("p4")).as("aspect export residue")
-                        .isEqualTo("nxexp://knowledge__imp/chroma://rdr__nb5/f.md");
+                        .isEqualTo("nxexp://knowledge__imp/chroma://rdr__nb5/p4");
                     assertThat(asp.get("p5")).as("aspect note, stale collection")
-                        .isEqualTo("nx-note://knowledge__nb5x/n8");
+                        .isEqualTo("nx-note://knowledge__nb5x/p5");
 
                     var hl = highlightUris(c);
-                    assertThat(hl.get("1.1.1")).isEqualTo("nx-note://knowledge__nb5/n1");
-                    assertThat(hl.get("1.1.3")).isEqualTo("nxexp://knowledge__imp/nx-note://knowledge__nb5/n3");
-                    assertThat(hl.get("1.1.4")).as("highlight residue").isEqualTo("chroma://docs__nb5/f.md");
+                    assertThat(hl.get("1.1.1")).isEqualTo("nx-note://knowledge__nb5/hl-1.1.1");
+                    assertThat(hl.get("1.1.3")).isEqualTo("nxexp://knowledge__imp/nx-note://knowledge__nb5/hl-1.1.3");
+                    assertThat(hl.get("1.1.4")).as("highlight residue").isEqualTo("chroma://docs__nb5/hl-1.1.4");
                     assertThat(hl.get("1.1.8")).as("highlight note, stale collection")
-                        .isEqualTo("nx-note://knowledge__nb5x/n8");
+                        .isEqualTo("nx-note://knowledge__nb5x/hl-1.1.8");
                 }
                 assertThat(forceFlags(pg)).as("FORCE is set on all three tables after the migration")
                     .containsOnly(Map.entry("catalog_documents", true), Map.entry("document_aspects", true),
@@ -262,14 +266,15 @@ class NoteUriBackfillMigrationTest {
                     .contains("Start the previous engine binary")
                     .contains("POST /v1/catalog/merge")
                     .contains("restart on the new engine")
-                    .contains("docs/migration-runbook.md");
+                    .contains("https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#"
+                        + "if-the-rdr-231-note-uri-backfill-halts-startup");
             });
         try (Connection su = pg.createConnection("")) {
             DSLContext c = DSL.using(su, SQLDialect.POSTGRES);
             assertThat(snapshot(c)).as("no catalog_documents row changed (%s)", form).isEqualTo(expected);
-            assertThat(aspectUris(c)).as("no document_aspects row changed (%s)", form).containsEntry("p1", "chroma://knowledge__nb5/n1");
+            assertThat(aspectUris(c)).as("no document_aspects row changed (%s)", form).containsEntry("p1", "chroma://knowledge__nb5/p1");
             assertThat(highlightUris(c)).as("no document_highlights row changed (%s)", form)
-                .containsEntry("1.1.1", "chroma://knowledge__nb5/n1");
+                .containsEntry("1.1.1", "chroma://knowledge__nb5/hl-1.1.1");
         }
         assertThat(forceFlags(pg)).as("FORCE is still set on all three tables after the abort (%s)", form)
             .containsOnly(Map.entry("catalog_documents", true), Map.entry("document_aspects", true),
@@ -292,18 +297,22 @@ class NoteUriBackfillMigrationTest {
         insertDoc(c, T1, "1.1.8", NOTES_Y, "chroma://knowledge__nb5x/n8", false);
         insertDoc(c, T1, "1.1.9", NOTES, "chroma://knowledge__nb5/tw", false);
         insertDoc(c, T1, "1.1.10", NOTES, "nx-note://knowledge__nb5/tw", true);
+        // a TOMBSTONED chroma:// note beside a LIVE nx-note:// twin: catalog-016 constrains live rows only, so
+        // the guard (o.deleted_at IS NULL) must neither count it nor halt on it
+        insertDoc(c, T1, "1.1.11", NOTES, "chroma://knowledge__nb5/dead", true);
+        insertDoc(c, T1, "1.1.12", NOTES, "nx-note://knowledge__nb5/dead", false);
         insertDoc(c, T2, "1.1.1", NOTES, "nx-note://knowledge__nb5/n1", false);
 
-        insertAspect(c, "p1", NOTES, "chroma://knowledge__nb5/n1", "1.1.1");
-        insertAspect(c, "p2", DOCS, "chroma://docs__nb5/f.md", "1.1.4");
-        insertAspect(c, "p3", NOTES, "nxexp://knowledge__imp/chroma://knowledge__nb5/n3", "1.1.3");
-        insertAspect(c, "p4", RDR, "nxexp://knowledge__imp/chroma://rdr__nb5/f.md", "1.1.5");
-        insertAspect(c, "p5", NOTES_Y, "chroma://knowledge__nb5x/n8", "1.1.8");
+        insertAspect(c, "p1", NOTES, "chroma://knowledge__nb5/p1", "1.1.1");
+        insertAspect(c, "p2", DOCS, "chroma://docs__nb5/p2", "1.1.4");
+        insertAspect(c, "p3", NOTES, "nxexp://knowledge__imp/chroma://knowledge__nb5/p3", "1.1.3");
+        insertAspect(c, "p4", RDR, "nxexp://knowledge__imp/chroma://rdr__nb5/p4", "1.1.5");
+        insertAspect(c, "p5", NOTES_Y, "chroma://knowledge__nb5x/p5", "1.1.8");
 
-        insertHighlight(c, "1.1.1", NOTES, "chroma://knowledge__nb5/n1");
-        insertHighlight(c, "1.1.3", NOTES, "nxexp://knowledge__imp/chroma://knowledge__nb5/n3");
-        insertHighlight(c, "1.1.4", DOCS, "chroma://docs__nb5/f.md");
-        insertHighlight(c, "1.1.8", NOTES_Y, "chroma://knowledge__nb5x/n8");
+        insertHighlight(c, "1.1.1", NOTES, "chroma://knowledge__nb5/hl-1.1.1");
+        insertHighlight(c, "1.1.3", NOTES, "nxexp://knowledge__imp/chroma://knowledge__nb5/hl-1.1.3");
+        insertHighlight(c, "1.1.4", DOCS, "chroma://docs__nb5/hl-1.1.4");
+        insertHighlight(c, "1.1.8", NOTES_Y, "chroma://knowledge__nb5x/hl-1.1.8");
     }
 
     private static void insertDoc(DSLContext c, String tenant, String tumbler, String collection, String uri,

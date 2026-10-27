@@ -279,7 +279,34 @@ class NoteUriBackfillPredicateParityTest {
             .contains("Start the previous engine binary")
             .contains("POST /v1/catalog/merge")
             .contains("restart on the new engine")
-            .contains("docs/migration-runbook.md, section \"If the RDR-231 note-URI backfill halts startup\"");
+            .contains(RUNBOOK_URL + "#if-the-rdr-231-note-uri-backfill-halts-startup")
+            .as("a PyPI install cannot open a repo-relative path: the RAISE cites the published URL")
+            .doesNotContain("docs/migration-runbook.md, section");
+    }
+
+    /** The published runbook URL (MIGRATION_RUNBOOK_URL in src/nexus/upgrade_finish.py). */
+    private static final String RUNBOOK_URL =
+        "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md";
+
+    /**
+     * The anchor the RAISE cites resolves to a heading of docs/migration-runbook.md (GitHub's slug: lower-cased,
+     * punctuation dropped, spaces to hyphens), so a renamed section turns this red instead of stranding an operator.
+     */
+    @Test
+    void raiseCitesAnAnchorTheRunbookHas() throws Exception {
+        Matcher cited = Pattern.compile(Pattern.quote(RUNBOOK_URL) + "#([a-z0-9-]+)").matcher(changesetSql());
+        assertThat(cited.find()).as("the RAISE cites the runbook URL with a section anchor").isTrue();
+        String anchor = cited.group(1);
+        java.nio.file.Path runbook = java.nio.file.Path.of("..", "docs", "migration-runbook.md");
+        assertThat(runbook).as("the runbook is read from the repo root").exists();
+        List<String> slugs = new ArrayList<>();
+        for (String line : java.nio.file.Files.readAllLines(runbook)) {
+            if (line.startsWith("#")) {
+                String title = line.replaceFirst("^#+\\s*", "").toLowerCase(java.util.Locale.ROOT);
+                slugs.add(title.replaceAll("[^a-z0-9 -]", "").replace(' ', '-'));
+            }
+        }
+        assertThat(slugs).as("headings of docs/migration-runbook.md").hasSizeGreaterThan(10).contains(anchor);
     }
 
     private static int count(String text, String needle) {

@@ -469,7 +469,7 @@ the client release before RDR-231).
 
 ```bash
 nx daemon service stop                                   # stops the supervisor retrying the halted engine
-nx daemon service install-binary engine-service-v0.1.165 # the PREVIOUS engine tag
+nx daemon service install-binary engine-service-v0.1.165 --no-pg-bundle   # the PREVIOUS engine tag, binary only
 nx daemon service start                                  # previous engine, same database
 # step 1: list the pairs (psql against the nx-managed cluster, see "Restoring a pg_dump" for its socket)
 nx catalog merge <duplicate> <canonical>                 # step 2, once per pair
@@ -477,6 +477,13 @@ nx daemon service stop
 nx daemon service install-binary <the new engine tag>    # the tag in the new client release's changelog entry
 nx daemon service start                                  # the backfill passes; check logs/storage_service_native.log
 ```
+
+`install-binary` also swaps the PostgreSQL bundle by default (`--pg-bundle`), and
+the previous tag ships the bundle it was built with, which can be an older
+PostgreSQL than the one that last opened this data directory. The first call
+therefore passes `--no-pg-bundle`: it installs the previous engine binary and
+leaves the PostgreSQL you have in place. The second call, for the new tag, takes
+the default.
 
 Do not run `nx daemon restart-stale` or any upgrade step between the two
 `install-binary` calls: they would put the pinned engine back before the merge.
