@@ -365,6 +365,39 @@ listed under Critical Assumptions before gate.
   *Source: golden journey and live canary. T2: `nexus_rdr/232-research-21`,
   `nexus/rdr232-canary-phase1`.*
 
+- **✅ Verified** (spike) — A1 in production, Phase 2. Eligibility runs on
+  every matcher branch and on the planner few-shots, and enforces live: plan
+  473 is excluded for the RDR-084 incident request and a grown plan is excluded
+  as unknown-grown (proof runs 731-738). Wrong-shape admission falls only
+  in-sample: golden_v1 4 of 24 to 0, and the 4 includes G06 admitted through a
+  synthetic grown clone of plan 473 (3 of 24 to 0 with builtins only). On a
+  blind 29-request held-out set the gate removed no wrong-shape admission (1 of
+  29 before and after) and cost one non-lookup selection (recall 0.724 to
+  0.690). Lookup recall holds at 0.4 only when extraction supplies the kind;
+  with first-pass kinds it halves. On 143 replayed real runs the gate removes
+  the selected plan from 50%, 42% and 38% of runs with first-pass, Opus and
+  Haiku kinds. Not settled: the directional rule admits synthesis plans for
+  lookups, so the one held-out wrong-shape admission cannot be removed, and a
+  live single-theorem lookup ran a synthesis plan for 1.64 USD.
+  *Source: gate matrix, replay and live proof. T2: `nexus_rdr/232-research-22`,
+  `nexus/rdr232-phase2-thresholds`.*
+
+- **✅ Verified** (spike) — A5 in production, Phase 2. The deterministic first
+  pass never assigned a wrong kind but abstains often out of sample: 11 of 29
+  held-out requests exact, 18 unknown (in-sample 23 of 24); on real traffic it
+  leaves 97 of 143 runs unknown. The structured step, now on by default with
+  Haiku, brings held-out agreement to 27 of 29 (both misses are requests
+  labelled unknown; the model does not abstain), with 0 of 112 calls failing,
+  about 0.002 USD and 4 s a call, on about two thirds of real requests. The
+  active-project tier works live on the unmodified RDR-084 call: candidates for
+  both documents from a Nexus session, ART's RDR-084 with an inferred owner
+  from an ART session, an ambiguity with its reason from a host without a
+  project, and an explicit owner when the call binds the project. Not settled:
+  Haiku reads compound single-paper questions as lookup where Opus says
+  synthesis, and no labelled set covers that class.
+  *Source: extraction measurement and live proof. T2:
+  `nexus_rdr/232-research-23`.*
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6; A7 has none yet. They establish
