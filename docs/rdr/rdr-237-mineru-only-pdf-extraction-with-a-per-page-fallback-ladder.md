@@ -391,18 +391,20 @@ the install, CI and tests; Docling's whole-document convert stays silent.
 - **Automatic text-layer fallback for the whole document when MinerU is absent**:
   hides a broken install behind a quietly worse index; the run would succeed
   with no layout, tables or math.
-- **Re-extract every Docling-extracted document under MinerU**: about 6 to 7 s
-  per page across a whole library, unasked for; `nx index pdf --force` does it
+- **Re-extract every Docling-extracted document under MinerU**: about 4 to 10 s
+  per page on CPU (RF-1, RF-4, RF-11) across a whole library, unasked for; `nx index pdf --force` does it
   for any document a user chooses.
 
 ## Trade-offs
 
 ### Consequences
 
-- Extraction is slower for non-math, born-digital PDFs: about 6 to 7 s per page
-  on CPU (RF-1, RF-4) against about 0.28 s (RF-2). A 300-page book goes from about
-  1.5 minutes to about 35, with steady progress instead of silence. Sam accepted
-  this cost.
+- Extraction is slower for non-math, born-digital PDFs: about 4 to 10 s per page
+  on CPU across the measured PDFs (RF-1, RF-4, RF-11) against about 0.28 s for
+  Docling's unenriched pass (RF-2). A 300-page book goes from about 1.5 minutes to
+  between about 20 and 50, with steady progress instead of silence. Docling's
+  enriched default, the path `--extractor docling` took, is not a fast baseline:
+  it ran 2.6 hours on a 30-page PDF (RF-11). Sam accepted this cost.
 - Math and scans extract better (RF-1), and no routing guess is made.
 - A document always finishes; degraded pages are named and countable.
 - The install loses Docling and its models; CI loses a priming action and a step.
@@ -514,11 +516,36 @@ documents on the laptop and chas before acceptance.
 
 ### Contradiction Check
 
-To be completed at gate.
+One contradiction was found and fixed before the gate: Consequences and Briefly
+Rejected stated MinerU's cost as "about 6 to 7 s per page" from RF-1 and RF-4,
+while RF-11 measured about 10 s per page on `tc-sql.pdf` and about 4 on
+`2408.04948.pdf`; both now cite the 4 to 10 s range of all three findings.
+
+RF-3 describes today's server recovery (restart, retry the same batch on the
+server, then the subprocess path); the Technical Design replaces it, and RF-12
+is the reason the restart now waits for a second consecutive timeout. Gap 5's
+13-minute worst case comes from that retry logic in nexus, not from the server
+queueing work, which RF-12 did not observe; the two do not conflict.
+
+No other contradictions found between research findings, design principles, and
+proposed solution.
 
 ### Assumption Verification
 
-To be completed at gate (A1 to A5).
+All five Critical Assumptions are resolved:
+
+- A1 (formula switch per call): Verified by spike, RF-10.
+- A2 (restart frees a stuck slot): reframed by spike, RF-12. A client timeout did
+  not queue the next page, so the design restarts only after two consecutive
+  timeouts. A page that never finishes was not reproduced; the restart is its
+  release, and the Test Plan's two-consecutive-timeouts scenario drives it with a
+  fake.
+- A3 (MinerU's non-math quality): Verified by proxy, RF-11, text recall within two
+  points of Docling. A retrieval evaluation was not run; the MVV's three documents
+  and the existing RF-1 retrieval result (MRR 0.74 against 0.65 on a scanned math
+  paper) are the remaining evidence. This is an accepted residual risk.
+- A4 (one page's text layer): Verified by source search, RF-8.
+- A5 (no other importer of Docling-only packages): Verified by source search, RF-9.
 
 #### API Verification
 
@@ -547,7 +574,10 @@ The MVV is in scope and runs before the RDR closes.
 
 ### Proportionality
 
-Right-sized for a change that removes a dependency across code, CI and docs.
+Right-sized for a change that removes a dependency across code, CI and docs and
+replaces a routing guess with a per-page ladder. The Research Findings carry the
+evidence Sam asked for (the measured costs and the A1 to A5 spikes); no section is
+a candidate for trimming.
 
 ## Open Questions for Sam
 
