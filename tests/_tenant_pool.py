@@ -276,6 +276,13 @@ def reset_client_caches() -> None:
     ae = mods.get("nexus.aspect_extractor")
     if ae is not None:
         ae._ENGINE_ASPECTS_ENABLED_CACHE.clear()
+    # The matcher's process-wide plan cache (``get_t1_plan_cache``) holds the plan ids of the library it was last
+    # filled from and refills only every 90 s. The wipe deletes that library and a reseed gets new ids (``plans.id``
+    # is a sequence), so a cache left by the previous lease turns every cosine hit into a deleted plan and
+    # ``plan_match`` falls back to FTS: an intermittent "the seeded library offers no plan" under xdist.
+    pcr = mods.get("nexus.mcp.plan_cache_registry")
+    if pcr is not None:
+        pcr.reset_plan_cache_registry_for_tests()
 
 
 class TenantLeaseBusyError(RuntimeError):
@@ -505,7 +512,19 @@ def tenant_lease(state: Mapping[str, Any], request: pytest.FixtureRequest | None
         return get_pool(state).lease(owner=request.node.nodeid if request is not None else "")
     if enabled():
         _entries["fresh"] += 1
-    return minted_test_tenant(state)
+    return _minted_with_clean_caches(minted_test_tenant, state)
+
+
+@contextlib.contextmanager
+def _minted_with_clean_caches(mint: Callable[[Any], Any], state: Mapping[str, Any]) -> Iterator[Any]:
+    """A minted tenant is as new as a wiped lease (its plans get new ids), so it starts and ends with the client
+    caches emptied too. Only here, not inside ``minted_test_tenant``: tests nest that one inside a running test."""
+    reset_client_caches()
+    try:
+        with mint(state) as lease:
+            yield lease
+    finally:
+        reset_client_caches()
 
 
 def _reset_for_tests() -> None:

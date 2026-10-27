@@ -223,14 +223,21 @@ def test_a_title_after_the_id_vetoes_an_inference_from_a_nexus_session(tmp_path:
 HUGE = "".join(f"Compare RDR-{i % 900:03d} to RDR-{(i + 1) % 900:03d} in the nexus project. " for i in range(16_000))[:750_000]
 
 
-def _best_scan_seconds(question: str) -> float:
-    best = float("inf")
-    for _ in range(3):
-        started = time.perf_counter()
-        derive_request_coverage(question, scope="rdr")
-        project_name_candidates(question)
-        best = min(best, time.perf_counter() - started)
-    return best
+def _scan_seconds(question: str) -> float:
+    started = time.perf_counter()
+    derive_request_coverage(question, scope="rdr")
+    project_name_candidates(question)
+    return time.perf_counter() - started
+
+
+def _best_scan_seconds_interleaved(a: str, b: str, rounds: int = 5) -> tuple[float, float]:
+    """Best-of-``rounds`` for each question, measured alternately so a burst of load on a busy xdist host lands
+    on both series instead of inflating only one (a sequential best-of-3 failed once under 15 workers on chas)."""
+    best_a = best_b = float("inf")
+    for _ in range(rounds):
+        best_a = min(best_a, _scan_seconds(a))
+        best_b = min(best_b, _scan_seconds(b))
+    return best_a, best_b
 
 
 def test_a_750_kb_question_is_scanned_in_bounded_time() -> None:
@@ -240,7 +247,7 @@ def test_a_750_kb_question_is_scanned_in_bounded_time() -> None:
     busy CI runner (develop 2bb124e98, shard 6)."""
     assert len(HUGE) == 750_000
     capped = HUGE[:MAX_SCAN_CHARS]
-    huge_s, capped_s = _best_scan_seconds(HUGE), _best_scan_seconds(capped)
+    huge_s, capped_s = _best_scan_seconds_interleaved(HUGE, capped)
     assert huge_s < 3 * capped_s + 0.05, (
         f"{huge_s:.3f}s against {capped_s:.3f}s at the limit: the scans must not grow with the question "
         f"past {MAX_SCAN_CHARS} characters")
