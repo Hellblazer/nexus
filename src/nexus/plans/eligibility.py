@@ -46,11 +46,21 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
 
 The session cache's ``answer_provenance`` metadata is not read here: it is stale until a refresh.
 
-The whole filter sits behind :data:`ANSWER_KIND_ELIGIBILITY_ENABLED`, which ships ``False``
-(nexus-jypmj.2.8 turns it on once thresholds are set from the baseline measurement). With it off an
+The whole filter sits behind a setting read at call time, :func:`eligibility_enforced`: the environment
+variable ``NX_ANSWER_KIND_ELIGIBILITY`` (``0``, ``false``, ``off`` or ``no`` is the kill switch; unset,
+blank or anything else enforces), over the default :data:`ANSWER_KIND_ELIGIBILITY_ENABLED`, which ships
+``True`` (nexus-jypmj.2.8 turned it on after thresholds were set from the measurement). In shadow mode an
 :class:`EligibilityFilter` still judges and counts every candidate, so the run envelope can say what the
 gate WOULD exclude, but :meth:`EligibilityFilter.admit` keeps every candidate and the matcher's output,
 metrics and over-fetch are identical to a call that passed no filter.
+
+The gate is not enforced against a library that still holds a builtin without its declaration (RDR-232
+section 1: such a builtin reads as unattested until a reseed, and the gate is not enabled before every
+builtin carries its declaration). ``nx_answer`` checks that per request from the plan cache's last
+population and calls :meth:`EligibilityFilter.degrade_to_shadow`; the envelope then says
+``shadow_reason`` ``library_not_reseeded`` with the count of undeclared builtin rows. The upgrade ladder's
+plan-library axis reconciles builtins (``seed_plan_templates(reconcile=True)``) on upgrade, which writes
+the declarations, so an upgraded install enforces.
 
 The matcher calls :meth:`EligibilityFilter.admit` last on each branch, after every other drop (unmet
 binding, scope conflict, always-failing, FTS literal drop), so a branch's ``excluded`` count is
@@ -76,25 +86,67 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "ANSWER_KIND_ELIGIBILITY_ENABLED",
+    "ANSWER_KIND_ELIGIBILITY_ENV",
     "BRANCHES",
     "BUILTIN_TAG",
     "GROWN_TAG",
     "REASONS",
+    "SHADOW_REASONS",
     "TRUSTED_ROUTES",
     "EligibilityFilter",
     "PlanStanding",
     "Verdict",
     "classify_plan",
     "coerce_kind",
+    "count_undeclared_builtins",
     "eligibility",
+    "eligibility_enforced",
     "eligible_matches",
     "fallback_reason",
+    "warn_library_not_reseeded",
 ]
 
-#: The one switch. Off: the filter reports what it would exclude and excludes nothing, the planner's
-#: few-shots are as before. On: ineligible candidates are removed from every matcher branch and from the
-#: planner's few-shots. Read at call time through the module, so a test can flip it.
-ANSWER_KIND_ELIGIBILITY_ENABLED: bool = False
+#: The default of the gate (nexus-jypmj.2.8: ``True``). Off: the filter reports what it would exclude and
+#: excludes nothing, the planner's few-shots are as before. On: ineligible candidates are removed from every
+#: matcher branch and from the planner's few-shots. Read at call time through the module (by
+#: :func:`eligibility_enforced`), so a test can flip it; the environment variable overrides it.
+ANSWER_KIND_ELIGIBILITY_ENABLED: bool = True
+
+#: The kill switch. ``0``, ``false``, ``off`` or ``no`` (any case) means shadow; unset, blank or any other
+#: value defers to :data:`ANSWER_KIND_ELIGIBILITY_ENABLED` (enforce).
+ANSWER_KIND_ELIGIBILITY_ENV = "NX_ANSWER_KIND_ELIGIBILITY"
+_OFF_VALUES = frozenset({"0", "false", "off", "no"})
+
+#: ``shadow_reason`` values the envelope reports: the setting turned the gate off, or the library still
+#: holds builtins without their declaration.
+SHADOW_REASONS: frozenset[str] = frozenset({"disabled_by_setting", "library_not_reseeded"})
+
+
+def eligibility_enforced(environ: Mapping[str, str]) -> bool:
+    """Whether the answer-kind gate enforces for a request, decided now from *environ*.
+
+    Unset or blank: :data:`ANSWER_KIND_ELIGIBILITY_ENABLED` (``True``). An off value (``0``, ``false``,
+    ``off``, ``no``): shadow. Anything else: enforce.
+    """
+    raw = str(environ.get(ANSWER_KIND_ELIGIBILITY_ENV, "")).strip().lower()
+    if not raw:
+        return ANSWER_KIND_ELIGIBILITY_ENABLED
+    return raw not in _OFF_VALUES
+
+
+_warned_counts: set[int] = set()
+
+
+def warn_library_not_reseeded(undeclared: int) -> None:
+    """Log the not-reseeded warning once per process for each distinct count (it recurs on every request)."""
+    if undeclared in _warned_counts:
+        return
+    _warned_counts.add(undeclared)
+    _log.warning(
+        "answer_kind_gate_shadowed_library_not_reseeded",
+        undeclared_builtins=undeclared,
+        remedy="nx plan reseed",
+    )
 
 #: The row tags provenance reads. ``BUILTIN_TAG`` is ``matcher._CATEGORY_PLAN_TAG``; a test pins that.
 BUILTIN_TAG = "builtin-template"
@@ -207,6 +259,25 @@ def classify_plan(tags: str | None, plan_json: Any) -> PlanStanding:
     return PlanStanding(_U, "unattested", "undeclared_builtin" if BUILTIN_TAG in tokens else None)
 
 
+def count_undeclared_builtins(rows: Iterable[Mapping[str, Any]]) -> int:
+    """How many of *rows* are builtin templates that carry no valid answer-kind declaration.
+
+    The same judgement :func:`classify_plan` makes (``undeclared_builtin``), so what the library check counts
+    is what the filter would refuse under that reason. A row that cannot be read counts as zero.
+    """
+    total = 0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        try:
+            standing = classify_plan(row.get("tags"), row.get("plan_json"))
+        except Exception:  # noqa: BLE001 — an unreadable row is counted nowhere; the filter reports it as judge_error
+            continue
+        if standing.flag == "undeclared_builtin":
+            total += 1
+    return total
+
+
 def eligibility(request_kind: PlanAnswerKind, plan_kind: PlanAnswerKind, provenance: str) -> Verdict:
     """May a plan of *plan_kind* and *provenance* serve a request of *request_kind*? (the matrix)
 
@@ -266,10 +337,15 @@ class EligibilityFilter:
     the fallback reason. With ``enforce`` False it judges and counts and admits everything.
     """
 
-    def __init__(self, request_kind: PlanAnswerKind | str, decision: str = "unknown", enforce: bool = False) -> None:
+    def __init__(
+        self, request_kind: PlanAnswerKind | str, decision: str = "unknown", enforce: bool = False,
+        shadow_reason: str | None = None,
+    ) -> None:
         self.request_kind = coerce_kind(request_kind)
         self.decision = decision
         self.enforce = enforce
+        self.shadow_reason = shadow_reason
+        self.undeclared_builtins: int | None = None
         self._branches: dict[str, dict[str, Any]] = {
             b: {"examined": 0, "excluded": 0, "reasons": {}} for b in BRANCHES
         }
@@ -332,11 +408,20 @@ class EligibilityFilter:
     def set_fallback(self, reason: str | None) -> None:
         self._fallback = reason
 
+    def degrade_to_shadow(self, reason: str, undeclared_builtins: int | None = None) -> None:
+        """Stop enforcing for this request and say why; judging and counting go on (call before the matcher runs)."""
+        self.enforce = False
+        self.shadow_reason = reason
+        if undeclared_builtins is not None:
+            self.undeclared_builtins = undeclared_builtins
+
     def to_wire(self) -> dict[str, Any]:
         return {
             "request_kind": self.request_kind.value,
             "kind_decision": self.decision,
             "enforced": self.enforce,
+            "shadow_reason": self.shadow_reason,
+            "undeclared_builtins": self.undeclared_builtins,
             "branches": {b: {**c, "reasons": dict(c["reasons"])} for b, c in self._branches.items()},
             "excluded_total": self.excluded_total,
             "excluded_plan_ids": self._excluded_ids[:_MAX_LISTED_IDS],

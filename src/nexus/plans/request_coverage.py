@@ -47,8 +47,8 @@ The first pass is deterministic and costs no model call. It follows the extracti
   fails open: with uncertain facets and an RDR source the caller bound, the stream is read.
 
 An optional second step (:func:`structured_extract`) makes at most one direct, schema-closed model call
-when the first pass could not establish the kind or the clause structure. It is off unless the caller
-enables it, has its own timeout, and its latency and cost are reported separately from plan-match latency
+when the first pass could not establish the kind or the clause structure. It is on by default (a kill switch
+turns it off), has its own timeout, and its latency and cost are reported separately from plan-match latency
 (:class:`ExtractionReport`). A failure leaves the first-pass result as it was. Model facets replace the
 first pass's only when they cover every content word of the question; otherwise the ``whole_question``
 facet stays beside them.
@@ -1234,26 +1234,31 @@ def _source_ambiguities(
 
 # ── the optional structured extraction ───────────────────────────────────────────────────────────────────
 
-#: Opt-in switch, read from the environment by the caller. Off unless this is a truthy value.
+#: The kill switch, read from the environment by the caller. On unless this is ``0``, ``false``, ``off`` or
+#: ``no`` (any case); unset, blank and every other value mean on (nexus-jypmj.2.8).
 EXTRACT_ENV = "NX_ANSWER_STRUCTURED_EXTRACT"
 #: Seconds the structured step may take, from the environment, bounded to [1, 60].
 EXTRACT_TIMEOUT_ENV = "NX_ANSWER_STRUCTURED_EXTRACT_TIMEOUT"
 DEFAULT_EXTRACT_TIMEOUT_S = 20.0
 #: The model the structured call asks for: an alias (haiku, sonnet, opus) or a model id, passed to the
-#: ``--model`` flag as given. Unset or blank leaves the call on the default operator pin.
+#: ``--model`` flag as given. Unset or blank means :data:`DEFAULT_EXTRACT_MODEL`.
 EXTRACT_MODEL_ENV = "NX_ANSWER_STRUCTURED_EXTRACT_MODEL"
+#: The default extraction model (nexus-jypmj.2.8): the cheap tier, measured on 56 calls with no timeout or
+#: error. Always passed explicitly, so ``NX_OPERATOR_MODEL_TIERING`` (which only picks the model of a
+#: dispatch that names none) does not change it; a set ``EXTRACT_MODEL_ENV`` wins.
+DEFAULT_EXTRACT_MODEL = "haiku"
 
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_OFF_VALUES = frozenset({"0", "false", "off", "no"})
 
 
 def extraction_enabled(environ: Mapping[str, str]) -> bool:
-    """Whether the structured step is switched on in *environ* (off by default)."""
-    return str(environ.get(EXTRACT_ENV, "")).strip().lower() in _TRUTHY
+    """Whether the structured step is switched on in *environ* (on by default; ``0``/``false``/``off``/``no`` is off)."""
+    return str(environ.get(EXTRACT_ENV, "")).strip().lower() not in _OFF_VALUES
 
 
-def extraction_model(environ: Mapping[str, str]) -> str | None:
-    """The model the structured call is asked to use, or None for the default pin (unset or blank)."""
-    return str(environ.get(EXTRACT_MODEL_ENV, "")).strip() or None
+def extraction_model(environ: Mapping[str, str]) -> str:
+    """The model the structured call is asked to use: the trimmed setting, else :data:`DEFAULT_EXTRACT_MODEL`."""
+    return str(environ.get(EXTRACT_MODEL_ENV, "")).strip() or DEFAULT_EXTRACT_MODEL
 
 
 def extraction_timeout(environ: Mapping[str, str]) -> float:

@@ -361,7 +361,8 @@ def test_model_report_names_the_requested_setting_and_the_models_that_answered()
     captured = {"a": [SimpleNamespace(model="claude-haiku-4-5")], "b": [SimpleNamespace(model="claude-haiku-4-5"), SimpleNamespace(model=None)]}
     rep = em.model_report({EXTRACT_MODEL_ENV: " haiku "}, captured)
     assert rep == {"requested": "haiku", "canonical_models": {"None": 1, "claude-haiku-4-5": 2}}
-    assert em.model_report({}, {}) == {"requested": None, "canonical_models": {}}
+    # nexus-jypmj.2.8: an unset setting now requests haiku (this pinned None).
+    assert em.model_report({}, {}) == {"requested": "haiku", "canonical_models": {}}
 
 
 def test_dry_run_main_writes_a_report_without_any_model_call(tmp_path, capsys) -> None:

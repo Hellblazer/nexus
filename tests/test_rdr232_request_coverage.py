@@ -261,8 +261,10 @@ def test_the_structured_call_never_overrides_an_explicit_kind_or_adds_a_call_for
     assert after.answer_kind == "debug" and after.kind_decision == "explicit"
 
 
-def test_the_setting_is_off_by_default_and_its_timeout_is_bounded() -> None:
-    assert rc.extraction_enabled({}) is False
+def test_the_setting_is_on_by_default_and_its_timeout_is_bounded() -> None:
+    # nexus-jypmj.2.8: on unless the kill switch (0/false/off/no) says otherwise; this pinned the old "off by default".
+    assert rc.extraction_enabled({}) is True
+    assert rc.extraction_enabled({rc.EXTRACT_ENV: ""}) is True
     assert rc.extraction_enabled({rc.EXTRACT_ENV: "1"}) is True
     assert rc.extraction_enabled({rc.EXTRACT_ENV: "off"}) is False
     assert rc.extraction_timeout({}) == rc.DEFAULT_EXTRACT_TIMEOUT_S
@@ -469,13 +471,15 @@ def test_coverage_is_built_before_plan_match_and_reported_in_the_envelope_and_th
 
 
 @pytest.mark.parametrize("qid", sorted(_golden()))
-def test_the_matcher_is_handed_the_same_arguments_whatever_the_coverage_says(qid: str) -> None:
-    """The matcher's selection inputs do not depend on the coverage while the eligibility gate is off. Swap the
+def test_the_matcher_is_handed_the_same_arguments_whatever_the_coverage_says(qid: str, monkeypatch) -> None:
+    """The matcher's selection inputs do not depend on the coverage while the eligibility gate is off (the test
+    sets the kill switch: the gate is on by default since nexus-jypmj.2.8). Swap the
     real derivation for a coverage that claims the opposite kind and a gate facet; the matcher sees identical
     arguments. The one new argument, the eligibility filter (nexus-jypmj.2.3), names the request kind it judges
     for, so it is compared by what it can change: it is not enforcing in either run."""
     from tests.test_rdr232_caller_scope import _MULTI_PLAN
 
+    monkeypatch.setenv("NX_ANSWER_KIND_ELIGIBILITY", "0")
     q = _golden()[qid]
     seen: list[dict] = []
 
@@ -492,7 +496,7 @@ def test_the_matcher_is_handed_the_same_arguments_whatever_the_coverage_says(qid
         _drive(q["text"], plan_match=matcher, scope="")
     assert len(seen) == 2
     filters = [call.pop("eligibility") for call in seen]
-    assert [f.enforce for f in filters] == [False, False], "the gate ships off: the filter only reports"
+    assert [f.enforce for f in filters] == [False, False], "the kill switch is set: the filter only reports"
     assert seen[0] == seen[1], (seen[0], seen[1])
     assert real_run[0]["request_coverage"]["answer_kind"] in REQUEST_KINDS
 
@@ -571,7 +575,8 @@ def test_trace_off_logs_counts_and_no_wording_and_trace_on_logs_the_facets(info_
 # ── 13. the structured call through nx_answer ─────────────────────────────────────────────────────────────
 
 
-def test_nx_answer_makes_the_structured_call_only_when_the_setting_is_on(monkeypatch) -> None:
+def test_nx_answer_makes_the_structured_call_unless_the_setting_is_off(monkeypatch) -> None:
+    # nexus-jypmj.2.8: the call is on by default; "0" is the kill switch (the old test treated unset as off).
     fake = _Dispatch({"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []})
 
     def run(env_value: str | None) -> dict:
@@ -583,10 +588,10 @@ def test_nx_answer_makes_the_structured_call_only_when_the_setting_is_on(monkeyp
             env, _ = _drive("Tell me about plan matching.")
         return env["request_coverage"]
 
-    off = run(None)
+    off = run("0")
     assert fake.calls == [] and off["extraction"]["outcome"] == "disabled"
-    on = run("1")
-    assert len(fake.calls) == 1, "one call, on the caller's opt-in"
+    on = run(None)
+    assert len(fake.calls) == 1, "one call with the setting unset"
     assert fake.extra[0]["operator"] == "request_coverage_extract"
     assert on["extraction"]["outcome"] == "ok" and on["extraction"]["calls"] == 1
     assert on["extraction"]["latency_ms"] is not None and on["extraction"]["timeout_s"] is not None
@@ -1021,22 +1026,21 @@ def test_nx_answer_gives_dispatch_a_deadline_inside_its_own_timeout(monkeypatch)
     assert env["request_coverage"]["extraction"]["timeout_s"] == 3.0
 
 
-def test_the_extraction_model_setting_is_unset_by_default_and_trimmed() -> None:
+def test_the_extraction_model_setting_defaults_to_haiku_and_is_trimmed() -> None:
+    # nexus-jypmj.2.8: unset or blank is haiku (this pinned None, the default operator pin).
     assert rc.EXTRACT_MODEL_ENV == "NX_ANSWER_STRUCTURED_EXTRACT_MODEL"
-    assert rc.extraction_model({}) is None
-    assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: ""}) is None
-    assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: "   "}) is None
+    assert rc.DEFAULT_EXTRACT_MODEL == "haiku"
+    assert rc.extraction_model({}) == "haiku"
+    assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: ""}) == "haiku"
+    assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: "   "}) == "haiku"
     assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: " haiku "}) == "haiku"
     assert rc.extraction_model({rc.EXTRACT_MODEL_ENV: "claude-haiku-4-5"}) == "claude-haiku-4-5"
 
 
 @pytest.mark.parametrize("value", [None, "", "  "])
-def test_nx_answer_extraction_model_is_the_strong_default_when_the_setting_is_unset_or_empty(
-    monkeypatch, value,
-) -> None:
-    """Unset or empty is today's behaviour exactly: the dispatch gets what ``_pin_default_model(None)`` gives."""
-    from nexus.operators.model_tiers import STRONG_DEFAULT_ALIAS
-
+def test_nx_answer_extraction_model_is_haiku_when_the_setting_is_unset_or_empty(monkeypatch, value) -> None:
+    """nexus-jypmj.2.8: unset or empty asks for haiku, and ``NX_OPERATOR_MODEL_TIERING=0`` does not change that: the
+    model is always passed explicitly (the old test pinned the strong operator pin and a bare dispatch under =0)."""
     fake = _Dispatch({"answer_kind": "synthesis", "facets": ["plan matching"], "constraints": []})
     _extract_env(monkeypatch, fake)
     if value is None:
@@ -1044,11 +1048,11 @@ def test_nx_answer_extraction_model_is_the_strong_default_when_the_setting_is_un
     else:
         monkeypatch.setenv(rc.EXTRACT_MODEL_ENV, value)
     _drive("Tell me about plan matching.")
-    assert fake.extra[0]["model"] == STRONG_DEFAULT_ALIAS == _core()._pin_default_model(None)
+    assert fake.extra[0]["model"] == "haiku"
     fake.extra.clear()
     monkeypatch.setenv("NX_OPERATOR_MODEL_TIERING", "0")
     _drive("Tell me about plan matching.")
-    assert fake.extra[0]["model"] is None, "the tiering kill switch still restores bare dispatch when no model is set"
+    assert fake.extra[0]["model"] == "haiku", "the tiering kill switch does not strip an explicit model"
 
 
 @pytest.mark.parametrize("value,expected", [("haiku", "haiku"), (" sonnet ", "sonnet"), ("claude-haiku-4-5", "claude-haiku-4-5")])

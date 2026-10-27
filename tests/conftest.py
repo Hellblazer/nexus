@@ -2890,6 +2890,17 @@ def _no_mcp_search_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nx_answer's structured request extraction is ON by default (nexus-jypmj.2.8) and makes one `claude -p`
+    call for a request the deterministic pass leaves open. No unit test may spend that call: it is off here, and
+    a test about the extraction setting (tests/test_rdr232_request_coverage.py, tests/test_rdr232_gate_defaults.py)
+    deletes the variable itself and fakes the dispatch. The gate's kill switch is cleared so a developer's
+    exported NX_ANSWER_KIND_ELIGIBILITY=0 cannot change what a test sees."""
+    monkeypatch.setenv("NX_ANSWER_STRUCTURED_EXTRACT", "0")
+    monkeypatch.delenv("NX_ANSWER_KIND_ELIGIBILITY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_search_telemetry_sink():
     """Give every test its own MCP search telemetry worker (nexus-vpa9q).
 

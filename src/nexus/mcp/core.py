@@ -10263,7 +10263,7 @@ async def _nx_answer_request_coverage(
     RDR-232 Phase 2 (nexus-jypmj.2.2), **shadow mode**: the result is reported (envelope, evidence
     diagnostics, one log event) and decides only whether the T2 lifecycle stream is read; it does not gate
     plan selection (nexus-jypmj.2.3). The deterministic first pass runs in-process and is timed on its own.
-    The optional structured extraction (``NX_ANSWER_STRUCTURED_EXTRACT``, off by default) makes at most one
+    The structured extraction (``NX_ANSWER_STRUCTURED_EXTRACT``, on by default, ``0`` turns it off) makes at most one
     direct dispatch under its own timeout, inside *deadline*, with its latency and cost in the coverage's
     ``extraction`` report. Never raises: a failure leaves the first-pass result.
     """
@@ -10297,7 +10297,7 @@ async def _nx_answer_request_coverage(
             own = time.monotonic() + timeout
             return await claude_dispatch(
                 prompt, schema, timeout=timeout, usage_sink=usage_sink,
-                model=_pin_default_model(extraction_model(_os.environ)),
+                model=extraction_model(_os.environ),  # always explicit: haiku unless the setting names another
                 operator="request_coverage_extract", deadline=own if deadline is None else min(own, deadline),
             )
 
@@ -10408,6 +10408,44 @@ def _nx_answer_settle_inference(request: EvidenceRequest, named: "NamedSourceRes
         "(each source's detail says which)"
     )
     return replace(request, owner=OwnerResolution("none"), active_project=tier)
+
+
+def _nx_answer_undeclared_builtins(cache: Any) -> "int | None":
+    """How many builtin templates the plan library holds without an answer-kind declaration; ``None`` if unknown.
+
+    The rows are already in hand: the T1 plan cache counted them when it last populated (at most 90 s ago), so
+    a request costs no T2 call. Only a request with no cache (T1 unreachable, the matcher then reads FTS5)
+    lists the active plans once, to count them.
+    """
+    from nexus.plans.eligibility import count_undeclared_builtins  # noqa: PLC0415 — deferred; matches this module's convention
+
+    count = getattr(cache, "undeclared_builtins", None)
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    rows = _t2_index_write(lambda db: db.plans.list_active_plans(), op="plan_library_precondition")
+    if not isinstance(rows, list):
+        return None
+    return count_undeclared_builtins(rows)
+
+
+def _nx_answer_library_precondition(filt: Any, cache: Any) -> None:
+    """Run the answer-kind gate in shadow when the library holds a builtin without its declaration.
+
+    RDR-232 section 1: a builtin seeded before declarations existed is unattested until a reseed, and the gate
+    is not enabled before every builtin carries its declaration. Only an enforcing request is checked. A
+    library that cannot be read leaves the gate enforcing (the cost of an unreadable library is recall, not a
+    wrong-shape answer). Never raises. The upgrade ladder reconciles builtins on upgrade
+    (``upgrade_ladder.preconditions._plan_library_report``), so an upgraded install does not trip this.
+    """
+    from nexus.plans.eligibility import warn_library_not_reseeded  # noqa: PLC0415 — deferred; matches this module's convention
+
+    if not filt.enforce:
+        return
+    count = _nx_answer_isolated("library_precondition", None, _nx_answer_undeclared_builtins, cache)
+    if not count:
+        return
+    filt.degrade_to_shadow("library_not_reseeded", count)
+    warn_library_not_reseeded(count)
 
 
 def _nx_answer_isolated(stage: str, default: Any, fn: "Callable[..., Any]", /, *args: Any, **kwargs: Any) -> Any:
@@ -11969,12 +12007,14 @@ async def nx_answer(
 
         _request_coverage = _nx_answer_isolated("withdraw_unqualified", _request_coverage, _withdraw_unqualified)
     # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
-    # plan_match, which asks it of every branch's candidates; enforcing only when the module constant is on
-    # (it ships off: the filter then counts what it would exclude and excludes nothing). Reported in the
-    # envelope as `plan_eligibility`, always present.
+    # plan_match, which asks it of every branch's candidates; enforcing unless NX_ANSWER_KIND_ELIGIBILITY turns
+    # the gate off (nexus-jypmj.2.8; shadow: the filter counts what it would exclude and excludes nothing).
+    # A library that still holds undeclared builtins degrades it to shadow just before plan_match (below).
+    # Reported in the envelope as `plan_eligibility`, always present.
+    _gate_on = _eligibility.eligibility_enforced(_os.environ)
     _plan_eligibility = _eligibility.EligibilityFilter(
-        _request_coverage.answer_kind, _request_coverage.kind_decision,
-        enforce=_eligibility.ANSWER_KIND_ELIGIBILITY_ENABLED,
+        _request_coverage.answer_kind, _request_coverage.kind_decision, enforce=_gate_on,
+        shadow_reason=None if _gate_on else "disabled_by_setting",
     )
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.
@@ -12610,6 +12650,8 @@ async def nx_answer(
                 lambda db: db.plans, op="plan_match_cache_populate",
             )
             cache = get_t1_plan_cache(populate_from=_plans_store_for_cache)
+            # nexus-jypmj.2.8: the gate is not enforced against a library that was never reseeded.
+            _nx_answer_library_precondition(_plan_eligibility, cache)
             # _plan_match's OWN real T2 traffic (HttpPlanLibrary.get_plan
             # per candidate, increment_match_metrics on every match) must
             # run INSIDE the closure — the critique's finding was that a

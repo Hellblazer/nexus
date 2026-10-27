@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-232 Phase 2 step 2 (nexus-jypmj.2.8): measure the optional model-backed request extraction.
 
-``NX_ANSWER_STRUCTURED_EXTRACT`` (default off) lets ``nx_answer`` make at most one schema-closed ``claude -p``
+``NX_ANSWER_STRUCTURED_EXTRACT`` (default on since this bead; this script still sets it itself) lets ``nx_answer`` make at most one schema-closed ``claude -p``
 call per request when the deterministic first pass left the request open. This script measures what that call
 buys: how many requests it resolves, how often it is wrong against a frozen label, what it costs and how long
 it takes, and (for recorded runs) how the eligibility gate's verdicts move when the extracted kinds are used.

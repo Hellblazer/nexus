@@ -5686,7 +5686,7 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   up to six constraints (each clipped, 600 characters in all; nothing when the
   coverage holds no more than `unknown`); the prompt is never logged.
   `extraction` is `{outcome, calls, timeout_s, latency_ms,
-  cost_usd}` for the optional structured call (`NX_ANSWER_STRUCTURED_EXTRACT`;
+  cost_usd}` for the structured call (`NX_ANSWER_STRUCTURED_EXTRACT`, on by default, `0` turns it off;
   `outcome` `disabled`, `not_needed`, `skipped_deadline`, `ok`, `unchanged`,
   `timeout`, `error` or `invalid`; at most one call). With `trace=False` the
   log event carries counts only. The first-pass patterns were written with
@@ -5694,8 +5694,9 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   in-sample.
 - `plan_eligibility` (nexus-jypmj.2.3, RDR-232 Phase 2): whether each plan the matcher
   considered may serve the request's answer kind, from the compatibility matrix in
-  RDR-232 section 1. `{request_kind, kind_decision, enforced, branches,
-  excluded_total, excluded_plan_ids, returned, selected, fallback_reason}`.
+  RDR-232 section 1. `{request_kind, kind_decision, enforced, shadow_reason,
+  undeclared_builtins, branches, excluded_total, excluded_plan_ids, returned, selected,
+  fallback_reason}`.
   `request_kind` and `kind_decision` are those of `request_coverage`. `branches` has
   `cosine`, `category_route` (the below-floor category route) and `fts` (the FTS5
   fallback), each `{examined, excluded, reasons}`; a reason is `kind_mismatch`,
@@ -5708,10 +5709,14 @@ The envelope has ten RDR-232 keys, all always present (`scope_diagnostics`,
   (judging the candidate failed; kept when not enforcing, dropped when enforcing).
   The filter judges after every other drop (unmet binding, scope conflict,
   always-failing, FTS literal drop), so a count is "would have been returned, but for
-  eligibility". The gate ships off
-  (`nexus.plans.eligibility.ANSWER_KIND_ELIGIBILITY_ENABLED`): `enforced` is then
-  `false`, nothing is excluded, and the object reports what the gate would exclude.
-  With the gate on, ineligible plans are removed from every branch and from the inline
+  eligibility". The gate is on by default (nexus-jypmj.2.8; `NX_ANSWER_KIND_ELIGIBILITY=0`,
+  `false`, `off` or `no` turns it off). In shadow mode `enforced` is `false`, nothing is
+  excluded, and the object reports what the gate would exclude; `shadow_reason` says why:
+  `disabled_by_setting`, or `library_not_reseeded` when the plan library holds builtin
+  templates with no answer-kind declaration (`undeclared_builtins` counts them; run
+  `nx plan reseed`, or upgrade, which reconciles them). Both are `null` when the gate
+  enforces.
+  With the gate enforcing, ineligible plans are removed from every branch and from the inline
   planner's few-shot examples, and a call left with no candidate plans inline with
   `fallback_reason` `all_candidates_ineligible`. `returned` is `{total, eligible}` for
   the plans the matcher returned; `selected` is `{plan_id, eligible, kind, provenance,

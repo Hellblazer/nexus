@@ -69,6 +69,9 @@ class PlanSessionCache:
         self._client = client
         self._session_id = session_id
         self._available = True
+        # Builtin templates the last populate() saw with no answer-kind declaration; None until a
+        # population has run (nexus-jypmj.2.8).
+        self.undeclared_builtins: int | None = None
         try:
             # The bundled MiniLM is the SETTLED choice, not an interim
             # one (2026-08-22). RDR-079 P5 proposed migrating this cache to
@@ -185,6 +188,12 @@ class PlanSessionCache:
         for row in rows:
             if self._upsert_row(row):
                 loaded += 1
+        # RDR-232 Phase 2 (nexus-jypmj.2.8): the rows are in hand, so note how many builtins still carry
+        # no answer-kind declaration. ``nx_answer`` reads this to run the eligibility gate in shadow against
+        # a library that was not reseeded. As fresh as this population (bounded staleness, 90 s).
+        from nexus.plans.eligibility import count_undeclared_builtins  # noqa: PLC0415 — deferred; eligibility is only needed here
+
+        self.undeclared_builtins = count_undeclared_builtins(rows)
         return loaded
 
     def upsert(self, row: dict[str, Any]) -> bool:

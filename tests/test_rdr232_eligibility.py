@@ -6,8 +6,11 @@ Tenant-free. The matcher runs over fake plan libraries and caches (the pattern o
 ``test_plan_match_category_route.py``); the ``nx_answer`` tests drive the real matcher through the
 ``nexus.plans.matcher.plan_match`` patch point, so the wiring is exercised and not stubbed away.
 
-The module constant ``ANSWER_KIND_ELIGIBILITY_ENABLED`` ships OFF. The scenario tests run with it on
-(``enabled`` fixture); the shadow tests run with it off and pin that selection does not move.
+The gate is ON by default since nexus-jypmj.2.8 (module constant ``ANSWER_KIND_ELIGIBILITY_ENABLED`` is the
+default, ``NX_ANSWER_KIND_ELIGIBILITY=0`` the kill switch). The scenario tests use the ``enabled`` fixture (kept
+from when the default was off; harmless now); the shadow tests set the kill switch (``shadow`` fixture) and pin
+that selection does not move. Defaults, kill switches and the library precondition are in
+``tests/test_rdr232_gate_defaults.py``.
 """
 from __future__ import annotations
 
@@ -38,6 +41,11 @@ LOOKUP_Q = "Which paper reported the value 0.82 for the cosine floor?"
 @pytest.fixture
 def enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(el, "ANSWER_KIND_ELIGIBILITY_ENABLED", True)
+
+
+@pytest.fixture
+def shadow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(el.ANSWER_KIND_ELIGIBILITY_ENV, "0")
 
 
 # ── the matrix, as a table over every cell ───────────────────────────────────────────────────────────────
@@ -477,8 +485,9 @@ def test_scenario_8_the_shadow_filter_still_reports_what_the_gate_would_exclude(
     assert filt.excluded_plan_ids == [473]
 
 
-def test_scenario_8_the_constant_ships_off() -> None:
-    assert el.ANSWER_KIND_ELIGIBILITY_ENABLED is False
+def test_scenario_8_the_constant_ships_on() -> None:
+    # nexus-jypmj.2.8: this pinned "ships off".
+    assert el.ANSWER_KIND_ELIGIBILITY_ENABLED is True
 
 
 def test_enforcing_widens_the_cosine_over_fetch_so_excluded_plans_do_not_starve_the_pool() -> None:
@@ -633,8 +642,8 @@ def test_the_filter_wire_shape() -> None:
     _, filt = _match([LOOKUP_473, SYNTH_12], [(473, 0.1), (12, 0.4)], S)
     wire = filt.to_wire()
     assert set(wire) == {
-        "request_kind", "kind_decision", "enforced", "branches", "excluded_total", "excluded_plan_ids",
-        "returned", "selected", "fallback_reason",
+        "request_kind", "kind_decision", "enforced", "shadow_reason", "undeclared_builtins", "branches",
+        "excluded_total", "excluded_plan_ids", "returned", "selected", "fallback_reason",
     }
     assert wire["request_kind"] == "synthesis" and wire["kind_decision"] == "heuristic"
     assert set(wire["branches"]) == {"cosine", "category_route", "fts"}
@@ -831,9 +840,11 @@ def _drive(question, rows, hits, *, plan_miss=None, fts=(), db=None, matcher_flo
     return env, miss, seen
 
 
-def test_the_envelope_reports_eligibility_even_with_the_gate_off() -> None:
+def test_the_envelope_reports_eligibility_even_with_the_gate_off(shadow) -> None:
+    # nexus-jypmj.2.8: the gate is on by default; the kill switch restores the old shadow behaviour.
     env, miss, seen = _drive(G06, [LOOKUP_473, SYNTH_12], [(473, 0.1), (12, 0.4)])
     wire = env["plan_eligibility"]
+    assert wire["shadow_reason"] == "disabled_by_setting"
     assert wire["enforced"] is False and wire["request_kind"] == "synthesis" and wire["kind_decision"] == "heuristic"
     assert wire["branches"]["cosine"] == {"examined": 2, "excluded": 1, "reasons": {"kind_mismatch": 1}}
     assert wire["selected"]["plan_id"] == 473 and wire["selected"]["eligible"] is False, (
@@ -894,19 +905,20 @@ def test_no_candidates_and_a_low_confidence_match_have_their_own_fallback_reason
 
 
 def test_the_planner_is_handed_the_coverage_and_the_filters_enforce(monkeypatch) -> None:
+    # nexus-jypmj.2.8: enforcing is the default; the kill switch gives False (the old test had the two reversed).
     env, miss, _ = _drive(G06, [], [])
     cov = miss.call_args.kwargs["coverage"]
     assert cov.answer_kind == "synthesis" and cov.kind_decision == "heuristic"
-    assert miss.call_args.kwargs["enforce_eligibility"] is False
-    monkeypatch.setattr(el, "ANSWER_KIND_ELIGIBILITY_ENABLED", True)
-    _, miss, _ = _drive(G06, [], [])
     assert miss.call_args.kwargs["enforce_eligibility"] is True
+    monkeypatch.setenv(el.ANSWER_KIND_ELIGIBILITY_ENV, "0")
+    _, miss, _ = _drive(G06, [], [])
+    assert miss.call_args.kwargs["enforce_eligibility"] is False
 
 
-def test_the_matcher_is_handed_a_filter_built_from_the_coverage_and_the_constant() -> None:
+def test_the_matcher_is_handed_a_filter_built_from_the_coverage_and_the_setting() -> None:
     _, _, seen = _drive(G06, [LOOKUP_473], [(473, 0.1)])
     filt = seen[0]["eligibility"]
-    assert (filt.request_kind, filt.decision, filt.enforce) == (S, "heuristic", False)
+    assert (filt.request_kind, filt.decision, filt.enforce) == (S, "heuristic", True)
 
 
 def test_a_caller_hint_is_an_explicit_decision_in_the_report() -> None:
