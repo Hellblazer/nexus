@@ -313,17 +313,23 @@ summary counts each kind and the run output names degraded pages. Existing
 values (`docling`, `mineru+docling-degraded`, `pymupdf_normalized`) stay
 readable on documents already indexed.
 
-**Configuration and CLI.** `pdf.extractor` and `--extractor` accept `mineru`.
-The values `auto` and `docling`, still present in users' configs and scripts,
-mean `mineru` and print a one-line deprecation notice. `--on-formula-oom` is
-retired, since the ladder handles that case. Whether to add an explicit
-`--extractor pymupdf` (text layer only, for a host that cannot run MinerU) is
-open question Q1.
+**Configuration and CLI.** `pdf.extractor` and `--extractor` accept `mineru`
+(the default) and `pymupdf`. The values `auto` and `docling`, still present in
+users' configs and scripts, mean `mineru` and print a one-line deprecation notice.
+`--on-formula-oom` is retired, since the ladder handles that case.
 
-**No MinerU at all.** If MinerU is not installed, extraction fails at once and
-names the fix (`pdf_stack` already words this), rather than degrading every
-page to its text layer. Q1 decides whether `pymupdf` exists as an explicit
-choice for that case.
+**`pymupdf`, the explicit text-only extractor (Sam, 2026-10-27).** For a host that
+cannot run MinerU, `--extractor pymupdf` (or `pdf.extractor: pymupdf`) runs only
+rung 3 for every page: the PDF's own text layer, with no layout, tables or math.
+Pages are stamped `pymupdf-text`, an image-only page is `unextracted`, and the run
+names the extractor in its summary so the result is never mistaken for a MinerU
+extraction. It needs only PyMuPDF, a core dependency, so it works without the
+`pdf` extra. It is never chosen automatically.
+
+**No MinerU at all.** With the default `mineru`, a missing MinerU fails the run
+at once and names both fixes: install the PDF stack (`pdf_stack` already words
+this) or rerun with `--extractor pymupdf` for text only. It does not degrade every
+page to its text layer on its own.
 
 **Title.** Title resolution falls back from `docling_title` to the next source
 already in the chain (`pdf_title`, then filename); documents that carry a
@@ -425,7 +431,7 @@ the install, CI and tests; Docling's whole-document convert stays silent.
 ### Prerequisites
 
 - [x] A1 to A5 verified or reframed (RF-8 to RF-12).
-- [ ] Q1 answered by Sam.
+- [x] Q1 answered by Sam (2026-10-27): add `--extractor pymupdf`.
 
 ### Minimum Viable Validation
 
@@ -481,8 +487,11 @@ None. Docling (`docling-slim` and its three companions) is removed.
   restarted.
 - **Scenario**: two consecutive server requests time out — **Verify**: the server
   is restarted once and later pages use it again.
-- **Scenario**: MinerU not installed — **Verify**: immediate failure naming the fix,
-  no page extracted.
+- **Scenario**: MinerU not installed — **Verify**: immediate failure naming both
+  fixes (install the PDF stack, or `--extractor pymupdf`), no page extracted.
+- **Scenario**: `--extractor pymupdf` without the `pdf` extra installed —
+  **Verify**: every page with a text layer is `pymupdf-text`, image-only pages are
+  `unextracted`, MinerU is never started, and the summary names the extractor.
 - **Scenario**: `pdf.extractor: docling` in config — **Verify**: runs MinerU, one notice.
 - **Scenario**: `mineru_page_timeout_s` set to the stale window or more —
   **Verify**: refused at config load.
@@ -531,7 +540,7 @@ The MVV is in scope and runs before the RDR closes.
 - **Licensing**: removing a dependency only.
 - **Deployment model**: client change; no engine change.
 - **IDE compatibility**: N/A.
-- **Incremental adoption**: Docling-extracted documents stay; re-extraction is opt-in.
+- **Incremental adoption**: Docling-extracted documents stay; re-extraction is opt-in. A host without MinerU indexes text only with `--extractor pymupdf`.
 - **Secret/credential lifecycle**: N/A.
 - **Memory management**: MinerU server memory per RF-4; Docling's in-process
   converter (about 2 GB) leaves the indexing process.
@@ -542,9 +551,9 @@ Right-sized for a change that removes a dependency across code, CI and docs.
 
 ## Open Questions for Sam
 
-- **Q1**: should `--extractor pymupdf` (text layer only, no layout, tables or
-  math) exist as an explicit choice for a host that cannot run MinerU, or does
-  a missing MinerU always fail?
+- **Q1** (answered 2026-10-27): should `--extractor pymupdf` (text layer only, no
+  layout, tables or math) exist as an explicit choice for a host that cannot run
+  MinerU? Yes; see Technical Design, "`pymupdf`, the explicit text-only extractor".
 
 ## References
 
@@ -562,3 +571,4 @@ Right-sized for a change that removes a dependency across code, CI and docs.
 
 - 2026-10-27: draft.
 - 2026-10-27: research RF-8 to RF-12; A2 reframed, so a server timeout no longer restarts the server unless it repeats.
+- 2026-10-27: Q1 answered by Sam: `--extractor pymupdf` added as an explicit text-only choice.
