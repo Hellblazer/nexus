@@ -538,8 +538,9 @@ only when that route was known and recorded in provenance; otherwise they are
 `unknown`. No migration may guess a shape from plan text and silently promote
 it to a hard constraint.
 
-Unknown-kind **builtin/curated** plans remain eligible as in the compatibility
-matrix because their scope and operator shape are reviewed. Unknown-kind
+A **builtin/curated** row stays eligible as its declared kind; a builtin seeded
+before declarations existed is treated as unattested until a reseed, and the
+gate is not enabled before every builtin carries its declaration. Unknown-kind
 **grown** plans are not a generic bypass: with no recorded answer-kind
 provenance, they are eligible only for `lookup` or `discovery/listing` requests,
 and remain subject to the existing literal/scope/confidence gates. An unknown
