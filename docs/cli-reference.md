@@ -255,7 +255,9 @@ the same cause (a timeout, or the same worker exit and stderr line) the install 
 the machine is failing, not the PDF: the document stops, naming the cause. The
 pages before that window stay in the kept buffer, so a rerun does not write them
 again, but MinerU runs over every earlier page again (the buffer only spares the
-writes), so repair the install first. On **Linux** you can additionally set
+writes), so repair the install first. Under `nx index pdf --dir` such a stop ends
+the whole run: the remaining PDFs are listed as not attempted, since each would
+trip the same check after its own timeouts. On **Linux** you can additionally set
 `mineru_memory_ceiling_mb` to cap the worker's address space (RLIMIT_AS) so a
 runaway page fails fast and catchably instead of thrashing; macOS does not honour
 RLIMIT_AS (the knob logs a warning and is ignored there). Note RLIMIT_AS caps

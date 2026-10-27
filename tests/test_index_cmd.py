@@ -2729,3 +2729,57 @@ def test_eta_ticker_restart_phase_resets_counters_and_rearms_a_stopped_ticker():
     t.stop()
     assert emitted, "restarted ticker never emitted"
     assert all(ln.startswith("[eta] rdr 1/5 files · 7 chunks") for ln in emitted), emitted
+
+
+# ── RDR-237: a MinerU breaker trip stops the whole --dir run (Sam, 2026-10-27) ──
+
+
+def test_pdf_dir_stops_the_whole_run_when_mineru_fails_systemically(runner, home):
+    """The breaker names the install, not the file: the next PDFs would each trip it again after
+    their own timeouts. The run stops at the trip and lists the rest as not attempted; any other
+    per-file failure still lets the batch continue (the control below)."""
+    from nexus.pdf_extractor import MineruSystemicFailure
+
+    d = home / "pdfs"
+    d.mkdir()
+    for name in ("a.pdf", "b.pdf", "c.pdf", "d.pdf"):
+        (d / name).write_bytes(b"fake pdf")
+
+    seen: list[str] = []
+
+    def _fake_index_pdf(path, **kwargs):
+        seen.append(path.name)
+        if path.name == "b.pdf":
+            raise MineruSystemicFailure("exit:1:ImportError: libGL.so.1", "ImportError: libGL.so.1", [1, 2, 3], path.name)
+        return 2
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_fake_index_pdf):
+        result = runner.invoke(main, ["index", "pdf", "--dir", str(d)])
+
+    assert seen == ["a.pdf", "b.pdf"], "no PDF after the trip is attempted"
+    assert result.exit_code != 0, result.output
+    assert "Stopped: MinerU failed systemically on b.pdf; 2 remaining PDF(s) not attempted." in result.output
+    assert "c.pdf: not attempted" in result.output and "d.pdf: not attempted" in result.output
+    assert "3 of 4 file(s) failed" in result.output, result.output
+
+
+def test_pdf_dir_continues_past_an_ordinary_per_file_failure(runner, home):
+    """Control for the test above: an ordinary failure (not the breaker) keeps batch isolation."""
+    d = home / "pdfs"
+    d.mkdir()
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        (d / name).write_bytes(b"fake pdf")
+
+    seen: list[str] = []
+
+    def _fake_index_pdf(path, **kwargs):
+        seen.append(path.name)
+        if path.name == "b.pdf":
+            raise RuntimeError("this one file is broken")
+        return 2
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_fake_index_pdf):
+        result = runner.invoke(main, ["index", "pdf", "--dir", str(d)])
+
+    assert seen == ["a.pdf", "b.pdf", "c.pdf"]
+    assert "1 of 3 file(s) failed" in result.output, result.output

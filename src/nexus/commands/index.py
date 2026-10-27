@@ -3352,6 +3352,28 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                     failures.append((pdf, msg))
                     _log.warning("batch_index_failed", path=str(pdf), error=msg)
                     click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
+                    if isinstance(exc, MineruSystemicFailure):
+                        # RDR-237 (Sam, 2026-10-27): the breaker says the install or the
+                        # machine is failing, not this file, so every later PDF would trip it
+                        # again after its own timeouts. Stop the whole run; list the rest as
+                        # not attempted so the summary and the exit code say so.
+                        remaining = pdfs[i:]
+                        for rest in remaining:
+                            failures.append((
+                                rest,
+                                f"not attempted: the run stopped after MinerU failed "
+                                f"systemically on {pdf.name} (repair the install, see "
+                                f"`nx doctor`, then rerun)",
+                            ))
+                        _log.warning(
+                            "batch_index_stopped_on_systemic_failure", path=str(pdf),
+                            failure_class=exc.failure_class, not_attempted=len(remaining),
+                        )
+                        click.echo(
+                            f"Stopped: MinerU failed systemically on {pdf.name}; "
+                            f"{len(remaining)} remaining PDF(s) not attempted."
+                        )
+                        break
                 finally:
                     file_heartbeat.touch(f"{i}/{total} PDF(s), {total_chunks:,} chunks")
         finally:
@@ -3385,8 +3407,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # nexus-7f5qj, identity drops) — "reporting success" at the
             # batch level while individual files were visibly broken. The
             # per-file isolation above is unchanged (every file is still
-            # attempted and the failures list still prints exactly as
-            # before); this only adds the batch-wide fail-loud exit. NOTE:
+            # attempted, except after a MinerU breaker trip, RDR-237, which
+            # stops the run and lists the rest as not attempted; the failures
+            # list prints as before); this only adds the batch-wide exit. NOTE:
             # this contract is deliberately STRICTER than `nx dt index`'s
             # run-level exit (which fires only on the collector classes via
             # raise_identity_drop_exception, not on plain per-record
