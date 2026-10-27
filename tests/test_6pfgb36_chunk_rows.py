@@ -103,3 +103,19 @@ def test_a_store_get_that_reports_its_count_does_not_warn(wire, monkeypatch):
     with capture_logs() as logs:
         _client().chunk_rows(_COLLECTION, ["a" * 64])
     assert [e for e in logs if e["event"] == "store_get_count_unreported"] == []
+
+
+def test_chunk_rows_raises_when_the_engine_reports_more_rows_than_it_returned(wire, monkeypatch):
+    """The export's own pin for the shared fail-closed check (nexus-hdx2u): a row the engine dropped
+    would read as a missing piece."""
+    real_post = hvc._post
+
+    def _short(path, body, **kw):
+        out = real_post(path, body, **kw)
+        return {**out, "count": len(out["ids"]) + 1}
+
+    monkeypatch.setattr(hvc, "_post", _short)
+    _calls, state = wire
+    state["rows"] = {"a" * 64: {"doc": "x", "meta": {}}}
+    with pytest.raises(VectorServiceError, match="matched-live rows"):
+        _client().chunk_rows(_COLLECTION, ["a" * 64])

@@ -611,8 +611,10 @@ def resolve_knowledge_doc_for_chash(
     whose ``title`` equals it, BEFORE the ambiguity count (nexus-6pfgb.31).
     The put path passes it: a note's identity is (collection, title), so a put
     reconciles only onto the note it names, and an untitled put only onto an
-    untitled one with an empty ``source_uri`` (an untitled document that has one
-    is a path-keyed import's, nexus-6pfgb.33). Without it a put adopted whatever note held the text, rewrote
+    untitled one with an empty ``source_uri``, which every untitled put writes (one
+    that has a source_uri was registered some other way, by hand through ``catalog
+    register`` since nothing in the tree writes one, and is not an earlier untitled
+    put, nexus-6pfgb.33). Without it a put adopted whatever note held the text, rewrote
     its source_uri and stamped its own ``ttl_days`` on it; with the filter after the count,
     a titled note sharing the text would hide the put's own note as ambiguous.
 
@@ -876,7 +878,7 @@ def catalog_store_hook_tracked(
 
     A put never adopts, re-sources or re-keys another note (nexus-6pfgb.31): the
     chash dedup considers only a document with this put's own *title* (an
-    untitled put: only an untitled one), and every other holder of the text
+    untitled put: only an untitled one with no ``source_uri``, nexus-6pfgb.33), and every other holder of the text
     stays as it was while the put mints a second document sharing the chunk.
     A repeated untitled put reuses its untitled document (the lowest tumbler when several share
     the text) and never overwrites a non-empty ``source_uri`` with an empty one.
@@ -1031,7 +1033,7 @@ def catalog_store_hook_tracked(
         # cross-collection chash coincidence must never satisfy it.
         #
         # nexus-6pfgb.31: only a document with THIS put's title is a candidate
-        # (an untitled put: only an untitled one). The source_uri check below
+        # (an untitled put: only an untitled one with no source_uri, nexus-6pfgb.33). The source_uri check below
         # cannot say it for an untitled put (no source_uri of its own to compare)
         # or for a legacy row (empty source_uri): such a put adopted a titled
         # note, blanked or rewrote its source_uri and stamped its own ttl_days
@@ -1071,8 +1073,8 @@ def catalog_store_hook_tracked(
             # nexus-sdp0u ghost-reconcile fix-round below, could still
             # carry a stale/empty one).
             writer = make_catalog_writer()
-            # An untitled put has no source_uri of its own and must never blank the one the document
-            # holds (nexus-6pfgb.31): send source_uri only when this put has one.
+            # Send source_uri only when this put has one (nexus-6pfgb.31). An untitled put reconciles
+            # only onto a document with none (nexus-6pfgb.33), so this guards a case it cannot reach.
             uri_field = {"source_uri": source_uri} if source_uri else {}
             writer.update(
                 existing.tumbler,

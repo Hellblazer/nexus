@@ -10,7 +10,7 @@ on it, and ``nx store expire`` then retired a note its owner had made permanent.
 
 A note's identity is (collection, title). Identical text under another title, or under none, is a
 second document whose manifest shares the chunk (RDR-108). An untitled put reconciles only onto
-an untitled document with the same text.
+an untitled document with the same text and no source_uri (nexus-6pfgb.33).
 
 Storage-free: a stateful catalog fake at the factory seam, with the engine's lookups (chash to
 documents by ``meta.doc_id``, exact source_uri, ghosts by exact title) and merge semantics for
