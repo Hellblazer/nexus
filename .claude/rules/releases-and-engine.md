@@ -30,7 +30,7 @@ Full text: [release-cadence](../../docs/agents/release-cadence.md).
 2. **`source.ref` only ever points at immutable release tags.** Never a branch, never main HEAD.
 3. **One channel until proven otherwise.** No `-dev` / `-rc` / `-canary` variants.
 4. **Bump cadence matches user-visible impact, not commit volume.**
-5. **Releaser is human. AI prepares; human cuts** (merge, tag, push tag).
+5. **Releaser is Sam. AI prepares; Sam cuts** (merge, tag, push tag), or authorizes the AI in-session to push one named tag, after its gates are green, recorded on the cut bead (engine-release skill Step 4).
 6. **Parity tests stay strict.** `pyproject.toml` version must match `mcpb/pyproject.toml`, `mcpb/manifest.json`, marketplace.json `plugins[].version` and `source.ref`, every plugin's `plugin.json`, and `uv.lock`. No `# noqa` escape hatches.
 
 ## Plugin-only releases (fast lane)

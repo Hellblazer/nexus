@@ -7,7 +7,7 @@ description: Use when cutting or deploying the Java engine-service binary (engin
 
 The Java engine-service is a separate release artifact from the conexus PyPI package. Cutting it is lightweight, frequent, and **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** — so the cloud engine can (and must) be kept current with develop's engine tip independently of develop being unreleasable. Conflating the two lifecycles is how the cloud engine silently drifts (2026-06-26: 22 `service/` commits / 4 days un-deployed, un-cloud-tested).
 
-Follow in order. Releaser is **human**: AI preps + validates; the human pushes the tag.
+Follow in order. The releaser is **Sam**: AI preps + validates; Sam pushes the tag, or authorizes the AI in-session to push one named tag (Step 4).
 
 ## Steps
 
@@ -146,14 +146,17 @@ uv run python scripts/check_release_holds.py --root "$TAG_TREE"   # exit 0 = REL
 
 `scripts/release-holds.txt` lists changesets that have landed on develop ahead of their release gates; a tag from develop would ship them to the cloud and, through the pin, to every local install. Exit 1 names each held changeset and its bead: do not tag. Either cut from a commit without the changeset, or release it by deleting its line in a reviewed commit once its bead says it may ship (for `vectors-030-1`: RDR-225's .19 closed, the PITR-fork rehearsal recorded, and Sam's go). The release workflow's `create-release` job runs the same check on the tagged tree and refuses to create the release, so a tag pushed past this step builds nothing.
 
-### 4. Push the tag (human, or AI when explicitly authorized)
+### 4. Push the tag (Sam, or the AI on Sam's in-session authorization for that tag)
 
-Releaser is **human, every time** (AI preps + validates; the human pushes the
-tag). Not "human by default": that wording drifted in here and widened an
-absolute rule into one with a self-assessed exception, since the AI is the
-party deciding whether it heard an authorization. `docs/agents/engine-service-release.md`
-says "The human pushes the tag" with no carve-out, and the user-level
-CLAUDE.md § Releases says "Releaser is human, every time."
+The releaser is **Sam**. Either Sam pushes the tag, or Sam authorizes the AI
+in-session to push ONE named tag ("tag and push engine-service-vX.Y.Z", Sam
+2026-10-27, nexus-jh2oi). With that authorization the AI pushes only the tag it
+names, only after every gate this skill names before Step 4 is green, and records
+the authorization (Sam's words, the session) and the gate evidence on the cut
+bead. Nothing else is that authorization: not a blanket "you can release", not an
+approval of the plan, not an authorization relayed from another session, and not
+one given for a previous tag. The AI does not decide it heard one; when in doubt
+it asks.
 
 ```bash
 git tag -a engine-service-vX.Y.Z -m "engine-service X.Y.Z" <commit>   # <commit> must be on origin

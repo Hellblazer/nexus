@@ -817,8 +817,9 @@ restarted session loads it. No Windows guest leg.
 For the first real use of this lane, paste the eligibility output, the battery
 table and the delivery-proof verdict into bead nexus-rbmja.13.
 
-The releaser is human: the AI prepares the branch and runs the gates; Sam says
-"cut the release" and pushes the tag.
+The releaser is Sam: the AI prepares the branch and runs the gates; Sam says
+"cut the release" and pushes the tag, or authorizes the AI in-session to push one
+named tag (engine-release skill Step 4 states the rule).
 
 ## Common Mistakes
 

@@ -284,7 +284,7 @@ The `release` skill (`.claude/skills/release/SKILL.md`, also `/conexus:release`)
 
 Three rules hold for every release:
 
-- **The releaser is human.** AI prepares the release branch; the explicit "cut the release" and "tag and push" come from Sam.
+- **The releaser is Sam.** AI prepares the release branch; the explicit "cut the release" and "tag and push" come from Sam, who may authorize the AI in-session to push one named tag once its gates are green (`.claude/skills/engine-release/SKILL.md` Step 4).
 - **Work in a release worktree off `origin/develop`**, never in the shared primary checkout, which keeps `develop` checked out (AGENTS.md worktree rules 2 to 4). The release branch is cut from `develop`, not `main`, because a release promotes `develop`'s state; `origin/main` is merged into the branch first so the release-only files resolve there and not in the PR.
 - **Nothing lands on `main` except through the release PR** (merged with `--merge`, never `--squash`, so the release commit keeps its SHA). The tag points at the merge commit.
 
