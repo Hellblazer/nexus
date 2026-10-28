@@ -831,10 +831,16 @@ def _strong_signals(text: str, facet_count: int, listed: bool) -> set[str]:
 
 def _weak_lookup(text: str, facet_count: int, certain: bool) -> bool:
     """A bare question word opening, with nothing stronger: ``lookup`` only for a question that asks ONE thing
-    (at most one facet, and a clause structure that was read). A question with more facets than one is a
-    request for several things, not a lookup, so a lookup plan must not be made eligible for it. A wh-clause
-    joined by ``and <wh-word>`` is a second question that the facet parse keeps inside the one item, so it
-    counts as a second facet here."""
+    (at most one facet, and a clause structure that was read). A wh-clause joined by ``and <wh-word>`` is a
+    second question that the facet parse keeps inside the one item, so it counts as a second facet here.
+
+    The boundary (RDR-232 section 1): a lookup includes several connected facts from one passage of one
+    source; a synthesis gathers aspects across sections, sources or history. This rule cannot see which of
+    the two a question with more than one facet is, since that depends on where the answer sits and the
+    first pass reads only the wording. So it does not guess: more than one facet is ``unknown`` here, the
+    request is sent to the structured extraction (``needs_structured_extract``), and the model, whose prompt
+    states the same boundary, decides. A deterministic ``lookup`` for two facets would override that
+    reading and lock in a wrong shape for every question that reads like a lookup and is not."""
     if facet_count > 1 or not certain or _AND_WH.search(text):
         return False
     lead = text.strip()
@@ -1252,7 +1258,7 @@ DEFAULT_EXTRACT_TIMEOUT_S = 20.0
 #: ``--model`` flag as given. Unset or blank means :data:`DEFAULT_EXTRACT_MODEL`.
 EXTRACT_MODEL_ENV = "NX_ANSWER_STRUCTURED_EXTRACT_MODEL"
 #: The default extraction model (nexus-jypmj.2.8): the cheap tier, measured on 56 calls with no timeout or
-#: error. Always passed explicitly, so ``NX_OPERATOR_MODEL_TIERING`` (which only picks the model of a
+#: error (with the prompt before nexus-jypmj.13 changed its lookup/synthesis wording; that figure is to be re-taken). Always passed explicitly, so ``NX_OPERATOR_MODEL_TIERING`` (which only picks the model of a
 #: dispatch that names none) does not change it; a set ``EXTRACT_MODEL_ENV`` wins.
 DEFAULT_EXTRACT_MODEL = "haiku"
 
@@ -1309,14 +1315,23 @@ EXTRACT_SCHEMA: dict[str, Any] = {
     },
 }
 
+#: The two kind definitions the prompt shares with RDR-232 section 1's shape table (tests/test_rdr232_lookup_
+#: boundary.py reads the table and fails if either phrase drifts). Sam decided on 2026-10-27 that the boundary
+#: between them is the source and the passage, not the number of facts asked for.
+_LOOKUP_DEFINITION = "a specific fact or small set of facts, including several connected facts from one passage of one source"
+_SYNTHESIS_DEFINITION = "a unified account of multiple requested aspects across sections, sources or history"
+
 _EXTRACT_PROMPT = (
     "Read the question below and return the shape of the answer it asks for. answer_kind is one of: lookup "
-    "(a specific fact), synthesis (a unified account of several aspects), discovery/listing (an inventory), "
-    "comparison, audit, debug, unknown. facets lists, in the question's own words, each topic that needs "
-    "evidence (one entry per requested aspect; never omit a requested aspect). constraints lists, in the "
-    "question's own words, each instruction about how to treat the evidence (cite sources, distinguish dates, "
-    "do not infer something, format limits); a constraint is never also a facet. Use answer_kind unknown when "
-    "the question does not settle one.\n\nQuestion:\n"
+    f"({_LOOKUP_DEFINITION}), synthesis ({_SYNTHESIS_DEFINITION}), discovery/listing (an inventory), "
+    "comparison, audit, debug, unknown. Asking for more than one fact does not make a question a synthesis: "
+    "when one passage of one source answers all of them, it is a lookup; it is a synthesis only when the "
+    "answer must be gathered from different sections, different sources or the history of a thing. facets "
+    "lists, in the question's own words, each fact or topic that needs evidence (one entry per requested "
+    "item; never omit a requested one; the number of facets does not decide the kind). constraints lists, in "
+    "the question's own words, each instruction about how to treat the evidence (cite sources, distinguish "
+    "dates, do not infer something, format limits); a constraint is never also a facet. Use answer_kind "
+    "unknown when the question does not settle one.\n\nQuestion:\n"
 )
 
 #: ``(prompt, schema, *, timeout, usage_sink) -> dict`` : the shape of ``claude_dispatch``.
