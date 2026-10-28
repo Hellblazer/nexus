@@ -17,7 +17,9 @@ Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) 
   brief.py site-layer [--site-page FILE] [--genre G]
                                  the site-page section 3 layer memory.py `read` takes
   brief.py setup                 what a first run here needs, as JSON: Nexus and T2, the two allow rules, the genre
-                                 map and exemplars, and the repository's documents no genre reaches
+                                 map and exemplars, at most eight documentation-looking folders no genre reaches
+                                 (`genre_candidates`, each with a suggested genre), `ready` and a `try_path`
+  brief.py suggest-genre PATH    the genre PATH's folder points to, all six genres ranked, as JSON
 
 TARGET is PATH, PATH:START-END or "-" (a stdin run; --file names the saved text).
 
@@ -99,7 +101,7 @@ MEMORY = HERE / "memory.py"
 # The site-page style sheet a repository keeps for its how-to pages and essays; a repository without one has no
 # site layer (nexus-scmcs: the skill ships as a plugin, so the sheet is the repository's, not a sibling skill).
 SITE_PAGE_IN_REPO = Path(".claude") / "skills" / "site-page" / "SKILL.md"
-COMMANDS = ("parse", "build", "filter", "tmpdir", "rmtmp", "site-layer", "setup")
+COMMANDS = ("parse", "build", "filter", "tmpdir", "rmtmp", "site-layer", "setup", "suggest-genre")
 SITE_GENRES = ("how-to", "exploration-essay")
 # Section 3 bullets that apply to some site genres only (nexus-ger02.23): the bullet's opening words, and the
 # genres it is dropped for. "No semicolons" is for web/ how-to pages; a docs/exploration essay may use them.
@@ -108,6 +110,43 @@ GENRE_DROPS: dict[str, tuple[str, ...]] = {"No semicolons": ("exploration-essay"
 # documents. A changelog entry or a commit message suffers from excess length, so its brief keeps to cutting.
 UNPACK_GENRES: tuple[str, ...] = ("rdr", "reference-doc", "how-to", "exploration-essay")
 DEFAULT_BUDGET = 10
+# One plain line per genre, the wording the skill's questions and the README's table show (nexus-scmcs). Each says what
+# kind of writing the genre is and how the editor treats it; a test pins the README to these words.
+GENRE_DESCRIPTIONS: dict[str, str] = {
+    "rdr": "A design record: the question, the decision and why. The editor cuts hedging, may unpack, and keeps every decision and number.",
+    "reference-doc": "Documentation read to look something up. The editor tightens it and may unpack compressed sentences.",
+    "how-to": "A page that walks a reader through a task. The editor keeps the steps plain and in order, and may unpack.",
+    "exploration-essay": "An essay that works out how something behaves. The editor keeps your voice, trims, and may unpack.",
+    "changelog": "Release-note entries, short by design. The editor only cuts.",
+    "commit-message": "A commit message, short by design. The editor only cuts.",
+}
+# Path segments that mark a folder as something other than prose to edit: setup does not offer them as a genre
+# candidate (they are counted in `unmapped_other`), and a hidden segment (a leading dot) is skipped the same way.
+SKIPPED_SEGMENTS = frozenset({
+    "tests", "test", "fixtures", "scripts", "src", "service", "agents", "skills", "commands", "hooks", "evals",
+    "examples", "resources", "node_modules", "out", "data", "archive", "infra", "vendor",
+})
+MAX_CANDIDATES = 8
+# Folder or file-name words that suggest a genre, tried in this order; no word means reference-doc.
+GENRE_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("changelog", frozenset({"changelog", "changes"})),
+    ("rdr", frozenset({"rdr", "adr", "decision"})),
+    ("how-to", frozenset({"runbook", "operation", "migration", "guide", "howto", "how to", "tutorial"})),
+    ("exploration-essay", frozenset({"postmortem", "exploration", "essay", "field report", "note", "notes"})),
+)
+DEFAULT_SUGGESTION = "reference-doc"
+# After the suggested genre, the other five best-first: the nearest kinds of writing come first, so the two options
+# a question shows beside the suggestion are the likeliest alternatives.
+GENRE_NEIGHBOURS: dict[str, tuple[str, ...]] = {
+    "reference-doc": ("how-to", "exploration-essay", "rdr", "changelog", "commit-message"),
+    "how-to": ("reference-doc", "exploration-essay", "rdr", "changelog", "commit-message"),
+    "exploration-essay": ("reference-doc", "how-to", "rdr", "changelog", "commit-message"),
+    "rdr": ("reference-doc", "exploration-essay", "how-to", "changelog", "commit-message"),
+    "changelog": ("reference-doc", "how-to", "exploration-essay", "rdr", "commit-message"),
+    "commit-message": ("changelog", "reference-doc", "how-to", "exploration-essay", "rdr"),
+}
+# Which mapped file `setup` offers to try first: the kinds of document a newcomer most likely has, in this order.
+TRY_ORDER = ("reference-doc", "how-to", "exploration-essay", "rdr", "changelog", "commit-message")
 PHASE3_FLAGS = ("--mode", "--voice-card", "--word-budget")
 TREATMENT_KEYS = {
     "ignored": "site_page_section3_ignored",
@@ -1413,6 +1452,35 @@ def _settings_allow() -> list[str] | None:
     return [str(x) for x in allow] if isinstance(allow, list) else []
 
 
+def folder_key(rel: str) -> str:
+    """The genre_map prefix that covers a repository-relative file: `<folder>/` for a folder, the file's own name at the
+    root, since no prefix reaches the root alone."""
+    folder = Path(rel).parent.as_posix()
+    return rel if folder == "." else folder + "/"
+
+
+def is_skipped(rel: str) -> bool:
+    """A path with a hidden segment or a segment that names code, tests, data or tooling, not prose to edit."""
+    return any(seg.startswith(".") or seg.lower() in SKIPPED_SEGMENTS for seg in Path(rel).parts)
+
+
+def _ranked(suggested: str) -> list[str]:
+    return [suggested, *GENRE_NEIGHBOURS[suggested]]
+
+
+def suggest_genre_for_key(key: str) -> str:
+    """The genre a folder or root file name points to: its words against GENRE_KEYWORDS, else reference-doc."""
+    raw = [t for t in re.split(r"[^a-z0-9]+", key.lower()) if t]
+    single = [t[:-1] if len(t) > 3 and t.endswith("s") else t for t in raw]
+    terms = set(raw) | set(single)
+    for words in (raw, single):
+        terms |= {f"{a} {b}" for a, b in zip(words, words[1:])}
+    for genre, keywords in GENRE_KEYWORDS:
+        if terms & keywords:
+            return genre
+    return DEFAULT_SUGGESTION
+
+
 def cmd_setup() -> Obj:
     """Everything a first run in this repository depends on, checked and reported; setup changes nothing itself."""
     nx = os.environ.get("PROSE_EDIT_NX", "nx")
@@ -1432,24 +1500,54 @@ def cmd_setup() -> Obj:
         "missing": [rule for rule in needed if rule not in (present or [])],
         "json": {"permissions": {"allow": needed}},
     }
+    out["ready"] = bool(out["nexus"]["found"] and out["t2"]["reachable"] and not out["allow_rules"]["missing"])
     root = Path(str(status["root"]))
     out["repo"], out["root"] = status["repo"], str(root)
     out["site_page"] = (root / SITE_PAGE_IN_REPO).is_file()
     if out["t2"]["reachable"]:
         out["genre_map"], out["exemplars"] = status["genre_map"], status["exemplars"]
+        out["genre_descriptions"] = dict(GENRE_DESCRIPTIONS)
         maps = cast(Obj, status["genre_map"])
         override = [list(maps.get("user") or []), list(maps.get("repo") or []), [], []]
         listed = _run_git(root, ["ls-files", "-co", "--exclude-standard", "-z", "--", "*.md", "*.html"]).stdout
-        unmapped: dict[str, int] = {}
-        for f in (f for f in listed.split("\0") if f):
-            if _MEM.genre_for(f, override) is None:
-                # a genre_map entry is a prefix: "<folder>/" covers a folder, and a file at the root needs its own
-                # name, since no prefix reaches the root alone
-                folder = Path(f).parent.as_posix()
-                key = f if folder == "." else folder + "/"
-                unmapped[key] = unmapped.get(key, 0) + 1
-        out["no_genre"] = dict(sorted(unmapped.items(), key=lambda kv: (-kv[1], kv[0])))
+        groups: dict[str, list[str]] = {}  # unmapped documentation-looking files, by genre_map prefix
+        mapped: list[tuple[str, str]] = []  # (genre, file) of files that already map and are not skipped
+        other = 0
+        for f in (f for f in sorted(set(listed.split("\0"))) if f and (root / f).is_file()):
+            genre = _MEM.genre_for(f, override)
+            if genre is not None:
+                if not is_skipped(f):
+                    mapped.append((genre, f))
+            elif is_skipped(f):
+                other += 1
+            else:
+                groups.setdefault(folder_key(f), []).append(f)
+        ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+        shown = ordered[:MAX_CANDIDATES]
+        other += sum(len(files) for _, files in ordered[MAX_CANDIDATES:])
+        candidates: list[Obj] = []
+        for key, files in shown:
+            suggested = suggest_genre_for_key(key)
+            candidates.append({"key": key, "files": len(files), "suggested": suggested,
+                               "ranked": _ranked(suggested), "sample": files[0]})
+        out["genre_candidates"], out["unmapped_other"] = candidates, other
+        out["genres_in_use"] = [g for g in TRY_ORDER if any(g == m[0] for m in mapped)]
+        first = min(mapped, key=lambda m: (TRY_ORDER.index(m[0]) if m[0] in TRY_ORDER else len(TRY_ORDER), m[1]),
+                    default=None)
+        out["try_path"] = first[1] if first else (candidates[0]["sample"] if candidates else None)
     return out
+
+
+def cmd_suggest_genre(path: str) -> Obj:
+    """The run-time genre question's options for one document: its folder key, the suggested genre, all six ranked."""
+    where = memory_json(["repo", path])
+    rel = where.get("path")
+    if not isinstance(rel, str) or not rel:
+        raise _user("suggest-genre takes the path of a document in the repository")
+    key = folder_key(rel)
+    suggested = suggest_genre_for_key(key)
+    return {"path": rel, "folder_key": key, "suggested": suggested, "ranked": _ranked(suggested),
+            "descriptions": dict(GENRE_DESCRIPTIONS)}
 
 
 def cmd_tmpdir() -> str:
@@ -1509,6 +1607,8 @@ def _parser() -> argparse.ArgumentParser:
     r = sub.add_parser("rmtmp", help="delete a work directory made by tmpdir")
     r.add_argument("path")
     sub.add_parser("setup", help="what a first run in this repository needs, checked and reported as JSON")
+    g = sub.add_parser("suggest-genre", help="the genre a document's folder points to, with all six ranked, as JSON")
+    g.add_argument("path")
     s = sub.add_parser("site-layer", help="the site-page section 3 layer")
     s.add_argument("--site-page")
     s.add_argument("--genre", choices=SITE_GENRES, default=None,
@@ -1546,6 +1646,8 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(f"WORK={made}\n" + ready_paths(made, list(READY_FILES)) if args.ready else made + "\n")
         elif args.cmd == "setup":
             sys.stdout.write(json.dumps(cmd_setup(), ensure_ascii=False, indent=1) + "\n")
+        elif args.cmd == "suggest-genre":
+            sys.stdout.write(json.dumps(cmd_suggest_genre(args.path), ensure_ascii=False, indent=1) + "\n")
         elif args.cmd == "rmtmp":
             cmd_rmtmp(args.path)
         else:
