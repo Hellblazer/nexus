@@ -221,12 +221,14 @@ def test_on_formula_oom_is_not_in_the_help_and_the_extractor_help_is_current() -
 # ── nx dt index and nx dt capture ───────────────────────────────────────────
 
 
-def test_the_dt_verbs_default_to_mineru_and_still_accept_every_choice() -> None:
+def test_the_dt_verbs_take_the_pdf_extractor_setting_and_still_accept_every_choice() -> None:
+    """nexus-tr1rj.14: no flag means ``pdf.extractor`` (``mineru`` when it is unset), as for
+    ``nx index pdf``; the flag's own default is therefore None."""
     from nexus.commands import dt as dt_module
 
     for verb in ("index", "capture"):
         option = next(p for p in dt_module.dt.commands[verb].params if p.name == "extractor")
-        assert option.default == "mineru", verb
+        assert option.default is None, verb
         assert tuple(option.type.choices) == EXTRACTOR_CHOICES, verb
 
 

@@ -315,6 +315,27 @@ class MineruSystemicFailure(Exception):
         )
 
 
+#: What stops a run's MinerU work (nexus-tr1rj.13). Both name the install or the machine, not the
+#: file, so every later PDF would fail the same way after its own timeouts. A batch command catches
+#: this tuple, stops the PDFs it has not started, lists them, and keeps its other work.
+MINERU_RUN_STOPPING: tuple[type[Exception], ...] = (MineruSystemicFailure, MineruMachineResourceError)
+
+
+def mineru_stop_reason(exc: BaseException) -> tuple[str, str, str]:
+    """``(what, detail, remedy)`` for a :data:`MINERU_RUN_STOPPING` exception, in the words a batch
+    command prints on its ``Stopped:`` line: ``Stopped: <what> on <file> (<detail>); N remaining
+    PDF(s) not attempted. <remedy>``."""
+    if isinstance(exc, MineruSystemicFailure):
+        return (
+            "MinerU failed systemically", f"failure class {exc.failure_class}",
+            "Repair the install (`nx doctor`), then rerun.",
+        )
+    # MineruMachineResourceError has one raise site today (exhausted POSIX named semaphores), and its
+    # message IS the platform's remedy (``nexus._mineru_health.semaphore_remedy``, about 400 characters).
+    # The detail stays short and the remedy appears once, so the Stopped line stays one readable line.
+    return ("MinerU cannot run on this machine", "POSIX named semaphores exhausted", str(exc))
+
+
 class MineruServerTimeout(MineruWorkerError):
     """The MinerU server did not answer one request inside its page budget (RDR-237).
 

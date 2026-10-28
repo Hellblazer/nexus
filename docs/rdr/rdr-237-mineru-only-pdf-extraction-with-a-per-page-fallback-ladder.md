@@ -362,9 +362,17 @@ buffer, and chunks of them that already reached T3 stay there, as an interrupted
 run's do; the pages counted toward the trip are held until the window resolves
 and are dropped, so none is stored as degraded text. A rerun after the install is
 repaired does not write the kept pages again, but MinerU still runs over every
-earlier page. Under `nx index pdf --dir` a trip stops the whole run, since every later PDF
+earlier page. A `--extractor pymupdf` rerun over that buffer starts clean instead (Sam
+delegated, 2026-10-28): it wipes the kept pages and extracts every page from the text
+layer, so the document is uniformly text-only and recorded `pymupdf`, never a
+mixture. Under `nx index pdf --dir` a trip stops the whole run, since every later PDF
 would trip it again after its own timeouts: the remaining PDFs are listed as not
-attempted and the run exits non-zero. A document whose every
+attempted and the run exits non-zero. The rule (Sam delegated, 2026-10-28): a trip, and
+`MineruMachineResourceError`, name the machine, so they stop MinerU work and keep
+unrelated work. `nx dt index` skips the remaining PDF records and lists them as not
+attempted while markdown and web records run; `nx index repo` contains the trip like the
+quality gate, lists the PDFs it did not reach, and keeps code, prose and RDR files
+running. A document whose every
 page is `unextracted` also fails with a named reason rather than indexing nothing.
 
 Docling is removed: code, dependency, configuration value, CLI choice, CI steps,
@@ -466,7 +474,8 @@ and `:1990`, `indexer.py:3010` for `nx index repo`, and
 `commands/collection.py:1234` for `nx collection reindex`; RF-16) take the
 extractor and neither require nor install the stack for `pymupdf`, and it skips
 the MinerU server probe (`commands/index.py:3242`). It is never chosen
-automatically.
+automatically. `nx dt index` and `nx dt capture` read `pdf.extractor` when no flag is
+given, as `nx index pdf` does (Sam delegated, 2026-10-28).
 
 **No MinerU at all.** With the default `mineru`, a missing MinerU fails the run
 at once and names both fixes: install the PDF stack (`pdf_stack` already words

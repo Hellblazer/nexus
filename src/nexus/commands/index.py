@@ -1943,6 +1943,11 @@ def index_repo_cmd(
                 f"the extraction deliberately, or 'nx index pdf <file>' after "
                 f"fixing the underlying extraction (e.g. --extractor mineru)."
             )
+        # nexus-tr1rj.13 (Sam delegated, 2026-10-28): a MinerU breaker trip or machine-resource
+        # error stopped the PDF loop. It was contained inside index_repository, so code, prose
+        # and RDR files were indexed; the PDFs it did not reach are listed here and the run ends
+        # non-zero, like `nx index pdf --dir`.
+        _run_failure = _fold_in_mineru_stop(_run_failure, stats or {})
         # nexus-deyd5 round 3 (coordinator directive, closing the round-2
         # HIGH finding): the run-level systemic-skip verdict. Checked HERE
         # — after drain/RDR-loop/post-processing have all already run and
@@ -2837,6 +2842,40 @@ def _refresh_derived_taxonomy(
             _log.warning("context_l1_refresh_failed", exc_info=True)
 
 
+def _report_mineru_stop(stats: dict) -> click.ClickException | None:
+    """nexus-tr1rj.13: print the ``Stopped:`` line and the PDFs ``nx index repo`` did not attempt
+    after a MinerU stop (``stats['pdf_mineru_stop']``, set by ``indexer._contain_mineru_stop``), and
+    return the exception that ends the run non-zero, or ``None`` when there was no stop. The listing
+    names the first 20; the rest are counted."""
+    stop = stats.get("pdf_mineru_stop")
+    if not stop:
+        return None
+    stop_name = Path(stop["file"]).name
+    unattempted = [Path(p).name for p in stats.get("pdf_mineru_not_attempted_paths") or ()]
+    if unattempted:
+        click.echo(
+            f"Stopped: {stop['what']} on {stop_name} ({stop['detail']}); "
+            f"{len(unattempted)} remaining PDF(s) not attempted. {stop['remedy']}"
+        )
+        for name in unattempted[:20]:
+            click.echo(f"  {name}: not attempted (the run stopped at {stop_name})")
+        if len(unattempted) > 20:
+            click.echo(f"  ... and {len(unattempted) - 20} more")
+    return click.ClickException(
+        f"{stop['what']} on {stop_name} ({stop['detail']}); {len(unattempted)} PDF(s) not attempted. "
+        f"Code, prose and RDR files were indexed. {stop['remedy']}"
+    )
+
+
+def _fold_in_mineru_stop(run_failure: click.ClickException | None, stats: dict) -> click.ClickException | None:
+    """nexus-tr1rj.13: report a MinerU stop and combine it with the run's earlier failure, the first
+    one winning the exit. The report is called FIRST and always: ``run_failure or _report_mineru_stop(...)``
+    skips it whenever a quality-gate, manifest or PDF-stack failure is already set, and the run then
+    names neither the stop nor the PDFs it did not attempt."""
+    stop_failure = _report_mineru_stop(stats)
+    return run_failure or stop_failure
+
+
 def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str = "") -> str:
     """Render a :class:`~nexus.errors.IndexRunVerifyRefused` as the clean,
     fail-loud wording nexus-5xn3k.6's summary contract requires (code-
@@ -3117,7 +3156,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         UnextractableContentError,
         CatalogIdentityMissingError,
     )
-    from nexus.pdf_extractor import MineruSystemicFailure  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
+    from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
 
     # Local wrapper: convert the typed credential/identity errors into a
     # Click exception so the CLI shows a friendly message + exits non-zero
@@ -3367,25 +3406,26 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
                     failures.append((pdf, msg))
                     _log.warning("batch_index_failed", path=str(pdf), error=msg)
                     click.echo(f" — FAILED ({elapsed:.1f}s): {exc}")
-                    if isinstance(exc, MineruSystemicFailure):
-                        # RDR-237 (Sam, 2026-10-27): the breaker says the install or the
-                        # machine is failing, not this file, so every later PDF would trip it
-                        # again after its own timeouts. Stop the whole run; list the rest as
-                        # not attempted so the summary and the exit code say so.
+                    if isinstance(exc, MINERU_RUN_STOPPING):
+                        # RDR-237 (Sam, 2026-10-27; nexus-tr1rj.13 adds the machine-resource
+                        # error): the breaker or the machine says the install is failing, not
+                        # this file, so every later PDF would fail again after its own timeouts.
+                        # Stop the whole run; list the rest as not attempted so the summary and
+                        # the exit code say so.
+                        what, detail, remedy = mineru_stop_reason(exc)
                         remaining = pdfs[i:]
                         for rest in remaining:
                             failures.append((rest, f"not attempted (the run stopped at {pdf.name})"))
                         not_attempted += len(remaining)
                         _log.warning(
                             "batch_index_stopped_on_systemic_failure", path=str(pdf),
-                            failure_class=exc.failure_class, not_attempted=len(remaining),
+                            failure_class=getattr(exc, "failure_class", type(exc).__name__),
+                            not_attempted=len(remaining),
                         )
                         if remaining:
                             click.echo(
-                                f"Stopped: MinerU failed systemically on {pdf.name} "
-                                f"(failure class {exc.failure_class}); {len(remaining)} "
-                                f"remaining PDF(s) not attempted. Repair the install "
-                                f"(`nx doctor`), then rerun."
+                                f"Stopped: {what} on {pdf.name} ({detail}); {len(remaining)} "
+                                f"remaining PDF(s) not attempted. {remedy}"
                             )
                         break
                 finally:
@@ -3503,7 +3543,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         click.echo(f"Indexing {path}…")
         try:
             n = index_pdf(path, corpus=corpus, t3=local_t3, collection_name=collection, embed_fn=_no_embed, hooks=HookRegistry(), enrich=enrich, extractor=extractor, streaming=streaming, source_uri=source_uri or "", allow_degraded_extraction=allow_degraded_extraction, dry_run=True)
-        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError, *MINERU_RUN_STOPPING, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -3601,7 +3641,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # completion stamp. Clean fail-loud ClickException, never
             # folded into a success summary.
             raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "", corpus=corpus)) from e
-        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError, *MINERU_RUN_STOPPING, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user
@@ -3629,7 +3669,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # nexus-5xn3k.6 code-review-expert IMPORTANT (2026-08-02): see
             # the identical rationale on the monitor branch above.
             raise click.ClickException(_index_run_refused_message(e, target_collection=collection or "", corpus=corpus)) from e
-        except (ImportError, RuntimeError, ExtractionQualityError, MineruSystemicFailure, UnextractableContentError) as e:
+        except (ImportError, RuntimeError, ExtractionQualityError, *MINERU_RUN_STOPPING, UnextractableContentError) as e:
             # nexus-2fyb code-review R4-I1: RuntimeError from extract() on
             # formula-detected PDFs without MinerU (or with MinerU operational
             # failures) must surface as a ClickException — otherwise the user

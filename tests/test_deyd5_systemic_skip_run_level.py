@@ -28,7 +28,10 @@ batcher's drain from running, and no already-completed work is discarded.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},
@@ -251,6 +254,61 @@ def test_systemic_skip_below_floor_does_not_flag_and_drain_still_runs(
     assert stats["skipped_unextractable_files"] == 1
     assert tracker["batcher"].drain_called is True
     assert stats["files_changed_by_kind"]["code"] == 24
+
+
+@pytest.mark.parametrize("kind", ["breaker-trip", "machine-resource"])
+def test_a_mineru_stop_skips_only_the_remaining_pdfs_and_lists_them(tmp_path, monkeypatch, kind):
+    """nexus-tr1rj.13: a MinerU breaker trip (or a machine-resource error) names the machine, so
+    nx index repo stops MinerU work and keeps the rest: the code file still writes, the batcher
+    still drains, _run_index returns normally, and the PDFs after the stop are listed as not
+    attempted. Before the fix the first trip re-raised through run_file_loop and aborted the run."""
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.indexer import _run_index
+    from nexus.pdf_extractor import MineruSystemicFailure
+    from tests._mineru_machine_error import real_machine_error
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "ok.py").write_text("x = 1\n")
+    for name in "abcd":
+        (repo / f"{name}.pdf").write_bytes(b"%PDF-1.4 fake content")
+    reg = _reg()
+
+    monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
+    monkeypatch.setenv("NX_LOCAL", "0")
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+    monkeypatch.setenv("CHROMA_API_KEY", "fake")
+
+    db = MagicMock(spec=HttpVectorClient)
+    attempted: list[str] = []
+
+    def _pdf_side_effect(file, *_a, **_kw):
+        attempted.append(file.name)
+        if kind == "breaker-trip":
+            raise MineruSystemicFailure("timeout", "", [1, 2, 3], file.name)
+        raise real_machine_error()
+
+    tracker: dict[str, "_DrainTrackingBatcher"] = {}
+
+    def _batcher_factory(*, flush, **kw):
+        b = _DrainTrackingBatcher(flush=flush, **kw)
+        tracker["batcher"] = b
+        return b
+
+    with _service_mode_patches(db, extra={
+        "nexus.indexer._index_pdf_file": {"side_effect": _pdf_side_effect},
+    }), patch("nexus.chunk_batcher.ChunkBatcher", _batcher_factory):
+        stats = _run_index(repo, reg)
+
+    assert len(attempted) == 1, f"no PDF after the stop is attempted: {attempted}"
+    stop = stats["pdf_mineru_stop"]
+    assert stop["file"].endswith(attempted[0])
+    assert stop["what"] == ("MinerU failed systemically" if kind == "breaker-trip" else "MinerU cannot run on this machine")
+    assert stats["pdf_mineru_tripped"] == 1
+    listed = sorted(Path(p).name for p in stats["pdf_mineru_not_attempted_paths"])
+    assert listed == sorted(n for n in ("a.pdf", "b.pdf", "c.pdf", "d.pdf") if n != attempted[0])
+    assert tracker["batcher"].drain_called is True, "the rest of the run still finishes"
+    assert stats["files_changed_by_kind"]["code"] == 1, "the code file was not cancelled"
 
 
 # ── nexus-nukn3: the durable queue replaces the RECORD, not the VERDICT ─────

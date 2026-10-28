@@ -134,6 +134,48 @@ def test_capture_forwards_extractor_to_index(runner, monkeypatch) -> None:
     assert seen.get("extractor") == "pymupdf"
 
 
+def test_capture_reads_the_pdf_extractor_setting_when_no_flag_is_given(runner, monkeypatch) -> None:
+    """nexus-tr1rj.14: no --extractor means `pdf.extractor`, like `nx index pdf`; a host set to
+    pymupdf neither asks for the PDF stack nor indexes with MinerU."""
+    from nexus import config as nx_config
+    from nexus.cli import main
+
+    real = nx_config.load_config
+    monkeypatch.setattr(nx_config, "load_config", lambda **kw: {**real(**kw), "pdf": {"extractor": "pymupdf"}})
+    gated: list[str] = []
+    monkeypatch.setattr("nexus.pdf_stack.ensure_or_exit", lambda *a, **kw: gated.append(kw["extractor"]))
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page", lambda url, **kw: "PDF-UUID")
+    monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
+    seen = {}
+    monkeypatch.setattr("nexus.commands.dt._index_record", lambda uuid, path, **kw: (seen.update(kw) or True, 1))
+    result = runner.invoke(main, ["dt", "capture", "https://e.com", "--type", "pdf"])
+    assert result.exit_code == 0, result.output
+    assert seen.get("extractor") == "pymupdf"
+    assert gated and set(gated) == {"pymupdf"}, "both stack gates (capture's, then index's) key on the setting"
+
+
+def test_capture_stops_on_a_mineru_breaker_trip_without_calling_it_a_defect(runner, monkeypatch) -> None:
+    """nexus-tr1rj.13: capture hands its one record to `nx dt index`, which now classifies a trip
+    as a breaker trip, not an unexpected defect."""
+    from nexus.cli import main
+    from nexus.pdf_extractor import MineruSystemicFailure
+
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page", lambda url, **kw: "PDF-UUID")
+    monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
+
+    def _trip(uuid, path, **kw):
+        raise MineruSystemicFailure("timeout", "", [1, 2, 3], "captured.pdf")
+
+    monkeypatch.setattr("nexus.commands.dt._index_record", _trip)
+    result = runner.invoke(main, ["dt", "capture", "https://e.com", "--type", "pdf", "--extractor", "mineru"])
+    assert result.exit_code != 0, result.output
+    assert "MinerU failed systemically on captured.pdf (failure class timeout)" in result.output
+    assert "unexpected error" not in result.output
+    assert "Recover with: nx dt index --uuid PDF-UUID" in result.output
+
+
 @pytest.mark.parametrize("name", ["auto", "docling"])
 def test_capture_runs_an_older_extractor_name_as_mineru(runner, monkeypatch, name) -> None:
     """RDR-237: the older names are aliases for mineru, resolved before the capture starts."""

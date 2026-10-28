@@ -158,11 +158,13 @@ def _merge_buffered_provenance(
 
     The explicit ``pymupdf`` extractor (RDR-237) is handled the same way, with one rule of its
     own: ``pymupdf`` names a document whose every indexed page is the PDF's text layer (or
-    nothing). A ``pymupdf`` rerun over a kept buffer that a MinerU run left (a breaker trip keeps
-    it) holds pages that are MinerU's; and a buffer page that names no rung cannot be proven
-    text-only. Either makes the document a mixture, so the method becomes
-    ``mineru+degraded`` (its pages below MinerU's first rung are in the map, MinerU's own pages
-    are not). A buffer of text-layer rungs only (an interrupted ``pymupdf`` run) stays ``pymupdf``.
+    nothing). :func:`pipeline_index_pdf` therefore never resumes a ``pymupdf`` run over a buffer that
+    holds a MinerU page or a page that names no rung: :func:`_discard_buffer_for_text_only` wipes that
+    buffer before any stage starts (nexus-tr1rj.14), so such a buffer never reaches this merge. The
+    branch for it stays as a backstop for a caller that skips the wipe: the document is then a
+    mixture and the method becomes ``mineru+degraded`` (its pages below MinerU's first rung are in
+    the map, MinerU's own pages are not). A buffer of text-layer rungs only (an interrupted
+    ``pymupdf`` run) stays ``pymupdf``.
     """
     method = metadata.get("extraction_method")
     ladder = method in _LADDER_METHODS
@@ -1524,6 +1526,50 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
     return False
 
 
+def _discard_buffer_for_text_only(db: HttpPipelineDB, pdf_path: Path, content_hash: str) -> bool:
+    """Wipe the resumed buffer when an explicit ``pymupdf`` run must not resume over it (nexus-tr1rj.14).
+
+    ``pymupdf`` names a document whose every page is the PDF's text layer. A buffer a MinerU run kept
+    (a breaker trip keeps it) holds that run's pages, a buffer page that names no rung cannot be
+    proven text-only, and a finished extraction another extractor made is not a text-only one. In
+    each case the rerun starts clean instead: the whole document is the text layer and is recorded as
+    ``pymupdf``. A buffer of text-layer rungs only (an interrupted ``pymupdf`` run) is resumed, and so
+    is a finished ``pymupdf`` extraction. Returns ``True`` when it wiped.
+
+    It runs in :func:`pipeline_index_pdf` BEFORE the stages are submitted, never inside a stage: the
+    chunker snapshots the buffer's pages and embedded-chunk count when it starts, so a wipe that ran
+    beside it would leave it holding the discarded MinerU text and skipping chunks the wipe deleted.
+    One engine call wipes the pages and chunks and zeroes both counters; it is fenced, so a newer run's
+    takeover raises PipelineRunFenced like any other call of this run.
+    """
+    state = db.get_pipeline_state(content_hash)
+    if not state or not state["pages_extracted"] > 0:
+        return False
+    rows = db.read_pages(content_hash)
+    if not rows:
+        return False
+    rungs, unknown = _buffer_provenance(rows)
+    total_pages = state["total_pages"]
+    finished_by_another = False
+    if (
+        total_pages is not None and state["pages_extracted"] >= total_pages
+        and state.get("extraction_meta") and len(rows) >= total_pages
+    ):
+        # A finished extraction the buffer really backs (its page count agrees with the claim).
+        finished_by_another = json.loads(state["extraction_meta"]).get("extraction_method") != "pymupdf"
+    del rows
+    mineru_pages = sorted(n for n, r in rungs.items() if r not in _TEXT_LAYER_RUNGS)
+    if not (finished_by_another or unknown or mineru_pages):
+        return False
+    _log.warning(
+        "resume_buffer_discarded_for_text_only", file_path=str(pdf_path), content_hash=content_hash,
+        buffered_pages=len(rungs) + len(unknown), complete_extraction=finished_by_another,
+        pages_on_a_mineru_rung=mineru_pages[:10], buffered_rows_without_a_rung=len(unknown),
+    )
+    db.clear_orphan_wal(content_hash)
+    return True
+
+
 def _reconcile_resumed_run(db: HttpPipelineDB, doc_id: str, content_hash: str) -> str:
     """Decide what a RESUMED run does with the buffer an earlier process left (RDR-223).
 
@@ -1989,6 +2035,19 @@ def pipeline_index_pdf(
             # buffer untouched, so the next run resumes it.
             if not isinstance(exc, PipelineRunFenced):
                 _rearm_failed(db, content_hash, f"resume reconcile failed: {exc}")
+            raise
+
+    # nexus-tr1rj.14: an explicit ``pymupdf`` run does not resume over a MinerU buffer. This runs here,
+    # before the stages exist, because the chunker snapshots the buffer when it starts (see
+    # _discard_buffer_for_text_only). After a wipe the document uploads through a new writer, whose
+    # completion is the stamp's first branch, so ``resumed_tail`` (a finished upload kept) is never read.
+    if extractor == "pymupdf":
+        try:
+            _discard_buffer_for_text_only(db, pdf_path, content_hash)
+        except BaseException as exc:
+            # The row is 'running' (create_pipeline answered); hand it back like the reconcile above.
+            if not isinstance(exc, PipelineRunFenced):
+                _rearm_failed(db, content_hash, f"text-only buffer discard failed: {exc}")
             raise
 
     # RDR-223: the index-run fence begins inside the writer, as its first request, so no chunk

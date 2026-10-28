@@ -2581,6 +2581,10 @@ def index_repository(
                     # nexus-2k66t.4.2: a held PDF was not offered this run; the
                     # next --since-head diff must still contain it.
                     + stats.get("pdf_stack_held", 0)
+                    # nexus-tr1rj.13: PDFs a MinerU stop failed or never reached are retried by
+                    # the next run once the install is repaired; the diff must still contain them.
+                    + stats.get("pdf_mineru_tripped", 0)
+                    + len(stats.get("pdf_mineru_not_attempted_paths") or ())
                 )
                 if _deferred_or_failed_files:
                     _log.warning(
@@ -3083,6 +3087,58 @@ def _contain_extraction_quality_gate(
             remedy=f"nx index pdf --allow-degraded-extraction {file}",
         )
         failed.append(str(file))
+        return 0
+
+
+class _MineruStop:
+    """What one ``nx index repo`` run knows about a MinerU stop (nexus-tr1rj.13).
+
+    A MinerU breaker trip or machine-resource error names the install or the machine, not the file,
+    so the PDF loop stops attempting PDFs once one is seen (code, prose and RDR files are other
+    loops and keep running). Shared by every worker of the PDF loop, so every write holds *lock*.
+    *tripped* are the files that raised it (more than one only when a concurrent worker was already
+    inside MinerU), *not_attempted* the PDFs the loop reached afterwards, *stopped_at* the first
+    file that tripped, *reason* its ``(what, detail, remedy)``.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.tripped: list[str] = []
+        self.not_attempted: list[str] = []
+        self.stopped_at: str | None = None
+        self.reason: tuple[str, str, str] | None = None
+
+
+def _contain_mineru_stop(fn: "Callable[[], int]", file: "Path", stop: _MineruStop) -> int:
+    """Run per-file PDF index ``fn``; on a MinerU stop (:data:`nexus.pdf_extractor.MINERU_RUN_STOPPING`),
+    record *file* as the one that tripped it and return 0 instead of propagating. Once a stop is
+    recorded, every later PDF is added to ``stop.not_attempted`` and ``fn`` is not called.
+
+    Pre-fix, ``run_file_loop``'s first-exception-cancels-all contract meant one trip aborted the
+    whole run (every code, prose and RDR file not yet started, with no list of what was skipped).
+    Same containment shape as :func:`_contain_extraction_quality_gate`; unlike it, the stop also
+    short-circuits the remaining PDFs, because each would trip the same breaker after its own
+    timeouts. Any other exception propagates unchanged.
+    """
+    from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
+
+    with stop.lock:
+        if stop.stopped_at is not None:
+            stop.not_attempted.append(str(file))
+            return 0
+    try:
+        return fn()
+    except MINERU_RUN_STOPPING as exc:
+        reason = mineru_stop_reason(exc)
+        with stop.lock:
+            stop.tripped.append(str(file))
+            if stop.stopped_at is None:
+                stop.stopped_at = str(file)
+                stop.reason = reason
+        _log.error(
+            "index_file_mineru_stopped",
+            file=str(file), error_type=type(exc).__name__, detail=reason[1], remedy=reason[2],
+        )
         return 0
 
 
@@ -6858,6 +6914,8 @@ def _run_index(
     # cancels-all contract. Collected here so the summary + stats key
     # below can report it (and index_repo_cmd can drive a non-zero exit).
     _quality_gate_failed: list[str] = []
+    # nexus-tr1rj.13: a MinerU stop is contained the same way, and also stops the remaining PDFs.
+    _mineru_stop = _MineruStop()
 
     def _index_one_pdf(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))
@@ -6865,21 +6923,22 @@ def _run_index(
         # nexus-wi1uv: quality-gate containment nests inside — extraction
         # (where the gate fires) happens before the vector upload (where a
         # transient 5xx fires), so the inner wrapper sees it first.
-        return _contain_transient_upsert(lambda: _contain_extraction_quality_gate(lambda: _index_pdf_file(
-            file, repo, docs_collection, docs_model, docs_col, db,
-            voyage_key, git_meta, now_iso, score,
-            force=force,
-            force_re_embed=force_re_embed,
-            timeout=read_timeout_seconds,
-            chunk_chars=tuning.pdf_chunk_chars,
-            embed_fn=_embed_fn,
-            stage_timers=timers,
-            doc_id_resolver=_doc_id_resolver,
-            staleness_cache=docs_staleness,
-            hooks=hooks,
-            batcher=_batcher,
-            extractor=_pdf_extractor,
-        ), file, _quality_gate_failed), file)
+        return _contain_transient_upsert(lambda: _contain_extraction_quality_gate(
+            lambda: _contain_mineru_stop(lambda: _index_pdf_file(
+                file, repo, docs_collection, docs_model, docs_col, db,
+                voyage_key, git_meta, now_iso, score,
+                force=force,
+                force_re_embed=force_re_embed,
+                timeout=read_timeout_seconds,
+                chunk_chars=tuning.pdf_chunk_chars,
+                embed_fn=_embed_fn,
+                stage_timers=timers,
+                doc_id_resolver=_doc_id_resolver,
+                staleness_cache=docs_staleness,
+                hooks=hooks,
+                batcher=_batcher,
+                extractor=_pdf_extractor,
+            ), file, _mineru_stop), file, _quality_gate_failed), file)
 
     _pdf_written = run_file_loop(
         _dispatch_pdf, _index_one_pdf, concurrency=_concurrency,
@@ -6907,6 +6966,23 @@ def _run_index(
                 + ("…" if len(_quality_gate_failed) > 5 else "")
                 + " — retry with 'nx index pdf --allow-degraded-extraction "
                 "<file>' to accept the extraction deliberately."
+            )
+
+    if _mineru_stop.stopped_at is not None:
+        # nexus-tr1rj.13: the PDF loop stopped at a MinerU breaker trip / machine-resource error.
+        # Code, prose and RDR files are unaffected; index_repo_cmd lists the PDFs not attempted
+        # and ends non-zero once the rest of the run has finished.
+        _stop_what, _stop_detail, _stop_remedy = _mineru_stop.reason or ("MinerU stopped", "", "")
+        _log.error(
+            "index_pdf_mineru_stopped",
+            stopped_at=_mineru_stop.stopped_at, tripped=len(_mineru_stop.tripped),
+            not_attempted=len(_mineru_stop.not_attempted),
+        )
+        if on_phase is not None:
+            on_phase(
+                f"WARNING: {_stop_what} on {Path(_mineru_stop.stopped_at).name} ({_stop_detail}); "
+                f"{len(_mineru_stop.not_attempted)} remaining PDF(s) not attempted this run "
+                f"(code, prose and RDR files proceed). {_stop_remedy}"
             )
 
     # Index RDR markdown files → rdr__ (nexus-3lswy: 4th run_file_loop
@@ -7577,6 +7653,20 @@ def _run_index(
         # index_repo_cmd uses this to drive a non-zero exit after
         # post-processing completes.
         "pdf_quality_gate_failed": len(_quality_gate_failed),
+        # nexus-tr1rj.13: a MinerU breaker trip / machine-resource error stopped the PDF loop.
+        # ``pdf_mineru_stop`` is None for a run that saw none; otherwise the first file that tripped
+        # and the words index_repo_cmd prints. The PDFs reached afterwards are listed, not indexed.
+        "pdf_mineru_tripped": len(_mineru_stop.tripped),
+        "pdf_mineru_stop": (
+            {
+                "file": _mineru_stop.stopped_at,
+                "what": (_mineru_stop.reason or ("", "", ""))[0],
+                "detail": (_mineru_stop.reason or ("", "", ""))[1],
+                "remedy": (_mineru_stop.reason or ("", "", ""))[2],
+            }
+            if _mineru_stop.stopped_at is not None else None
+        ),
+        "pdf_mineru_not_attempted_paths": sorted(_mineru_stop.not_attempted),
         # nexus-2k66t.4.2: PDFs held back because the PDF stack is missing and
         # the install was refused. index_repo_cmd exits 69 over a non-zero count.
         "pdf_stack_held": len(_pdf_held),

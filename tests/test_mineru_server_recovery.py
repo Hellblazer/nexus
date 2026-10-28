@@ -111,6 +111,27 @@ def test_enospc_with_no_semaphores_left_is_a_machine_error_not_a_runtime_error(
     sub.assert_not_called()
 
 
+def test_the_raise_sites_real_message_becomes_a_short_stop_detail_and_one_remedy(
+    ext: PDFExtractor, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-tr1rj.13 review: the raise site's message is the platform's whole remedy (about 400
+    characters). The Stopped line takes a short detail and that remedy once, not the text twice."""
+    from nexus._mineru_health import semaphore_remedy
+
+    remedy = semaphore_remedy("darwin")
+    monkeypatch.setattr("nexus._mineru_health.semaphores_exhausted", lambda: remedy)
+    exc = _status_error(409, {"error": "OSError: [Errno 28] No space left on device"})
+    with pytest.raises(MineruMachineResourceError) as info:
+        ext._mineru_after_server_error(_PDF, 0, 1, exc)
+
+    what, detail, stop_remedy = pe.mineru_stop_reason(info.value)
+
+    assert (what, detail) == ("MinerU cannot run on this machine", "POSIX named semaphores exhausted")
+    assert stop_remedy == remedy and len(remedy) > 300, "non-vacuity: the real message is long"
+    line = f"Stopped: {what} on b.pdf ({detail}); 2 remaining PDF(s) not attempted. {stop_remedy}"
+    assert line.count(remedy) == 1 and line.count("sysctl") == 1
+
+
 def test_enospc_on_a_box_that_can_still_make_a_semaphore_is_a_full_disk(
     ext: PDFExtractor, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

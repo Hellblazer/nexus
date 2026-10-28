@@ -96,10 +96,10 @@ ENTRY_EXTRACTOR_CHOICE: dict[str, str] = {
     "nx index pdf --dir": CHOICE_FLAG_AND_SETTING,
     "nx index repo": CHOICE_SETTING,
     "nx collection reindex": CHOICE_SETTING,
-    # `nx dt index` and `nx dt capture` read the flag only (default `auto`, never `pdf.extractor`);
-    # if they come to read the setting, change these two to CHOICE_FLAG_AND_SETTING.
-    "nx dt index": CHOICE_FLAG,
-    "nx dt capture": CHOICE_FLAG,
+    # `nx dt index` and `nx dt capture` take `--extractor` (default: unset) and fall back to
+    # `get_pdf_extractor()`, the `pdf.extractor` setting, like `nx index pdf` (nexus-tr1rj.14).
+    "nx dt index": CHOICE_FLAG_AND_SETTING,
+    "nx dt capture": CHOICE_FLAG_AND_SETTING,
     "nx mineru start": CHOICE_NONE,
 }
 

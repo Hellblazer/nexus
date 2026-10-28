@@ -14,15 +14,16 @@ the MinerU extraction path).
 * config accepts it;
 * the gates: ``nx index pdf`` (a file and ``--dir``), ``nx dt index``, ``nx dt capture``, ``nx index repo``
   (including its late recheck) and ``nx collection reindex``;
-* the resume decision: a ``pymupdf`` rerun over a buffer a MinerU run left is a mixture and is recorded
-  as ``mineru+degraded``.
+* the resume decision (nexus-tr1rj.14): a ``pymupdf`` rerun over a buffer a MinerU run left, or one that
+  names no rung, starts clean (the buffer is wiped), so the document is uniformly text-layer and recorded
+  as ``pymupdf``; a buffer an earlier ``pymupdf`` run left is resumed.
 """
 from __future__ import annotations
 
 import json
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pymupdf
 import pytest
@@ -35,7 +36,7 @@ from nexus.cli import main
 from nexus.errors import UnextractableContentError
 from nexus.pdf_extractor import PDFExtractor
 from nexus.pdf_stack import PdfStackMissingError
-from nexus.pipeline_stages import _merge_buffered_provenance, extractor_loop
+from nexus.pipeline_stages import _discard_buffer_for_text_only, _merge_buffered_provenance, extractor_loop
 
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
@@ -509,9 +510,6 @@ _SETTING_ONLY = (
     "For text only (no layout, tables or math), set `pdf.extractor: pymupdf` and rerun: "
     "that needs no PDF support."
 )
-_FLAG_ONLY = (
-    "For text only (no layout, tables or math), rerun with `--extractor pymupdf`: that needs no PDF support."
-)
 _NO_SENTENCE = None  # `nx mineru start` starts the MinerU server: there is no extractor to choose
 
 _ENTRY_CLASSES = [
@@ -519,8 +517,8 @@ _ENTRY_CLASSES = [
     pytest.param("nx index pdf --dir", _FLAG_AND_SETTING, id="flag-and-setting:index-pdf-dir"),
     pytest.param("nx index repo", _SETTING_ONLY, id="setting-only:index-repo"),
     pytest.param("nx collection reindex", _SETTING_ONLY, id="setting-only:collection-reindex"),
-    pytest.param("nx dt index", _FLAG_ONLY, id="flag-only:dt-index"),
-    pytest.param("nx dt capture", _FLAG_ONLY, id="flag-only:dt-capture"),
+    pytest.param("nx dt index", _FLAG_AND_SETTING, id="flag-and-setting:dt-index"),
+    pytest.param("nx dt capture", _FLAG_AND_SETTING, id="flag-and-setting:dt-capture"),
     pytest.param("nx mineru start", _NO_SENTENCE, id="none:mineru-start"),
 ]
 
@@ -530,8 +528,8 @@ def _assert_names_the_way_out(message: str, expected: str | None) -> None:
         assert "pymupdf" not in message and "For text only" not in message, message
     else:
         assert message.count(expected) == 1 and message.count("For text only") == 1, message
-        if expected is _FLAG_ONLY:
-            assert "pdf.extractor" not in message, "`nx dt` does not read the setting"
+        if expected is _FLAG_AND_SETTING:
+            assert "--extractor pymupdf" in message and "pdf.extractor: pymupdf" in message, "both ways are named"
         if expected is _SETTING_ONLY:
             assert "--extractor" not in message, "`nx index repo` and `nx collection reindex` have no flag"
 
@@ -616,7 +614,7 @@ def test_every_kind_of_refusal_names_the_text_only_way_out_in_the_words_of_the_c
 
     _assert_names_the_way_out(_refusal_message("nx index pdf"), _FLAG_AND_SETTING)
     _assert_names_the_way_out(_refusal_message("nx index repo"), _SETTING_ONLY)
-    _assert_names_the_way_out(_refusal_message("nx dt capture"), _FLAG_ONLY)
+    _assert_names_the_way_out(_refusal_message("nx dt capture"), _FLAG_AND_SETTING)
     _assert_names_the_way_out(_refusal_message("nx mineru start"), _NO_SENTENCE)
 
 
@@ -645,7 +643,7 @@ def test_a_windows_gap_refusal_from_require_names_the_way_out_too(refusal_bed) -
     with pytest.raises(PdfStackMissingError) as err:
         pdf_stack.require("nx dt index")
     assert "Visual C++" in str(err.value)
-    _assert_names_the_way_out(str(err.value), _FLAG_ONLY)
+    _assert_names_the_way_out(str(err.value), _FLAG_AND_SETTING)
 
 
 def test_every_cli_gate_names_an_entry_the_remedy_table_knows() -> None:
@@ -865,7 +863,7 @@ def test_dt_index_with_mineru_and_the_stack_missing_still_stops(stack_absent, ru
     with patch("nexus.doc_indexer.index_pdf") as index_pdf:
         result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--extractor", "mineru"])
     assert result.exit_code == pdf_stack.EXIT_REFUSED, result.output
-    assert _FLAG_ONLY in result.output and "pdf.extractor" not in result.output, "`nx dt` reads the flag only"
+    assert _FLAG_AND_SETTING in result.output, "`nx dt` reads the flag and the setting"
     index_pdf.assert_not_called()
 
 
@@ -1138,22 +1136,96 @@ def _buffer(rungs: list[str | None]) -> MagicMock:
     return db
 
 
-def test_a_pymupdf_rerun_over_a_tripped_mineru_buffer_indexes_the_buffer_and_records_the_mixture(
-    stack_absent, tmp_path,
-) -> None:
-    """Through ``extractor_loop`` and the real extractor: MinerU buffered pages 1 and 2 and tripped the
-    breaker; ``--extractor pymupdf`` writes only pages 3 to 5 and the record says what was indexed."""
-    pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, _P2, _P3, None, _P1])
+def _state(db: MagicMock, *, pages: int, total: int | None = None, method: str | None = None) -> None:
+    db.get_pipeline_state.return_value = {
+        "pages_extracted": pages, "total_pages": total,
+        "extraction_meta": json.dumps({"extraction_method": method}) if method else None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("rungs", "total", "method", "wipes"),
+    [
+        (["mineru", "mineru"], None, None, True),                      # a tripped MinerU run's kept buffer
+        (["pymupdf-text", "mineru-no-formula"], None, None, True),     # one MinerU page is enough
+        ([None, None], None, None, True),                              # pages that name no rung cannot be proven text-only
+        (["mineru", "mineru"], 2, "mineru", True),                     # a finished MinerU extraction is not reused
+        (["pymupdf-text", "unextracted"], None, None, False),          # an interrupted pymupdf run is resumed
+        (["pymupdf-text", "pymupdf-text"], 2, "pymupdf", False),       # a finished pymupdf extraction is reused
+    ],
+    ids=["mineru-buffer", "one-mineru-page", "no-rung", "finished-mineru", "own-interrupted", "own-finished"],
+)
+def test_the_text_only_discard_decision(rungs, total, method, wipes) -> None:
+    """nexus-tr1rj.14: wipe when the buffer holds a MinerU rung or a page naming no rung, or a finished
+    non-pymupdf extraction; resume a buffer of text-layer rungs and a finished pymupdf extraction."""
+    db = _buffer(rungs)
+    _state(db, pages=len(rungs), total=total, method=method)
+
+    assert _discard_buffer_for_text_only(db, Path("/a.pdf"), _HASH) is wipes
+
+    assert db.clear_orphan_wal.call_args_list == ([call(_HASH)] if wipes else [])
+
+
+def test_the_text_only_discard_reads_nothing_for_a_first_run() -> None:
+    db = _buffer([])
+    _state(db, pages=0)
+
+    assert _discard_buffer_for_text_only(db, Path("/a.pdf"), _HASH) is False
+
+    db.read_pages.assert_not_called()
+    db.clear_orphan_wal.assert_not_called()
+
+
+def test_a_stale_counter_over_an_empty_buffer_wipes_nothing() -> None:
+    """The counter claims pages the WAL no longer holds (a wipe an older engine left a counter behind)."""
+    db = _buffer([])
+    _state(db, pages=3, total=None)
+
+    assert _discard_buffer_for_text_only(db, Path("/a.pdf"), _HASH) is False
+
+    db.clear_orphan_wal.assert_not_called()
+
+
+def test_extractor_loop_never_wipes_the_buffer_it_runs_beside_the_chunker(stack_absent, tmp_path) -> None:
+    """The wipe is not a stage's job (nexus-tr1rj.14, review 2026-10-28): the chunker starts at the same
+    time as the extractor and snapshots the pages and the embedded-chunk count, so a wipe inside the
+    extractor leaves the chunker with the discarded MinerU text. ``extractor_loop`` resumes what it finds."""
+    pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, _P2, _P3])
     db = _buffer(["mineru", "mineru"])
 
-    result = extractor_loop(pdf, _HASH, db, threading.Event(), extractor="pymupdf")
+    extractor_loop(pdf, _HASH, db, threading.Event(), extractor="pymupdf")
 
-    assert [c.args[1] for c in db.write_page.call_args_list] == [2, 3, 4], "only the pages the buffer lacked"
-    assert result.metadata["extraction_method"] == "mineru+degraded"
-    assert result.metadata["extraction_pages"] == {"pymupdf-text": [3, 5], "unextracted": [4]}
-    ((_hash, stored),) = [c.args for c in db.store_extraction_metadata.call_args_list]
-    assert stored == result.metadata
-    assert stack_absent.calls == []
+    db.clear_orphan_wal.assert_not_called()
+
+
+def test_pipeline_index_pdf_wipes_a_mineru_buffer_before_any_stage_is_submitted(tmp_path) -> None:
+    """The ordering the race needs: the wipe is done when the chunker starts, so its snapshot of the
+    pages and the embedded-chunk count is the clean one. (The engine-backed twin sees the text.)"""
+    from nexus.pipeline_stages import pipeline_index_pdf
+
+    pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, _P2, _P3])
+    db = _buffer(["mineru", "mineru"])
+    db.create_pipeline.return_value = "resuming"
+    db.chunk_counts.return_value = (0, 0)
+    seen: dict[str, bool] = {}
+
+    def _chunker(*_a, **_k) -> None:
+        seen["wiped_when_the_chunker_started"] = db.clear_orphan_wal.called
+
+    def _extractor(*_a, **_k):
+        raise RuntimeError("stop after the stages have started")
+
+    with patch("nexus.pipeline_stages.extractor_loop", _extractor), \
+            patch("nexus.pipeline_stages.chunker_loop", _chunker), \
+            patch("nexus.pipeline_stages.uploader_loop", return_value=0), \
+            patch("nexus.doc_indexer._fence_fail"), \
+            pytest.raises(RuntimeError, match="stop after the stages"):
+        pipeline_index_pdf(
+            pdf, _HASH, "knowledge__t", MagicMock(), db=db, embed_fn=lambda t, m: ([], m),
+            extractor="pymupdf", doc_id="1.1.1",
+        )
+
+    assert seen == {"wiped_when_the_chunker_started": True}
 
 
 def test_a_pymupdf_rerun_over_its_own_interrupted_buffer_stays_pymupdf(stack_absent, tmp_path) -> None:
@@ -1162,6 +1234,8 @@ def test_a_pymupdf_rerun_over_its_own_interrupted_buffer_stays_pymupdf(stack_abs
 
     result = extractor_loop(pdf, _HASH, db, threading.Event(), extractor="pymupdf")
 
+    db.clear_orphan_wal.assert_not_called()
+    assert [c.args[1] for c in db.write_page.call_args_list] == [2], "only the page the buffer lacked"
     assert result.metadata["extraction_method"] == "pymupdf"
     assert result.metadata["extraction_pages"] == {"pymupdf-text": [1, 3], "unextracted": [2]}
 
@@ -1248,23 +1322,6 @@ def test_a_malformed_pdf_setting_does_not_stop_the_repo_walk_reading_the_extract
 
     monkeypatch.setattr(nx_config, "load_config", lambda **kw: {"pdf": {"extractor": "pymupdf"}})
     assert _repo_pdf_extractor(Path("/repo")) == "pymupdf"
-
-
-def test_a_pymupdf_rerun_over_a_buffer_that_names_no_rung_says_so_and_is_not_called_pymupdf(
-    stack_absent, tmp_path,
-) -> None:
-    from structlog.testing import capture_logs
-
-    pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, _P2, _P3])
-    db = _buffer([None, None])
-
-    with capture_logs() as cap:
-        result = extractor_loop(pdf, _HASH, db, threading.Event(), extractor="pymupdf")
-
-    assert result.metadata["extraction_method"] == "mineru+degraded"
-    assert result.metadata["extraction_pages"] == {"pymupdf-text": [3]}, "the unproven pages 1 and 2 are not listed"
-    (warning,) = [e for e in cap if e["event"] == "resume_provenance_unknown"]
-    assert warning["buffered_rows_without_a_rung"] == 2
 
 
 def test_the_repo_pdf_indexer_hands_its_extractor_to_the_chunker(tmp_path, monkeypatch) -> None:

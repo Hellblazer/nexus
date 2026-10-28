@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -105,6 +106,98 @@ def test_index_repo_pdf_quality_gate_failures_exit_nonzero(runner, repo_dir, moc
     # "Done." (the rest of the run, incl. post-processing) still printed --
     # the exception fires LAST, after useful work completes.
     assert "Done." in result.output
+
+
+_MINERU_STOP_STATS = {
+    "files_changed": 3,
+    "pdf_mineru_tripped": 1,
+    "pdf_mineru_stop": {
+        "file": "/r/b.pdf", "what": "MinerU failed systemically", "detail": "failure class timeout",
+        "remedy": "Repair the install (`nx doctor`), then rerun.",
+    },
+    "pdf_mineru_not_attempted_paths": ["/r/c.pdf", "/r/d.pdf"],
+}
+
+
+def test_index_repo_mineru_stop_report_lists_the_unattempted_pdfs_and_fails_the_run(capsys):
+    """nexus-tr1rj.13: index_repository contains a MinerU stop and reports it in its stats;
+    index_repo_cmd prints the PDFs not attempted and ends the run non-zero, after the rest of the
+    run (the wiring pin below). The report is a function so this test needs no engine tenant: the whole
+    command touches the service, and the unit tenant ceiling is exact."""
+    from nexus.commands.index import _report_mineru_stop
+
+    failure = _report_mineru_stop(_MINERU_STOP_STATS)
+
+    out = capsys.readouterr().out
+    assert "Stopped: MinerU failed systemically on b.pdf (failure class timeout); " \
+        "2 remaining PDF(s) not attempted. Repair the install (`nx doctor`), then rerun." in out, out
+    assert "c.pdf: not attempted (the run stopped at b.pdf)" in out
+    assert "d.pdf: not attempted (the run stopped at b.pdf)" in out
+    assert isinstance(failure, click.ClickException)
+    assert "2 PDF(s) not attempted" in failure.message and "Code, prose and RDR files were indexed" in failure.message
+
+
+def test_index_repo_mineru_stop_report_is_silent_without_a_stop(capsys):
+    from nexus.commands.index import _report_mineru_stop
+
+    assert _report_mineru_stop({"files_changed": 3}) is None
+    assert _report_mineru_stop({"pdf_mineru_stop": None, "pdf_mineru_not_attempted_paths": []}) is None
+    assert capsys.readouterr().out == ""
+
+
+def test_index_repo_mineru_stop_report_caps_the_listing_at_twenty(capsys):
+    from nexus.commands.index import _report_mineru_stop
+
+    stats = {**_MINERU_STOP_STATS, "pdf_mineru_not_attempted_paths": [f"/r/p{i:02d}.pdf" for i in range(25)]}
+    _report_mineru_stop(stats)
+
+    out = capsys.readouterr().out
+    assert "25 remaining PDF(s) not attempted" in out
+    assert out.count(": not attempted (the run stopped at b.pdf)") == 20
+    assert "... and 5 more" in out
+
+
+def test_a_mineru_stop_is_reported_even_when_another_failure_is_already_set(capsys):
+    """nexus-tr1rj.13 review: ``_run_failure or _report_mineru_stop(...)`` short-circuits, so a run that
+    already failed its quality gate (or the manifest check, or the PDF-stack check) printed neither the
+    Stopped line nor the PDFs it did not attempt. The first failure still wins the exit; the stop is
+    still reported. (The command folds the stats in through this function; a full invoke needs an engine
+    tenant, and the unit tenant ceiling is exact.)"""
+    from nexus.commands.index import _fold_in_mineru_stop
+
+    earlier = click.ClickException("2 PDF(s) failed the post-extraction quality gate")
+
+    combined = _fold_in_mineru_stop(earlier, _MINERU_STOP_STATS)
+
+    out = capsys.readouterr().out
+    assert combined is earlier, "the earlier failure keeps the exit"
+    assert "Stopped: MinerU failed systemically on b.pdf" in out, out
+    assert "c.pdf: not attempted (the run stopped at b.pdf)" in out
+    assert "d.pdf: not attempted (the run stopped at b.pdf)" in out
+
+
+def test_a_mineru_stop_alone_is_the_runs_failure_and_no_stop_leaves_it_alone(capsys):
+    from nexus.commands.index import _fold_in_mineru_stop
+
+    failure = _fold_in_mineru_stop(None, _MINERU_STOP_STATS)
+    assert isinstance(failure, click.ClickException) and "2 PDF(s) not attempted" in failure.message
+    capsys.readouterr()
+
+    earlier = click.ClickException("earlier")
+    assert _fold_in_mineru_stop(earlier, {"files_changed": 3}) is earlier
+    assert _fold_in_mineru_stop(None, {"files_changed": 3}) is None
+    assert capsys.readouterr().out == ""
+
+
+def test_index_repo_cmd_folds_the_stats_through_the_stop_report():
+    """Wiring pin only: the command's callback reaches the function above with its own failure and the
+    run's stats. The behaviour is the two tests above; this fails if the call is removed."""
+    import inspect
+
+    from nexus.commands.index import index_repo_cmd
+
+    src = inspect.getsource(index_repo_cmd.callback)
+    assert "_run_failure = _fold_in_mineru_stop(_run_failure, stats or {})" in src
 
 
 @pytest.mark.t2_tenant
@@ -2790,6 +2883,58 @@ def test_pdf_dir_trip_on_the_last_pdf_prints_no_stopped_line(runner, home):
     assert "Stopped:" not in result.output
     assert "not attempted" not in result.output
     assert "1 of 2 file(s) failed" in result.output, result.output
+
+
+def test_pdf_dir_stops_the_whole_run_when_the_machine_cannot_run_mineru(runner, home):
+    """nexus-tr1rj.13: MineruMachineResourceError (POSIX semaphores exhausted) names the machine,
+    not the file, exactly as a breaker trip does, so it stops the run the same way: nothing after
+    it is attempted, the rest are listed, and the exit is non-zero."""
+    from tests._mineru_machine_error import real_machine_error
+
+    machine_error = real_machine_error()
+    d = home / "pdfs"
+    d.mkdir()
+    for name in ("a.pdf", "b.pdf", "c.pdf", "d.pdf"):
+        (d / name).write_bytes(b"fake pdf")
+
+    seen: list[str] = []
+
+    def _fake_index_pdf(path, **kwargs):
+        seen.append(path.name)
+        if path.name == "b.pdf":
+            raise machine_error
+        return 2
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=_fake_index_pdf):
+        result = runner.invoke(main, ["index", "pdf", "--dir", str(d)])
+
+    assert seen == ["a.pdf", "b.pdf"], "no PDF after the machine error is attempted"
+    assert result.exit_code != 0, result.output
+    (stopped,) = [line for line in result.output.splitlines() if line.startswith("Stopped:")]
+    assert stopped == (
+        "Stopped: MinerU cannot run on this machine on b.pdf (POSIX named semaphores exhausted); "
+        f"2 remaining PDF(s) not attempted. {machine_error}"
+    ), "a short detail in the parentheses and the exception's own remedy once, with no second remedy"
+    assert "c.pdf: not attempted (the run stopped at b.pdf)" in result.output
+    assert "d.pdf: not attempted (the run stopped at b.pdf)" in result.output
+    assert "Summary: 4 PDFs (2 not attempted)" in result.output
+
+
+def test_pdf_single_file_reports_a_machine_resource_error_as_a_cli_error(runner, home):
+    """nexus-tr1rj.13: a single `nx index pdf PATH` gives MineruMachineResourceError the same
+    clean `Error:` line a breaker trip gets, not a raw traceback."""
+    from tests._mineru_machine_error import real_machine_error
+
+    pdf = home / "a.pdf"
+    pdf.write_bytes(b"fake pdf")
+    machine_error = real_machine_error()
+
+    with patch("nexus.doc_indexer.index_pdf", side_effect=machine_error):
+        result = runner.invoke(main, ["index", "pdf", str(pdf)])
+
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert f"Error: {machine_error}" in result.output, result.output
 
 
 def test_pdf_dir_continues_past_an_ordinary_per_file_failure(runner, home):

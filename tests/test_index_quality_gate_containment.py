@@ -108,3 +108,107 @@ def test_composes_with_transient_upsert_containment() -> None:
         lambda: _contain_extraction_quality_gate(transient_boom, _FILE, failed2), _FILE,
     ) == 0
     assert failed2 == []
+
+
+# ── nexus-tr1rj.13: a MinerU stop is contained like the quality gate, and stops only the PDFs ──
+
+
+def _trip(name: str = "b.pdf"):
+    from nexus.pdf_extractor import MineruSystemicFailure
+
+    return MineruSystemicFailure("timeout", "", [1, 2, 3], name)
+
+
+def _machine():
+    from tests._mineru_machine_error import real_machine_error
+
+    return real_machine_error()
+
+
+@pytest.mark.parametrize("make", [_trip, lambda: _machine()], ids=["breaker-trip", "machine-resource"])
+def test_a_mineru_stop_is_contained_and_recorded(make) -> None:
+    """The run's other files (code, prose, RDR loops) must not be cancelled by run_file_loop's
+    first-exception rule: the stop is contained, the file recorded as the one that tripped."""
+    from nexus.indexer import _MineruStop, _contain_mineru_stop
+
+    stop = _MineruStop()
+
+    def boom() -> int:
+        raise make()
+
+    assert _contain_mineru_stop(boom, Path("/repo/b.pdf"), stop) == 0
+    assert stop.tripped == ["/repo/b.pdf"]
+    assert stop.stopped_at == "/repo/b.pdf"
+    assert stop.reason, "the run output can say why it stopped"
+
+
+def test_after_a_mineru_stop_the_remaining_pdfs_are_listed_not_attempted() -> None:
+    from nexus.indexer import _MineruStop, _contain_mineru_stop
+
+    stop = _MineruStop()
+    calls: list[str] = []
+
+    def index(name: str):
+        def _run() -> int:
+            calls.append(name)
+            if name == "b.pdf":
+                raise _trip(name)
+            return 3
+        return _run
+
+    results = [_contain_mineru_stop(index(n), Path("/repo") / n, stop) for n in ("a.pdf", "b.pdf", "c.pdf", "d.pdf")]
+
+    assert calls == ["a.pdf", "b.pdf"], "no PDF after the stop is attempted"
+    assert results == [3, 0, 0, 0]
+    assert stop.tripped == ["/repo/b.pdf"]
+    assert stop.not_attempted == ["/repo/c.pdf", "/repo/d.pdf"]
+
+
+def test_a_mineru_stop_inside_run_file_loop_does_not_abort_the_loop() -> None:
+    """Through the real loop: without the containment the first MinerU stop re-raises and cancels
+    every not-yet-started file (the control); with it the loop returns, counting only what wrote."""
+    from nexus.indexer import _MineruStop, _contain_mineru_stop
+    from nexus.indexer_utils import run_file_loop
+
+    files = [(1.0, Path(f"/repo/{n}.pdf")) for n in "abcd"]
+
+    def index_one(file: Path, score: float, timers: object) -> int:
+        if file.name == "b.pdf":
+            raise _trip(file.name)
+        return 2
+
+    with pytest.raises(type(_trip())):
+        run_file_loop(files, index_one, concurrency=1, on_file=None, on_stage_timers=None)
+
+    stop = _MineruStop()
+    written = run_file_loop(
+        files, lambda f, s, t: _contain_mineru_stop(lambda: index_one(f, s, t), f, stop),
+        concurrency=1, on_file=None, on_stage_timers=None,
+    )
+    assert written == 1, "only a.pdf wrote"
+    assert stop.not_attempted == ["/repo/c.pdf", "/repo/d.pdf"]
+
+
+def test_a_non_mineru_error_still_propagates_through_the_mineru_containment() -> None:
+    from nexus.indexer import _MineruStop, _contain_mineru_stop
+
+    stop = _MineruStop()
+
+    def boom() -> int:
+        raise ValueError("unrelated")
+
+    with pytest.raises(ValueError):
+        _contain_mineru_stop(boom, _FILE, stop)
+    assert stop.tripped == [] and stop.stopped_at is None
+
+
+def test_the_stop_reason_names_the_failure_class_or_the_machine() -> None:
+    from nexus.pdf_extractor import mineru_stop_reason
+
+    what, detail, remedy = mineru_stop_reason(_trip())
+    assert (what, detail) == ("MinerU failed systemically", "failure class timeout")
+    assert "nx doctor" in remedy
+    what, detail, remedy = mineru_stop_reason(_machine())
+    assert (what, detail) == ("MinerU cannot run on this machine", "POSIX named semaphores exhausted")
+    assert remedy == str(_machine()), "the exception's own remedy text, once"
+    assert len(detail) < 60

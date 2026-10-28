@@ -392,6 +392,25 @@ def test_head_hash_not_updated_when_files_throttled(
     assert held[0]["chunk_flush_failed_files"] == 0
 
 
+@pytest.mark.parametrize(
+    "stats",
+    [{"pdf_mineru_tripped": 1}, {"pdf_mineru_not_attempted_paths": ["/r/c.pdf"]}],
+    ids=["tripped", "not-attempted"],
+)
+def test_head_hash_not_updated_when_a_mineru_stop_failed_or_skipped_pdfs(
+    tmp_path: Path, registry, lock_home: Path, stats: dict,
+) -> None:
+    """nexus-tr1rj.13: the PDFs a MinerU stop failed or never reached are retried once the install
+    is repaired. Advancing the --since-head base past them means the next diff never offers them
+    again, so either count holds the base back."""
+    with patch("nexus.indexer._run_index", return_value=stats):
+        with patch("nexus.indexer._current_head", return_value="abc"):
+            with patch("nexus.indexer._set_owner_head_hash") as mock_set:
+                index_repository(tmp_path, registry)
+
+    mock_set.assert_not_called()
+
+
 def test_head_hash_updated_when_no_files_deferred_or_failed(
     tmp_path: Path, registry, lock_home: Path,
 ) -> None:
