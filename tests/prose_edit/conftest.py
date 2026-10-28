@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import pytest
 
 from nexus.commands._helpers import t2_handle
+from tests._tmp_root import child_env_with_tmpdir
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts" / "memory.py"
@@ -153,7 +154,7 @@ def bare(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Prose:
     env["CLAUDE_CONFIG_DIR"] = str(config)
     env["NEXUS_CONFIG_DIR"] = str(tmp_path / "cfg")
     (tmp_path / "tmp").mkdir()
-    env["TMPDIR"] = str(tmp_path / "tmp")
+    env = child_env_with_tmpdir(env, tmp_path / "tmp")
     env["PROSE_EDIT_PROJECT_PREFIX"] = PREFIX
     env["PROSE_EDIT_NX"] = str(tmp_path / "no-such-nx")
     env["PROSE_EDIT_TEST"] = "1"
