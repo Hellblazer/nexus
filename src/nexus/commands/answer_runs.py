@@ -249,7 +249,27 @@ _WELL_FORMED_DEGENERATE_CLASSES: frozenset[str] = frozenset({
     # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage-decided non-answers carry the notice too. Without these
     # a row with executed steps would fall through to executed-ok.
     "non_answer/uncovered", "non_answer/no_evidence",
+    # A redacted row whose summary says unavailable because the generated prose was no usable answer: the
+    # text that named the shape was not recorded (nexus-jypmj.3.15).
+    "non_answer/no_usable_answer",
 })
+
+
+def _redacted_coverage_class(summary: object) -> str | None:
+    """The coverage-decided non-answer class of a redacted row, read from its run summary; ``None`` unless the
+    summary is an ``nx_answer`` run whose coverage state is ``unavailable``. ``fit_summary`` may cut the
+    ``coverage`` block (and its reason), so a missing reason falls back to ``no_usable_answer``."""
+    if not isinstance(summary, dict) or summary.get("kind") != "nx_answer":
+        return None
+    if summary.get("coverage_state") != "unavailable":
+        return None
+    block = summary.get("coverage")
+    reason = block.get("reason") if isinstance(block, dict) else None
+    if reason == "uncovered":
+        return "non_answer/uncovered"
+    if reason in ("no_evidence", "scope_conflict"):
+        return "non_answer/no_evidence"
+    return "non_answer/no_usable_answer"
 
 _NON_ANSWER_NOTICE_RE = _re.compile(r"^\[non-answer: ([a-z_]+)\]")
 
@@ -319,7 +339,9 @@ def _classify_degenerate_row(row: dict) -> str:
     final_text = str(row.get("final_text") or "")
     question = str(row.get("question") or "")
     if final_text == "[redacted]" or question == "[redacted]":
-        return "redacted"
+        # A trace=False row's text cannot carry the coverage notice, so its run summary decides
+        # (nexus-jypmj.3.15): unavailable coverage means the call returned a non-answer.
+        return _redacted_coverage_class(row.get("run_summary")) or "redacted"
     if final_text.startswith("Planner error:"):
         return "planner_error"
     if final_text.startswith("Error:"):
@@ -949,6 +971,9 @@ def answer_runs_cmd(
     ``no_evidence`` (nothing usable reached the reduction), are not in this
     bucket: they carry the ``[non-answer: <shape>]`` notice and are counted as
     degenerate classes ``non_answer/uncovered`` and ``non_answer/no_evidence``.
+    A ``trace=False`` row cannot carry the notice; when its run summary says
+    coverage ``unavailable`` it is counted in the same classes, or as
+    ``non_answer/no_usable_answer`` when the prose was no usable answer.
     """
     # nexus-spbay: validate/normalize --since BEFORE the service try-block —
     # a bad value must fail as a usage error naming the value, never fall

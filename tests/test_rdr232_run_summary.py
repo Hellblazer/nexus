@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from dataclasses import replace
 
 import pytest
 
@@ -267,6 +268,16 @@ class TestRedaction:
     def test_the_question_is_never_in_the_summary_at_either_setting(self):
         for trace in (True, False):
             assert PRIVATE_QUESTION not in canonical_json(_build(trace=trace, coverage=_coverage("complete")))
+
+    def test_a_whole_question_facet_carries_no_text_at_either_setting(self):
+        """Shakedown 2026-10-28 finding 5 (nexus-jypmj.3.16): the whole_question facet's text IS the question, so
+        a trace=True summary (row 743) carried the question verbatim against "no question text"."""
+        request = replace(_request(facets=1), facets=(Facet("f1", PRIVATE_QUESTION, "whole_question"),))
+        for trace in (True, False):
+            s = _build(trace=trace, coverage=_coverage("complete"), inputs=_inputs(request=request))
+            assert PRIVATE_QUESTION not in canonical_json(s), trace
+            assert s["request"]["facets"] == [{"id": "f1", "origin": "whole_question", "topics": []}
+                                              | ({"source_hints": []} if trace else {})]
 
 
 class TestSizeCap:

@@ -191,7 +191,10 @@ def _request_block(request: Any, trace: bool) -> dict[str, Any] | None:
     for f in facets[:_MAX_FACETS_LISTED]:
         item: dict[str, Any] = {"id": f.id, "origin": f.origin, "topics": list(f.topics)}
         if trace:
-            item["text"] = _text(f.text)
+            # A whole_question facet's text is the question itself, which the summary never carries
+            # (nexus-jypmj.3.16); the row's own question column holds it on a traced run.
+            if f.origin != "whole_question":
+                item["text"] = _text(f.text)
             item["source_hints"] = [_text(h) for h in f.source_hints[:_MAX_HINTS_LISTED]]
         listed.append(item)
     block: dict[str, Any] = {

@@ -5936,8 +5936,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   stored. `{version, persistence, detail, returned_coverage_state,
   persisted_coverage_state, digest}`; always an object. The summary (version 1:
   coverage counts and state, request kind, eligibility, per-stream counts, scope,
-  repair, cost and latency; no question text, and with `trace=False` no facet text
-  or source hint) rides on the run's `/record` and `/complete` write, in the same
+  repair, cost and latency; no question text, so a `whole_question` facet is listed
+  without its text, and with `trace=False` no facet text or source hint) rides on the run's `/record` and `/complete` write, in the same
   row, and is sent only when the engine's `/version` advertises
   `nx_answer_run_summary_supported` (engine-service-v0.1.167 and later).
   `persistence` is `persisted` (the run row was read back and carries a summary
