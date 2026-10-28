@@ -2948,7 +2948,8 @@ matchers (zero fires), or overly broad blocks (high block rate).
 
 **Writer swap (nexus-gjv9b PART 2, 2026-09):** the routing hooks record
 to the engine's `routing_events` table now (best-effort POST via
-`urllib`, no `nexus` import — see `conexus/hooks/scripts/routing/_lib.py`'s
+`urllib` from a detached child, so a guard's decision never waits on the
+engine; no `nexus` import — see `conexus/hooks/scripts/routing/_lib.py`'s
 `log_routing_event`), not the JSONL log this command reads by default. Use
 `--from-store` to read the table instead — an unreachable service exits
 non-zero with `UNAVAILABLE: <reason>`, never a fabricated empty report. A

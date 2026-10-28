@@ -71,7 +71,8 @@ audited in the telemetry log so over-use is visible.
 
 WRITER SWAP (nexus-gjv9b PART 2, Sam directive 2026-08-20):
 ``log_routing_event`` records to the engine's ``routing_events`` table
-now (best-effort POST via ``urllib``, 1.5 s total budget), not the JSONL
+now (best-effort POST via ``urllib`` from a DETACHED child, so the hook
+never waits on the network: nexus-njn1a.1), not the JSONL
 log below -- see that function's own docstring for the full design
 decision (metered drop on service-down, never a JSONL fallback). The
 JSONL append and rotation machinery was deleted at PART 3 (2026-09-05):
@@ -581,20 +582,26 @@ _STATIC_CAUSE_NAMES = frozenset({
 })
 
 
-#: Total budget (seconds) for the routing_events POST (nexus-njn1a finding 9).
-#: A cold HTTPS request to the managed edge costs 240-410 ms (connect ~80 ms,
-#: TLS 80-250 ms, first byte 240-410 ms, measured with curl), so the former
-#: 0.25 s per-socket-operation timeout sat below one round trip and 641 of
-#: the 650 drops on the shakedown box were ``timeout``. 1.5 s is a few round
-#: trips of headroom. It must stay well under the 5 s ``timeout`` hooks.json
-#: gives the routing hooks, because the POST runs BEFORE the deny envelope is
-#: emitted: a host kill mid-POST would let the gated command through.
-#: ``tests/test_routing_hooks.py`` pins both ends.
-_ROUTING_POST_BUDGET_S: float = 1.5
+#: Total deadline (seconds) for the routing_events POST made by the DETACHED
+#: poster child (nexus-njn1a finding 9, redesigned in nexus-njn1a.1). The hook
+#: itself never waits on the network: it starts the child and emits its decision.
+#: The former in-hook budgets were both wrong. A 0.25 s per-socket-operation
+#: timeout sat below one cold HTTPS round trip to the managed edge (a
+#: shakedown box's drop meter held 646 ``timeout`` entries in 650 rows, 641 of
+#: them ``routing_events``), and a 1.5 s join in the hook fixed that by making
+#: every logged guard event, a deny or a ``routing-allow`` escape, wait up to
+#: 1.5 s for the engine before the decision could be emitted. A child has no such
+#: cost, so the budget is generous (a slow authenticated WAN path included) and
+#: only bounds how long a hung engine keeps a child alive.
+_ROUTING_POST_BUDGET_S: float = 5.0
+
+#: argv marker that makes this file run as the detached poster child.
+_POSTER_ARGV = "--post-routing-event"
 
 
 def _post_routing_event_http(
     record: dict, *, timeout: float = _ROUTING_POST_BUDGET_S,
+    endpoint: "tuple[str, str] | None" = None,
 ) -> str:
     """Best-effort ``POST /v1/telemetry/routing_events/record`` via
     ``urllib`` (no ``httpx``/``requests`` dependency — this script runs
@@ -623,11 +630,13 @@ def _post_routing_event_http(
 
     *timeout* is a TOTAL deadline for the whole exchange (nexus-njn1a
     finding 9), enforced by joining a worker thread, not the per-socket-
-    operation timeout ``urlopen`` takes. The exchange runs before the
-    guard emits its deny, so it must end well inside the hook's own 5 s
-    timeout; see :data:`_ROUTING_POST_BUDGET_S`.
+    operation timeout ``urlopen`` takes. This runs in the detached poster
+    (:func:`_poster_main`), never in the hook, so the deadline bounds the
+    child's life, not the hook's decision; see :data:`_ROUTING_POST_BUDGET_S`.
+    *endpoint* is the ``(base_url, token)`` the hook already resolved;
+    without it this resolves its own.
     """
-    base_url, token = _engine_endpoint()
+    base_url, token = endpoint if endpoint is not None else _engine_endpoint()
     if base_url is None:
         return "unresolvable"
     import threading  # noqa: PLC0415 — stdlib, only needed on this path
@@ -778,14 +787,15 @@ def log_routing_event(
     engine's ``routing_events`` table, replacing the former JSONL append).
     Never raises; the hook's own exit code NEVER depends on this call.
 
-    Best-effort, fire-and-forget: POSTs to the engine with a SHORT
-    (1.5 s total) budget via :func:`_post_routing_event_http`; on ANY
-    failure (unresolvable endpoint -- no live supervisor lease, no
-    config.yml credentials, no NX_SERVICE_* env, per
-    :func:`_engine_endpoint` -- timeout, non-2xx), degrades to
-    :func:`_record_dropped_routing_event`
-    rather than a JSONL fallback (the routing hooks' own timeout budget has no room for a
-    filesystem retry story). The JSONL append and rotation
+    Best-effort, fire-and-forget (nexus-njn1a.1): the hook resolves the
+    endpoint from local files and env, starts a detached child
+    (:func:`_spawn_poster`) that POSTs the event, and returns at once; it
+    never waits on the network. On ANY failure (unresolvable endpoint -- no
+    live supervisor lease, no config.yml credentials, no NX_SERVICE_* env,
+    per :func:`_engine_endpoint` -- metered by the hook; timeout, refused
+    connection, non-2xx -- metered by the child), a drop is recorded through
+    :func:`_record_dropped_routing_event` rather than a JSONL fallback or a
+    retry file. The JSONL append and rotation
     machinery was deleted at PART 3 (2026-09-05).
 
     An empty ``session_id`` falls back to the session of the payload
@@ -810,14 +820,121 @@ def log_routing_event(
             # Dedicated field (nexus-mzvwa.9): the reason trails the command,
             # so the fragment cap above routinely truncated it away.
             record["escape_reason"] = escape_reason[:300]
-        cause = _post_routing_event_http(record)
-        if cause:
-            _record_dropped_routing_event(
-                f"routing_events POST failed: {cause}", cause=cause, event=record,
-            )
+        _send_routing_event(record)
     except Exception:
         # Telemetry must never crash a hook. Swallow.
         pass
+
+
+def _send_routing_event(record: dict) -> None:
+    """Hook side of the write: resolve the endpoint (local file and env reads only), then hand the POST to a
+    detached child. Never touches the network, so the hook's decision does not wait on the engine
+    (nexus-njn1a.1). An endpoint that cannot be resolved is a purely local fact and is metered here; a child
+    that cannot be started is metered here as ``other``. A POST that fails afterwards is metered by the child."""
+    base_url, token = _engine_endpoint()
+    if base_url is None:
+        _record_dropped_routing_event(
+            "routing_events POST failed: unresolvable", cause="unresolvable", event=record,
+        )
+        return
+    if not _spawn_poster(record, base_url, token):
+        _record_dropped_routing_event(
+            "routing_events POST failed: the poster child could not be started", cause="other", event=record,
+        )
+
+
+_IS_WINDOWS = os.name == "nt"
+# subprocess creationflags, spelled out so this stdlib-only script needs no platform constant import.
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_NO_WINDOW = 0x08000000
+_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def _poster_env() -> "dict[str, str]":
+    """The child's environment: this process's, with the two path variables the drop meter reads made
+    absolute (the child starts in the filesystem root, so a relative path would name a different place)."""
+    env = dict(os.environ)
+    for name in ("NEXUS_CONFIG_DIR", "NX_DROPPED_WRITES_LOG_PATH"):
+        raw = env.get(name, "").strip()
+        if raw and not os.path.isabs(raw):
+            try:
+                env[name] = os.path.abspath(raw)
+            except OSError:
+                pass
+    return env
+
+
+def _spawn_poster(record: dict, base_url: str, token: str) -> bool:
+    """Start :func:`_poster_main` DETACHED and hand it the event; ``True`` once it is started.
+
+    Pattern: ``version_lockstep_action._popen_detached``. The child gets a session of its own (POSIX) or a
+    process group and job of its own (Windows), so the host reaping or killing the hook does not take the
+    POST with it, and stdout and stderr on the null device, so it can never write to the hook's stdout (the
+    protocol channel) and holds no pipe the host reads to EOF (a child that inherited it would keep the hook
+    "running" until the POST ended). The event, with the bearer token, goes in over stdin, not argv, where
+    ``ps`` would show a command fragment and the token. A pipe write this small does not block. Never raises.
+    """
+    try:
+        import subprocess  # noqa: PLC0415 — stdlib, only needed on this path
+
+        if not sys.executable:
+            return False
+        # Only this interpreter, by absolute path: no name for CreateProcess to search the working directory for.
+        argv = [os.path.abspath(sys.executable), os.path.abspath(__file__), _POSTER_ARGV]
+        stable_cwd = os.path.abspath(os.sep)
+        env = _poster_env()
+        if not _IS_WINDOWS:
+            proc = subprocess.Popen(  # noqa: S603 -- argv list, this interpreter and this file, no shell
+                argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, env=env, start_new_session=True, cwd=stable_cwd,
+            )
+        else:
+            base = _CREATE_NO_WINDOW | _CREATE_NEW_PROCESS_GROUP
+            try:
+                proc = subprocess.Popen(  # noqa: S603
+                    argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    close_fds=True, env=env, creationflags=base | _CREATE_BREAKAWAY_FROM_JOB, cwd=stable_cwd,
+                )
+            except OSError:
+                # A job that forbids breakaway refuses the flag; start without it.
+                proc = subprocess.Popen(  # noqa: S603
+                    argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    close_fds=True, env=env, creationflags=base, cwd=stable_cwd,
+                )
+        payload = json.dumps({"record": record, "base_url": base_url, "token": token}).encode("utf-8")
+        if proc.stdin is None:
+            return False
+        try:
+            proc.stdin.write(payload)
+        finally:
+            proc.stdin.close()
+        return True
+    except Exception:  # noqa: BLE001 — boundary: telemetry never crashes a hook
+        return False
+
+
+def _poster_main(stdin_bytes: bytes | None = None) -> None:
+    """The detached child: POST the event it was handed, and meter a REAL failure as exactly one drop.
+
+    Reads ``{"record", "base_url", "token"}`` from stdin and prints nothing. A 2xx records nothing. Any other
+    outcome (a refused connection, a non-2xx, no answer within :data:`_ROUTING_POST_BUDGET_S`) records one
+    drop through :func:`_record_dropped_routing_event`, the same on-disk record the hook wrote before the POST
+    moved here, never a JSONL spool and never a retry (Sam, 2026-08-20, nexus-gjv9b). The one residual: an
+    answer that arrives after the deadline was a request in flight, and counts as a drop though the engine
+    may hold the row. Never raises.
+    """
+    try:
+        raw = stdin_bytes if stdin_bytes is not None else sys.stdin.buffer.read()
+        job = json.loads(raw.decode("utf-8"))
+        record = job["record"]
+        endpoint = (str(job["base_url"]), str(job["token"]))
+    except Exception:  # noqa: BLE001 — nothing to deliver and no event to meter
+        return
+    cause = _post_routing_event_http(record, timeout=_ROUTING_POST_BUDGET_S, endpoint=endpoint)
+    if cause:
+        _record_dropped_routing_event(
+            f"routing_events POST failed: {cause}", cause=cause, event=record,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -876,3 +993,7 @@ def run_hook(
 
     # Body returned without emitting — default: no decision (nexus-452oy).
     pass_through()
+
+
+if __name__ == "__main__" and sys.argv[1:2] == [_POSTER_ARGV]:
+    _poster_main()

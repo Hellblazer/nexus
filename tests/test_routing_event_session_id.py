@@ -15,6 +15,7 @@ import pathlib
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -62,6 +63,16 @@ def engine(tmp_path):
         server.server_close()
 
 
+def _wait_for(predicate, timeout: float = 15.0) -> bool:
+    """The POST is made by a detached child (nexus-njn1a.1), so it lands after the hook has returned."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
 def _run(script: str, payload: dict, env: dict) -> dict:
     proc = subprocess.run(
         [sys.executable, str(ROUTING / script)],
@@ -80,6 +91,7 @@ def test_credential_print_guard_deny_row_carries_session(engine):
         env,
     )
     assert out["permissionDecision"] == "deny"
+    assert _wait_for(lambda: len(bodies) >= 1)
     assert [b["outcome"] for b in bodies] == ["deny"], bodies
     assert bodies[0]["session_id"] == SESSION
 
@@ -97,6 +109,7 @@ def test_subagent_git_write_deny_row_carries_session(engine, tmp_path):
         env,
     )
     assert out["permissionDecision"] == "deny"
+    assert _wait_for(lambda: len(bodies) >= 1)
     assert [b["outcome"] for b in bodies] == ["deny"], bodies
     assert bodies[0]["session_id"] == SESSION
 
@@ -117,7 +130,9 @@ def test_explicit_session_id_wins_over_payload(engine):
         capture_output=True, text=True, timeout=20, env=env,
     )
     assert proc.returncode == 0, proc.stderr
-    assert [b["session_id"] for b in bodies] == ["explicit", SESSION], bodies
+    # Two events, two detached children: they may arrive in either order.
+    assert _wait_for(lambda: len(bodies) >= 2)
+    assert sorted(b["session_id"] for b in bodies) == sorted(["explicit", SESSION]), bodies
 
 
 def test_subagent_git_write_escape_row_carries_session(engine, tmp_path):
@@ -137,6 +152,7 @@ def test_subagent_git_write_escape_row_carries_session(engine, tmp_path):
         capture_output=True, text=True, timeout=20, env=env,
     )
     assert proc.returncode == 0, proc.stderr
+    assert _wait_for(lambda: len(bodies) >= 1)
     assert [(b["outcome"], b["session_id"]) for b in bodies] == [("escape", SESSION)], bodies
 
 
@@ -164,5 +180,6 @@ def test_dropped_event_keeps_session(tmp_path):
         env,
     )
     assert out["permissionDecision"] == "deny"
+    assert _wait_for(lambda: drops.exists() and drops.read_text().strip()), "the child recorded no drop"
     records = [json.loads(ln) for ln in drops.read_text().splitlines() if ln.strip()]
     assert [(r["outcome"], r["session_id"]) for r in records] == [("deny", SESSION)], records

@@ -63,6 +63,10 @@ _VLS = "conexus/hooks/scripts/version_lockstep_action.py"
 #: ``tests/hooks/test_nx_standin.py`` pins that nothing else is spawned there.
 _SPAWNS_ONLY_SYS_EXECUTABLE = {
     "conexus/launch/nx_standin.py": "starts nx_setup.py, beside it, with its own interpreter",
+    "conexus/hooks/scripts/routing/_lib.py": (
+        "starts its own routing_events poster (this file, --post-routing-event) with its own interpreter "
+        "(nexus-njn1a.1); its one spawn is [sys.executable, this file, --post-routing-event]"
+    ),
 }
 
 #: (path, enclosing function, name): each list literal that names a bare launcher

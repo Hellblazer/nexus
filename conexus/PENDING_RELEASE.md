@@ -49,4 +49,4 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/commands/setup.md` (nexus-tr1rj.5): the install-size sentence names the PDF support as MinerU and torch; the PDF stack no longer includes the removed layout extractor.
 - `conexus/launch/nx_standin.py` (nexus-tr1rj.5): the same name list in the stand-in's sizes note and slim description, kept equal to the real server's (`src/nexus/mcp/setup_tools.py`).
-- `conexus/hooks/scripts/routing/_lib.py` (nexus-njn1a): the routing hooks' `routing_events` POST gets a 1.5 s total deadline in place of a 0.25 s per-socket timeout, so a managed (HTTPS) engine is no longer dropped as a timeout.
+- `conexus/hooks/scripts/routing/_lib.py` (nexus-njn1a.1): the routing hooks send the `routing_events` write from a detached child, so a guard's deny or `routing-allow` escape is emitted without waiting on the engine; the child has a 5 s total deadline in place of the former 0.25 s per-socket timeout, and a failed write still lands one drop-meter record.
