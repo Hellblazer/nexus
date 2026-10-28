@@ -298,6 +298,17 @@ nightly gate's slow-marked step comment, nexus-jy4hd). `git grep -il docling` co
 `scripts/` (outside spikes and experiments); the T2 record of RF-15 states 31 and seven,
 and RF-15's text above carries the corrected counts.
 
+**RF-17 (Verified, MVV; T2 `nexus_rdr/237-mvv-2026-10-28`).** On develop
+`7e749db83`, in a virgin HOME with Docling not importable, the default extractor
+finished every run on the laptop and on chas (`lab-m`, CPU only). The 19-page scan
+took 12.5 s per page on the laptop on a cold cache (58 s on chas). The 300-page
+manual took 1.42 s per page on the laptop and 3.2 s on chas. The longest gap between
+progress writes was 180 s, on the forced timeouts; no run tripped the breaker. A forced
+rung-1 failure settled `mineru-no-formula`. A forced rung-1 and rung-2 timeout settled
+`pymupdf-text` on a page with a text layer and `unextracted` on the scan, which has no
+text layer on any page. The Grossberg & Stone scan and its equation count were not
+run: its DEVONthink database was not open to the run.
+
 ### Critical Assumptions
 
 - [x] A1: MinerU honours `formula_enable=false` per request on the server path
