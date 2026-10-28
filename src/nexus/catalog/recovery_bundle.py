@@ -8,7 +8,8 @@ Design of record: T2 ``nexus/design-xn3fr-recovery-bundle.md`` (Sam-approved
 2026-08-31). The two things a reinstall cannot regenerate are the catalog
 LINK GRAPH (cross-collection, tumbler-addressed — and tumblers are NOT
 stable across reindex) and store_put-origin knowledge content (whose ONLY
-copy is its single T3 chunk — nexus-b6enc). This module carries both in one
+copy is its T3 chunks — nexus-b6enc; one per piece of a note ``put_note``
+split, RDR-223). This module carries both in one
 human-inspectable JSONL bundle:
 
 - line 1: JSON header (``format_version``, counts, source fingerprint);
@@ -31,7 +32,7 @@ shape in ``commands/catalog_cmds/reconcile_stale.py`` (and its sibling in
 ``commands/`` (see ``store_hook.py``'s layering comment), the same
 three-implementations-one-contract pattern as the ``file://`` convention.
 It DIVERGES deliberately on two audited points (nx_plan_audit rounds 1-2,
-recorded on nexus-xn3fr): the ``chroma://`` leg carries a
+recorded on nexus-xn3fr): the note-URI leg carries a
 collection-prefix guard (a stray ``chroma://`` URI under a file-routed
 prefix is migration residue, never store_put-origin — importing it would
 recreate a duplicate document beside what ``nx index repo`` rebuilds,
@@ -52,8 +53,16 @@ from typing import Any, Callable, Iterable
 
 import structlog
 
-from nexus.aspect_readers import FILE_ROUTED_PREFIXES, uri_for
+from nexus.aspect_readers import (
+    FILE_ROUTED_PREFIXES,
+    NOTE_URI_SCHEME,
+    canonical_note_uri,
+    is_note_uri,
+    uri_for,
+)
+from nexus.catalog.note_ttl import row_may_give_tags, row_written_by
 from nexus.catalog.types import CatalogEntry
+from nexus.errors import NoteUriEngineTooOldError
 
 _log = structlog.get_logger(__name__)
 
@@ -67,35 +76,27 @@ MAX_SUPPORTED_RECOVERY_FORMAT_VERSION: int = 1
 _LINK_PAGE: int = 200
 
 
-class SingleChunkInvariantError(RuntimeError):
-    """A store_put-origin document's manifest carried more than one row.
-
-    ``store_put`` (MCP and CLI) is single-chunk BY CONSTRUCTION
-    (``single_chunk_manifest_metadata``; ``T3Database.put``'s docstring).
-    If this fires, that invariant broke somewhere and the export's
-    no-join content reconstruction is no longer sound — escalate, never
-    silently join.
-    """
-
-
 def classify_store_put_origin(entry: CatalogEntry) -> str | None:
-    """Return the store-put-origin leg (``"chroma_uri"`` /
+    """Return the store-put-origin leg (``"note_uri"`` /
     ``"knowledge_no_path"``) for *entry*, or ``None`` when it is not
     store_put-origin. See the module docstring for the two audited
     divergences from the ``commands/``-layer classifiers."""
     if entry.file_path:
         return None  # file-backed always wins
     if entry.physical_collection.startswith(FILE_ROUTED_PREFIXES):
-        # uri_for's own docstring is the single source of truth: chroma://
+        # uri_for's own docstring is the single source of truth: nx-note://
         # identity is minted for everything OUTSIDE the file-routed
         # prefixes; a chroma:// URI under one of them is residue.
         return None
     source_uri = entry.source_uri or ""
-    if source_uri.startswith("chroma://"):
-        return "chroma_uri"
+    # RDR-231: a note is nx-note://; a row still carrying the legacy chroma://
+    # spelling is the same note until the engine rewrites it (a note "in
+    # either spelling" is is_note_uri(canonical_note_uri(u))).
+    if is_note_uri(canonical_note_uri(source_uri)):
+        return "note_uri"
     if not source_uri:
         return "knowledge_no_path"
-    return None  # non-empty, non-chroma URI without a file_path: not ours
+    return None  # non-empty, non-note URI without a file_path: not ours
 
 
 def link_identity_uri(entry: CatalogEntry) -> str:
@@ -122,8 +123,20 @@ class ExportSummary:
     links_exported: int = 0
     ghosts_skipped: int = 0
     file_routed_excluded: int = 0
-    single_chunk_violations: int = 0
+    #: Notes written as several pieces (RDR-223) of which some, not all, are gone from T3: the
+    #: record is left out rather than carrying a truncated text, and ``notes_incomplete_notes``
+    #: names each as ``(collection, title)``. A note with every piece gone is a ghost.
+    notes_incomplete: int = 0
+    notes_incomplete_notes: list[tuple[str, str]] = field(default_factory=list)
     unresolvable_link_endpoints: int = 0
+    #: Notes whose catalog entry holds none of its own note keys (written before nexus-6pfgb.5, or
+    #: stored with none of them before nexus-6pfgb.15) while the chunk row carries a tags, category or
+    #: ttl_days value that is not provably its own (the row's ``catalog_doc_id`` and ``title`` are not
+    #: both this note's): the record carries none.
+    note_keys_unrecovered: int = 0
+    #: ``(collection, title)`` of each of those notes, in export order, so the command can name them
+    #: (a title is unique within a collection only).
+    note_keys_unrecovered_notes: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -174,7 +187,9 @@ def select_store_put_documents(
     Returns ``(entry, leg, manifest_rows)`` triples for exportable docs.
     ``manifests`` is the BATCH ``get_manifests`` result — a doc_id absent
     from it is identical to present-with-zero-rows (a true ghost for the
-    ``knowledge_no_path`` leg), never "not yet checked".
+    ``knowledge_no_path`` leg), never "not yet checked". A note may have
+    several rows: ``put_note`` writes a long note as pieces (RDR-223), and
+    :func:`export_knowledge_doc` joins them (nexus-6pfgb.36).
     """
     out: list[tuple[CatalogEntry, str, list]] = []
     for entry in entries:
@@ -198,39 +213,206 @@ def select_store_put_documents(
                 leg=leg,
             )
             continue
-        if len(rows) > 1:
-            summary.single_chunk_violations += 1
-            raise SingleChunkInvariantError(
-                f"store_put-origin doc {entry.tumbler} ({entry.title!r}) has "
-                f"{len(rows)} manifest rows — store_put is single-chunk by "
-                "construction; the no-join export contract is unsound for "
-                "this document. Escalate (nexus-xn3fr single-chunk tripwire)."
-            )
         out.append((entry, leg, rows))
     return out
 
 
-def export_knowledge_doc(t3: Any, entry: CatalogEntry, manifest_rows: list) -> dict | None:
-    """Build one ``knowledge_doc`` record; ``None`` when the chunk is gone
-    from T3 (reported by the caller, never raised)."""
-    chash = manifest_rows[0].chash
-    row = t3.get_by_id(entry.physical_collection, chash)
-    if row is None or not row.get("content"):
+def _positive_ttl(value: Any) -> int | None:
+    """A ``ttl_days`` as the note writer takes it: a positive integer, else ``None`` (permanent).
+
+    Catalog meta stores ``0`` as the retraction sentinel and ``put_note`` raises on it, and the chunk
+    row spells permanent as ``None``, absent or (a legacy row) ``0``: all of them read as permanent.
+    A ``bool`` is not a number of days.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
+    """The note's own ``tags``, ``category`` and ``ttl_days`` from its catalog entry's ``meta``
+    (nexus-6pfgb.5), or ``None`` when the entry holds none of the note keys.
+
+    Every put since nexus-6pfgb.5 writes each key it gives a real value and retracts one the entry
+    held, so an entry with at least one note key has an authoritative answer for the rest: an absent
+    key is unset, never "ask the chunk row". ``put_at`` counts: every put since nexus-6pfgb.15
+    writes it, so a note stored with every other key unset still has an answer (all empty, and not
+    counted as unrecovered). An entry with none is a legacy one, or a note stored with every key
+    unset before nexus-6pfgb.15. :func:`export_knowledge_doc` lets a chunk row fill such an entry when
+    :func:`nexus.catalog.note_ttl.row_written_by` says the row is this note's own write, and fill its
+    tags and category alone on sole ownership (nexus-6pfgb.35).
+    """
+    from nexus.catalog.store_hook import NOTE_META_KEYS  # noqa: PLC0415 — deferred, store_hook has a heavy import graph
+
+    meta = entry.meta or {}
+    if not any(key in meta for key in NOTE_META_KEYS):
+        return None
+    return {
+        "tags": str(meta.get("tags") or ""),
+        "category": str(meta.get("category") or ""),
+        "ttl_days": _positive_ttl(meta.get("ttl_days")),
+    }
+
+
+def export_knowledge_doc(
+    entry: CatalogEntry, manifest_rows: list, rows_by_chash: dict[str, dict], summary: ExportSummary,
+    owners_by_chash: dict[str, list[str]] | None = None,
+) -> dict | None:
+    """Build one ``knowledge_doc`` record from the note's manifest rows and the chunk rows
+    :func:`export_bundle` read for its collection (*rows_by_chash*); ``None`` when the note cannot be
+    exported whole, counted on *summary*, never raised.
+
+    The content is every piece of the note joined in manifest position order (nexus-6pfgb.36):
+    ``put_note`` writes a long note as several pieces (RDR-223) and ``"".join(pieces) == content``
+    by construction (:func:`nexus.catalog.store_hook.note_pieces`). A note with every piece gone from
+    T3 is a ghost, and so is every note of a collection the engine has no catalog row for. A note with
+    some pieces gone, or whose manifest positions do not run ``0..n-1`` (a lost leading or middle row),
+    is incomplete and left out, because importing a shortened text would overwrite the whole note
+    wherever it still exists. A lost FINAL manifest row leaves positions that still run ``0..n-2`` and
+    is not detected: the manifest carries no piece count, and the span columns are not trusted for it.
+
+    ``tags``, ``category`` and ``ttl_days`` are the NOTE'S OWN, read from its catalog entry's ``meta``
+    (nexus-6pfgb.5): two notes with identical text share one chunk row, and the row carries only the
+    last writer's. An entry with none of the note keys (written before nexus-6pfgb.5, or stored with
+    none of them before nexus-6pfgb.15 made every put write ``put_at``) takes a piece row's values only
+    when the row is this note's own write (:func:`nexus.catalog.note_ttl.row_written_by`: the row's
+    ``catalog_doc_id`` is this entry's tumbler AND its ``title`` this entry's title), the first such
+    piece in position order: every piece of one put carries that put's values, and a piece another
+    note shares may have been restamped by it. A row a later note wrote and a row carrying a stale
+    ``.nxexp`` stamp under another title are not, whoever else holds the chunk now: a row is not
+    rewritten when a co-owner leaves (nexus-6pfgb.34).
+
+    ``ttl_days`` comes from no other row, since a TTL a departed co-owner left on a row would make a
+    permanent note expire after import. ``tags`` and ``category`` alone, a wrong value being cosmetic,
+    also come from a piece row this note is the sole live owner of (*owners_by_chash*, from
+    :func:`export_bundle`'s one owner lookup, owners in other collections left out), unless the row's
+    stamp AND title both name another note (:func:`nexus.catalog.note_ttl.row_may_give_tags`): the first such piece in position
+    order (Sam, nexus-6pfgb.35 option B, the middle reading). That recovers an unstamped legacy row, a
+    renamed note (its own stamp, its old title) and an ``.nxexp`` import (the source box's stamp, its
+    own title). *summary* counts the note when a piece row held a value where the record has none.
+    ``ttl_days`` is a positive integer or ``None``.
+    """
+    ordered = sorted(manifest_rows, key=lambda r: r.position)
+    pieces = [rows_by_chash.get(mrow.chash) for mrow in ordered]
+    missing = [mrow.chash for mrow, piece in zip(ordered, pieces) if piece is None or not piece.get("content")]
+    gapped = [mrow.position for mrow in ordered] != list(range(len(ordered)))
+    if missing or gapped:
         _log.warning(
-            "recovery_export_chunk_missing",
+            "recovery_export_note_not_whole",
             tumbler=str(entry.tumbler),
             title=entry.title,
-            chash=chash,
+            missing_chashes=missing,
+            positions=[mrow.position for mrow in ordered],
         )
+        if len(missing) == len(ordered):
+            summary.ghosts_skipped += 1
+        else:
+            summary.notes_incomplete += 1
+            summary.notes_incomplete_notes.append((entry.physical_collection, entry.title or ""))
         return None
+    rows = [p for p in pieces if p is not None]
+    content = "".join(str(p["content"]) for p in rows)
+    keys = _own_note_keys(entry)
+    if keys is None:
+        written = next((p for p in rows if row_written_by(entry.tumbler, p, owner_title=entry.title)), None)
+        if written is not None:
+            keys = _row_keys(written)
+        else:
+            keys = {"tags": "", "category": "", "ttl_days": None}
+            me = str(entry.tumbler)
+            sole = next((
+                piece for mrow, piece in zip(ordered, rows)
+                if row_may_give_tags(entry.tumbler, piece, owner_title=entry.title or "") and set((owners_by_chash or {}).get(mrow.chash, [])) == {me}
+            ), None)
+            if sole is not None:
+                keys.update(tags=_row_keys(sole)["tags"], category=_row_keys(sole)["category"])
+            dropped = any(
+                (k["tags"] and not keys["tags"]) or (k["category"] and not keys["category"])
+                or (k["ttl_days"] and not keys["ttl_days"])
+                for k in map(_row_keys, rows)
+            )
+            if dropped:
+                summary.note_keys_unrecovered += 1
+                summary.note_keys_unrecovered_notes.append((entry.physical_collection, entry.title or ""))
+                _log.info(
+                    "recovery_export_note_keys_unrecovered",
+                    tumbler=str(entry.tumbler),
+                    title=entry.title,
+                )
     return {
         "record": "knowledge_doc",
         "source_uri": entry.source_uri or "",
         "collection": entry.physical_collection,
         "title": entry.title,
+        "tags": keys["tags"],
+        "category": keys["category"],
+        "ttl_days": keys["ttl_days"],
+        "content": content,
+    }
+
+
+def _collection_rows(t3: Any, collection: str, chashes: list[str]) -> dict[str, dict]:
+    """``t3.chunk_rows`` for one collection, where a collection the engine has no catalog row for
+    holds no chunks: its notes count as ghosts, as they did when each piece was read alone. Any other
+    store error propagates and stops the export."""
+    from nexus.db.http_vector_client import (  # noqa: PLC0415 — deferred, heavy import graph
+        VectorServiceError,
+        is_unregistered_collection_error,
+    )
+
+    try:
+        return t3.chunk_rows(collection, chashes)
+    except VectorServiceError as exc:
+        if not is_unregistered_collection_error(exc):
+            raise
+        _log.warning("recovery_export_collection_unregistered", collection=collection, pieces=len(chashes))
+        return {}
+
+
+def _tag_row_owners(
+    reader: Any,
+    selected: list[tuple[CatalogEntry, str, list]],
+    rows_by_collection: dict[str, dict[str, dict]],
+    collection_of: dict[str, str],
+) -> dict[str, list[str]]:
+    """``chash -> live owner tumblers in the chash's own collection`` for the pieces whose ownership can
+    decide a record's tags and category (:func:`export_knowledge_doc`, nexus-6pfgb.35 option B): rows
+    that hold a tag or category and :func:`~nexus.catalog.note_ttl.row_may_give_tags` allows, of keyless notes none of whose
+    pieces is their own write. One ``docs_for_chashes`` lookup for all of them, none when there are
+    none. ``docs_for_chashes`` is catalog-wide, so an owner the catalog walk places in another
+    collection (a different T3 row with the same text) is dropped; an owner the walk did not see is
+    kept, which can only withhold tags. A failed lookup withholds every such tag rather than the
+    backup: those notes are counted and named as unrecovered."""
+    wanted: dict[str, str] = {}
+    for entry, _leg, mrows in selected:
+        if _own_note_keys(entry) is not None:
+            continue
+        rows_by_chash = rows_by_collection.get(entry.physical_collection, {})
+        pieces = [(m.chash, rows_by_chash.get(m.chash)) for m in mrows]
+        if any(p is not None and row_written_by(entry.tumbler, p, owner_title=entry.title) for _c, p in pieces):
+            continue
+        for chash, row in pieces:
+            if row is not None and (row.get("tags") or row.get("category")) and row_may_give_tags(entry.tumbler, row, owner_title=entry.title or ""):
+                wanted.setdefault(chash, entry.physical_collection)
+    if not wanted:
+        return {}
+    try:
+        owners = reader.docs_for_chashes(list(wanted))
+    except Exception as exc:  # noqa: BLE001 — the lookup only adds cosmetic keys; its loss is counted per note, the backup goes on
+        _log.warning("recovery_export_owner_lookup_failed", chashes=len(wanted), error=str(exc))
+        return {}
+    return {
+        chash: [str(t) for t in ts if collection_of.get(str(t), wanted[chash]) == wanted[chash]]
+        for chash, ts in (owners or {}).items() if chash in wanted
+    }
+
+
+def _row_keys(row: dict) -> dict[str, Any]:
+    """A chunk row's ``tags``, ``category`` and ``ttl_days`` in the record's shape."""
+    return {
         "tags": row.get("tags", "") or "",
         "category": row.get("category", "") or "",
-        "content": row["content"],
+        "ttl_days": _positive_ttl(row.get("ttl_days")),
     }
 
 
@@ -312,6 +494,7 @@ def write_bundle(
         "knowledge_docs": len(knowledge_docs),
         "links": len(links),
         "ghosts_skipped": summary.ghosts_skipped,
+        "notes_incomplete": summary.notes_incomplete,
     }
     with path.open("w", encoding="utf-8") as f:
         f.write(json.dumps(header) + "\n")
@@ -323,7 +506,11 @@ def write_bundle(
 
 def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     """Full export: one catalog walk, batch manifest fetch, link
-    denormalization, JSONL write. Read-only against the store."""
+    denormalization, JSONL write. Read-only against the store.
+
+    *t3* must offer ``chunk_rows(collection, chashes)``
+    (:meth:`~nexus.db.http_vector_client.HttpVectorClient.chunk_rows`), which raises when the store
+    cannot be read; the error propagates and no bundle is written, since the file is written last."""
     summary = ExportSummary()
     entries = enumerate_all_documents(reader)
 
@@ -338,12 +525,24 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
 
     manifests = reader.get_manifests([str(e.tumbler) for e in candidates]) if candidates else {}
     docs: list[dict] = []
-    for entry, _leg, rows in select_store_put_documents(entries, manifests, summary):
-        rec = export_knowledge_doc(t3, entry, rows)
-        if rec is None:
-            summary.ghosts_skipped += 1
-            continue
-        docs.append(rec)
+    selected = select_store_put_documents(entries, manifests, summary)
+    # One paged read per collection for every piece of its notes (nexus-6pfgb.36). It raises when the
+    # store cannot be read, so a piece the export could not read is never reported as a piece gone.
+    chashes_by_collection: dict[str, list[str]] = {}
+    for entry, _leg, rows in selected:
+        chashes_by_collection.setdefault(entry.physical_collection, []).extend(r.chash for r in rows)
+    rows_by_collection = {
+        collection: _collection_rows(t3, collection, list(dict.fromkeys(chashes)))
+        for collection, chashes in chashes_by_collection.items()
+    }
+    collection_of = {str(e.tumbler): e.physical_collection for e in entries}
+    owners_by_chash = _tag_row_owners(reader, selected, rows_by_collection, collection_of)
+    for entry, _leg, rows in selected:
+        rec = export_knowledge_doc(
+            entry, rows, rows_by_collection[entry.physical_collection], summary, owners_by_chash,
+        )
+        if rec is not None:
+            docs.append(rec)
 
     links = export_links(reader, tumbler_to_uri, summary)
     summary.docs_exported = len(docs)
@@ -355,6 +554,8 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
         docs=summary.docs_exported,
         links=summary.links_exported,
         ghosts_skipped=summary.ghosts_skipped,
+        note_keys_unrecovered=summary.note_keys_unrecovered,
+        notes_incomplete=summary.notes_incomplete,
     )
     return summary
 
@@ -470,6 +671,7 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     outcome = put_note(
         content=rec["content"], collection=col_name, title=rec["title"],
         tags=rec.get("tags", ""), category=rec.get("category", ""),
+        ttl_days=_positive_ttl(rec.get("ttl_days")),
         source_agent="recovery-import",
     )
     message = failure_message(outcome, subject=repr(title))
@@ -487,18 +689,23 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
 
 
 def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:
-    """``by_source_uri``, with a chroma-identity re-derivation fallback
+    """``by_source_uri``, with a note-identity re-derivation fallback
     (review-fold, the critique's mode-change trace): a link exported from
-    a source install carries ``chroma://<SOURCE-collection>/<title>``, but
+    a source install carries ``nx-note://<SOURCE-collection>/<title>``, but
     on a mode-changed target the imported doc's minted identity uses the
     TARGET collection name — the recorded URI then resolves to nothing.
-    Re-derive: parse collection/title out of the chroma URI, resolve the
+    Re-derive: parse collection/title out of the note URI, resolve the
     collection under the target (``target_collection_for``), and retry
-    with the re-derived identity."""
+    with the re-derived identity.
+
+    An old bundle carries ``chroma://`` (RDR-231): *uri* goes through
+    :func:`canonical_note_uri` first, so the compare and the parse both see
+    the stored ``nx-note://`` form (Test Plan rows 557 and 564)."""
+    uri = canonical_note_uri(uri)
     entry = reader.by_source_uri(uri)
-    if entry is not None or not uri.startswith("chroma://"):
+    if entry is not None or not uri.startswith(NOTE_URI_SCHEME):
         return entry
-    rest = uri[len("chroma://"):]
+    rest = uri[len(NOTE_URI_SCHEME):]
     collection, sep, title = rest.partition("/")
     if not sep or not title:
         return None
@@ -544,7 +751,9 @@ def import_bundle(
     """Import a bundle. Docs first (the bundle writes them first), then
     links resolved by source_uri. FAIL-LOUD SUMMARY, not abort: every
     failure class is enumerated on the returned summary; a partial import
-    completes the resolvable records. Idempotent by construction — the
+    completes the resolvable records. One exception aborts: a
+    NoteUriEngineTooOldError (RDR-231) is raised on the first note, since every
+    later note would be refused the same way. Idempotent by construction — the
     store_put chain reconciles per sdp0u, and the engine merges duplicate
     links (``co_discovered_by``)."""
     _header, records = read_bundle(path)
@@ -554,6 +763,10 @@ def import_bundle(
     for rec in records:
         if rec.get("record") != "knowledge_doc":
             continue
+        # An old bundle carries chroma:// (RDR-231): the stored form is nx-note://,
+        # so no import_doc ever sees the legacy spelling.
+        if rec.get("source_uri"):
+            rec = {**rec, "source_uri": canonical_note_uri(rec["source_uri"])}
         try:
             do_import(t3, rec)
             summary.docs_imported += 1
@@ -571,6 +784,11 @@ def import_bundle(
                 stamp_refused=exc.stamp_refused,
                 error=str(exc),
             )
+        except NoteUriEngineTooOldError:
+            # RDR-231: the engine cannot hold a note's source URI, and that is true of every record that
+            # follows. Abort on the first with the one error rather than N per-record failures, each of
+            # which would probe the engine again. Records already imported stay (the import is idempotent).
+            raise
         except Exception as exc:  # noqa: BLE001 — per-record fail-loud summary; the import must complete for the rest
             summary.docs_failed += 1
             summary.doc_failures.append(

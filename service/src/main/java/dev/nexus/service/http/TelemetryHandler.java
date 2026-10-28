@@ -128,6 +128,20 @@ public final class TelemetryHandler implements HttpHandler {
      */
     private static final int MAX_QUERY_RUNS_LIMIT = 300;
 
+    /**
+     * RDR-232 Phase 3 (nexus-jypmj.3.4): the largest {@code run_summary} the
+     * engine accepts, in UTF-8 bytes of its serialized JSON (65 536, 64 KiB).
+     * The summary is a few dozen short facet ids, counters and state names (a
+     * few hundred bytes to a few KiB in practice); 64 KiB is two orders of
+     * magnitude of headroom and still bounds a row, the 300-row {@code /query}
+     * page ({@link #MAX_QUERY_RUNS_LIMIT}, at most about 19 MiB of summaries)
+     * and the {@code import_batch} payload. Over the cap is a 400 naming the
+     * field, never a silent truncation: a client that wants the summary kept
+     * must trim it before sending, and the readback it already does tells it
+     * whether the engine stored what it sent.
+     */
+    static final int MAX_RUN_SUMMARY_BYTES = 65_536;
+
     private final TelemetryRepository repo;
 
     public TelemetryHandler(TelemetryRepository repo) {
@@ -406,8 +420,10 @@ public final class TelemetryHandler implements HttpHandler {
         // RDR-196 .p1c (nexus-nyry9.9): OPTIONAL steps[] — absent/empty writes only
         // the parent, exactly as before this bead (the .p1d degradation contract).
         List<TelemetryRepository.StepInput> steps = parseNxAnswerSteps(body.get("steps"));
+        // RDR-232 P3 (nexus-jypmj.3.4): OPTIONAL run_summary — absent/null stores SQL NULL.
+        String runSummary = parseRunSummary(body.get("run_summary"));
         repo.recordNxAnswerRun(tenant, question, planId, conf, stepCount, finalText, cost,
-            durationMsV, createdAt, steps);
+            durationMsV, createdAt, steps, runSummary);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
     }
 
@@ -452,8 +468,11 @@ public final class TelemetryHandler implements HttpHandler {
         boolean success  = requireOutcome(body);
         OffsetDateTime createdAt = requireCreatedAt(body);
         List<TelemetryRepository.StepInput> steps = parseNxAnswerSteps(body.get("steps"));
+        // RDR-232 P3: the summary is a column of the run row the composite already inserts, so
+        // it commits (and rolls back) with the steps and plan counters: no second write.
+        String runSummary = parseRunSummary(body.get("run_summary"));
         repo.recordNxAnswerRunComplete(tenant, question, planId, conf, stepCount, finalText, cost,
-            durationMsV, createdAt, steps, success);
+            durationMsV, createdAt, steps, runSummary, success);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
     }
 
@@ -498,6 +517,69 @@ public final class TelemetryHandler implements HttpHandler {
             throw new IllegalArgumentException(
                 "Field 'created_at' is not a valid ISO-8601 timestamp: \"" + raw + "\"", e);
         }
+    }
+
+    /**
+     * RDR-232 Phase 3 (nexus-jypmj.3.4): validate the optional {@code run_summary}
+     * field and return it as compact JSON text for the repository, or {@code null}
+     * when absent or an explicit JSON {@code null} (stored as SQL NULL, never as an
+     * empty object). The engine stores the object opaquely, so the checks are the
+     * three it can make without knowing the shape: it is a JSON object, it holds no
+     * U+0000 (jsonb cannot store one), and its serialized form fits
+     * {@link #MAX_RUN_SUMMARY_BYTES} UTF-8 bytes. Every failure is a 400 naming the field. Shared by {@code /record}, {@code /complete},
+     * {@code /import} and {@code /import_batch}; the ETL sources that serialise a
+     * JSON column as text send the object as a JSON string, which is accepted when it
+     * parses to an object.
+     */
+    private static String parseRunSummary(Object raw) {
+        if (raw == null) return null;
+        Object value = raw;
+        if (raw instanceof String text) {
+            if (text.isBlank()) return null;
+            try {
+                value = MAPPER.readValue(text, Object.class);
+            } catch (Exception e) {
+                throw new IllegalArgumentException("field 'run_summary' must be a JSON object");
+            }
+        }
+        if (!(value instanceof Map<?, ?>)) {
+            throw new IllegalArgumentException("field 'run_summary' must be a JSON object");
+        }
+        // jsonb cannot hold U+0000 (Postgres: "unsupported Unicode escape sequence"); left alone it reaches the INSERT
+        // and surfaces as a 422 naming no field (HttpUtil's class-22 mapping) that loses the whole run row. Refuse it
+        // here with a 400 naming the field.
+        if (containsNul(value)) {
+            throw new IllegalArgumentException("field 'run_summary' must not contain a U+0000 character");
+        }
+        String json;
+        try {
+            json = MAPPER.writeValueAsString(value);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("field 'run_summary' must be a JSON object");
+        }
+        int bytes = json.getBytes(StandardCharsets.UTF_8).length;
+        if (bytes > MAX_RUN_SUMMARY_BYTES) {
+            throw new IllegalArgumentException("field 'run_summary' is " + bytes
+                + " bytes serialized; the limit is " + MAX_RUN_SUMMARY_BYTES);
+        }
+        return json;
+    }
+
+    /** Whether any string, or any object key, anywhere in the parsed JSON {@code value} holds U+0000. */
+    private static boolean containsNul(Object value) {
+        if (value instanceof String text) return text.indexOf(0) >= 0;
+        if (value instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> e : map.entrySet()) {
+                if (containsNul(e.getKey()) || containsNul(e.getValue())) return true;
+            }
+            return false;
+        }
+        if (value instanceof Iterable<?> items) {
+            for (Object item : items) {
+                if (containsNul(item)) return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1142,7 +1224,9 @@ public final class TelemetryHandler implements HttpHandler {
                     optStr(body, "final_text"),
                     cost,
                     durationMs != null ? durationMs : 0L,
-                    requireString(body, "created_at"));
+                    requireString(body, "created_at"),
+                    // RDR-232 P3: carried verbatim; absent stays NULL.
+                    parseRunSummary(body.get("run_summary")));
             }
             case "hook_failures" -> {
                 String batchDocIds = optStrNull(body, "batch_doc_ids");
@@ -1218,6 +1302,16 @@ public final class TelemetryHandler implements HttpHandler {
             if ("hook_failures".equals(table)) {
                 try {
                     HttpUtil.rejectMalformedJson(MAPPER, "batch_doc_ids", optStrNull(row, "batch_doc_ids"));
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("rows[" + rowIndex + "]: " + e.getMessage(), e);
+                }
+            }
+            // RDR-232 P3 (nexus-jypmj.3.4): run_summary is validated here, per row, and
+            // replaced by its compact JSON text so the repository's batch insert reads one
+            // shape. A refusal names the row, like hook_failures above.
+            if ("nx_answer_runs".equals(table) && row.get("run_summary") != null) {
+                try {
+                    row.put("run_summary", parseRunSummary(row.get("run_summary")));
                 } catch (IllegalArgumentException e) {
                     throw new IllegalArgumentException("rows[" + rowIndex + "]: " + e.getMessage(), e);
                 }

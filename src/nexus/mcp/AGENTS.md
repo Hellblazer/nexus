@@ -62,7 +62,7 @@ A separate runtime fire-once test (`test_index_pdf_fires_document_hook_exactly_o
 
 ## Out of scope by design
 
-- **Three catalog-registration mechanisms** (`_catalog_store_hook` in `commands/store.py`, `_catalog_pdf_hook` in `pipeline_stages.py`, `_catalog_hook` in `indexer.py`, ad hoc) capture different per-domain metadata. Three legitimate per-domain registrations, not three copies of the same hook.
+- **Three catalog-registration mechanisms** (`catalog_store_hook` in `catalog/store_hook.py`, `_catalog_pdf_hook` in `pipeline_stages.py`, `_catalog_hook` in `indexer.py`, ad hoc) capture different per-domain metadata. Three legitimate per-domain registrations, not three copies of the same hook.
 - **`_catalog_auto_link` is MCP-only** — reads T1 scratch `link-context` entries that agents seed before `store_put`. CLI bulk ingest has no per-file pre-declaration semantics; it uses the post-hoc linkers in `catalog/link_generator.py`. Intentional path-shape coupling.
 
 ## Hot rules

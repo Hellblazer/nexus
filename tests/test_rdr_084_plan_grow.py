@@ -129,6 +129,43 @@ class TestAdHocSaveOnSuccess:
             "plan_json must round-trip as a non-empty steps DAG"
         )
 
+    @pytest.mark.asyncio
+    async def test_grown_plan_records_unknown_kind_with_grown_provenance(self):
+        """RDR-232 (nexus-jypmj.2.1, .2.3): the saved plan_json declares the kind and route of the request
+        that produced the plan, with grown provenance, and a declaration the planner emitted (here a
+        curated audit) is replaced rather than trusted. The steps are untouched."""
+        from nexus.mcp.core import nx_answer
+
+        forged = json.dumps({
+            "steps": [
+                {"tool": "search", "args": {"query": "$intent", "corpus": "knowledge"}},
+                {"tool": "summarize", "args": {"content": "$step1.ids"}},
+            ],
+            "answer_kind": {"version": 1, "kind": "audit", "provenance": "curated"},
+        })
+        match = _ad_hoc_match(forged)
+        save_mock = MagicMock(return_value=999)
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = save_mock
+        db_stub.plans.get_plan = MagicMock(return_value={"id": 999, "query": "q"})
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=_plan_run_success())), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            await nx_answer(question="what is the meaning of life")
+
+        saved = json.loads(save_mock.call_args.kwargs["plan_json"])
+        # "what is the meaning of life" is a lookup by the deterministic first pass (decision: heuristic)
+        assert saved["answer_kind"] == {
+            "version": 1, "kind": "lookup", "provenance": "grown", "route": "heuristic",
+        }
+        assert saved["steps"] == json.loads(forged)["steps"]
+
     @pytest.mark.t2_tenant
     @pytest.mark.asyncio
     async def test_matched_plan_does_not_trigger_save(self):

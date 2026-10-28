@@ -1,0 +1,502 @@
+# RDR-232 held-out golden set v1 (nexus-jypmj.2.8).
+#
+# What this is: 29 labelled requests (H01 to H30, H08 removed) in the golden_v1 format, written so that the
+# RDR-232 Phase 2 measures can be reported twice: on the in-sample golden set and on this set.
+# Same label fields as golden_v1 and the same golden_set_version, so
+# scripts/bench/schema.py::load_golden_set loads it strictly. Label rules are the ones in the
+# golden_v1.yaml header block (answer_kind by hand from the wording; required_sources as
+# RDR-NNN, RDR-NNN@ART for ART's RDRs, or a paper/note title as indexed; unacceptable_plans as
+# "<verb>:<strategy>" builtin keys, with grown:hybrid-factual-lookup-473 listed wherever
+# lookup:hybrid-factual-lookup is).
+#
+# Provenance: written BLIND on 2026-10-27 by an agent (the conexus developer agent, dispatched
+# for nexus-jypmj.2.8). Blindness rules: the author did not open the request classifier, the
+# eligibility gate, the active-project code, the RDR-232 golden fixture, the RDR-232 tests or
+# document, the replay or metrics scripts, or any question text of golden_v1.yaml (only its
+# header comment was read). The author read scripts/bench/schema.py and the builtin plans'
+# descriptions under conexus/plans/builtin/ (to judge which plans are the wrong shape), and
+# checked every named RDR id against docs/rdr/ and every paper or note title against the
+# knowledge base with the search tool. Labels are the agent's, from the wording only; Sam should
+# spot-check them, the four "unknown" requests first.
+#
+# The figures this set produces are OUT-OF-SAMPLE: nothing in the classifier or the gate was
+# tuned on these requests. Do not tune on them either; a relabel or a rewording that changes a
+# measure of a recorded observation set bumps golden_set_version, and adding a request changes
+# the set's size, so it bumps too.
+#
+# Kind mix: lookup 5, synthesis 4, discovery 4, comparison 4, audit 5, debug 5, unknown 2.
+#
+# H08 ("plan matching", unknown) was removed before any measurement: it repeats golden_v1's
+# G22 ("Tell me about plan matching."), so it was not held out. The author did not see G22;
+# the overlap check against golden_v1 found it. No replacement was written, since anyone who
+# has read the classifier would break the blindness rules above. 29 requests.
+#
+# Sam's spot-check (2026-10-27), before any measurement: H23 relabelled from unknown to audit
+# (it asks for a paper's claim to be checked against evidence), with the other audit requests'
+# unacceptable_plans list. This relabel is Sam's, not the blind author's; every other label
+# stands as the author wrote it.
+golden_set_version: 1
+queries:
+  - qid: H01
+    category: factual
+    text: "which rdr added the nx console web ui"
+    answer_kind: lookup
+    required_sources: ["RDR-064"]
+    required_facets: ["introducing-rdr"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "analyze:default"
+      - "review:default"
+      - "debug:default"
+      - "research:citation-traversal"
+
+  - qid: H02
+    category: compositional
+    text: >-
+      I keep getting turned around on how the tuple space in nexus actually works. There are the
+      Linda style operations, then something about claiming and renewing a tuple and replying in
+      the ack, and then boards and queues and locks built as templates on top. Can you walk me
+      through how those pieces fit together and what problem each of the RDRs was solving?
+    answer_kind: synthesis
+    required_sources: ["RDR-205", "RDR-206", "RDR-211"]
+    required_facets:
+      - "linda-operations"
+      - "claim-renew-reply-in-ack"
+      - "board-queue-lock-templates"
+    allowed_corpora: ["rdr", "docs"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+
+  - qid: H03
+    category: compositional
+    text: "List the RDRs that deal with PDF text extraction."
+    answer_kind: discovery
+    required_sources:
+      - "RDR-012"
+      - "RDR-021"
+      - "RDR-044"
+      - "RDR-046"
+      - "RDR-047"
+      - "RDR-048"
+      - "RDR-148"
+      - "RDR-237"
+    required_facets: ["pdf-extraction-rdrs"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "analyze:default"
+      - "debug:default"
+      - "review:default"
+
+  - qid: H04
+    category: comparative
+    text: >-
+      RDR-110 (the semantic tuple space) and RDR-205 (Linda tuple space over Postgres) are both
+      tuple space designs. How do they differ in what they store, how they match, and what each
+      one gives up?
+    answer_kind: comparison
+    required_sources: ["RDR-110", "RDR-205"]
+    required_facets:
+      - "semantic-tuple-space-design"
+      - "linda-over-postgres-design"
+      - "differences"
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "debug:default"
+      - "research:find-by-author"
+
+  - qid: H05
+    category: compositional
+    text: "aspect queue is stuck, rows never drain and i think the backof ladder is involved?? whats causing it"
+    answer_kind: debug
+    required_sources: ["RDR-163", "RDR-172"]
+    required_facets: ["queue-stall-symptom", "backoff-ladder", "root-cause"]
+    allowed_corpora: ["code", "rdr", "docs"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "document:default"
+
+  - qid: H06
+    category: compositional
+    text: >-
+      Audit RDR-201 against the code. It says closed vocabularies live in checked tables under
+      src/nexus/tables. Is that true today, and are there any closed vocabularies still living
+      as prose or as hand-kept lists?
+    answer_kind: audit
+    required_sources: ["RDR-201"]
+    required_facets:
+      - "checked-table-claim"
+      - "remaining-hand-kept-vocabularies"
+    allowed_corpora: ["rdr", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+
+  - qid: H07
+    category: factual
+    text: "In RDR-188, does the rerank step run in the client or on the server?"
+    answer_kind: lookup
+    required_sources: ["RDR-188"]
+    required_facets: ["rerank-location"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "analyze:default"
+      - "review:default"
+      - "debug:default"
+      - "research:citation-traversal"
+
+  - qid: H09
+    category: factual
+    text: >-
+      Which paper in the knowledge base showed that accuracy follows a U-shaped curve depending
+      on where the relevant passage sits in the prompt, and what does it find for passages in
+      the middle?
+    answer_kind: lookup
+    required_sources: ["Lost in the Middle- How Language Models Use Long Contexts"]
+    required_facets: ["u-shaped-curve", "middle-position-result"]
+    allowed_corpora: ["knowledge"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "analyze:default"
+      - "review:default"
+      - "debug:default"
+      - "research:citation-traversal"
+
+  - qid: H10
+    category: compositional
+    text: >-
+      Give me the big picture on why nexus retired the SQLite T2 backend: what was wrong with it,
+      what took its place, and what happened to the client side that still used SQLite.
+    answer_kind: synthesis
+    required_sources: ["RDR-158", "RDR-186"]
+    required_facets: ["motivation", "replacement-backend", "client-side-closure"]
+    allowed_corpora: ["rdr", "docs"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+
+  - qid: H11
+    category: compositional
+    text: "Which papers do we have on vector database indexing or on how vector databases get benchmarked?"
+    answer_kind: discovery
+    required_sources:
+      - "Towards Robustness: A Critique of Current Vector Database Assessments"
+      - "The Case Against pgvector"
+      - "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing"
+    required_facets: ["vector-index-papers", "vector-benchmark-papers"]
+    allowed_corpora: ["knowledge"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "debug:default"
+      - "review:default"
+      - "analyze:default"
+
+  - qid: H12
+    category: compositional
+    text: >-
+      nx search returns nothing for a collection I indexed ten minutes ago, but store list shows
+      the documents are there. Why would search come back empty?
+    answer_kind: debug
+    required_sources: []
+    required_facets: ["empty-search-symptom", "index-versus-search-path", "root-cause"]
+    allowed_corpora: ["code", "docs", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+
+  - qid: H13
+    category: comparative
+    text: >-
+      How does Manticore's auto-chunking compare with the way nexus chunks documents before
+      embedding? Where do they split, and what does each one do about boundary loss?
+    answer_kind: comparison
+    required_sources:
+      - "Manticore Search auto-chunking: chunk_strategy on model-backed vector columns (1/4)"
+      - "Manticore Search auto-chunking: cross-engine comparison, what chunking does not fix, limits (4/4)"
+    required_facets:
+      - "manticore-chunking"
+      - "nexus-chunking"
+      - "boundary-loss-handling"
+    allowed_corpora: ["knowledge", "code", "docs"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "debug:default"
+      - "research:find-by-author"
+
+  - qid: H14
+    category: compositional
+    text: >-
+      Is docs/storage-tiers.md still accurate after RDR-158 and RDR-186? Check what it says about
+      T2 and the client against what those RDRs decided, and list the sentences that have gone
+      stale.
+    answer_kind: audit
+    required_sources: ["RDR-158", "RDR-186"]
+    required_facets: ["storage-tiers-claims", "stale-statements"]
+    allowed_corpora: ["docs", "rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+
+  - qid: H15
+    category: factual
+    text: "ART RDR-077, when was it accepted?"
+    answer_kind: lookup
+    required_sources: ["RDR-077@ART"]
+    required_facets: ["acceptance-date"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "analyze:default"
+      - "review:default"
+      - "debug:default"
+      - "research:citation-traversal"
+
+  - qid: H16
+    category: compositional
+    text: "taxonomy and clustered search"
+    answer_kind: unknown
+    required_sources: ["RDR-070"]
+    required_facets: ["taxonomy-clustering"]
+    allowed_corpora: ["rdr", "docs", "code"]
+    unacceptable_plans: []
+
+  - qid: H17
+    category: compositional
+    text: >-
+      Explain end to end how the conexus plugin and the nx CLI stay in step: the version marker
+      hook that checks them at session start, and how it ended up that the plugin installs the
+      CLI itself.
+    answer_kind: synthesis
+    required_sources: ["RDR-143", "RDR-228"]
+    required_facets: ["version-marker-hook", "plugin-installs-cli"]
+    allowed_corpora: ["rdr", "docs", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+
+  - qid: H18
+    category: compositional
+    text: "Which docs and RDRs cover running nexus on Windows?"
+    answer_kind: discovery
+    required_sources: ["RDR-218", "RDR-224"]
+    required_facets: ["windows-docs-and-rdrs"]
+    allowed_corpora: ["rdr", "docs"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "debug:default"
+      - "review:default"
+      - "analyze:default"
+
+  - qid: H19
+    category: compositional
+    text: >-
+      I made a fresh worktree and the first test run gave me a wall of setup errors from the
+      substrate, hundreds of them, nothing about my diff. What is going wrong and what do I do?
+    answer_kind: debug
+    required_sources: []
+    required_facets: ["setup-error-wall", "root-cause", "remedy"]
+    allowed_corpora: ["docs", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+
+  - qid: H20
+    category: comparative
+    text: >-
+      Lost in the Middle and Context Length Alone Hurts LLM Performance: do the two papers
+      agree about why long inputs degrade a model, even when the right passage is retrieved?
+    answer_kind: comparison
+    required_sources:
+      - "Lost in the Middle- How Language Models Use Long Contexts"
+      - "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval"
+    required_facets: ["lost-in-the-middle-explanation", "context-length-explanation", "agreement"]
+    allowed_corpora: ["knowledge"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "debug:default"
+
+  - qid: H21
+    category: compositional
+    text: >-
+      Has everything RDR-197 (plugin-only release channel) decided actually been implemented?
+      For each decision say shipped, partial or still open, with the evidence.
+    answer_kind: audit
+    required_sources: ["RDR-197"]
+    required_facets: ["decision-by-decision-status", "evidence"]
+    allowed_corpora: ["rdr", "code", "docs"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+
+  - qid: H22
+    category: factual
+    text: "How large a drop in performance does the Context Length Alone Hurts paper report even when retrieval is perfect?"
+    answer_kind: lookup
+    required_sources: ["Context Length Alone Hurts LLM Performance Despite Perfect Retrieval"]
+    required_facets: ["performance-drop-magnitude"]
+    allowed_corpora: ["knowledge"]
+    unacceptable_plans:
+      - "query:abstract-themes"
+      - "analyze:default"
+      - "review:default"
+      - "debug:default"
+      - "research:citation-traversal"
+
+  - qid: H23
+    category: compositional
+    text: "is the pgvector paper right about HNSW"
+    answer_kind: audit
+    required_sources: ["The Case Against pgvector", "RDR-227"]
+    required_facets: ["hnsw-claims"]
+    allowed_corpora: ["knowledge", "rdr", "docs"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+
+  - qid: H24
+    category: compositional
+    text: >-
+      What do the long-context papers in the knowledge base say, taken together, about whether
+      putting more retrieved text into the prompt helps or hurts the answer?
+    answer_kind: synthesis
+    required_sources:
+      - "Lost in the Middle- How Language Models Use Long Contexts"
+      - "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval"
+    required_facets: ["effect-of-more-context", "position-effects", "retrieval-quality-versus-length"]
+    allowed_corpora: ["knowledge"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+
+  - qid: H25
+    category: compositional
+    text: "list all the ART RDRs about Grossberg"
+    answer_kind: discovery
+    required_sources: ["RDR-037@ART", "RDR-043@ART"]
+    required_facets: ["grossberg-rdrs"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "debug:default"
+      - "review:default"
+      - "analyze:default"
+
+  - qid: H26
+    category: compositional
+    text: >-
+      Why did the T2 daemon burn a core spinning in its selector loop whenever two writers hit
+      it at once? I want the actual cause, not just that it was fixed.
+    answer_kind: debug
+    required_sources: ["RDR-151", "RDR-129"]
+    required_facets: ["selector-spin-symptom", "write-contention", "root-cause"]
+    allowed_corpora: ["rdr", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "document:default"
+
+  - qid: H27
+    category: compositional
+    text: >-
+      Does docs/cli-reference.md list every nx subcommand that really exists under
+      src/nexus/commands, and does it mention any that were removed? Report the mismatches.
+    answer_kind: audit
+    required_sources: []
+    required_facets: ["documented-subcommands", "actual-subcommands", "mismatches"]
+    allowed_corpora: ["docs", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "query:abstract-themes"
+      - "research:find-by-author"
+
+  - qid: H28
+    category: comparative
+    text: >-
+      Compare RDR-146 (catalog store behind the daemon) with RDR-168 (service mode catalog
+      interface conformance): what did the catalog look like before and after each, and which
+      one changed the contract that callers see?
+    answer_kind: comparison
+    required_sources: ["RDR-146", "RDR-168"]
+    required_facets: ["catalog-behind-daemon", "service-mode-conformance", "caller-contract-change"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "debug:default"
+      - "research:find-by-author"
+
+  - qid: H29
+    category: compositional
+    text: "session start dies with exit 75 and nothing else useful in the output. what does 75 mean here and how do i get past it"
+    answer_kind: debug
+    required_sources: []
+    required_facets: ["exit-75-meaning", "root-cause", "remedy"]
+    allowed_corpora: ["docs", "code"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "query:abstract-themes"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+
+  - qid: H30
+    category: compositional
+    text: "mailbox addressing, what do I need to know?"
+    answer_kind: unknown
+    required_sources: ["RDR-208"]
+    required_facets: ["mailbox-addressing"]
+    allowed_corpora: ["rdr", "docs", "code"]
+    unacceptable_plans: []

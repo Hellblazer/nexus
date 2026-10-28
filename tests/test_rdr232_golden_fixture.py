@@ -442,6 +442,10 @@ def _nx_answer_envelope(art, scope, bindings, *, strategy: tuple[str, str] | Non
     patches = [
         patch("nexus.plans.continuation_envelope._CONTINUATION_GO_LIVE", True),
         patch("nexus.operators.dispatch.claude_dispatch", no_model),
+        # nexus-jypmj.3.3: with the coverage boundary on, the run assesses the reducer's input (one operator_check
+        # call) before it hands off. This journey is Phase 1's (what the reducer is handed), so the Phase 3 check is
+        # off for it; the coverage journey is nexus-jypmj.3.10's.
+        patch.dict("os.environ", {"NX_ANSWER_COVERAGE": "0"}),
     ]
     if strategy is not None:
         match = g.library_match(lib, art.text, scope=scope, bindings=bindings,
@@ -539,6 +543,27 @@ def _assert_single_query_fast_path_is_contained(fx, art, scope) -> None:
     assert [x["outcome"] for x in env["scope_diagnostics"]] == ["narrowed"]
     print(f"RDR232-FASTPATH vector_refs={v['references']} by_collection={v['by_collection']} scope_state={d['scope_check']['state']}")
 
+    # nexus-jypmj.2.4: the call as filed names RDR-084 in its text and binds no source. Its text source now
+    # reaches the real resolver: with no reliable session project (this process is not an ART session) both
+    # documents are candidates and nothing is picked ...
+    (named,) = env["named_sources"]["sources"]
+    assert named["origin"] == "question" and named["status"] == "candidates" and named["tumbler"] is None, named
+    assert {c["tumbler"] for c in named["candidates"]} == {fx.art_rdr, fx.nexus_rdr}
+    assert env["evidence_request"]["owner"]["status"] == "none" and env["primary_evidence"] is None
+    # ... and with the session's project ART (the seam of the tier replaced, the catalog real) it resolves
+    # to ART's document, inferred, still without narrowing any stream by owner.
+    from unittest.mock import patch
+
+    from nexus.plans.active_project import ActiveProject
+
+    with patch("nexus.plans.active_project.detect_active_project",
+               return_value=ActiveProject(True, owner=fx.art_owner, name=g.ART_PROJECT)):
+        env_art = _nx_answer_envelope(art, scope, {"content_type": "rdr"}, strategy=("research", "corpus-coverage-check"))
+    (named_art,) = env_art["named_sources"]["sources"]
+    assert (named_art["status"], named_art["tumbler"], named_art["inferred"]) == ("resolved", fx.art_rdr, True), named_art
+    assert env_art["scope_diagnostics"] == env["scope_diagnostics"], "an inferred project narrows no stream"
+    print(f"RDR232-FASTPATH-TEXT-SOURCE no_project={named['status']} art_session={named_art['status']}:{named_art['tumbler']}")
+
     # nexus-jypmj.1.18: the same call with the explicit ART owner queries the ART collection only.
     env = _nx_answer_envelope(
         art, scope, {"content_type": "rdr", "owner": fx.art_owner}, strategy=("research", "corpus-coverage-check"))
@@ -622,7 +647,335 @@ def _measure_with_grown_473_clone(library, queries, art, floor_observations, flo
         f"with_clone={c.value} ({c.detail['selected_unacceptable']}/{c.n}) "
         f"eligible_plan_recall floor={floor['eligible_plan_recall'].value} "
         f"with_clone={with_clone['eligible_plan_recall'].value}")
-    return {"selections": selections, "measures": with_clone, "floor": floor}
+    eligibility = _measure_eligibility(library, queries, selections)
+    return {"selections": selections, "measures": with_clone, "floor": floor, "eligibility": eligibility}
+
+
+#: The golden label of the builtin template plan 473 came from (RDR-232 line 1606).
+BUILTIN_473_LABEL = "lookup:hybrid-factual-lookup"
+
+
+class _LegacyBuiltins:
+    """The plan library as it was before nexus-jypmj.2.1: builtin rows without their declaration."""
+
+    def __init__(self, library) -> None:
+        self._lib = library
+
+    def __getattr__(self, name):
+        return getattr(self._lib, name)
+
+    @staticmethod
+    def _strip(row):
+        if not row or "builtin-template" not in str(row.get("tags", "")):
+            return row
+        import json as _json
+
+        plan = _json.loads(row["plan_json"])
+        plan.pop("answer_kind", None)
+        return {**row, "plan_json": _json.dumps(plan)}
+
+    def get_plan(self, plan_id):
+        return self._strip(self._lib.get_plan(plan_id))
+
+    def search_plans(self, *args, **kwargs):
+        return [self._strip(r) for r in self._lib.search_plans(*args, **kwargs)]
+
+
+#: A question whose words are all in the seeded plans' own text and that no verb pattern reads (so the
+#: category route is closed); with the cosine ceiling open the matcher can only answer it from FTS5.
+FTS_PROBE_QUESTION = "hybrid factual lookup"
+
+
+def _drive_fts_branch(library, el) -> dict:
+    """One request driven through the matcher's FTS5 fallback, with the shadow filter, on the real substrate."""
+    from nexus.plans.request_coverage import derive_request_coverage
+
+    cov = derive_request_coverage(FTS_PROBE_QUESTION)
+    shadow = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=False)
+    sel = g.observe_plan_selection(
+        library, FTS_PROBE_QUESTION, eligibility=shadow, min_confidence=1.5, derive_category_verb=False)
+    fts = shadow.to_wire()["branches"]["fts"]
+    others = {b: c["examined"] for b, c in shadow.to_wire()["branches"].items() if b != "fts"}
+    assert not any(others.values()), f"the probe was meant to reach FTS only: {others}"
+    return {
+        "question": FTS_PROBE_QUESTION, "examined": fts["examined"], "excluded": fts["excluded"],
+        "reasons": fts["reasons"], "offered": sel.candidates,
+    }
+
+
+def _measure_eligibility(library, queries, with_clone_selections) -> dict:
+    """nexus-jypmj.2.3: the answer-kind eligibility filter over the golden set, gate off (shadow) and on.
+
+    Each request's kind is derived by the deterministic first pass of ``RequestCoverage`` (no model call),
+    the filter is built for that kind, and the unmodified call shape of ``observe_plan_selection`` is made
+    twice over the same library (builtins plus the grown clone of plan 473): with a shadow filter (the
+    shipped setting) and with an enforcing one. Asserted relations, not values: the shadow run selects
+    exactly what the unfiltered run did for every request (selection does not move), the enforcing run
+    never selects a plan the filter refused, and the incident request no longer selects the grown clone.
+    The numbers are emitted; nexus-jypmj.2.8 sets thresholds from them before the gate is enabled.
+
+    Limits: IN-SAMPLE. The request kinds are the derivation's own first pass, and that derivation was
+    written with this set in view. Wrong-shape 0 is therefore a FLOOR, not a rate: the kinds the gate acts on
+    and the kinds the labels say are both read off the same compatibility matrix, so agreement is near-certain
+    by construction, and the recall figures carry the same bias (the out-of-sample misses seen in the 2.2
+    review were all ``lookup``, the kind the gate admits most broadly). Read the printed figures as "does not
+    regress on these 24", never as an error rate; a held-out set is nexus-jypmj.2.8's. The library is the 12
+    builtins plus one grown clone, and only the incident request reaches the clone. A builtin seeded before nexus-jypmj.2.1 and not reseeded
+    declares nothing and would read as an untrusted unknown plan; the library here was seeded by this
+    build, so its builtins carry their declarations.
+    """
+    from nexus.plans import eligibility as el
+    from nexus.plans.request_coverage import derive_request_coverage
+
+    shadow_obs: list[RunObservation] = []
+    enforced_obs: list[RunObservation] = []
+    rows: list[dict] = []
+    for q in queries:
+        sc, bd = g.request_call_shape(q)
+        cov = derive_request_coverage(q.text, scope=sc)
+        shadow = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=False)
+        sel_off = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd, eligibility=shadow)
+        gate = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=True)
+        sel_on = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd, eligibility=gate)
+        base = with_clone_selections[q.qid]
+        assert (sel_off.selected, sel_off.candidates) == (base["selected"], base["candidates"]), (
+            q.qid, "a shadow filter moved the selection", sel_off, base)
+        refused = set(gate.excluded_plan_ids)
+        assert not (refused & set(sel_on.plan_ids)), (q.qid, "the enforcing run offered a refused plan", refused)
+        refused_labels = {key for pid, key in zip(sel_off.plan_ids, sel_off.candidates) if pid in refused}
+        shadow_obs.append(RunObservation(qid=q.qid, selected_plan=sel_off.selected, candidate_plans=sel_off.candidates))
+        enforced_obs.append(RunObservation(qid=q.qid, selected_plan=sel_on.selected, candidate_plans=sel_on.candidates))
+        rows.append({
+            "qid": q.qid.split("-")[0], "golden_kind": q.answer_kind, "derived_kind": cov.answer_kind,
+            "decision": cov.kind_decision, "selected_off": sel_off.selected, "selected_on": sel_on.selected,
+            "would_exclude": shadow.excluded_plan_ids, "branches_off": shadow.to_wire()["branches"],
+            "excluded_total": shadow.excluded_total, "refused_labels": refused_labels,
+        })
+    off = compute_measures(queries, shadow_obs)
+    on = compute_measures(queries, enforced_obs)
+    # Per-branch examined counts over the 24 requests (gate off, shadow): the exclusion counts alone cannot tell
+    # a branch that judged nothing from a branch that judged candidates and excluded none.
+    examined_by_branch = {b: sum(r["branches_off"][b]["examined"] for r in rows) for b in el.BRANCHES}
+    fts_natural = examined_by_branch["fts"]
+    # The golden requests all reach the cosine branch or the category route, so the FTS fallback is judged on
+    # no natural request (fts examined 0 and excluded 0 there is a branch that never ran, not a branch that
+    # found everything eligible). One request is driven to it on this substrate: a question with no cosine hit
+    # above the floor (an open ceiling above any cosine) and no category verb, whose words are in the seeded
+    # plans' text, so the matcher falls through to the FTS5 fallback and the filter judges what it finds there.
+    fts_probe = _drive_fts_branch(library, el)
+    assert fts_probe["examined"] > 0, (
+        "no request reached the FTS branch of the matcher on the real substrate, so its eligibility judgement "
+        f"is not exercised by this fixture: {fts_probe}")
+    # The same enforcing run over the library as it stands BEFORE `nx plan reseed`: builtins seeded before
+    # nexus-jypmj.2.1 carry no declaration, so with the gate on each reads as an untrusted unknown plan.
+    legacy_view = _LegacyBuiltins(library)
+    legacy_sel: dict[str, str | None] = {}
+    legacy_reasons: dict[str, int] = {}
+    for q in queries:
+        sc, bd = g.request_call_shape(q)
+        cov = derive_request_coverage(q.text, scope=sc)
+        gate = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=True)
+        legacy_sel[q.qid.split("-")[0]] = g.observe_plan_selection(
+            legacy_view, q.text, scope=sc, bindings=bd, eligibility=gate).selected
+        for branch in gate.to_wire()["branches"].values():
+            for reason, n in branch["reasons"].items():
+                legacy_reasons[reason] = legacy_reasons.get(reason, 0) + n
+    legacy_on = {r["qid"]: r["selected_on"] for r in rows}
+    print(
+        f"RDR232-ELIGIBILITY-LEGACY gate_on_after_reseed_vs_before: miss={sum(1 for v in legacy_on.values() if v is None)}"
+        f"->{sum(1 for v in legacy_sel.values() if v is None)} "
+        f"selection_differs={[k for k in legacy_sel if legacy_sel[k] != legacy_on[k]]} reasons_before_reseed={legacy_reasons}")
+    assert legacy_reasons.get("undeclared_builtin", 0) > 0, "the legacy view must have exercised the reason it reports"
+    g06 = next(r for r in rows if r["qid"] == "G06")
+    assert g06["selected_off"] == g.GROWN_473_KEY, g06
+    assert g06["selected_on"] != g.GROWN_473_KEY, g06
+    assert g06["excluded_total"] >= 1 and g06["derived_kind"] == "synthesis", g06
+    # Plan 473's template, the REAL seeded row (critique S3, RDR-232 Test Plan scenario 1): with the gate
+    # enforcing and the builtins seeded with their declarations, `lookup:hybrid-factual-lookup` is refused for
+    # the incident request, and the reason is the matrix's `kind_mismatch` (a curated lookup plan, a
+    # synthesis request). At the production floor this library does not OFFER the template for G06 (the
+    # incident selected 473 live; the builtins-only floor selects research:default), so the request is
+    # observed once more with the confidence floor open: the matcher then examines the row, and the
+    # enforcing filter must refuse it.
+    g06_q = next(q for q in queries if q.qid.startswith("G06"))
+    sc, bd = g.request_call_shape(g06_q)
+    cov = derive_request_coverage(g06_q.text, scope=sc)
+    gate = el.EligibilityFilter(cov.answer_kind, cov.kind_decision, enforce=True)
+    open_floor = g.observe_plan_selection(
+        library, g06_q.text, scope=sc, bindings=bd, eligibility=gate, min_confidence=0.0)
+    unfiltered = g.observe_plan_selection(library, g06_q.text, scope=sc, bindings=bd, min_confidence=0.0)
+    assert BUILTIN_473_LABEL in unfiltered.candidates, (unfiltered.candidates, "the open-floor run must offer the template")
+    assert BUILTIN_473_LABEL not in open_floor.candidates, (open_floor.candidates, "the enforcing filter offered the 473 template")
+    row = library.get_plan(dict(zip(unfiltered.candidates, unfiltered.plan_ids))[BUILTIN_473_LABEL])
+    assert "builtin-template" in str(row["tags"]), row["tags"]
+    assert row["id"] in gate.excluded_plan_ids, (gate.excluded_plan_ids, row["id"])
+    reasons = {r for b in gate.to_wire()["branches"].values() for r in b["reasons"]}
+    assert "kind_mismatch" in reasons, gate.to_wire()
+    standing = el.classify_plan(row["tags"], row["plan_json"])
+    assert (standing.kind.value, standing.provenance, standing.flag) == ("lookup", "curated", None), standing
+    verdict = el.eligibility(el.coerce_kind(cov.answer_kind), standing.kind, standing.provenance)
+    assert (verdict.eligible, verdict.reason) == (False, "kind_mismatch"), verdict
+    changed = [r["qid"] for r in rows if r["selected_off"] != r["selected_on"]]
+    # selection moves only through the filter: every changed request had a plan selected with the gate off, and
+    # that plan's label is among the labels the enforcing run refused for that request
+    for r in rows:
+        if r["qid"] in changed:
+            assert r["selected_off"] is not None, r
+            assert r["selected_off"] in r["refused_labels"], (r["qid"], "the old plan was not refused", r)
+    # in-sample tripwires (see Limits): the gate may not make the wrong-shape rate worse or lose recall here
+    assert on["wrong_shape_admission_rate"].value <= off["wrong_shape_admission_rate"].value, (on, off)
+    assert on["eligible_plan_recall"].value >= off["eligible_plan_recall"].value, (on, off)
+    print(
+        "RDR232-ELIGIBILITY-LIMIT in-sample: request kinds are the first pass fitted to these 24 requests; "
+        "wrong_shape 0 is a floor, recall is biased the same way; the figures below are not rates"
+    )
+    print(
+        f"RDR232-ELIGIBILITY in_sample(wrong_shape_0_is_a_floor,not_rates) requests={len(rows)} selection_changed={changed} "
+        f"wrong_shape off={off['wrong_shape_admission_rate'].value} on={on['wrong_shape_admission_rate'].value} "
+        f"eligible_plan_recall off={off['eligible_plan_recall'].value} on={on['eligible_plan_recall'].value} "
+        f"would_exclude_any={sum(1 for r in rows if r['excluded_total'])} "
+        f"examined_by_branch={examined_by_branch} fts_examined_natural={fts_natural} "
+        f"fts_probe(question={fts_probe['question']!r})=examined={fts_probe['examined']} "
+        f"excluded={fts_probe['excluded']} reasons={fts_probe['reasons']} offered={fts_probe['offered']} "
+        f"miss_off={sum(1 for r in rows if r['selected_off'] is None)} "
+        f"miss_on={sum(1 for r in rows if r['selected_on'] is None)}")
+    for r in rows:
+        print(
+            f"RDR232-ELIGIBILITY[{r['qid']}] golden={r['golden_kind']} derived={r['derived_kind']}/{r['decision']} "
+            f"off={r['selected_off']} on={r['selected_on']} would_exclude={r['would_exclude']} "
+            f"examined_by_branch={ {b: c['examined'] for b, c in r['branches_off'].items()} } "
+            f"excluded_by_branch={ {b: c['excluded'] for b, c in r['branches_off'].items()} }")
+    return {"rows": rows, "off": off, "on": on}
+
+
+#: nexus-jypmj.2.8. The gate-on matrix: each golden set (golden_v1, in-sample; the held-out set, blind) read with
+#: three sources of request kinds (the deterministic first pass; the kinds the Opus and the Haiku structured
+#: extraction produced, per request id, from the reports of ``bench.rdr232_extract_measure``), gate off and on.
+#: It runs only when ``$NX_RDR232_GATE_MATRIX_OUT`` is set (and then needs ``$NX_RDR232_GATE_MATRIX_REPORTS``, a
+#: directory holding ``rdr232-extract-<set>.json`` for Opus and ``rdr232-extract-haiku-<set>.json``, set being
+#: ``golden`` or ``heldout``), so the shipped journey costs what it did. No model call: the kinds are read from
+#: the reports, and the selections are the matcher over the seeded library, as in ``_measure_eligibility``.
+MATRIX_OUT_ENV = "NX_RDR232_GATE_MATRIX_OUT"
+MATRIX_REPORTS_ENV = "NX_RDR232_GATE_MATRIX_REPORTS"
+_MATRIX_SETS = (("golden_v1", g.GOLDEN_V1_PATH, "golden"), ("heldout_v1", g.HELDOUT_PATH, "heldout"))
+_MATRIX_SOURCES = ("deterministic", "opus", "haiku")
+
+
+def _gate_matrix_inputs() -> dict:
+    from bench import rdr232_gate_matrix as gm
+    from nexus.plans.request_coverage import derive_request_coverage
+
+    root = os.environ.get(MATRIX_REPORTS_ENV)
+    assert root, f"{MATRIX_OUT_ENV} needs {MATRIX_REPORTS_ENV}, the directory of the extraction reports"
+    sets: dict[str, dict] = {}
+    for name, path, stem in _MATRIX_SETS:
+        queries = load_golden_set(path)
+        qids = {q.qid for q in queries}
+        reports = {
+            "opus": json.loads((Path(root) / f"rdr232-extract-{stem}.json").read_text(encoding="utf-8")),
+            "haiku": json.loads((Path(root) / f"rdr232-extract-haiku-{stem}.json").read_text(encoding="utf-8")),
+        }
+        first_pass: dict[str, dict] = {}
+        extracted: dict[str, dict] = {}
+        for source, report in reports.items():
+            first_pass[source], extracted[source] = gm.kinds_from_report(report)
+            assert set(extracted[source]) == qids, (name, source, "the report does not cover this set's requests")
+        det = {}
+        for q in queries:
+            sc, _bd = g.request_call_shape(q)
+            cov = derive_request_coverage(q.text, scope=sc)
+            det[q.qid] = (cov.answer_kind, cov.kind_decision)
+        sets[name] = {
+            "queries": queries,
+            "kinds": {"deterministic": det, **extracted},
+            # the extraction reports read the first pass with no scope; this run reads it with the request's scope
+            "first_pass_differs_from_report": {s: gm.kind_disagreements(det, first_pass[s]) for s in reports},
+        }
+    return sets
+
+
+def _gate_matrix_pass(library, inputs: dict) -> dict:
+    """For each set: the gate-off selection of every request and the gate-on selection under each kind source."""
+    from nexus.plans import eligibility as el
+
+    out: dict[str, dict] = {}
+    for name, data in inputs.items():
+        queries = data["queries"]
+
+        def observed(q, **kw) -> dict:
+            sc, bd = g.request_call_shape(q)
+            sel = g.observe_plan_selection(library, q.text, scope=sc, bindings=bd, **kw)
+            return {"selected": sel.selected, "candidates": list(sel.candidates)}
+
+        off = {q.qid: observed(q) for q in queries}
+        on_by_kind: dict[tuple[str, str], dict] = {}  # the verdict depends on the kind only, not the decision label
+        on: dict[str, dict] = {}
+        for source in _MATRIX_SOURCES:
+            on[source] = {}
+            for q in queries:
+                kind, decision = data["kinds"][source][q.qid]
+                if (q.qid, kind) not in on_by_kind:
+                    on_by_kind[(q.qid, kind)] = observed(q, eligibility=el.EligibilityFilter(kind, decision, enforce=True))
+                on[source][q.qid] = on_by_kind[(q.qid, kind)]
+        out[name] = {"off": off, "on": on}
+    return out
+
+
+def _gate_matrix_report(inputs: dict, floor: dict, with_clone: dict) -> dict:
+    from bench import rdr232_gate_matrix as gm
+    from nexus.plans.request_coverage import normalize_kind
+
+    rows: list[dict] = []
+    for name, data in inputs.items():
+        queries = data["queries"]
+        states = [("builtins_only", floor)]
+        if name == "golden_v1":
+            states.append(("with_grown_473_clone", with_clone))
+        for state, taken in states:
+            for source in _MATRIX_SOURCES:
+                kinds = data["kinds"][source]
+                cell = gm.cell(queries, taken[name]["off"], taken[name]["on"][source], kinds)
+                rows.append({
+                    "set": name, "plan_library": state, "kind_source": source, **cell,
+                    "kinds_wrong_against_label": sorted(
+                        q.qid for q in queries
+                        if kinds[q.qid][0] not in (normalize_kind(q.answer_kind) or q.answer_kind, "unknown")),
+                    "kinds_unknown": sorted(q.qid for q in queries if kinds[q.qid][0] == "unknown"),
+                    "per_request": [
+                        {"qid": q.qid, "label": q.answer_kind, "kind_used": kinds[q.qid][0],
+                         "selected_off": taken[name]["off"][q.qid]["selected"],
+                         "selected_on": taken[name]["on"][source][q.qid]["selected"]}
+                        for q in queries],
+                })
+    heldout = inputs["heldout_v1"]["queries"]
+    moved_sel, moved_cand = g.selection_drift(floor["heldout_v1"]["off"], with_clone["heldout_v1"]["off"])
+    return {
+        "tree_sha": g.head_sha(), "tree_dirty": g.tree_is_dirty(), "golden_set_version": GOLDEN_SET_VERSION,
+        "requests": {name: len(d["queries"]) for name, d in inputs.items()},
+        "first_pass_differs_from_report": {name: d["first_pass_differs_from_report"] for name, d in inputs.items()},
+        "grown_clone_on_heldout": {
+            "selection_changed": moved_sel, "candidate_set_changed": moved_cand,
+            "selected_the_clone": sorted(
+                q.qid for q in heldout if with_clone["heldout_v1"]["off"][q.qid]["selected"] == g.GROWN_473_KEY),
+        },
+        "notes": [
+            "gate off is the unfiltered matcher (a shadow filter selects the same plans, pinned by _measure_eligibility); "
+            "gate on is the enforcing filter built for the kind the source gives the request",
+            "golden_v1 is IN-SAMPLE: the first pass was written with it in view, so its figures are floors, not rates; "
+            "the held-out set is blind and out-of-sample",
+            "the grown clone of plan 473 is keyed to G06's text (selected only for a verbatim repeat), so it exists only in "
+            "golden_v1's with_grown_473_clone rows; held-out rows use the builtins-only library, and "
+            "grown_clone_on_heldout shows the clone changing no held-out selection or candidate set. The held-out "
+            "unacceptable_plans lists name grown:hybrid-factual-lookup-473 wherever they name the lookup builtin; "
+            "that key is inert there",
+            "eligible_plan_recall is a blacklist reading: a request counts when some candidate is not labelled unacceptable; "
+            "it cannot say the candidate is the right shape",
+            "the Opus and Haiku kind sources are the kinds from the extraction reports, applied per request id; no model "
+            "call is made here. first_pass_differs_from_report lists requests whose first-pass kind differs between "
+            "this run (with the request's scope) and the report (no scope)",
+        ],
+        "rows": rows,
+    }
 
 
 def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, production) -> dict:
@@ -651,6 +1004,9 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
     # The plan cache is process-global and refills from the library only every 90 s: start from none,
     # so the floor does not depend on what an earlier test left in it, and leave none behind.
     reset_plan_cache_for_tests()
+    matrix_out = os.environ.get(MATRIX_OUT_ENV)
+    matrix_inputs = _gate_matrix_inputs() if matrix_out else None
+    matrix_floor = matrix_clone = None
     try:
         observations: list[RunObservation] = []
         selections: dict[str, dict] = {}
@@ -664,9 +1020,14 @@ def _emit_baseline(fx, run, queries, art, search_by_corpus, traverse_by_corpus, 
             ))
         measures = compute_measures(queries, observations)
         assert tuple(measures) == MEASURE_NAMES
+        matrix_floor = _gate_matrix_pass(library, matrix_inputs) if matrix_inputs else None
         grown = _measure_with_grown_473_clone(library, queries, art, observations, selections)
+        matrix_clone = _gate_matrix_pass(library, matrix_inputs) if matrix_inputs else None
     finally:
         reset_plan_cache_for_tests()
+    if matrix_out:
+        Path(matrix_out).write_text(
+            json.dumps(_gate_matrix_report(matrix_inputs, matrix_floor, matrix_clone), indent=2) + "\n", encoding="utf-8")
 
     # The ART request, scored on the reducer-input view as well (what the model is handed): once on the
     # secondary streams alone (the hydrated contents of the cut run), once on the production request,
@@ -770,7 +1131,9 @@ def _assert_measures_follow_containment(measures: dict, secondary_only: dict, pr
 
 def test_rdr084_fixture_containment_and_baseline_emission(t2_service_env) -> None:
     queries = load_golden_set(g.GOLDEN_PATH)
-    art = next(q for q in queries if q.qid == ART_REQUEST_QID)
+    art = next((q for q in queries if q.qid == ART_REQUEST_QID), None)
+    assert art is not None, (
+        f"the journey needs the {ART_REQUEST_QID} request; {g.GOLDEN_PATH_ENV} names a set without it ({g.GOLDEN_PATH})")
 
     fx = g.build_rdr084_fixture()
     reader = _assert_fixture_loads(fx)

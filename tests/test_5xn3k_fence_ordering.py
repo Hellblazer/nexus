@@ -27,6 +27,8 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
+from nexus.catalog.types import ManifestRow
+
 from nexus.errors import IndexRunVerifyRefused
 
 CONTENT_HASH = "c" * 64
@@ -451,8 +453,12 @@ def _run_pipeline(db, seq: list, fence: _RecordingFenceWriter, *, pages: int = 2
     from nexus.pipeline_stages import pipeline_index_pdf
     from tests.test_pipeline_stages import _er, _fx, _tc
 
+    # nexus-ahm18: the metadata post-pass reads the document's own manifest and then its chunk rows by
+    # id. The writer double sends no manifest rows, so name the chunks here; a post-pass that selects
+    # nothing after an upload now fails, and this test is about the fence, not the post-pass.
     mock_col = MagicMock()
-    mock_col.get.return_value = {"ids": [], "metadatas": []}
+    mock_col.get.side_effect = lambda *, ids=None, **kw: {
+        "ids": list(ids or []), "metadatas": [{} for _ in ids or []]}
     t3 = MagicMock()
     t3.get_or_create_collection.return_value = mock_col
 
@@ -462,7 +468,9 @@ def _run_pipeline(db, seq: list, fence: _RecordingFenceWriter, *, pages: int = 2
     )
     hooks = _RecordingHooks(seq)
     with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
-            patch("nexus.catalog.factory.make_catalog_writer", return_value=fence):
+            patch("nexus.catalog.factory.make_catalog_writer", return_value=fence), \
+            patch("nexus.pipeline_stages._own_manifest_rows",
+                  return_value=[ManifestRow(position=0, chash="c0")]):
         ME.return_value.extract.side_effect = _fx(pages, result)
         MC.return_value.chunk.return_value = fake_chunks
         total = pipeline_index_pdf(

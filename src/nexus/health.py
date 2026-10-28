@@ -11062,8 +11062,9 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
     ``extraction_method``; ``_enrich_metadata_from_extraction`` fills both
     in after the upload. A late upsert-chunks retry that commits after the
     post-pass, or a run that dies before it, leaves the placeholder in
-    place, and ``nx enrich bib`` (keyed on chunk title) then skips those
-    chunks without saying so. Measured 2026-09-24: 111 chunks in 2
+    place, and a reader keyed on chunk title then skips those chunks without
+    saying so (``nx enrich bib`` is not one since nexus-6pfgb.21: it selects
+    chunks through the catalog document's manifest). Measured 2026-09-24: 111 chunks in 2
     documents, both of which this check names.
 
     Blind spot: a PDF chunk with NO ``title`` key at all is not matched,
@@ -11140,8 +11141,8 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
                 f"{total} PDF chunk(s) in {len(documents)} document(s) still carry "
                 "the upload placeholder metadata (empty title, no "
                 "extraction_method): the post-pass never landed, or a late "
-                "write overwrote it (nexus-w94eo). Title-keyed tools such as "
-                f"`nx enrich bib` skip them. {listing}{more}."
+                "write overwrote it (nexus-w94eo). Readers keyed on the chunk "
+                f"title skip them. {listing}{more}."
             )
             fixes += [
                 "nx index pdf <path> --force        (file-backed document)",

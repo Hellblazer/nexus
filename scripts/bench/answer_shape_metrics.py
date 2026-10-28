@@ -80,7 +80,8 @@ BASELINE_CAVEATS: tuple[str, ...] = (
     "question is the G06 request text, so the matcher's verbatim-repeat rule selects it for G06 at "
     "confidence 1.0. It covers that one request (+1 admission), it is not a measured rate, and it says "
     "nothing about how plan 473 matched live. The clone stands for one Phase 2 exit clause only, "
-    "'unknown-grown plans cannot bypass the gate'; the clause '473 is ineligible' (a builtin-tagged "
+    "'unknown-grown plans cannot bypass the gate' (the fixture stamps it unknown with grown provenance, as "
+    "nx_answer's grow site does, replacing the lookup its source template declares since nexus-jypmj.2.1); the clause '473 is ineligible' (a builtin-tagged "
     "row declaring lookup) is not measured by it. Plan 473's builtin origin is inferred from RDR-232 "
     "line 1606 and T2 nexus_rdr/189-research-11, not read live. The top-level plan-side measures in "
     "the report are the builtins-only floor.",

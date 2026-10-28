@@ -565,8 +565,8 @@ class TestAutoDetectRouting:
     def test_auto_raises_when_mineru_runtime_fails_on_formula_pdf(self, extractor, dummy_pdf):
         """nexus-2fyb code-review C1: non-import failures (subprocess timeout,
         OOM kill, mineru-api 5xx, httpx errors) MUST NOT advise reinstalling
-        — the install is fine and the failure is operational. The opt-out
-        hint stays so users with a one-off bad PDF can skip formula extraction.
+        — the install is fine and the failure is operational. RDR-237 dropped
+        the opt-out hint: the formula-stripped Docling it named is no recovery.
         """
         with (
             patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
@@ -585,7 +585,8 @@ class TestAutoDetectRouting:
         assert "subprocess timed out" in msg  # underlying cause surfaced
         # MUST NOT misdirect the user to reinstall a healthy install:
         assert "reinstall" not in msg.lower()
-        assert "--extractor docling" in msg  # opt-out hint
+        assert "--extractor docling" not in msg  # RDR-237: formula-stripped Docling is no recovery
+        assert "nx doctor" in msg
         assert isinstance(excinfo.value.__cause__, RuntimeError)
 
     def test_auto_raises_with_callback_does_not_replay(self, extractor, dummy_pdf):

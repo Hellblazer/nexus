@@ -31,7 +31,7 @@ _FENCE_LOG = Path(os.environ["NX_4VX0A_FENCE_LOG"])
 
 class _Extractor:
     def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
-                allow_degraded=False):
+                allow_degraded=False, on_heartbeat=None):
         for i in range(3):
             on_page(i, f"page {i} of the nexus-4vx0a sigterm child", {"page_number": i + 1, "text_length": 40})
         sys.stdout.write("READY\n")

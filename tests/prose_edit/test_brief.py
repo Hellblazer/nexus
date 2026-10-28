@@ -22,11 +22,12 @@ import pytest
 from tests.prose_edit.conftest import ROOT, Prose
 
 SKILLS = ROOT / ".claude" / "skills"
-BRIEF = SKILLS / "prose-edit" / "scripts" / "brief.py"
-MEMORY = SKILLS / "prose-edit" / "scripts" / "memory.py"
+PLUGIN_SKILL = ROOT / "prose-edit" / "skills" / "prose-edit"
+BRIEF = PLUGIN_SKILL / "scripts" / "brief.py"
+MEMORY = PLUGIN_SKILL / "scripts" / "memory.py"
 SITE_PAGE = SKILLS / "site-page" / "SKILL.md"
-AGENT = ROOT / ".claude" / "agents" / "line-editor.md"
-SKILL = SKILLS / "prose-edit" / "SKILL.md"
+AGENT = ROOT / "prose-edit" / "agents" / "line-editor.md"
+SKILL = PLUGIN_SKILL / "SKILL.md"
 # What no instruction or message the model reads may name (nexus-ger02.15): naming the action primes it.
 NAMES_A_REPAIR = re.compile(r"\bnx\b|start a service|repair|daemon|doctor", re.IGNORECASE)
 

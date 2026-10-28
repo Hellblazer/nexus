@@ -112,10 +112,11 @@ def test_eligibility_verdict_and_non_passes_are_stated() -> None:
     assert flat.count("is not a pass") + flat.count("Neither is a pass") >= 2
 
 
-def test_the_releaser_is_human() -> None:
+def test_the_releaser_is_sam() -> None:
     flat = _flat(_section())
-    assert "The releaser is human" in flat
+    assert "The releaser is Sam" in flat
     assert '"cut the release"' in flat
+    assert "one named tag" in flat
 
 
 def test_engine_floor_check_precedes_the_pr_and_closes_the_lane() -> None:

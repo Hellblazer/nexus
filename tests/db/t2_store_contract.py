@@ -138,7 +138,7 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
         'mark_failed': ['collection', 'source_path', 'error'],
         'mark_retry': ['collection', 'source_path', 'interval_seconds'],
         'pending_count': [],
-        'reclaim_stale': ['timeout_seconds'],
+        'reclaim_stale': ['timeout_seconds', 'count_attempt'],
         'rename_collection': ['old', 'new'],
     },
     'taxonomy': {

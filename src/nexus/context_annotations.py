@@ -101,8 +101,10 @@ def annotate(
 
     - ``indexed YYYY-MM-DD (Nd ago)``
     - ``published YYYY`` from ``bib_year`` or the catalog ``year``
-    - ``expires in Nd`` from ``indexed_at + ttl_days`` (``ttl_days`` 0 or
-      absent is permanent and says nothing); a lapsed TTL reads ``expired``
+    - ``expires in Nd`` from ``expires_from + ttl_days`` (the note's own put
+      time, :func:`entry_facts`; ``indexed_at`` for an entry that has none;
+      ``ttl_days`` 0 or absent is permanent and says nothing); a lapsed TTL
+      reads ``expired``
     - ``index_state: <state>`` for any state other than ``complete``
 
     The contradiction flag is NOT repeated here: the render already prints
@@ -122,10 +124,11 @@ def annotate(
     ttl = metadata.get("ttl_days")
     try:
         ttl_days = int(ttl) if ttl is not None else 0
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         ttl_days = 0
-    if indexed is not None and ttl_days > 0:
-        remaining = ttl_days - (now - indexed).days
+    clock = _parse_iso(metadata.get("expires_from")) or indexed
+    if clock is not None and ttl_days > 0:
+        remaining = ttl_days - (now - clock).days
         tokens.append(f"expires in {remaining}d" if remaining > 0 else "expired")
     if index_state and index_state not in _QUIET_INDEX_STATES:
         tokens.append(f"index_state: {index_state}")
@@ -160,7 +163,7 @@ OWNER_RESOLVE_CAP: int = 10
 
 #: Facts compared by value across owners. ``indexed_at`` compares as an
 #: instant, so two spellings of one stamp agree.
-_FACT_KEYS: tuple[str, ...] = ("title", "file_path", "indexed_at", "bib_year", "ttl_days")
+_FACT_KEYS: tuple[str, ...] = ("title", "file_path", "indexed_at", "bib_year", "ttl_days", "expires_from")
 
 
 def entry_facts(entry: Any) -> dict[str, Any]:
@@ -169,8 +172,12 @@ def entry_facts(entry: Any) -> dict[str, Any]:
     ``title``, ``file_path``, ``indexed_at`` (the document's own index time),
     ``bib_year`` (the enriched year, else the catalog ``year``) and ``ttl_days``
     (the entry's ``meta["ttl_days"]``, which exists once the notes catalog-meta
-    writer has stamped it; an entry without one has no expiry to show). Reads
-    attributes with defaults, so a hand-built stub entry works.
+    writer has stamped it; an entry without one has no expiry to show) and, for
+    a note whose ``meta`` records its put time, ``expires_from``: the stamp the
+    TTL counts from, the same one ``nx store expire`` uses
+    (:mod:`nexus.catalog.note_ttl`), so the display and the sweep agree. An
+    entry without one counts from ``indexed_at``. Reads attributes with
+    defaults, so a hand-built stub entry works.
     """
     facts: dict[str, Any] = {}
     for key in ("title", "file_path", "indexed_at"):
@@ -187,13 +194,15 @@ def entry_facts(entry: Any) -> dict[str, Any]:
     if isinstance(meta, Mapping) and meta.get("ttl_days") is not None:
         try:
             facts["ttl_days"] = int(meta["ttl_days"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
+    if isinstance(meta, Mapping) and facts.get("ttl_days", 0) > 0 and _parse_iso(meta.get("put_at")) is not None:
+        facts["expires_from"] = str(meta["put_at"])
     return facts
 
 
 def _comparable(key: str, value: Any) -> Any:
-    if key == "indexed_at":
+    if key in ("indexed_at", "expires_from"):
         return _parse_iso(value) or value
     return value
 
@@ -210,9 +219,10 @@ def agreed_facts(per_owner: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         values = {_comparable(key, facts[key]) for facts in per_owner}
         if len(values) == 1:
             agreed[key] = per_owner[0][key]
-    # An expiry counts from the indexed stamp: without an agreed stamp there is
-    # nothing to count from.
-    if "indexed_at" not in agreed:
+    # An expiry counts from a stamp: the owners' own put times when any states one,
+    # else the indexed stamp. Without an agreed stamp there is nothing to count from.
+    clock = "expires_from" if any("expires_from" in facts for facts in per_owner) else "indexed_at"
+    if clock not in agreed:
         agreed.pop("ttl_days", None)
     return agreed
 

@@ -122,7 +122,7 @@ Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/lo
 
 This brake is a per-PROCESS coordination mechanism — it cannot see or pace OTHER processes/sessions sharing the same Voyage project, and it is attempt-bounded, not time-unbounded: each write-retry wrapper keeps its own attempt budget (only widened for a narrow 429/503+`Retry-After` signal), so a genuinely dead upstream still fails in bounded time — worst case per call ranges from ~2-5 minutes (a generic transient failure, process already mid-incident — this includes `http_vector_client._request`'s own inner gateway retry, ~17s, stacking with the outer wrapper's per-attempt sleep) to ~35 minutes (a sustained rate-limit window with the server consistently reporting a large `Retry-After`); see `nexus.retry`'s wrapper docstrings for the exact per-path numbers. Operators running several bulk `nx index` invocations concurrently (multiple terminals, multiple CI jobs, multiple agents) against the same account should size that concurrency with the shared 4000 RPM budget in mind; the brake reduces self-inflicted pile-ups within one process but is not a substitute for sizing the job.
 
-**Concurrent / interrupted runs (nexus-lcmbp):** a pipeline row stranded in `running` state is checked by heartbeat freshness before a retry proceeds. A `running` row younger than the stale threshold (5 minutes) now fails LOUD — HTTP 409 `conflict_running`, surfaced client-side as a non-zero exit with a remedy string — instead of the old silent `rc=0` skip that wrote zero chunks and reported success. A `running` row older than the threshold, or one marked `failed`, resumes normally; a `completed` row is skipped as up to date. Batch `--dir` mode places a fresh-heartbeat conflict in the run's failures bucket rather than aborting the whole batch — every file is still attempted (nexus-uqq9z: the batch as a whole now exits non-zero once any file lands in that bucket; see the Exit code note below).
+**Concurrent / interrupted runs (nexus-lcmbp):** a pipeline row stranded in `running` state is checked by heartbeat freshness before a retry proceeds. A `running` row younger than the stale threshold (5 minutes) now fails LOUD — HTTP 409 `conflict_running`, surfaced client-side as a non-zero exit with a remedy string — instead of the old silent `rc=0` skip that wrote zero chunks and reported success. A `running` row older than the threshold, or one marked `failed`, resumes normally; a `completed` row is skipped as up to date. Batch `--dir` mode places a fresh-heartbeat conflict in the run's failures bucket rather than aborting the whole batch — every file is still attempted, unless a MinerU breaker trip stops the run (RDR-237, below) (nexus-uqq9z: the batch as a whole now exits non-zero once any file lands in that bucket; see the Exit code note below).
 
 Two related output lines are new since the RUNFENCE arc (nexus-5xn3k): `skipped: index fresh (use --force)` on `repo`/`pdf`/`md`/`rdr`/`nx dt index` paths where a staleness no-op previously printed nothing or `Indexed 0 chunk(s)`; and an end-of-run `WARNING: N of the M indexed above had completion refused by the engine's fail-closed verify (fence left at 'indexing') — NOT fully indexed. Re-index or --force to retry.` The refusal warning means the manifest write succeeded but the engine's completion-verify step declined to stamp the document complete — `index_state` stays `'indexing'`, the chunks are real (already counted among the files indexed this run) but the document is not fully indexed until a subsequent run — usually `--force` — completes the fence. `nx catalog show TUMBLER_OR_TITLE` (`index_state`) and `nx doctor`'s `stale index-run fences` check (see [nx doctor](#nx-doctor)) both name documents left in this state (`nx catalog manifest-verify`, formerly the other pointer here, is [retired](#nx-catalog-manifest-verify--retired) as of RDR-191 Phase 6). Since 7.22.0 (nexus-l6tr7) a `nx dt index` batch that mixes a flush-grain refusal (counted in `indexed`) with a propagating one (bucketed into `failed`) prints the split instead — `N completion refusal(s) …: K of the M indexed above and J listed under failed` — and a bucket count the run-wide collector cannot account for is reported as recording drift (`complete_refused_count_mismatch`), never clamped; either way the run exits non-zero.
 
@@ -144,7 +144,7 @@ The cause after each name is `register_failed` (the per-file register raised), `
 
 **Unextractable-file exit code (nexus-deyd5): a single skip stays clean, a systemic skip does not.** A file that raises `UnextractableContentError` during `nx index repo` is skipped and counted, but no longer fails the run by itself (`rc=0`) — nothing was ever written for that file, so skipping it alone costs no data; a `Note:` line on stderr names the count and points at the WARNING/ERROR log line(s) for the affected path(s). Separately, after the run's drain and post-processing have all already completed and committed, the AGGREGATE skip population across the whole run is checked against a systemic-skip floor: 100% of attempted files skipped, or at least 20 files attempted with 50% or more skipped. Crossing that floor raises a `ClickException` (non-zero exit) naming the skipped/attempted counts and percentage, even though the run itself finished and its successful work was already committed — nothing is discarded by this check, it only decides the exit code. The message suggests the most likely legitimate cause: scanned/image-only PDFs, since the default extractor does not run OCR (retry with `--extractor mineru` or set `pdf.extractor: mineru` in `.nexus.yml`).
 
-**`pdf --dir` batch exit code (nexus-uqq9z):** `nx index pdf --dir` now EXITS NON-ZERO when one or more files land in the run's failures list — real per-file exceptions (extraction errors, pipeline conflicts, completion refusals) AND manifest-identity drops alike, i.e. any entry the printed `N failure(s):` list carries. Previously the batch always exited 0 regardless of how many files failed, the same "clean rc, damaged run" gap `nx index repo` / `nx dt index` closed above, just left open one layer down for the `--dir` batch path. Per-file isolation is UNCHANGED — every PDF in the directory is still attempted and the failures list still prints exactly as before; only the batch's own exit code is new. The failure message is `N of M file(s) failed — see list above`. Single-file `nx index pdf PATH` (no `--dir`) already exited non-zero on its own failures (nexus-7f5qj) and is unaffected.
+**`pdf --dir` batch exit code (nexus-uqq9z):** `nx index pdf --dir` now EXITS NON-ZERO when one or more files land in the run's failures list — real per-file exceptions (extraction errors, pipeline conflicts, completion refusals) AND manifest-identity drops alike, i.e. any entry the printed `N failure(s):` list carries. Previously the batch always exited 0 regardless of how many files failed, the same "clean rc, damaged run" gap `nx index repo` / `nx dt index` closed above, just left open one layer down for the `--dir` batch path. Per-file isolation is UNCHANGED — every PDF in the directory is still attempted and the failures list still prints exactly as before, with one exception: a MinerU breaker trip (RDR-237) names the install or the machine, not the file, so it stops the run and lists the remaining PDFs as not attempted; only the batch's own exit code is new. The failure message is `N of M file(s) failed — see list above`. Single-file `nx index pdf PATH` (no `--dir`) already exited non-zero on its own failures (nexus-7f5qj) and is unaffected.
 
 **`pdf` and `md` flags:**
 
@@ -168,8 +168,8 @@ catalog identity.
 |------|-------------|
 | `--dir DIR` | Index all PDFs in a directory (mutually exclusive with `PATH`) |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
-| `--extractor [auto\|docling\|mineru]` | PDF extraction backend (default: `pdf.extractor` from `.nexus.yml`, else `auto`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
-| `--on-formula-oom [fail\|docling]` | What to do when a single page reproducibly OOM-kills MinerU's formula model (default: `fail`). `fail` aborts the document (preserves the no-silent-fallback-for-formulas guarantee). `docling` degrades only that page to docling (formula-stripped) and continues |
+| `--extractor [auto\|docling\|mineru\|pymupdf]` | PDF extraction backend (default: `pdf.extractor` from `.nexus.yml`, else `auto`). `pymupdf` reads each page's own text layer and needs no PDF support (no layout, tables or math; an image-only page is `unextracted`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
+| `--on-formula-oom [fail\|docling]` | Accepted and ignored for one release (RDR-237). A page whose MinerU attempt fails is retried without formulas, then taken from its PyMuPDF text layer, whatever the value; the document no longer aborts for it (see the MinerU ladder below) |
 | `--dry-run` | Preview extraction and chunking only — nothing is embedded, stored, or written (no API keys needed). Prints a chunk preview. Also registers no catalog document (nexus-uxg4u) — a preview never mints a Document row a subsequent refusal would leave behind. A real (non-dry) run that fails after registering a brand-new document rolls that registration back automatically; re-indexing a pre-existing document is left exactly as the completion fence marked it |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs: pages and chunks are staged on the engine as they are produced, so a killed run (even a hard kill) is resumed by the next run without extracting the PDF again and without embedding anything twice (the rerun re-sends the document from its first chunk through a fresh write; the engine skips chunks it already holds), and a run that finished uploading and died before the completion stamp sends only the stamp; `never` forces the in-process path (extract and chunk the whole document first, then write it in batches with the same chunk-plus-owner write; a killed run restarts from the first chunk, extracts again, and re-embeds nothing) |
 | `--allow-degraded-extraction` | Accept extracted text that fails the post-extraction quality gate (nexus-wi1uv, see [Post-Extraction Quality Gate](#post-extraction-quality-gate) below) instead of failing the run |
@@ -189,6 +189,8 @@ Most PDFs work fine with the default (`auto`). You only need to think about this
 - All PDFs extract normally via Docling
 - Math-heavy PDFs get a `has_formulas: true` flag on their chunks (useful for filtering)
 - Formula regions are detected but not re-extracted with MinerU
+
+**Text only (`pymupdf`).** `--extractor pymupdf` (or `pdf.extractor: pymupdf`) reads each page's own text layer through PyMuPDF, a core dependency, so it installs, starts and probes nothing from the PDF stack. There is no layout, no table structure and no math. A page with no text layer (a scan) is recorded `unextracted`; a PDF with no text layer on any page fails. `auto` never chooses it. The run summary of `nx index pdf` and `nx dt index` names the extractor and lists the unextracted pages (`nx index repo` and `nx collection reindex` print no extraction summary); the catalog document records `extraction_method: pymupdf`, and a `pymupdf` rerun over pages a MinerU run left is recorded `mineru+degraded`, with its text-layer pages listed.
 
 **What MinerU adds (optional):**
 - Superior LaTeX extraction for display and inline equations
@@ -220,19 +222,46 @@ Or add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global) direc
 
 ```yaml
 pdf:
-  extractor: mineru   # auto | docling | mineru
+  extractor: mineru   # auto | docling | mineru | pymupdf
   mineru_page_batch: 1          # pages per MinerU subprocess (memory isolation)
-  mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range)
+  mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range); × mineru_page_batch must be at most 240
   mineru_memory_ceiling_mb: 0   # 0 = disabled; Linux-only RLIMIT_AS cap (see below)
+  ladder_breaker: 3             # consecutive pages failing both MinerU rungs with one cause that stop a document; 0 = off
 ```
 
 The `--extractor` flag overrides the config when passed explicitly.
 
-**MinerU OOM resilience (RDR-148).** Formula-dense pages can OOM-kill MinerU's
-formula model. The recovery ladder: a failed multi-page batch bisects toward
-single pages; a single page that still OOMs either aborts the document
-(`--on-formula-oom fail`, the default) or degrades only that page to docling
-(`--on-formula-oom docling`). On **Linux** you can additionally set
+**Which commands read `pdf.extractor`.** `nx index pdf` (flag first, then the setting), `nx index repo` and `nx collection reindex` (the setting only; they have no flag). The last two used to run `auto` whatever the setting said; they now honour it, so a repo configured `mineru` sends every new or changed PDF to MinerU alone (strict, no Docling routing for papers without formulas) and one configured `docling` gets formula-stripped extraction. Already-indexed, unchanged PDFs are not re-extracted either way. `nx dt index` and `nx dt capture` read the `--extractor` flag only.
+
+**Time limit of one MinerU attempt (RDR-237).** `mineru_page_timeout_s` times
+`mineru_page_batch` is the longest one attempt runs without a progress write, and a
+streaming run's pipeline row is taken over after 300 s of silence. A MinerU run
+refuses to start when the product is above 240 s, naming both settings (the commands
+exit 1); the defaults (180 × 1) pass, and a batch of 4 pages needs 60 s or less per
+page. A setting that holds no integer (`soon`, `true`, `2.5`) is named the same way and
+exits 1 without a traceback. `nx config set` warns when a change would cross the limit.
+A server request that times out sends its page to the next rung on the subprocess path
+(a batch that times out bisects on the subprocess path too, never on the server); the server is
+restarted after the first such timeout on a one-slot server (macOS) or after two
+consecutive pages on a server with more slots, and only a server nexus started itself.
+
+**MinerU OOM resilience (RDR-148, RDR-237).** Formula-dense pages can OOM-kill
+MinerU's formula model. The recovery ladder: a failed multi-page batch bisects
+toward single pages; a single page that still fails (a timeout, an OOM, a worker
+error, a dropped server connection) is retried without formulas
+(`formula_enable=false`, recorded `mineru-no-formula`), then read from the PDF's
+own text layer (`pymupdf-text`), then recorded `unextracted`; the document
+finishes and `extraction_method` reads `mineru+degraded`, with the pages by rung
+in `extraction_pages`. `--on-formula-oom` is accepted and ignored for one
+release, and no longer changes this. When
+`pdf.ladder_breaker` consecutive pages (default 3) fail both MinerU attempts with
+the same cause (a timeout, or the same worker exit and stderr line) the install or
+the machine is failing, not the PDF: the document stops, naming the cause. The
+pages before that window stay in the kept buffer, so a rerun does not write them
+again, but MinerU runs over every earlier page again (the buffer only spares the
+writes), so repair the install first. Under `nx index pdf --dir` such a stop ends
+the whole run: the remaining PDFs are listed as not attempted, since each would
+trip the same check after its own timeouts. On **Linux** you can additionally set
 `mineru_memory_ceiling_mb` to cap the worker's address space (RLIMIT_AS) so a
 runaway page fails fast and catchably instead of thrashing; macOS does not honour
 RLIMIT_AS (the knob logs a warning and is ignored there). Note RLIMIT_AS caps
@@ -278,7 +307,9 @@ index it anyway.
 
 **Blast radius of a failure differs by command.** `nx index pdf` (single
 file or `--dir`) fails just that invocation/file — `--dir` continues the
-rest of the batch and exits non-zero listing every failure. `nx dt index`
+rest of the batch and exits non-zero listing every failure, except after a
+MinerU breaker trip (RDR-237), which stops the batch and lists the PDFs it did
+not attempt. `nx dt index`
 contains a gate failure to the offending record (per-record batch
 isolation, same as any other recoverable indexing error) and continues the
 rest of the run. `nx index repo` contains it to the offending PDF too —
@@ -310,9 +341,28 @@ nx search "" --corpus docs --where quality_gate_overridden=true --files
 
 **Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every
 PDF chunk's metadata carries which backend actually produced its text:
-`docling` | `mineru` | `pymupdf_normalized`, or the honest mixed aggregate
-`mineru+docling-degraded` when `--on-formula-oom docling` degraded at least
-one page of an otherwise-MinerU document. This is what makes an extractor
+`docling` | `mineru` | `pymupdf` | `pymupdf_normalized`, or the honest mixed aggregate
+`mineru+degraded` when a page settled below the first MinerU attempt (RDR-237;
+the pages by rung are the catalog document's `meta.extraction_pages`, a map from rung
+to 1-based pages that the PDF hook writes on every extraction, `{}` when clean, so a
+clean re-extract clears an old map). `nx store get` and the MCP `store_get` print them
+as a `Degraded:   mineru-no-formula 3,7; pymupdf-text 12` line after `Extractor:`
+(one line per document, labelled with its title, when several documents hold the
+chunk; `nx store get --json` adds a `degraded_pages` list, only when some document has
+any), and `nx index pdf` and `nx dt index` list the degraded pages per document after
+their summary. A run that cannot write the record (no reachable catalog, a refused
+ephemeral path, a catalog error) logs `catalog_pdf_extraction_not_recorded` naming the
+document. `nx index repo` records the map on the document it registered (right after
+extraction, before the upload), so a clean re-extract through it clears an old map too,
+and logs the same warning when it cannot. After a kept-buffer resume the record covers the
+pages already in the buffer. Limit: a buffered page written by an earlier build names no
+rung, so its rung cannot be known; such a resume logs `resume_provenance_unknown` (the
+document and the count of buffered pages with no rung) and keeps the method at
+`mineru+degraded` rather than claim a clean `mineru`, and the map lists only the pages
+whose rung is known.
+Chunks written before RDR-237 may
+carry `mineru+docling-degraded` (a page degraded to Docling by
+`--on-formula-oom docling`, a flag that is now accepted and ignored for one release). This is what makes an extractor
 regression scopeable after the fact (e.g. "which documents did MinerU
 extract, so I can re-index just those").
 
@@ -450,7 +500,7 @@ nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force --re-embed
 | `--collection <name>` | T3 collection override. Wins over the extension-based default (e.g. `--collection knowledge__delos`) |
 | `--corpus <name>` | Corpus name used to derive the default collection (default: `dt`). PDFs route to `knowledge__<corpus>-papers` (paper-shaped, aspect-eligible); markdown notes route to `docs__<corpus>` |
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
-| `--extractor [auto\|docling\|mineru]` | PDF extraction backend for file-backed records (default `auto`). `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
+| `--extractor [auto\|docling\|mineru\|pymupdf]` | PDF extraction backend for file-backed records (default `auto`; `nx dt` reads this flag only, never `pdf.extractor`). `pymupdf` reads each page's own text layer and needs no PDF support; a page with no text layer is left out, so page coverage fails unless `--allow-page-gap`. `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
 | `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-sends every chunk in place) — same decoupled semantics as `nx index pdf --force` (nexus-8143o): does NOT by itself force a Voyage re-embed. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
 | `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-8143o `--force` behaviour). Forwarded to `index_pdf`/`index_markdown`'s own `force_re_embed` kwarg, same split as `nx index pdf`/`md`/`rdr`/`repo` |
 | `--allow-page-gap` | Accept a PDF whose extracted pages do not cover DEVONthink's `pageCount` (nexus-i0cwh). By default a gap is a per-record failure listed under `Failures:` with the missing page numbers, and the run exits non-zero; either way the gap is recorded on the catalog row as `meta.page_gap` (cleared on the next full-coverage run) |
@@ -645,15 +695,15 @@ nx enrich bib knowledge__papers --delay 0.5 --limit 50
 nx enrich bib knowledge__papers --source openalex --delay 0.5
 ```
 
-For each unique `source_title` in the collection: extracts DOI / arXiv ID from chunk body text, tries the direct identifier lookup first, falls back to fuzzy title search on miss. Writes `bib_year`, `bib_venue`, `bib_authors`, `bib_citation_count`, plus the source-specific identifier (`bib_semantic_scholar_id` and / or `bib_openalex_id`) back to every chunk with that title. Already-enriched chunks (non-empty backend ID) are skipped, so the command is idempotent.
+The unit is the catalog document, not the chunk title (nexus-6pfgb.21): a T3 chunk is shared by every document that holds the same text, and its `title` is whichever document wrote it last, so grouping by it enriched one document with another's bib. The catalog manifest names each document's chunks. For each document in the collection whose catalog row does not yet hold the backend's id: with OpenAlex (and `--source dt`) it extracts a DOI / arXiv ID from the document's chunk body text and file name and tries the direct identifier lookup first, then falls back to a fuzzy search on the document's catalog title; Semantic Scholar looks up by the catalog title only. Writes `bib_year`, `bib_venue`, `bib_authors`, `bib_citation_count`, plus the source-specific identifier (`bib_semantic_scholar_id` and / or `bib_openalex_id`) to the document's catalog row, and to its chunks that no other document holds; a chunk two documents hold keeps the values it had. A document whose catalog row already holds the backend's id is skipped, so the command is idempotent. A document enriched before the catalog carried `bib_*` columns (nexus-9l2lg) has its id only on its chunk rows, so its catalog row does not hold it; when a chunk that document alone holds names it as its last indexer (see `--backfill-catalog`) and carries the id, and its chunks of that kind all agree on the id, it is skipped too and counted in the progress line ("with the id on their chunks only"); a document whose such chunks disagree is looked up and counted ("whose chunks disagree on the id"), since `--backfill-catalog` skips it, and the cost of looking up every other such document again is one backend call each (`--delay`, and Semantic Scholar's 100 requests per 5 minutes without a key), so on a collection enriched before then **run `--backfill-catalog` first**. `nx dt index --enrich` runs this verb over every collection it touched and inherits that cost. A document with no catalog title, and a titled one whose manifest names no chunk of the collection, cannot be looked up and are each counted in the progress line. Only documents not yet enriched are read past one catalog listing of the collection (plus the T3 id scan the command always makes), so a fully enriched collection costs one catalog listing and the T3 id scan. `--limit` bounds the backend calls only: the manifest read and the chunk-owner lookup cover every document still to look up. The command needs the catalog: when the catalog cannot say which documents hold the chunks, it stops and changes nothing (`nx dt index --enrich` warns and keeps its indexing summary).
 
 | Flag | Description |
 |------|-------------|
 | `COLLECTION` (positional) | Fully-qualified T3 collection name (e.g. `knowledge__papers`) |
 | `--source {auto\|s2\|openalex\|dt}` | Bibliographic backend (default: `auto`) |
 | `--delay SECONDS` | Delay between API calls (default: 0.5s). Increase to avoid rate limiting |
-| `--limit N` | Maximum number of titles to enrich (default: 0 = unlimited) |
-| `--backfill-catalog` | Re-drive the catalog write from ALREADY-enriched chunk metadata — no external API calls. Populates the catalog Document rows' `bib_*` fields (surfaced by `catalog_search` / `catalog_list` / `nx catalog show`) for collections enriched before those columns had a writer. Idempotent; titles whose chunks carry bib metadata but have no matching catalog row are reported separately as skipped |
+| `--limit N` | Maximum number of documents to look up (default: 0 = unlimited). Bounds the backend calls only, not the manifest read or the chunk-owner lookup |
+| `--backfill-catalog` | A recovery tool: fill the catalog write from ALREADY-enriched chunk metadata — no external API calls. When in doubt prefer `nx enrich bib` (the API lookup). Populates the catalog Document rows' `bib_*` fields (surfaced by `catalog_search` / `catalog_list` / `nx catalog show`) for collections enriched before those columns had a writer. Fill-only per backend id: a document whose catalog row already holds that backend's id is left as it is (counted in the summary), but a row holding only the OTHER backend's id is filled and its author, year and venue are overwritten. A chunk row is evidence for a document only when BOTH exactly one live document holds the chunk (per the catalog manifest) AND the row names that document as its LAST INDEXER: a note's row by `catalog_doc_id`, an indexed file's row by `content_hash` equal to the document's own (`index_content_hash`, else `meta.content_hash`); the chunks the indexers write carry `content_hash` and no `catalog_doc_id`. That names who last indexed the row, not who wrote its `bib_*`: a re-index restamps `content_hash` and keeps the `bib_*`, so a bib a former co-holder wrote and a later re-index kept cannot be told apart, and may be copied onto the indexing document's empty catalog row. A chunk that is unheld, shared, or whose row names another document as its last indexer is skipped and counted, never matched to a catalog row by title. Every such chunk of a document is read; a document whose chunks disagree on the id is skipped and named in the summary. The write is by tumbler |
 
 Enrichment also writes the same bib fields to the matching **catalog**
 Document rows (year, authors, venue, citation count, backend id), so
@@ -766,7 +816,7 @@ Changes only `source_uri`, and only where it is empty, so a second run is a no-o
 nx enrich list COLLECTION [--limit N] [--scheme SCHEME]
 ```
 
-Day 2 Ops: list extracted aspect rows for a collection. One row per source document (not per chunk), in `source_path ASC` order. Returns source path, extractor name, model version, extracted-at timestamp, and a confidence indicator. `--limit` caps the printed rows (default `0` = unlimited). `--scheme` (RDR-096 P3.2) filters to rows whose `source_uri` scheme matches (`file`, `chroma`, `https`, `nx-scratch`, ...); rows with empty/NULL `source_uri` are excluded once `--scheme` is set. No `--json` output. Useful for triaging "what got extracted?" before running `--re-extract` against a model upgrade.
+Day 2 Ops: list extracted aspect rows for a collection. One row per source document (not per chunk), in `source_path ASC` order. Returns source path, extractor name, model version, extracted-at timestamp, and a confidence indicator. `--limit` caps the printed rows (default `0` = unlimited). `--scheme` (RDR-096 P3.2) filters to rows whose `source_uri` scheme matches (`file`, `nx-note`, `https`, `nx-scratch`, ...); rows with empty/NULL `source_uri` are excluded once `--scheme` is set. No `--json` output. Useful for triaging "what got extracted?" before running `--re-extract` against a model upgrade.
 
 ### nx enrich info
 
@@ -935,7 +985,10 @@ content** — the two things a reinstall cannot regenerate. Identity is
 carried (import re-embeds through the note writer `store_put` uses, so the
 bundle survives an embedding-mode change); import is idempotent and
 reports every unresolvable link or failed note without aborting the rest,
-and exits non-zero when any note did not verify.
+and exits non-zero when any note did not verify. Export exits non-zero
+when it left a note out (a split note with a piece missing or a gap in
+its manifest), after
+writing the bundle and naming the note.
 See `docs/catalog.md` § Recovery bundle for the format contract. For an
 embedding-preserving per-collection backup use `nx store export COLLECTION`
 (`.nxexp`) instead.
@@ -1049,7 +1102,7 @@ nx catalog register --title TITLE --owner OWNER [--author NAME] [--year YEAR]
 Hidden from `--help` but fully functional: single-document, explicit
 catalog registration, mirroring the MCP `catalog_register` tool. An
 absolute `--file-path` under a known repo is relativized automatically
-(RDR-060). `--source-uri` accepts an explicit persistent URI (`chroma://`,
+(RDR-060). `--source-uri` accepts an explicit persistent URI (`nx-note://`,
 `https://`, `nx-scratch://`, `x-devonthink-item://`) or is omitted to
 derive `file://<abspath>` from `--file-path`; malformed URIs are rejected
 at register time. Refuses (nexus-u8n4r) to register a path that sits under
@@ -1090,6 +1143,14 @@ NAME` (a single `docs__<repo>-<hash>` or `code__<repo>-<hash>` collection
 whose repo owner is already registered) or `--all-repo-collections` (run
 recovery against every matching collection in T3); the two are mutually
 exclusive.
+
+The paper pass of the bare form registers each `docs__` paper collection from its first
+chunk. A T3 chunk row is shared by every document that holds the text and carries the last
+writer's title and `bib_*` (nexus-6pfgb.21), so when a live document holds that chunk its
+catalog row supplies the title, author and year; a chunk no live document holds (the
+recovery case) is read from its row as before; a first chunk several documents hold names
+none of them, so the collection is skipped and reported, not registered under a stranger's
+title.
 
 ### nx catalog compact — RETIRED (hidden from `--help`)
 
@@ -1540,7 +1601,7 @@ it already refused in service mode, now the only mode.
 nx catalog backfill-source-uri [--apply] [--json]
 ```
 
-Re-derives `chroma://` catalog `source_uri` values for filesystem-backed collections (nexus-poigc). `chroma://` is ALSO the internal store_put-origin marker for `knowledge__` documents minted via `nx store put` / MCP `store_put` (see `_STORE_PUT_URI_PREFIX` in `commands/catalog_cmds/reconcile_stale.py`) — unrelated to the retired ChromaDB dependency (RDR-155 P4b) and left alone by this verb. It ONLY rewrites rows whose physical collection routes to `file://` in `nexus.aspect_readers.uri_for` (the `rdr__`/`docs__`/`code__` prefixes): those rows carry a `chroma://` identity solely because an older `uri_for` build minted it before those prefixes routed to `file://` — migration residue, not a legitimate origin marker.
+Re-derives `chroma://` catalog `source_uri` values for filesystem-backed collections (nexus-poigc). A note's identity is `nx-note://` (RDR-231; the store_put-origin marker for `knowledge__` documents minted via `nx store put` / MCP `store_put`, see `_STORE_PUT_URI_PREFIX` in `commands/catalog_cmds/reconcile_stale.py`) and is left alone by this verb; the retired `chroma://` spelling of it is residue the engine rewrites. It ONLY rewrites rows whose physical collection routes to `file://` in `nexus.aspect_readers.uri_for` (the `rdr__`/`docs__`/`code__` prefixes): those rows carry a `chroma://` identity solely because an older `uri_for` build minted it before those prefixes routed to `file://` — migration residue, not a legitimate origin marker.
 
 For each candidate, parses the path component out of the stored `chroma://<collection>/<path>` URI and re-derives through the CURRENT `uri_for(collection, path)`. Refuses (reports, never writes) a row whose parsed path is not absolute — there is no `repo_root` to anchor a relative one at backfill time, and this verb never guesses at one. Always prints a per-collection census of every `chroma://` row first — candidates (file-routed) vs. store_put-origin markers (left alone) — regardless of `--apply`.
 
@@ -1716,14 +1777,14 @@ Six mutation arms, each printing the classification report first, then its own t
 
 The `dishonest` bucket (`chunk_count > 0` but the manifest is empty; diagnosis only, never auto-swept per nexus-wq1e4) carries an `origin` field per document (nexus-0y0gk), checked in this order:
 
-- **`store_put_origin`** (critique fix-round, nexus-0y0gk) — the nexus-sdp0u store_put signature: `reason: "chroma_uri"` when `source_uri` is the synthesized `chroma://<collection>/<title>` identity, or `reason: "knowledge_single_chunk_no_path"` when `chunk_count == 1`, the collection is `knowledge__*`, and BOTH `file_path`/`source_uri` are empty (store_put docs are single-chunk by construction). This is a RECOGNIZABLE, likely FK-safe `nx t3 backfill-manifest --only-gapped` candidate — NOT "cannot confirm, leave it" — so it must not collapse into `unresolvable_provenance`. A real `file_path` always wins as `reindex_candidate` instead (never silently reclassified).
+- **`store_put_origin`** (critique fix-round, nexus-0y0gk) — the nexus-sdp0u store_put signature: `reason: "note_uri"` when `source_uri` is the synthesized `nx-note://<collection>/<title>` identity (named `chroma_uri` before RDR-231), or `reason: "knowledge_single_chunk_no_path"` when `chunk_count == 1`, the collection is `knowledge__*`, and BOTH `file_path`/`source_uri` are empty (store_put docs are single-chunk by construction). This is a RECOGNIZABLE, likely FK-safe `nx t3 backfill-manifest --only-gapped` candidate — NOT "cannot confirm, leave it" — so it must not collapse into `unresolvable_provenance`. A real `file_path` always wins as `reindex_candidate` instead (never silently reclassified).
 - **`reindex_candidate`** — a concrete on-disk location resolves and exists.
 - **`orphaned_path`** — confirmed absent (plus `reason`/`resolved_path`/`file_path`).
 - **`unresolvable_provenance`** — absence could never be confirmed (plus `reason`).
 
 This makes the triage between file-backed re-index, store_put-origin backfill, and genuinely-unknown provenance mechanical instead of a hand-run SQL query. `--json` also carries `dishonest_by_origin`, a count-by-origin summary alongside the existing `dishonest` list.
 
-The zero_count triage gets the SAME `store_put_origin` treatment: a `zero_count_store_put_origin` bucket (parallel to `zero_count_reindex_candidate`/`zero_count_orphaned_path`/`zero_count_unresolvable_provenance`) holds zero-chunk-count `knowledge__` store_put docs carrying the synthesized `chroma://` `source_uri` (`reason` is always `"chroma_uri"` here — the single-chunk sub-signature requires `chunk_count == 1`, unreachable at `chunk_count == 0`). Formerly folded into `zero_count_unresolvable_provenance`/`source_uri_only`. `--json`'s `zero_count_live` block carries `store_put_origin` (the row list) and `store_put_origin_by_reason` alongside the existing `orphaned_path_by_reason`/`unresolvable_provenance_by_reason` counts, and `summary.zero_count_store_put_origin` is the count.
+The zero_count triage gets the SAME `store_put_origin` treatment: a `zero_count_store_put_origin` bucket (parallel to `zero_count_reindex_candidate`/`zero_count_orphaned_path`/`zero_count_unresolvable_provenance`) holds zero-chunk-count `knowledge__` store_put docs carrying the synthesized `nx-note://` `source_uri` (`reason` is always `"note_uri"` here — the single-chunk sub-signature requires `chunk_count == 1`, unreachable at `chunk_count == 0`). Formerly folded into `zero_count_unresolvable_provenance`/`source_uri_only`. `--json`'s `zero_count_live` block carries `store_put_origin` (the row list) and `store_put_origin_by_reason` alongside the existing `orphaned_path_by_reason`/`unresolvable_provenance_by_reason` counts, and `summary.zero_count_store_put_origin` is the count.
 
 `--json` emits the full structured classification on stdout (diagnostics on stderr) and refuses to combine with `--execute`.
 
@@ -2411,7 +2472,7 @@ Deleted K entries with title 'X' from Y.
 
 The count line is omitted when K is 0. Exit is non-zero only when X was not removed as asked: a document whose manifest could not be retracted (left live, named on stderr), or uncataloged chunks that were all kept.
 
-`nx store expire` (removes all TTL-lapsed `knowledge__*` entries, no flags) has the same actual-count contract: it prints `Expired N entries.` where N is the count `batch_delete` actually removed, not the number of lapsed rows it found. The reap-before-delete ordering above applies here too: each expired chash's manifest row is retracted before the chunk delete is attempted, so a genuinely shared chash correctly stays retained and correctly stays out of the reported count, rather than being counted as expired while the chunk survives.
+`nx store expire` (removes all TTL-lapsed `knowledge__*` entries, no flags) has the same actual-count contract: it prints `Expired N entries.` where N is the count `batch_delete` actually removed, not the number of lapsed rows it found. The reap-before-delete ordering above applies here too: each expired chash's manifest row is retracted before the chunk delete is attempted, so a genuinely shared chash correctly stays retained and correctly stays out of the reported count, rather than being counted as expired while the chunk survives. Each note is judged by its own TTL and its own put time, kept in its catalog entry (not by the chunk row, which two notes with the same text share): a lapsed note is retired even when a permanent note put later shares its chunk, and the chunk stays served for the permanent one. When that retires notes, a second line says how many (it can exceed N); a note that could not be retired is named on stderr and the command exits non-zero. A lapsed note whose own chunk row records a later put or a different TTL than its catalog keys (the cause may be an older client or an import) is held, not retired: the summary line adds `N lapsed notes held, not retired.`, stderr names each held note, the exit stays 0, and a held note never expires until it is re-put or deleted. See [storage-tiers.md](storage-tiers.md) "A note's own keys in the catalog".
 
 **`get` flags:**
 
@@ -2710,7 +2771,7 @@ nx collection list
 | `aspects --from-config [--dry-run] [--yes]` | Sync every registered docs__ collection this machine's local `aspects.docs_collections` list matches onto the engine (sets `aspects_enabled=true` there); the migration path off the local-only list. Prompts once for the whole batch unless `--yes`/`-y` is given. `--dry-run` reports without writing and never prompts. Cannot combine with `NAME` or `--enable`/`--disable` |
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
-| `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn). The new collection takes the content type and owner its name implies, and each note's `chroma://<old>/<title>` source URI is rewritten to the new name in the same transaction; a rewrite onto a URI a live document already holds is refused (nexus-sis0m.3; needs an engine carrying it, older engines copy the old owner and leave URIs) |
+| `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn). The new collection takes the content type and owner its name implies, and each note's `nx-note://<old>/<title>` source URI is rewritten to the new name in the same transaction; a rewrite onto a URI a live document already holds is refused (nexus-sis0m.3; needs an engine carrying it, older engines copy the old owner and leave URIs) |
 | `re-embed NAME --to MODEL` | In-place re-embed for Voyage models, `voyage-context-3` included since nexus-tysei (the engine embeds each chunk on its own, so an in-place CCE re-embed writes the vector a fresh index would; it also repairs stored vectors that no longer match their text). Service mode: same-model only — the engine embeds by the model the collection's catalog row records (by the model its name encodes only when no row backs the name or the row records none), so a `--to` that differs from that model fails loud, `--dry-run` included, instead of stamping a model the engine did not use (nexus-dxifx); cross-model moves re-index from source into a collection named for the new model. `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
 | `re-embed --all`, `re-embed NAME --to MODEL` (a different model), `re-embed --status [JOB]`, `--pause JOB`, `--resume JOB`, `--abort JOB` | The cross-model re-embed job (RDR-210 Phase 6, nexus-cnxjk), local engine only: it refuses in any other mode. See [re-embed job](#nx-collection-re-embed-job) |
 | `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
@@ -3450,7 +3511,7 @@ Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + rea
 
 **Cross-process data-token lease cache (nexus-9c7t9).** Every successful mint also (best-effort) persists the short-TTL data token — never the mint credential itself — to `~/.config/nexus/data_token_lease.<key>` (mode `0600`, atomic write; `<key>` is a filesystem-safe digest of the endpoint host:port and tenant, never a raw URL). The NEXT `nx` invocation for the same `(endpoint, tenant)` borrows this lease instead of minting, as long as it is still within the same 20%-of-TTL freshness window the in-process cache uses; a stale, corrupt, or foreign lease is silently ignored and the manager mints as before, so a lease-write failure never breaks a mint. This is what makes back-to-back scripted `nx` loops safe: before this cache, every invocation minted its own token and 5+ back-to-back invocations in one minute exhausted the engine's `MintRateLimiter` default burst (5 per credential+tenant per minute) and failed loud; now the engine sees roughly one mint per `(endpoint, tenant)` per TTL window rather than per invocation, and the rate-limiter ceiling only binds a genuine cold-start storm (many `nx` processes launched concurrently before any lease exists), not ordinary sequential CLI usage. `nx uninstall` removes every `data_token_lease.*` file unconditionally, alongside the managed credentials.
 
-Then, corpus-integrity checks (both modes, all read-only, all degrade to a skip rather than crash `nx doctor`): dimension-orphaned collections (nexus-9tsdf, remedy `nx collection prune`); the embedding-profile rows (RDR-204 Day 2, nexus-ft04v.31, 7.38.0): the engine's install-scoped profile per content type (`GET /v1/catalog/embedding_profile`), the client's intent (`local.embed_model` plus key state) against it (a disagreement names the service restart, since the engine reads the model only at spawn), off-profile live collections (informational), and `disputed`, `dormant` and `quarantine` rows each with their remedy; an engine below the route reports the row as unread rather than clean; the re-embed job rows (nexus-s08oe): the off-profile row follows the job's rule and the *Re-embed jobs* row reports running and failed jobs (local mode; see [the re-embed job](#nx-collection-re-embed-job)); **the dangling-manifest ROW census RETIRED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15)** — `nx doctor` used to run a corpus-wide "populated manifest whose ROWS no longer resolve to a T3 chunk" sweep via the engine's `manifest_verify_all()`; that function is DROPPED, and the check is removed entirely, because the manifest-chunk FK (`catalog_document_chunks -> nexus.chunks`, VALIDATEd) now REJECTS the dangling state at write time — there is no longer anything for a corpus-wide sweep to find. The per-document form (formerly `nx catalog manifest-verify`) is [retired](#nx-catalog-manifest-verify--retired) the same way; use `nx catalog verify --collection NAME` for the one surviving damaged-manifest detection surface (client-side, per document, independent of the retired engine function — see [nx catalog verify](#nx-catalog-verify)). The pre-backfill NULL-collection census (`manifest pre-backfill rows (collection IS NULL)`) is UNAFFECTED and still runs — the FK does not cover NULL-collection rows (`MATCH SIMPLE` exempts them), so that census remains live. **The `--check-dangling-links` / `--strict-dangling-links` flags are RETIRED (RDR-194 Phase P1, bead nexus-tk070.p1, 2026-08-15)**, the identical shape as the manifest-verify retirement above: `nx doctor` used to report `catalog_links` rows whose `from_tumbler`/`to_tumbler` resolved to no document at all (nexus-ysrwi, GH #1419 issue 7) via the engine's `GET /v1/catalog/links/orphaned`; the flags are gone because `fk_catalog_links_from_document`/`fk_catalog_links_to_document` (`catalog-032-links-tumbler-fk.xml`, ON DELETE CASCADE) now REJECT a link naming a tumbler with no `catalog_documents` row at write time, so that state is unreachable by construction. The underlying `GET /v1/catalog/links/orphaned` route and the `HttpCatalogClient.orphaned_links()` method are NOT retired — they still report the one case the FK deliberately does not cover (a link whose endpoint document exists but is TOMBSTONED, since soft delete does not fire `ON DELETE CASCADE`); there is simply no `nx doctor` flag surfacing it any more. `nx catalog purge-trash`'s stranded-chunk count (the opposite direction: existing T3 chunks with no live manifest referrer) is unrelated to any of the above and still runs; stale index-run fences — documents stranded in `index_state='indexing'` beyond 6 hours (safe but wasteful: every intervening `nx index` re-chunks and re-embeds at full cost; remedy `nx index repo <path> --force`; nexus-5xn3k.6); failed index runs with hidden chunks — documents stamped `index_state='failed'` whose run stored chunks but never wrote their manifest rows, so live(c) hides those chunks from every read (since RDR-223 every writer sends a chunk with its owner row, so a failed run no longer leaves such chunks and a failed run does not rebuild a manifest, nexus-z0o2p.35; this row finds the debris of runs made before that, or killed outright); remedy `nx catalog reconcile`, then re-index the source; PDF chunk metadata — PDF chunks still carrying the streaming uploader's placeholder metadata (empty `title`, no `extraction_method`), which means the extraction post-pass never landed or a late write overwrote it; title-keyed tools such as `nx enrich bib` skip them silently. Scans every `knowledge__`/`docs__` collection with an engine-side filter, names each affected document by source URI (chunks whose source URI does not resolve, which includes chunks no manifest names, are listed apart by content hash), and names a collection it could not read as NOT CHECKED rather than counting it clean; remedy a `--force` re-index of the named document, then `nx enrich bib` (nexus-rte90, the detection half of nexus-w94eo); chash width-conformance — width-non-conformant chash rows (the GH #1414 class, `octet_length(chash) <> 32`) via the engine's tenant-scoped `GET /v1/catalog/chash/conformance` route (nexus-du2dw, RDR-180): reports per-dim (`embedding_<dim>` column of the unified `nexus.chunks` table) total/non-conformant/sample counts, names collections it cannot route to a dim instead of silently skipping them, and degrades honestly (loud skip, never a false clean) on a pre-route engine; and tumbler-allocator ("next_seq") drift — owners whose sequence counter has fallen at or below their own highest child. Self-heals per-owner on that owner's next registration (`nx index <path>`, the only remedy this check names); the engine also exposes an all-owners `sweepNextSeqDrift` converge route for the same drift class, not yet wired to a `nx` client verb (nexus-0ehwe).
+Then, corpus-integrity checks (both modes, all read-only, all degrade to a skip rather than crash `nx doctor`): dimension-orphaned collections (nexus-9tsdf, remedy `nx collection prune`); the embedding-profile rows (RDR-204 Day 2, nexus-ft04v.31, 7.38.0): the engine's install-scoped profile per content type (`GET /v1/catalog/embedding_profile`), the client's intent (`local.embed_model` plus key state) against it (a disagreement names the service restart, since the engine reads the model only at spawn), off-profile live collections (informational), and `disputed`, `dormant` and `quarantine` rows each with their remedy; an engine below the route reports the row as unread rather than clean; the re-embed job rows (nexus-s08oe): the off-profile row follows the job's rule and the *Re-embed jobs* row reports running and failed jobs (local mode; see [the re-embed job](#nx-collection-re-embed-job)); **the dangling-manifest ROW census RETIRED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15)** — `nx doctor` used to run a corpus-wide "populated manifest whose ROWS no longer resolve to a T3 chunk" sweep via the engine's `manifest_verify_all()`; that function is DROPPED, and the check is removed entirely, because the manifest-chunk FK (`catalog_document_chunks -> nexus.chunks`, VALIDATEd) now REJECTS the dangling state at write time — there is no longer anything for a corpus-wide sweep to find. The per-document form (formerly `nx catalog manifest-verify`) is [retired](#nx-catalog-manifest-verify--retired) the same way; use `nx catalog verify --collection NAME` for the one surviving damaged-manifest detection surface (client-side, per document, independent of the retired engine function — see [nx catalog verify](#nx-catalog-verify)). The pre-backfill NULL-collection census (`manifest pre-backfill rows (collection IS NULL)`) is UNAFFECTED and still runs — the FK does not cover NULL-collection rows (`MATCH SIMPLE` exempts them), so that census remains live. **The `--check-dangling-links` / `--strict-dangling-links` flags are RETIRED (RDR-194 Phase P1, bead nexus-tk070.p1, 2026-08-15)**, the identical shape as the manifest-verify retirement above: `nx doctor` used to report `catalog_links` rows whose `from_tumbler`/`to_tumbler` resolved to no document at all (nexus-ysrwi, GH #1419 issue 7) via the engine's `GET /v1/catalog/links/orphaned`; the flags are gone because `fk_catalog_links_from_document`/`fk_catalog_links_to_document` (`catalog-032-links-tumbler-fk.xml`, ON DELETE CASCADE) now REJECT a link naming a tumbler with no `catalog_documents` row at write time, so that state is unreachable by construction. The underlying `GET /v1/catalog/links/orphaned` route and the `HttpCatalogClient.orphaned_links()` method are NOT retired — they still report the one case the FK deliberately does not cover (a link whose endpoint document exists but is TOMBSTONED, since soft delete does not fire `ON DELETE CASCADE`); there is simply no `nx doctor` flag surfacing it any more. `nx catalog purge-trash`'s stranded-chunk count (the opposite direction: existing T3 chunks with no live manifest referrer) is unrelated to any of the above and still runs; stale index-run fences — documents stranded in `index_state='indexing'` beyond 6 hours (safe but wasteful: every intervening `nx index` re-chunks and re-embeds at full cost; remedy `nx index repo <path> --force`; nexus-5xn3k.6); failed index runs with hidden chunks — documents stamped `index_state='failed'` whose run stored chunks but never wrote their manifest rows, so live(c) hides those chunks from every read (since RDR-223 every writer sends a chunk with its owner row, so a failed run no longer leaves such chunks and a failed run does not rebuild a manifest, nexus-z0o2p.35; this row finds the debris of runs made before that, or killed outright); remedy `nx catalog reconcile`, then re-index the source; PDF chunk metadata — PDF chunks still carrying the streaming uploader's placeholder metadata (empty `title`, no `extraction_method`), which means the extraction post-pass never landed or a late write overwrote it; readers keyed on the chunk title skip them silently (`nx enrich bib` is not one since nexus-6pfgb.21: it selects chunks through the catalog document's manifest). Scans every `knowledge__`/`docs__` collection with an engine-side filter, names each affected document by source URI (chunks whose source URI does not resolve, which includes chunks no manifest names, are listed apart by content hash), and names a collection it could not read as NOT CHECKED rather than counting it clean; remedy a `--force` re-index of the named document, then `nx enrich bib` (nexus-rte90, the detection half of nexus-w94eo); chash width-conformance — width-non-conformant chash rows (the GH #1414 class, `octet_length(chash) <> 32`) via the engine's tenant-scoped `GET /v1/catalog/chash/conformance` route (nexus-du2dw, RDR-180): reports per-dim (`embedding_<dim>` column of the unified `nexus.chunks` table) total/non-conformant/sample counts, names collections it cannot route to a dim instead of silently skipping them, and degrades honestly (loud skip, never a false clean) on a pre-route engine; and tumbler-allocator ("next_seq") drift — owners whose sequence counter has fallen at or below their own highest child. Self-heals per-owner on that owner's next registration (`nx index <path>`, the only remedy this check names); the engine also exposes an all-owners `sweepNextSeqDrift` converge route for the same drift class, not yet wired to a `nx` client verb (nexus-0ehwe).
 
 Then: Voyage AI key, git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, PDF extraction (docling) (the modules docling's PDF pipeline imports, among them `cv2` and `torch`, are present; a missing one is a hard failure, because a docling pass that cannot import is an indexing error, not a PyMuPDF fallback), T2 schema applied, T2 best-effort writes (the meter's only producer — the RDR-129 chash dual-write hook — is retired by RDR-187, so a nonzero count is reported as a frozen HISTORICAL count, never a warning), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). (The RDR-129 T2 daemon-singleton check is retired along with the T2 daemon it guarded — nexus-i711w Stage 2 sub-stage B; the single-writer invariant it enforced now belongs to Postgres, not to a pid count.) The Voyage credential line (`VOYAGE_API_KEY`) is informational only: it describes enrichment/engine-bootstrap config, never a serving requirement, and is never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. (The `CHROMA_*` credential rows retired with the migration machinery at RDR-155 P4b.)
 
@@ -3485,7 +3546,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-collection-shape` | Read-only shape audit of the collection set against [docs/collections.md](collections.md), the doctor surface of `nx collection shape`: one row per check with its finding count and an examined count so a clean tenant is never confused with an audit that saw nothing. Findings are curation input and never fail doctor; **exit 1 only when the tenant cannot be read** (nexus-ger23) |
 | `--check-embeddings` | Embedding drift probe (nexus-f9duo): samples chunks per collection, embeds their stored text again with the collection's registered model (`POST /v1/vectors/embed`, which stores nothing) and compares with the stored vector. A chunk below cosine 0.99 is named with its collection's median and minimum; healthy engine-written chunks measure 0.998 or above, and the nexus-tysei stale vectors sat at 0.25 to 0.87. `--embeddings-sample N` (default 20, max 300) sets chunks per collection, drawn from non-overlapping windows at random offsets in four equal strata (engine rows are ordered by chash, so a window is not one document or one indexing era); a sampled chunk with text but no stored vector at the collection's dim (a re-embed in progress) is counted and not compared, and a collection with nothing comparable is named NOT CHECKED; `--embeddings-collection NAME` (repeatable) narrows the scope from every collection holding chunks; `--embeddings-seed` repeats a sample (default: today's UTC date, printed in the result). **Exit 1** when any sampled chunk is below the floor, when any collection could not be probed, or when nothing was compared. Opt-in because it costs one embedding call per sampled chunk. Remedy: `nx collection re-embed <collection>`, a production write |
 | `--check-assignments` | Cross-collection ("projection") topic-assignment audit (nexus-v4pj4): since engine-service-v0.1.132 the projection pass of `assign_from_chashes_<dim>` picks each chunk's nearest FOREIGN-collection centroid via an HNSW `LATERAL` (approximate) instead of an exact join — measured equal to exact under production insertion order, but a wrong pick would be silent. Round 1 compared a STORED historical pick against today's live centroids and could false-alarm on healthy taxonomy growth; round 2 closes that structurally with a new read-only engine route, `POST /v1/taxonomy/assignments/cross-preview` (`nexus.cross_preview_<dim>`, taxonomy-021 — a read-only twin of `assign_from_chashes`'s cross branch: the byte-identical `batch`/`nearest` CTE under the identical HNSW/access-path settings, but no persisted INSERT, so it can never write to `topic_assignments`). For each sampled chunk this compares the engine's LIVE ANN pick (via that route, right now) against an exact Python recompute over the SAME live foreign-centroid snapshot fetched in the same run — never a stored row; a currently-persisted assignment, if any, is shown in a disagreement's report line as context only (`stored=N`), never consulted to decide pass or fail. Same tie-break as the engine's own `ORDER BY distance, topic_id`. From the next engine cut both the pick and the recompute leave out the centroids of superseded collections (nexus-2k8wi), which a supersede tombstone keeps. At the default sample of 20, a systemic wrong-pick rate of 10% is caught with ~88% probability, 20% with ~99%; a rare, isolated bad pick under 1% of a collection's population may not land in any one run's sample. `--assignments-sample N` (default 20, max 300), `--assignments-collection NAME` (repeatable; default: every collection holding chunks), `--assignments-seed` (default: today's UTC date). Each sampled chunk's foreign-centroid snapshot is fetched twice per attempt — once immediately before the `cross-preview` call, once immediately after — and compared; a change (a topic added, removed, or revised in place mid-probe) means this collection's batch is not compared this run, retried once, and if it still changed, reported CHANGED DURING PROBE rather than risking a comparison against a snapshot the engine's own answer never actually saw. **Exit 1** when any sampled chunk disagrees beyond a float-noise tolerance, any collection could not be probed, or nothing was compared. A collection with no live foreign centroid to project onto is not applicable; a sample that turned up no comparable chunk is reported INCONCLUSIVE; an engine older than this route 404s on the first call and is reported not applicable, exit 0 — none of the four counts as a failure alone. No billed calls, but opt-in: real per-collection network work (up to `sample` route calls plus up to four foreign-centroid fetches per collection audited), and its false-positive behavior against a real corpus is not yet observed |
-| `--check-references` | Reference-only staleness sweep (RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `chroma://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see `nx catalog register`/`update` below for how that ETag gets recorded) with up to 8 concurrent stats sharing one `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme and names the stale and dangling documents (capped). `--references-sample N` (default 10, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff, plus one confirming HEAD after an ETag mismatch — about 81.5s worst case per document, so `ceil(sample / min(8, sample)) * 81.5s` worst case for the whole run (~163 s at the default sample of 10 if every sampled document were `https://` and every one exhausted its retries); a run prints its own estimate for the `--references-sample` it was given as its first line. **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents. Remedy for a document stuck at `unknown` because it predates ETag capture: `nx catalog backfill-etags`. A host that mints a fresh `ETag` on every response (no stable validator, which `backfill-etags` cannot fix) reads `unknown`, not `stale`: an `https://` ETag mismatch is confirmed with one more HEAD, and an ETag that changes again while `Content-Length` holds (or is absent from both) and no `Last-Modified` is sent is reported as an unstable validator (nexus-ltrjf); a second ETag equal to the recorded one reads `fresh`. A mismatch the second HEAD repeats, or one where the length also moved, stays `stale`, so a fresh-ETag host whose length also varies still reads `stale`. A real change can read `unknown` this way (a same-length rewrite behind per-node ETags, or a page edited between the two HEADs) |
+| `--check-references` | Reference-only staleness sweep (RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `nx-note://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see `nx catalog register`/`update` below for how that ETag gets recorded) with up to 8 concurrent stats sharing one `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme (a leftover `chroma://` row has no stat handler and counts as `unknown`, never a failure) and names the stale and dangling documents (capped). `--references-sample N` (default 10, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff, plus one confirming HEAD after an ETag mismatch — about 81.5s worst case per document, so `ceil(sample / min(8, sample)) * 81.5s` worst case for the whole run (~163 s at the default sample of 10 if every sampled document were `https://` and every one exhausted its retries); a run prints its own estimate for the `--references-sample` it was given as its first line. **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents. Remedy for a document stuck at `unknown` because it predates ETag capture: `nx catalog backfill-etags`. A host that mints a fresh `ETag` on every response (no stable validator, which `backfill-etags` cannot fix) reads `unknown`, not `stale`: an `https://` ETag mismatch is confirmed with one more HEAD, and an ETag that changes again while `Content-Length` holds (or is absent from both) and no `Last-Modified` is sent is reported as an unstable validator (nexus-ltrjf); a second ETag equal to the recorded one reads `fresh`. A mismatch the second HEAD repeats, or one where the length also moved, stays `stale`, so a fresh-ETag host whose length also varies still reads `stale`. A real change can read `unknown` this way (a same-length rewrite behind per-node ETags, or a page edited between the two HEADs) |
 | `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 | `--verbose` | Main sweep only: add the detail the sweep leaves out (nexus-i827c). The Chunks leaf bloat row, when it warns, lists each leaf of `nexus.chunks` that needs attention, read from the engine's operator-only `GET /v1/admin/chunks-leaves` (needs the root service token). A listing from an expired engine view is headed `STALE` with the time of its last read. Ignored by the `--check-*` modes. This is the `nx doctor` flag, not the global `-v`/`--verbose` that turns on debug logging (it is a different flag: `nx -v doctor` and `nx doctor --verbose` do different things) |
@@ -5302,7 +5363,9 @@ every row is split three ways:
     `extractions_only` (a bare `operator_extract` payload),
     `ranking_only`, `operator_payload` (filter, check, verify or groupby
     payload), `retrieval_only` (a search/query/traverse result payload),
-    `listing`, `empty`. A row
+    `listing`, `empty`, and, from RDR-232 Phase 3 (nexus-jypmj.3.3), `uncovered`
+    (evidence was retrieved and covered no requested part) and `no_evidence`
+    (nothing usable reached the reduction). A row
     written by a post-fix client carries the `[non-answer: <shape>]`
     notice as its `final_text` and is named by that prefix; a pre-fix row
     (the 2026-09-06 run 706 / plan 488 class) is named from its body by
@@ -5310,8 +5373,27 @@ every row is split three ways:
     Before this class existed these rows counted as executed-ok and the
     plan-grow path saved them as successes.
 
+- **insufficient-evidence** (RDR-232 Phase 3, nexus-jypmj.3.3) — a partial
+  answer: `nx_answer` returned prose behind the `[insufficient-evidence: <n>
+  unresolved]` notice (`answer_shape` `insufficient_evidence`). It is a success,
+  not a failure, so it is taken off BEFORE the split above and is in none of
+  executed-ok, executed-failed, handed-off or degenerate; it is therefore also
+  outside the executed-ok latency block and the `--steps` aggregates. A row that
+  carries a run summary is bucketed from it, for `trace=True` and `trace=False`
+  alike: a successful `nx_answer` run whose summary has `coverage_partial` 1 (the
+  summary records the state the call returned, so text that merely opens like the
+  notice cannot override it, and a partial ledger on a run that did not succeed is
+  not an insufficient-evidence result). A row without a summary (an engine that
+  predates the `run_summary` column, or a row written before it) is bucketed from
+  the notice at the start of its text when that text is visible (`trace=True`). A
+  `trace=False` row without a run summary has nothing left to read: its text is
+  `[redacted]`, so it stays redacted, is counted where it was before and is not
+  recognizable as insufficient-evidence. The human report's `of the N row(s)
+  shown` line counts the bucket as `insufficient-evidence N`.
+
 `--json` carries `executed_ok_count`, `executed_failed_count`,
-`degenerate_count`, `degenerate_breakdown: {class: count}`, plus a
+`degenerate_count`, `degenerate_breakdown: {class: count}`,
+`insufficient_evidence_count`, plus a
 page-scoped, executed-ok-only latency view: `executed_ok_avg_duration_ms`
 and `executed_ok_latency_buckets` (same fixed edges as the whole-set
 `latency_buckets` above, computed client-side from just the executed-ok
@@ -5388,14 +5470,33 @@ predicted `usd`/`ms`/`basis`, and which one was chosen are written to
 predicted_cost_usd, basis}`; `None` on any path that never reaches Step
 1's hit branch — force_dynamic, a plan-miss, or an error before Step 1).
 
-The envelope also carries `answer_shape` (nexus-90gyo): `"answered"` when
-`final_text` is a synthesized answer, otherwise one of `hydration_dump`,
-`extractions_only`, `ranking_only`, `operator_payload`, `retrieval_only`, `listing`, `empty`.
-On a non-answer `final_text` is a one-line `[non-answer: <shape>]` notice
-(the raw payload is never returned as prose), the `chunks` list still
-carries what was retrieved, the run is recorded as a failure, and no plan
-is grown from it (nexus-zy0kj). `None` on paths that never classified:
-errors, misses, the single-step fast path, a continuation handoff.
+The envelope also carries `answer_shape` (nexus-90gyo; extended by RDR-232 Phase 3, nexus-jypmj.3.3):
+what `final_text` structurally is. Two shapes carry prose. `answered` is a
+synthesized answer. `insufficient_evidence` is a partial answer: the coverage
+check found some requested parts supported and others not, so `final_text`
+opens `[insufficient-evidence: <n> unresolved]` (a count, no question text),
+names each unresolved part and why (no supporting evidence found, the evidence
+contradicts it, not assessed, or its named source was not found), then gives
+the prose for the rest. It counts as a plan success, and a run planned inline
+is never saved as a plan. Every other value is a non-answer: `final_text` is a
+one-line `[non-answer: <shape>]` notice (the raw payload is never returned as
+prose), the `chunks` list still carries what was retrieved, the run is
+recorded as a failure, and no plan is grown from it (nexus-zy0kj). Of those,
+`hydration_dump`, `extractions_only`, `ranking_only`, `operator_payload`,
+`retrieval_only`, `listing` and `empty` classify the final text itself;
+`planner_error` and `error` are set on a failure path; `no_evidence` means
+nothing usable reached the reduction (every retrieval step returned zero
+results, or a scope conflict removed it all); and `uncovered`
+(nexus-jypmj.3.12) means retrieval returned evidence and none of it covered a
+requested part, so no answer is given (terminal generation is skipped when the
+check has assessed every facet and found none covered, and prose generated
+anyway is withheld; while any facet is unassessed the prose is kept as
+`insufficient_evidence`). `None` on
+paths that never classified: the single-step fast path, a continuation
+handoff and a budget-exhausted stop. The coverage check is off unless
+`NX_ANSWER_COVERAGE=1` is set (the default flips only after the Phase 3
+measurement, nexus-jypmj.3.10); with it off every run is unassessed and
+`answer_shape` is what it was before RDR-232 Phase 3.
 Grown plans are additionally gated on identifier agreement at match time
 (nexus-wj12p): a grown plan whose originating question named identifiers
 (RDR/JDR ids, bead ids, engine tags, client versions, GH/PR numbers) is
@@ -5404,10 +5505,14 @@ about RDR-197 can no longer be answered by a plan grown for RDR-176; the
 drop is logged as `plan_match_grown_literal_disagreement_dropped` and
 the call falls through to the inline planner.
 
-The envelope has eight RDR-232 keys, all always present (`scope_diagnostics`,
+The envelope has twelve RDR-232 keys, all always present (`scope_diagnostics`,
 `scope_normalized`, `evidence_request`, `named_sources`, `primary_evidence`,
-`reserved_stream`, `lifecycle_stream` and `evidence_diagnostics`; the first is `[]`
-and the other seven `null` when they have nothing to report):
+`reserved_stream`, `lifecycle_stream`, `evidence_diagnostics`, `request_coverage`,
+`plan_eligibility`, `run_summary` and `coverage`; `scope_diagnostics` is `[]` when it has
+nothing to report, `request_coverage`, `plan_eligibility`, `run_summary` and `coverage` are
+always objects, and the other seven are `null` when they have nothing to report). `coverage`
+is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same object is
+`continuation.coverage` in a continuation hand-off:
 
 - `scope_normalized` (nexus-jypmj.1.8, nexus-n1908): `{given, applied, reason}`
   when the caller's `scope` was a comma-list. `scope` takes one corpus prefix or
@@ -5466,15 +5571,97 @@ and the other seven `null` when they have nothing to report):
 - `evidence_request` (nexus-jypmj.1.2): the caller's reserved bindings
   `source`, `owner` and `project`, plus a subtree `scope` as owner
   qualifier: `{source, source_error, owner: {status, tumbler, ...},
-  sources}`. `owner.status` is `none`, `resolved`, `conflict` or
-  `unresolved`; a qualifier that failed picks nothing. `None` when no
-  reserved binding was passed.
+  sources, active_project}`. `owner.status` is `none`, `resolved`,
+  `conflict`, `unresolved` or `inferred`; a qualifier that failed picks
+  nothing. `inferred` (nexus-jypmj.2.4, RDR-232 assumption A5) is the third
+  tier of source resolution, after an explicit `owner`/`project` binding and a
+  catalog-subtree `scope`: with an RDR `source` and none of those, the
+  session's project qualifies the source when it is reliable (the host
+  declared it in `CLAUDE_PROJECT_DIR`, the server's working directory is that
+  directory, and the catalog has an owner for it). `scope="rdr"` is a corpus
+  and never selects a project; a conformant collection-name `scope` and a
+  catalog-subtree `scope` are scope tiers and the project is not consulted.
+  Claude Desktop and Cowork start the server without `CLAUDE_PROJECT_DIR`, so
+  there the project is never inferred and a number that more than one project
+  holds stays `candidates`: pass `owner` or `project` (an owner name such as ART, or its tumbler) to choose. A reliable
+  session of another repo still resolves its own project's RDR (`inferred`) when
+  the question does not contradict it. The question contradicts it by a title
+  that the session's document does not fit while another project's does (a veto
+  only: the title never picks a document), or by a registered project name
+  (matched case-insensitively against the owner names) that is not the
+  session's; both give the `candidates` ambiguity, and `active_project.reason`
+  says the inference was set aside. The title counts only with at least two
+  distinctive words ("in detail" vetoes nothing). A title is read in two
+  forms: after a cue verb as the topic sentence (`Synthesize RDR-084, LIST
+  PARSE Canonical Consolidation`), and, anywhere in the question, in
+  parentheses or double quotes right after the id (`What did RDR-084 (LIST
+  PARSE Canonical Consolidation) decide?`, `RDR-084 titled "..."`; a comma,
+  colon, `titled`, `called` or `named` may sit between). A parenthesis that
+  names another RDR or opens like an aside (`see`, `e.g.`, `also`) is not a
+  title, and single quotes are not read. If the owner names cannot be
+  read while the question has a word that could name a project, the inference
+  is declined and the reason says "name check unavailable". A number the
+  session's project does not hold resolves to the other project's document and
+  the text says the active project holds no such number. `active_project` (present once the tier was
+  consulted) is `{applied, reliable, owner, name, reason}`; when it is not
+  applied, `reason` says why and an ambiguous source stays `candidates`. An
+  inferred owner qualifies source resolution only: it never narrows the vector
+  or graph streams, and a document tumbler given as `source` is never held to
+  it. An RDR id that only the question names (no `source` binding) is fed to the
+  same resolution, through the same three tiers (nexus-jypmj.2.4): the request
+  then carries `source_origin: "question"` and `sources` holds the ids read from
+  the text, at most 3 resolved per request (the rest are in
+  `named_sources.dropped`). The question is scanned for ids, ranges, project
+  names and titles up to 64,000 characters (a longer one adds a `scan_limit`
+  ambiguity with subject `question`), and the envelope lists at most 20 of
+  them: `sources` and `request_coverage.named_sources` stop at 20
+  (`sources_omitted` and `named_source_count` give the rest),
+  `named_sources.dropped` stops at 20 (`dropped_omitted` counts the rest, and
+  the text notice says `and N more`). A range (`RDR-078 through RDR-095`) keeps its two
+  ends as sources (the second end may be a bare number: `RDR-078 through 095`)
+  and is listed in `named_sources.ranges` and in a text notice
+  ("range RDR-078 to RDR-095 not expanded: RDR-079 to RDR-094 not resolved"):
+  the numbers between are not resolved. `Compare RDR-078 to RDR-095` is a
+  comparison of two documents, not a range. A `source` binding wins and replaces them. A source
+  read from the question is never an owner: only an `owner` or `project` binding
+  narrows the secondary streams. `None` when no reserved binding was passed and
+  the question names no RDR.
 - `named_sources` (nexus-jypmj.1.4): how each named source resolved,
-  `{sources: [{source, status, tumbler, title, file_path, qualified,
-  candidates, candidates_truncated, detail}], dropped, catalog_calls}`.
+  `{sources: [{source, status, tumbler, title, file_path, qualified, inferred,
+  origin, candidates, candidates_truncated, detail}], dropped, catalog_calls,
+  origin}`. `origin` is `explicit` (a `source` binding) or `question` (RDR ids
+  read from the question's text, nexus-jypmj.2.4; at most 3 are resolved, the
+  rest are in `dropped` and named in a text notice).
   `status` is `resolved`, `candidates` (several documents fit; nothing is
   picked) or `unresolved`; `qualified` says an owner qualifier narrowed the
-  choice. `None` when no source was named. Text mode adds one
+  choice, and `inferred` that the qualifier was the active project. Where one RDR number has sibling files (`rdr-200-*.md`: the RDR and
+  its phase notes), a bare `source=RDR-200` resolves to the one file whose
+  frontmatter `id` is that number (nexus-xho6c, Sam's ruling of 2026-10-25);
+  `detail` names the files passed over, and text mode says so on a
+  `[evidence request: ... resolved to ...]` line. Zero files carrying the id,
+  several carrying it, or a sibling whose id could not be read (a second
+  carrier might hide there) is `candidates` with the reason in `detail`. The
+  id is compared as a `source` binding is (`RDR-200`, `rdr-200`, `200` are
+  equal; `id: companion-note` is no RDR id; an `id` meant as an RDR id but
+  unreadable, such as `RDR-200 (superseded)`, makes that sibling unknown, not
+  clear). It comes from the document's `rdr-frontmatter-v1` aspect row
+  (`extras.rdr_id`, in the engine in local and cloud mode alike). The aspect
+  rows are filled asynchronously by the aspect worker, so a document the
+  worker has not reached has none; a row counts only when it shows the
+  frontmatter was parsed (a confidence and non-empty `extras`, which rows
+  written before nexus-xho6c lack), and otherwise the lookup reads the file
+  under the registration's `file://` source where the server has it (a `.md`
+  under `docs/rdr`, no host part, symlinks resolved first; a failing aspect
+  store falls back to the file too). A document with neither is not guessed:
+  `detail` counts the files by cause and names the remedy,
+  `nx enrich aspects <rdr collection> --validate-sample 0` for missing rows and
+  `nx enrich aspects <rdr collection> --all --validate-sample 0` for rows that
+  exist but were not parsed (empty `extras`, or another extractor's row). The
+  parse is deterministic, but without `--validate-sample 0` the command
+  spot-checks 5% of the new rows with a model call. Run it where the files are. At most
+  `max_frontmatter_lookups` (24) reads per number, each given at most
+  `frontmatter_call_seconds` (5) or what is left of the answer's budget; a
+  document tumbler as the source still wins outright. `None` when no source was named. Text mode adds one
   `[evidence request: ...]` line per ambiguous, unresolved or
   not-owner-qualified source, and states a failed owner qualifier once. On
   the single-step fast path the notice says the plan has no primary evidence
@@ -5556,7 +5743,97 @@ and the other seven `null` when they have nothing to report):
   records, an over-cap or cut-short source, a cut record, and every cap in
   `caps_hit`. `named_sources[].rdr_number`
   is the RDR number the resolved document's path carries (`null` when it is
-  not an RDR file).
+  not an RDR file). The stream is read only when the request has a
+  gate, lifecycle or status facet (see `request_coverage`), or when the clause
+  structure is uncertain and the request names an RDR source, bound or read from the question (it fails open);
+  a request about something else leaves it `null` even for a named RDR.
+- `request_coverage` (nexus-jypmj.2.2, RDR-232 Phase 2): what the request asks
+  for, derived before plan matching: a first pass with no model call, then at most one
+  structured model call for what it leaves open (on by default since nexus-jypmj.2.8,
+  see `extraction`). Its `answer_kind` is the request kind `plan_eligibility` judges
+  plans by, so it does choose among plans when the gate enforces; the rest is
+  reported, and the other plan-visible use is the lifecycle-stream gate above. `{answer_kind, kind_decision, facets,
+  constraints, named_sources, named_source_count, source_origin, source_hints,
+  source_hint_count, source_ranges, subject, explicit_scope, current_code_requested,
+  ambiguities, wants_lifecycle_stream, facets_certain, active_project_tier,
+  active_project, extraction, derive_ms}`. `answer_kind` is `lookup`,
+  `synthesis`, `discovery/listing`, `comparison`, `audit`, `debug` or
+  `unknown` (the plan-side `PlanAnswerKind` vocabulary); `kind_decision` is
+  `explicit` (a `dimensions["answer_kind"]` hint, which `nx_answer` removes
+  before plan matching), `heuristic`, `model-assisted` or `unknown`. A bare
+  question word is `lookup` only for a single-facet question. `facets` are the
+  topics that need evidence (`{id, origin, topics, text, source_hints}`;
+  `origin` `clause` or `whole_question`) and `constraints` the treatment
+  instructions (`{id, kind, text}`; cite sources, distinguish dates, do not
+  infer, format) that trigger no retrieval. When the clause structure cannot
+  be read, the question is longer than 8000 characters or the constraints
+  pass 8, `facets_certain` is `false` and one `whole_question` facet carries
+  the full question. `ambiguities` discloses what the request left open: an
+  RDR named without an owner, project or catalog-subtree scope
+  (`source_unqualified`, withdrawn once the resolver resolved it to one
+  document; replaced by `source_inferred` when the active project chose among
+  documents that other projects also carry), a conflicting or unresolved qualifier, a project named only in
+  the text, a `dimensions["answer_kind"]` that is not a kind (`kind_hint_invalid`:
+  ignored, and the kind is derived from the question), a question scanned only
+  in part or more ids than are listed (`scan_limit`). When the inline planner
+  has to plan, its prompt carries the request's answer kind, up to six facets and
+  up to six constraints (each clipped, 600 characters in all; nothing when the
+  coverage holds no more than `unknown`); the prompt is never logged.
+  `extraction` is `{outcome, calls, timeout_s, latency_ms,
+  cost_usd}` for the structured call (`NX_ANSWER_STRUCTURED_EXTRACT`, on by default, `0` turns it off;
+  `outcome` `disabled`, `not_needed`, `skipped_deadline`, `ok`, `unchanged`,
+  `timeout`, `error` or `invalid`; at most one call). With `trace=False` the
+  log event carries counts only. The first-pass patterns were written with
+  the 24 golden requests in view, so any agreement figure measured on them is
+  in-sample.
+- `plan_eligibility` (nexus-jypmj.2.3, RDR-232 Phase 2): whether each plan the matcher
+  considered may serve the request's answer kind, from the compatibility matrix in
+  RDR-232 section 1. `{request_kind, kind_decision, enforced, shadow_reason,
+  library_check, builtins_checked, undeclared_builtins, undeclared_builtin_names, branches,
+  excluded_total, excluded_plan_ids, returned, selected, fallback_reason}`.
+  `request_kind` and `kind_decision` are those of `request_coverage`. `branches` has
+  `cosine`, `category_route` (the below-floor category route) and `fts` (the FTS5
+  fallback), each `{examined, excluded, reasons}`; a reason is `kind_mismatch`,
+  `unknown_request_untrusted_plan`, `unknown_request_narrow_plan`,
+  `untrusted_unknown_plan`, `undeclared_builtin` (a builtin seeded before
+  nexus-jypmj.2.1 that `nx plan reseed` has not yet given its declaration),
+  `untrusted_curated_claim`, `unreviewed_route` (a grown plan whose recorded kind is discounted:
+  `eligibility.TRUSTED_ROUTES` is empty until a reviewed decision, nexus-jypmj.2.8,
+  names a route, so every grown plan reads as unknown-kind) or `judge_error`
+  (judging the candidate failed; kept when not enforcing, dropped when enforcing).
+  The filter judges after every other drop (unmet binding, scope conflict,
+  always-failing, FTS literal drop), so a count is "would have been returned, but for
+  eligibility". The gate is on by default (nexus-jypmj.2.8; `NX_ANSWER_KIND_ELIGIBILITY=0`,
+  `false`, `off` or `no` turns it off). In shadow mode `enforced` is `false`, nothing is
+  excluded, and the object reports what the gate would exclude; `shadow_reason` says why:
+  `disabled_by_setting` (`NX_ANSWER_KIND_ELIGIBILITY` is off), `extraction_disabled`
+  (`NX_ANSWER_STRUCTURED_EXTRACT` is off: the gate on first-pass kinds alone is the
+  regime that failed the held-out lookup measurement; one request's extraction that
+  times out or errors does not do this, that request keeps enforcing on the first
+  pass's kind) or `library_not_reseeded`. When several apply the first in that order
+  wins. `library_not_reseeded` means the plan library holds builtin templates with no
+  answer-kind declaration: `library_check` is `checked`, `builtins_checked` is how
+  many builtin rows a reseed can fix were examined, `undeclared_builtins` how many
+  of them lack the declaration and `undeclared_builtin_names` names up to 8 (run
+  `nx plan reseed`, or upgrade, which reconciles them). A builtin-tagged orphan that
+  no shipped template describes is not counted: the seed loader leaves it in place, so
+  a reseed could not fix it. A library with no such row enforces and says
+  `builtins_checked` 0. `library_check` is `unreadable` (and the gate keeps enforcing)
+  when the library could not be read, and `null`, with the other three keys `null`
+  or empty, when no check ran (the gate was already in shadow, or no plan match ran).
+  `shadow_reason` is `null` when the gate enforces.
+  With the gate enforcing, ineligible plans are removed from every branch and from the inline
+  planner's few-shot examples, and a call left with no candidate plans inline with
+  `fallback_reason` `all_candidates_ineligible`. `returned` is `{total, eligible}` for
+  the plans the matcher returned; `selected` is `{plan_id, eligible, kind, provenance,
+  route, reason}` for the plan that ran (`null` for an inline plan). `fallback_reason` is
+  `null` when a library plan ran, else `force_dynamic`, `no_plan_candidates`,
+  `all_candidates_ineligible` or `below_confidence_floor`. A plan grown by the inline
+  planner records the request's kind and route in its `plan_json` only when
+  `kind_decision` is `explicit`, `heuristic` or `model-assisted`; eligibility honours
+  the recorded kind for no route yet. Any agreement or wrong-shape figure measured
+  on the 24 golden requests is in-sample: the request kinds are the first pass fitted
+  to that set, so a wrong-shape count of 0 is a floor and the figures are not rates.
 - `evidence_diagnostics` (nexus-jypmj.1.8): per-stream counts, the reducer input,
   and two deterministic checks, built without a model call from the run's step
   outputs and what the runner handed the first evidence-consuming operator
@@ -5583,8 +5860,9 @@ and the other seven `null` when they have nothing to report):
   - `reducer_input`: what the first operator that consumes retrieved evidence
     received, after the reserved merge and the input cap: `{step, items, chars,
     by_stream, by_stream_collection, by_collection, in_scope, out_of_scope,
-    unattributed}`. `by_stream` keys are `primary`, `t2`, `vector`, `graph` and
-    `unattributed`. A reserved item carries its stream and collection; any other
+    unattributed}`. `by_stream` keys are `primary`, `t2`, `vector`, `graph`,
+    `unattributed` and `coverage_note` (the note the coverage check hands the
+    final reduction; it is counted apart, not as an unattributed input). A reserved item carries its stream and collection; any other
     item is attributed by the hash of its text (with the `[source: ...]` line
     removed) against the ids the retrieval steps returned, the stream that
     produced it first winning; an item that hashes to nothing retrieved (a
@@ -5652,6 +5930,10 @@ and the other seven `null` when they have nothing to report):
   - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
     secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
     report in brief; `null` when no stream was built.
+  - `request_coverage` (nexus-jypmj.2.2): the counts and closed names of the
+    `request_coverage` key (kind, `kind_decision`, facet and constraint counts,
+    constraint kinds, ambiguity codes, `wants_lifecycle_stream`, the extraction
+    outcome); no facet text and no source hint.
   An empty set of retrieval ids no longer turns an answer into the no-match
   notice when the reserved stream was merged into the reduction (a resolved
   source with no vector or graph hits is answered from its primary chunks and T2
@@ -5659,6 +5941,74 @@ and the other seven `null` when they have nothing to report):
   handoff's empty-evidence check uses the same predicate). A planner-made plan
   whose own retrieval steps found nothing keeps that answer but is not grown
   into the plan library.
+- `run_summary` (nexus-jypmj.3.5, RDR-232 Phase 3): what became of the run's
+  summary, with the coverage state the call returned kept apart from the one
+  stored. `{version, persistence, detail, returned_coverage_state,
+  persisted_coverage_state, digest}`; always an object. The summary (version 1:
+  coverage counts and state, request kind, eligibility, per-stream counts, scope,
+  repair, cost and latency; no question text, and with `trace=False` no facet text
+  or source hint) rides on the run's `/record` and `/complete` write, in the same
+  row, and is sent only when the engine's `/version` advertises
+  `nx_answer_run_summary_supported` (engine-service-v0.1.167 and later).
+  `persistence` is `persisted` (the run row was read back and carries a summary
+  of the same version and a matching digest over canonical JSON), `dropped`
+  (written, but the row came back without it, with another version or digest, or
+  the write failed; `detail` says which, and a warning is logged), `unsupported`
+  (the engine does not advertise the flag, so nothing was sent: the state on
+  every engine older than v0.1.167, and on the public edge until it allowlists the
+  flag), `unverified` (sent, but no readback was asked for or the readback could
+  not be read; a text call, `structured=False`, reads nothing back) or
+  `not_recorded` (no record was written, or the summary could not be built).
+  HTTP 200 is not evidence of persistence: an engine that predates the column
+  answers 200 and discards the field, so only `persisted` means the summary was
+  kept. A `trace=False` run redacts its question and text, so the readback
+  matches its row by timestamp, duration and step count only. `returned_coverage_state` is `complete`, `partial`, `unavailable` or
+  `unassessed` for a run that reached its terminal reduction, and `none` for one
+  that never did (an error before it, the single-query fast path, a budget or
+  deadline stop before it).
+  `persisted_coverage_state` is the state read back from the stored row, `null`
+  unless `persistence` is `persisted`. A summary failure never fails the answer.
+- `coverage` (nexus-jypmj.3.6, RDR-232 section 4): what the evidence covered of
+  what was asked; always an object. For a run whose final reduction was assessed
+  it is the coverage boundary's wire form (the `continuation.coverage` object,
+  below) at the state the call RETURNED, the value `run_summary.returned_coverage_state`
+  reports, so a run whose prose was not a usable answer shows `unavailable` here
+  even when the ledger said `complete`. It adds `requested_facet_ids` and
+  `covered_facet_ids`, `residual_gaps` (`{facet_id, state, reason}` for every
+  facet not covered, an unassessed one included), `primary_source`
+  (`{state, sources}`; `state` is `not_named`, `covered`, `partial` or
+  `missing`) and `corpus_counts` (`{anchors, by_stream, by_collection}`, what the
+  final reduction was handed); `repair` holds the repair attempt. A run no
+  boundary assessed has the same keys, state `unassessed` and a `reason`:
+  `switch_off` (`NX_ANSWER_COVERAGE` is not on, the default), `no_facets`,
+  `terminal_reduction_not_reached` (an error before the final reduction, the
+  single-query fast path, a run whose reduction raised) or `boundary_not_run`;
+  its facet lists are empty. A `partial` state goes with `answer_shape`
+  `insufficient_evidence`, never `answered`. Ids, states, counts and closed
+  names only; no evidence text and no facet text, and with `trace=False` the
+  source labels and row details are blanked as in `continuation.coverage`.
+- `continuation.coverage` (nexus-jypmj.3.2, nexus-jypmj.3.3): the coverage
+  object of a continuation hand-off, so the hand-off reports the same state a
+  headless run would instead of reverting to `unassessed` (it is also the top-level
+  `coverage` of that envelope); always present in the
+  `continuation` envelope, `null` when no boundary ran. It is the coverage
+  boundary's wire form (`CoverageResult.to_wire`): `{state, reason,
+  skip_generation, facets_required, facets, rounds, findings, anchors, sources,
+  scope, assessment, repair, ...}`. `state` is `complete` (every required facet
+  covered), `partial`, `unavailable` or `unassessed` (no facets, the assessor
+  failed, or `NX_ANSWER_COVERAGE` is not on); `reason` says why. `facets` counts
+  findings by state (`covered`, `unsupported`, `contradicted`, `unassessed`);
+  `findings` has one `{facet_id, state, evidence_ids, reason}` per required
+  facet (a facet with both supporting and contradicting evidence is `covered`
+  with reason `conflicted`; an assessor reply with no usable evidence record
+  leaves its facets `unassessed` with reason `assessment_unusable`, and the
+  assessment `detail` starts `assessor_unusable`); `anchors` is a list of `{item_id, stream, kind, chash, collection,
+  tumbler, t2_record_id}` and carries identity only, never evidence text;
+  `sources` and `scope` are the deterministic source and scope rows; `assessment`
+  and `repair` report calls, facets per call, latency and outcome, with counts and
+  closed names only. With `trace=False` the source labels and the `detail` of
+  `sources` and `scope` are blanked; ids, counts and closed names stay.
+
 - `traverse` under `nx_answer` (nexus-jypmj.1.5): `nx_answer` always supplies the
   traversal policy, so an unscoped call is not the legacy `traverse`. The
   document cap (500, the engine's node cap) does not bind with no scope, but

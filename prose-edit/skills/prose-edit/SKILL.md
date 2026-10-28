@@ -1,30 +1,23 @@
 ---
 name: prose-edit
-description: Use when the author asks to line-edit, tighten, cut or unpack a document (an RDR, reference doc, essay, CHANGELOG entry, web page, or text pasted in for a commit message), to list or remove a document's stored rejections, or to add an exemplar passage to a genre. Invoked as /prose-edit.
+description: Use when the author asks to line-edit, tighten, cut or unpack a document (an RDR, reference doc, essay, CHANGELOG entry, web page, or text pasted in for a commit message), to list or remove a document's stored rejections, to add an exemplar passage to a genre, or to set prose-edit up in a repository. Invoked as /prose-edit.
 disable-model-invocation: true
+allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/*)
 ---
 
 # Prose edit
 
 Arguments: $ARGUMENTS
 
-Run every command from the repository root, the directory this session started in. Never run `cd`, and put nothing in front of a command. Write the command prefix of the table below exactly as it is shown: relative, unquoted, with no `./` and no `cd` before it. The permission rule that lets a command run matches that text, and a quoted or `./`-prefixed script path, or a `cd '<dir>' &&` in front, does not match it. Pass each argument as its own argv token. Never build a shell string from the arguments. Only the arguments after the prefix go in single quotes (a single quote inside one is written `'\''`): a path with a space or a `;` is author input, and so is every token. In a command below, the names of the first column (BRIEF, MEMORY, REVIEW) stand for the prefix text of their row, typed as it is shown, and a `<placeholder>` stands for one argument in single quotes.
+Run every command from the directory this session started in. Never run `cd`, and put nothing in front of a command. Write the command prefix of the table below exactly as it is shown: unquoted, with no `./` and no `cd` before it. The skill's permission rule matches that text, and a quoted or `./`-prefixed script path, or a `cd '<dir>' &&` in front, does not match it. Pass each argument as its own argv token. Never build a shell string from the arguments. Only the arguments after the prefix go in single quotes (a single quote inside one is written `'\''`): a path with a space or a `;` is author input, and so is every token. In a command below, the names of the first column (BRIEF, MEMORY, REVIEW) stand for the prefix text of their row, typed as it is shown, and a `<placeholder>` stands for one argument in single quotes.
 
 | Name | Command prefix |
 | --- | --- |
-| BRIEF | `python3 .claude/skills/prose-edit/scripts/brief.py` |
-| MEMORY | `python3 .claude/skills/prose-edit/scripts/memory.py` |
-| REVIEW | `python3 .claude/skills/prose-edit/scripts/review.py` |
+| BRIEF | `python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/brief.py` |
+| MEMORY | `python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/memory.py` |
+| REVIEW | `python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/review.py` |
 
-## Setup
-
-The work directory is outside the repository, under the temp directory, so in default permission mode each Read and Write of it asks the author, and a headless run is refused at the first one. The author adds two allow rules to their user settings (`~/.claude/settings.json`), once per machine:
-
-```json
-"permissions": {"allow": ["Read(//<R>/prose-edit-*/**)", "Edit(//<R>/prose-edit-*/**)"]}
-```
-
-`<R>` is the output of `python3 -c 'import os,tempfile;print(os.path.realpath(tempfile.gettempdir()))'` without its leading slash. It must be the real path: `brief.py` resolves the temp directory, so on macOS the rule names `private/var/folders/...`, not the `$TMPDIR` spelling, and a rule on a symlinked path never matches. Both rules are needed. `Edit()` covers the Write tool and the line-editor's Read, but only `Read()` covers the `<` redirect of step 9. `additionalDirectories` is not a substitute: it allows reads of the whole temp directory and still asks for every Write (measured on Claude Code 2.1.302, T2 `nexus/prose-edit-allow-rule-measurement-2026-10-18`).
+A document in another checkout (a git worktree, say) is named by its absolute path: the scripts take the repository from the path, so the edit lands in that checkout.
 
 ## Invocation
 
@@ -34,7 +27,8 @@ The work directory is outside the repository, under the temp directory, so in de
 | `- --genre G [--budget N]` | Stdin run. The flags are the first line. The text is everything after the first newline. Nothing is applied. |
 | `rejections <path> [--remove N]` | List a document's stored rejections, or remove number N. |
 | `exemplar <genre> <path>:<start>-<end>` | Store that passage as an exemplar of the genre. |
-| `-- <path>` or `./<path>` | A file named `rejections` or `exemplar`. |
+| `setup` | Check and finish what runs in this repository need. Run it once per machine and once per repository. |
+| `-- <path>` or `./<path>` | A file named `rejections`, `exemplar` or `setup`. |
 
 ## Steps
 
@@ -45,6 +39,7 @@ The work directory is outside the repository, under the temp directory, so in de
    | --- | --- |
    | `rejections` | Run `MEMORY <memory_argv...>`. Show the numbered rejections. Stop. |
    | `exemplar` | Run `MEMORY <memory_argv...>`. Show the stored passage and `duplicate`. Stop. |
+   | `setup` | Follow the Setup run section below. Stop. |
    | `edit` | Continue. |
 
    If a `MEMORY` command fails, show stderr and stop.
@@ -72,7 +67,7 @@ The work directory is outside the repository, under the temp directory, so in de
 
 5. WORK is the directory on the `WORK=` line of step 3 or 4. It holds the marked-up copy and the saved proposal until step 12 deletes it. Every path in the steps below comes from a header line of step 3 or 4 and is used exactly as printed: `<work>` is the `WORK=` path, `<input>` the `INPUT=` path, `<reply>` the `REPLY=` path, `<filtered>` the `FILTERED=` path, `<reasons>` the `REASONS=` path, `<answers>` the `ANSWERS=` path (the `ENTRY=` and `CARD=` paths are for step 13). Never type the word WORK as a path and never build a path yourself. Never create a directory named WORK, in the repository or anywhere else: Write makes a missing directory without a word, and the stray one shows in the author's `git status`. A path that is not on a header line is not yours to invent: stop and tell the author. On every stop after WORK exists and before step 12, delete WORK first with `BRIEF rmtmp '<work>'`. Step 11, the answer route and a retry in step 12, and a retry of step 9 or step 10 after exit 3 are the exceptions: the turn ends there with WORK in place.
 6. If the brief contains `No exemplars are stored`, tell the author the genre has no exemplars yet and the editor runs without them. If it contains `all come from this document`, tell the author the genre's only exemplars are from this document, so the editor runs without them.
-7. Dispatch the `line-editor` agent with the Agent tool (`subagent_type` `line-editor`, `run_in_background` false). The prompt is the text after `DISPATCH=` on the header line of step 4, exactly as printed: copy it whole, change nothing, add nothing, and never type a path yourself. It already holds the full path of the brief and the instruction for the id; `<id>` stays as shown, because you do not know it. Do not paste the brief into the prompt. If the line-editor says it cannot read the brief, stop and show the author its error and the Setup section: do not create a directory or a link in the repository and do not list the work directory. Wait for its reply. The harness may run the agent in the background even so: then the tool result only says the agent started, and the reply comes later as a message from the agent (its report). Wait for that message and do nothing else meanwhile.
+7. Dispatch the `line-editor` agent with the Agent tool (`subagent_type` `conexus-prose-edit:line-editor`, `run_in_background` false). The prompt is the text after `DISPATCH=` on the header line of step 4, exactly as printed: copy it whole, change nothing, add nothing, and never type a path yourself. It already holds the full path of the brief and the instruction for the id; `<id>` stays as shown, because you do not know it. Do not paste the brief into the prompt. If the line-editor says it cannot read the brief, stop and show the author its error and tell the author to run `/prose-edit setup`: do not create a directory or a link in the repository and do not list the work directory. Wait for its reply. The harness may run the agent in the background even so: then the tool result only says the agent started, and the reply comes later as a message from the agent (its report). Wait for that message and do nothing else meanwhile.
 8. Write the agent's whole reply, once, with the Write tool to the `REPLY=` path: the tool result, or the report text of the agent's message. Keep its indentation and its ```json fence as they are: the filter reads both. Never copy the reply with Bash (a heredoc or `echo`): a quote or the delimiter inside the reply breaks the copy.
 9. Run `BRIEF filter <target> --budget <budget> --save '<filtered>' [--file '<input>'] < '<reply>'` (`<filtered>` is the `FILTERED=` path, `<reply>` the `REPLY=` path). Its output is the filtered proposal and the saved file holds the same text. A `warnings` entry about `brief_sha` means the editor's reply does not carry the id on the last line of `brief.md` in the work directory, so it did not read the file to its end. A `warnings` entry about `voice_card` means the editor's card is not the author-approved card the brief gave it. Show each to the author with the others in step 10. On exit 3 (a T2 outage; the `REPLY=` file holds the editor's work): show stderr, keep WORK, tell the author, end your turn, and run this step again when the author says to retry. On any failure, show stderr and stop.
 10. Run `REVIEW render <target> --work '<work>' [--file '<input>'] [--genre <genre>]`. A stdin run passes `--file '<input>'` and the genre it was given. A path run passes `--genre` only when the author gave one. If `REVIEW render` fails with exit 3 (T2 became unavailable after the editor ran), keep WORK: show stderr, tell the author, end your turn, and run the same command again when the author says to retry. Any other failure: show stderr and stop. Tell the author where the marked-up copy is (`copy`) and whether it opened in the viewer (`opened`; when false, `reason` says why and the path is how to read it). Show each filter `warnings` entry and each `unplaced` edit with its cause. If `opened` is false, also show the filtered proposal:
@@ -132,3 +127,15 @@ The work directory is outside the repository, under the temp directory, so in de
 | Never write to T2 except through MEMORY and REVIEW. |
 | Never pass the author's text in a shell string. |
 | On any failure, show stderr and stop. |
+
+## Setup run
+
+Setup changes nothing by itself: each change below is shown to the author first and made only on a yes.
+
+1. Run `BRIEF setup`. It prints JSON. On any failure, show stderr and stop.
+2. `nexus.found` false: tell the author prose-edit keeps its memory in Nexus T2, which is not installed on this machine (the conexus plugin installs it), and stop. `t2.reachable` false: show `t2.detail`, say T2 must answer before any run, and stop.
+3. `allow_rules.missing` not empty: the work directory sits in the temp directory, and without these rules each Read and Write there asks the author, and the line-editor cannot read its brief. A plugin cannot ship permission rules, so the author adds them. Show `allow_rules.json` as a JSON block to merge into `permissions.allow` of `~/.claude/settings.json` (when `allow_rules.settings_found` is false, that file is missing or is not valid JSON). Never edit that file yourself. Both rules are needed: `Edit()` covers the Write tool and the line-editor's Read, and only `Read()` covers the `<` redirect of step 9. Ask the author to say when the rules are in, end your turn, and on that answer run `BRIEF setup` again and go on from this step.
+4. Genres. `no_genre` lists what no genre reaches, with a count of Markdown and HTML files each: a folder as `<folder>/`, a file at the repository root by its name. The built-in map covers `docs/rdr/*.md` (rdr), `docs/exploration/*.md` (exploration-essay), top-level `docs/*.md` (reference-doc), `web/*.html` (how-to) and `CHANGELOG.md` (changelog). Show the list and ask the author which of them hold prose to edit and which genre each one is (rdr, reference-doc, how-to, exploration-essay, changelog, commit-message); one left out stays unmapped, and a run on a file there asks for `--genre`. Each answer is one entry, `<key>=<genre>`, with the key exactly as `no_genre` printed it (`notes/=how-to`, `README.md=reference-doc`). Show the entries and wait for the author to confirm them. Then make a fresh work directory as step 3 does, with the command of its stdin row, write `{"scalars": {}, "lists": {"genre_map": ["<key>=<genre>", ...]}}` (every confirmed entry in one list) with the Write tool to its `ENTRY=` path, run `MEMORY add-entry --level repo --from-stdin < '<entry>'`, then `BRIEF rmtmp '<work>'`.
+5. Exemplars. `exemplars` counts the stored example passages per genre. The editor imitates them, so a genre with none runs on the style sheet alone. For each genre the author mapped or uses that has 0, offer to store one: ask for a passage the author likes (a path and a line range, two to ten lines), Read those lines, show them, and wait for the author to confirm. Then run the exemplar form, `MEMORY exemplar-add '<genre>' '<path>:<start>-<end>'`, and show what it stored.
+6. Show the author what is now set and what is still missing.
+

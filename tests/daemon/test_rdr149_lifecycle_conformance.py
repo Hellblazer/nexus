@@ -608,7 +608,7 @@ class AspectWorkerRecordHarness(_LeaseHarness):
             def __init__(self, name: str) -> None:
                 self._name = name
 
-            def reclaim_stale(self, _t: float) -> int:
+            def reclaim_stale(self, _t: float, *, count_attempt: bool = True) -> int:
                 return 0
 
             def close(self) -> None:

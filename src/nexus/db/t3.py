@@ -768,7 +768,7 @@ class T3Database:
         """Read-only collection access. Raises on missing collection
         (CloudClient surface; EphemeralClient + PersistentClient also
         raise). Used by read paths that should NOT auto-create
-        collections — most importantly the ``chroma://`` reader in
+        collections — most importantly the ``nx-note://`` reader in
         :mod:`nexus.aspect_readers`, where a missing collection is a
         signal to surface ``ReadFail(reason='unreachable')`` rather
         than create an empty side-effect collection.

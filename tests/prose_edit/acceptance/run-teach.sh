@@ -45,7 +45,7 @@ export PROSE_EDIT_OPEN="${PROSE_EDIT_OPEN:-true}"
 DIR=docs/zz-teach
 DOC=$DIR/scenario.md
 S6DOC=tests/prose_edit/fixtures/user-entry.md
-MEM=(python3 .claude/skills/prose-edit/scripts/memory.py)
+MEM=(python3 prose-edit/skills/prose-edit/scripts/memory.py)
 mkdir -p "$OUT"
 cd "$WT" || exit 1
 runner_sweep_stale
@@ -77,7 +77,7 @@ RESUME_FROM=t1 run t2 "Accept edit 1 and reject all the other edits."
 RESUME_FROM=t2 run t2c "Yes, apply."
 RESUME_FROM=t2c run t3 "Yes, keep that voice card as shown."
 "${MEM[@]}" voice-card "$DOC" > "$OUT/voice-card-after.json"
-python3 .claude/skills/prose-edit/scripts/memory.py promote "$DOC" 1 --level repo > "$OUT/promote-nodry.out" 2> "$OUT/promote-nodry.err"
+python3 prose-edit/skills/prose-edit/scripts/memory.py promote "$DOC" 1 --level repo > "$OUT/promote-nodry.out" 2> "$OUT/promote-nodry.err"
 echo "rc=$?" > "$OUT/promote-nodry.rc"
 RESUME_FROM=t3 run t4 "The first stored rejection is never a defect: promote it at repo level."
 RESUME_FROM=t4 run t4c "Yes, store it."

@@ -31,6 +31,7 @@ from typing import Any
 import structlog
 
 from nexus.db.local_ef import LocalEmbeddingFunction
+from nexus.plans.answer_kind import decode_declaration
 from nexus.plans.match_text import (
     _synthesize_match_text as _plan_library_synthesize_match_text,
 )
@@ -68,6 +69,10 @@ class PlanSessionCache:
         self._client = client
         self._session_id = session_id
         self._available = True
+        # What the last populate() found among the builtin rows a reseed can fix (examined, and how many lack
+        # their answer-kind declaration); None until a population has run or when it could not be judged
+        # (nexus-jypmj.2.8). A BuiltinCheck.
+        self.library_check: Any = None
         try:
             # The bundled MiniLM is the SETTLED choice, not an interim
             # one (2026-08-22). RDR-079 P5 proposed migrating this cache to
@@ -184,6 +189,13 @@ class PlanSessionCache:
         for row in rows:
             if self._upsert_row(row):
                 loaded += 1
+        # RDR-232 Phase 2 (nexus-jypmj.2.8): the rows are in hand, so examine the builtins a reseed can fix and
+        # count those still without an answer-kind declaration. ``nx_answer`` reads this to run the eligibility
+        # gate in shadow against a library that was not reseeded. As fresh as this population (bounded
+        # staleness, 90 s).
+        from nexus.plans.eligibility import check_builtins  # noqa: PLC0415 — deferred; eligibility is only needed here
+
+        self.library_check = check_builtins(rows)
         return loaded
 
     def upsert(self, row: dict[str, Any]) -> bool:
@@ -228,6 +240,7 @@ class PlanSessionCache:
         if plan_id is None:
             return False
         doc_id = f"{self._session_id}:{int(plan_id)}"
+        _declared = decode_declaration(row.get("plan_json"))
         meta = {
             "session_id": self._session_id,
             "plan_id": int(plan_id),
@@ -235,6 +248,13 @@ class PlanSessionCache:
             "tags": row.get("tags") or "",
             "verb": row.get("verb") or "",
             "scope": row.get("scope") or "",
+            # RDR-232 Phase 2 (nexus-jypmj.2.1): the declared kind, decoded from plan_json, so a
+            # refresh after a reseed carries it. "unknown" for a row that declares none.
+            "answer_kind": _declared.kind.value,
+            # Origin and route ride beside the kind so the eligibility step can apply the
+            # fail-closed provenance rule (answer_kind module docstring). "" = no declaration / no route.
+            "answer_provenance": _declared.provenance or "",
+            "answer_route": _declared.route or "",
         }
         try:
             self._col.upsert(

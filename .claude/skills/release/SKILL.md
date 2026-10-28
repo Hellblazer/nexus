@@ -95,7 +95,10 @@ aborting on the first red -- it reports every failure it finds, so one cycle
 surfaces the whole fix list. The checks:
 
 - `wire-contract-ledger` -- `check_engine_release_floor.py --ledger-only`, which
-  is MERGE-BLOCKING on every PR to main, not just at tag time;
+  is MERGE-BLOCKING on every PR to main, not just at tag time. It also fails when
+  `REQUIRED_ENGINE_VERSION` is below `NOTE_URI_MIN_ENGINE_VERSION` (RDR-231: a
+  release must pin an engine that can hold `nx-note://`; the floor leads the pin
+  on develop, which no develop run checks);
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under
@@ -271,10 +274,10 @@ uv-lock-version-matches-pyproject test.
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
 - `mcpb/pyproject.toml`: `version` **and** the `conexus>=X.Y.Z` dependency pin (bare `conexus`, no extra, the same distribution the plugin's `nx-mcp` runs from: the engine embeds T3, so the `[local]` extra the bundle once pinned only fetched a second bge copy; `tests/test_plugin_structure.py::test_mcpb_pins_bare_conexus` enforces the bare pin and that it tracks the version.)
 - `mcpb/manifest.json`: `version`
-- `.claude-plugin/marketplace.json`: **`plugins[].version` for every plugin the file lists** (today conexus, sn and conexus-tool-spill; a loop, not a fixed set)
+- `.claude-plugin/marketplace.json`: **`plugins[].version` for every plugin the file lists** (today conexus, sn, conexus-tool-spill and conexus-prose-edit; a loop, not a fixed set)
 - `.claude-plugin/marketplace.json`: **`plugins[].source.ref` for every plugin the file lists** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
 - `uv.lock`: `version` — pinned exact versions the release publishes from
-- every plugin's own `<plugin>/.claude-plugin/plugin.json`: `version` (today `conexus/.claude-plugin/plugin.json`, `sn/.claude-plugin/plugin.json` **and** `tool-spill/.claude-plugin/plugin.json` — the directory is `tool-spill/`, the plugin is `conexus-tool-spill`; bump each file the marketplace lists; `test_every_plugins_own_plugin_json_version_matches_pyproject` loops over all of them, so a plugin added there is covered with no test edit)
+- every plugin's own `<plugin>/.claude-plugin/plugin.json`: `version` (today `conexus/.claude-plugin/plugin.json`, `sn/.claude-plugin/plugin.json`, `tool-spill/.claude-plugin/plugin.json` **and** `prose-edit/.claude-plugin/plugin.json`; the directories are `tool-spill/` and `prose-edit/`, the plugins `conexus-tool-spill` and `conexus-prose-edit`; bump each file the marketplace lists; `test_every_plugins_own_plugin_json_version_matches_pyproject` loops over all of them, so a plugin added there is covered with no test edit)
 - `conexus/PENDING_RELEASE.md`: **empty the pending list.** Not a version field (nothing here equals `X.Y.Z`) — a drift LEDGER. Advancing `source.ref` is exactly what makes those plugin changes live, so the ledger's entries stop being pending at this step. `tests/test_plugin_release_drift_ledger.py` FAILS on a stale entry, so a forgotten clear blocks the release rather than rotting silently. The list you are deleting is also the honest "what becomes active in this release" note for the CHANGELOG (nexus-mk3tw / the 2026-07-25 inert-guard incident: three guards were merged, closed as "mechanized", and protecting nothing because the pin had not moved).
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
@@ -424,6 +427,7 @@ git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
         conexus/.claude-plugin/plugin.json \
         sn/.claude-plugin/plugin.json \
         tool-spill/.claude-plugin/plugin.json \
+        prose-edit/.claude-plugin/plugin.json \
         conexus/PENDING_RELEASE.md
 git commit -m "chore(release): conexus X.Y.Z"
 
@@ -454,10 +458,11 @@ grep '"version"' .claude-plugin/marketplace.json    # every plugin entry must eq
 grep '"version"' conexus/.claude-plugin/plugin.json # must equal X.Y.Z
 grep '"version"' sn/.claude-plugin/plugin.json      # must equal X.Y.Z
 grep '"version"' tool-spill/.claude-plugin/plugin.json  # must equal X.Y.Z
+grep '"version"' prose-edit/.claude-plugin/plugin.json  # must equal X.Y.Z
 grep '"ref"' .claude-plugin/marketplace.json        # every plugin entry must equal "vX.Y.Z"
 ```
 
-The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field, looped over EVERY plugin marketplace.json lists — not a fixed count) fail the build if any mismatch. Add one more `grep '"version"' <plugin>/.claude-plugin/plugin.json` line here for each plugin marketplace.json gains; the three shown are today's set (conexus, sn, tool-spill), not a ceiling.
+The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field, looped over EVERY plugin marketplace.json lists — not a fixed count) fail the build if any mismatch. Add one more `grep '"version"' <plugin>/.claude-plugin/plugin.json` line here for each plugin marketplace.json gains; the four shown are today's set (conexus, sn, tool-spill, prose-edit), not a ceiling.
 
 ### 8a. Optional: bump source.sha post-merge (defends against tag force-push)
 
@@ -640,7 +645,7 @@ nx --version                 # must print X.Y.Z
 ## Plugin-only fast lane
 
 A patch release that ships plugin-surface content (`conexus/`, `sn/`,
-`tool-spill/`, `.claude-plugin/marketplace.json`) while `develop` carries `src/`
+`tool-spill/`, `prose-edit/`, `.claude-plugin/marketplace.json`) while `develop` carries `src/`
 work that must not ship yet. It is a client release: same tag form, same
 `release.yml` publish, same version surfaces. This section lists only what
 differs; every step it points at runs exactly as written above. Design record:
@@ -685,7 +690,7 @@ git worktree add ../nexus-wt/release-vX.Y.N -b release/vX.Y.N vX.Y.Z
 # the ledger names the entries to ship (each entry names its bead); skip those
 # under "Deferred to the next client release". This log only helps you FIND
 # their commits: pick the ledger's commits, not everything the range lists.
-git log --reverse --format='%h %s' vX.Y.Z..origin/develop -- conexus sn tool-spill .claude-plugin/marketplace.json
+git log --reverse --format='%h %s' vX.Y.Z..origin/develop -- conexus sn tool-spill prose-edit .claude-plugin/marketplace.json
 git cherry-pick -x <sha> [<sha> ...]     # -x records the develop sha in each message
 ```
 
@@ -714,12 +719,15 @@ not eligible.
 
 **3. Bump (Steps 3, 4, 5).** The same surfaces as Step 3 (`pyproject.toml`,
 `mcpb/pyproject.toml`, `mcpb/manifest.json`, `.claude-plugin/marketplace.json`
-version and `source.ref` for every plugin, every `plugin.json`, `uv.lock` via
-Step 5's `uv sync`), both changelogs, and `conexus/PENDING_RELEASE.md` emptied of
-the entries that shipped. The engine pin does not move, and a diff that touches
-`src/` or `scripts/` is refused, so do not run `scripts/regen-install-constraints.sh`
-unless `uv sync` changed a dependency (in which case this is not a fast-lane
-release). Steps 4a and 4b do not apply. The new `CHANGELOG.md` section must name
+version and `source.ref` for every plugin, every `plugin.json`, `uv.lock`), both
+changelogs, and `conexus/PENDING_RELEASE.md` emptied of the entries that shipped.
+In `uv.lock` change only the `version` line under `name = "conexus"` and confirm
+with `uv lock --check`; do not run Step 5's `uv sync`. A local uv newer than the
+one that wrote the tag's lock rewrites the whole file (on 7.87.1 it added
+`revision = 2` and changed platform markers on a dozen dependencies), and that is
+churn the base tag's tested wheel never had. The engine pin does not move, and a
+diff that touches `src/` or `scripts/` is refused, so do not run
+`scripts/regen-install-constraints.sh` either. Steps 4a and 4b do not apply. The new `CHANGELOG.md` section must name
 its engine pairing as its first `engine-service-v` mention, for example `Pairs
 with engine-service-vA.B.C (REQUIRED_ENGINE_VERSION unchanged from X.Y.Z)`
 (A.B.C is the engine tag the base tag's own CHANGELOG section names),
@@ -775,13 +783,19 @@ Step 11b's back-merge of `main` into `develop`.
 The back-merge is not trivially clean in this lane (Step 11b's remark assumes the
 release branch contained develop; this one did not). Expect conflicts in both
 changelogs and the ledger, and resolve them by hand; there is no helper script.
+On 7.87.1 only `CHANGELOG.md` conflicted: the ledger merged cleanly to develop's
+side, because each cherry-pick's ledger conflict was resolved to the tag's side, so
+main never changed the file. Clean is not done: delete the shipped entries and
+move the `## Awaiting the next release (pinned: ...)` heading to vX.Y.N by hand.
 Changelogs, in this order: develop's `## [Unreleased]` first, with the entries that
 shipped in X.Y.N deleted from it, then main's `## [X.Y.N]` section, then the older
 sections. `conexus/PENDING_RELEASE.md`: develop's side minus the entries that
 shipped (the deferred ones and any plugin commit not picked stay pending). A
 later develop edit to a file whose entry you removed still differs from the new
 pin, so keep or re-add an entry for it; `tests/test_plugin_release_drift_ledger.py`
-fails on an undeclared file or a stale entry.
+fails on an undeclared file or a stale entry. Commit the merge before running that
+test: it compares committed HEAD with the pin, so before the commit it reports the
+version surfaces as undeclared drift.
 
 **7. Post-publish.** Once Step 11 shows PyPI at X.Y.N, on the laptop (it needs the
 `claude` CLI), run Step 11c exactly as written (`tests/e2e/fresh-install-mvv.sh
@@ -803,8 +817,9 @@ restarted session loads it. No Windows guest leg.
 For the first real use of this lane, paste the eligibility output, the battery
 table and the delivery-proof verdict into bead nexus-rbmja.13.
 
-The releaser is human: the AI prepares the branch and runs the gates; Sam says
-"cut the release" and pushes the tag.
+The releaser is Sam: the AI prepares the branch and runs the gates; Sam says
+"cut the release" and pushes the tag, or authorizes the AI in-session to push one
+named tag (engine-release skill Step 4 states the rule).
 
 ## Common Mistakes
 

@@ -55,7 +55,7 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.aspect_readers import uri_for
+from nexus.aspect_readers import FILE_ROUTED_PREFIXES, canonical_note_uri, uri_for
 from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     embedding_model_for_collection_name,
@@ -640,7 +640,7 @@ def _locate_owner_group(
       (``{"source_uri", "title", "content_type", "position"}``,
       nexus-wbfpw.31). ``source_uri`` is the group key; an owner with no
       ``source_uri`` (title-only identity, RDR-192 design) synthesizes
-      one via the SAME ``chroma://<collection>/<title>`` convention
+      one via the SAME ``nx-note://<collection>/<title>`` convention
       ``catalog_store_hook_tracked`` already uses for a title-only
       knowledge note, so a later re-import (or re-put through the
       ordinary knowledge write path) converges onto the same document
@@ -661,7 +661,10 @@ def _locate_owner_group(
     """
     position: int | None = None
     if isinstance(owner_meta, dict) and (owner_meta.get("source_uri") or owner_meta.get("title")):
-        source_uri = owner_meta.get("source_uri") or ""
+        # RDR-231: an old export spells a note ``chroma://``; the stored form is
+        # ``nx-note://``, so the group is keyed (and later compared and registered)
+        # by that form. The one place an export's owner URI is read.
+        source_uri = canonical_note_uri(owner_meta.get("source_uri") or "")
         title = owner_meta.get("title") or ""
         content_type = owner_meta.get("content_type") or fallback_content_type
         if not source_uri:
@@ -747,7 +750,10 @@ def _resolve_owner_document(
     target), import COPIES rather than moves (Sam, 2026-09-27): the
     existing document is left untouched, so its own collection stays
     live, and the target gets a separate document under the
-    target-qualified identity ``nxexp://<target>/<original source_uri>``.
+    target-qualified identity ``nxexp://<target>/<original source_uri>``, the
+    original in its stored form: ``<canonical_note_uri(source_uri)>``, so a
+    note an old export spells ``chroma://`` still names (and finds) the
+    ``nxexp://<target>/nx-note://...`` copy (RDR-231, critique Significant 6).
     Re-importing finds that qualified document again, so it is idempotent.
 
     A legacy group (``legacy_doc_id`` set) whose original document is live
@@ -762,7 +768,7 @@ def _resolve_owner_document(
     legacy = (live_legacy or {}).get(group.get("legacy_doc_id") or "")
     if legacy is not None:
         return str(legacy.tumbler)
-    source_uri = group["source_uri"]
+    source_uri = canonical_note_uri(group["source_uri"])
     existing = reader.by_source_uri(source_uri) if source_uri else None
     if existing is not None and existing.physical_collection != collection_name:
         source_uri = f"nxexp://{collection_name}/{source_uri}"
@@ -1181,6 +1187,11 @@ class _OwnerImport:
         if not rows_by_doc:
             return
 
+        # The import writes chunk rows (metadata whole, ttl_days and indexed_at included) and the
+        # document's manifest, and writes NO note keys (ttl_days, put_at) to the catalog entry: an
+        # imported note makes no TTL claim the catalog could keep true, and a note it lands on keeps
+        # the keys it had. The TTL sweep reads a note's own chunk rows before retiring it for that reason
+        # (nexus-6pfgb.30, note_ttl.catalog_ttl_stale).
         already = self._existing_ids([r.rec_id for recs in recs_by_doc.values() for r in recs])
         chunks: dict[str, dict] = {}
         for recs in recs_by_doc.values():
@@ -1529,6 +1540,15 @@ def import_collection(
             "The file may be corrupt or was produced by an incompatible version."
         )
     collection_name: str = target_collection or source_collection
+    # RDR-231 (nexus-bivz3.13/.15): a note import registers owner documents (a title-only owner
+    # synthesizes an nx-note:// URI), so it is refused when the serving engine cannot hold one: after the
+    # header names the target, before any register and before any T3 upsert. A file-routed target
+    # (docs__, code__, rdr__) mints file:// URIs and no note URI, so the check does not apply to it.
+    # Aspect and highlight upserts and the reads are not covered (no unique key on source_uri).
+    if not collection_name.startswith(FILE_ROUTED_PREFIXES):
+        from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
+
+        require_note_uri_engine()
     bypass_schema = collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
     if _owners_apply(db) and bypass_schema:
         # Their ids are not chunk hashes and they have no catalog documents, so no chunk of theirs

@@ -218,7 +218,7 @@ def _index_record(
     extractor: str = "auto",
     force: bool = False,
     force_re_embed: bool = False,
-) -> tuple[bool, int]:
+) -> tuple[bool, int] | tuple[bool, int, list[int] | None, dict[str, list[int]], str]:
     """Dispatch a single supported ``(uuid, path)`` to the right indexer.
 
     The caller (``index_cmd``) is responsible for filtering unsupported
@@ -244,7 +244,12 @@ def _index_record(
     relocations, and the file path returned by osascript at index time
     is not (DT moves files inside Files.noindex/ on its own schedule).
 
-    Returns ``(stamped, chunks, pages)`` (nexus-5xn3k.6 AC4 — before this, the
+    Returns ``(stamped, chunks, pages, degraded, method)``, except that a dry run returns the 2-tuple
+    ``(True, 0)``; the caller accepts that and the older 3- and 4-tuple shapes. ``degraded`` (RDR-237)
+    is the document's ``extraction_pages`` (rung to the 1-based pages that settled below
+    MinerU's first rung), ``{}`` for a clean extraction, markdown, or an unchanged
+    document; ``method`` is the ``extraction_method`` the run recorded for it (``""`` when
+    nothing was extracted), which the run summary keys on. The first three, from nexus-5xn3k.6 AC4: before this, the
     indexer's chunk count was discarded and the caller could only do
     ``indexed += 1`` unconditionally, so a no-op re-index of an unchanged
     document reported "Indexed 1 record(s)" identically to a real write).
@@ -308,17 +313,25 @@ def _index_record(
     # truncated fragment) while the catalog title carried the real name.
     dt_facts = _dt_record_facts(uuid)
     dt_title = (dt_facts or {}).get("name", "")
+    degraded: dict[str, list[int]] = {}  # rung -> pages the ladder settled below rung 1 (RDR-237)
+    method = ""  # the extraction_method the run recorded (RDR-237)
     if ext == ".pdf":
         # nexus-pxxyn: thread the operator's --extractor choice through so the
         # documented MinerU-failure recovery ("rerun with --extractor docling")
         # is actionable on the DT path. Markdown has no extractor backend.
         # nexus-i0cwh: return_metadata gives the pages that produced text,
         # the page-coverage check's input.
+        # RDR-237: on_extraction reports the pages the ladder settled below MinerU's first rung.
+        extraction_reports: list[dict] = []
         raw = index_pdf(
             file_path, corpus=corpus, collection_name=collection, extractor=extractor,
             force=force, force_re_embed=force_re_embed, return_metadata=True,
             source_uri=dt_source_uri, title_override=dt_title,
+            on_extraction=extraction_reports.append,
         )
+        if extraction_reports:
+            degraded = dict(extraction_reports[-1].get("extraction_pages") or {})
+            method = str(extraction_reports[-1].get("extraction_method") or "")
         if isinstance(raw, dict):
             chunks = int(raw.get("chunks", 0) or 0)
             # Pages the EXTRACTOR produced text for, never chunk starts
@@ -337,7 +350,7 @@ def _index_record(
         pages = None
 
     stamped = _stamp_dt_uri_on_entry(file_path, uuid, facts=dt_facts)
-    return stamped, chunks, pages
+    return stamped, chunks, pages, degraded, method
 
 
 def _dt_uri_is_catalogued(uuid: str) -> bool:
@@ -966,14 +979,16 @@ def dt() -> None:
 )
 @click.option(
     "--extractor",
-    type=click.Choice(["auto", "docling", "mineru"], case_sensitive=False),
+    type=click.Choice(["auto", "docling", "mineru", "pymupdf"], case_sensitive=False),
     default="auto",
     show_default=True,
     help=(
         "PDF extraction backend for file-backed records. ``mineru`` is "
         "formula-aware but OOM-fails on some formula-dense pages; the recovery "
         "is ``--extractor docling`` (formula-stripped, but always completes). "
-        "``auto`` picks mineru when formulas are detected, else docling."
+        "``auto`` picks mineru when formulas are detected, else docling. "
+        "``pymupdf`` reads only each page's text layer (no layout, tables or math) "
+        "and needs no PDF support; it is never chosen automatically."
     ),
 )
 @click.option(
@@ -1095,13 +1110,15 @@ def index_cmd(
     if any(Path(p).suffix.lower() == ".pdf" for _uuid, p in records):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
-        pdf_stack.ensure_or_exit("nx dt index")
+        pdf_stack.ensure_or_exit("nx dt index", extractor=extractor)
 
     indexed = 0
     unchanged = 0
     skipped = 0
     stamp_failed = 0
     coverage_failed = 0
+    # RDR-237: shown at the end of the run: (record, the extraction method the catalog recorded, extraction_pages)
+    degraded_runs: list[tuple[str, str, dict[str, list[int]]]] = []
     coverage_unverified = 0
     unverified_no_pages = 0
     unverified_no_page_count = 0
@@ -1301,7 +1318,13 @@ def index_cmd(
                 force=force,
                 force_re_embed=re_embed,
             )
-            if len(_result) == 3:
+            degraded_pages: dict[str, list[int]] = {}
+            extraction_method = ""
+            if len(_result) == 5:
+                stamped, chunks, pages_seen, degraded_pages, extraction_method = _result
+            elif len(_result) == 4:
+                stamped, chunks, pages_seen, degraded_pages = _result
+            elif len(_result) == 3:
                 stamped, chunks, pages_seen = _result
             else:
                 stamped, chunks = _result
@@ -1403,6 +1426,8 @@ def index_cmd(
         if chunks:
             indexed += 1
             touched_collections.add(resolved_collection)
+            if degraded_pages:
+                degraded_runs.append((f"{Path(path).name} ({uuid})", extraction_method, degraded_pages))
         else:
             unchanged += 1
             # nexus-g276c: an unchanged record still belongs to the run's
@@ -1433,9 +1458,19 @@ def index_cmd(
                     detail = (
                         f"page coverage: {seen_n} of {facts['page_count']} pages produced text; "
                         f"missing pages {', '.join(str(n) for n in missing)} (DEVONthink pageCount vs "
-                        "the pages the extractor produced text for). Re-run with --extractor mineru, "
-                        "or --allow-page-gap to accept."
+                        "the pages the extractor produced text for). "
                     )
+                    if extractor == "pymupdf":
+                        # An image page has no text layer, so the text-only extractor is expected to
+                        # leave it out; do not lead with the MinerU extractor, which this user chose
+                        # pymupdf to avoid.
+                        detail += (
+                            "--extractor pymupdf reads only a page's text layer, so an image page is "
+                            "expected to be missing. Pass --allow-page-gap to accept, or OCR the PDF "
+                            "(--extractor mineru does, and needs the PDF stack)."
+                        )
+                    else:
+                        detail += "Re-run with --extractor mineru, or --allow-page-gap to accept."
                     if allow_page_gap:
                         page_gap_allowed += 1
                         click.echo(f"  page gap allowed: {uuid}\t{Path(path).name}: {detail}")
@@ -1454,14 +1489,26 @@ def index_cmd(
 
     # RDR-139 Layer C: gap-fill bibliographic metadata over the collections
     # this run touched, unchanged records included (nexus-g276c). Runs once
-    # per distinct collection (title-group oriented),
-    # after all records land so a multi-record paper enriches as one group.
+    # per distinct collection, after all records land: nexus-6pfgb.21 selects
+    # by the catalog document (its manifest, its own catalog row), so the
+    # records of this run are in the catalog by now. The catalog cannot always
+    # answer (not initialised, unreachable): the enrich verb then stops with no
+    # change and raises, and the indexing above is already done, so the failure
+    # is a warning here, the summary below is still printed, and the remaining
+    # collections are still tried.
     if enrich and touched_collections:
         from nexus.commands.enrich import run_bib_enrichment  # noqa: PLC0415 — deferred to avoid circular import (commands.enrich)
 
         for coll in sorted(touched_collections):
             click.echo(f"\nEnriching bibliographic metadata: {coll}")
-            run_bib_enrichment(coll, source="dt")
+            try:
+                run_bib_enrichment(coll, source="dt")
+            except click.ClickException as exc:
+                click.echo(
+                    f"Warning: bibliographic enrichment of {coll} did not run "
+                    f"(indexing is unaffected): {exc.format_message()}",
+                    err=True,
+                )
 
     summary = f"Indexed {indexed} record(s) ({skipped} skipped"
     if unchanged:
@@ -1490,6 +1537,10 @@ def index_cmd(
         summary += f", {coverage_unverified} page coverage unverified"
     summary += ")."
     click.echo(summary)
+    if degraded_runs:
+        from nexus.commands._helpers import emit_extraction_summary  # noqa: PLC0415 — deferred import, shared with `nx index pdf`
+
+        emit_extraction_summary(degraded_runs)
     if coverage_unverified:
         reasons = []
         unreachable = coverage_unverified - unverified_no_pages - unverified_no_page_count
@@ -1916,10 +1967,11 @@ def _capture_is_pdf(url: str | None, doi: str | None, file_path: str | None, cap
 @click.option("--enrich", "enrich", is_flag=True, default=False,
               help="After indexing, run DT-CrossRef bib gap-fill over the collection (Layer C).")
 @click.option("--extractor",
-              type=click.Choice(["auto", "docling", "mineru"], case_sensitive=False),
+              type=click.Choice(["auto", "docling", "mineru", "pymupdf"], case_sensitive=False),
               default="auto", show_default=True,
               help="PDF extraction backend for the index step (docling = formula-stripped "
-                   "recovery when mineru OOM-fails on formula-dense PDFs).")
+                   "recovery when mineru OOM-fails on formula-dense PDFs; pymupdf = text layer "
+                   "only, needs no PDF support).")
 @click.pass_context
 def capture_cmd(
     ctx: click.Context,
@@ -1975,7 +2027,7 @@ def capture_cmd(
     if _capture_is_pdf(url, doi, file_path, capture_type):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
-        pdf_stack.ensure_or_exit("nx dt capture")
+        pdf_stack.ensure_or_exit("nx dt capture", extractor=extractor)
 
     if url:
         # pdf AND markdown captures are stored by DT as on-disk files (.pdf /

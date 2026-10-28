@@ -439,6 +439,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   pipeline-002-2 nexus-edjmu
                 //   hygiene-008-2 nexus-0rxvg
                 //   catalog-044-3 nexus-6pbwx
+                //   note-uri-001-1 nexus-bivz3.5
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1093,6 +1094,26 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedBoundedQuarantineMisregistrations(su);
                 }
 
+                // ── note-uri-001-1 (nexus-bivz3.5, RDR-231): the backfill rewrites chroma:// note
+                // source_uris on three FORCE-RLS tables. A chroma:// value is the shape every OLD_TAG
+                // client wrote, but catalog-016-0 (dedup) and aspects-004-1 (doc_id stamp, keyed on an
+                // exact source_uri match) run earlier in the hop and would act on seeded documents, so the
+                // rows are seeded after migrateUpTo("note-uri-001-1"), the tuples-003-2 idiom, with the
+                // changesets before it applied. Both note spellings, the export form, a residue row under
+                // each file-routed prefix and a stale-collection note go into all three tables. ─────────
+                migrateUpTo(adminDs, "note-uri-001-1");
+                try (Connection su = pg.createConnection("")) {
+                    su.setAutoCommit(true);
+                    seedNoteUriRows(su);
+                }
+                try (Connection admin = adminDs.getConnection()) {
+                    assertThat(dsl(admin).fetchCount(DOCUMENT_ASPECTS,
+                            DOCUMENT_ASPECTS.SOURCE_URI.like("chroma://knowledge__nb5%")))
+                        .as("FORCE RLS must hide the seeded note rows from the non-BYPASSRLS owner — "
+                            + "note-uri-001-1's own toggle-wrap target")
+                        .isEqualTo(0);
+                }
+
                 // ── HEAD LEG over a populated database. This is the leg the
                 // v0.1.33 outage proved was untested: catalog-013-0's naked DML
                 // no-ops under RLS here exactly as it did in production; only
@@ -1151,6 +1172,15 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             .and(CATALOG_COLLECTIONS.OWNER_ID.eq("h044subject"))))
                         .as("a knowledge collection keeps its subject")
                         .isEqualTo(1);
+                }
+
+                // ── note-uri-001-1's own effect (nexus-bivz3.5), under FORCE RLS for the NOBYPASSRLS
+                // owner: notes in all three tables rewritten by scheme (the export form and a tombstoned
+                // note included), the stale-collection note rewritten by scheme only, residue under every
+                // file-routed prefix untouched, and the chroma:// sweep over every nexus text column
+                // finding only that residue. ───────────────────────────────────────────────────────────
+                try (Connection su = pg.createConnection("")) {
+                    assertNoteUriBackfillEffect(su);
                 }
 
                 // ── tuples-003-2's own effect, mirroring TuplesBaselineSchemaLiquibaseTest's
@@ -2713,6 +2743,173 @@ class SchemaUpgradeRehearsalIntegrationTest {
         PgContainerHelper.insertCollection(DSL.using(c, SQLDialect.POSTGRES), tenant, name);
     }
 
+
+    // ── note-uri-001-1 (nexus-bivz3.5): collections, rows and the effect assertion ──────────────────
+
+    private static final String NU_K = "knowledge__nb5__bge-base-en-v15-768__v1";
+    private static final String NU_K_STALE = "knowledge__nb5x__bge-base-en-v15-768__v1";
+    private static final String NU_D = "docs__nb5__bge-base-en-v15-768__v1";
+    private static final String NU_R = "rdr__nb5__bge-base-en-v15-768__v1";
+    private static final String NU_C = "code__nb5__bge-base-en-v15-768__v1";
+    private static final String NU_EXPORT = "nxexp://knowledge__imp/";
+
+    /** tumbler to {collection, source_uri before, source_uri after} for every seeded document. */
+    private static final java.util.Map<String, String[]> NU_DOCS = new java.util.LinkedHashMap<>();
+
+    static {
+        NU_DOCS.put("1.1.401", new String[]{NU_K, "chroma://" + NU_K + "/n1", "nx-note://" + NU_K + "/n1"});
+        NU_DOCS.put("1.1.402", new String[]{NU_K, "chroma://" + NU_K + "/n2", "nx-note://" + NU_K + "/n2"});
+        NU_DOCS.put("1.1.403", new String[]{NU_K, NU_EXPORT + "chroma://" + NU_K + "/n3",
+            NU_EXPORT + "nx-note://" + NU_K + "/n3"});
+        NU_DOCS.put("1.1.404", new String[]{NU_D, "chroma://" + NU_D + "/f.md", "chroma://" + NU_D + "/f.md"});
+        NU_DOCS.put("1.1.405", new String[]{NU_R, "chroma://" + NU_R + "/f.md", "chroma://" + NU_R + "/f.md"});
+        NU_DOCS.put("1.1.406", new String[]{NU_C, "chroma://" + NU_C + "/x.py", "chroma://" + NU_C + "/x.py"});
+        NU_DOCS.put("1.1.407", new String[]{NU_R, NU_EXPORT + "chroma://" + NU_R + "/f.md",
+            NU_EXPORT + "chroma://" + NU_R + "/f.md"});
+        // a stale-collection note: the row lives in NU_K, its URI names NU_K_STALE (scheme-only rewrite)
+        NU_DOCS.put("1.1.408", new String[]{NU_K, "chroma://" + NU_K_STALE + "/n8", "nx-note://" + NU_K_STALE + "/n8"});
+    }
+
+    /** Documents that also get a document_aspects row and a document_highlights row. */
+    private static final List<String> NU_WITH_CHILDREN =
+        List.of("1.1.401", "1.1.403", "1.1.404", "1.1.405", "1.1.406", "1.1.408");
+
+    /**
+     * A satellite row's own URI: the document's URI with its last path segment replaced, so the aspect
+     * (source_path {@code seed/note-uri-<t>.md}) and the highlight carry URIs that differ from the
+     * catalog row's and each is checked against its own derivation (critique Significant 8).
+     */
+    private static String sibling(String uri, String leaf) {
+        return uri.substring(0, uri.lastIndexOf('/') + 1) + leaf;
+    }
+
+    private static String aspectUriOf(String docUri, String tumbler) {
+        return sibling(docUri, "aspect-" + tumbler + ".md");
+    }
+
+    private static String highlightUriOf(String docUri, String tumbler) {
+        return sibling(docUri, "hl-" + tumbler);
+    }
+
+    private static void seedNoteUriRows(Connection su) throws Exception {
+        for (String coll : List.of(NU_K, NU_D, NU_R, NU_C)) {
+            registerCollection(su, "t1", coll);
+        }
+        for (var e : NU_DOCS.entrySet()) {
+            seedDocumentWithUri(su, "t1", e.getKey(), "note-uri doc " + e.getKey(), e.getValue()[0],
+                e.getValue()[1], 1);
+        }
+        // a tombstoned note: live and tombstoned rows are both rewritten
+        dsl(su).update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t1")).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.1.402")).execute();
+        for (String tumbler : NU_WITH_CHILDREN) {
+            String[] d = NU_DOCS.get(tumbler);
+            seedAspect(su, "t1", d[0], "seed/note-uri-" + tumbler + ".md", "note-uri rehearsal",
+                aspectUriOf(d[1], tumbler), tumbler);
+            dsl(su).insertInto(DOCUMENT_HIGHLIGHTS)
+                .set(DOCUMENT_HIGHLIGHTS.TENANT_ID, "t1")
+                .set(DOCUMENT_HIGHLIGHTS.DOC_ID, tumbler)
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, highlightUriOf(d[1], tumbler))
+                .set(DOCUMENT_HIGHLIGHTS.COLLECTION, d[0])
+                .set(DOCUMENT_HIGHLIGHTS.INGESTED_AT, DSL.currentOffsetDateTime())
+                .execute();
+        }
+        assertThat(columnsHolding(su, "chroma://"))
+            .as("non-vacuity: before the hop the seeded chroma:// values sit in all three tables")
+            .contains("catalog_documents.source_uri", "document_aspects.source_uri", "document_highlights.source_uri");
+    }
+
+    private static void assertNoteUriBackfillEffect(Connection su) {
+        var c = dsl(su);
+        for (var e : NU_DOCS.entrySet()) {
+            String tumbler = e.getKey();
+            String expected = e.getValue()[2];
+            assertThat(c.select(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t1")).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                    .fetchOne(CATALOG_DOCUMENTS.SOURCE_URI))
+                .as("note-uri-001-1: catalog_documents %s", tumbler).isEqualTo(expected);
+        }
+        assertThat(c.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq("t1")).and(CATALOG_DOCUMENTS.TUMBLER.eq("1.1.408"))
+                .fetchOne(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
+            .as("the stale-collection note is rewritten by scheme only; its collection is not repaired")
+            .isEqualTo(NU_K);
+        for (String tumbler : NU_WITH_CHILDREN) {
+            String expectedAspect = aspectUriOf(NU_DOCS.get(tumbler)[2], tumbler);
+            String expectedHighlight = highlightUriOf(NU_DOCS.get(tumbler)[2], tumbler);
+            assertThat(c.select(DOCUMENT_ASPECTS.SOURCE_URI).from(DOCUMENT_ASPECTS)
+                    .where(DOCUMENT_ASPECTS.TENANT_ID.eq("t1")).and(DOCUMENT_ASPECTS.DOC_ID.eq(tumbler))
+                    .fetchOne(DOCUMENT_ASPECTS.SOURCE_URI))
+                .as("note-uri-001-1: document_aspects %s", tumbler).isEqualTo(expectedAspect);
+            assertThat(c.select(DOCUMENT_HIGHLIGHTS.SOURCE_URI).from(DOCUMENT_HIGHLIGHTS)
+                    .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq("t1")).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(tumbler))
+                    .fetchOne(DOCUMENT_HIGHLIGHTS.SOURCE_URI))
+                .as("note-uri-001-1: document_highlights %s", tumbler).isEqualTo(expectedHighlight);
+        }
+        // The Critical-Assumption-1 sweep: after the backfill every chroma:// value left in any nexus
+        // text, varchar or json column is file-routed residue, and only the three tables hold any.
+        java.util.Set<String> residue = new java.util.TreeSet<>();
+        for (String tumbler : List.of("1.1.404", "1.1.405", "1.1.406", "1.1.407")) {
+            residue.add(NU_DOCS.get(tumbler)[2]);
+            residue.add(aspectUriOf(NU_DOCS.get(tumbler)[2], tumbler));
+            residue.add(highlightUriOf(NU_DOCS.get(tumbler)[2], tumbler));
+        }
+        assertThat(columnsHolding(su, "chroma://"))
+            .as("the chroma:// sweep finds only the three source_uri columns, holding only residue")
+            .containsExactlyInAnyOrder("catalog_documents.source_uri", "document_aspects.source_uri",
+                "document_highlights.source_uri");
+        assertThat(c.selectDistinct(CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+                .where(DSL.function("strpos", Integer.class, CATALOG_DOCUMENTS.SOURCE_URI, DSL.val("chroma://")).gt(0))
+                .fetch(CATALOG_DOCUMENTS.SOURCE_URI))
+            .as("every chroma:// value left in catalog_documents is residue")
+            .allSatisfy(u -> assertThat(residue).contains(u));
+        assertThat(c.selectDistinct(DOCUMENT_ASPECTS.SOURCE_URI).from(DOCUMENT_ASPECTS)
+                .where(DSL.function("strpos", Integer.class, DOCUMENT_ASPECTS.SOURCE_URI, DSL.val("chroma://")).gt(0))
+                .fetch(DOCUMENT_ASPECTS.SOURCE_URI))
+            .as("every chroma:// value left in document_aspects is residue")
+            .allSatisfy(u -> assertThat(residue).contains(u));
+        assertThat(c.selectDistinct(DOCUMENT_HIGHLIGHTS.SOURCE_URI).from(DOCUMENT_HIGHLIGHTS)
+                .where(DSL.function("strpos", Integer.class, DOCUMENT_HIGHLIGHTS.SOURCE_URI, DSL.val("chroma://")).gt(0))
+                .fetch(DOCUMENT_HIGHLIGHTS.SOURCE_URI))
+            .as("every chroma:// value left in document_highlights is residue")
+            .allSatisfy(u -> assertThat(residue).contains(u));
+    }
+
+    /**
+     * Every nexus base-table text, varchar, json or jsonb column holding {@code needle}, as "table.column"
+     * (the sweep helper of CatalogRenameIdentityCascadeTest, over a superuser connection so FORCE RLS hides
+     * nothing).
+     */
+    private static List<String> columnsHolding(Connection su, String needle) {
+        var ctx = dsl(su);
+        var columns = DSL.table(DSL.name("information_schema", "columns")).as("c");
+        var tables = DSL.table(DSL.name("information_schema", "tables")).as("t");
+        org.jooq.Field<String> cSchema = DSL.field(DSL.name("c", "table_schema"), String.class);
+        org.jooq.Field<String> cTable = DSL.field(DSL.name("c", "table_name"), String.class);
+        org.jooq.Field<String> cColumn = DSL.field(DSL.name("c", "column_name"), String.class);
+        org.jooq.Field<String> cType = DSL.field(DSL.name("c", "data_type"), String.class);
+        org.jooq.Field<String> tSchema = DSL.field(DSL.name("t", "table_schema"), String.class);
+        org.jooq.Field<String> tTable = DSL.field(DSL.name("t", "table_name"), String.class);
+        org.jooq.Field<String> tType = DSL.field(DSL.name("t", "table_type"), String.class);
+        var cols = ctx.select(cTable, cColumn).from(columns)
+            .join(tables).on(tSchema.eq(cSchema).and(tTable.eq(cTable)).and(tType.eq("BASE TABLE")))
+            .where(cSchema.eq("nexus"))
+            .and(cType.in("text", "character varying", "jsonb", "json"))
+            .fetch();
+        assertThat(cols).as("the sweep must see the URI columns it is checking")
+            .anySatisfy(r -> assertThat(r.value2()).isEqualTo("source_uri"));
+        List<String> hits = new java.util.ArrayList<>();
+        for (var col : cols) {
+            org.jooq.Field<String> asText = DSL.field(DSL.name(col.value2())).cast(String.class);
+            boolean holds = ctx.fetchExists(ctx.selectOne()
+                .from(DSL.table(DSL.name("nexus", col.value1())))
+                .where(DSL.function("strpos", Integer.class, asText, DSL.val(needle)).gt(0)));
+            if (holds) {
+                hits.add(col.value1() + "." + col.value2());
+            }
+        }
+        return hits;
+    }
 
     private static void seedChashRow(Connection c, String tenant, String chash,
                                      String collection) throws Exception {

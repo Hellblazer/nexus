@@ -30,7 +30,7 @@ from tests.prose_edit.test_brief import (
     run_brief,
 )
 
-REVIEW = ROOT / ".claude" / "skills" / "prose-edit" / "scripts" / "review.py"
+REVIEW = ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts" / "review.py"
 
 
 def _review() -> ModuleType:

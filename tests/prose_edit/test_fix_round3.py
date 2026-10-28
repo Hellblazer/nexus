@@ -252,7 +252,7 @@ def test_a_stale_document_treatment_stops_the_build_and_names_the_document_layer
 
 
 def test_the_section_3_rules_heading_no_longer_says_apply_as_written() -> None:
-    text = (ROOT / ".claude" / "skills" / "prose-edit" / "scripts" / "brief.py").read_text(encoding="utf-8")
+    text = (ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts" / "brief.py").read_text(encoding="utf-8")
     assert "apply as written" not in text  # it contradicted "the narrower layer wins"
 
 

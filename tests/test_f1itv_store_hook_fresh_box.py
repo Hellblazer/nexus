@@ -156,11 +156,11 @@ def test_fresh_box_service_mode_registers(fake_client):
     assert reg["title"] == "fresh-box-note"
     assert reg["content_type"] == "knowledge"
     assert reg["physical_collection"] == _COLLECTION
-    assert reg["meta"] == {"doc_id": _DOC_ID}
-    # nexus-sdp0u: the synthesized identity — same chroma:// convention as
+    assert {k: v for k, v in reg["meta"].items() if k != "put_at"} == {"doc_id": _DOC_ID}  # put_at: nexus-6pfgb.15
+    # nexus-sdp0u: the synthesized identity — same nx-note:// convention as
     # aspect_readers.uri_for — must reach the wire so the engine's
     # upsert-on-source_uri identity can match a later re-put.
-    assert reg["source_uri"] == f"chroma://{_COLLECTION}/fresh-box-note"
+    assert reg["source_uri"] == f"nx-note://{_COLLECTION}/fresh-box-note"
 
 
 def test_fresh_box_service_mode_dedups_by_doc_id(fake_client, monkeypatch):
@@ -191,6 +191,8 @@ def test_fresh_box_service_mode_dedups_by_doc_id(fake_client, monkeypatch):
         content_type = "knowledge"
         file_path = ""
         physical_collection = _COLLECTION
+        # nexus-6pfgb.31: the dedup reconciles only onto a document with the put's own title.
+        title = "fresh-box-note"
 
     monkeypatch.setattr(
         _FakeHttpCatalogClient, "docs_for_chashes",
@@ -220,7 +222,7 @@ def test_fresh_box_service_mode_reconciles_reput_by_source_uri(fake_client, monk
 
     monkeypatch.setattr(
         _FakeHttpCatalogClient, "by_source_uri",
-        lambda self, uri: _Existing() if uri == f"chroma://{_COLLECTION}/fresh-box-note" else None,
+        lambda self, uri: _Existing() if uri == f"nx-note://{_COLLECTION}/fresh-box-note" else None,
     )
     tumbler = catalog_store_hook(
         title="fresh-box-note",
@@ -232,7 +234,7 @@ def test_fresh_box_service_mode_reconciles_reput_by_source_uri(fake_client, monk
     assert client.registered == [], "reconcile must not mint a new document"
     (upd,) = client.updated
     assert upd["tumbler"] == "1.1.9"
-    assert upd["meta"] == {"doc_id": "b" * 64}
+    assert {k: v for k, v in upd["meta"].items() if k != "put_at"} == {"doc_id": "b" * 64}  # put_at: nexus-6pfgb.15
 
 
 def test_fresh_box_service_unreachable_is_loud_not_silent(fake_client, monkeypatch):

@@ -210,3 +210,89 @@ def test_index_pdf_on_a_slim_box_refuses_and_touches_neither_store_nor_catalog(m
         doc_indexer.index_pdf(pdf, "c", t3=MagicMock(), collection_name="docs__c__m__v1", embed_fn=lambda texts: [])
     register.assert_not_called()
     resolve.assert_not_called()
+
+
+# ── the eight gates take the extractor (RDR-237, nexus-tr1rj.4) ──────────────
+
+#: A gate call that is deliberately NOT extractor-aware, with the reason. ``nx mineru start`` starts
+#: the MinerU server: it needs the stack by definition and has no PDF extractor to choose.
+_NOT_EXTRACTOR_AWARE: dict[tuple[str, str], str] = {
+    ("commands/mineru.py", "nx mineru start"): "starts the MinerU server; there is no extractor to choose",
+}
+
+#: The eight stack gates of the extraction path (RDR-237 Technical Design, RF-16), as
+#: ``(file, entry label)``: the label is the ``entry`` string the gate passes.
+_EIGHT_GATES: frozenset[tuple[str, str]] = frozenset({
+    ("pdf_extractor.py", "<f-string>"),   # PDFExtractor.extract's library backstop
+    ("doc_indexer.py", "index_pdf"),
+    ("commands/index.py", "nx index pdf"),
+    ("commands/index.py", "nx index pdf --dir"),
+    ("commands/dt.py", "nx dt index"),
+    ("commands/dt.py", "nx dt capture"),
+    ("indexer.py", "nx index repo"),
+    ("commands/collection.py", "nx collection reindex"),
+})
+
+
+def _entry_label(call: ast.Call) -> str:
+    if call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str):
+        return call.args[0].value
+    return "<f-string>" if call.args and isinstance(call.args[0], ast.JoinedStr) else "<dynamic>"
+
+
+def _gate_calls() -> list[tuple[str, int, str, bool]]:
+    """``(file, line, entry label, passes extractor=)`` for every ``pdf_stack`` gate call outside the
+    stack module itself (``ensure_or_exit``, ``ensure``, ``require`` on any name ending ``pdf_stack``)."""
+    out: list[tuple[str, int, str, bool]] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        rel = path.relative_to(_SRC).as_posix()
+        if rel == "pdf_stack.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            f = getattr(node, "func", None)
+            if not (isinstance(node, ast.Call) and isinstance(f, ast.Attribute) and f.attr in _GATE_ATTRS):
+                continue
+            if isinstance(f.value, ast.Name) and f.value.id.endswith("pdf_stack"):
+                out.append((rel, node.lineno, _entry_label(node), any(k.arg == "extractor" for k in node.keywords)))
+    return out
+
+
+def test_every_stack_gate_takes_the_extractor_except_the_reasoned_ones() -> None:
+    calls = _gate_calls()
+    blind = [
+        f"{rel}:{line} pdf_stack gate {label!r}"
+        for rel, line, label, aware in calls
+        if not aware and (rel, label) not in _NOT_EXTRACTOR_AWARE
+    ]
+    assert not blind, (
+        "a pdf_stack gate that does not pass extractor= would install or require the PDF stack for "
+        "the text-only pymupdf extractor (RDR-237). Pass extractor=..., or add a reasoned entry to "
+        "_NOT_EXTRACTOR_AWARE:\n  " + "\n  ".join(blind)
+    )
+
+
+def test_there_are_exactly_the_eight_extractor_aware_gates() -> None:
+    """Non-vacuity: the scan finds the eight gates the RDR names, each extractor-aware, and the one
+    allowlisted exception; a rename that hid them from the scan fails here, not silently above."""
+    calls = _gate_calls()
+    aware = {(rel, label) for rel, _line, label, ok in calls if ok}
+    assert aware == _EIGHT_GATES, (sorted(aware ^ _EIGHT_GATES), calls)
+    assert len([c for c in calls if c[3]]) == 8, "one call each, none duplicated or dropped"
+    unaware = {(rel, label) for rel, _line, label, ok in calls if not ok}
+    assert unaware == set(_NOT_EXTRACTOR_AWARE), unaware
+
+
+def test_the_repo_walks_two_hold_calls_pass_the_extractor_and_the_late_recheck_asks_needs_stack() -> None:
+    tree = ast.parse((_SRC / "indexer.py").read_text(encoding="utf-8"))
+    holds = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_hold_pdfs_without_stack"
+    ]
+    assert len(holds) == 2, "the early hold and the late recheck"
+    assert all(any(k.arg == "extractor" for k in h.keywords) for h in holds)
+    run_index = _functions(tree)["_run_index"]
+    asks = [
+        n for n in ast.walk(run_index)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "needs_stack"
+    ]
+    assert asks, "the late recheck must skip the stack probe for an extractor that needs none"

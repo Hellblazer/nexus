@@ -675,7 +675,7 @@ _NOT_NEXUS_TEST_CODE = (
 _TMPDIR_OVERRIDE_EXEMPT: dict[str, str] = {
     "tests/e2e/lib/setup_journey.py::sandbox_env": _FROM_SCRATCH,
     "tests/prose_edit/conftest.py::prose": _NOT_NEXUS_TEST_CODE + " (prose-edit scripts and the nx CLI)",
-    "tests/prose_edit/test_allow_rule_setup.py::test_the_documented_path_command_is_the_base_every_work_directory_sits_under":
+    "tests/prose_edit/test_allow_rule_setup.py::_symlinked_tmp":
         _NOT_NEXUS_TEST_CODE,
     "tests/prose_edit/test_brief_review.py::test_tmpdir_refuses_a_location_inside_the_repository_and_leaves_nothing":
         _NOT_NEXUS_TEST_CODE,

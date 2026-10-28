@@ -11,10 +11,10 @@
         "source": "git-subdir",
         "url": "https://github.com/Hellblazer/nexus.git",
         "path": "conexus",
-        "ref": "v7.87.1"
+        "ref": "v7.88.0"
       },
       "description": "Self-hosted three-tier knowledge management with 10 specialized agents, plan-centric retrieval via nx_answer, semantic search, and RDR decision tracking for Claude Code.",
-      "version": "7.87.1"
+      "version": "7.88.0"
     },
     {
       "name": "sn",
@@ -22,10 +22,10 @@
         "source": "git-subdir",
         "url": "https://github.com/Hellblazer/nexus.git",
         "path": "sn",
-        "ref": "v7.87.1"
+        "ref": "v7.88.0"
       },
       "description": "Injects Serena and Context7 MCP tool usage guidance into subagents via SubagentStart hook.",
-      "version": "7.87.1"
+      "version": "7.88.0"
     },
     {
       "name": "conexus-tool-spill",
@@ -33,10 +33,21 @@
         "source": "git-subdir",
         "url": "https://github.com/Hellblazer/nexus.git",
         "path": "tool-spill",
-        "ref": "v7.87.1"
+        "ref": "v7.88.0"
       },
       "description": "Keeps big tool output out of your context, no setup needed: a main-session Bash output or whole-file Read over 4000 bytes is cut to its head and tail, with a note saying where the full text is. Options can stay blank (blank = default).",
-      "version": "7.87.1"
+      "version": "7.88.0"
+    },
+    {
+      "name": "conexus-prose-edit",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/Hellblazer/nexus.git",
+        "path": "prose-edit",
+        "ref": "v7.88.0"
+      },
+      "description": "A line editor for your own prose: /prose-edit proposes numbered sentence edits to a document, you accept or reject each, and it remembers your rejections and preferred voice per document. Needs Nexus (nx) for its memory; run /prose-edit setup once per machine and repository.",
+      "version": "7.88.0"
     }
   ]
 }

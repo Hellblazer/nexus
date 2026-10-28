@@ -260,6 +260,8 @@ class TestPdfExtractorRestartUsesResolver:
         extractor = object.__new__(PDFExtractor)
         extractor._mineru_server_restarts = 0
         extractor._MINERU_MAX_RESTARTS = 3
+        # RDR-237: the restart beats a progress heartbeat first; with no run bound, none.
+        extractor._heartbeat = None
         return extractor
 
     def test_restart_uses_resolver_path(self, tmp_path: Path, monkeypatch) -> None:

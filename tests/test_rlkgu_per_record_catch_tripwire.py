@@ -359,6 +359,14 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
 #: tripwire; the fix is a deliberate classification decision, not a
 #: blanket exemption.
 _COMMAND_LEVEL_REASONS: dict[str, str] = {
+    "NoteUriEngineTooOldError": (
+        "RDR-231 (nexus-bivz3.13): raised by require_note_uri_engine when the serving engine is "
+        "older than NOTE_URI_MIN_ENGINE_VERSION. It is a property of the engine, not of a record: "
+        "every later note in the same run would be refused the same way, so the note writers "
+        "(put_note, import_collection, the register paths) refuse the whole command and "
+        "import_bundle re-raises it on the first note rather than catch-and-continue. doc_indexer's "
+        "per-record loops index code, docs and PDFs, which mint no note URI and never call the guard."
+    ),
     "DryRunStoreError": (
         "RDR-223 (nexus-z0o2p.11/.15): raised by doc_indexer._require_throwaway_store when a PDF "
         "dry run is handed a store that is not a throwaway in-memory one. Only `nx index pdf "

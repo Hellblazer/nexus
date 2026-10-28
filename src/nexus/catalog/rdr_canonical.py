@@ -294,7 +294,7 @@ def rdr_source_prefix(repo_root: Path | str) -> str:
     must not be accepted as this repo's own registration — a bare-root
     prefix would wrongly match it; this anchor does not. Mirrors the
     ``file://`` + ``os.path.normpath`` shape
-    :func:`nexus.catalog.types._normalize_source_uri` stamps onto
+    the engine's ``CatalogRepository.deriveSourceUri`` stamps onto
     ``source_uri`` at register time, plus a trailing separator so a
     differently-named sibling directory sharing this one as a string
     prefix (``…/nexus`` vs ``…/nexus2``) cannot false-match.

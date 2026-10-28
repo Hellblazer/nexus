@@ -25,13 +25,14 @@ import json
 import struct
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait, ALL_COMPLETED, FIRST_EXCEPTION
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from nexus.catalog.types import ManifestRow
     from nexus.hook_registry import HookRegistry
 
 import structlog
@@ -39,7 +40,13 @@ import structlog
 from nexus.embed_window import window_for_collection
 from nexus.errors import UploadStalledError
 from nexus.pdf_chunker import PDFChunker
-from nexus.pdf_extractor import ExtractionResult, PDFExtractor, bind_run_cancel, stop_mineru_workers
+from nexus.pdf_extractor import (
+    ExtractionResult,
+    MineruSystemicFailure,
+    PDFExtractor,
+    bind_run_cancel,
+    stop_mineru_workers,
+)
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.retry import _vector_with_retry
 from nexus.util.termination import TerminationRequested, sigterm_raises
@@ -82,6 +89,101 @@ class PipelineCancelled(Exception):
 # ── Stage 1: Extractor ──────────────────────────────────────────────────────
 
 
+def _page_rungs(page_metadata: Any, page_index: int) -> dict[int, str]:
+    """``{1-based page: rung}`` for one page write, from the ``page_method`` the ladder puts in
+    the page metadata (RDR-237). ``{}`` when the metadata carries none (a non-ladder extractor, or
+    a buffer row written before the ladder recorded it). *page_metadata* is the dict ``on_page``
+    gets or a buffer row's ``metadata_json`` (a JSON string or an already-decoded dict).
+    """
+    if isinstance(page_metadata, str):
+        try:
+            page_metadata = json.loads(page_metadata)
+        except ValueError:
+            return {}
+    if not isinstance(page_metadata, dict):
+        return {}
+    method = page_metadata.get("page_method")
+    if not isinstance(method, str) or not method:
+        return {}
+    numbers = page_metadata.get("page_numbers") or [page_metadata.get("page_number", page_index + 1)]
+    return {int(n): method for n in numbers if isinstance(n, int) and not isinstance(n, bool)}
+
+
+#: The document methods the ladder reports; the only ones a resume recomputes.
+_LADDER_METHODS = ("mineru", "mineru+degraded")
+
+#: The rungs the explicit ``pymupdf`` extractor produces; a buffered page on any other rung is MinerU's.
+_TEXT_LAYER_RUNGS = ("pymupdf-text", "unextracted")
+
+
+def _buffer_provenance(rows: list[dict[str, Any]]) -> tuple[dict[int, str], list[int]]:
+    """``({1-based page: rung}, [pages with no rung])`` for the buffer rows a resume found.
+
+    Reads only ``page_index`` and ``metadata_json``, so a caller can drop the rows (page text
+    included) as soon as this returns. A page is *unknown* when its row carries no ``page_method``:
+    a buffer an older build wrote, or a non-ladder extractor's.
+    """
+    rungs: dict[int, str] = {}
+    unknown: list[int] = []
+    for row in rows:
+        index = int(row.get("page_index", 0))
+        found = _page_rungs(row.get("metadata_json"), index)
+        if found:
+            rungs.update(found)
+        else:
+            unknown.append(index + 1)
+    return rungs, unknown
+
+
+def _merge_buffered_provenance(
+    metadata: dict[str, Any], run_rungs: dict[int, str], buffered_rungs: dict[int, str],
+    unknown_pages: list[int] | tuple[int, ...] = (),
+) -> None:
+    """Make a resumed run's ``extraction_pages`` and ``extraction_method`` describe the document.
+
+    A kept-buffer resume re-extracts every page but writes only those the buffer lacks
+    (``extractor_loop``'s ``on_page`` skip), so the chunks come from the BUFFER's text and the
+    ladder's own map describes the current run's attempt, not what was indexed. The rung a page
+    settled on is stored in its buffer row (``page_method``); that rung wins for a page the buffer
+    holds, the current run's for the rest.
+
+    *unknown_pages* are buffered pages whose row names no rung (a buffer an older build wrote).
+    Their indexed text is the buffer's and the run's rung for them may not describe it, so the
+    record cannot prove them clean: the map lists only the pages whose rung is known (an unknown
+    page is left out, never given the run's rung), and a ladder run's method stays
+    ``mineru+degraded`` rather than claiming a clean ``mineru``. No-op when the buffer
+    recorded no rung and no page is unknown (a first run, a non-ladder extractor): the run's own
+    map then stands.
+
+    The explicit ``pymupdf`` extractor (RDR-237) is handled the same way, with one rule of its
+    own: ``pymupdf`` names a document whose every indexed page is the PDF's text layer (or
+    nothing). A ``pymupdf`` rerun over a kept buffer that a MinerU run left (a breaker trip keeps
+    it) holds pages that are MinerU's; and a buffer page that names no rung cannot be proven
+    text-only. Either makes the document a mixture, so the method becomes
+    ``mineru+degraded`` (its pages below MinerU's first rung are in the map, MinerU's own pages
+    are not). A buffer of text-layer rungs only (an interrupted ``pymupdf`` run) stays ``pymupdf``.
+    """
+    method = metadata.get("extraction_method")
+    ladder = method in _LADDER_METHODS
+    text_only = method == "pymupdf"
+    unknown = bool(unknown_pages) and (ladder or text_only)
+    if not buffered_rungs and not unknown:
+        return
+    from nexus.pdf_extractor import _DEGRADED_METHODS  # noqa: PLC0415 — module-private rung order, shared with the ladder
+    unproven = set(unknown_pages) if unknown else set()
+    rungs = {**{n: r for n, r in run_rungs.items() if n not in unproven}, **buffered_rungs}
+    pages = {
+        method: sorted(n for n, r in rungs.items() if r == method)
+        for method in _DEGRADED_METHODS
+        if any(r == method for r in rungs.values())
+    }
+    metadata["extraction_pages"] = pages
+    if ladder:
+        metadata["extraction_method"] = "mineru+degraded" if (pages or unknown) else "mineru"
+    elif text_only and (unknown or any(r not in _TEXT_LAYER_RUNGS for r in buffered_rungs.values())):
+        metadata["extraction_method"] = "mineru+degraded"
+
+
 def extractor_loop(
     pdf_path: Path,
     content_hash: str,
@@ -106,6 +208,14 @@ def extractor_loop(
     """
     state = db.get_pipeline_state(content_hash)
     pages_extracted_at_start = state["pages_extracted"] if state else 0
+    # RDR-237: the counter the row held when this run began. The resume checks below can lower
+    # ``pages_extracted_at_start`` (a wiped buffer), but a heartbeat must never lower the row.
+    row_pages_extracted = pages_extracted_at_start
+    #: What a resume's buffer says about its pages (RDR-237 provenance: each row carries the rung
+    #: its page settled on); empty on a first run. Reduced as soon as the rows are read, so the
+    #: buffered page text is not kept alive for the whole extraction.
+    buffered_rungs: dict[int, str] = {}
+    unknown_pages: list[int] = []
 
     # Resume fast path: if all pages already in buffer, skip extraction.
     if (state and state["total_pages"] is not None
@@ -114,15 +224,16 @@ def extractor_loop(
         # nexus-gl99l: the counters above are NOT proof the WAL pages
         # backing them still exist. pipeline_index_pdf's caught-exception
         # handler calls db.mark_failed + db.clear_orphan_wal, which wipes
-        # the pdf_pages/pdf_chunks WAL rows but never resets these
-        # progress counters (deliberately — mark_failed's audit trail is
-        # load-bearing, nexus-2fyb/nexus-rewgw). Trusting the counters
-        # alone after ANY caught pipeline exception means a retry sees a
-        # row that CLAIMS full extraction with none of the underlying
-        # data, and silently skips re-extraction. Verify the actual WAL
-        # page count agrees with the claim before trusting the fast path
-        # — this also self-heals rows stranded by any earlier code
-        # version that never checked, not just future failures.
+        # the pdf_pages/pdf_chunks WAL rows. Since nexus-33q80 the engine's
+        # clearOrphanWal zeroes pages_extracted and chunks_uploaded in the
+        # same transaction as the wipe, so today's wipe leaves no stale
+        # counter behind. Rows stranded by an earlier engine or client
+        # (which left the counters up) can still exist: trusting the
+        # counters alone for such a row means a retry sees a row that
+        # CLAIMS full extraction with none of the underlying data, and
+        # silently skips re-extraction. Verify the actual WAL page count
+        # agrees with the claim before trusting the fast path — this
+        # self-heals those rows, not just future failures.
         # A COUNT (not an index-coverage check) is sound here only because
         # of two coupled invariants: clear_orphan_wal deletes ALL of a
         # content_hash's pdf_pages/pdf_chunks rows in one server-side
@@ -135,12 +246,15 @@ def extractor_loop(
         # partial/selective clear_orphan_wal, or out-of-order/sparse page
         # writes), this guard must switch to actually verifying index
         # coverage (e.g. the max page_index present), not just a count.
-        actual_pages = len(db.read_pages(content_hash))
+        buffered_rows = db.read_pages(content_hash)
+        actual_pages = len(buffered_rows)
         if actual_pages >= state["total_pages"]:
             stored_meta = json.loads(state["extraction_meta"])
             if extraction_done is not None:
                 extraction_done.set()
             return ExtractionResult(text="", metadata=stored_meta)
+        buffered_rungs, unknown_pages = _buffer_provenance(buffered_rows)
+        del buffered_rows
         # The claimed prefix isn't backed by real WAL data — the ENTIRE
         # claimed prefix is suspect (clear_orphan_wal is all-or-nothing
         # per content_hash), so fall through to a full re-extraction
@@ -152,33 +266,72 @@ def extractor_loop(
         # attempt did NOT complete cleanly — either a SIGKILL mid-stream
         # (WAL rows for the pages already written stay intact) or a
         # caught exception followed by pipeline_index_pdf's
-        # mark_failed + clear_orphan_wal (the WAL is wiped but
-        # pages_extracted survives it, per the nexus-gl99l comment above).
-        # pages_extracted alone cannot distinguish the two: verify against
+        # mark_failed + clear_orphan_wal (the WAL is wiped, and today's
+        # engine zeroes pages_extracted with it; a row stranded by an
+        # earlier engine can still hold the old counter, per the
+        # nexus-gl99l comment above).
+        # pages_extracted alone cannot distinguish the cases: verify against
         # the actual WAL before trusting it, exactly as the fast path
         # above does for the total_pages-set case. When the WAL still
         # backs the counter this is a no-op (actual_pages ==
-        # pages_extracted_at_start); when clear_orphan_wal wiped it, this
+        # pages_extracted_at_start); when a wipe left a stale counter, this
         # is what stops on_page from skipping pages the retry needs to
         # re-extract.
-        pages_extracted_at_start = len(db.read_pages(content_hash))
+        buffered_rows = db.read_pages(content_hash)
+        pages_extracted_at_start = len(buffered_rows)
+        buffered_rungs, unknown_pages = _buffer_provenance(buffered_rows)
+        del buffered_rows
+
+    #: Pages settled so far, as the counter counts them (a list so ``on_page`` can move it).
+    settled = [pages_extracted_at_start]
+    #: The rung each page settled on in THIS run, by 1-based page, skipped pages included.
+    run_rungs: dict[int, str] = {}
 
     def on_page(page_index: int, page_text: str, page_metadata: dict) -> None:
         if cancel.is_set():
             raise PipelineCancelled("pipeline cancelled")
+        run_rungs.update(_page_rungs(page_metadata, page_index))
         if page_index < pages_extracted_at_start:
             return
         db.write_page(content_hash, page_index, page_text, metadata=page_metadata)
         db.update_progress(content_hash, pages_extracted=page_index + 1)
+        settled[0] = max(settled[0], page_index + 1)
+
+    def on_heartbeat() -> None:
+        # RDR-237: called by the extractor at the start of every MinerU attempt and during its two
+        # waits, so a long attempt (up to 240 s) does not let the row go stale (5 min). The
+        # ladder holds some pages back from ``on_page``, so ``on_page`` alone is too sparse.
+        # It re-sends the counter the row already has, never a lower one. How it reaches the
+        # row's ``updated_at``: ``update_progress`` flushes at once only when no page or chunk is
+        # pending; while a batch is pending the write rides the next flush, which the chunker
+        # triggers about every 0.5 s through ``read_pages_from``. A stop is checked first, like
+        # ``on_page`` does, so a cancel ends a long wait; what this raises (PipelineCancelled,
+        # PipelineRunFenced from the flush) stops the extraction and never moves a page down a rung.
+        if cancel.is_set():
+            raise PipelineCancelled("pipeline cancelled")
+        db.update_progress(content_hash, pages_extracted=max(row_pages_extracted, settled[0]))
 
     ext = PDFExtractor()
     try:
         result = ext.extract(
             pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
-            allow_degraded=allow_degraded_extraction,
+            allow_degraded=allow_degraded_extraction, on_heartbeat=on_heartbeat,
         )
     except PipelineCancelled:
         return ExtractionResult(text="", metadata={"page_count": 0, "table_regions": []})
+
+    # RDR-237 provenance: a resumed run's pages came from the buffer, so the map and method
+    # describe those pages' own rungs, not only this run's attempt (nexus-q6nw0 item 6).
+    if unknown_pages and result.metadata.get("extraction_method") in (*_LADDER_METHODS, "pymupdf"):
+        # A buffered page whose row names no rung cannot be proven clean: say so, and the merge
+        # keeps the method at ``mineru+degraded`` rather than claim a clean ``mineru`` (or, for
+        # the text-only extractor, claim ``pymupdf`` for text that may be another extractor's).
+        _log.warning(
+            "resume_provenance_unknown", file_path=str(pdf_path), content_hash=content_hash,
+            buffered_rows_without_a_rung=len(unknown_pages), buffered_rows_with_a_rung=len(buffered_rungs),
+            first_pages_without_a_rung=sorted(unknown_pages)[:10],
+        )
+    _merge_buffered_provenance(result.metadata, run_rungs, buffered_rungs, unknown_pages)
 
     page_count = result.metadata.get("page_count", 0)
     db.update_progress(content_hash, total_pages=page_count)
@@ -889,6 +1042,86 @@ def uploader_loop(
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 
+def extraction_record(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The extraction fields the PDF catalog hook records, from an extraction result's metadata.
+
+    ``extraction_method`` is the document-level value (``mineru``, ``mineru+degraded``,
+    ``pymupdf``, or a legacy one), ``""`` when the extractor named none. ``extraction_pages`` is
+    the rung-to-sorted-1-based-pages map of the pages that settled below rung 1, ``{}`` when none
+    did or the extractor reports no map (a non-ladder extractor): the hook writes it on EVERY
+    extraction, because the catalog merge never removes a key and so a clean re-extract can clear
+    an old map only by replacing it with ``{}`` (RDR-237).
+    """
+    meta = metadata or {}
+    raw = meta.get("extraction_pages")
+    pages: dict[str, list[int]] = {}
+    if isinstance(raw, Mapping):
+        for rung, nums in raw.items():
+            kept: list[int] = []
+            for p in nums if isinstance(nums, (list, tuple, set, frozenset)) else ():
+                # A page is a real integer. The streaming caller runs this outside any try, after
+                # all the work is done, so a malformed entry is skipped and named, never raised.
+                if isinstance(p, int) and not isinstance(p, bool):
+                    kept.append(p)
+                else:
+                    _log.warning("extraction_record_skipped_a_malformed_page", rung=str(rung), page=repr(p))
+            if kept:
+                pages[str(rung)] = sorted(kept)
+            elif nums:
+                _log.warning("extraction_record_skipped_a_malformed_rung", rung=str(rung), pages=repr(nums))
+    return {"extraction_method": str(meta.get("extraction_method") or ""), "extraction_pages": pages}
+
+
+def _catalog_extraction_meta(extraction: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``meta`` keys one extraction record writes: ``extraction_pages`` always (``{}`` when
+    clean), ``extraction_method`` only when the extractor named one."""
+    meta: dict[str, Any] = {"extraction_pages": dict(extraction.get("extraction_pages") or {})}
+    if extraction.get("extraction_method"):
+        meta["extraction_method"] = str(extraction["extraction_method"])
+    return meta
+
+
+def record_pdf_extraction_on_document(
+    doc_id: str, pdf_path: Path, collection_name: str, extraction: Mapping[str, Any],
+) -> None:
+    """Record an extraction on an already-registered catalog document (``nx index repo``, RDR-237).
+
+    The repo indexer registers every file, PDFs included, in its catalog pass before it chunks
+    anything, so unlike :func:`_catalog_pdf_hook` there is no row to find or register: *doc_id* is
+    the document's tumbler. The merge is the same ``meta`` update (``extraction_pages`` written
+    whole, ``{}`` included, so a clean re-extract clears an old map). It never raises: an empty
+    *doc_id* or a failed write logs ``catalog_pdf_extraction_not_recorded`` (``reason``
+    ``repo_indexer_no_document`` or ``repo_indexer_update_failed``) naming the file.
+    """
+    meta = _catalog_extraction_meta(extraction)
+
+    def _not_recorded(reason: str, **extra: Any) -> None:
+        _log.warning(
+            "catalog_pdf_extraction_not_recorded", reason=reason, file_path=str(pdf_path),
+            doc_id=doc_id, collection=collection_name,
+            extraction_method=meta.get("extraction_method", ""),
+            extraction_pages=meta["extraction_pages"], **extra,
+        )
+
+    if not doc_id:
+        _not_recorded("repo_indexer_no_document")
+        return
+    writer = None
+    try:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        writer = make_catalog_writer()
+        if writer is None:
+            _not_recorded("no_catalog_writer")
+            return
+        writer.update(doc_id, meta=meta)
+    except Exception as exc:  # noqa: BLE001 - best-effort: the PDF is indexed either way; named, not raised
+        _not_recorded("repo_indexer_update_failed", error=str(exc))
+    finally:
+        if writer is not None:
+            writer.close()
+
+
 def _catalog_pdf_hook(
     pdf_path: Path,
     collection_name: str,
@@ -898,10 +1131,49 @@ def _catalog_pdf_hook(
     corpus: str = "",
     chunk_count: int = 0,
     source_uri: str = "",
+    extraction: Mapping[str, Any] | None = None,
 ) -> None:
-    """Register PDF document in catalog after successful indexing. Silently skipped if absent."""
+    """Register PDF document in catalog after successful indexing. Silently skipped if absent.
+
+    *extraction* (RDR-237, :func:`extraction_record`) is merged into the catalog document's
+    ``meta`` on BOTH branches, the update of an existing row and the registration of a new one
+    (and the update that follows a registration which resolved onto an existing row, because the
+    engine's register returns that row untouched). ``extraction_pages`` is always written, ``{}``
+    when clean. ``None`` writes nothing.
+
+    Runs that record NO extraction metadata, each with a ``catalog_pdf_extraction_not_recorded``
+    warning that names the document (``reason`` says which):
+
+    - ``no_catalog_reader``: no catalog is reachable (the SQLite opt-out mode, uninitialised).
+    - ``ephemeral_path``: a NEW registration of a file under an agent worktree or system temp
+      directory is refused (an existing row is updated, so it is recorded). The refusal needs an
+      owner with a non-ephemeral ``repo_root``; the curator owners PDFs register under have none,
+      so for them this exit is not reached (``should_skip_ephemeral_registration``'s KNOWN
+      RESIDUAL), and the warning is the net if that changes.
+    - ``hook_failed``: any error in the hook; it is swallowed (the PDF is indexed either way).
+
+    ``nx index repo`` does not call this hook (the repo indexer registers its files in its own
+    catalog pass); it records through :func:`record_pdf_extraction_on_document`, whose own
+    warnings are ``repo_indexer_no_document`` and ``repo_indexer_update_failed``.
+
+    The callers add their own: the streaming pipeline and ``index_pdf`` do not call the hook on a
+    dry run, and ``index_pdf``'s batch-path wrapper logs ``register_in_catalog_raised``.
+    """
     reader = None
     writer = None
+    # Bound before the try so the except handler always has a name to log (resolve() can raise).
+    file_path_str = str(pdf_path)
+    extraction_meta = _catalog_extraction_meta(extraction) if extraction is not None else None
+
+    def _not_recorded(reason: str) -> None:
+        if extraction_meta is not None:
+            _log.warning(
+                "catalog_pdf_extraction_not_recorded", reason=reason,
+                file_path=file_path_str, source_uri=source_uri, collection=collection_name,
+                extraction_method=extraction_meta.get("extraction_method", ""),
+                extraction_pages=extraction_meta["extraction_pages"],
+            )
+
     try:
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
 
@@ -920,6 +1192,7 @@ def _catalog_pdf_hook(
         reader = make_catalog_reader()
         if reader is None:
             _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized (sqlite opt-out mode)")
+            _not_recorded("no_catalog_reader")
             return
         writer = make_catalog_writer()
         effective_title = title or pdf_path.stem
@@ -1002,6 +1275,11 @@ def _catalog_pdf_hook(
                 update_kwargs["author"] = author
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
+            if extraction_meta is not None:
+                # RDR-237: the service merges meta key by key (jsonb ||), never removing one, so
+                # a clean re-extract clears an old map only because extraction_pages is written
+                # whole here, {} included.
+                update_kwargs["meta"] = extraction_meta
             writer.update(existing.tumbler, **update_kwargs)
             # nexus-t952k (critique [24114] S1): logged AFTER the write, so
             # the claim "repointed" is only made once the row actually moved.
@@ -1044,6 +1322,7 @@ def _catalog_pdf_hook(
                 _record_ephemeral_registration_skip(
                     file_path_str, str(owner), reason="worktree_or_tempdir",
                 )
+                _not_recorded("ephemeral_path")
                 return
             # nexus-yzij1: the lookup above is owner-scoped (and the
             # source_uri leg missed, or there was no URI), so this mint can
@@ -1072,6 +1351,7 @@ def _catalog_pdf_hook(
                 source_mtime=source_mtime,
                 source_uri=source_uri,
                 with_created=True,
+                **({"meta": extraction_meta} if extraction_meta is not None else {}),
             )
             _created = created_from_register_result(_write_result)
             announce_cross_owner_mint(
@@ -1094,10 +1374,17 @@ def _catalog_pdf_hook(
                     target_collection=collection_name, file_path=file_path_str,
                     owner=owner,
                 )
+                if extraction_meta is not None:
+                    # RDR-237: register() returns an existing row untouched (the engine's
+                    # idempotency legs do not merge ``meta``), so the extraction record rides an
+                    # update, as on the ``existing`` branch above.
+                    writer.update(tumbler_from_register_result(_write_result), meta=extraction_meta)
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is
         # invisible to every catalog-routed query. WARNING + audit row.
-        _log.warning("catalog_pdf_hook_failed", exc_info=True)
+        _log.warning("catalog_pdf_hook_failed", file_path=file_path_str, source_uri=source_uri,
+                     collection=collection_name, exc_info=True)
+        _not_recorded("hook_failed")
         from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
 
         record_catalog_hook_failure(
@@ -1371,6 +1658,38 @@ def _release_interrupted_run(
         _log.warning("pipeline_interrupt_release_failed", content_hash=content_hash, exc_info=True)
         return False
     _log.info("pipeline_run_released_on_interrupt", content_hash=content_hash, reason=reason)
+    return False
+
+
+def _release_systemic_failure(db: HttpPipelineDB, content_hash: str, failure: MineruSystemicFailure) -> bool:
+    """Give the pipeline row back after the MinerU breaker tripped (RDR-237), buffer KEPT.
+
+    The failure says the install or the machine is failing, which says nothing about the
+    document, so the exit is :func:`_release_interrupted_run`'s and not
+    :func:`_mark_failed_and_reset_wal`'s: the row moves to ``failed``, the pipeline buffer is
+    not wiped, and the next run (after the install is repaired) does not write the buffered pages
+    again; MinerU still re-extracts every earlier page, so the buffer spares only the writes.
+    Chunks of earlier pages that already reached T3 stay there, as an interrupted run's do; no
+    catalog manifest is written for the document because the run never reaches the
+    tail. The recorded error names the failure class and the worker's last stderr line (the
+    exception's message). Never raises. Returns True when the engine fenced the write."""
+    try:
+        db.mark_failed(content_hash, error=str(failure))
+    except PipelineRunFenced as fenced:
+        _log.warning(
+            "pipeline_run_fenced_at_systemic_failure",
+            content_hash=content_hash, pipeline_id=fenced.pipeline_id,
+            run_epoch=fenced.run_epoch, current_epoch=fenced.current_epoch,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — boundary catch: the failure must propagate, not a /fail transport error
+        _log.warning("pipeline_systemic_failure_release_failed", content_hash=content_hash, exc_info=True)
+        return False
+    _log.warning(
+        "pipeline_run_released_on_systemic_failure",
+        content_hash=content_hash, failure_class=failure.failure_class,
+        stderr_line=failure.stderr_line, buffer="kept",
+    )
     return False
 
 
@@ -1821,6 +2140,12 @@ def pipeline_index_pdf(
                 # deterministic failure is wiped by the next run, which fails the same way with
                 # every stage stopped.
                 fenced = _release_interrupted_run(db, content_hash, interrupt, stage_error=first_exc)
+            elif isinstance(first_exc, MineruSystemicFailure):
+                # RDR-237: the MinerU install or machine is failing, not this document. Keep the
+                # buffer (a rerun skips the writes of the pages already buffered, though MinerU
+                # re-extracts them); wiping it would also redo those writes for a cause the PDF
+                # did not have.
+                fenced = _release_systemic_failure(db, content_hash, first_exc)
             else:
                 fenced = _mark_failed_and_reset_wal(db, content_hash, first_exc)
             # nexus-5xn3k.4: _fence_fail never raises, so first_exc propagation
@@ -1852,6 +2177,7 @@ def pipeline_index_pdf(
             # buffer written by an older version): "unverified", never "no pages".
             _pwt = _em.get("pages_with_text")
             extraction_stats["pages_with_text"] = list(_pwt) if _pwt is not None else None
+            extraction_stats.update(extraction_record(_em))
 
         # Resolve collection once for all post-passes (avoids repeated API calls).
         col = t3.get_or_create_collection(collection)
@@ -1866,10 +2192,15 @@ def pipeline_index_pdf(
         # Track post-pass success — pipeline data preserved on failure (nexus-pfmr).
         post_pass_ok = True
 
+        # nexus-ahm18: how many chunks the run uploaded, so a post-pass that selects none of them
+        # (a manifest that names none of this collection's chunks) fails loud instead of passing.
+        _uploaded_state = db.get_pipeline_state(content_hash)
+        _uploaded = int(_uploaded_state["chunks_uploaded"] or 0) if _uploaded_state else 0
+
         # 1. Metadata enrichment from ExtractionResult.
         if not _enrich_metadata_from_extraction(
             content_hash, extraction_result, pdf_path, t3, col, collection,
-            title_override=title_override,
+            title_override=title_override, doc_id=doc_id, dry_run=dry_run, chunks_uploaded=_uploaded,
         ):
             post_pass_ok = False
 
@@ -1884,7 +2215,10 @@ def pipeline_index_pdf(
                     return True
                 return False
 
-            if not _update_chunk_metadata(t3, col, collection, content_hash, _tag_table_page):
+            if not _update_chunk_metadata(
+                t3, col, collection, content_hash, _tag_table_page, doc_id=doc_id,
+                dry_run=dry_run, chunks_uploaded=_uploaded,
+            ):
                 post_pass_ok = False
 
         # 3. Stale chunk pruning: DELETED dead code (nexus-tbkk1). This used
@@ -1958,6 +2292,7 @@ def pipeline_index_pdf(
                 corpus=corpus,
                 chunk_count=total_chunks,
                 source_uri=source_uri,
+                extraction=extraction_record(_meta),
             )
 
             # RDR-089 document-grain chain — once per PDF boundary at the
@@ -2048,8 +2383,39 @@ def _enrich_metadata_from_extraction(
     collection: str,
     *,
     title_override: str = "",
+    doc_id: str,
+    dry_run: bool = False,
+    chunks_uploaded: int = 0,
 ) -> bool:
     """Post-pass: update chunk metadata with fields from ExtractionResult.
+
+    nexus-ahm18: the chunks to update are the ones the PDF's own manifest names
+    (*doc_id* -> ``get_manifest`` -> chash ids), never ``where content_hash=H``. A
+    chunk row's ``content_hash`` is the last writer's, so that where missed this
+    PDF's chunks another document had restamped and hit rows the PDF does not own.
+    Selection by manifest updates every chunk the PDF holds (a shared one included)
+    and no chunk it does not.
+
+    It does NOT make the values per-document, and it writes rows develop's selection
+    never reached. A row another document restamped between this PDF's upload and
+    this post-pass (its ``content_hash`` is not *content_hash*) is now written: its
+    ``title``, ``source_author`` and ``extraction_method`` are replaced by this PDF's
+    (the last-writer-wins limitation until those keys live in the catalog,
+    nexus-6pfgb.6, and the chunk-row keys are retired, nexus-6pfgb.27). Nothing else
+    is touched on such a row: no ``delete_keys`` (the co-owner's
+    ``quality_gate_overridden`` audit flag is never removed, and this PDF's own flag
+    is not set on it), and a key whose value here is empty is skipped, so a
+    co-owner's non-empty value is never blanked. A row that still carries this
+    PDF's hash is written in full (the empty strings, the flag's removal on a healthy
+    run), as develop wrote it. Each selected row's ``content_hash`` is read first
+    (one ``col.get(ids=...)`` per 300), then only keys are written, so the
+    nexus-w94eo merge race stays closed.
+
+    *doc_id* is keyword-required, so a caller states whether it has a document: an empty one
+    (``""``, a direct caller with no catalog identity) keeps the ``content_hash`` selection, as
+    does *dry_run* (a throwaway store with no catalog and nothing shared). On a real run with
+    *doc_id* a selection of no chunk while *chunks_uploaded* is positive fails the
+    post-pass (``post_pass_selected_no_chunks``): zero rows examined is not a pass.
 
     Resolves source_title (docling_title → pdf_title → filename) and
     source_author — matching the batch path in doc_indexer._pdf_chunks.
@@ -2106,33 +2472,163 @@ def _enrich_metadata_from_extraction(
         # landing between this read and this method's own write (another
         # post-pass, a concurrent frecency reindex) was silently discarded
         # the moment this method's copy-of-the-old-state committed over it.
-        # The engine's merge makes the read unnecessary — sending only
-        # `enrichment`'s keys leaves every other key (and any write that
-        # lands in between) untouched.
-        all_ids: list[str] = []
-        offset = 0
-        while True:
-            batch = _vector_with_retry(
-                col.get,
-                where={"content_hash": content_hash},
-                limit=300,
-                offset=offset,
+        # The engine's merge makes the read of the metadata unnecessary —
+        # sending only `enrichment`'s keys leaves every other key (and any
+        # write that lands in between) untouched. (nexus-ahm18: the only read
+        # left is each selected row's content_hash, to tell a row this PDF last
+        # wrote from one another document restamped; no metadata is written
+        # back from it.)
+        if doc_id and not dry_run:
+            chashes = list(dict.fromkeys(r.chash for r in _own_manifest_rows(doc_id, collection)))
+            stored = _stored_rows_by_id(col, chashes)
+            if not stored and _selected_nothing(
+                "enrich", doc_id, collection, content_hash, len(chashes), chunks_uploaded,
+            ):
+                return False
+            _warn_manifest_chunks_not_live("enrich", doc_id, collection, content_hash, chashes, stored)
+            own_ids = [c for c in chashes if c in stored and stored[c].get("content_hash") == content_hash]
+            other_ids = [c for c in chashes if c in stored and stored[c].get("content_hash") != content_hash]
+        else:
+            own_ids, other_ids = _throwaway_ids_by_content_hash(col, content_hash), []
+
+        if own_ids:
+            t3.update_chunks(
+                collection, own_ids, [enrichment] * len(own_ids), delete_keys=delete_keys,
             )
-            all_ids.extend(batch.get("ids", []))
-            if len(batch.get("ids", [])) < 300:
-                break
-            offset += 300
-
-        if not all_ids:
-            return True
-
-        t3.update_chunks(
-            collection, all_ids, [enrichment] * len(all_ids), delete_keys=delete_keys,
-        )
+        # Rows another document restamped: values only. No delete_keys, no empty value, and not
+        # quality_gate_overridden, which is this document's fact about its own rows.
+        shared = {k: v for k, v in enrichment.items() if k != "quality_gate_overridden" and v not in ("", None)}
+        if other_ids and shared:
+            t3.update_chunks(collection, other_ids, [shared] * len(other_ids))
         return True
     except Exception as exc:  # noqa: BLE001 - best-effort metadata enrichment; logged via log.warning, returns False
         _log.warning("metadata_enrichment_failed", content_hash=content_hash, error=str(exc))
         return False
+
+
+_MANIFEST_ID_BATCH = 300
+
+
+def _own_manifest_rows(doc_id: str, collection: str) -> list[ManifestRow]:
+    """nexus-ahm18: the rows of *doc_id*'s own manifest that belong to *collection*, in position order.
+
+    One ``get_manifest`` call. A row's own ``collection`` (nexus-kzso5) is honoured when the engine
+    sends it; ``None`` (a pre-field engine) is taken as this collection. A catalog-read failure
+    propagates: the post-passes turn it into a failed post-pass, which keeps the pipeline buffer for a
+    retry, never into a silent empty selection.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - circular-dep avoidance (nexus.catalog.factory)
+
+    reader = make_catalog_reader()
+    try:
+        rows = reader.get_manifest(doc_id)
+    finally:
+        reader.close()
+    return [
+        r for r in rows
+        if getattr(r, "chash", "") and getattr(r, "collection", None) in (None, "", collection)
+    ]
+
+
+def _stored_rows_by_id(col: Any, chashes: list[str]) -> dict[str, dict]:
+    """The stored metadata of the chunk rows *chashes*, by id, read in batches of 300.
+
+    A chash no row holds is absent from the result. A failing batch raises, before any write.
+    """
+    stored: dict[str, dict] = {}
+    for start in range(0, len(chashes), _MANIFEST_ID_BATCH):
+        batch = _vector_with_retry(
+            col.get,
+            ids=chashes[start:start + _MANIFEST_ID_BATCH],
+            include=["metadatas"],
+        )
+        stored.update(zip(batch.get("ids", []), batch.get("metadatas", [])))
+    return stored
+
+
+def _selected_nothing(
+    post_pass: str, doc_id: str, collection: str, content_hash: str, manifest_chunks: int, chunks_uploaded: int,
+) -> bool:
+    """True, after a loud warning, when a real run's post-pass selected no chunk although some were uploaded.
+
+    A manifest that names none of this collection's chunks (unreadable as empty, every row of another
+    collection, no row live) would otherwise pass having examined nothing, and the PDF would finish with
+    no title, author or extraction method and no signal (the nexus-moht0 vacuous-gate doctrine). The
+    caller turns True into a failed post-pass, which keeps the pipeline buffer for a retry. No chunk
+    uploaded (a zero-chunk PDF) is not this case.
+    """
+    if chunks_uploaded <= 0:
+        return False
+    _log.warning(
+        "post_pass_selected_no_chunks",
+        post_pass=post_pass, doc_id=doc_id, collection=collection, content_hash=content_hash,
+        manifest_chunks_in_collection=manifest_chunks, chunks_uploaded=chunks_uploaded,
+        remedy=_SELECTED_NO_CHUNKS_REMEDY,
+    )
+    return True
+
+
+_SELECTED_NO_CHUNKS_REMEDY = (
+    "a rerun resumes the kept pipeline buffer and fails this post-pass again; "
+    "`nx index pdf --force <path>` drops the buffer and re-extracts"
+)
+
+
+def _warn_manifest_chunks_not_live(
+    post_pass: str, doc_id: str, collection: str, content_hash: str, chashes: list[str], stored: dict[str, dict],
+) -> None:
+    """Warn, with the count, when some of the manifest's chunks have no live T3 row although others do.
+
+    The post-pass updates the rows that exist and passes; a manifest chash with no row (purged, or
+    never written) is otherwise dropped without a trace. (None live at all is the louder
+    ``post_pass_selected_no_chunks`` failure.)
+    """
+    missing = len(chashes) - len(stored)
+    if stored and missing > 0:
+        _log.warning(
+            "post_pass_manifest_chunks_not_live",
+            post_pass=post_pass, doc_id=doc_id, collection=collection, content_hash=content_hash,
+            manifest_chunks_in_collection=len(chashes), not_live=missing, live=len(stored),
+        )
+
+
+def _throwaway_ids_by_content_hash(col: Any, content_hash: str) -> list[str]:
+    """The ids of *content_hash*'s rows in a dry run's throwaway store.
+
+    The only place a post-pass still selects by ``content_hash``: a dry run has no catalog, so no
+    manifest to read, and its store holds nothing another document wrote, so the value cannot have
+    been restamped by a co-owner (nexus-ahm18).
+    """
+    ids: list[str] = []
+    offset = 0
+    while True:
+        batch = _vector_with_retry(
+            col.get,
+            where={"content_hash": content_hash},
+            limit=300,
+            offset=offset,
+        )
+        ids.extend(batch.get("ids", []))
+        if len(batch.get("ids", [])) < 300:
+            return ids
+        offset += 300
+
+
+def _own_labels_view(meta: dict, row: Any) -> dict:
+    """A copy of a chunk row's metadata whose labels are the document's own.
+
+    A chunk several documents hold has one T3 row, and its ``page_number`` / ``section_*`` are the
+    last writer's. The manifest row carries the label of this document's own position, and
+    ``labels_written`` says it is authoritative (an engine before the label columns, and a row
+    written before them, send ``labels_written`` false: the chunk row is then the only record, and
+    is used as it stands). Page 0 travels as null on the wire and means "not paged".
+    """
+    view = dict(meta)
+    if getattr(row, "labels_written", False):
+        view["page_number"] = row.page_number or 0
+        view["section_title"] = row.section_title or ""
+        view["section_type"] = row.section_type or ""
+    return view
 
 
 def _update_chunk_metadata(
@@ -2141,56 +2637,101 @@ def _update_chunk_metadata(
     collection: str,
     content_hash: str,
     update_fn: Callable[[dict], bool],
+    *,
+    doc_id: str,
+    dry_run: bool = False,
+    chunks_uploaded: int = 0,
 ) -> bool:
-    """Generic post-pass: query chunks by content_hash, apply update_fn to each.
+    """Generic post-pass: apply update_fn to each chunk of the document's own manifest.
 
-    Paginates the T3 query to handle documents with 300+ chunks.
+    nexus-ahm18: the chunks are the ones *doc_id*'s manifest names, read with one ``get_manifest``,
+    never ``where content_hash=H`` (the last writer's value on a shared row). Their rows are read by
+    id in batches of 300, and *update_fn* is handed each row's metadata with the document's own
+    labels laid over it (:func:`_own_labels_view`), so a position judged by page is judged by the
+    manifest's page for this document, not by the page a co-owner wrote on the shared row. A chunk
+    the manifest names at several positions is updated if any of them says so. The overlay is never
+    written: only the keys *update_fn* added or changed against that view are.
+
+    A row another document restamped since this PDF's upload (its ``content_hash`` is not
+    *content_hash*) is written where develop's selection never reached it, so the write there is
+    non-destructive: a position whose manifest row has no label (``labels_written`` false, every row
+    on engine 0.1.164) is skipped, since the only page it has is the co-owner's and a tag judged by
+    it would mark the co-owner's chunk with this document's table page; a key whose new value is
+    empty is skipped, so a co-owner's non-empty value is never blanked; nothing is deleted (no
+    caller deletes a key). A row that still carries *content_hash* behaves as it always did, the
+    chunk row's page being this document's own. Document-level keys written onto a shared row
+    still overwrite the co-owner's until they move to the catalog (nexus-6pfgb.6) and the chunk-row
+    keys are retired (nexus-6pfgb.27).
+
+    *dry_run* (a throwaway store with no catalog and nothing shared) selects by *content_hash*, as
+    does an empty *doc_id*, and has no manifest labels to overlay. On a real run with *doc_id* a
+    selection of no chunk while *chunks_uploaded* is positive fails the post-pass.
+
     Returns True on success, False on failure (nexus-f8it).
 
-    nexus-vhyar: *update_fn* mutates a copy of the row it was given, and only
-    the keys it added or changed are written. The engine merges, so the rest
-    of the row is untouched; writing the whole row back re-asserted every key
-    as it stood at read time over any write that committed in between (the
-    read-modify-write race nexus-w94eo removed from the enrichment post-pass).
-    A key *update_fn* deletes is not written and so not removed; no caller
-    deletes one today.
+    nexus-vhyar: only the keys *update_fn* added or changed are written. The engine merges, so the
+    rest of the row is untouched; writing the whole row back re-asserted every key as it stood at
+    read time over any write that committed in between (the read-modify-write race nexus-w94eo
+    removed from the enrichment post-pass). A key *update_fn* deletes is not written and so not
+    removed; no caller deletes one today.
     """
     try:
-        all_ids: list[str] = []
-        all_metas: list[dict] = []
-        offset = 0
-        while True:
-            batch = _vector_with_retry(
-                col.get,
-                where={"content_hash": content_hash},
-                include=["metadatas"],
-                limit=300,
-                offset=offset,
-            )
-            all_ids.extend(batch.get("ids", []))
-            all_metas.extend(batch.get("metadatas", []))
-            if len(batch.get("ids", [])) < 300:
-                break
-            offset += 300
+        # (chunk id, the manifest row whose labels judge it or None, the row's metadata, whether this
+        # document was the row's last writer)
+        selected: list[tuple[str, Any, dict, bool]] = []
+        if doc_id and not dry_run:
+            rows = _own_manifest_rows(doc_id, collection)
+            chashes = list(dict.fromkeys(r.chash for r in rows))
+            stored = _stored_rows_by_id(col, chashes)
+            selected = [
+                (r.chash, r, stored[r.chash], stored[r.chash].get("content_hash") == content_hash)
+                for r in rows if r.chash in stored
+            ]
+            if not selected and _selected_nothing(
+                "table_page", doc_id, collection, content_hash, len(chashes), chunks_uploaded,
+            ):
+                return False
+            _warn_manifest_chunks_not_live("table_page", doc_id, collection, content_hash, chashes, stored)
+        else:
+            all_ids: list[str] = []
+            all_metas: list[dict] = []
+            offset = 0
+            while True:
+                batch = _vector_with_retry(
+                    col.get,
+                    where={"content_hash": content_hash},
+                    include=["metadatas"],
+                    limit=300,
+                    offset=offset,
+                )
+                all_ids.extend(batch.get("ids", []))
+                all_metas.extend(batch.get("metadatas", []))
+                if len(batch.get("ids", [])) < 300:
+                    break
+                offset += 300
+            selected = [(cid, None, meta, True) for cid, meta in zip(all_ids, all_metas)]
     except Exception as exc:  # noqa: BLE001 - best-effort chunk-metadata query; logged via log.warning, returns False
-        _log.warning("chunk_metadata_query_failed", content_hash=content_hash, error=str(exc))
+        _log.warning("chunk_metadata_query_failed", content_hash=content_hash, doc_id=doc_id, error=str(exc))
         return False
 
-    ids_to_update: list[str] = []
-    updated_metas: list[dict] = []
-    for cid, meta in zip(all_ids, all_metas):
-        before = dict(meta)
-        if update_fn(meta):
-            delta = {k: v for k, v in meta.items() if k not in before or before[k] != v}
+    deltas: dict[str, dict] = {}
+    for cid, row, meta, own in selected:
+        if not own and not getattr(row, "labels_written", False):
+            continue  # the page on this row is the co-owner's: it cannot judge this document's chunk
+        view = _own_labels_view(meta, row) if row is not None else meta
+        before = dict(view)
+        if update_fn(view):
+            delta = {k: v for k, v in view.items() if k not in before or before[k] != v}
+            if not own:
+                delta = {k: v for k, v in delta.items() if v not in ("", None)}
             if delta:
-                ids_to_update.append(cid)
-                updated_metas.append(delta)
+                deltas.setdefault(cid, {}).update(delta)
 
-    if ids_to_update:
+    if deltas:
         try:
-            t3.update_chunks(collection, ids_to_update, updated_metas)
+            t3.update_chunks(collection, list(deltas), list(deltas.values()))
         except Exception as exc:  # noqa: BLE001 - best-effort chunk-metadata update; logged via log.warning, returns False
-            _log.warning("chunk_metadata_update_failed", count=len(ids_to_update), error=str(exc))
+            _log.warning("chunk_metadata_update_failed", count=len(deltas), error=str(exc))
             return False
     return True
 

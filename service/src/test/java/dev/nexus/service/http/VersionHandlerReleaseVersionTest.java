@@ -140,4 +140,23 @@ class VersionHandlerReleaseVersionTest {
         VersionHandler.appendNxAnswerStepsCapabilityField(body);
         assertThat(body.toString()).contains(",\"nx_answer_run_complete_supported\":true");
     }
+
+    // ── RDR-232 Phase 3 (nexus-jypmj.3.4): run_summary capability advertisement ──
+
+    @Test
+    void versionAdvertisesRunSummarySupportAsItsOwnFlag() {
+        // An independent flag, not folded into nx_answer_steps_supported or
+        // nx_answer_run_complete_supported: an engine that has /complete but not the
+        // column answers false, and a client that gated persistence on the older
+        // flags would send a summary an old engine drops without a word.
+        var body = new StringBuilder();
+        VersionHandler.appendNxAnswerRunSummaryCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"nx_answer_run_summary_supported\":true");
+
+        var steps = new StringBuilder();
+        VersionHandler.appendNxAnswerStepsCapabilityField(steps);
+        assertThat(steps.toString())
+            .as("the older flags' fragment is unchanged")
+            .doesNotContain("run_summary");
+    }
 }

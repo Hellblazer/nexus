@@ -11,8 +11,9 @@ aspect rows.
 Initial schemes (Phase 1):
 
 * ``file:///abs/path/to/file.md`` — disk read.
-* ``chroma://<collection>/<source-identifier>`` — chunk reassembly
-  from T3 by metadata-field match.
+* ``nx-note://<collection>/<source-identifier>`` — chunk reassembly
+  from T3 by metadata-field match (RDR-231: a note's stored identity;
+  the legacy ``chroma://`` spelling has no reader).
 * ``x-devonthink-item://<UUID>`` — macOS-only, resolves the UUID to
   a current filesystem path via the DEVONthink AppleScript bridge
   (osascript) and reads the file. Lets DT-managed PDFs survive
@@ -37,7 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import structlog
 
@@ -55,6 +56,7 @@ __all__ = [
     "HTTPS_STAT_MAX_ATTEMPTS",
     "HTTPS_STAT_RETRY_DELAYS_S",
     "HTTPS_STAT_TIMEOUT_S",
+    "NOTE_URI_SCHEME",
     "NX_REFERENCE_ETAG_CAPTURE_ENV",
     "ReadFail",
     "ReadFailReason",
@@ -64,7 +66,10 @@ __all__ = [
     "StatFail",
     "StatOk",
     "StatResult",
+    "canonical_note_uri",
     "capture_https_etag",
+    "is_note_uri",
+    "note_uri",
     "read_source",
     "record_https_etag",
     "staleness_signal",
@@ -87,14 +92,82 @@ HTTPS_ETAG_META_KEY = "https_etag"
 #: Collection prefixes whose ``uri_for`` identity routes to ``file://``
 #: (RDR-108: document identity is ``source_uri``, a filesystem path).
 #: Every other prefix (``knowledge__`` and any future one) routes to
-#: ``chroma://`` — the internal store_put-origin marker
-#: (``nexus.commands.catalog_cmds.reconcile_stale._STORE_PUT_URI_PREFIX``),
-#: unrelated to the retired ChromaDB dependency (RDR-155 P4b). Single
+#: ``nx-note://`` — the store_put-origin note identity (RDR-231; the
+#: ``chroma://`` spelling it replaced is residue under a file-routed
+#: collection; ``nx catalog backfill-source-uri`` re-derives it). Single
 #: source of truth so :func:`uri_for` and every caller that needs to
 #: know "does this collection get a file:// identity" (nexus-poigc's
 #: backfill candidate filter, nexus-r0kum's aspect-writer attribution
 #: guard) cannot silently diverge from each other.
 FILE_ROUTED_PREFIXES: tuple[str, ...] = ("rdr__", "docs__", "code__")
+
+
+#: RDR-231: the stored scheme of a note ``source_uri``. A note is
+#: ``nx-note://<collection>/<rest>`` where ``<collection>`` is not
+#: file-routed; the legacy ``chroma://`` spelling is still accepted on
+#: input (see :func:`canonical_note_uri`). The engine twin is
+#: ``dev.nexus.service.db.NoteUri``; both read
+#: ``service/src/test/resources/note-uri-corpus.json``.
+NOTE_URI_SCHEME: str = "nx-note://"
+
+_LEGACY_NOTE_SCHEME: str = "chroma://"
+_EXPORT_SCHEME: str = "nxexp://"
+
+
+def _collection_is_file_routed(after_scheme: str) -> bool:
+    """True when the first path segment of ``after_scheme`` (the text after
+    the scheme) starts with a :data:`FILE_ROUTED_PREFIXES` entry."""
+    segment = after_scheme.split("/", 1)[0]
+    return segment.startswith(FILE_ROUTED_PREFIXES)
+
+
+def is_note_uri(uri: str) -> bool:
+    """True for a stored-form note URI: ``nx-note://`` whose collection
+    segment is not file-routed. ``nx-note://docs__...`` is not a note.
+
+    Answers for the stored spelling only; a legacy ``chroma://`` value is
+    a note once :func:`canonical_note_uri` has rewritten it (the shared
+    corpus's ``is_note`` is ``is_note_uri(canonical_note_uri(u))``).
+    """
+    if not uri.startswith(NOTE_URI_SCHEME):
+        return False
+    return not _collection_is_file_routed(uri[len(NOTE_URI_SCHEME):])
+
+
+def note_uri(collection: str, rest: str, *, quote_rest: bool = False) -> str:
+    """Mint ``nx-note://<collection>/<rest>`` (RDR-231).
+
+    ``quote_rest=True`` percent-encodes ``rest`` with ``safe='/'``, the
+    form the transient read mints use; the stored mint keeps ``rest``
+    verbatim, as :func:`uri_for` does.
+    """
+    tail = quote(rest, safe="/") if quote_rest else rest
+    return f"{NOTE_URI_SCHEME}{collection}/{tail}"
+
+
+def canonical_note_uri(uri: str) -> str:
+    """The stored spelling of a note URI (RDR-231).
+
+    A legacy ``chroma://<c>/...`` with ``<c>`` not file-routed becomes
+    ``nx-note://<c>/...``; the same inside an export identity,
+    ``nxexp://<target>/chroma://<c>/...``. Everything else comes back
+    unchanged: file-routed ``chroma://rdr__...`` residue, ``nx-note://``,
+    ``file://``, ``https://`` and the empty string.
+    """
+    if uri.startswith(_LEGACY_NOTE_SCHEME):
+        rest = uri[len(_LEGACY_NOTE_SCHEME):]
+        if _collection_is_file_routed(rest):
+            return uri
+        return NOTE_URI_SCHEME + rest
+    if uri.startswith(_EXPORT_SCHEME):
+        slash = uri.find("/", len(_EXPORT_SCHEME))
+        if slash >= 0:
+            inner = uri[slash + 1:]
+            if inner.startswith(_LEGACY_NOTE_SCHEME):
+                rest = inner[len(_LEGACY_NOTE_SCHEME):]
+                if not _collection_is_file_routed(rest):
+                    return uri[: slash + 1] + NOTE_URI_SCHEME + rest
+    return uri
 
 
 _unanchored_relative_warned: set[str] = set()
@@ -134,8 +207,8 @@ def uri_for(
 
     Filesystem-backed collections (``rdr__/docs__/code__``) get a
     ``file://`` URI; everything else (``knowledge__`` and any future
-    prefix) gets ``chroma://`` with the literal source_path as the path
-    component. The chroma reader handles the title/source_path
+    prefix) gets ``nx-note://`` (via :func:`note_uri`) with the literal
+    source_path as the path component. The note reader handles the title/source_path
     identity-field fallback for knowledge collections internally
     (research-5, id 1014).
 
@@ -203,7 +276,7 @@ def uri_for(
             return "file://" + os.path.normpath(os.path.join(str(repo_root), source_path))
         _warn_unanchored_relative_once(collection, source_path)
         return None
-    return f"chroma://{collection}/{source_path}"
+    return note_uri(collection, source_path)
 
 
 # ── Result types ─────────────────────────────────────────────────────────────
@@ -344,7 +417,7 @@ def _read_file_uri(uri: str, **_kw: Any) -> ReadResult:
     )
 
 
-# ── chroma:// reader ─────────────────────────────────────────────────────────
+# ── nx-note:// reader ─────────────────────────────────────────────────────────
 
 
 def _gather_chroma_chunks_by_field(
@@ -518,7 +591,7 @@ def _gather_chroma_chunks_by_field(
     return ReadOk(
         text=text,
         metadata={
-            "scheme": "chroma",
+            "scheme": "nx-note",
             "collection": collection,
             "source_id": source_id,
             "identity_field": identity_field,
@@ -538,7 +611,7 @@ def _read_chroma_uri(
 ) -> ReadResult:
     """Reassemble a document from chroma chunks.
 
-    URI shape: ``chroma://<collection>/<source-identifier>``. Post
+    URI shape: ``nx-note://<collection>/<source-identifier>``. Post
     RDR-101 Phase 4 (nexus-o6aa.10.1), the ``<source-identifier>`` is
     resolved to the catalog-stable ``doc_id`` via the caller's
     ``doc_id_lookup`` projection, and the chunk lookup keys on
@@ -568,7 +641,7 @@ def _read_chroma_uri(
     # is present. ``removeprefix`` strips exactly one leading slash,
     # preserving any that are part of the source_path itself (e.g.,
     # ``/Users/.../paper.pdf`` round-trips intact when constructed as
-    # ``chroma://collection//Users/...``).
+    # ``nx-note://collection//Users/...``).
     source_id = unquote(parsed.path.removeprefix("/"))
     if not collection or not source_id:
         return ReadFail(
@@ -786,7 +859,7 @@ def _read_https_uri(
         and t3 is not None
     ):
         coll, src = chroma_hint
-        chroma_uri = f"chroma://{coll}/{src}"
+        chroma_uri = note_uri(coll, src, quote_rest=True)
         chroma_result = _read_chroma_uri(chroma_uri, t3=t3)
         if isinstance(chroma_result, ReadOk):
             return ReadOk(
@@ -794,7 +867,7 @@ def _read_https_uri(
                 metadata={
                     **chroma_result.metadata,
                     "https_uri": uri,
-                    "served_from": "chroma",
+                    "served_from": "nx-note",
                 },
             )
         # Chroma miss: fall through to live fetch.
@@ -1104,7 +1177,7 @@ def _read_obsidian_uri(
 
 _READERS: dict[str, Callable[..., ReadResult]] = {
     "file": _read_file_uri,
-    "chroma": _read_chroma_uri,
+    "nx-note": _read_chroma_uri,
     "nx-scratch": _read_scratch_uri,
     "https": _read_https_uri,
     "x-devonthink-item": _read_devonthink_uri,
@@ -1141,14 +1214,14 @@ def read_source(
     ``tenant["vault_root"]`` to resolve vault-relative paths.
 
     **Registered Python-side schemes** (all schemes currently in ``_READERS``):
-    ``file``, ``chroma``, ``nx-scratch``, ``https``, ``x-devonthink-item``,
+    ``file``, ``nx-note``, ``nx-scratch``, ``https``, ``x-devonthink-item``,
     ``obsidian``.
 
     **Where the readers run:** every scheme is read client-side, in this
     process.  The engine had a ``POST /v1/vectors/resolve`` route and a Java
-    resolver registry for ``chroma://`` and ``https://``; both were removed
+    resolver registry for note (``nx-note://``) and ``https://``; both were removed
     (nexus-3t0jv), so there is no server-side read of any scheme.  The
-    ``chroma`` and ``https`` readers serve the Python bridge's own
+    ``nx-note`` and ``https`` readers serve the Python bridge's own
     aspect-enrichment path (``commands/enrich.py``), which runs in the MCP
     process on the tenant's local machine where both local and network sources
     are reachable.
@@ -1211,7 +1284,7 @@ def read_source(
 #     obsidian://         — os.stat() on the resolved vault path
 #     x-devonthink-item:// — os.stat() on the dt_resolver path (macOS only)
 #     nx-scratch://       — scratch.get() existence check (no mtime on scratch)
-#     chroma://           — content-addressed; chash IS identity → staleness N/A
+#     nx-note://          — content-addressed; chash IS identity → staleness N/A
 #                          (always returns StatOk(current_mtime=None))
 #     https://            — HEAD + Last-Modified, DONE (nexus-oqenh leg 1):
 #                          a real HEAD request reads Last-Modified and parses
@@ -1259,7 +1332,7 @@ def read_source(
 class StatOk:
     """Source is reachable.  ``current_mtime`` is the POSIX float mtime of the
     source at the time of the stat, or ``None`` for schemes where a meaningful
-    mtime is unavailable (e.g. ``chroma://`` is content-addressed, ``nx-scratch``
+    mtime is unavailable (e.g. ``nx-note://`` is content-addressed, ``nx-scratch``
     lacks per-entry mtime).  When ``None``, ``staleness_signal`` returns
     ``'fresh'`` — absence of a mtime signal is treated as non-stale.
 
@@ -1482,9 +1555,9 @@ def _stat_scratch_uri(uri: str, *, scratch: Any = None, **_kw: Any) -> StatResul
 
 
 def _stat_chroma_uri(uri: str, **_kw: Any) -> StatResult:
-    """Stat a ``chroma://`` URI.
+    """Stat a ``nx-note://`` URI.
 
-    ``chroma://`` is content-addressed: the chash IS the identity, so the
+    ``nx-note://`` is content-addressed: the chash IS the identity, so the
     content cannot change out from under the reference — a chunk either
     exists with the recorded chash or it does not.  Staleness in the
     mtime sense does not apply; this handler always returns
@@ -1493,7 +1566,7 @@ def _stat_chroma_uri(uri: str, **_kw: Any) -> StatResult:
 
     Dangling detection (chunk deleted from T3) is handled by the resolve
     path at serving time, not here.  Phase B may add a lightweight
-    ``chroma://`` existence check if the serving layer needs it.
+    ``nx-note://`` existence check if the serving layer needs it.
     """
     # Content-addressed: mtime is N/A.  Return StatOk with None so
     # staleness_signal returns 'fresh' and the caller knows to defer to
@@ -1936,7 +2009,7 @@ _STAT_HANDLERS: dict[str, Callable[..., StatResult]] = {
     "obsidian":           _stat_obsidian_uri,
     "x-devonthink-item":  _stat_devonthink_uri,
     "nx-scratch":         _stat_scratch_uri,
-    "chroma":             _stat_chroma_uri,
+    "nx-note":            _stat_chroma_uri,
     "https":              _stat_https_uri,
 }
 
@@ -1978,7 +2051,7 @@ def stat_source(
 
     RDR-169 G6 split (inherits G3):
     - Python-side handlers: ``file``, ``obsidian``, ``x-devonthink-item``,
-      ``nx-scratch``, ``chroma`` (content-addressed → always fresh),
+      ``nx-scratch``, ``nx-note`` (content-addressed → always fresh),
       ``https`` (nexus-oqenh leg 1, DONE: real HEAD + Last-Modified stat;
       nexus-0ne1m, DONE: ETag fallback comparison — see ``_stat_https_uri``).
     - Java-side stat: still deferred, owned by nexus-oqenh (leg 2).
@@ -2023,7 +2096,7 @@ def staleness_signal(
 
     * ``'fresh'``    — ``StatOk`` and ``current_mtime is None`` and
                         ``etag_stale`` is not ``False`` (scheme has no
-                        meaningful mtime, e.g. ``chroma://``, ``nx-scratch://``)
+                        meaningful mtime, e.g. ``nx-note://``, ``nx-scratch://``)
                         OR ``StatOk`` and ``recorded_mtime >= current_mtime``
                         (source has not changed since the reference was recorded)
                         OR ``StatOk(current_mtime=None, etag_stale=False)``
@@ -2086,7 +2159,7 @@ def staleness_signal(
     current_mtime = stat_result.current_mtime
     if current_mtime is None:
         # nexus-0ne1m: the https:// ETag-only comparison path sets
-        # etag_stale explicitly; every other no-mtime scheme (chroma://,
+        # etag_stale explicitly; every other no-mtime scheme (nx-note://,
         # nx-scratch://) leaves it None, and absence of ANY signal is
         # treated as fresh, same as before.
         etag_stale = getattr(stat_result, "etag_stale", None)

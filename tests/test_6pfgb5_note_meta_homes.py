@@ -101,6 +101,12 @@ def _note_keys(doc) -> dict:
     return {k: doc.meta[k] for k in _KEYS if k in doc.meta}
 
 
+def _no_put_at(doc) -> dict:
+    """The entry's ``meta`` without ``put_at`` (nexus-6pfgb.15: every put stamps its own time, which
+    these pins, written for the four keys, do not compare)."""
+    return {k: v for k, v in doc.meta.items() if k != "put_at"}
+
+
 def test_two_notes_with_identical_text_each_keep_their_own_keys(cat):
     """The bead's pin: one chash, two titles, four different values each."""
     a, created_a = catalog_store_hook_tracked(
@@ -120,9 +126,9 @@ def test_an_unset_key_is_never_sent(cat):
     agent: the entry is as it was before."""
     for title, ttl in (("bare", None), ("zero", 0)):
         tumbler, _ = catalog_store_hook_tracked(title, _CHASH, _COLLECTION, ttl_days=ttl)
-        assert cat.docs[tumbler].meta == {"doc_id": _CHASH}
+        assert _no_put_at(cat.docs[tumbler]) == {"doc_id": _CHASH}
     only_tags, _ = catalog_store_hook_tracked("only-tags", _CHASH, _COLLECTION, tags="x")
-    assert cat.docs[only_tags].meta == {"doc_id": _CHASH, "tags": "x"}
+    assert _no_put_at(cat.docs[only_tags]) == {"doc_id": _CHASH, "tags": "x"}
 
 
 def test_a_reput_under_the_same_title_replaces_the_keys(cat):
@@ -147,7 +153,7 @@ def test_a_reput_that_leaves_a_key_unset_retracts_it(cat):
 def test_a_reput_that_changes_nothing_adds_no_unset_keys(cat):
     first, _ = catalog_store_hook_tracked("plain", _CHASH, _COLLECTION)
     catalog_store_hook_tracked("plain", "cd" * 32, _COLLECTION)
-    assert cat.docs[first].meta == {"doc_id": "cd" * 32}
+    assert _no_put_at(cat.docs[first]) == {"doc_id": "cd" * 32}
 
 
 def test_note_catalog_meta_returns_the_undo():
@@ -301,7 +307,7 @@ def test_a_minted_row_that_cannot_be_rolled_back_loses_the_failed_puts_keys(cat,
         out = _put("6pfgb5 minted refused", tags="never", category="x", ttl_days=7, source_agent="agent-m")
     assert out.status == note_write.NOT_LANDED and out.minted
     (doc,) = cat.docs.values()
-    assert doc.meta == {"doc_id": "", "tags": "", "category": "", "ttl_days": 0, "source_agent": ""}
+    assert _no_put_at(doc) == {"doc_id": "", "tags": "", "category": "", "ttl_days": 0, "source_agent": ""}
 
 
 def test_a_minted_row_that_cannot_be_rolled_back_after_an_unexpected_error_loses_the_keys(cat, no_row_lookup):
@@ -311,7 +317,7 @@ def test_a_minted_row_that_cannot_be_rolled_back_after_an_unexpected_error_loses
          pytest.raises(RuntimeError, match="boom"):
         _put("6pfgb5 minted boom", tags="never", ttl_days=7)
     (doc,) = cat.docs.values()
-    assert doc.meta == {"doc_id": "", "tags": "", "ttl_days": 0}
+    assert _no_put_at(doc) == {"doc_id": "", "tags": "", "ttl_days": 0}
 
 
 def test_a_put_note_that_fails_unexpectedly_leaves_the_old_keys(cat, no_row_lookup):
@@ -327,3 +333,42 @@ def test_a_put_note_that_fails_unexpectedly_leaves_the_old_keys(cat, no_row_look
     meta = cat.docs[first].meta
     assert meta["doc_id"] == before["doc_id"]
     assert (meta["tags"], meta["ttl_days"], meta.get("category", "")) == ("old", 7, "")
+
+
+# ── put_at: the note's own TTL clock (nexus-6pfgb.15) ────────────────────────────────────────
+
+
+def test_every_put_stamps_its_own_put_time_even_a_permanent_one(cat):
+    """put_at is the clock ttl_days counts from, and the marker that the catalog (not the shared chunk
+    row) holds this note's TTL. A permanent put must carry it too, or a sweep would take the note
+    for one put before the catalog held TTLs and judge it by whichever note wrote the row last."""
+    permanent, _ = catalog_store_hook_tracked("clock-permanent", _CHASH, _COLLECTION, put_at="2026-10-01T00:00:00+00:00")
+    timed, _ = catalog_store_hook_tracked("clock-timed", _CHASH, _COLLECTION, ttl_days=7, put_at="2026-10-02T00:00:00+00:00")
+    assert cat.docs[permanent].meta["put_at"] == "2026-10-01T00:00:00+00:00"
+    assert "ttl_days" not in cat.docs[permanent].meta
+    assert cat.docs[timed].meta["put_at"] == "2026-10-02T00:00:00+00:00"
+
+
+def test_a_put_without_a_given_time_stamps_now(cat):
+    from datetime import UTC, datetime  # noqa: PLC0415 - only this pin reads the clock
+
+    before = datetime.now(UTC)
+    tumbler, _ = catalog_store_hook_tracked("clock-now", _CHASH, _COLLECTION, ttl_days=1)
+    stamped = datetime.fromisoformat(cat.docs[tumbler].meta["put_at"])
+    assert before <= stamped <= datetime.now(UTC)
+
+
+def test_a_reput_restarts_the_clock_and_a_failed_one_restores_it(cat):
+    first, _ = catalog_store_hook_tracked(
+        "clock-reput", _CHASH, _COLLECTION, ttl_days=7, put_at="2026-10-01T00:00:00+00:00")
+    pre_call: dict = {}
+    again, _ = catalog_store_hook_tracked(
+        "clock-reput", "cd" * 32, _COLLECTION, ttl_days=7, put_at="2026-10-20T00:00:00+00:00",
+        pre_call_doc_id_out=pre_call)
+    assert again == first and cat.docs[first].meta["put_at"] == "2026-10-20T00:00:00+00:00"
+
+    restore_pre_call_stamp(
+        first, pre_call["doc_id"], "cd" * 32, pre_call.get("note_meta"), pre_call.get("note_meta_stamped"))
+
+    assert cat.docs[first].meta["put_at"] == "2026-10-01T00:00:00+00:00", (
+        "a put that did not land must not restart the old note's TTL")

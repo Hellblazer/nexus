@@ -16,9 +16,11 @@ import), plus the read-side and cleanup helpers ``mcp/core.py`` and
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -601,10 +603,21 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
 
 def resolve_knowledge_doc_for_chash(
     reader, chash: str, *, log_event: str, collection: str | None = None,
-    owner_collection: str | None = None,
+    owner_collection: str | None = None, title: str | None = None,
 ):
     """Resolve *chash* to the single store_put-origin catalog document it
     identifies, or ``None`` if there is no match or the match is ambiguous.
+
+    *title*, when given (``""`` included), restricts candidates to documents
+    whose ``title`` equals it, BEFORE the ambiguity count (nexus-6pfgb.31).
+    The put path passes it: a note's identity is (collection, title), so a put
+    reconciles only onto the note it names, and an untitled put only onto an
+    untitled one with an empty ``source_uri``, which every untitled put writes (one
+    that has a source_uri was registered some other way, by hand through ``catalog
+    register`` since nothing in the tree writes one, and is not an earlier untitled
+    put, nexus-6pfgb.33). Without it a put adopted whatever note held the text, rewrote
+    its source_uri and stamped its own ``ttl_days`` on it; with the filter after the count,
+    a titled note sharing the text would hide the put's own note as ambiguous.
 
     *collection*, when given, additionally restricts candidates to
     entries whose ``physical_collection`` equals it (nexus-bb6n2 round 2).
@@ -653,7 +666,11 @@ def resolve_knowledge_doc_for_chash(
     logs at WARNING — rather than acting on an arbitrary pick or every
     candidate: acting on the wrong one (or deleting/reconciling onto all of
     them) is a worse outcome than leaving one ghost row for the periodic
-    ``nx catalog gc`` sweep to reap.
+    ``nx catalog gc`` sweep to reap. One exception: an UNTITLED put
+    (``title == ""``) that finds several untitled candidates returns the
+    lowest tumbler, since untitled documents sharing the text are
+    interchangeable and treating them as ambiguous minted another on every
+    later untitled put (nexus-6pfgb.31).
 
     *log_event* names the calling site (e.g. ``"catalog_store_hook_dedup"``)
     so the ambiguity warning is attributable to dedup vs. delete-path vs.
@@ -684,6 +701,10 @@ def resolve_knowledge_doc_for_chash(
             entry is not None
             and entry.content_type == "knowledge"
             and not entry.file_path
+            and (title is None or entry.title == title)
+            # nexus-6pfgb.33: an untitled put reconciles only onto an earlier untitled put, which writes
+            # no source_uri; an untitled document that has one (a path-keyed import) is that path's.
+            and (title != "" or not entry.source_uri)
             and (collection is None or entry.physical_collection == collection)
             and (
                 owner_collection is None
@@ -692,6 +713,17 @@ def resolve_knowledge_doc_for_chash(
             )
         ):
             candidates.append(entry)
+    if len(candidates) > 1 and title == "":
+        # Several UNTITLED documents share the text (concurrent first untitled puts leave them: no unique
+        # index guards source_uri ""). They are interchangeable, and calling them ambiguous made every
+        # later untitled put mint another (2 -> 5 after 3 puts). Reconcile onto the lowest tumbler, the
+        # oldest. Only for the untitled put: it writes no source_uri, so the pick cannot collide with the
+        # live-source_uri index; a titled put stays ambiguous and finds its note by source_uri.
+        _log.warning(
+            f"{log_event}_duplicate_untitled",
+            chash=chash, candidate_count=len(candidates), tumblers=[str(c.tumbler) for c in candidates],
+        )
+        return min(candidates, key=lambda c: c.tumbler)
     if len(candidates) > 1:
         _log.warning(
             f"{log_event}_ambiguous_chash",
@@ -752,18 +784,21 @@ def _find_ghost_by_title(reader, owner, title: str):
 
 #: The note keys that have no catalog column, kept in the document's ``meta`` (nexus-6pfgb.5). The
 #: chunk row carries them too, but a chunk shared by two notes carries only the last writer's.
-NOTE_META_KEYS: tuple[str, ...] = ("tags", "category", "ttl_days", "source_agent")
+#: ``put_at`` (nexus-6pfgb.15) is the time of the note's last put: the clock its own ``ttl_days``
+#: counts from (:mod:`nexus.catalog.note_ttl`), and the marker that the catalog, not the shared
+#: chunk row, holds this note's TTL.
+NOTE_META_KEYS: tuple[str, ...] = ("tags", "category", "ttl_days", "source_agent", "put_at")
 
 #: What a note key reads as when it is unset: the retraction sentinel written over a key the entry held
 #: (catalog ``update`` has no meta delete-keys, so a written key cannot be removed). In catalog meta a
 #: ``ttl_days`` of 0 is that sentinel, not an accepted input (``put_note`` and ``write_note`` reject 0;
 #: the chunk row spells permanent as ``None``/absent): readers treat 0 and absent as permanent.
-_NOTE_META_UNSET: dict[str, Any] = {"tags": "", "category": "", "ttl_days": 0, "source_agent": ""}
+_NOTE_META_UNSET: dict[str, Any] = {"tags": "", "category": "", "ttl_days": 0, "source_agent": "", "put_at": ""}
 
 
 def note_catalog_meta(
     *, tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
-    prior: dict[str, Any] | None = None,
+    put_at: str = "", prior: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The note keys one put writes to its catalog entry's ``meta``, and what undoes them.
 
@@ -774,10 +809,15 @@ def note_catalog_meta(
     row, and a ``ttl_days`` of 7 that outlived a permanent re-put would expire the note. *revert* maps
     each written key to the value *prior* held (or the unset value), for
     :func:`restore_pre_call_stamp` when the write does not land.
+
+    *put_at* (nexus-6pfgb.15) is the time of this put, an ISO-8601 stamp. Every put sends it, so the
+    TTL clock of a re-put note restarts as the chunk row's does, and a failed put restores the old
+    stamp with the rest.
     """
     given: dict[str, Any] = {
         "tags": tags or "", "category": category or "",
         "ttl_days": ttl_days if ttl_days and ttl_days > 0 else 0, "source_agent": source_agent or "",
+        "put_at": put_at or "",
     }
     prior = prior or {}
     write: dict[str, Any] = {}
@@ -812,6 +852,7 @@ def catalog_store_hook_tracked(
     pre_call_doc_id_out: dict[str, Any] | None = None,
     error_out: dict[str, str] | None = None,
     tags: str = "", category: str = "", ttl_days: int | None = None, source_agent: str = "",
+    put_at: str | None = None,
 ) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
 
@@ -836,6 +877,13 @@ def catalog_store_hook_tracked(
     catalog — the Java service owns it; nexus-f1itv) — the schema
     funnel drops empty ``doc_id`` at the boundary.
 
+    A put never adopts, re-sources or re-keys another note (nexus-6pfgb.31): the
+    chash dedup considers only a document with this put's own *title* (an
+    untitled put: only an untitled one with no ``source_uri``, nexus-6pfgb.33), and every other holder of the text
+    stays as it was while the put mints a second document sharing the chunk.
+    A repeated untitled put reuses its untitled document (the lowest tumbler when several share
+    the text) and never overwrites a non-empty ``source_uri`` with an empty one.
+
     ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6;
     the FULL ``sha256(content)`` hex per RDR-180). It is consulted for legacy
     ``meta.doc_id`` dedup via :func:`resolve_knowledge_doc_for_chash`
@@ -850,9 +898,10 @@ def catalog_store_hook_tracked(
     regardless of chunk_count. When that also misses, a third,
     title-scoped lookup (:func:`_find_ghost_by_title`) reuses a
     pre-existing GHOST entry's tumbler instead of minting a duplicate
-    (GH #1370 Defect 4a; legacy rows registered before this fix carry
-    ``source_uri=""`` and are unreachable by the second lookup, so this
-    third one stays the reconciliation path for them). Only when all
+    (GH #1370 Defect 4a). A legacy row registered before that fix carries
+    ``source_uri=""``, which the second lookup cannot see: the first
+    lookup reaches it under its own title and heals its ``source_uri``
+    (nexus-6pfgb.31), and this third one is the path for a ghost. Only when all
     three lookups miss does the hook register a brand-new document —
     with the synthesized ``source_uri`` attached, so a LATER re-put finds
     it via the second lookup instead of falling through to this one.
@@ -871,7 +920,7 @@ def catalog_store_hook_tracked(
     nexus-bm8dd, so the reader's knowledge-collection identity field is
     *title* — this reuses that exact convention rather than forking a
     second one). Empty *title* synthesizes nothing (``source_uri=None``):
-    a title-less ``chroma://<collection>/`` URI would collapse every
+    a title-less ``nx-note://<collection>/`` URI would collapse every
     untitled document under one identity, which is worse than today's
     unlimited-duplicate behavior for that one case — so it is left
     exactly as before (nexus-39upx: legacy-duplicate collapse is a
@@ -903,6 +952,9 @@ def catalog_store_hook_tracked(
             ``pre_call_doc_id_out["note_meta"]`` carries what
             :func:`restore_pre_call_stamp` needs to put them back and
             ``["note_meta_stamped"]`` what this call wrote (its compare-and-set).
+        put_at: the time of this put, written with them as ``meta.put_at``, the clock the
+            note's own ``ttl_days`` counts from (nexus-6pfgb.15, :mod:`nexus.catalog.note_ttl`).
+            ``None`` (the default) stamps the current time; tests pass a fixed one.
         error_out: Optional out-parameter, like *pre_call_doc_id_out* (no
             return-shape change). The ``("", False)`` return does not say
             WHY; when it is returned, ``error_out["error"]`` names the
@@ -935,7 +987,7 @@ def catalog_store_hook_tracked(
             return "", False
 
         # nexus-sdp0u: stable, collection-scoped identity for this document.
-        # Reuses aspect_readers.uri_for's exact chroma:// convention (the
+        # Reuses aspect_readers.uri_for's exact nx-note:// convention (the
         # knowledge-collection identity field the reader already resolves
         # by is *title*, since these single-chunk callers carry no
         # source_path in chunk metadata post-RDR-102 D2) — one URI format,
@@ -945,12 +997,13 @@ def catalog_store_hook_tracked(
         # Computed BEFORE the chash dedup below (moved up at nexus-bb6n2
         # round 2) so a dedup HIT can stamp it too.
         source_uri = uri_for(collection_name, title) if title else None
+        put_at_stamp = put_at if put_at is not None else datetime.now(UTC).isoformat()
 
         def stamp_for(entry) -> dict[str, Any]:
             """The ``meta`` to merge into *entry* (``None`` for a brand-new row): the identity stamp
             and the note keys. Records the note keys' undo in ``pre_call_doc_id_out``."""
             write, revert = note_catalog_meta(
-                tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent,
+                tags=tags, category=category, ttl_days=ttl_days, source_agent=source_agent, put_at=put_at_stamp,
                 prior=(getattr(entry, "meta", None) or {}) if entry is not None else None)
             if pre_call_doc_id_out is not None and revert:
                 pre_call_doc_id_out["note_meta"] = revert
@@ -979,16 +1032,25 @@ def catalog_store_hook_tracked(
         # code path, no structural difference between "split" and
         # "unsplit" here. Docstring contract is (collection, title); a
         # cross-collection chash coincidence must never satisfy it.
+        #
+        # nexus-6pfgb.31: only a document with THIS put's title is a candidate
+        # (an untitled put: only an untitled one with no source_uri, nexus-6pfgb.33). The source_uri check below
+        # cannot say it for an untitled put (no source_uri of its own to compare)
+        # or for a legacy row (empty source_uri): such a put adopted a titled
+        # note, blanked or rewrote its source_uri and stamped its own ttl_days
+        # on it, and ``nx store expire`` retired a note its owner had made
+        # permanent. An untitled put of text a titled note holds mints an
+        # untitled document of its own sharing the chunk (RDR-108).
         existing = resolve_knowledge_doc_for_chash(
             reader, doc_id, log_event="catalog_store_hook_dedup",
-            collection=collection_name,
+            collection=collection_name, title=title,
         )
         # nexus-enej7: the same content under a DIFFERENT title is a second
         # document sharing the chunk (RDR-108), not a re-put of this one.
         # Reconciling onto it rewrote the first document's source_uri to the
         # new title and never registered the new one (shakeout 7.64.1 F1).
-        # Only a row with the same identity, or a legacy row with no
-        # source_uri to compare, reconciles here.
+        # The title filter above already holds that; this stays for the
+        # same-title row whose source_uri names another identity.
         if (
             existing is not None
             and source_uri is not None
@@ -1012,11 +1074,14 @@ def catalog_store_hook_tracked(
             # nexus-sdp0u ghost-reconcile fix-round below, could still
             # carry a stale/empty one).
             writer = make_catalog_writer()
+            # Send source_uri only when this put has one (nexus-6pfgb.31). An untitled put reconciles
+            # only onto a document with none (nexus-6pfgb.33), so this guards a case it cannot reach.
+            uri_field = {"source_uri": source_uri} if source_uri else {}
             writer.update(
                 existing.tumbler,
                 physical_collection=collection_name,
                 meta=stamp_for(existing),
-                source_uri=source_uri or "",
+                **uri_field,
             )
             return str(existing.tumbler), False
 
@@ -1115,9 +1180,13 @@ def catalog_store_hook_tracked(
             return str(ghost.tumbler), False
 
         # KNOWN RESIDUAL (nexus-n90xg): a legacy NON-ghost row (chunk_count
-        # > 0, source_uri="" — populated before nexus-sdp0u) is unreachable
-        # by all three lookups above, so its first post-fix re-put falls
-        # through here and mints ONE bounded duplicate. That new document
+        # > 0, source_uri="" — populated before nexus-sdp0u) whose chash is
+        # no longer its put's chash (the row's meta.doc_id is stale, e.g. the
+        # note's text changed, or a pre-Phase-4 16-char id) is unreachable by
+        # all three lookups above, so its first post-fix re-put falls
+        # through here and mints ONE bounded duplicate. A legacy row whose
+        # meta.doc_id still is the text's chash IS reached, by the first
+        # lookup, under its own title (nexus-6pfgb.31). The new document
         # carries the synthesized source_uri, so the second-and-later
         # re-puts converge onto it via by_source_uri. The legacy row itself
         # is collapsed by the nexus-n90xg one-shot backfill sweep, not here.
@@ -1451,13 +1520,17 @@ class TitleReap:
     *chashes* the chunks their manifests named, which the caller then asks
     T3 to delete; *failures* ``(tumbler, error)`` for any document left
     live; *held* the chunks of those failed documents, which the caller
-    must leave alone (no other path may reap a document this one refused).
+    must leave alone (no other path may reap a document this one refused);
+    *stale* ``(tumbler, title)`` of each lapsed note the TTL sweep left alone
+    because a chunk row of its own records a later put than its catalog TTL
+    keys do (nexus-6pfgb.30). Their chunks are in *held* too.
     """
 
     documents: tuple[tuple[str, str], ...]
     chashes: tuple[str, ...]
     failures: tuple[tuple[str, str], ...]
     held: tuple[str, ...] = ()
+    stale: tuple[tuple[str, str], ...] = ()
 
 
 def _is_title_reap_candidate(entry, title: str, collection: str) -> bool:
@@ -1552,52 +1625,213 @@ def reap_catalog_documents_by_title(
     if reader is None:
         return None
     writer = None
-    documents: list[tuple[str, str]] = []
-    reaped_chashes: dict[str, None] = {}
-    failures: list[tuple[str, str]] = []
-    held: dict[str, None] = {}
     try:
         entries = title_reap_candidates(reader, collection, title, list(chashes), present)
         if not entries:
             return TitleReap((), (), ())
         writer = make_catalog_writer()
-        for entry in entries:
-            tumbler = str(entry.tumbler)
-            rows = reader.get_manifest(tumbler)
-            original = [manifest_row_wire(r) for r in rows]
-            row_collection = entry.physical_collection or collection
-            try:
-                if original:
-                    writer.write_manifest(tumbler, [], collection=row_collection)
-            except Exception as exc:  # noqa: BLE001 — nothing changed; reported, the caller fails loud
-                _log.warning("catalog_title_reap_retract_failed", tumbler=tumbler, exc_info=True)
-                failures.append((tumbler, f"manifest not retracted ({type(exc).__name__}: {exc})"))
-                held.update(dict.fromkeys(r["chash"] for r in original))
-                continue
-            try:
-                writer.delete_document(entry.tumbler)
-            except Exception as exc:  # noqa: BLE001 — restore below; reported, the caller fails loud
-                _log.warning("catalog_title_reap_tombstone_failed", tumbler=tumbler, exc_info=True)
-                detail = f"not tombstoned ({type(exc).__name__}: {exc})"
-                if original:
-                    try:
-                        writer.write_manifest(tumbler, original, collection=row_collection)
-                    except Exception as restore_exc:  # noqa: BLE001 — named so the operator can repair it
-                        _log.error("catalog_title_reap_restore_failed", tumbler=tumbler, exc_info=True)
-                        detail += (
-                            f"; its manifest could NOT be restored ({type(restore_exc).__name__}) "
-                            f"and is empty: re-run the delete, or repair with nx catalog reconcile"
-                        )
-                failures.append((tumbler, detail))
-                held.update(dict.fromkeys(r["chash"] for r in original))
-                continue
-            documents.append((tumbler, title))
-            reaped_chashes.update(dict.fromkeys(r["chash"] for r in original))
-        return TitleReap(tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held))
+        return _reap_documents(reader, writer, entries, collection, title=title)
     finally:
         if writer is not None:
             writer.close()
         reader.close()
+
+
+def _reap_documents(
+    reader, writer, entries, collection: str, *, title: str = "",
+    still_due: Callable[[Any], bool] | None = None,
+    guard: Callable[[Any, list[str]], tuple[str, str] | None] | None = None,
+) -> TitleReap:
+    """Tombstone each of *entries*, retracting its own manifest first; the one note delete path
+    behind ``nx store delete --title`` and the TTL sweep (nexus-6pfgb.15).
+
+    All or nothing per document, as :func:`reap_catalog_documents_by_title` documents. A document
+    that cannot be reaped is left live and intact, named in ``failures``, and its chunks in ``held``.
+
+    *still_due*, when given, is asked of each document's entry freshly read just before its
+    retraction; a document that is gone, or for which it says no, is skipped untouched (not counted,
+    its chunks not returned). The TTL sweep passes it so a note re-put since the listing (made
+    permanent, or its clock restarted) is not retired from the stale entry. There is no
+    compare-and-set on the catalog, so this narrows the window to one read and does not close it.
+
+    *guard*, when given, is asked ``guard(fresh_entry, chashes)`` after *still_due* and before the
+    retraction, with the chashes of the document's manifest. It returns ``None`` to go ahead, or
+    ``(kind, detail)`` to leave the document untouched: ``"stale"`` (the TTL sweep found a chunk row
+    that records a later put than the catalog's TTL keys, nexus-6pfgb.30) is reported in ``stale``;
+    any other kind (``"unreadable"``: the rows could not be read, so the answer is unknown) is a
+    failure. Either way the document stays live and its chunks are held.
+    """
+    documents: list[tuple[str, str]] = []
+    reaped_chashes: dict[str, None] = {}
+    failures: list[tuple[str, str]] = []
+    held: dict[str, None] = {}
+    stale: list[tuple[str, str]] = []
+    for entry in entries:
+        tumbler = str(entry.tumbler)
+        fresh = entry
+        if still_due is not None:
+            fresh = reader.resolve_many([tumbler]).get(tumbler)
+            if fresh is None or not still_due(fresh):
+                continue
+        rows = reader.get_manifest(tumbler)
+        original = [manifest_row_wire(r) for r in rows]
+        if guard is not None:
+            verdict = guard(fresh, [r["chash"] for r in original])
+            if verdict is not None:
+                kind, detail = verdict
+                held.update(dict.fromkeys(r["chash"] for r in original))
+                if kind == "stale":
+                    stale.append((tumbler, getattr(entry, "title", "") or title))
+                else:
+                    failures.append((tumbler, detail))
+                continue
+        row_collection = entry.physical_collection or collection
+        try:
+            if original:
+                writer.write_manifest(tumbler, [], collection=row_collection)
+        except Exception as exc:  # noqa: BLE001 — nothing changed; reported, the caller fails loud
+            _log.warning("catalog_title_reap_retract_failed", tumbler=tumbler, exc_info=True)
+            failures.append((tumbler, f"manifest not retracted ({type(exc).__name__}: {exc})"))
+            held.update(dict.fromkeys(r["chash"] for r in original))
+            continue
+        try:
+            writer.delete_document(entry.tumbler)
+        except Exception as exc:  # noqa: BLE001 — restore below; reported, the caller fails loud
+            _log.warning("catalog_title_reap_tombstone_failed", tumbler=tumbler, exc_info=True)
+            detail = f"not tombstoned ({type(exc).__name__}: {exc})"
+            if original:
+                try:
+                    writer.write_manifest(tumbler, original, collection=row_collection)
+                except Exception as restore_exc:  # noqa: BLE001 — named so the operator can repair it
+                    _log.error("catalog_title_reap_restore_failed", tumbler=tumbler, exc_info=True)
+                    detail += (
+                        f"; its manifest could NOT be restored ({type(restore_exc).__name__}) "
+                        f"and is empty: re-run the delete, or repair with nx catalog reconcile"
+                    )
+            failures.append((tumbler, detail))
+            held.update(dict.fromkeys(r["chash"] for r in original))
+            continue
+        documents.append((tumbler, getattr(entry, "title", "") or title))
+        reaped_chashes.update(dict.fromkeys(r["chash"] for r in original))
+    return TitleReap(tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held), tuple(stale))
+
+
+def lapsed_note_documents(reader, collection: str, *, now: datetime) -> list:
+    """The live store_put-origin notes in *collection* whose own TTL has run out at *now*
+    (nexus-6pfgb.15).
+
+    Each is judged by its own catalog entry (:mod:`nexus.catalog.note_ttl`): ``meta.ttl_days``
+    counted from ``meta.put_at``. A chunk row's ``ttl_days`` and ``indexed_at`` are the last writer's
+    and are never read here. A note with ``ttl_days`` absent or ``0`` is permanent. Reads one catalog
+    listing of the collection, so the cost follows the collection's document count.
+    """
+    from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
+
+    return [
+        e for e in (reader.list_by_collection(collection) or [])
+        if e.content_type == "knowledge" and not e.file_path
+        and (e.physical_collection or collection) == collection
+        and note_ttl.lapsed(e.meta, e.indexed_at, now=now)
+    ]
+
+
+def reap_lapsed_note_documents(
+    collection: str, *, now: datetime,
+    row_reader: Callable[[list[str]], dict[str, dict]] | None = None,
+) -> TitleReap | None:
+    """Tombstone every note in *collection* whose own TTL has lapsed, each through the note delete
+    path of ``nx store delete --title`` (manifest retracted, then the document tombstoned; all or
+    nothing per note), and return what that did (nexus-6pfgb.15).
+
+    The caller then asks T3 to delete the returned ``chashes``; the engine's delete anti-join keeps
+    any chunk another live document still holds, so a co-owner keeps serving it. ``None`` when the
+    catalog is unavailable.
+
+    *row_reader*, when given, maps chashes to their chunk rows' metadata (a chash with no row is absent).
+    Before a lapsed note is retired its own rows are read through it, and the note is left alone,
+    its chunks held, when one records a put the catalog's TTL keys do not
+    (:func:`~nexus.catalog.note_ttl.catalog_ttl_stale`, nexus-6pfgb.30: a re-put by an older client, or a
+    writer that bypasses the catalog hook, leaves the catalog entry stale). If the rows cannot be read
+    the note is not retired and is reported as a failure: no read, no deletion.
+    """
+    from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return None
+    writer = None
+    try:
+        entries = lapsed_note_documents(reader, collection, now=now)
+        if not entries:
+            return TitleReap((), (), ())
+        writer = make_catalog_writer()
+        return _reap_documents(
+            reader, writer, entries, collection,
+            still_due=lambda e: note_ttl.lapsed(e.meta, e.indexed_at, now=now),
+            guard=None if row_reader is None else _row_guard(row_reader),
+        )
+    finally:
+        if writer is not None:
+            writer.close()
+        reader.close()
+
+
+def _row_guard(row_reader: Callable[[list[str]], dict[str, dict]]):
+    """The :func:`_reap_documents` guard of the TTL sweep: read the note's own chunk rows and refuse to
+    retire it when they show a put its catalog TTL keys do not (nexus-6pfgb.30)."""
+    from nexus.catalog import note_ttl  # noqa: PLC0415 — sibling module, deferred like the other catalog imports here
+
+    def guard(entry, chashes: list[str]) -> tuple[str, str] | None:
+        try:
+            rows = row_reader(chashes) if chashes else {}
+        except Exception as exc:  # noqa: BLE001 — fail closed: unknown is not "no later put"
+            _log.warning("catalog_ttl_guard_rows_unreadable", tumbler=str(entry.tumbler), exc_info=True)
+            return ("unreadable", f"its chunk rows could not be read ({type(exc).__name__}: {exc}), so a later put cannot be ruled out")
+        if note_ttl.catalog_ttl_stale(
+            entry.meta, entry.indexed_at, list(rows.values()),
+            owner_tumbler=entry.tumbler, owner_title=getattr(entry, "title", "") or "",
+        ):
+            return ("stale", "")
+        return None
+
+    return guard
+
+
+def live_note_owners(reader, collection: str, chashes: list[str]) -> dict[str, list]:
+    """``chash -> [CatalogEntry, ...]`` of the LIVE documents in *collection* (or ghosts, which have
+    none) whose manifests name each chash; a chash nobody holds maps to ``[]`` (nexus-6pfgb.15).
+
+    Unlike :func:`live_holders_of_chashes` this keeps the entries, so a caller can read each owner's
+    ``meta``, and it raises on a catalog failure: the expiry sweep must not treat "could not look"
+    as "no owner". A chash the wire rejects as not hex (a legacy id) owns nothing.
+    """
+    out: dict[str, list] = {c: [] for c in chashes}
+    if not chashes:
+        return out
+    page = 300
+    owners: dict[str, list] = {}
+    for i in range(0, len(chashes), page):
+        batch = chashes[i:i + page]
+        try:
+            owners.update(reader.docs_for_chashes(batch) or {})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 400:
+                raise
+            for chash in batch:  # one bad id 400s the whole batch: isolate it
+                try:
+                    owners.update(reader.docs_for_chashes([chash]) or {})
+                except httpx.HTTPStatusError as one:
+                    if one.response.status_code != 400:
+                        raise
+    tumblers = sorted({str(t) for ts in owners.values() for t in ts})
+    entries = reader.resolve_many(tumblers) if tumblers else {}
+    for chash, ts in owners.items():
+        out[chash] = [
+            entries[str(t)] for t in ts
+            if str(t) in entries and (entries[str(t)].physical_collection or "") in ("", collection)
+        ]
+    return out
 
 
 def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, list[tuple[str, str]]]:
@@ -1638,6 +1872,98 @@ def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, li
         return {}
     finally:
         reader.close()
+
+
+#: The rungs a document's ``extraction_pages`` map can name, in display order. Mirrors
+#: ``nexus.pdf_extractor._DEGRADED_METHODS``, which this module cannot import without pulling the
+#: extractor stack into ``nx store get``; ``tests/test_degraded_pages_line.py`` pins the two equal.
+_DEGRADED_RUNG_ORDER: tuple[str, ...] = ("mineru-no-formula", "pymupdf-text", "unextracted")
+
+
+def _clean_extraction_pages(raw: object) -> dict[str, list[int]]:
+    """A catalog ``meta['extraction_pages']`` value as ``{rung: [pages]}``, non-empty rungs only.
+    Anything malformed reads as ``{}``: this feeds a display line, never a decision."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[int]] = {}
+    for rung, pages in raw.items():
+        if isinstance(pages, list) and pages and all(isinstance(p, int) for p in pages):
+            out[str(rung)] = sorted(pages)
+    return out
+
+
+def format_degraded_pages(extraction_pages: dict[str, list[int]]) -> str:
+    """``mineru-no-formula 3,7; pymupdf-text 12``: the rungs in ladder order (an unknown rung
+    after them, by name), each with its sorted 1-based pages."""
+    known = [r for r in _DEGRADED_RUNG_ORDER if r in extraction_pages]
+    rest = sorted(r for r in extraction_pages if r not in _DEGRADED_RUNG_ORDER)
+    return "; ".join(f"{r} {','.join(str(p) for p in extraction_pages[r])}" for r in known + rest)
+
+
+def degraded_pages_for_chunk(
+    collection: str, chash: str, *, holders: list[tuple[str, str]] | None = None,
+) -> tuple[list[tuple[str, str, dict[str, list[int]]]], int]:
+    """``([(tumbler, title, extraction_pages), ...], holder_count)``: the live documents holding
+    chunk *chash* in *collection* whose catalog ``meta`` records degraded pages (RDR-237), and how
+    many documents hold it. Documents with no degraded page are left out of the list.
+
+    *holders* is the ``(tumbler, title)`` list :func:`live_holders_of_chashes` already returned for
+    this chunk (the MCP ``store_get`` has it); ``None`` looks it up. Best-effort like that
+    function: ``([], 0)`` when the catalog is unavailable or unreadable, so a catalog fault never
+    breaks a ``get``.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    try:
+        if holders is None:
+            holders = live_holders_of_chashes(collection, [chash]).get(chash, [])
+        if not holders:
+            return [], 0
+        reader = make_catalog_reader()
+        if reader is None:
+            return [], len(holders)
+        try:
+            entries = reader.resolve_many([t for t, _title in holders])
+        finally:
+            reader.close()
+        rows: list[tuple[str, str, dict[str, list[int]]]] = []
+        for tumbler, title in holders:
+            entry = entries.get(tumbler)
+            meta = getattr(entry, "meta", None) or {}
+            pages = _clean_extraction_pages(meta.get("extraction_pages"))
+            if meta.get("extraction_method") == "pymupdf":
+                # The explicit text-only extractor's map lists every page under its rung, so its
+                # ``pymupdf-text`` pages are its normal output, not a fall-back. Only the pages with
+                # no text layer are worth a "Degraded:" line. A mixture (mineru+degraded) keeps them.
+                pages.pop("pymupdf-text", None)
+            if pages:
+                rows.append((tumbler, title, pages))
+        return rows, len(holders)
+    except Exception:  # noqa: BLE001 — a display line is best-effort
+        # Warning, not debug: a fault here leaves "Extractor: mineru+degraded" with no Degraded
+        # line, which reads like "clean" or "never recorded".
+        _log.warning("degraded_pages_lookup_failed", collection=collection, chash=chash, exc_info=True)
+        return [], 0
+
+
+def degraded_pages_lines(
+    collection: str, chash: str, *, holders: list[tuple[str, str]] | None = None,
+) -> list[str]:
+    """The ``Degraded:`` lines ``nx store get`` and the MCP ``store_get`` print after ``Extractor:``:
+    one per document whose catalog record has degraded pages, ``[]`` when none does. A chunk held
+    by one document prints ``Degraded:   mineru-no-formula 3,7; pymupdf-text 12``; held by several,
+    each line is labelled with its document's title (its tumbler when it has none)."""
+    rows, holder_count = degraded_pages_for_chunk(collection, chash, holders=holders)
+    lines = []
+    for tumbler, title, pages in rows:
+        text = format_degraded_pages(pages)
+        lines.append(f"Degraded:   {title or tumbler}: {text}" if holder_count > 1 else f"Degraded:   {text}")
+    return lines
 
 
 def catalog_chashes_for_title(collection: str, title: str) -> list[list[str]]:

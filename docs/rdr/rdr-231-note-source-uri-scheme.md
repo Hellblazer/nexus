@@ -2,12 +2,12 @@
 title: "Note source_uri scheme: replace chroma:// with nx-note://"
 id: RDR-231
 type: Technical Debt
-status: draft
+status: accepted
 priority: low
 author: nexus_8f2
 reviewed-by: self
 created: 2026-10-23
-accepted_date:
+accepted_date: 2026-10-26
 related_issues: [nexus-t7fbb, nexus-ql5m5]
 ---
 
@@ -666,3 +666,7 @@ Sam, 2026-10-26, at the round 1 gate (`nexus_rdr/231-research-10`):
 - 2026-10-26: Round 1 fixes and Sam's rulings (Decisions 4 and 5): backfill confirmed; legacy rendering and the capability header dropped, old clients upgrade; re-home refuses a taken URI whole, the re-embed move rewrites and refuses per document, the aspect and highlight renames stay unchanged; Gap 2 split stored and transient mints and added `aspect_sql` (that hunk was left out of a85e22c93 and landed with the fix-check fixes); the three classifier predicates stated and unified; the route gate widened; deploy-topology assumption added.
 
 - 2026-10-26: Fix-check fixes (`nexus_rdr/231-fix-check-a85e22c93`): activation by nexus-1emxn choreography (b); `NOTE_URI_MIN_ENGINE_VERSION` refuses a note write to a lagging engine; the collection update rewrites a moved note's URI; the re-embed collision becomes a per-document skip; `recovery_bundle` link parse and residue counter stated; residue rewritten by `backfill-source-uri` after the deploy; the corpus agreement defined; the route-gate exempt list completed; citations refreshed.
+
+- 2026-10-26: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `344b73652`; critique `nexus_rdr/231-gate-critique-2026-10-26-r2`.
+
+- 2026-10-26: Accepted (Sam). The eight round 2 Significants are carried into the implementation beads, not edited here.

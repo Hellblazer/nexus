@@ -127,10 +127,37 @@ def test_prune_refuses_a_jdk_without_voyages_anchors(tmp_path: Path) -> None:
     assert run.returncode == 1 and "has no globalsignca [jdk]" in run.stderr
 
 
-def test_prune_refuses_a_jdk_that_names_none_of_the_dropped_roots(tmp_path: Path) -> None:
+def test_prune_passes_a_jdk_already_pruned_of_the_dropped_roots(tmp_path: Path) -> None:
+    # The CVE-2026-91403 pool sweep pruned these roots from every pool JDK (labrun-5rb), and patched
+    # GraalVM builds ship without them; a build on such a JDK reaches the end state with nothing to
+    # drop. engine-service-v0.1.166's mac-arm64 leg failed here before this (run 40588808885).
     roots = {a: s for a, s in _ROOTS.items() if a in KEEP or a.startswith("control")}
-    run = _run("prune", tmp_path / "out", _store(tmp_path / "src", roots))
-    assert run.returncode == 1 and "check the aliases against this JDK" in run.stderr
+    out = tmp_path / "out"
+    run = _run("prune", out, _store(tmp_path / "src", roots))
+    assert run.returncode == 0, run.stderr
+    assert "0 of 4 named roots dropped (already absent from this JDK)" in run.stdout
+    assert _aliases(out) == set(roots)
+
+
+def test_verify_passes_on_a_jdk_already_pruned_of_the_dropped_roots(tmp_path: Path) -> None:
+    roots = {a: s for a, s in _ROOTS.items() if a in KEEP or a.startswith("control")}
+    pruned_jdk = _store(tmp_path / "src", roots)
+    filler = bytes(range(256)) * 64
+    (tmp_path / "nexus-service").write_bytes(filler + b"".join(a.encode("ascii") + b"\0\0" + filler for a in KEEP))
+    run = _run("verify", tmp_path, pruned_jdk)
+    assert run.returncode == 0, run.stderr
+    assert "0 dropped roots absent, 2 required roots present" in run.stdout
+
+
+def test_verify_fails_on_a_pruned_jdk_that_keeps_a_distrusted_root_under_another_name(tmp_path: Path) -> None:
+    roots = {a: s for a, s in _ROOTS.items() if a in KEEP or a.startswith("control")}
+    roots["renamed-emsign"] = _ROOTS["emsignrootcag1 [jdk]"]
+    jdk = _store(tmp_path / "src", roots)
+    filler = bytes(range(256)) * 64
+    (tmp_path / "nexus-service").write_bytes(filler + b"".join(a.encode("ascii") + b"\0\0" + filler for a in KEEP))
+    run = _run("verify", tmp_path, jdk)
+    assert run.returncode == 1
+    assert "distrusted root renamed-emsign" in run.stderr
 
 
 _TRUSTED = """

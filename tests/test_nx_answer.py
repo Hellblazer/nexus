@@ -143,7 +143,7 @@ class TestMinConfidenceOverride:
             # miss path must kick in.
             return [_make_match(plan_id=1, confidence=0.45)]
 
-        async def fake_miss(question, scope="", max_steps=6):
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
             return _make_match(plan_id=0, confidence=None)
 
         plan_run_result = MagicMock()
@@ -179,7 +179,7 @@ class TestMinConfidenceOverride:
             captured.update(kwargs)
             return []
 
-        async def fake_miss(question, scope="", max_steps=6):
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
             return _make_match(plan_id=0, confidence=None)
 
         plan_run_result = MagicMock()
@@ -250,7 +250,7 @@ class TestMinConfidenceOverride:
             captured.update(kwargs)
             return []
 
-        async def fake_miss(question, scope="", max_steps=6):
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
             return _make_match(plan_id=0, confidence=None)
 
         plan_run_result = MagicMock()
@@ -1084,7 +1084,7 @@ class TestPlanRunTelemetry:
         def fake_match(question, **kwargs):
             return []
 
-        async def fake_miss(question, scope="", max_steps=6):
+        async def fake_miss(question, scope="", max_steps=6, **kwargs):
             return _make_match(plan_id=0, confidence=None)
 
         plan_run_result = MagicMock()
@@ -5056,6 +5056,10 @@ class TestContinuationGoLive:
         claude_dispatch_calls: list = []
 
         async def spy_claude_dispatch(prompt, schema, **kwargs):
+            if kwargs.get("operator") == "request_coverage_extract":
+                # nexus-jypmj.2.8: the request-coverage extraction is on by default and is not the operator
+                # path under test; it fails (outcome "error") and is not counted as an operator dispatch.
+                raise RuntimeError("the structured extraction is not under test")
             claude_dispatch_calls.append(prompt)
             return {"items": [], "rationale": []}
 
@@ -5092,7 +5096,8 @@ class TestContinuationGoLive:
         )
 
     @pytest.mark.asyncio
-    async def test_interleaved_prefix_llm_step_redispatches_on_fallback(self):
+    @pytest.mark.parametrize(("coverage_on", "redispatched_steps"), [(False, 1), (True, 2)])
+    async def test_interleaved_prefix_llm_step_redispatches_on_fallback(self, monkeypatch, coverage_on, redispatched_steps):
         """CR-Important-1 / critic-F1 (T2 [23951]/[23952], both
         reproduced live): an INTERLEAVED prefix (search->extract->search
         ->summarize, the RDR's own worked example) whose `extract` step
@@ -5108,6 +5113,8 @@ class TestContinuationGoLive:
         conflated with summarize's -- the terminal step only ever
         dispatches on the fallback's full run, a THIRD, unrelated
         dispatch this test must not miscount as a repeated `extract`."""
+        if coverage_on:
+            monkeypatch.setenv("NX_ANSWER_COVERAGE", "1")
         import logging
 
         import structlog
@@ -5211,7 +5218,14 @@ class TestContinuationGoLive:
             "the prefix's real extract StepRecord must be visible to "
             "the fallback-decision event"
         )
-        assert events[0]["fallback_redispatch_step_count"] == 1
+        # RDR-232 Phase 3 (nexus-jypmj.3.3): with the coverage check on (NX_ANSWER_COVERAGE=1; it is off by default)
+        # nx_answer hands the runner a coverage boundary, which assesses the terminal step's input before the cut. The
+        # summarize step's literal `content` is evidence it can read, so the prefix-only run made one assessment call
+        # (the unit-test guard refuses the live model, so it failed) and that call is a second billable record the
+        # fallback re-run pays for again. With the default (off) there is the extract step alone.
+        assert events[0]["fallback_redispatch_step_count"] == redispatched_steps, (
+            "the extract step" + (" plus the coverage assessment call" if coverage_on else "")
+        )
 
 
 class TestContinuationGoLiveMidPrefixFailure:
@@ -5689,6 +5703,7 @@ class TestAnswerShapeGate:
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
              patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp.core._get_catalog", return_value=None), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
             env = await nx_answer(question="why does RDR-160 route bge-768", structured=True)
@@ -5723,6 +5738,7 @@ class TestAnswerShapeGate:
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
              patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp.core._get_catalog", return_value=None), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
             text = await nx_answer(question="why does RDR-160 route bge-768")
@@ -5787,6 +5803,7 @@ class TestAnswerShapeGate:
              patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
              patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
              patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp.core._get_catalog", return_value=None), \
              patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
             t2_ctx.return_value.__enter__.return_value = db_stub
             env = await nx_answer(question="compare RDR-185 with RDR-197", structured=True)

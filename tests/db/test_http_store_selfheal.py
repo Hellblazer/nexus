@@ -457,7 +457,7 @@ def _aspect_record(**kwargs: Any) -> AspectRecord:
         "extracted_at": "2026-07-12T00:00:00.000000Z",
         "model_version": "claude-haiku-v1",
         "extractor_name": "scholarly-paper-v1",
-        "source_uri": "chroma://test-coll/doc.pdf",
+        "source_uri": "nx-note://test-coll/doc.pdf",
         "doc_id": "1.2.3",
         "salient_sentences": ["sentence one"],
     }

@@ -107,6 +107,11 @@ SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
         "tool-spill/hooks/",
         "tool-spill/.claude-plugin/plugin.json",
     ),
+    "conexus-prose-edit": (
+        "prose-edit/skills/",
+        "prose-edit/agents/",
+        "prose-edit/.claude-plugin/plugin.json",
+    ),
 }
 
 #: Flattened, for the checks that legitimately do not care which plugin owns a

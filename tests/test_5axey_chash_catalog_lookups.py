@@ -136,8 +136,10 @@ class TestDedupA1:
     def test_same_chash_legacy_row_without_source_uri_dedups(self, tmp_path, monkeypatch):
         """nexus-5axey's chash dedup, on the row shape it still serves: a
         legacy store_put document with no source_uri (pre nexus-sdp0u) has
-        no identity to compare, so a put of its content reconciles onto it
-        and stamps the new source_uri instead of minting a duplicate."""
+        no identity to compare, so a re-put of its content UNDER ITS OWN
+        TITLE reconciles onto it and stamps the new source_uri instead of
+        minting a duplicate. (nexus-6pfgb.31: under another title it is a
+        second document, see the next test.)"""
         from nexus.aspect_readers import uri_for
         from nexus.catalog.store_hook import catalog_store_hook_tracked
 
@@ -156,13 +158,40 @@ class TestDedupA1:
         assert count_documents() == 1
 
         tumbler, created = catalog_store_hook_tracked(
-            title="Renamed Doc", doc_id=chash, collection_name=collection,
+            title="Legacy Doc", doc_id=chash, collection_name=collection,
         )
 
         assert created is False
         assert tumbler == legacy
         assert count_documents() == 1
-        assert cat.resolve(legacy).source_uri == uri_for(collection, "Renamed Doc")
+        assert cat.resolve(legacy).source_uri == uri_for(collection, "Legacy Doc")
+
+    def test_same_chash_legacy_row_under_another_title_is_a_second_document(self, tmp_path, monkeypatch):
+        """nexus-6pfgb.31: this used to reconcile onto the legacy note, rewrite its source_uri and stamp
+        the put's keys (a ttl_days) on it. A note's identity is (collection, title)."""
+        from nexus.catalog.store_hook import catalog_store_hook_tracked
+
+        cat = _make_catalog(tmp_path)
+        chash = _chash("legacy-no-uri-content-2")
+        collection = "knowledge__test1__bge-base-en-v15-768__v1"
+        owner = cat.register_owner("knowledge", "curator")
+        legacy = str(cat.register(
+            owner, "Legacy Doc", content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": chash},
+        ))
+        seed_manifest_chunks(collection, [chash])
+        cat.append_manifest_chunks(legacy, [{"chash": chash, "position": 0}], collection=collection)
+        cat.resync_chunk_count_cache(legacy)
+
+        tumbler, created = catalog_store_hook_tracked(
+            title="Renamed Doc", doc_id=chash, collection_name=collection,
+        )
+
+        assert created is True
+        assert tumbler != legacy
+        assert count_documents() == 2
+        assert cat.resolve(legacy).title == "Legacy Doc"
+        assert not (cat.resolve(legacy).source_uri or "")
 
     def test_same_chash_different_collection_does_not_dedup(self, tmp_path, monkeypatch):
         """nexus-bb6n2 round 2: a chash match in a DIFFERENT collection

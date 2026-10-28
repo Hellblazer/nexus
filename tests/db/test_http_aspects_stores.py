@@ -79,7 +79,7 @@ def _make_aspect(**kwargs) -> AspectRecord:
         "extracted_at": "2025-01-01T00:00:00.000000Z",
         "model_version": "claude-haiku-v1",
         "extractor_name": "scholarly-paper-v1",
-        "source_uri": "chroma://test-coll/doc.pdf",
+        "source_uri": "nx-note://test-coll/doc.pdf",
         "doc_id": "1.2.3",
         "salient_sentences": ["sentence one"],
     }
@@ -184,6 +184,21 @@ class TestHttpDocumentAspectsStore:
     def test_get_by_doc_id_returns_none_on_404(self):
         store = self._store({"/v1/aspects/get_by_doc_id": (404, {})})
         assert store.get_by_doc_id("missing") is None
+
+    def test_get_by_doc_id_hands_its_timeout_to_the_request_and_defaults_to_the_clients(self):
+        """nexus-xho6c: a caller spending one budget over several reads clamps each read's timeout."""
+        seen: list[dict] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen.append(dict(request.extensions["timeout"]))
+            return httpx.Response(404, json={})
+
+        store = HttpDocumentAspectsStore(base_url="http://test", _token="tok")
+        store._client = httpx.Client(transport=httpx.MockTransport(handle))
+        assert store.get_by_doc_id("1.2.3", timeout=1.5, retry_read_timeout=False) is None
+        assert store.get_by_doc_id("1.2.3") is None
+        assert seen[0]["read"] == 1.5, "the per-call override reaches the request"
+        assert seen[1]["read"] != 1.5, "no override: the client-wide default, as before"
 
     def test_list_by_collection_returns_records(self):
         body_list = [
@@ -525,6 +540,28 @@ class TestHttpAspectQueue:
     def test_reclaim_stale_returns_count(self):
         store = self._queue({"/v1/aspects/queue/reclaim_stale": {"reclaimed": 3}})
         assert store.reclaim_stale(300) == 3
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({}, True),
+            ({"count_attempt": True}, True),
+            ({"count_attempt": False}, False),
+        ],
+    )
+    def test_reclaim_stale_posts_count_attempt(self, kwargs, expected):
+        # nexus-j67ix.3: the body always carries both keys; the stop sweep passes
+        # count_attempt=False so only the age-based sweep spends an attempt.
+        captured = {}
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"reclaimed": 2})
+
+        store = HttpAspectQueue(base_url="http://test", _token="tok")
+        store._client = httpx.Client(transport=httpx.MockTransport(handle_request))
+        assert store.reclaim_stale(0, **kwargs) == 2
+        assert captured["body"] == {"timeout_seconds": 0, "count_attempt": expected}
 
     def test_pending_count(self):
         store = self._queue({"/v1/aspects/queue/pending_count": {"count": 7}})

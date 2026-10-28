@@ -8,7 +8,6 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog, count_documents, only_document
 
-pytestmark = pytest.mark.t2_tenant
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +33,7 @@ def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
     return catalog_dir, ActiveCatalog()
 
 
+@pytest.mark.t2_tenant
 class TestPdfCatalogHook:
     def test_registers_pdf(self, tmp_path, monkeypatch):
         from nexus.pipeline_stages import _catalog_pdf_hook
@@ -103,6 +103,7 @@ class TestPdfCatalogHook:
         assert rows[0] == "docs__v2"
 
 
+@pytest.mark.t2_tenant
 class TestPdfCatalogHookPhysicalCollectionRepointLogging:
     """nexus-t952k half 2: the tail reconcile branch above already stamps
     ``physical_collection`` unconditionally on every re-index — it must
@@ -216,6 +217,7 @@ class TestPdfCatalogHookPhysicalCollectionRepointLogging:
         assert events == [], f"same-collection re-index must log nothing, got {cap}"
 
 
+@pytest.mark.t2_tenant
 class TestPdfCatalogHookTitleBackfill:
     """Mirror of nexus-ivzw8 for PDFs (papers/2512.11001.pdf, 2026-08-19).
 
@@ -305,3 +307,97 @@ class TestPdfCatalogHookTitleBackfill:
         assert only_document().title in ("attention-is-all", "Attention Is All")
         _catalog_pdf_hook(pdf_path=p, collection_name="knowledge__x", title="Attention Is All You Need")
         assert only_document().title == "Attention Is All You Need"
+
+
+# ── RDR-237 (nexus-tr1rj.3): the extraction record on the catalog document ───────────────────
+
+_DEGRADED = {"extraction_method": "mineru+degraded", "extraction_pages": {"mineru-no-formula": [3, 7], "pymupdf-text": [12]}}
+_CLEAN = {"extraction_method": "mineru", "extraction_pages": {}}
+
+
+def _meta() -> dict:
+    return dict(only_document().meta)
+
+
+class TestPdfCatalogHookNamesTheRunsThatRecordNothing:
+    """Every run on which the hook cannot write the extraction record logs one structured warning
+    that names the document and says why."""
+
+    def _warnings(self, cap, reason):
+        return [e for e in cap if e.get("event") == "catalog_pdf_extraction_not_recorded" and e.get("reason") == reason]
+
+    def test_no_catalog_reader(self, tmp_path, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.catalog import factory as _factory
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        monkeypatch.setattr(_factory, "make_catalog_reader", lambda: None)
+        with capture_logs() as cap:
+            _catalog_pdf_hook(
+                pdf_path=Path("/data/papers/rdr237-noreader.pdf"), collection_name="docs__v1",
+                title="Paper", source_uri="x-devonthink-item://U1", extraction=_DEGRADED,
+            )
+        (w,) = self._warnings(cap, "no_catalog_reader")
+        assert w["log_level"] == "warning"
+        assert w["file_path"].endswith("rdr237-noreader.pdf") and w["source_uri"] == "x-devonthink-item://U1"
+        assert w["extraction_pages"] == _DEGRADED["extraction_pages"], "the lost record is in the log"
+
+    def test_no_warning_when_there_was_no_extraction_to_lose(self, tmp_path, monkeypatch):
+        from structlog.testing import capture_logs
+
+        from nexus.catalog import factory as _factory
+        from nexus.pipeline_stages import _catalog_pdf_hook
+
+        monkeypatch.setattr(_factory, "make_catalog_reader", lambda: None)
+        with capture_logs() as cap:
+            _catalog_pdf_hook(pdf_path=Path("/data/papers/x.pdf"), collection_name="docs__v1", title="Paper")
+        assert not [e for e in cap if e.get("event") == "catalog_pdf_extraction_not_recorded"]
+
+
+class TestExtractionRecord:
+    """``extraction_record`` turns an extraction result's metadata into what the hook writes."""
+
+    def test_keeps_the_method_and_a_sorted_map(self):
+        from nexus.pipeline_stages import extraction_record
+
+        assert extraction_record({
+            "extraction_method": "mineru+degraded",
+            "extraction_pages": {"pymupdf-text": [12, 3], "mineru-no-formula": [7]},
+            "page_count": 12,
+        }) == {"extraction_method": "mineru+degraded",
+               "extraction_pages": {"pymupdf-text": [3, 12], "mineru-no-formula": [7]}}
+
+    def test_drops_empty_rungs_and_reads_a_missing_map_as_clean(self):
+        from nexus.pipeline_stages import extraction_record
+
+        assert extraction_record({"extraction_method": "mineru", "extraction_pages": {"unextracted": []}}) == {
+            "extraction_method": "mineru", "extraction_pages": {}}
+        # A non-ladder extractor reports no map: the record says "none degraded", never "unknown".
+        assert extraction_record({"extraction_method": "pymupdf_normalized"}) == {
+            "extraction_method": "pymupdf_normalized", "extraction_pages": {}}
+        assert extraction_record(None) == {"extraction_method": "", "extraction_pages": {}}
+        assert extraction_record({"extraction_pages": "garbage"}) == {"extraction_method": "", "extraction_pages": {}}
+
+    @pytest.mark.parametrize("bad_pages", [["x", 3], [None, 3], [4.5, 3], [True, 3], "3,4"])
+    def test_a_malformed_map_is_skipped_and_named_never_raised(self, bad_pages):
+        """The streaming caller runs this outside any try, after all the work is done."""
+        from structlog.testing import capture_logs
+
+        from nexus.pipeline_stages import extraction_record
+
+        with capture_logs() as cap:
+            rec = extraction_record({
+                "extraction_method": "mineru+degraded",
+                "extraction_pages": {"mineru-no-formula": bad_pages, "pymupdf-text": [12]},
+            })
+        assert rec["extraction_method"] == "mineru+degraded"
+        assert rec["extraction_pages"].get("pymupdf-text") == [12], "the well-formed rung survives"
+        if isinstance(bad_pages, str):
+            assert "mineru-no-formula" not in rec["extraction_pages"]
+            events = {e["event"] for e in cap}
+            assert events == {"extraction_record_skipped_a_malformed_rung"}
+        else:
+            assert rec["extraction_pages"]["mineru-no-formula"] == [3]
+            assert {e["event"] for e in cap} == {"extraction_record_skipped_a_malformed_page"}
+        assert all(e["log_level"] == "warning" for e in cap)

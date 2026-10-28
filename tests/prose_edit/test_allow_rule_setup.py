@@ -1,53 +1,120 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-ger02.28: the Setup section's allow rules match the work directories `tmpdir` makes.
+"""nexus-ger02.28, nexus-scmcs: the allow rules `brief.py setup` prints match the work directories `tmpdir` makes.
 
 Measured 2026-10-18 (T2 nexus/prose-edit-allow-rule-measurement-2026-10-18): default mode needs both a Read() and an
-Edit() rule on <realpath of the temp dir>/prose-edit-*/**, and a rule on a symlinked temp path never matches.
+Edit() rule on <realpath of the temp dir>/prose-edit-*/**, and a rule on a symlinked temp path never matches. Since the
+skill ships as a plugin (which cannot carry permission rules), `setup` computes the two rules and reports which ones the
+user settings lack; the skill shows them and never edits the file.
 """
+
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
-import re
-import subprocess
-import sys
 from pathlib import Path
 
 from tests.prose_edit.conftest import Prose
 from tests.prose_edit.test_brief import SKILL, brief_ok
 
 
-def _setup() -> str:
+def _setup_run() -> str:
     text = SKILL.read_text(encoding="utf-8")
-    start = text.index("\n## Setup\n")
-    return text[start:text.index("\n## ", start + 1)]
+    start = text.index("\n## Setup run\n")
+    end = text.find("\n## ", start + 1)
+    return text[start:] if end < 0 else text[start:end]
 
 
-def test_setup_names_both_rules_on_the_work_directory_glob() -> None:
-    setup = _setup()
-    assert '"Read(//<R>/prose-edit-*/**)"' in setup
-    assert '"Edit(//<R>/prose-edit-*/**)"' in setup
-    assert "~/.claude/settings.json" in setup
+def test_the_setup_run_shows_the_rules_for_user_settings_and_never_edits_them() -> None:
+    section = _setup_run()
+    assert "BRIEF setup" in section
+    assert "allow_rules.json" in section and "~/.claude/settings.json" in section
+    assert "Never edit that file yourself" in section
+    assert "`Read()`" in section and "`Edit()`" in section
 
 
-def test_the_documented_path_command_is_the_base_every_work_directory_sits_under(prose: Prose) -> None:
-    cmd = re.search(r"`(python3 -c '[^`]+')`", _setup())
-    assert cmd, "Setup must give the command that prints <R>"
-    code = cmd.group(1).split("'", 2)[1]
-    # TMPDIR reached through a symlink, as macOS's /var -> /private/var: the rule must name the target.
+def _symlinked_tmp(prose: Prose) -> tuple[Path, Path]:
+    # TMPDIR reached through a symlink, as macOS's /var -> /private/var: the rules must name the target.
     real = prose.tmp
     real.mkdir(parents=True, exist_ok=True)
     link = real.parent / "tmp-link"
     link.symlink_to(real, target_is_directory=True)
     prose.env["TMPDIR"] = str(link)
-    printed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
-                             env=prose.env).stdout.strip()
-    assert printed == os.path.realpath(real) and printed != str(link)
-    work = Path(dict(line.split("=", 1) for line in brief_ok(prose, "tmpdir", "--ready").strip().splitlines())["WORK"])
+    return real, link
+
+
+def _config_dir(prose: Prose) -> Path:
+    config = prose.tmp.parent / "claude-config"
+    config.mkdir()
+    prose.env["CLAUDE_CONFIG_DIR"] = str(config)
+    return config
+
+
+def test_the_printed_rules_name_the_real_temp_path_every_work_directory_sits_under(
+    prose: Prose,
+) -> None:
+    real, link = _symlinked_tmp(prose)
+    _config_dir(prose)
+    report = json.loads(brief_ok(prose, "setup"))
+    printed = os.path.realpath(real)
+    rules = [
+        f"Read(//{printed.lstrip('/')}/prose-edit-*/**)",
+        f"Edit(//{printed.lstrip('/')}/prose-edit-*/**)",
+    ]
+    assert report["allow_rules"] == {
+        "settings_found": False,
+        "missing": rules,
+        "json": {"permissions": {"allow": rules}},
+    }
+    work = Path(
+        dict(
+            line.split("=", 1)
+            for line in brief_ok(prose, "tmpdir", "--ready").strip().splitlines()
+        )["WORK"]
+    )
     try:
-        assert str(work.parent) == printed, "brief.py resolves the temp dir, so the rule must name the real path"
+        assert str(work.parent) == printed, (
+            "brief.py resolves the temp dir, so the rule must name the real path"
+        )
         rule_glob = "/" + printed.lstrip("/") + "/prose-edit-*/**"
         assert fnmatch.fnmatch(str(work / "brief.md"), rule_glob.replace("/**", "/*"))
-        assert not fnmatch.fnmatch(str(work / "brief.md"), str(link) + "/prose-edit-*/*")
+        assert not fnmatch.fnmatch(
+            str(work / "brief.md"), str(link) + "/prose-edit-*/*"
+        )
     finally:
         brief_ok(prose, "rmtmp", str(work))
+
+
+def test_setup_reports_only_the_rule_the_user_settings_lack(prose: Prose) -> None:
+    _symlinked_tmp(prose)
+    config = _config_dir(prose)
+    first = json.loads(brief_ok(prose, "setup"))["allow_rules"]["json"]["permissions"][
+        "allow"
+    ]
+    (config / "settings.json").write_text(
+        json.dumps(
+            {
+                "permissions": {"allow": [first[0], "Bash(ls:*)"]},
+                "env": {"CANARY_TOKEN": "canary-value-7f3a"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = (config / "settings.json").read_bytes()
+    out = brief_ok(prose, "setup")
+    report = json.loads(out)
+    # only the computed rules come back: nothing else in the file is printed, and the file is left as it was
+    assert "canary" not in out.lower() and "Bash(ls:*)" not in out
+    assert (config / "settings.json").read_bytes() == before
+    assert report["allow_rules"]["settings_found"] is True
+    assert report["allow_rules"]["missing"] == [first[1]]
+    assert report["t2"] == {"reachable": True}
+    assert set(report["exemplars"]) == {
+        "rdr",
+        "reference-doc",
+        "how-to",
+        "exploration-essay",
+        "changelog",
+        "commit-message",
+    }
+    assert report["genre_map"] == {"user": [], "repo": []}

@@ -133,10 +133,11 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
     # DT-sourced chunks spend the extra key — file chunks stay under the cap.
     "extraction_source",
     # nexus-1oguj: which PDF-extraction BACKEND actually produced this
-    # chunk's text (``docling`` | ``mineru`` | ``pymupdf_normalized``, or
-    # the honest degraded-aggregate ``mineru+docling-degraded`` when
-    # RDR-148 Gap 5's per-page OOM-degrade fired at least once for this
-    # document). Load-bearing for retroactively scoping extractor
+    # chunk's text (``docling`` | ``mineru`` | ``pymupdf`` | ``pymupdf_normalized``, or
+    # the honest degraded-aggregate ``mineru+degraded`` when any page settled
+    # below the first rung of RDR-237's per-page ladder; documents indexed
+    # before it carry ``mineru+docling-degraded`` for RDR-148 Gap 5's degrade
+    # to docling). Load-bearing for retroactively scoping extractor
     # regressions (e.g. nexus-gtltb's mineru-corruption blast radius) —
     # previously produced at extraction time and asserted in tests but
     # discarded before storage. Empty for non-PDF content_types
@@ -297,9 +298,10 @@ def normalize(raw: dict[str, Any], *, content_type: str) -> dict[str, Any]:
         normalised.pop("extraction_source", None)
 
     # Step 2d: drop the nexus-1oguj extraction_method key when empty.
-    # Only PDF chunks pass a real value (docling / mineru /
-    # pymupdf_normalized / mineru+docling-degraded); markdown/code/prose
-    # chunks never set it and must not spend a metadata slot on "".
+    # Only PDF chunks pass a real value (docling / mineru / pymupdf /
+    # pymupdf_normalized / mineru+degraded / legacy mineru+docling-degraded);
+    # markdown/code/prose chunks never set it and must not spend a metadata
+    # slot on "".
     if not normalised.get("extraction_method", ""):
         normalised.pop("extraction_method", None)
 
@@ -520,7 +522,10 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
                 "by a caller outside those two methods)"
             ),
         )
-    if not ttl or ttl <= 0:
+    # A row's ttl_days is whatever a writer stored. Anything that is not a plain positive number
+    # (a string, a list, a bool, NaN) or is past timedelta's range (10**10, inf, 1e300) is not a
+    # TTL that has lapsed: the expiry sweep must not abort on one bad row (nexus-6pfgb.15).
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not ttl or ttl <= 0:
         return False
     indexed_at = metadata.get("indexed_at", "")
     if not indexed_at:
@@ -529,6 +534,6 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
     try:
         idx_dt = datetime.fromisoformat(indexed_at)
         now_dt = datetime.fromisoformat(now_iso)
-    except (TypeError, ValueError):
+        return (now_dt - idx_dt) >= timedelta(days=ttl)
+    except (TypeError, ValueError, OverflowError):  # an unparseable or mixed naive/aware stamp, a ttl past timedelta
         return False
-    return (now_dt - idx_dt) >= timedelta(days=ttl)

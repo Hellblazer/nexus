@@ -131,7 +131,9 @@ from nexus.mcp import channel as _channel
 if TYPE_CHECKING:
     from nexus.plans.lifecycle_stream import LifecycleStream
     from nexus.plans.primary_evidence import NamedSourceResolution, PrimaryEvidence
+    from nexus.plans.request_coverage import RequestCoverage
     from nexus.plans.reserved_stream import ReservedStream
+    from nexus.plans.run_summary import RunSummaryRecorder
 
 #: Module logger for MCP tool handlers (nexus-yttqr). Read-path handlers return a
 #: string to the agent rather than raising; before returning an error they must
@@ -5556,8 +5558,9 @@ def store_put(
         description=(
             "Document title (recommended). Non-empty makes catalog identity "
             "stable: re-putting the same (collection, title) replaces the "
-            "document's manifest rather than duplicating it. Empty always "
-            "registers a new, untitled document."
+            "document's manifest rather than duplicating it. Empty "
+            "registers an untitled document; a repeated untitled put of the "
+            "same text reuses it, and it never adopts a titled note."
         ),
     )] = "",
     tags: Annotated[str, Field(description="Comma-separated tags.")] = "",
@@ -5597,8 +5600,9 @@ def store_put(
     - `collection` must be a bare subject area, never a placeholder or a
       pre-rendered four-segment/model-token name.
     - A non-empty `title` reconciles onto the existing (collection, title)
-      document instead of duplicating it; an empty title always creates a
-      new document.
+      document instead of duplicating it. An empty title registers an
+      untitled document; a repeated untitled put of the same text reuses
+      it, and it never adopts a titled note.
     - `ttl` accepts "Nd", "Nw", or "permanent" (default).
     """
     try:
@@ -5667,11 +5671,20 @@ def store_put(
         # the identity stamp it changed) so nx store put, nx memory promote
         # and the recovery import run the same sequence. This tool only words
         # the result.
-        outcome = put_note(
-            content=content, collection=col_name, title=title, tags=tags,
-            category=category, session_id=session_arg, source_agent=agent_arg,
-            ttl_days=ttl_days,
-        )
+        from nexus.errors import NoteUriEngineTooOldError  # noqa: PLC0415 — deferred import; only the refusal branch needs it
+
+        try:
+            outcome = put_note(
+                content=content, collection=col_name, title=title, tags=tags,
+                category=category, session_id=session_arg, source_agent=agent_arg,
+                ttl_days=ttl_days,
+            )
+        except NoteUriEngineTooOldError as exc:
+            # RDR-231 (nexus-bivz3.13): the serving engine cannot hold a note's nx-note:// URI. Raised
+            # before the register and the write, so nothing changed; the message carries the remedy.
+            # An expected refusal, worded here, not an MCP tool fault with a traceback.
+            _log.warning("mcp_store_put_note_uri_engine_too_old", error=str(exc))
+            return _fail(f"Error: store_put: {exc}")
         pieces = outcome.pieces
         doc_id = outcome.doc_id
         catalog_doc_id = outcome.catalog_doc_id
@@ -5905,6 +5918,7 @@ def store_get(
         # names the wrong note when two share this text and a deleted one
         # after its writer is removed. Asked by title, show that title;
         # asked by id, name the live documents holding the chunk.
+        holders: list[tuple[str, str]] | None = None  # None: not looked up (asked by title)
         if not looks_like_hash:
             title = doc_id
         else:
@@ -5918,7 +5932,7 @@ def store_get(
         indexed_at = (entry.get("indexed_at") or "")[:10]
         # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF
         # chunks now (docling/mineru/pymupdf_normalized, or the honest
-        # mixed aggregate mineru+docling-degraded) — display it when
+        # mixed aggregate mineru+degraded; legacy mineru+docling-degraded) — display it when
         # present. Absent for non-PDF chunks and for chunks indexed
         # before the fix shipped (new-writes-only, no backfill;
         # nexus-0qc4b — absence is "unknown", not "not mineru").
@@ -5939,6 +5953,12 @@ def store_get(
             lines.append(f"Indexed:    {indexed_at}")
         if extraction_method:
             lines.append(f"Extractor:  {extraction_method}")
+            # RDR-237: the pages the ladder settled below MinerU's first rung, read from the
+            # catalog document(s) holding this chunk (one line each). Reuses the holders looked up
+            # above; best-effort, so a catalog fault leaves the line out and `get` still answers.
+            from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+            lines.extend(degraded_pages_lines(col_name, entry["id"], holders=holders))
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         if also_titled:
@@ -7470,6 +7490,8 @@ def plan_save(
       evidence request: a plan that lists one in `required_bindings`,
       `optional_bindings` or `default_bindings`, or references it as
       `$name` in a step's args, is refused.
+    - An `answer_kind` key in `plan_json` is removed before the save, and
+      the reply says so: only seeded templates declare an answer kind.
     """
     try:
         if not query or not plan_json:
@@ -7526,6 +7548,18 @@ def plan_save(
                 f"Plan not saved: {embedded.ref} sits where the runner will not substitute it "
                 f"({embedded.reason})."
             )
+        # RDR-232 Phase 2 (nexus-jypmj.2.1): plan_save never writes an answer-kind declaration.
+        # Only the seed loader declares curated and only the nx_answer grow site declares grown,
+        # so an embedded key (valid, malformed or an unrelated one of the same name) is removed
+        # rather than stored or refused. A row saved here declares nothing and decodes unknown.
+        from nexus.plans.answer_kind import strip_declaration  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        plan_json_to_store = plan_json
+        _declaration_removed = False
+        if isinstance(parsed_plan, dict):
+            stripped_plan, _declaration_removed = strip_declaration(parsed_plan)
+            if _declaration_removed:
+                plan_json_to_store = json.dumps(stripped_plan)
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
         # _WRITE_OPS; the daemon serialises the write through its single WAL
         # writer, eliminating the "database is locked" races seen 2026-06-11).
@@ -7533,7 +7567,7 @@ def plan_save(
         row_id = _t2_index_write(
             lambda db: db.plans.save_plan(
                 query=query,
-                plan_json=plan_json,
+                plan_json=plan_json_to_store,
                 outcome=outcome,
                 tags=tags,
                 project=project,
@@ -7546,7 +7580,10 @@ def plan_save(
             tool="plan_save", tier="plan",
             project=project, target_title=query[:80],
         )
-        return f"Saved plan: [{row_id}] {query[:80]}"
+        saved = f"Saved plan: [{row_id}] {query[:80]}"
+        if _declaration_removed:
+            saved += " (answer_kind field removed: only seeded templates declare an answer kind)"
+        return saved
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("plan_save", e)
 
@@ -10041,9 +10078,16 @@ def _nx_answer_record_run(
     duration_ms: int,
     trace: bool,
     planner_cost_usd: float | None = None,
+    run_summary: "RunSummaryRecorder | None" = None,
+    summary_outcome: str = "recorded",
 ) -> None:
     """Persist one ``nx_answer_runs`` row (+ its ``step_records``, when any)
     via the telemetry store. Redacts when ``trace=False``.
+
+    *run_summary* (RDR-232 Phase 3, nexus-jypmj.3.5) is the call's summary recorder: when given, the run
+    summary rides on the same ``/record`` write (with the stamp that finds the row again), under the store's
+    capability rule, and the recorder is told what became of it. *summary_outcome* names the arm in the
+    summary (``planner_failure``, ``handoff``). ``None`` keeps this write exactly as it was.
 
     nexus-pyzk7: routes through ``telemetry.record_nx_answer_run`` (the
     service's POST /v1/telemetry/nx_answer_runs/record), not a raw
@@ -10072,16 +10116,55 @@ def _nx_answer_record_run(
     steps = step_records or []
     cost_usd = _run_cost_usd(steps, planner_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
+    summary = None
+    created_at = None
+    extra: dict[str, Any] = {}
+    if run_summary is not None:
+        summary = run_summary.prepare(
+            telemetry, outcome=summary_outcome, plan_id=plan_id, step_count=step_count,
+            duration_ms=duration_ms, cost_usd=cost_usd,
+        )
+        if summary is not None:
+            created_at = _utc_now_iso()
+            extra = {"run_summary": summary, "created_at": created_at}
     try:
         telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
             step_count=step_count, final_text=text, cost_usd=cost_usd,
-            duration_ms=duration_ms, steps=wire_steps,
+            duration_ms=duration_ms, steps=wire_steps, **extra,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
         # Best-effort, but warn once so a service-mode drop is visible (the call
         # sites also swallow; this makes the failure mode observable). nexus-pyzk7.
         _warn_telemetry_drop("nx_answer_runs", exc)
+        if run_summary is not None:
+            run_summary.settle(
+                telemetry, summary, question=q, created_at=created_at, sent=False, error=exc,
+                final_text=text, duration_ms=duration_ms, step_count=step_count,
+            )
+        return
+    if run_summary is not None:
+        run_summary.settle(
+            telemetry, summary, question=q, created_at=created_at, sent=summary is not None,
+            final_text=text, duration_ms=duration_ms, step_count=step_count,
+        )
+
+
+def _utc_now_iso() -> str:
+    """The instant a run record is stamped with, as ISO-8601 UTC (RDR-203: stamped once, before the first attempt)."""
+    from datetime import datetime, timezone  # noqa: PLC0415 — stdlib import deferred to call site
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _nx_answer_report_summary(telemetry: Any, *, ok: bool) -> "dict[str, Any] | None":
+    """The summary of an ``nx_answer_report`` row: the report's verdict and nothing about the run it reports
+    (the report cannot know that run's ``trace`` setting, so it carries no text at all). ``None`` when the
+    engine does not keep a run summary; the store would drop it anyway, this keeps the drop logged once."""
+    from nexus.plans.run_summary import RunSummaryRecorder  # noqa: PLC0415 — deferred; matches this module's convention
+
+    recorder = RunSummaryRecorder(trace=False, readback=False, kind="continuation_report")
+    return recorder.prepare(telemetry, outcome="report_ok" if ok else "report_failed", plan_id=None, step_count=0, duration_ms=0, cost_usd=None)
 
 
 #: Literal no-result texts the single-step reroute path can synthesize. Kept as
@@ -10215,6 +10298,89 @@ def _nx_answer_seconds_left(ceiling: float, deadline: float | None) -> float:
     return max(left, 0.0)
 
 
+def _nx_answer_split_kind_hint(
+    dimensions: dict[str, Any] | None,
+) -> "tuple[dict[str, Any] | None, Any]":
+    """``(dimensions, hint)``: the caller's answer-kind hint taken out of *dimensions* (RDR-232 Phase 2,
+    nexus-jypmj.2.2). ``dimensions`` is a hard superset filter over plans, and no plan carries an
+    ``answer_kind`` dimension, so the hint must not reach ``plan_match``; it is read by the request
+    coverage and nothing else. *dimensions* is returned untouched (same object) when it holds no hint."""
+    if not dimensions or "answer_kind" not in dimensions:
+        return dimensions, None
+    rest = {k: v for k, v in dimensions.items() if k != "answer_kind"}
+    hint = dimensions["answer_kind"]
+    return (rest or None), hint
+
+
+async def _nx_answer_request_coverage(
+    *,
+    question: str,
+    scope: str,
+    evidence_request: EvidenceRequest,
+    explicit_kind: object,
+    deadline: float | None,
+    trace: bool,
+) -> "RequestCoverage":
+    """Build the request's :class:`~nexus.plans.request_coverage.RequestCoverage` before ``plan_match``.
+
+    RDR-232 Phase 2 (nexus-jypmj.2.2): the result is reported (envelope, evidence diagnostics, one log event),
+    decides whether the T2 lifecycle stream is read, and its answer kind is the request kind the answer-kind
+    eligibility gate judges plan candidates by (nexus-jypmj.2.3; enforcing by default since nexus-jypmj.2.8, in
+    shadow when ``NX_ANSWER_KIND_ELIGIBILITY=0`` or the extraction below is off). The deterministic first pass
+    runs in-process and is timed on its own.
+    The structured extraction (``NX_ANSWER_STRUCTURED_EXTRACT``, on by default, ``0`` turns it off) makes at most one
+    direct dispatch under its own timeout, inside *deadline*, with its latency and cost in the coverage's
+    ``extraction`` report. Never raises: a failure leaves the first-pass result.
+    """
+    from dataclasses import replace  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.request_coverage import (  # noqa: PLC0415 — deferred; matches this module's convention
+        ExtractionReport,
+        derive_request_coverage,
+        extraction_enabled,
+        extraction_model,
+        extraction_timeout,
+        log_fields,
+        structured_extract,
+    )
+
+    started = time.monotonic()
+    coverage = derive_request_coverage(
+        question, scope=scope, evidence_request=evidence_request, explicit_kind=explicit_kind,
+    )
+    coverage = replace(coverage, derive_ms=int((time.monotonic() - started) * 1000))
+    if extraction_enabled(_os.environ):
+        left = _nx_answer_seconds_left(float("inf"), deadline)
+        timeout = min(extraction_timeout(_os.environ), left)
+        sink: list = []
+
+        async def _dispatch(prompt: str, schema: dict, *, timeout: float, usage_sink: list) -> dict:
+            from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — deferred; operator dispatch is a call-time import here
+
+            # dispatch spends its timeout once per phase (first byte, then the rest), so twice the setting in
+            # the worst case; an absolute deadline at now + timeout (or the answer's own, if sooner) holds the
+            # whole call to the timeout and lets dispatch's own kill path end the claude -p tree.
+            own = time.monotonic() + timeout
+            return await claude_dispatch(
+                prompt, schema, timeout=timeout, usage_sink=usage_sink,
+                model=extraction_model(_os.environ),  # always explicit: haiku unless the setting names another
+                operator="request_coverage_extract", deadline=own if deadline is None else min(own, deadline),
+            )
+
+        from nexus.operators.dispatch import _TIMEOUT_CLEANUP_GRACE_SECONDS  # noqa: PLC0415 — deferred, as above
+
+        coverage = await structured_extract(
+            coverage, question, dispatch=_dispatch, timeout=timeout, enabled=True, usage_sink=sink,
+            seconds_left=left, cleanup_grace=_TIMEOUT_CLEANUP_GRACE_SECONDS + 1.0,
+        )
+    else:
+        coverage = replace(coverage, extraction=ExtractionReport("disabled"))
+    # A logger fetched per call (as nx_answer does), so a test's log capture sees the event.
+    fields = _nx_answer_isolated("coverage_log", None, log_fields, coverage, trace=trace)
+    if fields is not None:
+        structlog.get_logger().info("nx_answer_request_coverage", **fields)
+    return coverage
+
+
 async def _nx_answer_evidence_request(
     *,
     bindings: dict[str, Any] | None,
@@ -10274,8 +10440,234 @@ async def _nx_answer_evidence_request(
         return build_evidence_request(bindings, scope=scope, name_lookup=_hung)
 
 
+def _nx_answer_source_stage_deadline(deadline: float | None) -> float:
+    """The one absolute ``time.monotonic()`` deadline the active-project stage and the named-source stage share
+    (nexus-jypmj.2.4): ``PrimaryEvidenceCaps.max_seconds`` from now, or the answer's own *deadline* if that is
+    sooner. Each stage bounds itself by what is left of it, so together they stay within one budget instead of
+    each taking a full ceiling."""
+    from nexus.plans.primary_evidence import DEFAULT_CAPS  # noqa: PLC0415 — deferred; matches this module's convention
+
+    ceiling = time.monotonic() + DEFAULT_CAPS.max_seconds
+    return ceiling if deadline is None else min(ceiling, deadline)
+
+
+def _nx_answer_settle_inference(request: EvidenceRequest, named: "NamedSourceResolution | None") -> EvidenceRequest:
+    """Make the envelope say what the resolver did with an inferred owner.
+
+    The active-project tier infers an owner BEFORE resolution. The resolver may set it aside: the project holds
+    no such number, its owner could not be probed, or the question's title pointed at another project's
+    document. If no source ended up resolved or ambiguous under it, the envelope must not go on saying the
+    owner was ``inferred`` and the tier ``applied`` (nexus-jypmj.2.4). Pure; the request comes back unchanged
+    unless an inference was made and no source kept it.
+    """
+    if request.owner.status != "inferred" or named is None or any(s.inferred for s in named.sources):
+        return request
+    from dataclasses import replace  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.evidence import OwnerResolution  # noqa: PLC0415 — deferred; matches this module's convention
+
+    tier = dict(request.active_project or {})
+    tier["applied"] = False
+    tier["reason"] = (
+        "the session's project was inferred and then set aside during resolution: it holds no such document, "
+        "its owner could not be checked, or the question's title pointed at another project's document "
+        "(each source's detail says which)"
+    )
+    return replace(request, owner=OwnerResolution("none"), active_project=tier)
+
+
+def _nx_answer_library_check(cache: Any) -> "Any":
+    """The plan library's builtin check (a ``BuiltinCheck``), or ``None`` when it cannot be known.
+
+    The rows are normally already in hand: the T1 plan cache examined them when it last populated (at most
+    90 s ago), so a request costs no T2 call. A request with no check from the cache (T1 unreachable, the
+    matcher then reads FTS5; or a cache that has not populated) lists the active plans, and that result is
+    reused for ``LIBRARY_CHECK_TTL_S`` (an unreadable one too), so a process without a cache does not list the
+    library on every request.
+    """
+    from nexus.plans.eligibility import BuiltinCheck, check_builtins, memoized_library_check  # noqa: PLC0415 — deferred; matches this module's convention
+
+    check = getattr(cache, "library_check", None)
+    if isinstance(check, BuiltinCheck):
+        return check
+
+    def _list_and_check() -> "Any":
+        try:
+            rows = _t2_index_write(lambda db: db.plans.list_active_plans(), op="plan_library_precondition")
+        except Exception as exc:  # noqa: BLE001 — a library that cannot be listed is "unreadable", and that is reused for the bound too
+            structlog.get_logger().warning("nx_answer_library_check_unreadable", error=type(exc).__name__)
+            return None
+        return check_builtins(rows) if isinstance(rows, list) else None
+
+    return memoized_library_check(_list_and_check)
+
+
+def _nx_answer_library_precondition(filt: Any, cache: Any) -> None:
+    """Run the answer-kind gate in shadow when the library holds a builtin without its declaration.
+
+    RDR-232 section 1: a builtin seeded before declarations existed is unattested until a reseed, and the gate
+    is not enabled before every builtin carries its declaration. Only an enforcing request is checked (a filter
+    already in shadow keeps its own ``shadow_reason`` and costs no lookup). Only builtin rows a reseed can fix
+    count, so an orphan the seed loader leaves in place cannot hold the library in shadow. A library that cannot
+    be read leaves the gate enforcing (the cost of an unreadable library is recall, not a wrong-shape answer)
+    and the envelope says ``library_check`` ``unreadable``. Never raises. The upgrade ladder reconciles builtins
+    on upgrade (``upgrade_ladder.preconditions._plan_library_report``), so an upgraded install does not trip this.
+    """
+    from nexus.plans.eligibility import warn_library_not_reseeded  # noqa: PLC0415 — deferred; matches this module's convention
+
+    if not filt.enforce:
+        return
+    check = _nx_answer_isolated("library_precondition", None, _nx_answer_library_check, cache)
+    filt.note_library(check)
+    if check is None or not check.undeclared:
+        return
+    filt.degrade_to_shadow("library_not_reseeded")
+    warn_library_not_reseeded(check)
+
+
+def _nx_answer_isolated(stage: str, default: Any, fn: "Callable[..., Any]", /, *args: Any, **kwargs: Any) -> Any:
+    """``fn(*args, **kwargs)``, or *default* if it raises (nexus-jypmj.2 follow-up, code review I2).
+
+    The pre-match disclosure stages (request coverage, question sources, active project, eligibility
+    fallback) are pure helpers that promise never to raise, and that promise is each helper's own. This
+    wrapper is the call site's: a fault in one leaves that stage at its default and the answer goes on. The
+    log carries the stage name and the exception TYPE only, never its text (which can quote the question).
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — a disclosure stage never fails an answer
+        _log.warning("nx_answer_pre_match_stage_failed", stage=stage, error=type(exc).__name__)
+        return default
+
+
+def _nx_answer_question_sources(request: EvidenceRequest, coverage: "RequestCoverage") -> EvidenceRequest:
+    """Feed the RDR ids the question names into named-source resolution (RDR-232 Phase 2, nexus-jypmj.2.4).
+
+    Until this stage only a ``source`` binding reached :func:`_nx_answer_named_sources`; an RDR id that
+    appeared only in the question was recorded by the request coverage (``source_origin`` ``question``) and
+    never resolved, so the incident call as filed (``scope="rdr"``, ``content_type``, no ``source``) stayed
+    unresolved whatever the active-project tier did. Those sources now take the same tiers as a binding: the
+    explicit ``owner``/``project``, the owner scope, then the session's project.
+
+    A ``source`` binding wins and replaces them (:meth:`EvidenceRequest.with_question_sources`). They are not
+    an owner: ``request.owner`` is untouched here, so the ``_nx_owners`` run binding, built from the
+    explicit bindings before this stage, is unchanged. At most ``QUESTION_SOURCE_CAP`` are resolved; the
+    rest are named in the resolution's ``dropped`` list. Pure: no catalog call, never raises.
+    """
+    if coverage.source_origin != "question":
+        return request
+    return _nx_answer_isolated(
+        "question_sources", request, request.with_question_sources, coverage.named_sources, coverage.source_ranges,
+    )
+
+
+async def _nx_answer_active_project(
+    request: EvidenceRequest,
+    project_names: list[str] | tuple[str, ...],
+    *,
+    scope: str,
+    deadline: float | None = None,
+) -> EvidenceRequest:
+    """The active-project tier of named-source resolution (RDR-232 Phase 2, nexus-jypmj.2.4, A5).
+
+    Resolution order: an explicit ``owner``/``project`` binding, then a catalog-subtree ``scope``, then the
+    session's project (:mod:`nexus.plans.active_project`). *request* comes back unchanged, with no catalog
+    call, unless it names an RDR source and no explicit tier qualified it. Otherwise the tier is consulted and
+    its outcome is on ``request.active_project``: when the session's project is reliable and the question's
+    text does not name another one, the request's owner becomes ``inferred``. An inferred owner qualifies
+    source resolution only; it is applied after the ``_nx_owners`` run binding was built, and
+    ``request_owners`` ignores it, so it never narrows the secondary streams (nexus-jypmj.1.18).
+
+    *project_names* are the words the question puts where a project name could stand. Only a registered owner
+    name counts as one (case-insensitively), so ``in detail`` is no project and ``the conexus RDR-084`` is.
+
+    The detection reads git and the catalog, so it runs in a worker thread bounded by
+    ``PrimaryEvidenceCaps.max_seconds`` and *deadline*; the caller passes the stage deadline it shares with the
+    named-source resolution, so the two together stay within one budget. The catalog is not touched until the
+    host's project variable and directories agree. It never raises; a failure is "no reliable active
+    project" with the reason in the envelope.
+    """
+    from nexus.plans.evidence import ScopeConstraint, scope_subtree  # noqa: PLC0415 — deferred; matches this module's convention
+
+    if request.owner.status != "none" or scope_subtree(scope) is not None:
+        return request
+    if ScopeConstraint.parse(scope).kind == "collection":
+        return request  # a collection name carries its own owner: the scope tier, not a session guess
+    if not any(s.kind == "rdr" for s in request.sources):
+        return request  # a tumbler names its document outright; there is nothing for a project to qualify
+    import asyncio  # noqa: PLC0415 — stdlib, branch-local
+    from dataclasses import replace  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans import active_project as _ap  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.primary_evidence import DEFAULT_CAPS  # noqa: PLC0415 — deferred; matches this module's convention
+
+    def _detect() -> "tuple[_ap.ActiveProject, frozenset[str] | None]":
+        # The catalog is fetched inside detect_active_project, after the environment and directories agree.
+        active = _ap.detect_active_project(None, get_catalog=_get_catalog)
+        # Nothing to vouch for when the question has no candidate word. With candidates, an unreadable registry
+        # is None, and the tier then declines (a name check that did not run is not a pass, nexus-jypmj.2.4).
+        registered: frozenset[str] | None = frozenset()
+        if active.reliable and project_names:
+            try:
+                registered = _ap.registered_owner_names(_get_catalog(), ttl=_ap.OWNER_NAMES_TTL_S)
+            except Exception as exc:  # noqa: BLE001 — no registry means no name can be vouched for
+                _log.warning("nx_answer_active_project_registry_unavailable", error=type(exc).__name__)
+                registered = None
+        return active, registered
+
+    registered: frozenset[str] | None = frozenset()
+    try:
+        active, registered = await asyncio.wait_for(
+            asyncio.to_thread(_detect), timeout=_nx_answer_seconds_left(DEFAULT_CAPS.max_seconds, deadline),
+        )
+    except asyncio.TimeoutError:
+        active = _ap.ActiveProject(False, reason="the lookup of the session's project stopped at the deadline")
+    except Exception as exc:  # noqa: BLE001 — the disclosure stage never raises
+        _log.warning("nx_answer_active_project_failed", error=type(exc).__name__)
+        active = _ap.ActiveProject(False, reason=f"the session's project could not be determined ({type(exc).__name__})")
+    tier = _nx_answer_isolated(
+        "active_project", None, _ap.apply_active_project,
+        request.owner, active, scope=scope, project_names=project_names, registered=registered,
+    )
+    if tier is None:
+        return request
+    return replace(request, owner=tier.owner, active_project=tier.to_wire())
+
+
 async def _nx_answer_named_sources(
     request: EvidenceRequest, *, deadline: float | None = None,
+    title_hints: dict[str, list[str]] | None = None, trace: bool = True,
+) -> NamedSourceResolution | None:
+    """:func:`_nx_answer_named_sources_stage`, made total: the stage never raises into ``nx_answer``. A failure
+    anywhere in it (an import, the catalog handle, the worker thread) leaves every named source ``unresolved``
+    with the exception's TYPE as the reason (never its text), and the answer goes on.
+
+    With ``trace=False`` the stage's failure logs leave out the id of a source read from the question text (the
+    caller's wording); the id of a source the caller bound is logged as before (nexus-jypmj.2 follow-up, S5)."""
+    if not request.sources:
+        return None
+    from nexus.plans.primary_evidence import redacted_source_logs  # noqa: PLC0415 — deferred; matches this module's convention
+
+    try:
+        with redacted_source_logs(not trace and request.source_origin == "question"):
+            return await _nx_answer_named_sources_stage(request, deadline=deadline, title_hints=title_hints)
+    except Exception as exc:  # noqa: BLE001 — the disclosure stage never fails an answer
+        _log.warning("nx_answer_named_sources_failed", error=type(exc).__name__)
+        from dataclasses import replace as _replace  # noqa: PLC0415 — stdlib, branch-local
+        from nexus.plans.primary_evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+            DEFAULT_CAPS,
+            NamedSourceResolution,
+            question_source_caps,
+        )
+
+        caps = question_source_caps(DEFAULT_CAPS) if request.source_origin == "question" else DEFAULT_CAPS
+        return _replace(
+            NamedSourceResolution.failed(request.sources, type(exc).__name__, caps=caps),
+            origin=request.source_origin, ranges=request.source_ranges,
+        )
+
+
+async def _nx_answer_named_sources_stage(
+    request: EvidenceRequest, *, deadline: float | None = None,
+    title_hints: dict[str, list[str]] | None = None,
 ) -> NamedSourceResolution | None:
     """Resolve the request's named sources (RDR-232 Phase 1, nexus-jypmj.1.4).
 
@@ -10285,16 +10677,32 @@ async def _nx_answer_named_sources(
     document's chunks happens where the primary stream is merged (nexus-jypmj.1.6),
     not here, so a call that never reaches a reduction pays for the lookup only.
 
-    The up-to-13 catalog calls are blocking, so they run in a worker thread, bounded by
+    The catalog calls (an owner probe and at most two capped finds per source) and, where sibling files share an
+    RDR number, up to ``max_frontmatter_lookups`` aspect-row or file reads per number are blocking, so they run
+    in a worker thread, bounded by
     ``PrimaryEvidenceCaps.max_seconds`` and *deadline* (``nx_answer``'s own, absolute ``time.monotonic()``):
     the resolution starts no call past it, and one that has not returned by then is abandoned (a thread
     cannot be cancelled; it ends after its current call) and every source is ``unresolved`` with the
     deadline as the reason (nexus-jypmj.1.9 code review F2).
+
+    *title_hints* (source value to the titles the question gives it) act only as a veto on an inferred
+    qualifier (nexus-jypmj.2.4). The ranges the question named by their ends ride on the result for disclosure.
     """
     if not request.sources:
         return None
     import asyncio  # noqa: PLC0415 — stdlib, branch-local
-    from nexus.plans.primary_evidence import DEFAULT_CAPS, NamedSourceResolution, resolve_named_sources  # noqa: PLC0415 — deferred; matches this module's convention
+    from dataclasses import replace as _replace  # noqa: PLC0415 — stdlib, branch-local
+    from nexus.plans.primary_evidence import (  # noqa: PLC0415 — deferred; matches this module's convention
+        DEFAULT_CAPS,
+        NamedSourceResolution,
+        question_source_caps,
+        recorded_frontmatter_id,
+        resolve_named_sources,
+    )
+
+    # nexus-jypmj.2.4: RDR ids read from the question are held to QUESTION_SOURCE_CAP; a binding keeps the resolver's cap.
+    origin = request.source_origin
+    caps = question_source_caps(DEFAULT_CAPS) if origin == "question" else DEFAULT_CAPS
 
     def _resolve() -> NamedSourceResolution:
         try:
@@ -10302,15 +10710,26 @@ async def _nx_answer_named_sources(
         except Exception as exc:  # noqa: BLE001 — a missing catalog is disclosed as an unresolved source
             _log.warning("nx_answer_named_sources_catalog_unavailable", error=str(exc))
             cat = None
-        return resolve_named_sources(request.sources, request.owner, cat=cat, deadline=deadline)
+        # Sibling files of one RDR number are told apart by the frontmatter id the aspect row records (nexus-xho6c).
+        # Each read is given what is left of the budget as its timeout and is not retried at that clamp.
+        ids = recorded_frontmatter_id(lambda doc_id, timeout: _t2_index_write(
+            lambda db: db.document_aspects.get_by_doc_id(doc_id, timeout=timeout, retry_read_timeout=False),
+            op="rdr_frontmatter_id",
+        ))
+        return _replace(resolve_named_sources(
+            request.sources, request.owner, cat=cat, caps=caps, deadline=deadline, frontmatter_id=ids,
+            title_hints=title_hints,
+        ), origin=origin, ranges=request.source_ranges)
 
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_resolve), timeout=_nx_answer_seconds_left(DEFAULT_CAPS.max_seconds, deadline),
+            asyncio.to_thread(_resolve), timeout=_nx_answer_seconds_left(caps.max_seconds, deadline),
         )
     except asyncio.TimeoutError:
         _log.warning("nx_answer_named_sources_deadline", sources=len(request.sources))
-        return NamedSourceResolution.deadline_hit(request.sources)
+        return _replace(
+            NamedSourceResolution.deadline_hit(request.sources, caps=caps), origin=origin, ranges=request.source_ranges,
+        )
 
 
 async def _nx_answer_lifecycle_stream(
@@ -10560,6 +10979,7 @@ def _nx_answer_record_complete(
     composite_supported_at_start: bool,
     early_bump_fired: bool,
     planner_cost_usd: float | None = None,
+    run_summary: "RunSummaryRecorder | None" = None,
 ) -> None:
     """RDR-203 P1/P3 choke point: the ``nx_answer_runs`` record and the plan
     outcome-counter bump for ONE converting arm, issued as ONE function
@@ -10652,6 +11072,13 @@ def _nx_answer_record_complete(
     hygiene and the always-failing skip. The composite route carries a verdict, so a verdictless
     run takes the per-call record path on either capability, as the 404 fallback does.
 
+    **run_summary** (RDR-232 Phase 3, nexus-jypmj.3.5): the call's summary recorder. The summary rides on
+    the SAME write (``/complete``, or ``/record`` on the degradation path and the 404 fallback), prepared
+    once so both attempts carry the one object and one stamp; the store sends it only to an engine that
+    advertises ``nx_answer_run_summary_supported``. After the write the recorder reads the row back when the
+    call is structured and sets its persistence state; a readback is a GET, never a second write. None of this
+    can raise into the caller. ``None`` keeps every write exactly as it was.
+
     This REPRODUCES the source functions' bodies rather than delegating
     to them, so each keeps its own behaviour precisely:
 
@@ -10682,21 +11109,34 @@ def _nx_answer_record_complete(
     steps = step_records or []
     cost_usd = _run_cost_usd(steps, planner_cost_usd)
     wire_steps = [_step_record_to_wire(s) for s in steps] or None
+    # RDR-232 Phase 3: prepared once, before either attempt, so a 404 fallback re-sends the same summary
+    # under the same stamp. None when there is no recorder, the engine cannot take it, or it could not be built.
+    summary = None
+    stamp: str | None = None
+    if run_summary is not None:
+        summary = run_summary.prepare(
+            db.telemetry, outcome="unscored" if success is None else "success" if success else "failure",
+            plan_id=plan_id, step_count=step_count, duration_ms=duration_ms, cost_usd=cost_usd,
+        )
 
     if composite_supported_at_start and success is not None:
         import httpx  # noqa: PLC0415 — rare/branch-local path; only the composite route needs the 404-vs-other-failure distinction
-        from datetime import datetime, timezone  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
         # RDR-203 Idempotency: stamped ONCE, here, before the first
         # attempt — never inside a retry loop. See docstring.
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = stamp = _utc_now_iso()
         try:
             db.telemetry.record_nx_answer_run_complete(
                 question=q, plan_id=plan_id, matched_confidence=matched_confidence,
                 step_count=step_count, final_text=text, cost_usd=cost_usd,
                 duration_ms=duration_ms, created_at=created_at, steps=wire_steps,
-                success=success,
+                success=success, **({"run_summary": summary} if summary is not None else {}),
             )
+            if run_summary is not None:
+                run_summary.settle(
+                    db.telemetry, summary, question=q, created_at=created_at, sent=summary is not None,
+                    final_text=text, duration_ms=duration_ms, step_count=step_count,
+                )
             return
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
@@ -10705,6 +11145,11 @@ def _nx_answer_record_complete(
                 # whole composite write, exactly as a single
                 # _nx_answer_record_run failure is dropped today.
                 _warn_telemetry_drop("nx_answer_runs", exc)
+                if run_summary is not None:
+                    run_summary.settle(
+                        db.telemetry, summary, question=q, created_at=created_at, sent=False, error=exc,
+                        final_text=text, duration_ms=duration_ms, step_count=step_count,
+                    )
                 return
             # D5 404 downgrade guard: the cached probe said supported and
             # the running engine now disagrees. Flip the cache for FUTURE
@@ -10719,6 +11164,11 @@ def _nx_answer_record_complete(
                 pass
         except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
             _warn_telemetry_drop("nx_answer_runs", exc)
+            if run_summary is not None:
+                run_summary.settle(
+                    db.telemetry, summary, question=q, created_at=created_at, sent=False, error=exc,
+                    final_text=text, duration_ms=duration_ms, step_count=step_count,
+                )
             return
 
     # Degradation path: byte-for-byte today's (pre-composite) behaviour,
@@ -10728,14 +11178,28 @@ def _nx_answer_record_complete(
     # downgrade guard's fallback for THIS call, falling through from
     # above with early_bump_fired == False.
     _nx_answer_ensure_run_started(db, plan_id, early_bump_fired)
+    extra: dict[str, Any] = {}
+    if summary is not None:
+        stamp = stamp or _utc_now_iso()
+        extra = {"run_summary": summary, "created_at": stamp}
     try:
         db.telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
             step_count=step_count, final_text=text, cost_usd=cost_usd,
-            duration_ms=duration_ms, steps=wire_steps,
+            duration_ms=duration_ms, steps=wire_steps, **extra,
         )
+        if run_summary is not None:
+            run_summary.settle(
+                db.telemetry, summary, question=q, created_at=stamp, sent=summary is not None,
+                final_text=text, duration_ms=duration_ms, step_count=step_count,
+            )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller (warned once via _warn_telemetry_drop)
         _warn_telemetry_drop("nx_answer_runs", exc)
+        if run_summary is not None:
+            run_summary.settle(
+                db.telemetry, summary, question=q, created_at=stamp, sent=False, error=exc,
+                final_text=text, duration_ms=duration_ms, step_count=step_count,
+            )
 
     if plan_id and success is not None:
         try:
@@ -10857,15 +11321,61 @@ def _format_plan_few_shot(matches: "list | None") -> str:
     )
 
 
+#: The most text the request coverage may add to the planner's prompt (RDR-232 Phase 2 step 3), and the most
+#: facets and constraints it lists. The prompt is model input, not a log; it is never logged.
+_PLANNER_REQUEST_MAX_CHARS = 600
+_PLANNER_REQUEST_MAX_ITEMS = 6
+_PLANNER_REQUEST_ITEM_CHARS = 90
+
+
+def _nx_answer_planner_request_block(coverage: "RequestCoverage | None") -> str:
+    """What the request asks for, as prompt lines (RDR-232 Phase 2 step 3, critique S2): its answer kind, its
+    facets as a short list and its constraints, so the inline planner builds steps that cover every clause
+    instead of planning blind. Empty (the prompt is exactly the pre-Phase-2 one) when there is no coverage or
+    it holds nothing beyond ``unknown``. Capped at ``_PLANNER_REQUEST_MAX_CHARS``; a facet or constraint
+    past ``_PLANNER_REQUEST_MAX_ITEMS`` is counted, not listed. Never raises."""
+    if coverage is None:
+        return ""
+    try:
+        def _clip(text: str) -> str:
+            text = " ".join(str(text).split())
+            return text if len(text) <= _PLANNER_REQUEST_ITEM_CHARS else text[:_PLANNER_REQUEST_ITEM_CHARS - 1] + "…"
+
+        def _listed(label: str, items: "tuple[Any, ...]") -> str:
+            if not items:
+                return ""
+            shown = "; ".join(_clip(i.text) for i in items[:_PLANNER_REQUEST_MAX_ITEMS])
+            more = len(items) - _PLANNER_REQUEST_MAX_ITEMS
+            return f"{label}: {shown}" + (f" (and {more} more)" if more > 0 else "") + "\n"
+
+        lines = ""
+        if coverage.answer_kind and coverage.answer_kind != "unknown":
+            lines += f"The request asks for a {coverage.answer_kind} answer.\n"
+        lines += _listed("Cover each of these", tuple(coverage.facets))
+        lines += _listed("The answer must also respect", tuple(coverage.constraints))
+        return lines[:_PLANNER_REQUEST_MAX_CHARS]
+    except Exception as exc:  # noqa: BLE001 — a prompt hint never fails the planner
+        _log.warning("nx_answer_planner_request_block_failed", error=type(exc).__name__)
+        return ""
+
+
 async def _nx_answer_plan_miss(
     question: str,
     *,
     scope: str = "",
     max_steps: int = 6,
     few_shot_matches: "list | None" = None,
+    coverage: "RequestCoverage | None" = None,
+    enforce_eligibility: bool = False,
 ) -> Any:
     """Decompose *question* into a plan via claude_dispatch, execute it,
     and return a synthetic Match for plan_run.
+
+    *coverage* (RDR-232 Phase 2, nexus-jypmj.2.3) is the request's derived coverage and
+    *enforce_eligibility* is the caller's eligibility filter's ``enforce`` (the caller read the gate once
+    for the whole request; this function does not re-read it). With both, the near-miss plans offered as
+    few-shot examples are only those the request's answer kind may use: a rejected shape must not teach
+    the planner its structure. Without either, the examples are those passed in.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
     from nexus.plans.match import Match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -10894,6 +11404,12 @@ async def _nx_answer_plan_miss(
     # examples. On a miss these near-miss matches are still the most similar
     # historical plans; demonstrating their structure measurably lifts plan
     # quality over the prior zero-shot prompt.
+    from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — deferred, rare/branch-local (nexus-jypmj.2.3)
+
+    if coverage is not None and enforce_eligibility:
+        few_shot_matches = _eligibility.eligible_matches(
+            _eligibility.coerce_kind(coverage.answer_kind), few_shot_matches,
+        )
     few_shot_block = _format_plan_few_shot(few_shot_matches)
     if few_shot_block:
         import structlog as _slog2  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -10911,6 +11427,7 @@ async def _nx_answer_plan_miss(
         f"with at most {max_steps} steps:{corpus_hint}\n\n"
         f"{few_shot_block}"
         f"Question: {question}\n"
+        f"{_nx_answer_planner_request_block(coverage)}"
         f"{corpus_names_hint}\n\n"
         f"{_PLANNER_SCOPING_RULES}\n\n"
         f"{_PLANNER_TOOL_REFERENCE}\n"
@@ -11176,6 +11693,13 @@ def _non_answer_prefix() -> str:
     return NON_ANSWER_NOTICE_PREFIX
 
 
+def _insufficient_evidence_prefix() -> str:
+    """``INSUFFICIENT_EVIDENCE_NOTICE_PREFIX``, imported on first use (RDR-232 nexus-jypmj.3.3)."""
+    from nexus.plans.answer_shape import INSUFFICIENT_EVIDENCE_NOTICE_PREFIX  # noqa: PLC0415 — deferred: only reached when a notice is composed
+
+    return INSUFFICIENT_EVIDENCE_NOTICE_PREFIX
+
+
 #: RDR-200 §Telemetry (nexus-4e75w.5). Handoff-row marker — the SAME
 #: "a stable prefix, followed by call-specific detail" convention as
 #: ``NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX`` above. Written by
@@ -11296,7 +11820,9 @@ async def nx_answer(
     dimensions: Annotated[dict[str, Any] | None, Field(
         description=(
             "Dimensional filter for the plan-match gate, e.g. "
-            "{\"verb\": \"research\"}. Unset considers every active plan."
+            "{\"verb\": \"research\"}. Unset considers every active plan. "
+            "The key answer_kind (lookup, synthesis, discovery/listing, comparison, audit, "
+            "debug) is a hint about the answer you want, not a filter."
         ),
     )] = None,
     structured: Annotated[bool, Field(
@@ -11327,7 +11853,14 @@ async def nx_answer(
             "owner name such as ART) are reserved: they name the document the "
             "question is about and which project's it is, are never plan "
             "bindings, and are reported back in the envelope's "
-            "evidence_request."
+            "evidence_request. With no owner, project or subtree scope, an "
+            "RDR number that several projects hold is qualified by the "
+            "session's own project when the server knows it reliably "
+            "(Claude Code sets CLAUDE_PROJECT_DIR); the result is marked "
+            "inferred, and a title or a registered project name in the "
+            "question that contradicts it blocks the inference. Claude "
+            "Desktop and Cowork start the server without that variable, so "
+            "nothing is inferred there: pass owner or project to choose."
         ),
     )] = None,
     continuation: Annotated[bool | None, Field(
@@ -11342,33 +11875,37 @@ async def nx_answer(
 ) -> "str | dict":
     """Answer a knowledge question via plan-match-first, multi-step retrieval.
 
-    Use `search`/`query` directly instead for a single-step, already-known-
-    shape lookup — this tool reduces from many documents and is NOT
-    sub-second (p50 ~80s, p95 ~217s; see the module comment above this
-    tool for the measured distribution). Matches the question to a saved
-    retrieval plan (or grows one via an inline planner on a miss), executes
-    it, and returns the synthesized answer.
+    Use `search`/`query` directly for a single-step, already-known-shape
+    lookup: this tool reduces from many documents and is NOT sub-second
+    (p50 ~80s, p95 ~217s). Matches the question to a saved retrieval plan
+    (an inline planner grows one on a miss), runs it, and returns the
+    synthesized answer.
 
-    Returns the final step's output as a string, or a structured envelope
-    (`{final_text, chunks, plan_id, step_count, answer_shape, ...}`) when
-    `structured=True`. The envelope's `plan_id` is the matched library plan
-    or, on a miss, the plan this call grew and saved, and 0 when no row
-    exists (for example ttl 0, a failed save, or a run that ended before a plan was grown).
+    Returns the final step's output as a string, or with `structured=True`
+    an envelope (`{final_text, chunks, plan_id, step_count, answer_shape,
+    coverage, run_summary, ...}`). `plan_id` is the matched library plan or, on a
+    miss, the plan this call grew and saved; 0 when no row exists (ttl 0,
+    a failed save, or a run that ended first).
 
     Constraints:
-    - `budget_usd` is a soft cost guide (warns, does not hard-block, and
-      can overshoot); `budget_seconds` is a hard wall-clock cap on plan
-      execution only.
-    - A corpus-prefix or collection `scope` narrows each retrieval step's
-      plan-declared corpus; a step with nothing under the scope is skipped,
-      named in the `scope_diagnostics` list of a `structured=True` envelope
-      and in a `[scope conflict: ...]` line in text mode.
-    - `continuation=True` is live for eligible plan cuts and requires a
-      matching `nx_answer_report` call from the caller afterward.
-    - A `structured=True` `answer_shape` other than "answered" means
-      `final_text` is a one-line notice, not the raw payload.
-    - In text mode a degraded answer starts with `[budget exhausted ...]`
-      (a cost or time budget stopped the plan) or `[non-answer: <shape>]`.
+    - `budget_usd` is a soft cost guide (warns, can overshoot);
+      `budget_seconds` is a hard wall-clock cap on plan execution only.
+    - A corpus or collection `scope` narrows each retrieval step's plan-
+      declared corpus; a step with nothing under it is skipped and named
+      in `scope_diagnostics` (text mode: a `[scope conflict: ...]` line).
+    - `continuation=True` is live for eligible plan cuts and needs a
+      matching `nx_answer_report` call afterward.
+    - `answer_shape` says what `final_text` is. Prose follows for
+      "answered" and "insufficient_evidence" (opens with
+      `[insufficient-evidence: <n> unresolved]`, names each unsettled
+      part, then answers the rest). Any other value, "uncovered" (none of
+      the evidence covers a requested part; only with NX_ANSWER_COVERAGE=1)
+      included, is a one-line notice, never the raw payload.
+    - `run_summary.persistence` (persisted, dropped, unsupported,
+      unverified, not_recorded): only "persisted" means the engine kept
+      the run's coverage summary.
+    - Text mode starts a degraded answer with `[budget exhausted ...]`,
+      `[non-answer: <shape>]` or `[insufficient-evidence: ...]`.
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
     import structlog as _slog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
@@ -11399,6 +11936,8 @@ async def nx_answer(
         estimate_plan_cost,
         get_cached_price_table,
     )
+    from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so a test's patch of the constant is honored (RDR-232 nexus-jypmj.2.3)
+    from nexus.plans.request_coverage import extraction_enabled as _extraction_enabled  # noqa: PLC0415 — deferred; the gate follows the extraction switch (nexus-jypmj.2.8)
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.verb_infer import infer_verb as _infer_verb  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -11514,6 +12053,9 @@ async def nx_answer(
         _scope_diagnostics[:] = (
             [d for d in diag if isinstance(d, dict)] if isinstance(diag, list) else []
         )
+        # RDR-232 Phase 3 (nexus-jypmj.3.5): called right after every plan_run, so it is also where the run
+        # summary notes that the run reached its terminal reduction and takes the coverage assessment.
+        _run_summary.observe_plan_result(plan_result)
 
     # RDR-137 followup (nexus-n1908): normalize a malformed comma-list
     # scope to broad search (with a warning) so it doesn't filter
@@ -11547,10 +12089,76 @@ async def nx_answer(
     )
     # nexus-jypmj.1.18: an explicit owner also narrows the secondary streams (vector corpus, traversal).
     _caller_run.update(_nx_answer_owner_binding(_evidence_request))
+    # RDR-232 Phase 2 (nexus-jypmj.2.2): what the request asks for, derived BEFORE plan_match in a stage of
+    # its own. A caller's answer-kind hint rides in `dimensions` and is taken out here, since `dimensions` is a
+    # hard filter over plans and none carries that key. Reported in the envelope and the evidence diagnostics.
+    # Its answer kind is the request kind the eligibility gate judges plans by (below); the other plan-visible
+    # use is the lifecycle-stream read.
+    dimensions, _kind_hint = _nx_answer_split_kind_hint(dimensions)
+    _request_coverage = await _nx_answer_request_coverage(
+        question=question, scope=scope, evidence_request=_evidence_request, explicit_kind=_kind_hint,
+        deadline=deadline, trace=trace,
+    )
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
     # resolved documents is merged at the runner (nexus-jypmj.1.6).
-    _named_sources = await _nx_answer_named_sources(_evidence_request, deadline=deadline)
+    # nexus-jypmj.2.4: an RDR id that only the question names takes the same path as a `source` binding (a
+    # binding wins). It adds no owner, and the `_nx_owners` binding above was built without it.
+    _evidence_request = _nx_answer_question_sources(_evidence_request, _request_coverage)
+    # nexus-jypmj.2.4: the third tier, after the explicit owner/project and the owner scope: the session's
+    # project, only when it is reliable and nothing explicit qualified an RDR source. Applied after the
+    # `_nx_owners` binding above, so an inferred owner never narrows the secondary streams.
+    # The two stages share ONE budget (PrimaryEvidenceCaps.max_seconds, or the answer's own deadline if sooner).
+    from nexus.plans.request_coverage import project_name_candidates  # noqa: PLC0415 — deferred; matches this module's convention
+
+    _source_deadline = _nx_answer_source_stage_deadline(deadline)
+    _evidence_request = await _nx_answer_active_project(
+        _evidence_request, _nx_answer_isolated("project_names", (), project_name_candidates, question or ""),
+        scope=scope, deadline=_source_deadline,
+    )
+    _title_hints: dict[str, list[str]] = {}
+    for _hint in _request_coverage.source_hints:
+        if _hint.kind == "title":
+            _title_hints.setdefault(_hint.source, []).append(_hint.text)
+    _named_sources = await _nx_answer_named_sources(
+        _evidence_request, deadline=_source_deadline, title_hints=_title_hints or None, trace=trace,
+    )
+    _evidence_request = _nx_answer_settle_inference(_evidence_request, _named_sources)
+    # A source the resolver resolved to exactly one document has nothing left to tell apart, so its
+    # "no project qualifier" ambiguity (derived before resolution) is withdrawn. One the active project
+    # chose among documents that other projects also hold keeps a distinct `source_inferred` line instead.
+    # One the session's project could not hold (`fallback`) was resolved to ANOTHER project's document by
+    # elimination, not confirmed by any qualifier: its line stays (nexus-jypmj.2.4, confirmation N1).
+    if _named_sources is not None:
+        def _withdraw_unqualified() -> "RequestCoverage":
+            return _request_coverage.without_unqualified_for(
+                (s.ref.value for s in _named_sources.resolved() if not s.fallback),
+                inferred_over={
+                    s.ref.value: (
+                        f"{s.ref.value} was resolved to {s.tumbler} by the session's project, inferred; "
+                        f"{s.foreign} document(s) in other projects carry the same number"
+                    )
+                    for s in _named_sources.resolved() if s.inferred and s.foreign
+                },
+            )
+
+        _request_coverage = _nx_answer_isolated("withdraw_unqualified", _request_coverage, _withdraw_unqualified)
+    # RDR-232 Phase 2 (nexus-jypmj.2.3): the answer-kind eligibility filter for this request. Handed to
+    # plan_match, which asks it of every branch's candidates; enforcing unless NX_ANSWER_KIND_ELIGIBILITY turns
+    # the gate off (nexus-jypmj.2.8; shadow: the filter counts what it would exclude and excludes nothing).
+    # The gate also runs in shadow while the structured extraction is switched off (the measured failing regime
+    # is the gate on deterministic kinds alone; a per-request extraction failure keeps enforcing), and a library
+    # that still holds undeclared builtins degrades it just before plan_match (below). The reason that applies
+    # first wins: disabled_by_setting, extraction_disabled, library_not_reseeded.
+    # Reported in the envelope as `plan_eligibility`, always present.
+    _gate_on = _eligibility.eligibility_enforced(_os.environ)
+    _extract_on = _extraction_enabled(_os.environ)
+    _plan_eligibility = _eligibility.EligibilityFilter(
+        _request_coverage.answer_kind, _request_coverage.kind_decision, enforce=_gate_on and _extract_on,
+        shadow_reason=(
+            "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
+        ),
+    )
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.
     _single_query_fast_path = False
@@ -11603,6 +12211,7 @@ async def nx_answer(
                 named_sources=_named_sources, reducer_expected=_diag_inputs["reducer_expected"],
                 dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
                 owner_resolution=_evidence_request.owner.to_wire(),
+                request_coverage=_request_coverage.diagnostics_summary(),
             )
             log_evidence_diagnostics(diag, plan_id=_diag_inputs["plan_id"])
         except Exception as exc:  # noqa: BLE001 — diagnostics never fail an answer
@@ -11610,6 +12219,25 @@ async def nx_answer(
             diag = None
         _diag_cache[:] = [diag]
         return diag
+
+    # RDR-232 Phase 3 (nexus-jypmj.3.5): the run summary every telemetry write of this call carries. It reads
+    # the call's live state when a record is written (the request coverage can be re-derived, the
+    # diagnostics are built once a run has finished); a structured call asks for the readback.
+    from nexus.plans.run_summary import RunSummaryInputs, RunSummaryRecorder  # noqa: PLC0415 — deferred; matches this module's convention
+
+    def _run_summary_inputs() -> "RunSummaryInputs":
+        return RunSummaryInputs(
+            request=_request_coverage, eligibility=_plan_eligibility.to_wire(),
+            diagnostics=_evidence_diagnostics_now(), scope_diagnostics=list(_scope_diagnostics),
+        )
+
+    _run_summary = RunSummaryRecorder(trace=trace, readback=structured, inputs=_run_summary_inputs)
+
+    def _coverage_switch_on() -> bool:
+        # The envelope's `coverage` reason for a run no boundary assessed: read now, from the same switch that decided the boundary.
+        from nexus.plans.switches import coverage_enabled as _enabled  # noqa: PLC0415 — deferred; matches this module's convention
+
+        return _enabled(_os.environ)
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -11706,6 +12334,14 @@ async def nx_answer(
             "subtree, so this run was NOT scoped (broad search). Pass one scope token to filter.]"
             if _scope_normalized else None
         )
+        # nexus-jypmj.2.4: an ambiguous source with no active project to break the tie says why none applied.
+        _active = _evidence_request.active_project
+        _active_notice = (
+            f"[evidence request: no active project was applied to the ambiguous source: {_active['reason']}]"
+            if _active and not _active.get("applied") and _evidence_request.owner.status == "none"
+            and _named_sources is not None and any(s.status == "candidates" for s in _named_sources.sources)
+            else None
+        )
         _extra_lines = [
             line for line in (
                 _budget_warning_text, _dropped_reduce_text, _scope_normalized_text, _scope_notice,
@@ -11720,6 +12356,7 @@ async def nx_answer(
                         primary_stream=not _single_query_fast_path,
                     ) if _named_sources else ()
                 ),
+                _active_notice,
             )
             if line
         ]
@@ -11727,10 +12364,12 @@ async def nx_answer(
         if not _extra_text:
             _text = text
         elif text.startswith(
-            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix())
+            (NX_ANSWER_BUDGET_EXHAUSTED_MARKER_PREFIX, _non_answer_prefix(), _insufficient_evidence_prefix())
         ):
             # The tool contract: a degraded text answer STARTS with its
-            # marker. Both markers keep the leading position and the extra
+            # marker. The markers (budget exhausted, non-answer, and the
+            # partial answer's insufficient-evidence notice, RDR-232
+            # nexus-jypmj.3.3) keep the leading position and the extra
             # notices (budget warnings, dropped reduce steps, evidence-
             # request disclosures) follow.
             _text = f"{text}\n{_extra_text}"
@@ -11824,8 +12463,12 @@ async def nx_answer(
             # or one of the non-answer shapes (hydration_dump,
             # extractions_only, ranking_only, operator_payload, retrieval_only, listing,
             # empty), or, set by _error_result (nexus-f9kxd), error /
-            # planner_error / no_evidence. A caller must not read final_text
-            # as prose unless this is "answered". None on the remaining
+            # planner_error / no_evidence. RDR-232 Phase 3 (nexus-jypmj.3.3)
+            # adds "insufficient_evidence" (a partial answer: the text opens
+            # with the [insufficient-evidence: <n> unresolved] notice, then the
+            # prose) and "uncovered" (evidence that covered no facet; a
+            # non-answer). A caller must not read final_text as prose unless
+            # this is "answered" or "insufficient_evidence". None on the remaining
             # unclassified paths: the single-step fast path, a continuation
             # handoff, and the budget-exhausted marker (which carries its
             # own prefix).
@@ -11854,6 +12497,19 @@ async def nx_answer(
             # {status, tumbler, contributions, detail}}. Always present,
             # None when no reserved binding was passed.
             "evidence_request": _evidence_request.to_wire(),
+            # RDR-232 Phase 2 (nexus-jypmj.2.2): what the request asks for, derived before
+            # plan_match: {answer_kind, kind_decision, facets, constraints, named_sources, source_origin,
+            # source_hints, explicit_scope, current_code_requested, ambiguities, wants_lifecycle_stream,
+            # extraction: {outcome, calls, timeout_s, latency_ms, cost_usd}, derive_ms}. Its answer kind is
+            # the request kind the eligibility gate (below) judges plans by; the rest is reported only.
+            # Always present.
+            "request_coverage": _request_coverage.to_wire(),
+            # RDR-232 Phase 2 (nexus-jypmj.2.3): answer-kind eligibility of the plan candidates: {request_kind,
+            # kind_decision, enforced, branches: {cosine, category_route, fts: {examined, excluded, reasons}},
+            # excluded_total, excluded_plan_ids, returned: {total, eligible}, selected: {plan_id, eligible,
+            # kind, provenance, reason}, fallback_reason}. With the gate off (`enforced` false) it reports
+            # what the gate would exclude; nothing was. Always present; `selected` is None for an inline plan.
+            "plan_eligibility": _plan_eligibility.to_wire(),
             # RDR-232 section 2a (nexus-jypmj.1.3): one entry per corpus-taking
             # retrieval step the caller's scope reached: {step_index, tool,
             # plan_corpus, caller_scope, scope_kind, outcome, resolved_corpus}.
@@ -11869,6 +12525,20 @@ async def nx_answer(
             # until Phase 3 persists a run summary. Always present; None when no retrieval ran
             # (an error before the plan, a plan-miss refusal).
             "evidence_diagnostics": _diagnostics,
+            # RDR-232 Phase 3 (nexus-jypmj.3.5): what became of the run summary, with the coverage state the
+            # call RETURNED and the one PERSISTED apart: {version, persistence (persisted | dropped |
+            # unsupported | unverified | not_recorded), detail, returned_coverage_state, persisted_coverage_state,
+            # digest}. `persisted` means the row was read back with the same version and digest; HTTP 200
+            # proves nothing against an engine that predates the column. Always present.
+            "run_summary": _run_summary.to_wire(),
+            # RDR-232 Phase 3 (nexus-jypmj.3.6, section 4): the coverage object, always present: the run's
+            # CoverageResult wire at the FINAL state the call returned (the one run_summary reports), or an
+            # `unassessed` object with its reason (switch_off | no_facets | terminal_reduction_not_reached |
+            # boundary_not_run) when no boundary assessed the run. Ids, states and counts only; never evidence
+            # or facet text; trace=False also blanks the source labels. Same shape as continuation.coverage.
+            "coverage": _run_summary.coverage_wire(
+                enabled=_coverage_switch_on(), facets=len(_request_coverage.facets),
+            ),
         }
 
     # nexus-f9kxd: single emitter for every error return. The tool contract
@@ -12027,6 +12697,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -12163,6 +12834,8 @@ async def nx_answer(
                 lambda db: db.plans, op="plan_match_cache_populate",
             )
             cache = get_t1_plan_cache(populate_from=_plans_store_for_cache)
+            # nexus-jypmj.2.8: the gate is not enforced against a library that was never reseeded.
+            _nx_answer_library_precondition(_plan_eligibility, cache)
             # _plan_match's OWN real T2 traffic (HttpPlanLibrary.get_plan
             # per candidate, increment_match_metrics on every match) must
             # run INSIDE the closure — the critique's finding was that a
@@ -12201,15 +12874,22 @@ async def nx_answer(
                     # only typed bindings can make a plan unrunnable.
                     available_bindings=_caller_available,
                     category_verb=_category_verb,
+                    eligibility=_plan_eligibility,
                 ),
                 op="plan_match",
             )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _error_result(f"Error during plan match: {exc}")
 
-    if not matches or not _nx_answer_match_is_hit(
+    _plan_hit = bool(matches) and _nx_answer_match_is_hit(
         matches[0].confidence, threshold=effective_min_confidence,
-    ):
+    )
+    # RDR-232 Phase 2 (nexus-jypmj.2.3): why this call plans inline, if it does (reported in the envelope).
+    _plan_eligibility.set_fallback(_nx_answer_isolated(
+        "fallback_reason", None, _eligibility.fallback_reason,
+        force_dynamic=bool(force_dynamic), matches=matches, hit=_plan_hit, filt=_plan_eligibility,
+    ))
+    if not _plan_hit:
         # Plan miss — inline LLM planner via claude_dispatch.
         _log.info(
             "nx_answer_plan_miss",
@@ -12229,7 +12909,8 @@ async def nx_answer(
             with _ambient_usage_sink(_planner_usage_sink):
                 best = await _nx_answer_plan_miss(
                     question, scope=scope, max_steps=max_steps,
-                    few_shot_matches=matches,
+                    few_shot_matches=matches, coverage=_request_coverage,
+                    enforce_eligibility=_plan_eligibility.enforce,
                 )
         except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -12246,6 +12927,7 @@ async def nx_answer(
                         step_count=0, final_text=f"Planner error: {exc}",
                         step_records=[], duration_ms=elapsed_ms, trace=trace,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary, summary_outcome="planner_failure",
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -12329,6 +13011,8 @@ async def nx_answer(
         except Exception:  # noqa: BLE001 — boundary catch; degrade to top-confidence match, must not crash caller
             _log.warning("nx_answer_plan_cost_ranking_failed", exc_info=True)
 
+    # RDR-232 Phase 2 (nexus-jypmj.2.3): what was returned and which plan was selected, with its verdict.
+    _plan_eligibility.record_returned(matches, best)
     if best.plan_id == 0:
         conf_str = "ad-hoc"
     elif best.confidence is None:
@@ -12603,6 +13287,7 @@ async def nx_answer(
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
                             planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                            run_summary=_run_summary,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -12655,6 +13340,7 @@ async def nx_answer(
                             composite_supported_at_start=composite_supported_at_start,
                             early_bump_fired=early_bump_fired,
                             planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                            run_summary=_run_summary,
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
@@ -12831,6 +13517,7 @@ async def nx_answer(
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -12876,6 +13563,7 @@ async def nx_answer(
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -12951,6 +13639,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
             pass
@@ -12973,10 +13662,32 @@ async def nx_answer(
     # RDR-232 (nexus-jypmj.1.6): the reserved primary stream, passed only when a named source
     # resolved and yielded evidence (the same "only pass when set" rule as the kwargs below).
     # nexus-jypmj.1.7: the resolved RDR's T2 lifecycle records ride the same stream, ahead of the chunks.
-    _lifecycle = await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
+    # RDR-232 Phase 2 (nexus-jypmj.2.2, step 8): the T2 stream is read only for a request that has a gate,
+    # lifecycle or status facet. Before Phase 2 every resolved RDR source read it.
+    _lifecycle = (
+        await _nx_answer_lifecycle_stream(_named_sources, deadline=deadline)
+        if _request_coverage.wants_lifecycle_stream else None
+    )
     _primary_evidence, _reserved_stream = await _nx_answer_primary_stream(_named_sources, _lifecycle, deadline=deadline)
     if _reserved_stream is not None:
         _plan_run_kwargs["reserved_stream"] = _reserved_stream
+    # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage boundary, built from the inputs this call already holds (the
+    # ones `_evidence_diagnostics_now` hands build_evidence_diagnostics) and given to the runner, which assesses the
+    # terminal reduction's evidence before dispatching it. It rides `_plan_run_kwargs`, so the continuation
+    # fallback re-run below gets the same one. With NX_ANSWER_COVERAGE off (the default until nexus-jypmj.3.10) none
+    # is passed: every run is then unassessed and this call is what it was before Phase 3. The single_query fast path
+    # never gets here (no reduction).
+    from nexus.plans.switches import coverage_enabled as _coverage_enabled  # noqa: PLC0415 — deferred; matches this module's convention
+
+    if _coverage_enabled(_os.environ):
+        from nexus.plans.coverage_ledger import CoverageBoundary as _CoverageBoundary  # noqa: PLC0415 — deferred; matches this module's convention
+        from nexus.plans.evidence import ScopeConstraint as _ScopeConstraint  # noqa: PLC0415 — as above
+
+        _plan_run_kwargs["coverage_boundary"] = _CoverageBoundary(
+            request=_request_coverage, scope=_ScopeConstraint.parse(scope), named_sources=_named_sources,
+            primary=_primary_evidence, lifecycle=_lifecycle, owner_resolution=_evidence_request.owner.to_wire(),
+            dropped_scope=_scope_normalized["given"] if _scope_normalized else "",
+        )
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline
     # RDR-196 .p3c (nexus-nyry9.21) D5: same "only pass when set"
@@ -13070,6 +13781,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -13189,7 +13901,17 @@ async def nx_answer(
     # when it is being handed off"). Every other call (continuation
     # False/None, a non-handoff-eligible cut, or go-live not armed) skips
     # this block entirely and reaches Step 5 exactly as before.
-    if _continuation_engaged:
+    # RDR-232 Phase 3 (nexus-jypmj.3.2): a coverage boundary that skipped generation (nothing covered, even after
+    # its one repair) leaves a COMPLETE run -- the cut did not fire -- so there is nothing to hand off and no
+    # fallback re-run. ``isinstance`` rather than ``getattr``: a MagicMock result has a truthy ``coverage``.
+    from nexus.plans.coverage_ledger import CoverageResult as _CoverageResult  # noqa: PLC0415 — deferred; matches this module's convention
+    from nexus.plans.repair_stream import RepairSupplement as _RepairSupplement, supplement_scope  # noqa: PLC0415 — as above
+
+    _run_coverage = getattr(result, "coverage", None)
+    _run_coverage = _run_coverage if isinstance(_run_coverage, _CoverageResult) else None
+    _run_supplement = getattr(result, "repair_supplement", None)
+    _run_supplement = _run_supplement if isinstance(_run_supplement, _RepairSupplement) else None
+    if _continuation_engaged and not (_run_coverage is not None and _run_coverage.skip_generation):
         _continuation_envelope: "dict | None" = None
         # CR-Important-1 / critic-F1 (T2 [23951]/[23952], both reviewers
         # reproduced live): on ANY of the four fallback triggers below
@@ -13225,12 +13947,15 @@ async def nx_answer(
             # same reserved stream and the caller-side reduction sees the same evidence.
             from nexus.plans.reserved_stream import reserved_scope  # noqa: PLC0415 — rare/branch-local path
 
-            with reserved_scope(_reserved_stream), reducer_input_scope(_reducer_recorder):
+            # nexus-jypmj.3.2: and the repair evidence the boundary merged, so the hand-off prompt holds what the
+            # ledger assessed; the envelope carries the same coverage state a headless run would report.
+            with reserved_scope(_reserved_stream), supplement_scope(_run_supplement), reducer_input_scope(_reducer_recorder):
                 _continuation_envelope = assemble_continuation_envelope(
                     cut=_cut, steps=_continuation_steps, bindings=_continuation_merged,
                     step_outputs=result.steps, plan_id=best.plan_id, run_id=None,
                     prefix_may_redispatch=_prefix_may_redispatch,
                     prefix_redispatch_step_count=_prefix_redispatch_step_count,
+                    coverage=None if _run_coverage is None else _run_coverage.to_wire(redact=not trace),
                 )
         except Exception as exc:  # noqa: BLE001 — a broken reconstruction must never strand a call whose prefix already stopped short of the suffix — falls back exactly like an assembly-returns-None case
             _log.warning(
@@ -13272,6 +13997,7 @@ async def nx_answer(
                         final_text=_handoff_text, step_records=_result_step_records,
                         duration_ms=_continuation_elapsed_ms, trace=trace,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary, summary_outcome="handoff",
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -13335,6 +14061,7 @@ async def nx_answer(
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
                         planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                        run_summary=_run_summary,
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
@@ -13484,6 +14211,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
@@ -13507,9 +14235,21 @@ async def nx_answer(
         NON_ANSWER_SHAPES as _NON_ANSWER_SHAPES,
         classify_answer_shape as _classify_answer_shape,
         render_non_answer_notice as _render_non_answer_notice,
+        AnswerShape as _AnswerShape,
     )
+    from nexus.plans.coverage_outcome import decide_outcome as _decide_outcome, render_insufficient_evidence as _render_insufficient_evidence  # noqa: PLC0415 — deferred: plan path only
 
-    _shape = _classify_answer_shape(final_text)
+    # RDR-232 Phase 3 (nexus-jypmj.3.3): the post-generation half of the coverage-state table. The boundary
+    # decided the state before generation; what generation returned decides whether a usable answer exists, and
+    # this verdict is the one place the result's answer_shape, the plan counter outcome, the no-grow flag and the
+    # final coverage state come from. `unassessed` (no boundary, the switch off, an assessor outage) is today's
+    # behaviour unchanged. `result` is read here, after any continuation fallback re-run replaced it.
+    _verdict_coverage = getattr(result, "coverage", None)
+    _verdict_coverage = _verdict_coverage if isinstance(_verdict_coverage, _CoverageResult) else None
+    _verdict = _decide_outcome(_verdict_coverage, _classify_answer_shape(final_text))
+    if _verdict.coverage is not _verdict_coverage:
+        _run_summary.observe_final_coverage(_verdict.coverage)  # the summary counts the state the call returned
+    _shape = _verdict.shape
     _answer_shape = _shape.value
     if _shape in _NON_ANSWER_SHAPES:
         _log.info(
@@ -13548,6 +14288,7 @@ async def nx_answer(
                     composite_supported_at_start=composite_supported_at_start,
                     early_bump_fired=early_bump_fired,
                     planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                    run_summary=_run_summary,
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the notice must still surface
             pass
@@ -13573,6 +14314,14 @@ async def nx_answer(
     # no counter arithmetic, only the record-vs-outcome POST order the
     # census below pins (residual 8).
 
+    # RDR-232 Phase 3 (nexus-jypmj.3.3): a partial answer is returned, with the marker notice ahead of it naming
+    # the facets the evidence did not settle. It counts as a success (the matcher's always-failing skip must not
+    # retire a plan that usually covers five of six facets) and is never grown (`_verdict.no_grow`, below).
+    if _shape is _AnswerShape.INSUFFICIENT_EVIDENCE and _verdict.coverage is not None:  # only ever decided from a coverage result
+        final_text = _render_insufficient_evidence(
+            _verdict.coverage, {f.id: f.text for f in _request_coverage.facets}, final_text,
+        )
+
     _log.info(
         "nx_answer_complete",
         plan_id=best.plan_id,
@@ -13595,8 +14344,8 @@ async def nx_answer(
     _saved_grown_plan_id = 0
     # RDR-232 (nexus-jypmj.1.8): a reserved stream can carry an answer past the empty-retrieval guard above, but
     # that is the caller's evidence, not the plan's. A plan whose own retrieval steps found nothing is still
-    # never grown (nexus-yg49g).
-    if best.plan_id == 0 and not _nx_answer_is_empty_retrieval(result.steps):
+    # never grown (nexus-yg49g). Nor is a partial answer (RDR-232 nexus-jypmj.3.3): the no-grow flag is the verdict's.
+    if best.plan_id == 0 and not _verdict.no_grow and not _nx_answer_is_empty_retrieval(result.steps):
         ttl_days = _load_ad_hoc_ttl()
         if ttl_days > 0:
             try:
@@ -13636,7 +14385,17 @@ async def nx_answer(
                 )
                 # nexus-j5geq: route through daemon (eliminates second WAL writer).
                 _grow_scope_tags = scope or None
-                _grow_plan_json = best.plan_json
+                # RDR-232 Phase 2 (nexus-jypmj.2.1, .2.3): record the grown plan's answer kind with grown
+                # provenance. A kind is recorded only when the request route that produced the plan was
+                # known: the route is the request's RequestCoverage (its kind and how it was decided). An
+                # unknown kind, or a kind whose decision is "unknown", records the plan as unknown.
+                from nexus.plans.answer_kind import grown_plan_json  # noqa: PLC0415 — deferred, rare/branch-local
+
+                _grow_plan_json = grown_plan_json(
+                    best.plan_json,
+                    route_kind=_request_coverage.answer_kind,
+                    route_source=_request_coverage.kind_decision,
+                )
                 _grow_project = project_name
                 def _do_grow(db):
                     gid = db.plans.save_plan(
@@ -13718,6 +14477,7 @@ async def nx_answer(
                 composite_supported_at_start=composite_supported_at_start,
                 early_bump_fired=early_bump_fired,
                 planner_cost_usd=_planner_cost_usd(_planner_usage_sink),
+                run_summary=_run_summary,
             ),
             op="record_run",
         )
@@ -13778,8 +14538,16 @@ async def nx_answer_report(
     )
     try:
         with _t2_ctx() as db:
+            _report_question = f"nx_answer_report({continuation_id})"
+            # RDR-232 Phase 3 (nexus-jypmj.3.5): the report row carries a minimal summary under the same
+            # capability rule as every other /record path. The tool's own return shape is unchanged, so no
+            # readback is asked for here.
+            _report_summary = _nx_answer_report_summary(db.telemetry, ok=ok)
+            _report_extra: dict[str, Any] = (
+                {"run_summary": _report_summary, "created_at": _utc_now_iso()} if _report_summary is not None else {}
+            )
             db.telemetry.record_nx_answer_run(
-                question=f"nx_answer_report({continuation_id})",
+                question=_report_question,
                 plan_id=None,
                 matched_confidence=None,
                 step_count=0,
@@ -13787,6 +14555,7 @@ async def nx_answer_report(
                 cost_usd=None,
                 duration_ms=0,
                 steps=None,
+                **_report_extra,
             )
     except Exception as exc:  # noqa: BLE001 — best-effort telemetry, must not crash caller
         _warn_telemetry_drop("nx_answer_runs", exc)

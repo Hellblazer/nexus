@@ -46,11 +46,9 @@ class ChunkRef(TypedDict):
 # local-catalog tests keep working unchanged in the interim.
 # ─────────────────────────────────────────────────────────────────────────────
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from nexus.catalog.tumbler import Tumbler
 
@@ -63,12 +61,15 @@ def make_relative(abs_path: str | Path, repo_root: Path) -> str:
         return str(abs_path)
 
 
-# Set of URI schemes the catalog will accept verbatim. Each scheme
-# corresponds to a reader registered in ``nexus.aspect_readers``;
-# adding a new scheme is gated on landing the reader first so
-# register-time validation can't silently allow URIs that have no
-# downstream consumer. ``file`` and ``chroma`` ship in Phase 1
-# (RDR-096); ``https`` and ``nx-scratch`` are reserved for Phase 4.
+# Set of URI schemes the client recognises for a catalog document's ``source_uri``. Each scheme
+# corresponds to a reader registered in ``nexus.aspect_readers``; adding a new scheme is gated on
+# landing the reader first so the set can't silently allow URIs that have no downstream consumer.
+# There is NO client-side register-time validation against it any more: the engine owns
+# ``source_uri`` at register time (it derives ``file://`` from a path and canonicalizes a legacy
+# ``chroma://`` note to ``nx-note://``, RDR-231), and the client's only consumer is the link-safe
+# subset in ``nexus.doc.catalog_links``. ``file`` and ``chroma`` shipped in Phase 1 (RDR-096;
+# ``chroma`` was renamed ``nx-note`` by RDR-231, so the legacy spelling is not in the set);
+# ``https`` and ``nx-scratch`` are reserved for Phase 4.
 # ``http`` is intentionally excluded — Phase 4's https reader does
 # NOT cover plain http; users with http URIs must upgrade to https
 # or wait for a dedicated reader. ``x-devonthink-item`` (nexus-bqda)
@@ -77,7 +78,7 @@ def make_relative(abs_path: str | Path, repo_root: Path) -> str:
 # the reader gates on ``sys.platform == 'darwin'`` and surfaces a
 # clear error elsewhere.
 _KNOWN_URI_SCHEMES: frozenset[str] = frozenset({
-    "file", "chroma", "https", "nx-scratch", "x-devonthink-item",
+    "file", "nx-note", "https", "nx-scratch", "x-devonthink-item",
     # ``nx-orphan-backfill://<collection>/<title|chash/<hash>>`` is a
     # marker scheme used by ``nx catalog orphan-backfill synthetic`` to
     # register catalog Documents for T3 chunks that have no recoverable
@@ -88,61 +89,6 @@ _KNOWN_URI_SCHEMES: frozenset[str] = frozenset({
     # ``document_chunks`` manifest so doctor reports clean.
     "nx-orphan-backfill",
 })
-
-
-def _normalize_source_uri(
-    source_uri: str, file_path: str, *, repo_root: str = "",
-) -> str:
-    """RDR-096 P3.1 register-boundary URI validation.
-
-    * Empty ``source_uri`` + non-empty ``file_path`` → derive
-      ``file://<abspath>`` (back-compat for callers passing only a
-      filesystem path).
-    * Empty ``source_uri`` + empty ``file_path`` → return ``""``
-      (legacy entries with no identity at all stay shapeless).
-    * Non-empty ``source_uri`` → validate via ``urlparse``: must
-      have a recognized scheme. Malformed URIs raise ``ValueError``
-      at the register boundary, NOT silently persisted (RDR-096
-      Risks and Mitigations).
-
-    nexus-3e4s: when ``file_path`` is relative AND ``repo_root`` is
-    provided, the abspath is anchored on ``repo_root`` rather than
-    the process CWD. This is the upstream fix for the catalog
-    contamination bug class — without it, indexing repo ``A`` from
-    a CWD inside repo ``B`` produced ``source_uri`` rows pointing
-    to ``B``'s tree, leaving the row attributed to ``A``'s owner.
-    """
-    if not source_uri:
-        if file_path:
-            # nexus-yg70j / nexus-3e4s: never anchor an identity on the process
-            # CWD. `os.path.abspath` on a RELATIVE file_path with no repo_root
-            # called getcwd() -- raising when the cwd was deleted, and silently
-            # minting a plausible-but-wrong URI when it was merely unrelated.
-            # Mirrors the engine's CatalogRepository.deriveSourceUri, which
-            # returns "" for a relative file_path when repoRoot is empty rather
-            # than guessing, and aspect_readers.uri_for's identical rule.
-            if os.path.isabs(file_path):
-                return "file://" + os.path.normpath(file_path)
-            if repo_root:
-                return "file://" + os.path.normpath(os.path.join(repo_root, file_path))
-            return ""
-        return ""
-
-    parsed = urlparse(source_uri)
-    scheme = parsed.scheme
-    if not scheme:
-        raise ValueError(
-            f"malformed source_uri {source_uri!r}: no scheme. "
-            f"Expected one of {sorted(_KNOWN_URI_SCHEMES)} or a "
-            f"bare filesystem path (passed via file_path instead).",
-        )
-    if scheme not in _KNOWN_URI_SCHEMES:
-        raise ValueError(
-            f"unknown source_uri scheme {scheme!r} in {source_uri!r}. "
-            f"Known schemes: {sorted(_KNOWN_URI_SCHEMES)}. To add a "
-            f"new scheme, register a reader in nexus.aspect_readers.",
-        )
-    return source_uri
 
 
 # nexus-3e4s: env-var escape hatch for the cross-project guard. Set to
@@ -226,7 +172,7 @@ class CatalogEntry:
     alias_of: str = ""
     # RDR-096 P3.1: persistent URI identity. Populated at register
     # time — bare paths normalize to ``file://<abspath>``; explicit
-    # URIs (chroma://, https://, etc.) are stored verbatim. ''
+    # URIs (nx-note://, https://, etc.) are stored verbatim. ''
     # only on legacy entries that predate P2.1's column migration.
     source_uri: str = ""
     # nexus-rzqto: bibliographic enrichment surfaced from catalog_documents

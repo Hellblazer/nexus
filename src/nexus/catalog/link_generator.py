@@ -190,7 +190,10 @@ def generate_citation_links(cat: CatalogReader, *, writer: CatalogWriter | None 
     for entry in entries:
         meta = entry.meta or {}
         for id_field in ("bib_semantic_scholar_id", "bib_openalex_id"):
-            bib_id = meta.get(id_field, "")
+            # nexus-9l2lg moved the ids to catalog columns (``meta`` now carries
+            # only ``references``); a row that predates it keeps them in ``meta``
+            # (nexus-7mcev: reading ``meta`` alone linked no enriched paper).
+            bib_id = getattr(entry, id_field, "") or meta.get(id_field, "")
             if bib_id:
                 id_to_tumbler[bib_id] = entry.tumbler
         refs = meta.get("references", [])

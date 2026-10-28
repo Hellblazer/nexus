@@ -40,25 +40,27 @@ class TestMineruBuildResult:
         assert isinstance(result, ExtractionResult)
         assert result.metadata["extraction_method"] == "mineru"
 
-    def test_extraction_method_is_pure_mineru_with_zero_degraded_pages(self, dummy_pdf):
-        """nexus-1oguj: an explicit degraded_page_count=0 (the default)
-        still reports the bare 'mineru' value — no false-positive
-        degradation flag."""
+    def test_extraction_method_is_pure_mineru_with_no_degraded_pages(self, dummy_pdf):
+        """nexus-1oguj: an empty extraction_pages map (the default) still
+        reports the bare 'mineru' value — no false-positive degradation flag."""
         result = PDFExtractor._mineru_build_result(
             dummy_pdf, "# Title", [], [{"page_idx": 0, "para_blocks": []}],
-            degraded_page_count=0,
+            extraction_pages={},
         )
         assert result.metadata["extraction_method"] == "mineru"
+        assert result.metadata["extraction_pages"] == {}
 
-    def test_extraction_method_reflects_docling_degradation(self, dummy_pdf):
-        """nexus-1oguj: when RDR-148 Gap 5's per-page OOM-degrade fired at
-        least once, the recorded extraction_method must be the honest
-        mixed aggregate, not a bare 'mineru' that overstates coverage."""
+    def test_extraction_method_reflects_ladder_degradation(self, dummy_pdf):
+        """nexus-1oguj, RDR-237: when any page settled below rung 1 the recorded
+        extraction_method must be the honest mixed aggregate, not a bare
+        'mineru' that overstates coverage (it was 'mineru+docling-degraded' when
+        the degrade was to Docling)."""
         result = PDFExtractor._mineru_build_result(
             dummy_pdf, "# Title", [], [{"page_idx": 0, "para_blocks": []}],
-            degraded_page_count=1,
+            extraction_pages={"mineru-no-formula": [1]},
         )
-        assert result.metadata["extraction_method"] == "mineru+docling-degraded"
+        assert result.metadata["extraction_method"] == "mineru+degraded"
+        assert result.metadata["extraction_pages"] == {"mineru-no-formula": [1]}
 
     def test_text_passed_through(self, dummy_pdf):
         md = "# My Paper\n\nBody text."
@@ -205,6 +207,7 @@ class TestMineruOrchestration:
 
         with self._mock_pymupdf(12), self._mock_do_parse(), \
              patch("nexus.config.get_mineru_page_batch", return_value=5), \
+             patch("nexus.config.get_mineru_page_timeout_s", return_value=30), \
              patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso:
             result = extractor._extract_with_mineru(dummy_pdf)
 
@@ -224,12 +227,15 @@ class TestMineruOrchestration:
 
         with self._mock_pymupdf(4), self._mock_do_parse(), \
              patch("nexus.config.get_mineru_page_batch", return_value=2), \
+             patch("nexus.config.get_mineru_page_timeout_s", return_value=30), \
              patch.object(extractor, "_mineru_run_isolated", side_effect=[batch1, batch2]):
             result = extractor._extract_with_mineru(dummy_pdf)
 
         assert "# Page 1" in result.text
         assert "# Page 2" in result.text
-        assert result.metadata["page_count"] == 2
+        # RDR-237: the page count is the PDF's own (4), not len(pdf_info) (the mocked batches
+        # return one entry each, which used to read as 2 pages).
+        assert result.metadata["page_count"] == 4
         assert result.metadata["formula_count"] == 1
 
 

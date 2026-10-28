@@ -41,6 +41,15 @@ import static org.jooq.impl.DSL.*;
  */
 public final class AspectRepository {
 
+    /**
+     * Retry budget of the aspect-extraction queue (RDR-163): a failure seen at
+     * {@code retry_count >= RETRY_MAX_ATTEMPTS} is terminal. The worker applies it before
+     * calling {@code markRetry}/{@code markFailed}; {@link #reclaimStale} applies the same
+     * rule to a reclaimed row. MUST equal {@code _RETRY_MAX_ATTEMPTS} in
+     * {@code src/nexus/aspect_worker.py} (pinned by tests/test_aspect_retry_cap_parity.py).
+     */
+    public static final int RETRY_MAX_ATTEMPTS = 5;
+
     private static final Logger log = LoggerFactory.getLogger(AspectRepository.class);
 
     static final DateTimeFormatter UTC_SECOND =
@@ -259,7 +268,7 @@ public final class AspectRepository {
                     // against a caller that omits it (was a silent NULL write
                     // before this migration, matching CatalogRepository's own
                     // nne()-guarded NOT NULL text columns).
-                    nne((String) body.get("source_uri")),
+                    NoteUri.canonical(nne((String) body.get("source_uri"))),
                     jsonbOrNull((String) body.get("salient_sentences")),
                     docId)
                 .onConflict(
@@ -584,7 +593,7 @@ public final class AspectRepository {
                             // "" would satisfy NOT NULL but violate the FK to
                             // catalog_documents(tumbler); a blank doc_id here is a
                             // genuine caller error, same as the live upsert path.
-                            nne((String) body.get("source_uri")),
+                            NoteUri.canonical(nne((String) body.get("source_uri"))),
                             jsonbOrNull((String) body.get("salient_sentences")),
                             nullIfBlank((String) body.get("doc_id")));
                 }
@@ -656,7 +665,7 @@ public final class AspectRepository {
                     (String) body.get("extractor_name"),
                     // hygiene-001: source_uri is NOT NULL now (see importAspectsBatch's
                     // identical comment for why doc_id stays nullIfBlank).
-                    nne((String) body.get("source_uri")),
+                    NoteUri.canonical(nne((String) body.get("source_uri"))),
                     jsonbOrNull((String) body.get("salient_sentences")),
                     nullIfBlank((String) body.get("doc_id")))
                 .onConflict(
@@ -716,7 +725,7 @@ public final class AspectRepository {
                     docId,
                     // hygiene-001 (nexus-tk070.p6a follow-on): source_uri/collection
                     // are NOT NULL now.
-                    nne((String) body.get("source_uri")),
+                    NoteUri.canonical(nne((String) body.get("source_uri"))),
                     nne((String) body.get("collection")),
                     highlightsMd,
                     mentionsMd,
@@ -767,7 +776,7 @@ public final class AspectRepository {
                     DOCUMENT_HIGHLIGHTS.MENTIONS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
                 .from(DOCUMENT_HIGHLIGHTS)
-                .where(DOCUMENT_HIGHLIGHTS.SOURCE_URI.eq(sourceUri))
+                .where(DOCUMENT_HIGHLIGHTS.SOURCE_URI.eq(NoteUri.canonical(sourceUri)))  // RDR-231
                 .limit(1)
                 .fetch();
             if (rows.isEmpty()) return Optional.empty();
@@ -864,7 +873,7 @@ public final class AspectRepository {
                     insert = insert.values(
                             tenant,
                             (String) body.get("doc_id"),
-                            nne((String) body.get("source_uri")),
+                            NoteUri.canonical(nne((String) body.get("source_uri"))),
                             nne((String) body.get("collection")),
                             (String) body.getOrDefault("highlights_md", ""),
                             (String) body.getOrDefault("mentions_md", ""),
@@ -904,7 +913,7 @@ public final class AspectRepository {
                 .values(
                     tenant,
                     docId,
-                    nne((String) body.get("source_uri")),
+                    NoteUri.canonical(nne((String) body.get("source_uri"))),
                     nne((String) body.get("collection")),
                     (String) body.getOrDefault("highlights_md", ""),
                     (String) body.getOrDefault("mentions_md", ""),
@@ -1218,17 +1227,70 @@ public final class AspectRepository {
         });
     }
 
+    /** last_error written to a row that a reclaim moves to the terminal failed state. */
+    public static final String RECLAIM_CAP_ERROR = "reclaimed_stale_retry_cap_exhausted";
+
     /**
-     * Reclaim stale in_progress rows (worker died).
+     * Reclaim stale in_progress rows (worker died or hung), counting each as an
+     * attempt. Equivalent to {@link #reclaimStale(String, int, boolean)} with
+     * {@code countAttempt = true}: the periodic age-based sweep.
      */
     public int reclaimStale(String tenant, int timeoutSeconds) {
+        return reclaimStale(tenant, timeoutSeconds, true);
+    }
+
+    /**
+     * Reclaim stale in_progress rows (worker died or hung).
+     *
+     * <p>{@code countAttempt = true} (the age-based sweep): a reclaim counts as an
+     * attempt (RDR-235 Gap 2, nexus-j67ix.2): without it a
+     * document that kills its worker every time (OOM, a kill) cycles pending ->
+     * in_progress -> pending forever and never reaches the terminal {@code failed}
+     * state RDR-163 defined. {@code retry_count} is incremented, and the row is
+     * decided by the worker's own rule: seen at {@code retry_count >= }
+     * {@link #RETRY_MAX_ATTEMPTS} it goes {@code failed} exactly as {@link #markFailed}
+     * leaves it (status, retry_count + 1, last_error; last_attempt_at and
+     * next_retry_at untouched); below the cap it returns to {@code pending} with the
+     * incremented count and last_attempt_at cleared, as before.
+     *
+     * <p>{@code countAttempt = false} (the daemon's graceful-stop sweep and the
+     * self-fault stand-down that ends in it, nexus-j67ix.3): the rows a stopping
+     * worker abandons did nothing wrong, so every stale row returns to
+     * {@code pending} with {@code retry_count} and {@code last_error} unchanged and
+     * {@code last_attempt_at} cleared. A row already at the cap goes to
+     * {@code pending}, never {@code failed}: this reclaim is not the row's fault.
+     *
+     * <p>{@code next_retry_at} is never written by any outcome (RDR-163 invariant:
+     * clearing it would bypass the backoff, bumping it would punish a crash).
+     *
+     * @return rows reclaimed, whichever way they went
+     */
+    public int reclaimStale(String tenant, int timeoutSeconds, boolean countAttempt) {
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusSeconds(timeoutSeconds);
+            var stale = ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress")
+                .and(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT.lt(cutoff));
+            if (!countAttempt) {
+                return ctx.update(ASPECT_EXTRACTION_QUEUE)
+                    .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
+                    .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
+                    .where(stale)
+                    .execute();
+            }
+            // Every right-hand side reads the row's pre-update values (SQL UPDATE semantics),
+            // so the cap test sees the count the worker saw at claim time.
+            var atCap = ASPECT_EXTRACTION_QUEUE.RETRY_COUNT.ge(RETRY_MAX_ATTEMPTS);
             return ctx.update(ASPECT_EXTRACTION_QUEUE)
-                .set(ASPECT_EXTRACTION_QUEUE.STATUS, "pending")
-                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
-                .where(ASPECT_EXTRACTION_QUEUE.STATUS.eq("in_progress")
-                    .and(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT.lt(cutoff)))
+                .set(ASPECT_EXTRACTION_QUEUE.STATUS,
+                    when(atCap, inline("failed")).otherwise(inline("pending")))
+                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                    field("retry_count + 1", Integer.class))
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
+                    when(atCap, ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT)
+                        .otherwise(inline((OffsetDateTime) null)))
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,
+                    when(atCap, inline(RECLAIM_CAP_ERROR)).otherwise(ASPECT_EXTRACTION_QUEUE.LAST_ERROR))
+                .where(stale)
                 .execute();
         });
     }
@@ -1716,12 +1778,13 @@ public final class AspectRepository {
     public List<String> filterBySourceUris(
             String tenant, List<String> sourceUris, String field, String predicate) {
         if (sourceUris == null || sourceUris.isEmpty()) return List.of();
+        List<String> uris = sourceUris.stream().map(NoteUri::canonical).distinct().toList();  // RDR-231
         validateField(field);
         String fieldExpr = fieldExpression(field);
 
         List<String> result = new ArrayList<>();
-        for (int start = 0; start < sourceUris.size(); start += 300) {
-            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+        for (int start = 0; start < uris.size(); start += 300) {
+            List<String> batch = uris.subList(start, Math.min(start + 300, uris.size()));
             // fieldExpr is validated by fieldExpression() which only emits:
             //   - a bare column name (from ALLOWED_ASPECT_COLUMNS, no injection risk)
             //   - COALESCE(extras,'{}')::json#>>'{...}' (keys validated to [A-Za-z0-9_.]+)
@@ -1762,12 +1825,13 @@ public final class AspectRepository {
      */
     public Map<String, String> groupByField(String tenant, List<String> sourceUris, String field) {
         if (sourceUris == null || sourceUris.isEmpty()) return Map.of();
+        List<String> uris = sourceUris.stream().map(NoteUri::canonical).distinct().toList();  // RDR-231
         validateField(field);
         String fieldExpr = fieldExpression(field);
 
         Map<String, String> result = new java.util.LinkedHashMap<>();
-        for (int start = 0; start < sourceUris.size(); start += 300) {
-            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+        for (int start = 0; start < uris.size(); start += 300) {
+            List<String> batch = uris.subList(start, Math.min(start + 300, uris.size()));
             // fieldExpr validated by fieldExpression() — safe to embed in DSL.field()
             Field<String> fExpr = field(fieldExpr, String.class);
 
@@ -1809,6 +1873,7 @@ public final class AspectRepository {
      */
     public Double confidenceAggregate(String tenant, List<String> sourceUris, String reducerKind) {
         if (sourceUris == null || sourceUris.isEmpty()) return null;
+        List<String> uris = sourceUris.stream().map(NoteUri::canonical).distinct().toList();  // RDR-231
 
         String aggFunc = switch (reducerKind) {
             case "avg_confidence" -> "AVG";
@@ -1824,8 +1889,8 @@ public final class AspectRepository {
         Double minAcc = null;
         Double maxAcc = null;
 
-        for (int start = 0; start < sourceUris.size(); start += 300) {
-            List<String> batch = sourceUris.subList(start, Math.min(start + 300, sourceUris.size()));
+        for (int start = 0; start < uris.size(); start += 300) {
+            List<String> batch = uris.subList(start, Math.min(start + 300, uris.size()));
 
             final double[] localSum = {0.0};
             final long[]   localCnt = {0L};

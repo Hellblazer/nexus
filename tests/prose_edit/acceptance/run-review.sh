@@ -55,7 +55,7 @@ runner_sweep_stale
 mkdir -p "$DIR" && runner_track "$DIR"
 cp tests/prose_edit/fixtures/review-scenario.md "$DOC" || exit 1
 git status --short > "$OUT/repo-status-before.txt"
-python3 .claude/skills/prose-edit/scripts/memory.py viewer --set Typora > "$OUT/seed-viewer.json" || exit 1
+python3 prose-edit/skills/prose-edit/scripts/memory.py viewer --set Typora > "$OUT/seed-viewer.json" || exit 1
 
 run() { OUT_DIR="$OUT" "$HERE/run-scenario.sh" "$@"; }
 # answer NAME FROM PROMPT: the author's answer, then the confirmation of the echo the skill shows.

@@ -24,6 +24,8 @@ required_bindings:
 - symptom
 optional_bindings: []
 default_bindings: {}
+# RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
+answer_kind: debug
 tags: builtin-template,rdr-078,debug
 plan_json:
   steps:

@@ -33,6 +33,13 @@ _TEST_URL = "https://example.test"
 
 
 @pytest.fixture(autouse=True)
+def _note_uri_floor_at_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The release shape: the note-URI floor equal to the pin (nexus-bivz3.20 set the floor on develop,
+    where it leads the pin until the paired client release). Tests of the floor check set their own."""
+    monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
+
+
+@pytest.fixture(autouse=True)
 def _data_effect_relay_passes_by_default():
     """check_data_effect_relay does real git-tag + filesystem I/O against the
     checkout; only TestCheckDataEffectRelay (which shadows this fixture) and the
@@ -566,6 +573,40 @@ def test_ledger_only_runs_the_ledger_and_nothing_else(tmp_path) -> None:
             assert gate.main(["--ledger-only"]) == rc
         probe.assert_not_called()
         ancestry.assert_not_called()
+
+
+# ── RDR-231 note-URI floor vs the pin (nexus-bivz3.15/.16) ──────────────────
+
+_PIN_BELOW_FLOOR = (REQUIRED_ENGINE_VERSION[0], REQUIRED_ENGINE_VERSION[1], REQUIRED_ENGINE_VERSION[2] + 1)
+
+
+def test_a_pin_below_the_note_uri_floor_fails_the_release_check(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    assert gate.check_note_uri_floor_vs_pin() == 1
+    err = capsys.readouterr().err
+    assert "NOTE URI FLOOR CHECK FAILED" in err and ".".join(map(str, _PIN_BELOW_FLOOR)) in err
+
+
+@pytest.mark.parametrize(
+    "floor",
+    [pytest.param((0, 0, 0), id="unset"), pytest.param(REQUIRED_ENGINE_VERSION, id="equal"),
+     pytest.param((0, 0, 1), id="below")],
+)
+def test_a_pin_at_or_above_the_note_uri_floor_passes(monkeypatch, floor) -> None:
+    monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", floor)
+    assert gate.check_note_uri_floor_vs_pin() == 0
+
+
+def test_ledger_only_and_the_bare_form_both_run_the_note_uri_floor_check(monkeypatch, tmp_path) -> None:
+    """The PR-to-main job (--ledger-only) and the tag-time form gate it; the network probe never runs when it fails."""
+    monkeypatch.setattr(gate._engine_version, "NOTE_URI_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, None)):
+        assert gate.main(["--ledger-only"]) == 1
+    with patch.object(gate, "probe_managed_service") as probe, \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        assert gate.main(["--url", _TEST_URL]) == 1
+        assert gate.main(["--paired-deploy-auto"]) == 1
+    probe.assert_not_called()
 
 
 # ── --client-precondition (nexus-9ssih deploy-order gate) ───────────────────

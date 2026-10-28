@@ -764,7 +764,7 @@ def _stage_dir(root: Path, target: Path) -> tuple[Path, bool]:
     cross one) or the repository has no git directory. A directory that cannot be made is an error, not a
     reason to fall back: a stage beside the document is never reached by accident."""
     proc = subprocess.run(["git", "-C", str(root), "rev-parse", "--absolute-git-dir"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8")
     if proc.returncode != 0 or not proc.stdout.strip():
         return target.parent, True
     directory = Path(proc.stdout.strip()) / STAGE_DIRNAME

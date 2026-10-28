@@ -178,13 +178,95 @@ class PDFConfig:
     # replacing the old fixed batch-level 180s. The effective subprocess timeout
     # is this value times the number of pages in the range.
     mineru_page_timeout_s: int = 180
+    #: RDR-237: how many consecutive pages that fail both MinerU rungs with one
+    #: failure class stop the document as a failing install or machine. 0 turns
+    #: the rule off; anything else below 3 (or not an integer) becomes 3, so the
+    #: breaker never preempts the server restart.
+    ladder_breaker: int = 3
+
+
+#: Lowest ``pdf.ladder_breaker`` other than 0 that is honoured.
+_LADDER_BREAKER_FLOOR = 3
+
+#: ``repr`` of every malformed ``pdf.ladder_breaker`` value already warned about (tests clear it).
+_LADDER_BREAKER_WARNED: set[str] = set()
+
+
+def _coerce_ladder_breaker(value: Any) -> int:
+    """``pdf.ladder_breaker`` as an int: 0 (off) or 3 and up; else warn and use 3.
+
+    Its own coercion, not the bare ``int(...)`` the other ``[pdf]`` keys use: a
+    value of 1 or 2 would trip the rule on a single equation-dense page, and
+    ``nx config set`` stores every value as a string, so ``"3"`` must parse
+    while ``"x"`` and ``2.5`` must not crash the loader.
+    """
+    parsed: int | None = None
+    if isinstance(value, bool):
+        parsed = None
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            parsed = None
+    if parsed is not None and (parsed == 0 or parsed >= _LADDER_BREAKER_FLOOR):
+        return parsed
+    # The accessors re-read the config on every call, so a malformed value would warn on every
+    # page of every document. Warn once per distinct value per process.
+    seen = repr(value)
+    if seen not in _LADDER_BREAKER_WARNED:
+        _LADDER_BREAKER_WARNED.add(seen)
+        _log.warning(
+            "pdf_config_malformed",
+            key="pdf.ladder_breaker",
+            value=value,
+            fell_back_to=_LADDER_BREAKER_FLOOR,
+            reason="must be 0 (off) or an integer of 3 or more",
+        )
+    return _LADDER_BREAKER_FLOOR
+
+
+class PdfConfigError(ValueError):
+    """A ``[pdf]`` integer setting holds a value that is not an integer (RDR-237).
+
+    The message names the setting, which the bare ``ValueError`` of ``int("x")`` did not: a
+    run that stopped on it said ``invalid literal for int() with base 10: 'x'`` and nothing
+    about which key held it. *key* is the setting's own name, without the ``pdf.`` prefix.
+    """
+
+    def __init__(self, message: str, *, key: str) -> None:
+        super().__init__(message)
+        self.key = key
+
+
+def _pdf_int(pdf: dict, key: str, default: int, *, floor: int) -> int:
+    """``pdf[key]`` as an int of at least *floor*; a value that is no integer raises
+    :class:`PdfConfigError` naming ``pdf.<key>``. ``nx config set`` stores every value as a
+    string, so ``"180"`` parses."""
+    raw = pdf.get(key, default)
+    # A YAML boolean is an int to Python and 2.5 truncates to 2: neither is what the operator
+    # meant, so both are refused by name. An integral float (180.0) is a whole number.
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+        raise PdfConfigError(f"pdf.{key} must be an integer, got {raw!r}", key=key)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise PdfConfigError(f"pdf.{key} must be an integer, got {raw!r}", key=key) from exc
+    return max(floor, value)
 
 
 def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
-    """Load PDF config. Invalid ``extractor`` falls back to ``"auto"``."""
+    """Load PDF config. Invalid ``extractor`` falls back to ``"auto"``.
+
+    ``pymupdf`` (RDR-237) is the explicit text-only extractor; it is only ever set here or with
+    ``--extractor``, never chosen for the user.
+
+    A ``[pdf]`` integer key that holds no integer raises :class:`PdfConfigError` (a
+    ``ValueError``) naming the key."""
     pdf = load_config(repo_root=repo_root).get("pdf", {})
     extractor = pdf.get("extractor", "auto")
-    if extractor not in ("auto", "docling", "mineru"):
+    if extractor not in ("auto", "docling", "mineru", "pymupdf"):
         _log.warning("invalid pdf.extractor config", value=extractor)
         extractor = "auto"
     return PDFConfig(
@@ -201,9 +283,10 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
             pdf.get("mineru_table_enable", True), key="pdf.mineru_table_enable", default=True,
             event="pdf_config_malformed",
         ),
-        mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
-        mineru_memory_ceiling_mb=max(0, int(pdf.get("mineru_memory_ceiling_mb", 0))),
-        mineru_page_timeout_s=max(1, int(pdf.get("mineru_page_timeout_s", 180))),
+        mineru_page_batch=_pdf_int(pdf, "mineru_page_batch", 1, floor=1),
+        mineru_memory_ceiling_mb=_pdf_int(pdf, "mineru_memory_ceiling_mb", 0, floor=0),
+        mineru_page_timeout_s=_pdf_int(pdf, "mineru_page_timeout_s", 180, floor=1),
+        ladder_breaker=_coerce_ladder_breaker(pdf.get("ladder_breaker", _LADDER_BREAKER_FLOOR)),
     )
 
 
@@ -556,6 +639,42 @@ def get_mineru_memory_ceiling_mb(repo_root: Path | None = None) -> int:
 
 def get_mineru_page_timeout_s(repo_root: Path | None = None) -> int:
     return get_pdf_config(repo_root).mineru_page_timeout_s
+
+def get_pdf_ladder_breaker(repo_root: Path | None = None) -> int:
+    """RDR-237 systemic-failure threshold: 0 = off, else 3 or more."""
+    return get_pdf_config(repo_root).ladder_breaker
+
+
+#: RDR-237: the longest one MinerU attempt may run without a progress write, in seconds. A pipeline
+#: row goes stale after 5 minutes without one (``STALE_THRESHOLD`` in ``db.http_pipeline_client``),
+#: and a concurrent run takes over a stale row, so the longest attempt, ``mineru_page_timeout_s``
+#: times ``mineru_page_batch``, keeps a 60 s margin under it.
+MINERU_ATTEMPT_BOUND_S: int = 240
+
+
+def mineru_attempt_bound_problem(repo_root: Path | None = None) -> str | None:
+    """Why the MinerU time limits cannot be used as set, or ``None`` when they can (RDR-237).
+
+    Two reasons, each naming the settings: one of ``pdf.mineru_page_timeout_s`` and
+    ``pdf.mineru_page_batch`` holds no integer, or their product exceeds
+    :data:`MINERU_ATTEMPT_BOUND_S`. The getters are read apart during a run and the loader falls
+    back rather than checking, so this is the one place the pair is judged; ``PDFExtractor``
+    calls it where a MinerU run starts and ``nx config set`` calls it after a change.
+    """
+    try:
+        timeout_s = get_mineru_page_timeout_s(repo_root)
+        batch = get_mineru_page_batch(repo_root)
+    except PdfConfigError as exc:
+        return str(exc)
+    if timeout_s * batch > MINERU_ATTEMPT_BOUND_S:
+        return (
+            f"pdf.mineru_page_timeout_s ({timeout_s} s) x pdf.mineru_page_batch ({batch}) "
+            f"= {timeout_s * batch} s, above the {MINERU_ATTEMPT_BOUND_S} s one MinerU attempt may "
+            f"run without a progress write (a pipeline row is taken over after 300 s of silence). "
+            f"Lower pdf.mineru_page_timeout_s or pdf.mineru_page_batch; the defaults are 180 x 1, "
+            f"and a batch of 4 pages needs a timeout of {MINERU_ATTEMPT_BOUND_S // 4} s or less."
+        )
+    return None
 
 
 def get_tuning_config(repo_root: Path | None = None) -> TuningConfig:
@@ -1161,6 +1280,7 @@ _DEFAULTS: dict[str, Any] = {
         "mineru_server_url": "http://127.0.0.1:8010",
         "mineru_table_enable": True,
         "mineru_page_batch": 1,
+        "ladder_breaker": 3,
     },
     "taxonomy": {
         # Glob patterns for collections to exclude from auto-discover

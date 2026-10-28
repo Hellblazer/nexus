@@ -437,11 +437,13 @@ def _frontmatter_description(path: Path) -> str | None:
 # files (skills, agents, commands) the lint must examine. A new skill, agent
 # or command changes the count on purpose: the pin makes the addition visible
 # here, and the undescribed check below stops a file with no description from
-# dropping out of the walk unnoticed. sn and tool-spill ship none today.
+# dropping out of the walk unnoticed. sn and tool-spill ship none today;
+# prose-edit ships one skill and one agent.
 _DESCRIPTION_SURFACES: dict[str, tuple[Path, int]] = {
     "conexus": (PLUGIN_DIR, 67),
     "sn": (REPO_ROOT / "sn", 0),
     "tool-spill": (REPO_ROOT / "tool-spill", 0),
+    "prose-edit": (REPO_ROOT / "prose-edit", 2),
 }
 
 
@@ -970,7 +972,7 @@ class TestHooks:
             "check."
         )
 
-    @pytest.mark.parametrize("plugin_dir", ["conexus", "sn", "tool-spill"])
+    @pytest.mark.parametrize("plugin_dir", ["conexus", "sn", "tool-spill", "prose-edit"])
     def test_plugin_json_has_only_recognised_keys(self, plugin_dir: str) -> None:
         """Claude Desktop's plugin sync warns on, and the store strips, any
         plugin.json key outside the manifest reference (nexus-0nskc: 'bugs'

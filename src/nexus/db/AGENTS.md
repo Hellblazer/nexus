@@ -5,8 +5,8 @@ T1, T2, and T3 implementations. The interesting policy lives in the Liquibase/up
 **ChromaDB is GONE (RDR-155 P4b, 2026-07-25).** The dependency is dropped, not
 merely unused: it is absent from `uv.lock` and not importable. Serving is the
 pgvector nexus-service in every mode. `chroma://` URI literals survive
-deliberately — they are a persisted data format (RDR-169 G3), not a
-dependency. (`ChromaSchemeHandler.java`, the engine's resolver for them, was
+only as residue (RDR-231 renamed the note identity to `nx-note://`) — a
+persisted data format (RDR-169 G3), not a dependency. (`ChromaSchemeHandler.java`, the engine's resolver for them, was
 removed with `POST /v1/vectors/resolve`, nexus-3t0jv.) Pinned by
 `tests/test_rdr155_p4b_deletion_gate.py`.
 

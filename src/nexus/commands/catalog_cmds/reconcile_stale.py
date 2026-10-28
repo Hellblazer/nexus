@@ -44,7 +44,7 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          Population is LEGACY-ONLY going forward: since
                          nexus-sdp0u, every non-empty-title store_put /
                          memory-promote doc is registered with a synthesized
-                         ``chroma://<collection>/<title>`` source_uri, so a
+                         ``nx-note://<collection>/<title>`` source_uri, so a
                          post-fix doc can no longer land here — it falls to
                          ``unresolvable_provenance``/``source_uri_only``
                          below instead. That is the deliberate resolution,
@@ -82,7 +82,7 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          ``skipped_no_root`` refusal; ``malformed_tumbler``
                          — the tumbler has no owner-address component;
                          ``source_uri_only`` — empty file_path but a
-                         non-``file://``, non-``chroma://`` source_uri
+                         non-``file://``, non-note (``nx-note://``) source_uri
                          (RDR-096 P3.1 schemes: ``x-devonthink-item://``,
                          ``nx-orphan-backfill://``, ``nx-scratch://``);
                          ``no_provenance`` — empty
@@ -97,7 +97,7 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          store_put_origin -> nexus-0y0gk critique fix-round:
                          a zero-chunk-count knowledge__ store_put doc
                          carrying its nexus-sdp0u synthesized
-                         ``chroma://<collection>/<title>`` source_uri.
+                         ``nx-note://<collection>/<title>`` source_uri.
                          Formerly folded into ``unresolvable_provenance``/
                          ``source_uri_only`` (see the ``rdr145_exempt``
                          entry above for the pre-sdp0u/post-sdp0u split this
@@ -107,7 +107,7 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          here) it still needs a content re-write, not a
                          manifest-only backfill; see ``dishonest``'s
                          ``store_put_origin`` below for the FK-safe sibling
-                         population. ``reason`` is always ``chroma_uri``
+                         population. ``reason`` is always ``note_uri``
                          here (the ``knowledge_single_chunk_no_path``
                          sub-reason requires chunk_count==1, unreachable at
                          chunk_count==0).
@@ -126,7 +126,7 @@ Classes, mirroring the design memo (T1 scratch 80500d58):
                          ``resolved_path``/``file_path``) — FOUR values,
                          checked in this order: ``store_put_origin`` (the
                          nexus-sdp0u store_put signature — ``reason``
-                         ``chroma_uri`` for a synthesized ``chroma://``
+                         ``note_uri`` for a synthesized ``nx-note://``
                          source_uri, or ``knowledge_single_chunk_no_path``
                          for a knowledge__ doc with chunk_count==1 and
                          NEITHER file_path nor source_uri — store_put docs
@@ -166,6 +166,7 @@ from typing import TYPE_CHECKING
 import click
 import structlog
 
+from nexus.aspect_readers import canonical_note_uri, is_note_uri
 from nexus.catalog.tumbler import Tumbler
 
 # Deliberate cross-module reuse of catalog_cmds.integrity's private
@@ -214,20 +215,19 @@ _PROGRESS_EVERY = 100
 
 _ORPHANED_REASONS = ("file_missing", "owner_root_gone")
 _UNRESOLVABLE_REASONS = ("no_repo_root", "malformed_tumbler", "source_uri_only", "no_provenance")
-_STORE_PUT_ORIGIN_REASONS = ("chroma_uri", "knowledge_single_chunk_no_path")
-# nexus-poigc: this is an INTERNAL origin marker, not a reference to the
-# retired ChromaDB dependency (RDR-155 P4b dropped it from uv.lock
-# entirely). ``nexus.aspect_readers.uri_for`` mints a ``chroma://<collection>/
-# <path>`` identity for every collection prefix OUTSIDE
-# ``FILE_ROUTED_PREFIXES`` (``rdr__``/``docs__``/``code__``) — today that is
-# ``knowledge__`` documents minted via ``nx store put`` / MCP ``store_put``,
-# and this classifier's ``chroma_uri`` reason keys on exactly that shape. A
-# ``chroma://`` row under a FILE-ROUTED collection prefix is a different,
-# migration-residue population (an older ``uri_for`` build that predated
-# those prefixes routing to ``file://``) — ``nx catalog backfill-source-uri``
-# re-derives those, it does not touch the marker rows this constant exists
-# to recognize.
-_STORE_PUT_URI_PREFIX = "chroma://"
+_STORE_PUT_ORIGIN_REASONS = ("note_uri", "knowledge_single_chunk_no_path")
+# RDR-231: ``nexus.aspect_readers.uri_for`` mints a ``nx-note://<collection>/
+# <title>`` identity for every collection prefix OUTSIDE
+# ``FILE_ROUTED_PREFIXES`` (``rdr__``/``docs__``/``code__``) -- today that is
+# ``knowledge__`` documents minted via ``nx store put`` / MCP ``store_put`` --
+# and this classifier's ``note_uri`` reason keys on exactly that shape,
+# through ``is_note_uri(canonical_note_uri(uri))`` (a note in either
+# spelling, the corpus rule of RDR-231 Technical Design step 1). A
+# ``chroma://`` or ``nx-note://`` row under a FILE-ROUTED collection prefix
+# is a different, migration-residue population (an older ``uri_for`` build
+# that predated those prefixes routing to ``file://``): it is NOT counted here
+# (RDR-231 Test Plan row 562), and ``nx catalog backfill-source-uri``
+# re-derives it.
 
 # nexus-wq1e4: paths under a Claude Code worktree, or shaped like a system
 # temp directory, are the "confirmed-safe" population an operator asked to
@@ -286,7 +286,7 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
         return Path(root) / fp, ""
 
     if source_uri.startswith("file://"):
-        # RDR-096 P3.1 (_normalize_source_uri, catalog/types.py): a
+        # RDR-096 P3.1 (the engine's deriveSourceUri at register time): a
         # file:// source_uri is already an absolute path — resolvable
         # exactly like file_path, cwd-independent by construction.
         return Path(source_uri[len("file://"):]), ""
@@ -345,8 +345,8 @@ def _store_put_signature_reason(entry: object) -> str | None:
 
     Two disjoint sub-signatures:
 
-      chroma_uri                      source_uri is the nexus-sdp0u
-                                       synthesized ``chroma://<collection>/
+      note_uri                        source_uri is the nexus-sdp0u
+                                       synthesized ``nx-note://<collection>/
                                        <title>`` identity written at
                                        store_put time, regardless of
                                        chunk_count. Reachable from both the
@@ -376,8 +376,8 @@ def _store_put_signature_reason(entry: object) -> str | None:
     if entry.file_path:
         return None
     source_uri = getattr(entry, "source_uri", "") or ""
-    if source_uri.startswith(_STORE_PUT_URI_PREFIX):
-        return "chroma_uri"
+    if is_note_uri(canonical_note_uri(source_uri)):
+        return "note_uri"
     if (
         not source_uri
         and resolve_row_preferred(

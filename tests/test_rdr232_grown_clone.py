@@ -10,13 +10,13 @@ question). These tests pin the pure parts, with no tenant: the label key, the la
 the metric counts a selection of it, and the shape of the row the fixture saves. The measurement itself
 runs inside the existing golden tenant test (``test_rdr232_golden_fixture.py``).
 
-Which Phase 2 exit clause the clone stands for. It is stored ``ad-hoc,grown`` and its ``plan_json`` has no
-answer-kind declaration, so it exercises ONE clause: "unknown-grown plans cannot bypass the gate" (RDR-232
+Which Phase 2 exit clause the clone stands for. It is stored ``ad-hoc,grown`` and its ``plan_json`` declares
+kind unknown with grown provenance, so it exercises ONE clause: "unknown-grown plans cannot bypass the gate" (RDR-232
 lines ~487-498). It does NOT measure the clause "473 is ineligible" (a builtin-tagged row that declares
 lookup), and its +1 wrong-shape admission is forced by construction (an exact-text repeat of one request),
 not a measured rate. Plan 473's builtin origin is inferred (RDR-232 line 1606; T2 nexus_rdr/189-research-11),
-not read live. ``TestPhase2Tripwire`` turns red when Phase 2 adds the declaration to the template the clone
-copies, so that decision is made at a known point.
+not read live. Phase 2 (nexus-jypmj.2.1) added the declaration to the template the clone copies; the clone
+is stamped as nx_answer's grow site stamps a grown plan, and ``TestPhase2Tripwire`` pins the stamp.
 """
 from __future__ import annotations
 
@@ -214,21 +214,40 @@ class TestReportLabels:
 
 
 class TestPhase2Tripwire:
-    def test_the_clone_plan_json_carries_no_answer_kind_declaration(self) -> None:
-        # RDR-232 puts the declaration in the builtin plan_json (lines ~487-498). The clone copies the
-        # hybrid-factual-lookup template, so when Phase 2 adds the declaration there the clone becomes a
-        # declared-kind plan without anyone choosing it.
+    """Phase 2 (nexus-jypmj.2.1) added the answer-kind declaration to ``hybrid-factual-lookup.yml``, which
+    the clone copies. The clone is stamped with ``grown_plan_json(..., route_kind=None, route_source=None)``,
+    what nx_answer stores for a grown plan today, so it stays an unknown-kind grown plan and keeps measuring
+    'unknown-grown plans cannot bypass the gate'. These pins fail if the stamp is removed (the clone would
+    carry the template's curated lookup), and they fail if the source template stops declaring (then the
+    stamp would be guarding nothing and the clone would no longer show what a grown plan looks like)."""
+
+    def test_the_source_template_declares_lookup_so_the_stamp_has_something_to_replace(self) -> None:
+        from nexus.plans.answer_kind import PlanAnswerKind, decode_answer_kind
+        from nexus.plans.seed_loader import desired_row_for_template
+
+        template = yaml.safe_load((g.BUILTIN_PLANS / "hybrid-factual-lookup.yml").read_text(encoding="utf-8"))
+        assert decode_answer_kind(desired_row_for_template(template).plan_json) is PlanAnswerKind.LOOKUP
+
+    def test_the_clone_is_an_unknown_kind_grown_plan_like_nx_answer_stores(self) -> None:
+        from nexus.plans.answer_kind import PlanAnswerKind, decode_declaration
+
         lib = _RecordingLibrary()
         g.seed_grown_473_clone(lib, origin_question="Synthesize RDR-084 something.")
         body = json.loads(lib.calls[0]["plan_json"])
-        declared = sorted(k for k in body if "kind" in k.lower())
-        assert not declared, (
-            f"plan_json now declares {declared}: Phase 2 (nexus-jypmj.2) added the answer-kind field to "
-            "hybrid-factual-lookup.yml, which the grown 473 clone copies. DECIDE: strip the field from the "
-            "clone (tests/_rdr232_golden.py seed_grown_473_clone) so it keeps exercising 'unknown-grown "
-            "plans cannot bypass the gate', or keep it and re-record the baseline knowing the clone is then "
-            "a declared-lookup plan and that clause is no longer measured. Then update this pin.")
+        assert body["answer_kind"] == {"version": 1, "kind": "unknown", "provenance": "grown"}
+        decl = decode_declaration(lib.calls[0]["plan_json"])
+        assert (decl.kind, decl.provenance, decl.route) == (PlanAnswerKind.UNKNOWN, "grown", None)
         assert [s["tool"] for s in body["steps"]][:1] == ["search"], "non-vacuity: this is the lookup body"
+
+    def test_a_legacy_grown_row_with_no_declaration_decodes_unattested(self) -> None:
+        """A grown plan saved before nexus-jypmj.2.1 has no declaration: unknown kind, provenance None."""
+        from nexus.plans.answer_kind import PlanAnswerKind, decode_declaration
+
+        lib = _RecordingLibrary()
+        g.seed_grown_473_clone(lib, origin_question="Synthesize RDR-084 something.")
+        legacy = {k: v for k, v in json.loads(lib.calls[0]["plan_json"]).items() if k != "answer_kind"}
+        decl = decode_declaration(json.dumps(legacy))
+        assert (decl.kind, decl.provenance) == (PlanAnswerKind.UNKNOWN, None)
 
 
 class _RecordingLibrary:

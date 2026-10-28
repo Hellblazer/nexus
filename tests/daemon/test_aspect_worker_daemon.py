@@ -57,7 +57,7 @@ class _NoopQueue:
     (which needs a live service). Reclaim behavior itself is covered in
     tests/daemon/test_aspect_worker_reclaim.py."""
 
-    def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
         return 0
 
     def close(self) -> None:
@@ -152,7 +152,7 @@ class _RecordingQueue:
     def __init__(self) -> None:
         self.reclaim_calls = 0
 
-    def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+    def reclaim_stale(self, timeout_seconds: int = 300, *, count_attempt: bool = True) -> int:
         self.reclaim_calls += 1
         return 0
 

@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
     # the SQLite PlanLibrary.
     from nexus.db.t2.http_plan_library import HttpPlanLibrary
+    from nexus.plans.eligibility import EligibilityFilter
 from nexus.plans.evidence import declared_reserved_names
 from nexus.plans.match import Match, _decode_json_dict
 from nexus.plans.schema import unsatisfiable_typed_binding
@@ -608,6 +609,7 @@ def plan_match(
     project: str = "",
     available_bindings: frozenset[str] | None = None,
     category_verb: str | None = None,
+    eligibility: EligibilityFilter | None = None,
 ) -> list[Match]:
     """Return plans ranked for *intent*.
 
@@ -675,6 +677,12 @@ def plan_match(
     as ``research`` or ``analyze``; routing a derived ``debug`` through
     it would drop every grown plan, and grown plans are currently the
     entire live hit rate.
+
+    *eligibility* (RDR-232 Phase 2, nexus-jypmj.2.3) is the answer-kind filter for this request. Every
+    branch (cosine, the below-floor category route, the FTS5 fallback) asks it last, after every other
+    drop, whether a candidate may serve the request. When it is enforcing, a refused candidate is dropped
+    and the cosine over-fetch grows by ``n`` so refused plans cannot starve the pool; when it is not, it
+    only counts, and the result is identical to a call that passed none.
     """
     filter_dims = dimensions or {}
     # nexus-h33x8.6 a2: precompute once — every candidate on the T1 path
@@ -697,6 +705,9 @@ def plan_match(
         _over += n  # extra budget for potential conflict drops
     if available_bindings is not None:
         _over += n  # and for unrunnable-plan drops (nexus-0yrjr)
+    _eligibility_enforced = eligibility is not None and eligibility.enforce
+    if _eligibility_enforced:
+        _over += n  # and for answer-kind drops (nexus-jypmj.2.3)
     # (plan_id, binding) for every candidate dropped as unrunnable; drained
     # by _log_binding_drops on each return path so the pool never shrinks
     # silently.
@@ -768,8 +779,10 @@ def plan_match(
             # Bypasses the CONFIDENCE floors (via confidence=1.0) and
             # NOTHING else. Not the always-failing skip, not the dimension
             # filter, not the unmet-binding gate, not the unanchored-grown
-            # drop, not a scope conflict. Those answer "can this plan run
-            # here at all", which a repeated question does not speak to.
+            # drop, not a scope conflict, not answer-kind eligibility
+            # (nexus-jypmj.2.3: asked last, below). Those answer "can this
+            # plan run here at all" or "may this plan serve this kind of
+            # request", which a repeated question does not speak to.
             is_verbatim = _is_verbatim_repeat(row, normalized_intent)
             if is_verbatim:
                 confidence = 1.0
@@ -865,6 +878,11 @@ def plan_match(
             if unmet is not None:
                 binding_drops.append((m.plan_id, unmet))
                 continue
+            # nexus-jypmj.2.3: answer-kind eligibility, last, so the count is "would have been pooled".
+            if eligibility is not None and not eligibility.admit(
+                row, "category_route" if routable else "cosine",
+            ):
+                continue
             if routable:
                 # Below the floor, but a category plan the caller's verb
                 # asked for. Held aside — never mixed into `scored`, so it
@@ -944,6 +962,8 @@ def plan_match(
         # this path carries compensating headroom, so binding drops must
         # too or a caller asking for n silently receives fewer.
         _fts_over += n
+    if _eligibility_enforced:
+        _fts_over += n  # answer-kind drops (nexus-jypmj.2.3)
     rows = library.search_plans(intent, limit=_fts_over, project=project)
     matches: list[Match] = []
     fts_literal_drops: list = []
@@ -978,6 +998,9 @@ def plan_match(
         unmet = _unmet_typed_binding(m, available_bindings)
         if unmet is not None:
             binding_drops.append((m.plan_id, unmet))
+            continue
+        # nexus-jypmj.2.3: the same answer-kind eligibility on the FTS5 fallback.
+        if eligibility is not None and not eligibility.admit(row, "fts"):
             continue
         matches.append(m)
         if len(matches) >= n:

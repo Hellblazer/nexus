@@ -28,6 +28,7 @@ import logging
 import re
 from typing import Any
 
+from nexus.plans.answer_kind import ANSWER_KIND_KEY, PlanAnswerKind
 from nexus.plans.evidence import ReservedBindingError, check_no_reserved_declarations
 
 __all__ = [
@@ -310,6 +311,7 @@ def validate_plan_template(
             "plan template requires a 'plan_json' object with a 'steps' list"
         )
     validate_plan_steps(plan_json)
+    _validate_template_answer_kind(template)
     # RDR-232 (nexus-jypmj.1.2): a template's binding lists sit at the
     # template level, not inside plan_json, until the seed loader folds
     # them in; check both places.
@@ -318,6 +320,37 @@ def validate_plan_template(
         "optional_bindings": template.get("optional_bindings"),
         "default_bindings": template.get("default_bindings"),
     })
+
+
+def _validate_template_answer_kind(template: dict[str, Any]) -> None:
+    """Refuse a template-level ``answer_kind`` that is not one of :class:`PlanAnswerKind`.
+
+    RDR-232 Phase 2 (nexus-jypmj.2.1). The YAML author writes the bare kind
+    (``answer_kind: lookup``) at the TEMPLATE level only; the seed loader
+    folds it into ``plan_json`` as the versioned, curated declaration. A
+    declaration inside ``plan_json`` is refused: the loader is the only writer
+    of a curated one. ``unknown`` is allowed (a template may say it declares
+    nothing); an explicit ``answer_kind: null`` is refused, here and so by the
+    seed loader's validation. The declaration is never a dimension. This check
+    runs where a template is loaded; read paths such as ``nx plan hygiene``
+    do not run it.
+    """
+    plan_json = template.get("plan_json")
+    if isinstance(plan_json, dict) and ANSWER_KIND_KEY in plan_json:
+        raise PlanTemplateSchemaError(
+            f"plan template plan_json must not carry {ANSWER_KIND_KEY!r}: declare the kind with "
+            f"the template-level `{ANSWER_KIND_KEY}: <kind>` key, which the seed loader folds in"
+        )
+    if ANSWER_KIND_KEY not in template:
+        return
+    value = template[ANSWER_KIND_KEY]
+    try:
+        PlanAnswerKind(value)
+    except (ValueError, TypeError):
+        raise PlanTemplateSchemaError(
+            f"plan template {ANSWER_KIND_KEY} {value!r} is not one of "
+            f"{sorted(k.value for k in PlanAnswerKind)}"
+        ) from None
 
 
 def _refuse_reserved_declarations(plan: dict[str, Any]) -> None:

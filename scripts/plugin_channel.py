@@ -119,12 +119,12 @@ class GitCommandError(RuntimeError):
 #: The channel allowlist — a strict SUPERSET of the loader-visible
 #: SURFACE_BY_PLUGIN in tests/test_plugin_release_drift_ledger.py: it
 #: also admits conexus/CHANGELOG.md, conexus/registry.yaml,
-#: conexus/evals/, conexus/PENDING_RELEASE.md and every path under sn/ and
+#: conexus/evals/, conexus/PENDING_RELEASE.md and every path under sn/,
 #: tool-spill/ (the opt-in conexus-tool-spill mod, its README and tests
-#: included).
+#: included) and prose-edit/ (the opt-in conexus-prose-edit skill).
 #: Do not narrow this to SURFACE_BY_PLUGIN and do not widen
 #: SURFACE_BY_PLUGIN to this.
-ALLOWED_PREFIXES: tuple[str, ...] = ("conexus/", "sn/", "tool-spill/")
+ALLOWED_PREFIXES: tuple[str, ...] = ("conexus/", "sn/", "tool-spill/", "prose-edit/")
 
 ALLOWED_EXACT: tuple[str, ...] = (".claude-plugin/marketplace.json",)
 
@@ -150,6 +150,7 @@ PLUGIN_BY_ALLOWLIST_PREFIX: dict[str, str] = {
     # The directory is not the plugin name: marketplace.json lists the
     # opt-in mod as conexus-tool-spill, installed from path tool-spill.
     "tool-spill/": "conexus-tool-spill",
+    "prose-edit/": "conexus-prose-edit",
 }
 
 #: \Z, not $: a bare $ also matches before a trailing newline, so

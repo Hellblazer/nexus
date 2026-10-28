@@ -1357,7 +1357,7 @@ def _print_store_put_integrity_text(report: dict) -> None:
 # is NOT the test. A census-superseded chunk the reader can still see is.
 #
 # The reader must stay the live(c)-filtered one. Passing ``include_non_live``
-# (or reading the physical ``chroma://`` permalink) would return exactly the
+# (or reading the physical ``nx-note://`` permalink) would return exactly the
 # correctly hidden debris this check is looking for and flag all of it, so the
 # probe is a plain ``get(ids=...)`` and nothing else.
 

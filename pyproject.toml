@@ -12,7 +12,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conexus"
-version = "7.87.1"
+version = "7.88.0"
 description = "Self-hosted semantic search and knowledge management for LLM-driven development"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12,<3.14"
@@ -378,6 +378,7 @@ markers = [
     "t2_tenant: provision the opt-in test tenant for this test or module (the default substrate, optin; under NX_TEST_T2_SUBSTRATE=none the marker is a no-op, and only a t2_tenant parameter still provisions) — nexus-j23ni, tests/_storage_touch_guard.py",
     "fresh_tenant: opt OUT of the per-worker tenant pool (on by default since nexus-7zloy; NX_TEST_TENANT_POOL=0 turns it off for a whole run) and mint and drop this test's own tenant: for a test that mints or drops tenants, rotates or revokes the tenant's token, or needs a tenant with never-used partition leaves - nexus-fpwj1, tests/_tenant_pool.py",
     "expects_unresolvable_endpoint: the test constructs ServiceEndpointUnresolvableError / T1ServerNotFoundError on purpose (a resolver-subject test); exempt from the storage-touch guard, and reported stale when it never does — nexus-j23ni, tests/_storage_touch_guard.py",
+    "real_engine_probe: the test exercises the real nexus.db.serving_engine_version.probe_serving_engine_version (HTTP) rather than the autouse stub in tests/conftest.py — RDR-231, nexus-bivz3.15/.16",
     "plan_grow_generalizer: opt OUT of the unit suite's stubbed grow-time match-text generalizer (nexus-93cc6) — for tests exercising _generalize_grown_match_description itself, which MUST patch claude_dispatch and never reach a real subprocess",
     "mandatory_regression_pin: a release/CI-gate test (nexus-moht0 vacuous-gate class) that MUST exercise a real external dependency (live git tags, an authenticated network call) rather than a mock, per its bead's own 'measure the detector against a deliberately broken fix' acceptance criterion. Always ALSO carries `integration` (excluded from default addopts, since it needs an environment the unit `test` job deliberately does not provide — full git history / GITHUB_TOKEN). A skip here must never read as a pass — see the pytest_sessionfinish non-vacuity guard in tests/conftest.py, NX_MANDATORY_PIN_SKIP_BUDGET.",
 ]

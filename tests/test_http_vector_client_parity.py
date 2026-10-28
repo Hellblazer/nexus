@@ -571,6 +571,22 @@ class TestSourcePathMethodsRetired:
         assert "list_by_collection" in msg
 
 
+class _EmptyCatalog:
+    """A catalog with no documents, for the sweep's reads."""
+
+    def list_by_collection(self, collection, *, limit=None):
+        return []
+
+    def docs_for_chashes(self, chashes):
+        return {}
+
+    def resolve_many(self, doc_ids):
+        return {}
+
+    def close(self):
+        pass
+
+
 class TestExpire:
     """nexus-h8rf6.5: expire() was missing entirely — `nx store expire`
     crashed with AttributeError in service mode. Implemented client-side.
@@ -615,6 +631,12 @@ class TestExpire:
             ],
         )
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        # nexus-6pfgb.15: the sweep also reads the catalog (each note's own TTL, who owns a lapsed
+        # chunk). An empty one: no notes, so every lapsed row is an orphan chunk, as these cases
+        # assume. The catalog rules are pinned in tests/test_6pfgb15_note_ttl.py.
+        empty = _EmptyCatalog()
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: empty)
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda *a, **k: empty)
 
     @pytest.mark.t2_tenant
     def test_expire_deletes_only_expired_knowledge_rows(self, monkeypatch):

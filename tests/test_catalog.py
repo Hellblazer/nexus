@@ -15,7 +15,7 @@ from __future__ import annotations
 class TestSourceUriRegistration:
     def test_known_uri_schemes_table_is_locked_to_planned_set(self):
         """Lock the scheme registry against silent additions OR
-        shrinking. Phase 1: ``file`` + ``chroma``. Phase 4:
+        shrinking. Phase 1: ``file`` + ``chroma`` (renamed ``nx-note``, RDR-231). Phase 4:
         ``nx-scratch`` (P4.1) + ``https`` (P4.2). nexus-bqda adds
         ``x-devonthink-item`` (macOS-only DT identity URLs).
         nexus-h2pm adds ``nx-orphan-backfill`` for synthetic
@@ -28,7 +28,7 @@ class TestSourceUriRegistration:
         """
         from nexus.catalog.types import _KNOWN_URI_SCHEMES
         assert _KNOWN_URI_SCHEMES == frozenset({
-            "file", "chroma", "https", "nx-scratch", "x-devonthink-item",
+            "file", "nx-note", "https", "nx-scratch", "x-devonthink-item",
             "nx-orphan-backfill",
         })
 

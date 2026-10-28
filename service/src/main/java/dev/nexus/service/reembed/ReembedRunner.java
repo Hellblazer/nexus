@@ -58,7 +58,9 @@ import java.util.function.Supplier;
  * {@link CombinedWriteService#moveDocsCombined} under a {@link Settings#batchDeadline} request deadline, with the
  * job's id so each document's move and its record commit in one transaction. A document the engine refuses with
  * {@code move_precondition_failed} or as tombstoned is a <i>skip</i> (a client changed it; a later pass sees it
- * where the client put it); any other per-document failure, or an exception from the move, is a <i>failed batch</i>:
+ * where the client put it); so is a note whose rewritten {@code source_uri} a live document in the target holds
+ * ({@value #REASON_URI_TAKEN}, RDR-231 step 4: found before any embedding, or by the engine's own check if the holder
+ * appeared since, and recorded with the holder's id); any other per-document failure, or an exception from the move, is a <i>failed batch</i>:
  * the job goes to {@code failed} and a resume continues. A pass ends when no candidate lies after the cursor. If
  * candidates remain (a skip, or a client writing back to the source after its document moved), a new pass starts
  * from the beginning, at most {@link Settings#maxPasses} passes in all; what is still there after the last pass is
@@ -83,6 +85,11 @@ public final class ReembedRunner {
     static final String REASON_PRECONDITION = CatalogRepository.MOVE_PRECONDITION_FAILED;
     static final String REASON_TOMBSTONED = "tombstoned";
     static final String REASON_CHUNK_MISSING = "source_chunk_missing";
+    /**
+     * RDR-231: the document's rewritten source_uri is held by a live document. The skip keeps the holder's id; the
+     * document is left in the source, counted once, and reported with its holder.
+     */
+    static final String REASON_URI_TAKEN = ReembedJobRepository.REASON_SOURCE_URI_TAKEN;
     /** The prefix of the engine's tombstone refusal message ({@code TombstonedDocumentException}). */
     private static final String ENGINE_TOMBSTONED_PREFIX = "move refused: document is tombstoned";
     private static final int LEFTOVER_PAGE = 500;
@@ -312,6 +319,10 @@ public final class ReembedRunner {
         List<Map<String, Object>> docs = new ArrayList<>();
         Map<String, List<String>> expected = new LinkedHashMap<>();
         Map<String, Map<String, Object>> chunksToMove = new LinkedHashMap<>();
+        // RDR-231 step 4: a document whose rewritten source_uri a live document holds is skipped here, before any of
+        // its chunks reach the token estimate or the embed, so a collision spends no tokens. The engine repeats the
+        // check inside the document's transaction for a holder that appears after this read.
+        Map<String, String> uriHolders = catalog.moveUriHolders(tenant, source, job.targetCollection(), docIds);
         for (Candidate c : batch) {
             List<Map<String, Object>> rows = manifests.getOrDefault(c.docId(), List.of());
             List<String> chashes = new ArrayList<>(rows.size());
@@ -331,6 +342,11 @@ public final class ReembedRunner {
             }
             if (!allReadable) {
                 skips.add(new Skip(c.docId(), REASON_CHUNK_MISSING));
+                continue;
+            }
+            String uriHolder = uriHolders.get(c.docId());
+            if (uriHolder != null) {
+                skips.add(new Skip(c.docId(), REASON_URI_TAKEN, uriHolder));
                 continue;
             }
             docs.add(Map.of("doc_id", c.docId(), "rows", rows));
@@ -399,6 +415,10 @@ public final class ReembedRunner {
                         skips.add(new Skip(docId, REASON_PRECONDITION));
                     } else if (reason.startsWith(ENGINE_TOMBSTONED_PREFIX)) {
                         skips.add(new Skip(docId, REASON_TOMBSTONED));
+                    } else if (reason.startsWith(CatalogRepository.MOVE_SOURCE_URI_TAKEN)) {
+                        // The engine's backstop (completeMove) found a holder the pre-check did not: the same skip.
+                        skips.add(new Skip(docId, REASON_URI_TAKEN,
+                            reason.substring(CatalogRepository.MOVE_SOURCE_URI_TAKEN.length())));
                     } else {
                         fatal.add(docId + ": " + reason);
                         failedDocs.add(docId);

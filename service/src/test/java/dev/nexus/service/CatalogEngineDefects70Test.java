@@ -737,18 +737,19 @@ class CatalogEngineDefects70Test {
     }
 
     @Test
-    void eldyi_updateDocumentCollection_silentZeroOnTombstonedDoc() {
+    void eldyi_updateDocument_collectionMove_silentZeroOnTombstonedDoc() {
         String t = tombstonedDoc("updatecoll");
-        assertThat(repo.updateDocumentCollection(TENANT, t, "code__eldyi-newcoll__voyage-code-3__v1"))
-            .as("updateDocumentCollection returns the honest 0 rows-affected — no exception needed")
+        assertThat(repo.updateDocument(TENANT, t, Map.of("physical_collection", "code__eldyi-newcoll__voyage-code-3__v1")))
+            .as("a collection update returns the honest 0 rows-affected — no exception needed")
             .isZero();
     }
 
     @Test
-    void eldyi_updateDocumentsCollectionBatch_silentZeroOnTombstonedDoc() {
+    void eldyi_updateDocumentsMany_collectionMove_silentZeroOnTombstonedDoc() {
         String t = tombstonedDoc("updatecollbatch");
-        assertThat(repo.updateDocumentsCollectionBatch(TENANT, List.of(t), "code__eldyi-newcoll2__voyage-code-3__v1"))
-            .isZero();
+        assertThat(repo.updateDocumentsMany(TENANT,
+                List.of(Map.of("tumbler", t, "physical_collection", "code__eldyi-newcoll2__voyage-code-3__v1"))))
+            .containsExactly(0);
     }
 
     @Test
@@ -1483,8 +1484,13 @@ class CatalogEngineDefects70Test {
         String from = "code__defects70-recon6-a__voyage-code-3__v1";
         String to   = "code__defects70-recon6-b__voyage-code-3__v1";
         injectDamagedDoc("9006.1", from, 11, "{}");
+        repo.upsertCollection(TENANT, Map.of(
+            "name", from, "content_type", "code", "owner_id", "defects70",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
 
-        assertThat(repo.updateDocumentCollection(TENANT, "9006.1", to)).isEqualTo(1);
+        // The collection move that carries the count is the rename cascade: a /update with a
+        // physical_collection re-derives chunk_count from the manifest by design (nexus-e4gel).
+        repo.renameCollection(TENANT, from, to);
 
         var doc = repo.getDocument(TENANT, "9006.1");
         assertThat(doc.get("physical_collection")).isEqualTo(to);

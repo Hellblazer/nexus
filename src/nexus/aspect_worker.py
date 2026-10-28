@@ -30,7 +30,13 @@ Worker contract:
   30 s — nexus-59611; the idle poll is edge load, see the constant).
 * Reclaims rows stuck in ``in_progress`` for > ``stale_timeout``
   seconds (default 300 s) before each poll, so worker process
-  death does not wedge a row forever.
+  death does not wedge a row forever. The age-based reclaim counts as an
+  attempt (engine ``AspectRepository.reclaimStale``, nexus-j67ix.2): it adds
+  one to ``retry_count`` and, from ``_RETRY_MAX_ATTEMPTS`` on, terminal-fails
+  the row, so a document that kills its worker every time is not reclaimed
+  forever. The daemon's final sweep at a graceful stop does not count
+  (``count_attempt=False``, nexus-j67ix.3): rows a stopping worker leaves
+  behind did nothing wrong.
 
 Result handling:
 
@@ -47,7 +53,9 @@ Result handling:
   a bad document terminal-fails for triage; a SELF FAULT — this
   process's own environment is broken — writes no row state at
   all, stands the worker down, and leaves the claimed rows for
-  ``reclaim_stale``. Only the middle class is terminal, and it is
+  ``reclaim_stale``. The middle class is terminal, and so is an
+  age-based reclaim of a row whose attempts have reached the cap (the engine's
+  ``reclaimStale`` counts each reclaim as an attempt); both stay
   terminal until manually re-enqueued.
 
 The hook function ``aspect_extraction_enqueue_hook`` is registered
@@ -93,7 +101,9 @@ _ENQUEUE_TENANT: str = "default"
 # A transient failure re-queues the row with a backoff interval the WORKER
 # chooses; the service stamps the absolute next_retry_at = now()+interval
 # server-side. retry_count is monotonic and is the cap's source of truth, so
-# termination is guaranteed even under the ±1 race of concurrent reclaim.
+# termination is guaranteed even under the ±1 race of concurrent reclaim. The
+# engine applies this same cap to a reclaim (AspectRepository.RETRY_MAX_ATTEMPTS,
+# pinned equal by tests/test_aspect_retry_cap_parity.py).
 _RETRY_MAX_ATTEMPTS: int = 5          # terminal mark_failed once retry_count >= cap
 _RETRY_BASE_SECONDS: float = 30.0     # interval = base * 2**retry_count, jittered
 _RETRY_JITTER_FRACTION: float = 0.2   # ±20% — spreads re-claims when a wide outage clears
@@ -582,7 +592,7 @@ class AspectExtractionWorker:
 
         Each row's content was captured at enqueue time when in
         scope. CLI rows with empty content are sourced via
-        ``chroma://`` URI inside ``extract_aspects_batch`` (RDR-096
+        ``nx-note://`` URI inside ``extract_aspects_batch`` (RDR-096
         P5.1 / nexus-8g79.34 — the batch path now mirrors the
         single-doc extractor's read contract).
         """
@@ -725,8 +735,9 @@ class AspectExtractionWorker:
                     # single-row path's terminal ``mark_failed`` (it is not
                     # retryable there either) and go on with the rest of the
                     # batch. Letting it abort the loop left every later row
-                    # unmarked, and ``reclaim_stale`` resets those without touching
-                    # retry_count, so the extractor re-ran them indefinitely.
+                    # unmarked, and ``reclaim_stale`` reset those without touching
+                    # retry_count (it now counts the reclaim), so the extractor
+                    # re-ran them indefinitely.
                     _log.warning(
                         "aspect_worker_batch_row_superseded",
                         collection=row.collection,
@@ -844,7 +855,13 @@ class AspectExtractionWorker:
         the lease is relinquished and the next enqueue spawns a daemon with a
         fresh environment. A persistent host fault (a full disk) therefore
         becomes a respawn loop rather than a silent one. That is the intended
-        trade: loud and non-destructive over quiet and destructive.
+        trade: loud and non-destructive over quiet and destructive. One
+        cost (nexus-j67ix.2) is bounded by nexus-j67ix.3: the stopping
+        daemon's own sweep (``reclaim_stale(0, count_attempt=False)``) returns
+        the rows this worker leaves behind without spending an attempt, so a
+        respawn loop on a persistent fault does not terminal-fail them. A row
+        that stays ``in_progress`` until the periodic age-based sweep reclaims
+        it (the daemon died without stopping) still spends one.
         """
         with self._self_fault_lock:
             first = self._self_fault is None

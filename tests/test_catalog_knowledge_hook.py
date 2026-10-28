@@ -136,7 +136,7 @@ class TestListByCollection:
 
 class TestStorePutHook:
     def test_registers_knowledge_entry(self, tmp_path, monkeypatch):
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -161,7 +161,7 @@ class TestStorePutHook:
         )
 
     def test_skipped_when_not_initialized(self, tmp_path, monkeypatch):
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
         # Should not raise
@@ -172,7 +172,7 @@ class TestStorePutHook:
         )
 
     def test_idempotent_by_doc_id(self, tmp_path, monkeypatch):
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -189,7 +189,7 @@ class TestStorePutHook:
         e.g. from a pre-migration catalog or an earlier failed index)
         sharing the new doc's title must be reused, not duplicated.
         """
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -231,7 +231,7 @@ class TestStorePutHook:
         population) reconciles via by_source_uri onto the SAME tumbler.
         """
         from nexus.aspect_readers import uri_for
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -301,7 +301,7 @@ class TestStorePutHook:
         the residual stays deliberate, not accidental.
         """
         from nexus.aspect_readers import uri_for
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -350,7 +350,7 @@ class TestStorePutHook:
         one title used to mint three documents with contradictory content
         (production: 1.1.1/1.1.2/1.1.3) because source_uri was always ""
         and the engine's upsert-on-source_uri identity never matched."""
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -383,7 +383,7 @@ class TestStorePutHook:
         """A same-titled document in a DIFFERENT collection is a distinct
         identity (the synthesized source_uri is collection-scoped) — it
         must mint its own document, not reconcile onto the first."""
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -414,7 +414,7 @@ class TestStorePutHook:
     def test_empty_title_does_not_reconcile(self, tmp_path, monkeypatch):
         """An empty title must never dedup against arbitrary same-("")-titled
         ghosts — always registers a new document."""
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -442,7 +442,7 @@ class TestStorePutHook:
         ``aspect_readers.uri_for``'s convention — one URI format, never a
         second one forked here."""
         from nexus.aspect_readers import uri_for
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -453,7 +453,7 @@ class TestStorePutHook:
         )
         entry = cat.resolve(result)
         assert entry.source_uri == uri_for("knowledge__format", "URI Format Check")
-        assert entry.source_uri == "chroma://knowledge__format/URI Format Check"
+        assert entry.source_uri == "nx-note://knowledge__format/URI Format Check"
 
     def test_ghost_reconciliation_scoped_to_knowledge_owner(
         self, tmp_path, monkeypatch,
@@ -461,7 +461,7 @@ class TestStorePutHook:
         """A same-titled ghost under a DIFFERENT owner (e.g. a repo owner)
         must not be reconciled — only knowledge-curator-owned ghosts are
         eligible."""
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
@@ -499,7 +499,7 @@ class TestStorePutHook:
         from unittest.mock import MagicMock
 
         from nexus.catalog.tumbler import Tumbler
-        from nexus.commands.store import _catalog_store_hook
+        from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook
 
         catalog_dir, _cat = _make_catalog(tmp_path)  # real init -> is_initialized True
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))

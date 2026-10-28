@@ -535,6 +535,11 @@ class AspectWorkerDaemon:
             # OBSERVABLE — the rows it owned but could not finish — AND resets them
             # to pending for the next daemon (recovery in one). reclaim_stale(0):
             # the worker is already stopped, so any in_progress row is abandoned.
+            # count_attempt=False (nexus-j67ix.3): those rows did nothing wrong, so
+            # this sweep spends no retry attempt; only the periodic age-based sweep
+            # counts. The self-fault stand-down ends here too (it sets _stop), so a
+            # persistent host fault's respawn loop cannot terminal-fail the rows it
+            # keeps claiming.
             #
             # nexus-cd1k0.6 finding (6): reclaim_stale(0) resets ANY stale
             # in_progress row in this tenant's scope, not only rows THIS
@@ -547,7 +552,7 @@ class AspectWorkerDaemon:
             # entirely and let the successor's own heartbeat/reclaim cadence
             # own recovery.
             try:
-                undrained = self._reclaim_queue.reclaim_stale(0)
+                undrained = self._reclaim_queue.reclaim_stale(0, count_attempt=False)
                 if undrained:
                     _log.warning(
                         "aspect_worker_daemon.stopping_with_undrained_rows",
@@ -556,6 +561,9 @@ class AspectWorkerDaemon:
             except Exception as exc:  # noqa: BLE001 - shutdown diagnostic is best-effort
                 _log.warning("aspect_worker_daemon.final_reclaim_failed", tenant=self._tenant, error=str(exc))
         elif self._reclaim_queue is not None:
+            # A fenced loser skips the sweep, so the rows it held wait for the
+            # successor's periodic age sweep, which counts them (nexus-j67ix.3):
+            # one attempt per row in a rare lease overlap, by design.
             _log.info("aspect_worker_daemon.reclaim_skipped_fenced", tenant=self._tenant)
         if self._reclaim_queue is not None:
             try:

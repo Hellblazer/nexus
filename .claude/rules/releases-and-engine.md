@@ -7,6 +7,7 @@ paths:
   - "conexus/.claude-plugin/**"
   - "sn/.claude-plugin/**"
   - "tool-spill/.claude-plugin/**"
+  - "prose-edit/.claude-plugin/**"
   - "CHANGELOG.md"
   - "conexus/PENDING_RELEASE.md"
   - "service/**"
@@ -29,12 +30,12 @@ Full text: [release-cadence](../../docs/agents/release-cadence.md).
 2. **`source.ref` only ever points at immutable release tags.** Never a branch, never main HEAD.
 3. **One channel until proven otherwise.** No `-dev` / `-rc` / `-canary` variants.
 4. **Bump cadence matches user-visible impact, not commit volume.**
-5. **Releaser is human. AI prepares; human cuts** (merge, tag, push tag).
+5. **Releaser is Sam. AI prepares; Sam cuts** (merge, tag, push tag), or authorizes the AI in-session to push one named tag, after its gates are green, recorded on the cut bead (engine-release skill Step 4).
 6. **Parity tests stay strict.** `pyproject.toml` version must match `mcpb/pyproject.toml`, `mcpb/manifest.json`, marketplace.json `plugins[].version` and `source.ref`, every plugin's `plugin.json`, and `uv.lock`. No `# noqa` escape hatches.
 
 ## Plugin-only releases (fast lane)
 
-Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `.claude-plugin/marketplace.json`) ships ahead of `src/` work as a patch client release cut off the last client tag with the plugin commits cherry-picked from `develop`; the `release` skill's "Plugin-only fast lane" section is the procedure, and `scripts/check_plugin_only_eligibility.py` refuses anything that leaves the plugin surface. The anchored `plugin-vX.Y.Z-n` channel of RDR-197 is retired. Never cut while a release PR is open.
+Full text: [plugin-release-channel](../../docs/agents/plugin-release-channel.md). Plugin-surface content (`conexus/`, `sn/`, `tool-spill/`, `prose-edit/`, `.claude-plugin/marketplace.json`) ships ahead of `src/` work as a patch client release cut off the last client tag with the plugin commits cherry-picked from `develop`; the `release` skill's "Plugin-only fast lane" section is the procedure, and `scripts/check_plugin_only_eligibility.py` refuses anything that leaves the plugin surface. The anchored `plugin-vX.Y.Z-n` channel of RDR-197 is retired. Never cut while a release PR is open.
 
 ## Engine-service release (a SECOND lifecycle — decoupled from the PyPI release)
 

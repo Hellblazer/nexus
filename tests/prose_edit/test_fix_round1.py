@@ -33,7 +33,7 @@ from tests.prose_edit.test_review import DOC, E1, E2, REVIEW, review_ok, run_rev
 from tests.prose_edit.test_review_apply_safety import hook, tracked
 
 SENTINEL = ".prose-edit-work"
-SCRIPTS = ROOT / ".claude" / "skills" / "prose-edit" / "scripts"
+SCRIPTS = ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts"
 THREE_HOURS = 3 * 3600
 
 

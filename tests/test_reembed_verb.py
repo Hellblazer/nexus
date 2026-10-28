@@ -473,6 +473,18 @@ class TestControls:
         assert "a-1  running" in result.output and "moved 3" in result.output and "tokens 40 of 100" in result.output
         assert "b-2  failed (token_cap)" in result.output and "last error: cap reached" in result.output
 
+    def test_status_names_each_skipped_document_and_the_holder_of_a_taken_source_uri(self, runner):
+        # RDR-231 step 4: the job report names every skipped document; a taken URI names its holder.
+        skipped = [
+            {"doc_id": "1.2.3", "reason": "source_uri_taken", "holder": "1.2.9"},
+            {"doc_id": "1.2.4", "reason": "tombstoned", "holder": None},
+        ]
+        db = _engine(jobs=[_job("a-1", state="done_with_skips", documents_skipped=2, skipped_documents=skipped)])
+        result = _invoke(runner, db, FakeCatalog([], {}), ["--status"])
+        assert result.exit_code == 0, result.output
+        assert "skipped 1.2.3: source_uri_taken (source_uri held by 1.2.9)" in result.output
+        assert "skipped 1.2.4: tombstoned\n" in result.output + "\n"
+
     def test_status_with_an_id_shows_that_job_and_an_unknown_id_is_an_error(self, runner):
         db = _engine(jobs=[_job("a-1"), _job("b-2")])
         ok = _invoke(runner, db, FakeCatalog([], {}), ["--status", "b-2"])

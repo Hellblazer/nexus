@@ -59,7 +59,7 @@ V = _verdicts()
 
 
 def _memory() -> ModuleType:
-    path = HERE.parents[2] / ".claude" / "skills" / "prose-edit" / "scripts" / "memory.py"
+    path = HERE.parents[2] / "prose-edit" / "skills" / "prose-edit" / "scripts" / "memory.py"
     spec = importlib.util.spec_from_file_location("prose_edit_memory_for_verdicts", path)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)

@@ -2974,13 +2974,34 @@ def _pdfs_needing_index(pdf_paths: list[Path], repo: Path) -> list[Path]:
     return needing
 
 
+def _repo_pdf_extractor(repo: Path) -> str:
+    """The repo's ``pdf.extractor`` setting (RDR-237), for the stack gates and the PDF indexer.
+
+    A ``[pdf]`` integer key that holds no integer raises ``PdfConfigError`` in the config loader.
+    The repo walk must not stop code and prose indexing for it, so it is logged and ``auto``
+    stands in: the extractor meets the same error on the first PDF it extracts and fails that
+    file, naming the key, exactly as before this read existed."""
+    from nexus.config import PdfConfigError, get_pdf_extractor  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
+
+    try:
+        return get_pdf_extractor(repo)
+    except PdfConfigError as exc:
+        _log.warning("repo_pdf_extractor_config_unreadable", repo=str(repo), error=str(exc))
+        return "auto"
+
+
 def _hold_pdfs_without_stack(
     pdf_paths: list[Path], repo: Path, *, on_phase: Callable[[str], None] | None = None,
     probe: Callable[[list[Path]], list[Path]] | None = None,
     already_held: Sequence[Path] = (),
+    extractor: str = "",
 ) -> list[Path]:
     """The repo walk found PDFs: make sure the PDF stack is here before any of
     them is registered or written (nexus-2k66t.4.2).
+
+    *extractor* is the repo's ``pdf.extractor`` (RDR-237). The explicit ``pymupdf`` needs none of
+    the stack, so nothing is probed, installed or held for it: every PDF goes on to be extracted
+    as text and the repo's skipped record is replaced by *already_held* (empty on the early call).
 
     Returns ``[]`` when the stack is present or was just installed (an install
     raises ``pdf_stack.RerunRequired``, caught by ``nx index repo`` after the
@@ -2999,7 +3020,7 @@ def _hold_pdfs_without_stack(
     """
     from nexus import pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
 
-    if probe is not None and not pdf_stack.state().present:
+    if probe is not None and pdf_stack.needs_stack(extractor) and not pdf_stack.state().present:
         # nexus-2k66t.4.8: the stack is absent, so settle first whether any PDF
         # needs extracting. A walk whose PDFs are all indexed and unchanged
         # must not cost the install; the PDFs the probe clears are not held.
@@ -3009,6 +3030,7 @@ def _hold_pdfs_without_stack(
             return []
     if pdf_stack.ensure_or_exit(
         "nx index repo", hold_on_refuse=True, defer_rerun=True, quiet_refusal=bool(already_held),
+        extractor=extractor,
     ):
         pdf_stack.record_skipped([*already_held], repo=repo)
         return []
@@ -3278,12 +3300,15 @@ def _index_pdf_file(
     hooks: "HookRegistry | None" = None,
     batcher: object | None = None,
     force_re_embed: bool = False,
+    extractor: str = "auto",
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
     Uses PDF extraction + chunking from doc_indexer, embeds via ``embed_fn``
     (local/service mode; non-service embedding was retired, nexus-sghyo).
     Returns the post-filter chunk count (chunks upserted), or 0 if skipped/failed.
+
+    *extractor* is the repo's ``pdf.extractor`` (RDR-237), handed to ``_pdf_chunks``.
 
     *chunk_chars* overrides the PDF chunk size (default 1500 chars).  Pass
     ``tuning.pdf_chunk_chars`` from TuningConfig to honour per-repo config.
@@ -3317,10 +3342,12 @@ def _index_pdf_file(
         def _stage(_name: str):  # type: ignore[misc]
             return nullcontext()
 
+    _extraction_stats: dict = {}
     with _stage("chunking"):
         prepared = _pdf_chunks(
             file, content_hash_hex, target_model, now_iso, collection_name,
             chunk_chars=chunk_chars, collection_name=collection_name,
+            extraction_stats=_extraction_stats, extractor=extractor,
         )
     if not prepared:
         _log.debug("skipped PDF with no chunks", path=str(file))
@@ -3348,6 +3375,18 @@ def _index_pdf_file(
     # once per file. Empty string when no catalog handle exists;
     # ``normalize`` Step 4c drops the field on the way to T3.
     catalog_doc_id = doc_id_resolver(file) if doc_id_resolver is not None else ""
+
+    # RDR-237 (nexus-tr1rj.3): record the extraction method and the degraded-page map on the
+    # catalog document this run registered, so a clean re-extract here clears an old map and a
+    # degraded one is visible to ``nx store get``. Recorded when the extraction finishes, before
+    # the upload (the upload has three landing routes, and the record describes the extraction,
+    # not the upload; an upload that then fails is raised to the run as any failed file is, and
+    # the next run extracts and records again). Never raises; a run that cannot record it logs
+    # ``catalog_pdf_extraction_not_recorded``.
+    from nexus.pipeline_stages import extraction_record, record_pdf_extraction_on_document  # noqa: PLC0415 — deferred: pipeline_stages imports the indexers
+    record_pdf_extraction_on_document(
+        catalog_doc_id, file, collection_name, extraction_record(_extraction_stats),
+    )
 
     # Augment metadata with repo-indexer fields.
     # Filter empty/zero values from _pdf_chunks to stay under ChromaDB's
@@ -5469,11 +5508,15 @@ def _run_index(
     # (which counts a file absent from the walk as missing and deletes it after
     # two runs) still sees them as present.
     _pdf_held: list[Path] = []
+    # RDR-237: the repo's ``pdf.extractor``, read once for the gates below and every PDF handed
+    # to ``_index_pdf_file``. ``pymupdf`` needs none of the stack, so the gates let it by.
+    _pdf_extractor = _repo_pdf_extractor(repo) if pdf_files else "auto"
     if pdf_files:
         _pdf_held = _hold_pdfs_without_stack(
             [f for _, f in pdf_files], repo, on_phase=on_phase,
             # --force / --force-re-embed re-extract every PDF: no probe.
             probe=None if (force or force_re_embed) else (lambda paths: _pdfs_needing_index(paths, repo)),
+            extractor=_pdf_extractor,
         )
         if _pdf_held:
             _held = set(_pdf_held)
@@ -6102,7 +6145,7 @@ def _run_index(
     if _dispatch_pdf and docs_col is not None and not (force or force_re_embed):
         from nexus import pdf_stack as _late_pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
 
-        if not _late_pdf_stack.state().present:
+        if _late_pdf_stack.needs_stack(_pdf_extractor) and not _late_pdf_stack.state().present:
             def _late_pdf_is_stale(f: Path) -> bool:
                 try:
                     digest = _file_sha256(f)
@@ -6119,6 +6162,7 @@ def _run_index(
             if _late_stale:
                 _late_held = _hold_pdfs_without_stack(
                     _late_stale, repo, on_phase=on_phase, already_held=_pdf_held,
+                    extractor=_pdf_extractor,
                 )
                 if _late_held:
                     _late_set = set(_late_held)
@@ -6833,6 +6877,7 @@ def _run_index(
             staleness_cache=docs_staleness,
             hooks=hooks,
             batcher=_batcher,
+            extractor=_pdf_extractor,
         ), file, _quality_gate_failed), file)
 
     _pdf_written = run_file_loop(

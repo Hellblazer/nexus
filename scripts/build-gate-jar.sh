@@ -24,8 +24,11 @@
 # This script is that same step for a developer's machine, so a local run proves
 # what CI proves.
 #
-# The stamp is taken from REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py
-# — the ONE floor constant — so it cannot drift when the pin bumps.
+# The stamp is max(REQUIRED_ENGINE_VERSION, NOTE_URI_MIN_ENGINE_VERSION) from
+# src/nexus/engine_version.py, so it cannot drift when the pin bumps, and the gate jar is never
+# below the note-write floor (RDR-231, nexus-bivz3.13: a note write against an engine under
+# NOTE_URI_MIN_ENGINE_VERSION is refused, and the gate jar must stay writable). The floor is
+# (0, 0, 0) while unset, so until the landing bead sets it the stamp is REQUIRED_ENGINE_VERSION.
 #
 # ALSO stamps build_ref (nexus-308ph): a per-run artifact-identity
 # discriminator, <git short sha>+<per-run nonce>. release_version alone
@@ -153,9 +156,11 @@ fi
 ver=$(cd "$repo_root" && python3 -c "
 import pathlib, re
 s = pathlib.Path('src/nexus/engine_version.py').read_text()
-m = re.search(r'REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s)
-assert m, 'REQUIRED_ENGINE_VERSION not parseable — fix the regex before stamping'
-print('.'.join(m.groups()))
+def floor(name):
+    m = re.search(r'^' + name + r'[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s, re.M)
+    assert m, name + ' not parseable — fix the regex before stamping'
+    return tuple(int(g) for g in m.groups())
+print('.'.join(map(str, max(floor('REQUIRED_ENGINE_VERSION'), floor('NOTE_URI_MIN_ENGINE_VERSION')))))
 ")
 
 # nexus-308ph: git short sha + a per-build nonce (epoch seconds + PID) —

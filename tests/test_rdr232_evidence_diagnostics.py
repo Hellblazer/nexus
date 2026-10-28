@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nexus.plans.coverage_repair import NOTE_PREFIX
 from nexus.plans.evidence import ScopeConstraint, SourceRef
 from nexus.plans.lifecycle_stream import LifecycleCaps, LifecycleRecord, LifecycleStream, SourceLifecycle
 from nexus.plans.primary_evidence import (
@@ -302,6 +303,19 @@ def test_reducer_input_counts_by_stream_and_collection_with_provenance_for_every
     assert r["by_stream_collection"]["primary"] == {RDR_COLL: 2}
     assert r["by_collection"] == {RDR_COLL: 4, CODE_COLL: 1}
     assert (r["in_scope"], r["out_of_scope"], r["unattributed"]) == (4, 1, 1)
+
+
+def test_the_coverage_note_is_its_own_stream_not_an_unattributed_reducer_input() -> None:
+    """RDR-232 fix round (code M5): the note the coverage boundary installs for the generator is not retrieved
+    evidence. It is counted as its own ``coverage_note`` stream; it is not an unattributed input and it sits in no
+    collection, so it cannot skew the scope counts."""
+    steps = [_search_out(["vector one"], [RDR_COLL])]
+    note = f"{NOTE_PREFIX} The request asks for the points below and the evidence supplied does not settle them."
+    d = _build(steps=steps, tools=["search"], scope=ScopeConstraint.parse("rdr"), recorder=_recorder([note, "vector one", "an unknown text"]))
+    r = d["reducer_input"]
+    assert r["items"] == 3 and r["by_stream"] == {"coverage_note": 1, "vector": 1, "unattributed": 1}
+    assert r["unattributed"] == 1, "only the unknown text is unattributed"
+    assert r["by_collection"] == {RDR_COLL: 1} and (r["in_scope"], r["out_of_scope"]) == (1, 0)
 
 
 def test_no_evidence_consuming_operator_means_no_reducer_input_and_says_so() -> None:
@@ -1014,9 +1028,9 @@ def test_a_project_qualified_golden_source_is_a_source_binding_plus_an_owner_or_
     assert no_owner == {"source": "RDR-084", "project": "ART"}, "an unmapped project is passed on, never guessed"
 
 
-def test_a_bare_golden_source_has_no_qualifier_and_so_can_resolve_to_candidates() -> None:
-    """G01 names RDR-049 with no project. Where sibling files share the number a bare id resolves to
-    candidates; whether the golden label should carry a qualifier is nexus-xho6c's decision."""
+def test_a_bare_golden_source_has_no_qualifier() -> None:
+    """G01 names RDR-049 with no project, so its binding carries no owner. Where sibling files share the
+    number the resolver picks the file whose frontmatter carries the id (nexus-xho6c)."""
     g, q = _golden("G01")
     assert g.golden_source_bindings(q, {"ART": "1.61"}) == ({"source": "RDR-049"}, [])
 

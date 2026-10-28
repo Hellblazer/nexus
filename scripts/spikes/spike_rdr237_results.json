@@ -1,0 +1,174 @@
+{
+  "host": "chas",
+  "cpus": 64,
+  "a1_subprocess": [
+    {
+      "page": 1,
+      "on": {
+        "rc": 0,
+        "seconds": 22.3,
+        "chars": 4351,
+        "formula_markers": 0,
+        "md_head": "lenges of distributed trust. Grid computing and hierarchical overlay networks, including VIRGO [5]and The Grid [7], introduced scalable hierarchical approaches, while LDAP-based directory services [6] provide structured identity management.\n\n## A. STRUCTURED OVERLAY NETWORKS\n\nStructured overlay netw"
+      },
+      "off": {
+        "rc": 0,
+        "seconds": 12.1,
+        "chars": 4351,
+        "formula_markers": 0,
+        "md_head": "lenges of distributed trust. Grid computing and hierarchical overlay networks, including VIRGO [5]and The Grid [7], introduced scalable hierarchical approaches, while LDAP-based directory services [6] provide structured identity management.\n\n## A. STRUCTURED OVERLAY NETWORKS\n\nStructured overlay netw"
+      }
+    },
+    {
+      "page": 2,
+      "on": {
+        "rc": 0,
+        "seconds": 21.1,
+        "chars": 4708,
+        "formula_markers": 1,
+        "md_head": "\u2022 Overlay-based scalability leveraging the VIRGO network [5, 16].\n\nThese features make PVTNs suitable for secure, privacy-preserving authorization in enterprise, consortium, and multi-tenant distributed systems, bridging the gaps left by PKI, Web-of-Trust, blockchain, and traditional overlay/grid in"
+      },
+      "off": {
+        "rc": 0,
+        "seconds": 12.8,
+        "chars": 4541,
+        "formula_markers": 0,
+        "md_head": "\u2022 Overlay-based scalability leveraging the VIRGO network [5, 16].\n\nThese features make PVTNs suitable for secure, privacy-preserving authorization in enterprise, consortium, and multi-tenant distributed systems, bridging the gaps left by PKI, Web-of-Trust, blockchain, and traditional overlay/grid in"
+      }
+    },
+    {
+      "page": 3,
+      "on": {
+        "rc": 0,
+        "seconds": 129.1,
+        "chars": 4855,
+        "formula_markers": 10,
+        "md_head": "<table><tr><td>Symbol</td><td>Meaning</td></tr><tr><td> ${ \\overline { { P V T N _ { i } } } }$ </td><td>Private Virtual Tree Network of tenant  $T _ { i }$ </td></tr><tr><td> $R _ { i }$ </td><td>Root (trust anchor) of  $P V T N _ { i }$ </td></tr><tr><td> $\\left( P K _ { x } , S K _ { x } \\right)$"
+      },
+      "off": {
+        "rc": 0,
+        "seconds": 37.1,
+        "chars": 4503,
+        "formula_markers": 0,
+        "md_head": "<table><tr><td>Symbol</td><td>Meaning</td></tr><tr><td>PVTNi</td><td>Private Virtual Tree Network of tenant Ti</td></tr><tr><td>Ri</td><td>Root (trust anchor) of PVTNi</td></tr><tr><td>(PKx, SKx)</td><td>Public/private key pair of node x</td></tr><tr><td>Certp\u2192c</td><td>Delegation certificate from p"
+      }
+    }
+  ],
+  "a1_server": [
+    {
+      "page": 1,
+      "on": {
+        "ok": true,
+        "seconds": 19.4,
+        "chars": 4351,
+        "formula_markers": 0
+      },
+      "off": {
+        "ok": true,
+        "seconds": 3.1,
+        "chars": 4351,
+        "formula_markers": 0
+      }
+    },
+    {
+      "page": 2,
+      "on": {
+        "ok": true,
+        "seconds": 8.0,
+        "chars": 4708,
+        "formula_markers": 1
+      },
+      "off": {
+        "ok": true,
+        "seconds": 2.6,
+        "chars": 4541,
+        "formula_markers": 0
+      }
+    },
+    {
+      "page": 3,
+      "on": {
+        "ok": true,
+        "seconds": 21.2,
+        "chars": 4855,
+        "formula_markers": 10
+      },
+      "off": {
+        "ok": true,
+        "seconds": 3.9,
+        "chars": 4503,
+        "formula_markers": 0
+      }
+    }
+  ],
+  "a2": {
+    "baseline_one_page": {
+      "ok": true,
+      "seconds": 18.9,
+      "chars": 3955,
+      "formula_markers": 7
+    },
+    "client_gave_up": {
+      "ok": false,
+      "timeout": true,
+      "seconds": 3.0
+    },
+    "next_page_without_restart": {
+      "ok": true,
+      "seconds": 17.8,
+      "chars": 5520,
+      "formula_markers": 0
+    },
+    "client_gave_up_again": {
+      "ok": false,
+      "timeout": true,
+      "seconds": 3.0
+    },
+    "next_page_after_restart": {
+      "ok": true,
+      "seconds": 48.5,
+      "chars": 5520,
+      "formula_markers": 0
+    }
+  },
+  "a3": [
+    {
+      "pdf": "tc-sql.pdf",
+      "pages": 30,
+      "truth_words": 6592,
+      "docling": {
+        "seconds": 9396.7,
+        "chars": 62737,
+        "table_rows": 110,
+        "recall": 0.8639,
+        "precision": 0.824
+      },
+      "mineru": {
+        "seconds": 296.5,
+        "chars": 68738,
+        "table_rows": 0,
+        "recall": 0.8453,
+        "precision": 0.7362
+      }
+    },
+    {
+      "pdf": "2408.04948.pdf",
+      "pages": 9,
+      "truth_words": 6324,
+      "docling": {
+        "seconds": 12.9,
+        "chars": 53621,
+        "table_rows": 42,
+        "recall": 0.9551,
+        "precision": 0.9619
+      },
+      "mineru": {
+        "seconds": 35.8,
+        "chars": 53660,
+        "table_rows": 0,
+        "recall": 0.9505,
+        "precision": 0.9531
+      }
+    }
+  ]
+}

@@ -195,3 +195,29 @@ def test_source_clause_is_empty_without_the_marker():
     assert source_clause("plain body") == ""
     assert source_clause("") == ""
     assert source_clause("[source: Doc A]\nbody") == f"\n\n{SOURCE_INSTRUCTION}"
+
+
+def test_an_expiry_counts_from_the_notes_own_put_time_the_same_clock_the_sweep_uses():
+    """nexus-6pfgb.15: the entry's indexed_at is refreshed by every manifest write (a heal, a
+    backfill), so "expires in Nd" counted from it would promise more days than `nx store expire`
+    allows. A note whose meta records its put time shows the expiry from that."""
+    from nexus.context_annotations import agreed_facts, entry_facts
+
+    entry = _entry(indexed_at="2026-09-08T00:00:00+00:00",
+                   meta={"ttl_days": 30, "put_at": "2026-08-27T00:00:00+00:00"})
+    facts = entry_facts(entry)
+    assert facts["expires_from"] == "2026-08-27T00:00:00+00:00"
+    assert "expires in 18d" in annotate(agreed_facts([facts]), now=NOW)  # 30 - 12, not 30 - 0
+    # an entry with no put time keeps counting from indexed_at, and states no expires_from
+    assert "expires_from" not in entry_facts(_entry(indexed_at="2026-09-08T00:00:00+00:00", meta={"ttl_days": 30}))
+    # a permanent note (0) states none either
+    assert "expires_from" not in entry_facts(_entry(meta={"ttl_days": 0, "put_at": "2026-08-27T00:00:00+00:00"}))
+
+
+def test_owners_that_state_different_put_times_agree_on_no_expiry():
+    from nexus.context_annotations import agreed_facts
+
+    a = {"indexed_at": "2026-09-08T00:00:00+00:00", "ttl_days": 30, "expires_from": "2026-08-27T00:00:00+00:00"}
+    b = {"indexed_at": "2026-09-08T00:00:00+00:00", "ttl_days": 30, "expires_from": "2026-08-28T00:00:00+00:00"}
+    assert "ttl_days" not in agreed_facts([a, b])
+    assert agreed_facts([a, dict(a, expires_from="2026-08-27T00:00:00Z")])["ttl_days"] == 30

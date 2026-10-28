@@ -57,6 +57,11 @@ required.
 **Ledger-only mode** (``--ledger-only``, nexus-55r6o): just the tree-static
 ledger read, for release-branch PR CI.
 
+**Note-URI floor** (RDR-231, nexus-bivz3.15/.16): ``--ledger-only`` and the bare/auto-paired forms
+also fail when ``REQUIRED_ENGINE_VERSION`` is below ``NOTE_URI_MIN_ENGINE_VERSION``
+(:func:`check_note_uri_floor_vs_pin`). Develop pushes run neither mode, so the floor leading the pin
+there is not flagged.
+
 **Client-precondition mode** (``--client-precondition [TAG]``, nexus-9ssih):
 the mirror image, gating an engine DEPLOY rather than a PyPI release -- are
 the client commits that ``TAG`` REQUIRES already in a released conexus
@@ -109,6 +114,7 @@ from nexus.db.managed_endpoint import (
     probe_managed_service,
     resolve_managed_endpoint,
 )
+from nexus import engine_version as _engine_version
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 _REMEDY = (
@@ -480,6 +486,42 @@ def check_source_ancestry(pinned_tag: str, repo_root: pathlib.Path | None = None
         f"engine source is current: no {_ANCESTRY_SCOPE} drift between "
         f"{pinned_tag} and HEAD",
     )
+    return 0
+
+
+def check_note_uri_floor_vs_pin() -> int:
+    """A release must pin an engine that can hold a note's ``nx-note://`` URI (RDR-231, nexus-bivz3.15/.16).
+
+    ``NOTE_URI_MIN_ENGINE_VERSION`` is the first engine that accepts the scheme; the client refuses
+    note writes against anything older. On develop the floor legitimately LEADS the pin (the landing
+    bead sets the floor at the engine-tag push; the paired client release bumps the pin later), and a
+    box pinned below the floor refuses note writes with a message that says so. A release must not
+    ship in that state: every local install would converge to the pin and then refuse every note
+    write. So this is tree-static and runs only where a release is gated: ``--ledger-only`` (the CI
+    job on every PR targeting ``main``) and the bare/auto-paired form at tag time. Develop pushes run
+    neither, so the lead is never flagged there.
+
+    Returns ``0`` (unset floor, or pin >= floor) or ``1``.
+    """
+    floor = _engine_version.NOTE_URI_MIN_ENGINE_VERSION
+    pin = _engine_version.REQUIRED_ENGINE_VERSION
+    floor_s = ".".join(str(p) for p in floor)
+    pin_s = ".".join(str(p) for p in pin)
+    if floor == (0, 0, 0):
+        print("note-URI floor is unset (0.0.0): nothing to compare against the pin")
+        return 0
+    if pin < floor:
+        print(
+            f"NOTE URI FLOOR CHECK FAILED: REQUIRED_ENGINE_VERSION v{pin_s} is below "
+            f"NOTE_URI_MIN_ENGINE_VERSION v{floor_s}. This client mints nx-note source URIs, so a "
+            f"release pinning v{pin_s} would converge every local install to an engine that cannot hold "
+            "them and every note write would be refused. "
+            f"Remedy: bump REQUIRED_ENGINE_VERSION (src/nexus/engine_version.py) to v{floor_s} or newer "
+            "in the release (the paired-release choreography, docs/agents/engine-service-release.md).",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"note-URI floor holds: REQUIRED_ENGINE_VERSION v{pin_s} >= NOTE_URI_MIN_ENGINE_VERSION v{floor_s}")
     return 0
 
 
@@ -1469,7 +1511,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         return check_client_precondition(args.client_precondition or _pinned_engine_tag())
     if args.ledger_only:
-        return check_client_lag_ledger()
+        ledger_rc = check_client_lag_ledger()
+        floor_rc = check_note_uri_floor_vs_pin()
+        return ledger_rc or floor_rc
+    # RDR-231: tree-static and local, so it runs before the network probe (a failure here is actionable alone).
+    note_floor_rc = check_note_uri_floor_vs_pin()
+    if note_floor_rc != 0:
+        return note_floor_rc
     rc = check_floor(
         url=args.url,
         paired_deploy=args.paired_deploy,

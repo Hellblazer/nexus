@@ -51,7 +51,9 @@ class TelemetrySchemaLiquibaseTest {
         "id", "tenant_id", "session_id", "ts", "tool", "tier", "agent", "project", "target_title");
     private static final Set<String> NX_ANSWER_RUNS_COLS = Set.of(
         "id", "tenant_id", "question", "plan_id", "matched_confidence", "step_count",
-        "final_text", "cost_usd", "duration_ms", "created_at");
+        "final_text", "cost_usd", "duration_ms", "created_at",
+        // telemetry-016-1 (nexus-jypmj.3.4, RDR-232 Phase 3): the versioned run summary.
+        "run_summary");
     private static final Set<String> HOOK_FAILURES_COLS = Set.of(
         "id", "tenant_id", "doc_id", "collection", "hook_name", "error", "occurred_at",
         "batch_doc_ids", "is_batch", "chain");
@@ -195,6 +197,22 @@ class TelemetrySchemaLiquibaseTest {
             assertThat(col.columnDefault())
                 .as("telemetry-007-3 must DROP DEFAULT on nx_answer_runs.cost_usd")
                 .isNull();
+        }
+    }
+
+    // ── nx_answer_runs.run_summary (RDR-232 Phase 3, nexus-jypmj.3.4) ─────────
+
+    @Test
+    void nxAnswerRuns_runSummaryIsNullableJsonbNoDefault() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            PgCatalogProbes.ColumnInfo col = PgCatalogProbes.columnInfo(
+                DSL.using(su, SQLDialect.POSTGRES), "nexus", "nx_answer_runs", "run_summary");
+            assertThat(col).as("telemetry-016-1 must add nx_answer_runs.run_summary").isNotNull();
+            assertThat(col.udtName()).as("jsonb, not json or text: the readback and any later filter index it").isEqualTo("jsonb");
+            assertThat(col.nullable())
+                .as("NULLABLE: an old client sends no summary, and no existing row has one").isTrue();
+            assertThat(col.columnDefault())
+                .as("no default: a stored '{}' would claim a summary the run never made").isNull();
         }
     }
 

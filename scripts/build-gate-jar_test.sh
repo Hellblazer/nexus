@@ -40,7 +40,8 @@ cp "$HERE/build-gate-jar.sh" "$repo/scripts/"
 cp "$HERE/lib/build-lease.sh" "$HERE/lib/release-props-lease.sh" "$HERE/lib/gate-jar-cache.sh" "$HERE/lib/leased-build.sh" "$repo/scripts/lib/"
 chmod +x "$repo/scripts/build-gate-jar.sh"
 printf 'release_version=\nbuild_ref=\nname=nexus\n' > "$repo/$props_rel"
-echo 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 107)' > "$repo/src/nexus/engine_version.py"
+printf '%s\n' 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 107)' \
+    'NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 0, 0)' > "$repo/src/nexus/engine_version.py"
 echo 'class A {}' > "$repo/service/src/main/A.java"
 printf 'service/target/\nservice/.build-lease/\n' > "$repo/.gitignore"
 # Fake mvnw: MVNW_FAIL=1 fails; otherwise writes a real jar whose payload
@@ -508,6 +509,39 @@ for help_args in "--help" "-h" "--lab-run lab-m --help" "-Dx=1 -h"; do
     [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "'$help_args' left release.properties alone" || bad "'$help_args' stamped release.properties: $(cat "$repo/$props_rel")"
     [[ ! -e "$repo/service/.build-lease" || -z "$(ls -A "$repo/service/.build-lease" 2>/dev/null)" ]] && ok "'$help_args' took no lease" || bad "'$help_args' left a lease"
 done
+
+echo "Test 13 (nexus-bivz3.13): the stamp is max(REQUIRED_ENGINE_VERSION, NOTE_URI_MIN_ENGINE_VERSION); an unparseable floor is fatal"
+ev_file="$repo/src/nexus/engine_version.py"
+ev_original="$(cat "$ev_file")"
+_stamp_with_floor() {  # _stamp_with_floor <required tuple body> <floor tuple body or "-" for no constant>
+    {
+        printf 'REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (%s)\n' "$1"
+        [[ "$2" == "-" ]] || printf 'NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (%s)\n' "$2"
+    } > "$ev_file"
+    (cd "$repo" && scripts/build-gate-jar.sh 2>&1)
+}
+# Unset floor (0, 0, 0): the stamp is REQUIRED, exactly as before the floor existed.
+out13a="$(_stamp_with_floor "0, 1, 107" "0, 0, 0")"
+[[ "$out13a" == *"stamped release_version=0.1.107"* ]] && ok "an unset floor stamps REQUIRED_ENGINE_VERSION" || bad "unset floor: $out13a"
+# A floor below the pin: the pin wins.
+out13b="$(_stamp_with_floor "0, 1, 107" "0, 1, 50")"
+[[ "$out13b" == *"stamped release_version=0.1.107"* ]] && ok "a floor below the pin stamps the pin" || bad "floor below the pin: $out13b"
+# A floor above the pin: the floor wins, and the jar payload carries it.
+out13c="$(_stamp_with_floor "0, 1, 107" "0, 1, 200")"
+[[ "$out13c" == *"stamped release_version=0.1.200"* ]] && ok "a floor above the pin stamps the floor" || bad "floor above the pin: $out13c"
+python3 - "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" <<'PY' && ok "the jar payload carries release_version=0.1.200" || bad "jar payload does not carry the floor stamp"
+import sys, zipfile
+p = zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode()
+assert "release_version=0.1.200\n" in p, p
+PY
+# Numeric, not lexical: 0.1.1000 beats 0.1.200.
+out13d="$(_stamp_with_floor "0, 1, 200" "0, 1, 1000")"
+[[ "$out13d" == *"stamped release_version=0.1.1000"* ]] && ok "the max is numeric (0.1.1000 > 0.1.200)" || bad "numeric max: $out13d"
+# The floor constant missing is fatal, never a silent fall back to the pin.
+out13e="$(_stamp_with_floor "0, 1, 107" "-")"; rc13e=$?
+[[ $rc13e -ne 0 && "$out13e" == *"NOTE_URI_MIN_ENGINE_VERSION not parseable"* ]] && ok "a missing floor constant is fatal and named (rc $rc13e)" || bad "missing floor constant rc $rc13e: $out13e"
+[[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored after the floor cases" || bad "props dirty after the floor cases"
+printf '%s\n' "$ev_original" > "$ev_file"
 
 echo
 skipnote=""; (( SKIP == 0 )) || skipnote=", $SKIP skipped"

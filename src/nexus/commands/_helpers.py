@@ -196,6 +196,58 @@ def t2_handle() -> Iterator[Any]:
 # deferred ``from nexus.commands._helpers import ...``).
 
 
+def emit_degraded_pages_summary(degraded: "list[tuple[str, dict[str, list[int]]]]") -> None:
+    """Echo, at the end of an index run, the pages the PDF extractor settled below its first
+    rung, one line per document: ``  paper.pdf: mineru-no-formula 3,7; pymupdf-text 12``
+    (RDR-237). *degraded* is ``[(document name, extraction_pages)]``; silent when empty.
+    ``nx index pdf`` and ``nx dt index`` share it, and ``nx store get`` prints the same
+    rung/pages text from ``format_degraded_pages``."""
+    import click  # noqa: PLC0415 — deferred: CLI-only dependency, avoids import cost for non-CLI callers of this module
+
+    from nexus.catalog.store_hook import format_degraded_pages  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    if not degraded:
+        return
+    click.echo(
+        f"Degraded pages in {len(degraded)} document(s) "
+        "(the extractor fell back below its first choice for these pages; `nx store get` shows them per chunk):"
+    )
+    for name, pages in degraded:
+        click.echo(f"  {name}: {format_degraded_pages(pages)}")
+
+
+def emit_text_only_summary(runs: "list[tuple[str, dict[str, list[int]]]]") -> None:
+    """The run summary of the explicit ``pymupdf`` extractor (RDR-237): it names the extractor, so
+    the result is never mistaken for a MinerU extraction, and lists the pages with no text layer.
+
+    *runs* is ``[(document name, extraction_pages)]`` for the documents this run extracted;
+    silent when empty (a run that extracted nothing, every document fresh). Every page of such a
+    document settled on the text layer, so ``pymupdf-text`` is the extractor's normal output and
+    is not listed; only the ``unextracted`` pages are."""
+    import click  # noqa: PLC0415 — deferred: CLI-only dependency, avoids import cost for non-CLI callers of this module
+
+    if not runs:
+        return
+    click.echo(
+        f"Extractor: pymupdf, text layer only (no layout, tables or math), {len(runs)} document(s)."
+    )
+    for name, pages in runs:
+        gone = pages.get("unextracted") or []
+        if gone:
+            click.echo(f"  {name}: no text layer, not extracted: page(s) {','.join(str(p) for p in gone)}")
+
+
+def emit_extraction_summary(runs: "list[tuple[str, str, dict[str, list[int]]]]") -> None:
+    """The end-of-run extraction summary. *runs* is ``[(document name, extraction_method,
+    extraction_pages)]`` for the documents this run extracted, with the method the catalog
+    RECORDED for each (not the extractor the run asked for): only ``pymupdf`` gets the text-only
+    form; anything else, a ``pymupdf`` rerun over a MinerU buffer included (``mineru+degraded``),
+    gets the degraded-pages list, which names its ``pymupdf-text`` pages. ``nx index pdf`` and
+    ``nx dt index`` call this one."""
+    emit_text_only_summary([(name, pages) for name, method, pages in runs if method == "pymupdf"])
+    emit_degraded_pages_summary([(name, pages) for name, method, pages in runs if method != "pymupdf"])
+
+
 def reset_identity_drop_collectors() -> None:
     """Zero the post-store-hook failure collectors for a fresh run.
 

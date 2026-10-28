@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 import structlog
@@ -29,6 +32,9 @@ _log = structlog.get_logger(__name__)
 #: How many of the other exact-title matches ``_enrich_apply``'s ambiguity warning names
 #: (the rest are counted in ``others_total``).
 _TITLE_AMBIGUOUS_LOG_LIMIT = 5
+
+#: A chunk's natural id: the full sha256 of its text (RDR-180).
+_CHASH_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
@@ -60,70 +66,204 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     return _lookup
 
 
-def _catalog_owner_titles(collection: str, chunk_ids: Iterable[str]) -> dict[str, dict[str, str]]:
-    """nexus-g276c / nexus-3ajpd: ``chunk id -> {owning document tumbler: its
-    catalog title}`` for the live documents of *collection* whose manifest
-    holds the chunk. A chunk id is the chunk's content hash (chash), so the
-    manifest binds a chunk to its documents without a ``doc_id`` on the chunk.
+def _catalog_documents_for_chunks(
+    collection: str, chunk_ids: Iterable[str],
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """nexus-6pfgb.21: who holds these chunks, by the catalog.
 
-    The binding is the document's own, not the chunk row's ``content_hash``:
-    a chunk row is shared by every document holding that text and its
-    ``content_hash`` is the last writer's file hash, so a title looked up by
-    that hash named whichever document wrote the chunk last. A chunk several
-    documents hold maps to all of them. Empty on any catalog failure; the
-    lookup then falls back to the chunk title, the pre-fix behaviour."""
-    wanted = sorted({c for c in chunk_ids if c})
+    Returns ``(owners, entries)``: ``owners`` maps a chunk id (the chunk's chash)
+    to the tumblers of the LIVE catalog documents whose manifest names it in
+    *collection*, and ``entries`` maps each of those tumblers to its catalog
+    entry. A chunk nobody holds is absent from ``owners``.
+
+    A T3 chunk row is shared by every document that holds that text, and the
+    keys on it that describe a document (``title``, ``content_hash``, ``bib_*``)
+    are the last writer's. The manifest is the document's own binding to its
+    chunks, so enrichment selects through it and never through a chunk row's
+    title. One batched reverse lookup (``chash_positions`` where the engine has
+    it, else the referencing documents' manifests, filtered to *collection* in
+    both cases) and one ``resolve_many``; no per-chunk call.
+
+    Raises ``click.ClickException`` when the catalog cannot answer: the
+    pre-6pfgb.21 fallback (group by chunk title) is the defect, so there is no
+    degraded mode to fall back to.
+    """
+    # A manifest names chunks by chash (64 hex); an id of any other shape is not a
+    # chunk a document can hold, and the engine answers a malformed chash with 400.
+    wanted = sorted({c for c in chunk_ids if c and _CHASH_RE.fullmatch(c)})
     if not wanted:
-        return {}
+        return {}, {}
+    from nexus.catalog.orphan_backfill import live_owners_in_collection  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
+    reader = _open_catalog_reader()
     try:
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+        owners = live_owners_in_collection(reader, wanted, collection)
+        tumblers = sorted({t for ts in owners.values() for t in ts})
+        entries = reader.resolve_many(tumblers) if tumblers else {}
+    except Exception as exc:  # noqa: BLE001 — surfaced to the operator as a ClickException
+        _log.warning("enrich_catalog_owners_unavailable", collection=collection, exc_info=True)
+        raise click.ClickException(
+            f"cannot read which documents hold the chunks of '{collection}': {exc}; "
+            "nothing was changed."
+        ) from exc
+    finally:
+        close = getattr(reader, "close", None)
+        if close is not None:
+            close()
+    return owners, entries
 
+
+def _open_catalog_reader() -> Any:
+    """The catalog reader, or a ``ClickException`` when there is none: the enrich
+    verbs attribute chunks to documents through the catalog and have no degraded
+    mode (the chunk-title grouping they had is the defect nexus-6pfgb.21 removed)."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    try:
         reader = make_catalog_reader()
-        if reader is None:
-            return {}
-        try:
-            by_chash = reader.docs_for_chashes(wanted)
-            tumblers = sorted({t for ts in by_chash.values() for t in ts})
-            entries = reader.resolve_many(tumblers) if tumblers else {}
-        finally:
-            close = getattr(reader, "close", None)
-            if close is not None:
-                close()
-    except Exception:  # noqa: BLE001 — best-effort catalog read; the chunk title is the fallback
-        _log.debug("enrich_catalog_titles_unavailable", collection=collection, exc_info=True)
-        return {}
-    out: dict[str, dict[str, str]] = {}
-    for chash, tumblers in by_chash.items():
-        owners = {
-            t: entries[t].title
-            for t in tumblers
-            if t in entries
-            and getattr(entries[t], "title", "")
-            and getattr(entries[t], "physical_collection", "") == collection
-        }
-        if owners:
-            out[chash] = owners
-    return out
+    except Exception as exc:  # noqa: BLE001 — surfaced to the operator as a ClickException
+        raise click.ClickException(f"the catalog is not reachable: {exc}") from exc
+    if reader is None:
+        raise click.ClickException(
+            "the catalog is not initialised, so no chunk can be attributed to a "
+            "document; nothing was changed."
+        )
+    return reader
 
 
-def _catalog_title_for_chunks(
-    chunk_ids: Iterable[str], owner_titles: dict[str, dict[str, str]],
-) -> str:
-    """The catalog title of THE document that owns every one of *chunk_ids*
-    that the manifest names an owner for, or ``""`` when that is not exactly
-    one title (no chunk has an owner, the chunks belong to different
-    documents, or the documents holding them all carry different titles).
+@dataclass(frozen=True)
+class _CollectionDocuments:
+    """What :func:`_catalog_collection_documents` found: the documents that still
+    need a lookup (tumbler -> ``(catalog entry, its chunk ids in the collection)``)
+    and the counts of the rest."""
 
-    A title group's chunks can include chunks shared with other documents, so
-    the documents holding ALL of them is the intersection of the per-chunk
-    owner sets: one shared chunk does not turn the title into the other
-    document's, and a group that mixes two documents' chunks yields none."""
-    ids = [c for c in chunk_ids if c in owner_titles]
-    if not ids:
-        return ""
-    common = set.intersection(*(set(owner_titles[c]) for c in ids))
-    titles = {t for c in ids for d, t in owner_titles[c].items() if d in common}
-    return next(iter(titles)) if len(titles) == 1 else ""
+    to_look_up: dict[str, tuple[Any, list[str]]]
+    total: int
+    enriched: int
+    untitled: int
+    # Titled documents not yet enriched whose manifest names no chunk this
+    # collection serves: nothing to read a lookup from, so none is made.
+    no_chunks: int = 0
+
+
+def _catalog_collection_documents(
+    collection: str, id_field: str, served: set[str],
+) -> _CollectionDocuments:
+    """nexus-6pfgb.21: the collection's live catalog documents, split by whether
+    the catalog row already holds the backend's id (*id_field*).
+
+    Only a document that does NOT hold it is read further (its manifest, for its
+    chunks in *collection* that T3 serves, *served*), so a fully enriched
+    collection costs one catalog listing (the caller has already scanned T3 for
+    *served*) and no chunk-to-owner reverse lookup. A document with no catalog
+    title cannot be looked up and is counted in ``untitled``; a titled one with no
+    served chunk in ``no_chunks``. ``--limit`` does not bound this read.
+    Raises ``click.ClickException`` when the catalog cannot answer, as
+    :func:`_catalog_documents_for_chunks` does.
+    """
+    reader = _open_catalog_reader()
+    try:
+        entries = reader.list_by_collection(collection, limit=1_000_000)
+        pending = [e for e in entries if not getattr(e, id_field, "")]
+        titled = [e for e in pending if e.title]
+        manifests = reader.get_manifests([str(e.tumbler) for e in titled]) if titled else {}
+    except Exception as exc:  # noqa: BLE001 — surfaced to the operator as a ClickException
+        _log.warning("enrich_catalog_documents_unavailable", collection=collection, exc_info=True)
+        raise click.ClickException(
+            f"cannot read the documents of '{collection}' from the catalog: {exc}; "
+            "nothing was changed."
+        ) from exc
+    finally:
+        close = getattr(reader, "close", None)
+        if close is not None:
+            close()
+    to_look_up: dict[str, tuple[Any, list[str]]] = {}
+    for entry in titled:
+        tumbler = str(entry.tumbler)
+        chunk_ids = list(dict.fromkeys(
+            m.chash for m in manifests.get(tumbler, ())
+            if m.collection in (collection, None) and m.chash in served
+        ))
+        if chunk_ids:
+            to_look_up[tumbler] = (entry, chunk_ids)
+    return _CollectionDocuments(
+        to_look_up=to_look_up, total=len(entries),
+        enriched=len(entries) - len(pending), untitled=len(pending) - len(titled),
+        no_chunks=len(titled) - len(to_look_up),
+    )
+
+
+def _entry_content_hash(entry: Any) -> str:
+    """The whole-file hash a catalog document's chunks carry in their ``content_hash``:
+    ``index_content_hash``, else the pre-fence ``meta.content_hash`` (the rule of
+    ``link_generator._pdf_content_hash``, which orphan_backfill matches chunks on)."""
+    return (
+        getattr(entry, "index_content_hash", "")
+        or (getattr(entry, "meta", None) or {}).get("content_hash")
+        or ""
+    )
+
+
+def _row_names_document(
+    row_doc_id: str, row_content_hash: str, tumbler: str, entry: Any,
+) -> bool:
+    """True when a T3 chunk row names the catalog document *tumbler* as the one that
+    last INDEXED it. This is a weaker statement than "wrote its ``bib_*``".
+
+    A chunk row is shared by every document that holds the text. Its identity keys
+    (``content_hash``, ``title``) are restamped by the last indexer, while its
+    ``bib_*`` keys survive a later index write (``metadata_schema.REWRITE_OWNED_KEYS``
+    leaves them out and the engine merge never retracts a key). So a row that names
+    this document may carry a ``bib_*`` another document wrote earlier and this
+    document's re-index kept; that case cannot be told apart from the document's own
+    bib, and the verbs that use this test (``--backfill-catalog``, the ``chunk_only``
+    skip of ``nx enrich bib``) can copy such a bib onto this document's catalog row.
+
+    A note's row carries ``catalog_doc_id`` (``catalog.note_write``). A chunk the
+    indexers write (PDF, markdown, code) does NOT: its identity is the file's
+    ``content_hash``, which is the document's ``index_content_hash`` (orphan_backfill
+    matches chunks to documents on the same pair). A row naming another document, or
+    carrying neither key, names this one for nobody.
+    """
+    if row_doc_id:
+        return row_doc_id == tumbler
+    key = _entry_content_hash(entry)
+    return bool(key) and row_content_hash == key
+
+
+def _chunk_bib(meta: dict | None) -> dict | None:
+    """The bib a T3 chunk row carries (``year``, ``venue``, ``authors``,
+    ``citation_count`` and the backend's id), or ``None`` for a row that carries
+    none. Which document the bib describes is decided by the caller."""
+    if not meta:
+        return None
+    s2_id = meta.get("bib_semantic_scholar_id", "") or ""
+    oa_id = meta.get("bib_openalex_id", "") or ""
+    if not (meta.get("bib_year") or s2_id or oa_id):
+        return None
+    bib: dict = {
+        "year": meta.get("bib_year", 0),
+        "venue": meta.get("bib_venue", ""),
+        "authors": meta.get("bib_authors", ""),
+        "citation_count": meta.get("bib_citation_count", 0),
+    }
+    if oa_id:
+        bib["openalex_id"] = oa_id
+        if meta.get("bib_doi"):
+            bib["doi"] = meta.get("bib_doi", "")
+    else:
+        bib["semantic_scholar_id"] = s2_id
+    return bib
+
+
+def _bib_key(bib: dict) -> tuple[bool, str]:
+    """``(is OpenAlex, backend id)``: two chunk bibs of one document agree when
+    their keys are equal. ``--backfill-catalog`` and ``nx enrich bib`` apply the
+    same test, so a document one skips as conflicting the other looks up."""
+    return (
+        bool(bib.get("openalex_id")),
+        bib.get("openalex_id") or bib.get("semantic_scholar_id") or "",
+    )
 
 
 def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
@@ -164,6 +304,18 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
             if tumbler:
                 # doc_id and tumbler are identical in the catalog contract.
                 return tumbler
+            # _chroma_source_id_for_entry passes the absolute path from a
+            # file:// source_uri, but file_path is stored repo-relative, so
+            # the point-query misses a registered document. Match the row
+            # by its source_uri, in this collection only.
+            if source_id.startswith("/"):
+                from urllib.parse import quote  # noqa: PLC0415 — branch-local stdlib import
+                for uri in dict.fromkeys(
+                    (f"file://{source_id}", f"file://{quote(source_id)}"),
+                ):
+                    hit = cat.by_source_uri(uri)
+                    if hit is not None and hit.physical_collection == collection:
+                        return str(hit.tumbler)
             # Try title search as fallback.
             hits = cat.find_all(source_id)
             for hit in hits:
@@ -205,7 +357,11 @@ def enrich() -> None:
     "--limit",
     default=0,
     type=int,
-    help="Maximum number of titles to enrich (0 = unlimited).",
+    help=(
+        "Maximum number of documents to look up (0 = unlimited). Bounds the "
+        "backend calls only: the catalog manifest read and the chunk-owner "
+        "lookup cover every document still to look up."
+    ),
 )
 @click.option(
     "--source",
@@ -229,31 +385,67 @@ def enrich() -> None:
     "--backfill-catalog",
     is_flag=True,
     help=(
-        "Re-drive the catalog bib_* write from already-enriched T3 "
-        "chunk metadata; no external API calls. Idempotent."
+        "Fill the catalog bib_* columns from already-enriched T3 chunk "
+        "metadata; no external API calls. A recovery tool: when in doubt "
+        "run `nx enrich bib` (an API lookup) instead. Fill-only per backend "
+        "id: a document whose catalog row already holds that backend's id "
+        "is left alone, while a row holding only the other backend's id is "
+        "filled and its author, year and venue are overwritten. A chunk "
+        "counts only when exactly one live document holds it AND its row "
+        "names that document as its last indexer (catalog_doc_id, else the "
+        "file content_hash). A row names its last INDEXER, not whoever "
+        "wrote its bib_*: a bib a former co-holder wrote and a later "
+        "re-index kept cannot be told apart and may be copied onto the "
+        "indexing document's empty row. A document whose chunks disagree "
+        "on the id is skipped and reported."
     ),
 )
 def enrich_bib(
     collection: str, delay: float, limit: int, source: str,
     backfill_catalog: bool,
 ) -> None:
-    """Backfill bibliographic metadata for chunks in COLLECTION.
+    """Backfill bibliographic metadata for the documents in COLLECTION.
 
-    Queries the selected backend for each unique source title in the
-    collection and writes bib_year, bib_venue, bib_authors,
-    bib_citation_count, and a backend-specific ID
-    (bib_semantic_scholar_id or bib_openalex_id) back to every chunk
-    with that title. nexus-57mk added the OpenAlex backend so users
-    without a Semantic Scholar API key can still enrich.
+    The unit is the catalog document, not the chunk's ``title``: a chunk row
+    is shared by every document that holds the text, and its title and
+    ``content_hash`` are whichever document indexed it last (its ``bib_*``
+    keys are whichever document enriched it, kept across a later re-index).
+    Each catalog document of the collection whose catalog row has no id for
+    the selected backend (bib_semantic_scholar_id or bib_openalex_id) is
+    looked up once, under its catalog title, and the result is written to its
+    catalog row by tumbler: bib_year, bib_venue, bib_authors,
+    bib_citation_count and the backend's id. OpenAlex and ``--source dt`` also
+    try the DOI or arXiv id in the document's text or file name; Semantic
+    Scholar looks up by title only. The same values go onto a chunk row only
+    where that document is the chunk's sole live holder; a chunk two documents
+    hold keeps the values it had. ``--limit`` bounds the backend calls only:
+    the manifest read and the chunk-owner lookup cover every document still to
+    look up.
+    nexus-57mk added the OpenAlex backend so users without a Semantic
+    Scholar API key can still enrich.
 
-    Already-enriched chunks (the backend's ID field is non-empty) are
-    skipped — the command is idempotent per backend.
+    A document whose catalog row holds the backend's id is skipped, so the
+    command is idempotent per backend. A document enriched before the catalog
+    carried bib_* columns (nexus-9l2lg) has the id only on its chunk rows:
+    when a chunk it alone holds names it as last indexer and carries the id,
+    and its attributed chunks agree on the id, it is skipped too, and
+    ``--backfill-catalog`` fills its catalog row. Run that first on an old
+    collection. A document whose attributed chunks disagree is looked up.
+    The verb stops with no change when the catalog cannot answer.
 
-    ``--backfill-catalog`` (nexus-9l2lg) skips the network path
-    entirely: it re-derives the catalog ``bib_*`` write from chunk
-    metadata that a prior live enrichment already wrote, for catalog
-    rows that predate the ``_enrich_apply`` column-level write (or
-    otherwise drifted stale). Idempotent; makes zero external calls.
+    ``--backfill-catalog`` (nexus-9l2lg) skips the network path entirely: it
+    fills the catalog ``bib_*`` columns from chunk metadata that a prior live
+    enrichment already wrote, and makes zero external calls. It is a recovery
+    tool; when in doubt use the API lookup above. Fill-only per backend id (a
+    row that already holds that id is left as it is; a row holding only the
+    other backend's id is filled, and its author, year and venue are
+    overwritten). A chunk is used only when exactly one live document holds it
+    and the chunk row names that document as its last indexer
+    (``catalog_doc_id``, else the file ``content_hash``). The row names its
+    last INDEXER, not whoever wrote its ``bib_*``: a bib that a former
+    co-holder wrote and a later re-index kept cannot be told apart, and may be
+    copied onto the indexing document's empty catalog row. A document whose
+    chunks disagree on the id is skipped and reported.
     """
     # nexus-g276c: accept the bare subject every other CLI verb accepts.
     # Passed through unresolved, the engine's /v1/vectors/get refused
@@ -271,20 +463,34 @@ def enrich_bib(
 def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
     """Re-drive the catalog bib_* write from already-enriched T3 chunk
     metadata. No external API calls — zero imports of
-    ``nexus.bib_enricher*``. Idempotent: re-running re-applies the
-    same values to the same matched rows (``titles_backfilled`` counts
-    "a catalog row was matched and updated", not "this changed since
-    last run" — a title with an already-current row still counts as
-    backfilled on every run).
+    ``nexus.bib_enricher*``. Fill-only and idempotent: a document whose catalog
+    row already holds the backend's id is left as it is (``documents_backfilled``
+    counts documents a catalog row was written for in this run).
 
-    nexus-6ha8a follow-up (critic finding 3): a title with enriched
-    chunk metadata but NO matching catalog row (deleted, never
-    registered, migrated away, ...) is a silent no-op at the
-    ``_catalog_enrich_hook`` layer — such titles are counted in
-    ``titles_skipped_no_row``, not ``titles_backfilled``, so the
-    summary line reports what actually changed.
+    nexus-6pfgb.21: a chunk row is shared by every document that holds the text.
+    A chunk row is evidence about a document only when BOTH hold:
 
-    Returns ``(titles_backfilled, chunks_scanned, titles_skipped_no_row)``.
+    * exactly one live document holds the chunk (the catalog manifest says who,
+      :func:`_catalog_documents_for_chunks`), and
+    * the row names that document as its last INDEXER (:func:`_row_names_document`:
+      ``catalog_doc_id`` for a note, else the file ``content_hash`` the indexers
+      stamp, against the document's own).
+
+    KNOWN LIMIT: that names who last indexed the row, not who wrote its ``bib_*``.
+    A later index write restamps ``content_hash`` and keeps the ``bib_*`` (the
+    engine merge never retracts a key), so a bib a former co-holder wrote and a
+    re-index by this document kept is indistinguishable from this document's own
+    and can be copied onto its empty catalog row. This verb is a recovery tool;
+    ``nx enrich bib`` (an API lookup) is the safe path when in doubt.
+
+    Every such chunk of a document is read; a document whose chunks disagree on
+    the backend id is skipped and reported, not guessed. The catalog row written
+    is the holder's own, by tumbler. Fill-only per backend id: a row holding the
+    other backend's id is still filled, and its author, year and venue replaced.
+
+    Returns ``(documents_backfilled, chunks_scanned, chunks_skipped)``;
+    ``chunks_skipped`` counts enriched chunks that were not used (held by none or
+    by several documents, or not naming their holder).
     """
     from nexus.db import make_t3  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
@@ -292,11 +498,10 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
     db = make_t3()
     col = db.get_or_create_collection(collection)
 
-    # One representative chunk's bib_* metadata per title — no
-    # re-lookup, no external call. Mirrors the already_enriched
-    # detection in run_bib_enrichment (an id field is non-empty).
-    title_bib: dict[str, dict] = {}
-    title_source_paths: dict[str, set[str]] = {}
+    # Enriched chunks, in scan order: (chunk id, bib dict, row's catalog_doc_id,
+    # row's content_hash). The bib is read from the chunk row; WHICH document it
+    # describes is decided afterwards.
+    enriched: list[tuple[str, dict, str, str]] = []
     chunks_scanned = 0
     offset = 0
     while True:
@@ -306,60 +511,99 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
         batch_ids = batch.get("ids", [])
         batch_meta = batch.get("metadatas", [])
         chunks_scanned += len(batch_ids)
-        for meta in batch_meta:
-            s2_id = meta.get("bib_semantic_scholar_id", "") or ""
-            oa_id = meta.get("bib_openalex_id", "") or ""
-            if not (meta.get("bib_year") or s2_id or oa_id):
+        for chunk_id, meta in zip(batch_ids, batch_meta):
+            bib = _chunk_bib(meta)
+            if bib is None:
                 continue
-            title = meta.get("title", "") or ""
-            if not title:
-                continue
-            if title not in title_bib:
-                title_bib[title] = {
-                    "year": meta.get("bib_year", 0),
-                    "venue": meta.get("bib_venue", ""),
-                    "authors": meta.get("bib_authors", ""),
-                    "citation_count": meta.get("bib_citation_count", 0),
-                }
-                if oa_id:
-                    title_bib[title]["openalex_id"] = oa_id
-                    if meta.get("bib_doi"):
-                        title_bib[title]["doi"] = meta.get("bib_doi", "")
-                else:
-                    title_bib[title]["semantic_scholar_id"] = s2_id
-            sp = meta.get("source_path", "") or ""
-            if sp:
-                title_source_paths.setdefault(title, set()).add(sp)
+            enriched.append((
+                chunk_id, bib,
+                meta.get("catalog_doc_id", "") or "", meta.get("content_hash", "") or "",
+            ))
         if len(batch_ids) < 300:
             break
         offset += 300
 
-    titles_backfilled = 0
-    titles_skipped_no_row = 0
-    for title, bib in title_bib.items():
-        backend = "openalex" if bib.get("openalex_id") else "s2"
-        updated = _catalog_enrich_hook(
-            title=title, bib_meta=bib, collection_name=collection,
-            backend=backend,
-            source_paths=sorted(title_source_paths.get(title, set())),
-        )
-        # nexus-6ha8a follow-up (critic finding 3): _catalog_enrich_hook
-        # now reports whether it actually matched+updated a row. A
-        # title with enriched chunks but no corresponding catalog row
-        # (deleted, never registered, etc.) is a silent no-op there —
-        # count it as skipped, not backfilled, so this summary line
-        # doesn't overstate what changed.
-        if updated:
-            titles_backfilled += 1
-        else:
-            titles_skipped_no_row += 1
-
-    click.echo(
-        f"Backfilled {titles_backfilled} titles from {chunks_scanned} "
-        f"chunks in '{collection}' (no external calls); "
-        f"{titles_skipped_no_row} titles skipped (no matching catalog row)."
+    owners, entries = _catalog_documents_for_chunks(
+        collection, (cid for cid, _bib, _d, _h in enriched),
     )
-    return titles_backfilled, chunks_scanned, titles_skipped_no_row
+
+    # tumbler -> [(backend id, bib)] over the chunks that are sole-held AND name
+    # their holder.
+    doc_bibs: dict[str, list[tuple[tuple[bool, str], dict]]] = {}
+    chunks_unheld = 0
+    chunks_unattributed = 0
+    for chunk_id, bib, row_doc_id, row_hash in enriched:
+        held_by = owners.get(chunk_id, [])
+        if len(held_by) != 1 or held_by[0] not in entries:
+            chunks_unheld += 1
+            _log.debug(
+                "enrich_backfill_chunk_not_single_owner",
+                chunk=chunk_id, owners=len(held_by),
+            )
+            continue
+        tumbler = held_by[0]
+        if not _row_names_document(row_doc_id, row_hash, tumbler, entries[tumbler]):
+            chunks_unattributed += 1
+            _log.debug(
+                "enrich_backfill_chunk_names_another_writer",
+                chunk=chunk_id, holder=tumbler,
+            )
+            continue
+        doc_bibs.setdefault(tumbler, []).append((_bib_key(bib), bib))
+
+    documents_backfilled = 0
+    documents_not_updated = 0
+    documents_already_filled: list[str] = []
+    documents_conflicting: list[str] = []
+    for tumbler, candidates in doc_bibs.items():
+        entry = entries[tumbler]
+        bib = candidates[0][1]
+        backend = "openalex" if bib.get("openalex_id") else "s2"
+        id_field = "bib_openalex_id" if backend == "openalex" else "bib_semantic_scholar_id"
+        if getattr(entry, id_field, ""):
+            documents_already_filled.append(tumbler)
+            continue
+        if len({key for key, _b in candidates}) > 1:
+            documents_conflicting.append(tumbler)
+            _log.warning(
+                "enrich_backfill_document_chunks_disagree", collection=collection,
+                tumbler=tumbler, ids=sorted({key[1] for key, _b in candidates}),
+            )
+            continue
+        updated = _catalog_enrich_hook(
+            title=entry.title, bib_meta=bib, collection_name=collection,
+            backend=backend, tumblers=[tumbler],
+        )
+        if updated:
+            documents_backfilled += 1
+        else:
+            documents_not_updated += 1
+
+    extra = ""
+    if chunks_unattributed:
+        extra += (
+            f" {chunks_unattributed} enriched chunks skipped (the row does not name "
+            "the document that holds it as its last indexer)."
+        )
+    if documents_already_filled:
+        extra += (
+            f" {len(documents_already_filled)} documents already hold the id "
+            "(left as they were)."
+        )
+    if documents_conflicting:
+        extra += (
+            f" {len(documents_conflicting)} documents skipped (their chunks "
+            f"disagree on the id: {', '.join(documents_conflicting)})."
+        )
+    if documents_not_updated:
+        extra += f" {documents_not_updated} documents could not be updated."
+    click.echo(
+        f"Backfilled {documents_backfilled} documents from {chunks_scanned} "
+        f"chunks in '{collection}' (no external calls); "
+        f"{chunks_unheld} enriched chunks skipped (not held by exactly one "
+        f"live document).{extra}"
+    )
+    return documents_backfilled, chunks_scanned, chunks_unheld + chunks_unattributed
 
 
 def run_bib_enrichment(
@@ -392,12 +636,16 @@ def run_bib_enrichment(
     db = make_t3()
     col = db.get_or_create_collection(collection)
 
-    # nexus-sbzr: also collect source_paths per title group so we can
-    # try DOI / arXiv-ID extraction from chunk text before falling
-    # through to fuzzy title search at the backend.
-    title_to_ids: dict[str, list[str]] = {}
-    title_to_source_paths: dict[str, set[str]] = {}
-    already_enriched = 0
+    # Every chunk id the collection serves (a plain read serves only chunks a
+    # live document holds, RDR-192). The chunk rows' own ``title`` is not read:
+    # it is the last writer's, shared by every document that holds the chunk.
+    # What is kept per chunk is the bib it carries, with the row's two indexer
+    # keys: a document enriched before the catalog carried bib_* columns has the
+    # id only here (see ``chunk_only`` below).
+    all_chunk_ids: list[str] = []
+    # chunk id -> (row's catalog_doc_id, row's content_hash, the bib it carries),
+    # for every chunk carrying a bib (the rows ``--backfill-catalog`` reads).
+    row_bibs: dict[str, tuple[str, str, dict]] = {}
     total_chunks = 0
     offset = 0
     while True:
@@ -408,19 +656,15 @@ def run_bib_enrichment(
             offset=offset,
         )
         batch_ids = batch.get("ids", [])
-        batch_meta = batch.get("metadatas", [])
         total_chunks += len(batch_ids)
-        for chunk_id, meta in zip(batch_ids, batch_meta):
-            if meta.get(id_field, ""):
-                already_enriched += 1
-                continue
-            title = meta.get("title", "") or ""
-            if not title:
-                continue
-            title_to_ids.setdefault(title, []).append(chunk_id)
-            sp = meta.get("source_path", "") or ""
-            if sp:
-                title_to_source_paths.setdefault(title, set()).add(sp)
+        all_chunk_ids.extend(batch_ids)
+        for cid, meta in zip(batch_ids, batch.get("metadatas") or []):
+            chunk_bib = _chunk_bib(meta)
+            if chunk_bib is not None:
+                row_bibs[cid] = (
+                    meta.get("catalog_doc_id", "") or "", meta.get("content_hash", "") or "",
+                    chunk_bib,
+                )
         if len(batch_ids) < 300:
             break
         offset += 300
@@ -429,49 +673,92 @@ def run_bib_enrichment(
         click.echo(f"Collection '{collection}' is empty — nothing to enrich.")
         return
 
-    # nexus-g276c: the chunk-level ``title`` is the extractor's first line
-    # ("Self-Aware Vector Embeddings for Retrieval-Augmented Generation:"),
-    # while the catalog row carries the document's registered title (the
-    # DEVONthink record name there). OpenAlex found the paper only under
-    # the full title, so the fuzzy fallback ran on the fragment and matched
-    # a stranger. Grouping stays keyed on the chunk title (that is what the
-    # chunks carry); the LOOKUP uses the catalog title when the group's
-    # chunks map to exactly one catalog row whose title differs. nexus-3ajpd:
-    # the mapping is the catalog manifest's (chunk id -> owning documents), not
-    # the chunk row's content_hash, which is the last writer's.
-    titles_to_process = list(title_to_ids.items())
-    if limit > 0:
-        titles_to_process = titles_to_process[:limit]
-    owner_titles = _catalog_owner_titles(
-        collection, (cid for _t, cids in titles_to_process for cid in cids),
-    )
+    # nexus-6pfgb.21 (x54wv census rows 10, 11): the unit is the catalog
+    # DOCUMENT. Its manifest names its chunks; whether it is enriched is the
+    # catalog row's own id column; the lookup title is the catalog title (the
+    # DEVONthink record name for a DT import, not the extractor's first line,
+    # which found a stranger in nexus-g276c). Grouping by chunk title, as this
+    # did, attributed a chunk restamped by another document's writer to that
+    # document: it was enriched with the other's bib, counted as already
+    # enriched, or left out.
+    #
+    # Only a document that does not hold the id yet is read past the listing:
+    # the chunk-to-owner reverse lookup runs on ITS chunks alone, so a fully
+    # enriched collection costs one listing.
+    served = set(all_chunk_ids)
+    found = _catalog_collection_documents(collection, id_field, served)
+    owners: dict[str, list[str]] = {}
+    if found.to_look_up:
+        owners, _held_entries = _catalog_documents_for_chunks(
+            collection,
+            sorted({c for _e, cids in found.to_look_up.values() for c in cids}),
+        )
 
+    # nexus-9l2lg left documents with the id on their chunk rows and none in the
+    # catalog. Looking those up again costs an API call each, and the lookup may
+    # replace good values; a chunk this document alone holds that names it as
+    # last indexer and carries the id is the same evidence ``--backfill-catalog``
+    # uses, so the document is left to that verb, but only when that verb would
+    # fill it: it skips a document whose attributed chunks disagree on the id,
+    # so such a document is looked up here instead of being left to neither verb.
+    chunk_only: set[str] = set()
+    chunks_disagree: set[str] = set()
+    for tumbler, (entry, cids) in found.to_look_up.items():
+        keys = {
+            _bib_key(row_bibs[c][2]) for c in cids
+            if len(owners.get(c, [])) == 1 and c in row_bibs
+            and _row_names_document(row_bibs[c][0], row_bibs[c][1], tumbler, entry)
+        }
+        if len(keys) > 1:
+            chunks_disagree.add(tumbler)
+        elif keys and next(iter(keys))[0] == (backend == "openalex") and next(iter(keys))[1]:
+            chunk_only.add(tumbler)
+    docs_to_process: list[tuple[str, Any, list[str]]] = [
+        (tumbler, entry, cids)
+        for tumbler, (entry, cids) in found.to_look_up.items()
+        if tumbler not in chunk_only
+    ]
+    if limit > 0:
+        docs_to_process = docs_to_process[:limit]
+
+    notes = ""
+    if found.untitled:
+        notes += f", {found.untitled} without a catalog title (not looked up)"
+    if found.no_chunks:
+        notes += (
+            f", {found.no_chunks} with no chunk in the collection (not looked up)"
+        )
+    if chunk_only:
+        notes += (
+            f", {len(chunk_only)} with the id on their chunks only (run "
+            "--backfill-catalog to fill their catalog rows)"
+        )
+    if chunks_disagree:
+        notes += (
+            f", {len(chunks_disagree)} whose chunks disagree on the id (looked up "
+            "here; --backfill-catalog skips them)"
+        )
     click.echo(
-        f"Collection '{collection}': {total_chunks} total chunks, "
-        f"{already_enriched} already enriched, "
-        f"{len(titles_to_process)} titles to look up"
+        f"Collection '{collection}': {total_chunks} chunks, {found.total} documents, "
+        f"{found.enriched} already enriched{notes}, "
+        f"{len(docs_to_process)} documents to look up"
         + (f" (capped at {limit})" if limit > 0 else "")
         + "."
     )
 
-    enriched_titles = 0
+    enriched_docs = 0
     enriched_chunks = 0
-    skipped_titles = 0
-    by_id_count = 0  # how many titles resolved via DOI / arXiv (nexus-sbzr)
+    skipped_docs = 0
+    by_id_count = 0  # how many documents resolved via DOI / arXiv (nexus-sbzr)
 
-    for i, (title, chunk_ids) in enumerate(titles_to_process):
+    for i, (tumbler, entry, chunk_ids) in enumerate(docs_to_process):
         if i > 0:
             time.sleep(delay)
 
-        title_source_paths = sorted(title_to_source_paths.get(title, set()))
-        lookup_title = title
-        catalog_title = _catalog_title_for_chunks(chunk_ids, owner_titles)
-        if catalog_title and catalog_title != title:
-            _log.info(
-                "enrich_lookup_title_from_catalog",
-                chunk_title=title, catalog_title=catalog_title,
-            )
-            lookup_title = catalog_title
+        title = entry.title
+        # The document's own file name (nexus-sbzr: an arXiv id in it is a
+        # direct lookup); the chunk rows' ``source_path`` key is gone.
+        title_source_paths = [entry.file_path] if entry.file_path else []
         # Extract the record's DOI/arXiv identifiers once, up front, when
         # either the OpenAlex primary path or the DT-CrossRef gap-fill will
         # need them. Sharing the scan keeps the chunk read single-pass.
@@ -482,7 +769,7 @@ def run_bib_enrichment(
             )
 
         bib = _resolve_bib_for_title(
-            title=lookup_title,
+            title=title,
             chunk_ids=chunk_ids,
             source_paths=title_source_paths,
             col=col,
@@ -511,23 +798,23 @@ def run_bib_enrichment(
         elif "_resolved_via" in bib:
             bib = {k: v for k, v in bib.items() if k != "_resolved_via"}
         if not bib:
-            skipped_titles += 1
+            skipped_docs += 1
             _log.debug("enrich_no_result", title=title)
             continue
 
-        # Build per-chunk metadata updates: ChromaDB update requires full
+        # Chunk rows carry the bib only where this document is the sole live
+        # holder: a chunk another document also holds would show this
+        # document's values to that one (and the other's, last, to this one).
+        # The catalog row below is the document's own, whatever its chunks.
+        own_ids = [c for c in chunk_ids if len(owners.get(c, ())) == 1]
+        # Build per-chunk metadata updates: the stub's update takes full
         # metadata dicts, so we fetch and merge. Batch at 200 to stay under
-        # ChromaDB Cloud's 300-record get/write limit.
+        # the 300-record get/write limit.
         _BATCH = 200
         updated_ids: list[str] = []
         updated_meta: list[dict] = []
-        # nexus-tv22: collect distinct source_paths in this title
-        # group so the catalog hook can match catalog rows by
-        # file_path (unambiguous) instead of by title (which drifts
-        # after derive_title rewrites in --from-t3 recovery).
-        source_paths: set[str] = set()
-        for batch_start in range(0, len(chunk_ids), _BATCH):
-            batch_ids = chunk_ids[batch_start:batch_start + _BATCH]
+        for batch_start in range(0, len(own_ids), _BATCH):
+            batch_ids = own_ids[batch_start:batch_start + _BATCH]
             fetch = _vector_with_retry(col.get, ids=batch_ids, include=["metadatas"])
             for cid, meta in zip(fetch.get("ids", []), fetch.get("metadatas", [])):
                 merged = dict(meta)
@@ -548,31 +835,29 @@ def run_bib_enrichment(
                     )
                 updated_ids.append(cid)
                 updated_meta.append(merged)
-                sp = meta.get("source_path", "") if meta else ""
-                if sp:
-                    source_paths.add(sp)
 
-        if updated_ids:
-            for batch_start in range(0, len(updated_ids), _BATCH):
-                batch_end = min(batch_start + _BATCH, len(updated_ids))
-                _vector_with_retry(
-                    col.update,
-                    ids=updated_ids[batch_start:batch_end],
-                    metadatas=updated_meta[batch_start:batch_end],
-                )
-            enriched_chunks += len(updated_ids)
-            enriched_titles += 1
+        for batch_start in range(0, len(updated_ids), _BATCH):
+            batch_end = min(batch_start + _BATCH, len(updated_ids))
+            _vector_with_retry(
+                col.update,
+                ids=updated_ids[batch_start:batch_end],
+                metadatas=updated_meta[batch_start:batch_end],
+            )
+        enriched_chunks += len(updated_ids)
+        catalog_updated = _catalog_enrich_hook(
+            title=title, bib_meta=bib,
+            collection_name=collection, backend=backend,
+            tumblers=[tumbler],
+        )
+        if updated_ids or catalog_updated:
+            enriched_docs += 1
             _log.debug(
                 "enrich_updated",
                 title=title,
+                tumbler=tumbler,
                 chunks=len(updated_ids),
                 year=bib.get("year"),
                 venue=bib.get("venue"),
-            )
-            _catalog_enrich_hook(
-                title=lookup_title, bib_meta=bib,
-                collection_name=collection, backend=backend,
-                source_paths=sorted(source_paths),
             )
 
     backend_label = "Semantic Scholar" if backend == "s2" else "OpenAlex"
@@ -581,12 +866,12 @@ def run_bib_enrichment(
     )
     click.echo(
         f"Done: enriched {enriched_chunks} chunks across "
-        f"{enriched_titles} titles{via_id_note}; "
-        f"{skipped_titles} titles had no {backend_label} match."
+        f"{enriched_docs} documents{via_id_note}; "
+        f"{skipped_docs} documents had no {backend_label} match."
     )
 
     # Auto-generate citation links if the catalog is reachable
-    if enriched_titles > 0:
+    if enriched_docs > 0:
         try:
             from nexus.catalog.link_generator import generate_citation_links  # noqa: PLC0415 — circular-dep avoidance; command-local import
             from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance; command-local import
@@ -617,24 +902,23 @@ def run_bib_enrichment(
 def _extract_identifiers_for_title(
     *, chunk_ids: list, source_paths: list[str], col,
 ) -> dict:
-    """Scan a title group's chunk text + filename for a DOI / arXiv ID.
+    """Scan a document's chunk text + filename for a DOI / arXiv ID.
 
     Returns the ``extract_identifiers`` dict (``{"doi": ..., "arxiv": ...}``).
     Shared by the OpenAlex direct-lookup path and the RDR-139 Layer C
-    DT-CrossRef gap-fill so the chunk scan happens at most once per title.
+    DT-CrossRef gap-fill so the chunk scan happens at most once per document.
 
     Scans ALL chunks: Docling's reading-order extraction can put the page-1
     DOI text into chunks 0-4 OR much deeper depending on column layout,
     abstract length, and figure placement (live evidence on knowledge__delos:
     9/15 papers have an extractable DOI somewhere in full text but only 2/15
-    in the first 5 chunks). Concatenating one title group is cheap — ChromaDB
+    in the first 5 chunks). Concatenating one document's chunks is cheap — ChromaDB
     reads are free, the regex is bounded, the direct lookup is unambiguous.
     """
     from nexus.bib_extractor import extract_identifiers  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     body_text = ""
-    filename = ""
     if chunk_ids:
         try:
             collected_docs: list[str] = []
@@ -642,25 +926,19 @@ def _extract_identifiers_for_title(
                 batch = _vector_with_retry(
                     col.get,
                     ids=chunk_ids[batch_start:batch_start + 300],
-                    include=["documents", "metadatas"],
+                    include=["documents"],
                 )
                 docs = batch.get("documents") or []
-                metas = batch.get("metadatas") or []
                 for d in docs:
                     if d:
                         collected_docs.append(d)
-                if not filename:
-                    for m in metas:
-                        if m and m.get("source_path"):
-                            filename = m["source_path"]
-                            break
             body_text = "\n".join(collected_docs)
         except Exception as exc:  # noqa: BLE001 — best-effort chunk scan; failure logged at debug, falls back to filename
             _log.debug("enrich_chunk_scan_failed", error=str(exc))
 
-    # Filename fallback when chunk metadata didn't carry source_path.
-    if not filename and source_paths:
-        filename = source_paths[0]
+    # The document's file name comes from its catalog row (the chunk rows'
+    # ``source_path`` key was dropped, RDR-102 D2).
+    filename = source_paths[0] if source_paths else ""
 
     return extract_identifiers(filename=filename, body_text=body_text)
 
@@ -822,8 +1100,15 @@ def _catalog_enrich_hook(
     collection_name: str = "",
     backend: str = "s2",
     source_paths: list[str] | None = None,
+    tumblers: list[str] | None = None,
 ) -> bool:
     """Update catalog entry with bib metadata. Silently skipped if absent.
+
+    nexus-6pfgb.21: ``tumblers`` names the catalog documents to update and
+    bypasses every lookup below. The callers that know their document (the
+    manifest-driven enrich and ``--backfill-catalog``) pass it; ``title`` and
+    ``source_paths`` then only describe the write in logs. Matching a catalog
+    row by a chunk row's title is how one document's bib reached another's.
 
     Returns True when a catalog row was matched and updated, False on
     any no-op (catalog not initialized, no matching row, or an
@@ -868,7 +1153,7 @@ def _catalog_enrich_hook(
         try:
             return _enrich_apply(
                 reader, writer, collection_name, title, source_paths,
-                bib_meta, backend, Tumbler,
+                bib_meta, backend, Tumbler, explicit_tumblers=tumblers,
             )
         finally:
             writer.close()
@@ -879,18 +1164,13 @@ def _catalog_enrich_hook(
         return False
 
 
-def _enrich_apply(
-    reader, writer, collection_name, title, source_paths, bib_meta, backend, Tumbler,
-) -> bool:
-    """Returns True when >=1 catalog row was matched and updated, False
-    when the hook was a silent no-op (no matching row — nexus-6ha8a
-    follow-up, critic finding 3: the caller needs this to distinguish
-    a genuine backfill from a no-op so summary counts stay honest).
-
-    RDR-146 P1.2: reads via the read-only reader, writes via the
-    write-only daemon proxy. Exceptions propagate to the caller's
-    catalog_enrich_hook_failed handler.
-    """
+def _resolve_enrich_targets(
+    reader, collection_name, title, source_paths, Tumbler,
+) -> list:
+    """The catalog rows a caller that holds only a title and chunk-row paths
+    means: source path first, then the collection's exact title, then an exact
+    title anywhere. Only callers with no document in hand reach this; the
+    manifest-driven paths name their tumbler."""
     target_tumblers: list[Tumbler] = []
 
     # nexus-tv22: prefer source_path match (unique per document).
@@ -992,6 +1272,28 @@ def _enrich_apply(
                     others=[str(e.tumbler) for e in entries[1:1 + _TITLE_AMBIGUOUS_LOG_LIMIT]],
                     others_total=len(entries) - 1,
                 )
+
+    return target_tumblers
+
+
+def _enrich_apply(
+    reader, writer, collection_name, title, source_paths, bib_meta, backend, Tumbler,
+    *, explicit_tumblers: list[str] | None = None,
+) -> bool:
+    """Returns True when >=1 catalog row was matched and updated, False
+    when the hook was a silent no-op (no matching row — nexus-6ha8a
+    follow-up, critic finding 3: the caller needs this to distinguish
+    a genuine backfill from a no-op so summary counts stay honest).
+
+    RDR-146 P1.2: reads via the read-only reader, writes via the
+    write-only daemon proxy. Exceptions propagate to the caller's
+    catalog_enrich_hook_failed handler.
+    """
+    target_tumblers: list[Tumbler] = [Tumbler.parse(str(t)) for t in explicit_tumblers or ()]
+    if not target_tumblers:
+        target_tumblers = _resolve_enrich_targets(
+            reader, collection_name, title, source_paths, Tumbler,
+        )
 
     if not target_tumblers:
         _log.debug(
@@ -1573,10 +1875,8 @@ def _dry_run_predict_skips(
     distinct source_uri scheme+host pairs, surfacing contamination
     even when individual lines are truncated to the first 20.
     """
-    from urllib.parse import quote  # noqa: PLC0415 — branch-local stdlib import; deferred to command execution
-
     try:
-        from nexus.aspect_readers import ReadFail, read_source  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+        from nexus.aspect_readers import ReadFail, note_uri, read_source  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
         from nexus.mcp_infra import get_t3  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
         t3 = get_t3()
     except Exception as exc:  # noqa: BLE001 — best-effort T3 setup for dry-run; any failure surfaced to operator and prediction skipped
@@ -1614,7 +1914,7 @@ def _dry_run_predict_skips(
         sp = _chroma_source_id_for_entry(entry)
         if not sp:
             continue
-        uri = f"chroma://{collection}/{quote(sp, safe='/')}"
+        uri = note_uri(collection, sp, quote_rest=True)
         try:
             result = read_source(
                 uri, t3=t3,
@@ -2199,7 +2499,7 @@ async def _verify(claim_json: str, evidence: str) -> dict:
     default="",
     help=(
         "Filter to rows whose source_uri scheme matches (RDR-096 "
-        "P3.2). Common values: 'file', 'chroma', 'https', "
+        "P3.2). Common values: 'file', 'nx-note', 'https', "
         "'nx-scratch'. Use '' (default) for no filter; rows with "
         "empty / NULL source_uri are excluded when --scheme is set."
     ),
@@ -2212,7 +2512,7 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
     ``<scheme>:<source_path>  <fields_populated>/5  <model_version>``
     so an operator can spot null-fields rows AND identify which URI
     scheme each row will dispatch to. The ``--scheme`` flag pre-
-    filters to a single scheme (e.g., ``--scheme=chroma`` lists only
+    filters to a single scheme (e.g., ``--scheme=nx-note`` lists only
     chunk-reassembly-backed rows).
     """
     from urllib.parse import urlparse  # noqa: PLC0415 — stdlib deferred to call site (startup cost)
@@ -2225,6 +2525,14 @@ def enrich_aspects_list(collection: str, limit: int, scheme: str) -> None:
             collection, limit=limit if limit > 0 else None,
         )
 
+    if scheme == "chroma":
+        # RDR-231: a note's source_uri is nx-note:// now; chroma:// survives only as residue under a
+        # file-routed collection. The filter still matches that residue literally, but an operator who
+        # typed the old scheme for a note would see an empty list and no reason.
+        click.echo(
+            "Note: a note's source_uri scheme is now 'nx-note' (RDR-231); 'chroma' matches only "
+            "legacy residue rows. Use --scheme nx-note for notes."
+        )
     if scheme:
         records = [
             r for r in records

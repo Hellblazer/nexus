@@ -140,11 +140,11 @@ You don't have to register documents manually. Every indexing pathway does it au
 | `nx index pdf paper.pdf` | PDF with title, author, page count |
 | `nx index rdr .` | RDR documents with frontmatter titles |
 | `nx index md file.md` | Markdown documents |
-| `nx enrich bib <collection>` | Adds Semantic Scholar metadata + enables citation link generation |
+| `nx enrich bib <collection>` | Adds Semantic Scholar or OpenAlex metadata (bib columns and the paper's reference list) to each document's catalog row, then auto-generates `cites` links between enriched papers |
 | `nx enrich aspects <collection>` | Extracts structured per-paper aspects (RDR-089) into T2 ``document_aspects`` |
 | MCP `store_put` | Knowledge entries stored by agents |
 
-After `nx enrich bib`, run `nx catalog generate-links` to create citation links from the newly fetched references.
+`nx enrich bib` creates the citation links itself when it enriched at least one document (it prints the count). A reference matches a paper only within one id space: a Semantic Scholar id against a paper enriched by Semantic Scholar, an OpenAlex id against one enriched by OpenAlex. `nx catalog generate-links` re-runs the scan, for example after enriching a second collection with the other backend's ids.
 
 ### Taxonomy and topic links
 
@@ -387,7 +387,7 @@ The guard skips:
 
 - Curator owners (legitimately span sources: papers, mirrored docs, etc.).
 - Pre-RDR-060 repo owners with empty `repo_root` (back-compat).
-- Non-`file://` URIs (`chroma://`, `https://`, `x-devonthink-item://`). They have no filesystem identity to compare.
+- Non-`file://` URIs (`nx-note://`, `https://`, `x-devonthink-item://`). They have no filesystem identity to compare.
 - Empty `source_uri`. Synthesized records with no path identity.
 
 `nx catalog backfill` rebuilds catalog entries from T3 metadata after data recovery. Backfill goes through the same `register()` boundary as live indexing, so the guard fires on the disaster-recovery path as well: an `rdr__*` collection whose suffix matches a registered repo is attributed to that repo's owner (not a curator), and any source path outside the owner's `repo_root` is rejected.
@@ -414,7 +414,7 @@ nx catalog import recovery.jsonl    # after the reinstall + re-index
 Carries the two things a reinstall cannot regenerate: the **link graph**
 (cross-collection, and tumblers are NOT stable across reindex) and
 **store_put-origin knowledge content** (whose only copy is its indexed
-chunk). One human-inspectable JSONL file: a header line, then
+chunks). One human-inspectable JSONL file: a header line, then
 `knowledge_doc` records, then `link` records.
 
 Locked format decisions (design of record: T2
@@ -439,13 +439,51 @@ Locked format decisions (design of record: T2
 - **Idempotent.** Re-importing the same bundle merges (the engine's
   duplicate-link `co_discovered_by` contract; store_put reconciles) —
   zero net growth on a second pass.
+- **A note written as several pieces exports whole.** The note writer
+  stores a long note as pieces under one catalog document (RDR-223); the
+  export joins every piece in manifest position order into one record, and
+  import hands the whole text to the note writer, which splits it again.
+  A note with some pieces gone from T3, or whose manifest positions do not
+  run 0 to n-1 (a lost leading or middle row; a lost final row is not
+  detected), is left out of the bundle rather than exported short; the export
+  names it (`have a piece missing from the store or a gap in their
+  manifest`), the bundle header counts it (`notes_incomplete`), and the command
+  exits 1 with the bundle written, so a scripted reinstall stops there. A note
+  with every piece gone counts as a ghost, as does every note of a
+  collection the engine no longer has registered. Any other store read
+  error stops the export with a non-zero exit and no bundle, so an
+  unreadable piece is never reported as a missing one. A keyless note takes its chunk-row keys from
+  the first piece whose row is its own write.
 - **Spans degrade gracefully.** A `chash:`-anchored link span whose
   chunk no longer exists on the target is stripped and counted in the
   import report; the link itself still imports.
-- **TTL is not carried.** A store_put note that had a live TTL before
-  export imports as permanent — the bundle is a recovery artifact, and
-  silently expiring recovered content would be the worse failure. Re-set
-  TTLs after import if you need them.
+- **A note's own `tags`, `category` and `ttl_days` are carried.** They
+  come from the note's catalog entry (`meta`, see
+  [storage-tiers](storage-tiers.md#a-notes-own-keys-in-the-catalog)),
+  not from the T3 chunk row, so two notes with identical text each export
+  their own. `ttl_days` is a positive integer or `null` (permanent); a
+  recorded value that is not a positive integer imports as permanent. A
+  note written before the catalog kept these keys, or stored with none of
+  them before every put wrote `put_at` (nexus-6pfgb.15; an entry holding
+  `put_at` answers for its note, so its unset keys export empty and are not
+  counted), takes the chunk row's values only when the row is that note's
+  own write, by the expiry sweep's rule (`note_ttl.row_written_by`): the
+  row's `catalog_doc_id` is the note's tumbler and its `title` the note's
+  title. A row with no stamp is nobody's for `ttl_days`, even when the note
+  is the only owner left, since a departed co-owner's values stay on the
+  row (nexus-6pfgb.34). For `tags` and `category` alone, a note that is the
+  chunk's sole live owner in its collection takes them from any row whose
+  stamp and title do not both name another note (nexus-6pfgb.35). For
+  `ttl_days`, an untitled note never matches, and a note brought in
+  by an `.nxexp` import does not unless the destination minted the source
+  box's tumbler for it (its rows keep the source's stamp). Otherwise it
+  exports with them empty and the export summary counts it when the row
+  held a value (`note keys not recovered`). Import restarts a note's TTL
+  clock: the expiry is `ttl_days` from the import, not from the original
+  store. Importing the same bundle again restarts it again. A note already
+  past its expiry but not yet reaped is exported (expiry cannot be judged
+  from the catalog) and comes back with a full TTL. Importing over an
+  existing permanent note of the same title makes it expiring.
 
 
 ```bash

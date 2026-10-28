@@ -368,7 +368,7 @@ def _assigned(sh: str, var: str) -> str:
 
 def _default_genre(path: str) -> object:
     spec = importlib.util.spec_from_file_location(
-        "prose_edit_memory_r5", ROOT / ".claude" / "skills" / "prose-edit" / "scripts" / "memory.py")
+        "prose_edit_memory_r5", ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts" / "memory.py")
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     sys.modules.setdefault(spec.name, mod)

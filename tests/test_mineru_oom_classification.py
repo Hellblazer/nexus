@@ -2,8 +2,9 @@
 """RDR-148 Gap 5: catchable MinerU OOM + per-page degrade-to-docling.
 
 Covers the 3-way OOM classification in ``_mineru_run_subprocess`` and the
-``on_formula_oom={fail|docling}`` policy in ``_extract_with_mineru``. No API
-keys / model weights — MinerU and docling boundaries are mocked.
+``on_formula_oom={fail|docling}`` policy in ``_extract_with_mineru`` (RDR-237: the
+policy no longer reaches the MinerU path; rung 2 replaced the docling degrade). No API
+keys / model weights - MinerU boundaries are mocked.
 """
 from __future__ import annotations
 
@@ -173,40 +174,53 @@ def _mineru_extractor_for_one_page() -> PDFExtractor:
 def _patch_one_page_pdf():
     mock_doc = MagicMock()
     mock_doc.__len__.return_value = 1
+    # The page's text layer is empty. Left a MagicMock, get_text() hands the normaliser a
+    # non-string and the TypeError is swallowed by rung 3's broad except, so a test passes
+    # for a reason that is not the page having no text.
+    mock_doc.__getitem__.return_value.get_text.return_value = ""
     mock_ctx = MagicMock()
     mock_ctx.__enter__.return_value = mock_doc
     mock_ctx.__exit__.return_value = False
     return mock_ctx
 
 
-def test_single_page_oom_degrades_to_docling_when_opted_in() -> None:
+@pytest.mark.parametrize("on_formula_oom", ["docling", "fail"])
+def test_single_page_oom_settles_on_rung_2_whatever_on_formula_oom_says(on_formula_oom) -> None:
+    """RDR-237: a page that OOMs with formulas on is retried without them (rung 2),
+    replacing RDR-148's degrade to docling. ``on_formula_oom`` has no effect on the
+    MinerU path any more, and docling is never called."""
     ext = _mineru_extractor_for_one_page()
+
+    def run(pdf_path, start, end, formula_enable=True):
+        if formula_enable:
+            raise MineruMemoryError("page 1 OOM")
+        return ("NO-FORMULA PAGE TEXT", [], [])
+
     with patch("nexus.pdf_extractor.do_parse", object()), patch(
         "pymupdf.open", return_value=_patch_one_page_pdf(),
     ), patch(
         "nexus.config.get_mineru_page_batch", return_value=1,
     ), patch.object(
-        ext, "_mineru_run_isolated",
-        side_effect=MineruMemoryError("page 1 OOM"),
+        ext, "_mineru_run_isolated", side_effect=run,
     ), patch.object(
-        ext, "_extract_page_via_docling", return_value="DEGRADED PAGE TEXT",
-    ) as mock_degrade:
+        ext, "_extract_page_via_docling", return_value="SHOULD NOT BE USED",
+    ) as mock_docling:
         result = ext._extract_with_mineru(
-            Path("/tmp/math.pdf"), formula_count=9, on_formula_oom="docling",
+            Path("/tmp/math.pdf"), formula_count=9, on_formula_oom=on_formula_oom,
         )
-    # The pathological page was degraded, not failed — document survives.
-    mock_degrade.assert_called_once()
-    assert "DEGRADED PAGE TEXT" in result.text
-    # nexus-1oguj: the recorded extraction_method must be the honest
-    # mixed aggregate, not a bare "mineru" that overstates coverage —
-    # this page was actually docling-rendered (formulas stripped).
-    assert result.metadata["extraction_method"] == "mineru+docling-degraded"
+    # The pathological page was degraded, not failed - the document survives.
+    mock_docling.assert_not_called()
+    assert "NO-FORMULA PAGE TEXT" in result.text
+    # nexus-1oguj: the recorded extraction_method must be the honest mixed aggregate, not a bare
+    # "mineru" that overstates coverage - this page lost its formulas.
+    assert result.metadata["extraction_method"] == "mineru+degraded"
+    assert result.metadata["extraction_pages"] == {"mineru-no-formula": [1]}
 
 
 def test_multipage_batch_retry_degrades_only_oom_page() -> None:
     """A multi-page batch fails, bisects to single pages; the page that OOMs
-    degrades to docling while the healthy page keeps MinerU extraction —
-    exercises the batch//2 ladder + per-page degrade (span > 1)."""
+    settles on rung 2 (no formulas) while the healthy page keeps MinerU
+    extraction - exercises the batch//2 bisect + the per-page ladder (span > 1)."""
     ext = _mineru_extractor_for_one_page()
     mock_doc = MagicMock()
     mock_doc.__len__.return_value = 2  # two pages
@@ -214,38 +228,45 @@ def test_multipage_batch_retry_degrades_only_oom_page() -> None:
     mock_ctx.__enter__.return_value = mock_doc
     mock_ctx.__exit__.return_value = False
 
-    def fake_isolated(pdf_path, start, end):
+    def fake_isolated(pdf_path, start, end, formula_enable=True):
         if (start, end) == (0, None):
             raise RuntimeError("multi-page batch failure")  # forces 1-page retry
-        if (start, end) == (1, 2):
+        if (start, end) == (1, 2) and formula_enable:
             raise MineruMemoryError("page 2 OOM")
-        return (f"PAGE{start} MINERU", [], [])
+        suffix = "MINERU" if formula_enable else "NOFORMULA"
+        return (f"PAGE{start} {suffix}", [], [])
 
     with patch("nexus.pdf_extractor.do_parse", object()), patch(
         "pymupdf.open", return_value=mock_ctx,
     ), patch(
         "nexus.config.get_mineru_page_batch", return_value=2,
+    ), patch(
+        "nexus.config.get_mineru_page_timeout_s", return_value=30,
     ), patch.object(
         ext, "_mineru_run_isolated", side_effect=fake_isolated,
-    ), patch.object(
-        ext, "_extract_page_via_docling", return_value="PAGE1 DEGRADED",
-    ) as mock_degrade:
-        result = ext._extract_with_mineru(
-            Path("/tmp/math.pdf"), formula_count=9, on_formula_oom="docling",
-        )
-    # Page 0 kept MinerU; page 1 degraded to docling — only the OOM page.
+    ):
+        result = ext._extract_with_mineru(Path("/tmp/math.pdf"), formula_count=9)
+    # Page 0 kept MinerU with formulas; page 1 lost them - only the OOM page.
     assert "PAGE0 MINERU" in result.text
-    assert "PAGE1 DEGRADED" in result.text
-    mock_degrade.assert_called_once()
-    # nexus-1oguj: even one degraded page flips the whole-document value
-    # to the honest mixed aggregate.
-    assert result.metadata["extraction_method"] == "mineru+docling-degraded"
+    assert "PAGE1 NOFORMULA" in result.text
+    # nexus-1oguj: even one degraded page flips the whole-document value to the honest mixed aggregate.
+    assert result.metadata["extraction_method"] == "mineru+degraded"
+    assert result.metadata["extraction_pages"] == {"mineru-no-formula": [2]}
 
 
-def test_single_page_oom_fails_by_default() -> None:
+def test_single_page_oom_on_both_rungs_is_no_longer_a_document_failure() -> None:
+    """RDR-237: a page that OOMs with and without formulas used to fail the document
+    (``on_formula_oom="fail"``). It now walks on to the text layer, and a lone page
+    with none ends the document with a named reason instead. Docling is not on the path."""
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local import
+
+    from nexus.errors import UnextractableContentError
+
     ext = _mineru_extractor_for_one_page()
-    with patch("nexus.pdf_extractor.do_parse", object()), patch(
-        "pymupdf.open", return_value=_patch_one_page_pdf(),
+    pdf = _patch_one_page_pdf()
+    page = pdf.__enter__.return_value.__getitem__.return_value
+    with capture_logs() as logs, patch("nexus.pdf_extractor.do_parse", object()), patch(
+        "pymupdf.open", return_value=pdf,
     ), patch(
         "nexus.config.get_mineru_page_batch", return_value=1,
     ), patch.object(
@@ -253,12 +274,16 @@ def test_single_page_oom_fails_by_default() -> None:
         side_effect=MineruMemoryError("page 1 OOM"),
     ), patch.object(
         ext, "_extract_page_via_docling", return_value="SHOULD NOT BE USED",
-    ) as mock_degrade:
-        with pytest.raises(MineruMemoryError):
+    ) as mock_docling:
+        with pytest.raises(UnextractableContentError, match="every page.*unextracted"):
             ext._extract_with_mineru(
                 Path("/tmp/math.pdf"), formula_count=9, on_formula_oom="fail",
             )
-    mock_degrade.assert_not_called()
+    mock_docling.assert_not_called()
+    page.get_text.assert_called_once()  # rung 3 read the page's text layer, and it was empty
+    assert not [e for e in logs if e.get("event") == "mineru_page_text_layer_unreadable"], (
+        "the page ended unextracted because it has no text, not because reading it raised"
+    )
 
 
 # ── Gap 6: RLIMIT_AS ceiling (Linux-gated) + per-page timeout ────────
@@ -420,6 +445,8 @@ def test_failed_batch_bisects_before_per_page() -> None:
         "pymupdf.open", return_value=mock_ctx,
     ), patch(
         "nexus.config.get_mineru_page_batch", return_value=4,
+    ), patch(
+        "nexus.config.get_mineru_page_timeout_s", return_value=30,
     ), patch.object(ext, "_mineru_run_isolated", side_effect=fake_isolated):
         result = ext._extract_with_mineru(Path("/tmp/math.pdf"), formula_count=9)
 

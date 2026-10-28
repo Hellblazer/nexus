@@ -388,9 +388,12 @@ def test_full_run_equals_one_combined_write_of_the_file(env: _Env) -> None:
     assert max(len(b.get("chunks") or []) for _, b, _ in data) <= _WRITER_CAP
     assert [p for p, _, _ in log][-1] == "/index-run/complete"
     # No request but the writer's wrote anything: the registered manifest hook was excluded, so
-    # the only non-data requests are collection registration, the fence begins (the early one and the writer's) and the
-    # stamp.
-    assert {p for p, _, _ in log if p not in _DATA_PATHS} <= {"/index-run/begin", "/index-run/complete", "/collections/upsert"}
+    # the only non-data requests are collection registration, the fence begins (the early one and the writer's), the
+    # stamp, and (a PDF only, RDR-237) the one /update that records the extraction on the catalog document.
+    assert {p for p, _, _ in log if p not in _DATA_PATHS} <= {
+        "/index-run/begin", "/index-run/complete", "/collections/upsert", "/update"}
+    updates = [p for p, _, _ in log if p == "/update"]
+    assert len(updates) == (1 if env.kind == "pdf" else 0), "one extraction record, and only for a PDF"
 
     ctl = env.control_write(rows, chunks)
     assert _manifest(env.doc_id) == _manifest(ctl) != []

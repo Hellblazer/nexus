@@ -1435,22 +1435,6 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # (the retired anchored channel, nexus-rbmja.8; two peers' files modified during tests/hooks/). Append-only, one
     # line per commit, never read by any test.
     "session_commits/",
-    # The conexus plugin's git-integrity hook, REMOVED from the tree at
-    # nexus-i93tz (Sam, 2026-10-25) but still LIVE in every session whose
-    # installed plugin copy is 7.83.x to 7.86.x: it writes
-    # ``git-integrity/<session_id>/*`` on every tool call of the Claude
-    # session that is RUNNING this pytest, so the directory changes during any
-    # run launched from such a session with no test involved. MEASURED
-    # 2026-10-26 on the removing worktree: with this entry deleted, a run
-    # failed the mutation guard on 8 ``git-integrity/`` paths. DELETE THIS
-    # ENTRY (and flip ``test_git_integrity_carveout_waits_for_the_plugin_upgrade``)
-    # once the plugin cut that drops the hook is installed in the sessions
-    # that run these tests; until then it is a live writer, not a dead carve-out.
-    # MECHANICAL TRIGGER: that test goes RED, with the delete instruction, as
-    # soon as the conexus ref pinned in .claude-plugin/marketplace.json is a tag
-    # whose conexus/hooks/hooks.json no longer registers the hook (the plugin
-    # cut that drops it), so this entry cannot outlive its writer unnoticed.
-    "git-integrity/",
     # Live aspect-worker daemon's own address/heartbeat registration file
     # (``ttl=3.0``-second heartbeat_epoch bump, same size every write).
     # MEASURED directly (nexus-pfuns round 1): ran `uv run pytest tests/
@@ -2903,6 +2887,76 @@ def _no_mcp_search_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
     """The MCP lifespan starts a search warm-up thread (nexus-vpa9q) that reaches the engine.
     Off in the unit suite; tests/test_search_warmup.py turns it back on where it is the subject."""
     monkeypatch.setenv("NX_MCP_SEARCH_WARMUP", "0")
+
+
+#: What the stubbed serving-engine probe reports: far above any note-URI floor, so the guard clears.
+_STUBBED_SERVING_ENGINE_VERSION = (999, 0, 0)
+
+
+@pytest.fixture(autouse=True)
+def _stub_serving_engine_probe(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Keep the RDR-231 note-write guard off the network in every test that is not about it (nexus-bivz3.15/.16).
+
+    Once ``NOTE_URI_MIN_ENGINE_VERSION`` is set, ``put_note`` and ``import_collection`` probe the serving
+    engine, which reaches ``put_note`` from 138 test files. The probe answers a version above any floor
+    here and the guard's process cache is reset around each test. A test that is about the probe or the
+    guard opts out: ``tests/test_bivz3_13_note_uri_engine_floor.py`` replaces the probe in its own
+    fixture, and a test that needs the real HTTP probe carries ``@pytest.mark.real_engine_probe``.
+    """
+    from nexus.db import serving_engine_version as sev
+
+    sev.reset_note_uri_guard_for_tests()
+    if request.node.get_closest_marker("real_engine_probe") is None:
+        monkeypatch.setattr(sev, "probe_serving_engine_version", lambda: _STUBBED_SERVING_ENGINE_VERSION)
+    yield
+    sev.reset_note_uri_guard_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nx_answer's structured request extraction is ON by default (nexus-jypmj.2.8) and makes one `claude -p`
+    call for a request the deterministic pass leaves open. No unit test may spend that call, and none may switch
+    the setting off to avoid it: with the setting off the eligibility gate runs in shadow (``extraction_disabled``),
+    which would hide the gate from every test that drives ``nx_answer``. So the setting stays at its default and
+    the dispatch refuses the extraction operator (``request_coverage_extract``): the call fails the way a
+    per-request failure does (outcome ``error``, the gate keeps enforcing) and every other operator reaches the
+    real ``claude_dispatch``, except the Phase 3 coverage assessment (an ``operator_check`` call), which is refused
+    the same way. A test about the extraction patches ``nexus.operators.dispatch.claude_dispatch``
+    itself, which replaces this guard for the test. The switches are cleared so a developer's exported
+    ``NX_ANSWER_KIND_ELIGIBILITY=0``, ``NX_ANSWER_STRUCTURED_EXTRACT=0`` or ``NX_ANSWER_COVERAGE=0`` cannot change what a test sees, and the
+    process-wide memos of the gate (library check, warnings) start empty."""
+    import functools  # noqa: PLC0415 — test-only import
+
+    from nexus.operators import dispatch as _dispatch  # noqa: PLC0415 — test-only import
+    from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — test-only import
+    from nexus.plans import switches as _switches  # noqa: PLC0415 — test-only import
+
+    monkeypatch.delenv("NX_ANSWER_STRUCTURED_EXTRACT", raising=False)
+    monkeypatch.delenv("NX_ANSWER_KIND_ELIGIBILITY", raising=False)
+    monkeypatch.delenv("NX_ANSWER_COVERAGE", raising=False)
+    real = _dispatch.claude_dispatch
+
+    @functools.wraps(real)
+    async def _guarded(*args, **kwargs):
+        if kwargs.get("operator") == "request_coverage_extract":
+            raise RuntimeError("a unit test must not make the live structured extraction call; patch claude_dispatch")
+        # RDR-232 Phase 3 (nexus-jypmj.3.3): nx_answer now hands the runner a coverage boundary, whose facet
+        # assessment is an operator_check call. A unit test that drives the real runner with its own operator stubs
+        # must not reach a live model through it either: the call fails the way an assessor outage does (state
+        # unassessed). A test about the assessment stubs the dispatcher or patches claude_dispatch, as the ledger tests do.
+        prompt = str(args[0]) if args else str(kwargs.get("prompt", ""))
+        # The marker is the ledger module's own constant, so retuning the prompt cannot silently unguard the suite
+        # (tests/test_rdr232_coverage_ledger.py pins that the built instruction carries it).
+        from nexus.plans.coverage_ledger import INSTRUCTION_MARKER  # noqa: PLC0415 — test-only import, taken when an operator_check is dispatched
+
+        if kwargs.get("operator") == "operator_check" and INSTRUCTION_MARKER in prompt:
+            raise RuntimeError("a unit test must not make the live coverage assessment call; stub the dispatcher or patch claude_dispatch")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(_dispatch, "claude_dispatch", _guarded)
+    _eligibility.reset_library_memo()
+    _eligibility._warned_libraries.clear()
+    _switches.reset_warned()
 
 
 @pytest.fixture(autouse=True)

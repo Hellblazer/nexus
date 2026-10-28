@@ -301,8 +301,9 @@ public final class CatalogHandler implements HttpHandler {
             body.put("job_id", e.jobId().toString());
             HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(body));
         } catch (CatalogRepository.SourceUriCollision e) {
-            // nexus-sis0m.3: the rename's source_uri rewrite would land on a URI a live
-            // document already holds; a refusal, not a server error.
+            // nexus-sis0m.3, RDR-231: a move's source_uri rewrite (rename, re-home, /update and
+            // /update_many collection moves) would land on a URI a live document already holds;
+            // a refusal, not a server error. The message names the operation and the holder.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.RehomeRefused e) {
             // nexus-wsx4l: the bounded re-home refused — same endpoints, an absent or

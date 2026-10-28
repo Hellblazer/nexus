@@ -74,6 +74,11 @@ if TYPE_CHECKING:
     # plan library left after nexus-i711w Stage 2 sub-stage A3 deleted
     # the SQLite PlanLibrary.
     from nexus.db.t2.http_plan_library import HttpPlanLibrary
+from nexus.plans.answer_kind import (
+    ANSWER_KIND_KEY,
+    PlanAnswerKind,
+    declaration_payload,
+)
 from nexus.plans.schema import (
     PlanTemplateDuplicateError,
     PlanTemplateLoader,
@@ -199,6 +204,17 @@ def desired_row_for_template(template: dict[str, Any]) -> DesiredRow:
     if template.get("optional_bindings"):
         plan_json_payload["optional_bindings"] = list(
             template["optional_bindings"]
+        )
+    # RDR-232 Phase 2 (nexus-jypmj.2.1): a template-level ``answer_kind`` is
+    # folded in as the versioned, curated declaration. It lands in plan_json,
+    # never in dimensions, so plan identity and the reconcile key do not move.
+    # Only the template-level key declares: a declaration written inside the
+    # template's own plan_json (which validate_plan_template refuses) is dropped here
+    # too, and an explicit ``answer_kind: null`` raises, as the validator does.
+    plan_json_payload.pop(ANSWER_KIND_KEY, None)
+    if ANSWER_KIND_KEY in template:
+        plan_json_payload[ANSWER_KIND_KEY] = declaration_payload(
+            PlanAnswerKind(template[ANSWER_KIND_KEY]), "curated",
         )
     return DesiredRow(
         query=template["description"],

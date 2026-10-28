@@ -595,6 +595,7 @@ def assemble_continuation_envelope(
     run_id: int | None,
     prefix_may_redispatch: bool = False,
     prefix_redispatch_step_count: int = 0,
+    coverage: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Assemble the RDR-200 continuation envelope, or ``None`` when there
     is nothing to hand off.
@@ -630,6 +631,12 @@ def assemble_continuation_envelope(
             sees the same inert default it always has.
         prefix_redispatch_step_count: Companion count for the same
             reason; defaults ``0``.
+        coverage: RDR-232 Phase 3 (nexus-jypmj.3.2): the coverage boundary's wire form
+            (``CoverageResult.to_wire``) from the prefix-only run, carried unchanged as the envelope's
+            ``coverage`` key so the hand-off reports the same state a headless run would, never a revert
+            to unassessed. ``None`` (no boundary ran) puts ``null`` there. The caller must re-enter the run's
+            repair supplement (:func:`nexus.plans.repair_stream.supplement_scope`) around this call, so the
+            prompt this function composes holds the evidence the boundary assessed.
 
     Returns:
         The envelope dict, or ``None`` when the cut has nothing to hand
@@ -719,6 +726,7 @@ def assemble_continuation_envelope(
             "prompt_chars": prompt_chars,
         },
         "hydrated_bundles": hydrated_bundles,
+        "coverage": coverage,
         "reduction_contract": {
             "return": "one JSON object conforming to response_schema",
             "report_tool": "nx_answer_report",

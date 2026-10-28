@@ -365,6 +365,45 @@ listed under Critical Assumptions before gate.
   *Source: golden journey and live canary. T2: `nexus_rdr/232-research-21`,
   `nexus/rdr232-canary-phase1`.*
 
+- **✅ Verified** (spike) — A1 in production, Phase 2. Eligibility runs on
+  every matcher branch and on the planner few-shots, and enforces live: plan
+  473 is excluded for the RDR-084 incident request and a grown plan is excluded
+  as unknown-grown (proof runs 731-738). Wrong-shape admission falls only
+  in-sample: golden_v1 4 of 24 to 0, and the 4 includes G06 admitted through a
+  synthetic grown clone of plan 473 (3 of 24 to 0 with builtins only). On a
+  blind 29-request held-out set the gate removed no wrong-shape admission (1 of
+  29 before and after) and cost one non-lookup selection (recall 0.724 to
+  0.690). Lookup recall holds at 0.4 only when extraction supplies the kind;
+  with first-pass kinds it halves. On 143 replayed real runs the gate removes
+  the selected plan from 50%, 42% and 38% of runs with first-pass, Opus and
+  Haiku kinds. Plan reuse on broad requests (step 6): with first-pass kinds,
+  builtin reuse on broad-kind runs falls from 33 to 15 and grown reuse stays 0
+  to 0 (no grown plan was selected in the window, so it cannot move); with
+  Haiku kinds, 50 of 113 broad-kind runs lose their selected plan (synthesis
+  36 of 84, comparison 13 of 28, audit 1 of 1). Not settled: the directional rule admits synthesis plans for
+  lookups, so the one held-out wrong-shape admission cannot be removed, and a
+  live single-theorem lookup ran a synthesis plan for 1.64 USD.
+  *Source: gate matrix, replay and live proof. T2: `nexus_rdr/232-research-22`,
+  `nexus/rdr232-phase2-thresholds`.*
+
+- **✅ Verified** (spike) — A5 in production, Phase 2. The deterministic first
+  pass never assigned a wrong kind but abstains often out of sample: 11 of 29
+  held-out requests exact, 18 unknown (in-sample 23 of 24); on real traffic it
+  leaves 97 of 143 runs unknown. The structured step, now on by default with
+  Haiku, brings held-out agreement to 27 of 29: it reads H30 (labelled unknown)
+  as synthesis and leaves H23 (labelled audit) unknown, and it rightly leaves
+  H16 unknown, so Haiku does sometimes abstain (Opus never did: its misses are
+  H16 and H30). 0 of 112 calls failed across both models (56 each); Haiku costs
+  about 0.002 USD and 4 s a call, on about two thirds of real requests. The
+  active-project tier works live on the unmodified RDR-084 call: candidates for
+  both documents from a Nexus session, ART's RDR-084 with an inferred owner
+  from an ART session, an ambiguity with its reason from a host without a
+  project, and an explicit owner when the call binds the project. Not settled:
+  Haiku reads compound single-paper questions as lookup where Opus says
+  synthesis, and no labelled set covers that class.
+  *Source: extraction measurement and live proof. T2:
+  `nexus_rdr/232-research-23`.*
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6; A7 has none yet. They establish
@@ -376,12 +415,15 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
 
 - [ ] **A1 — explicit answer-kind metadata and conservative request routing can
   improve eligibility without material recall loss.** **Status**: Partially
-  verified (research 6). **Method**: Source Search plus executed prototype
+  verified (research 6, 22). **Method**: Source Search plus executed prototype
   fixture using the real matcher. The gate passed 14/14 eligible and 0/3
   wrong-shape cases, with correct unknown routing and few-shot exclusion.
-  Production matcher/core integration and natural-language request-kind
-  inference remain unverified; the small labeled fixture is not a live recall
-  estimate. Store kind in `plan_json`, never dimensions; decode legacy absence
+  Phase 2 (2026-10-27) verified production integration on every matcher
+  branch and the planner few-shots, and request-kind inference with Haiku
+  extraction (Key Discoveries; research 22, 23). Still open: the fall in
+  wrong-shape admission is in-sample only (held-out 1 of 29 before and
+  after), and the directional rule admits synthesis plans for lookups
+  (nexus-jypmj.11). Store kind in `plan_json`, never dimensions; decode legacy absence
   or invalid metadata as `unknown`; apply eligibility on every matcher branch
   and planner few-shot selection.
 - [ ] **A2 — ordered manifests plus content-derived, document-scoped section
@@ -413,9 +455,9 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   unverified; that sub-leg's private-test write-guard opt-in was denied by the
   permission classifier and was not executed.
 
-- [ ] **A5 — deterministic-first request extraction can produce kind, facets,
+- [x] **A5 — deterministic-first request extraction can produce kind, facets,
   and project-qualified sources without silent narrowing.** **Status**:
-  Partially verified (research 10, corrected by review). **Method**: Source
+  Verified (research 10, corrected by review; research 23). **Method**: Source
   Search plus bounded extraction spike and real owner/catalog reads. The
   question's opening synthesis cue classified correctly and the splitter
   returned seven clauses, including topic and constraint clauses. It did not
@@ -423,10 +465,13 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   its absolute path, which resolved owner 1.2 and ART RDR-084 tumbler
   1.2.4686; the recorded question contains no `ART` token, so qualifier
   extraction was not proven. The MVV therefore requires an explicit owner or
-  project binding. Prototype heuristics needed fixture corrections, and
-  general inference, ambiguity fallback, optional structured extraction
-  cost, and the active-project tier (the only path that fixes the call as
-  filed) remain unverified.
+  project binding. Phase 2 (2026-10-27) verified general inference with
+  Haiku structured extraction (27 of 29 held-out; 0 of 112 calls failed;
+  about 0.002 USD and 4 s a call), the ambiguity fallback, and the
+  active-project tier live on the unmodified RDR-084 call (research 23).
+  Still open: compound single-paper questions are lookups only because Haiku
+  departs from the extraction prompt; the prompt and `_weak_lookup` are
+  aligned with the approved lookup definition in nexus-jypmj.13.
 - [ ] **A6 — traversal can apply scope before its chunk cap without losing
   alignment.** **Status**: Partially verified (research 10). **Method**: Source
   Search plus synthetic graph fixture with >300 out-of-scope ids preceding
@@ -485,8 +530,8 @@ taxonomy.
 
 | Shape | Meaning | Typical evidence requirement |
 | --- | --- | --- |
-| `lookup` | A specific fact or small set of facts | Best direct evidence; optional graph context |
-| `synthesis` | A unified account of multiple requested aspects | Coverage of each requested facet |
+| `lookup` | A specific fact or small set of facts, including several connected facts from one passage of one source | Best direct evidence; optional graph context |
+| `synthesis` | A unified account of multiple requested aspects across sections, sources or history | Coverage of each requested facet |
 | `discovery/listing` | A bounded inventory or corpus-coverage result | Complete, attributable result set within the declared bounds |
 | `comparison` | Relative treatment of two or more subjects | Comparable evidence for every subject and axis |
 | `audit` | Findings against a criterion or implementation | Inspectable evidence for each claimed finding |
@@ -538,8 +583,9 @@ only when that route was known and recorded in provenance; otherwise they are
 `unknown`. No migration may guess a shape from plan text and silently promote
 it to a hard constraint.
 
-Unknown-kind **builtin/curated** plans remain eligible as in the compatibility
-matrix because their scope and operator shape are reviewed. Unknown-kind
+A **builtin/curated** row stays eligible as its declared kind; a builtin seeded
+before declarations existed is treated as unattested until a reseed, and the
+gate is not enabled before every builtin carries its declaration. Unknown-kind
 **grown** plans are not a generic bypass: with no recorded answer-kind
 provenance, they are eligible only for `lookup` or `discovery/listing` requests,
 and remain subject to the existing literal/scope/confidence gates. An unknown
@@ -582,6 +628,15 @@ enter inline planning with eligibility diagnostics. There is no existing
 no-model generic synthesis fallback to reuse; adding one would be separate
 work.
 
+The directional rule is a measured limit, kept for the first enabled release
+(Sam, 2026-10-27). "When its operators are suitable" is not checked: any
+synthesis-capable plan is admitted for a lookup. So the gate cannot remove a
+synthesis plan the labels call wrong for a lookup (held-out H09), and a live
+single-theorem lookup ran a synthesis plan for 1.64 USD where the lookup plan
+costs about 0.13 (proof run 737). In the other direction it removed one plan
+the labels accept (held-out H18). A tightened rule is measured after the
+release (nexus-jypmj.11).
+
 Apply eligibility to ordinary cosine candidates, below-floor category-route
 candidates, and FTS fallback candidates before cost choice. Wrong-shape plans
 must also be excluded from the inline planner's few-shot examples, or they can
@@ -597,8 +652,13 @@ when `trace=False`.
 `RequestCoverage` is built **before** `plan_match`, in a separately measured
 stage with its own timeout and cost accounting. Explicit caller parameters and
 bindings take precedence over question text. The implementation uses a
-deterministic first pass and an optional single structured-extraction call only
-when the first pass cannot establish the required shape.
+deterministic first pass and a single structured-extraction call only when the
+first pass cannot establish the required shape. The call is on by default with
+Haiku (Sam, 2026-10-27): the first pass leaves about two thirds of real
+requests unknown or facet-uncertain, and the call costs about 0.002 USD and
+4 s. `NX_ANSWER_STRUCTURED_EXTRACT=0` turns it off, and the eligibility gate
+then runs in shadow, because the gate on first-pass kinds failed the
+lookup-recall threshold (held-out lookup recall 0.4 to 0.2).
 
 | Field | Extraction | On failure |
 | --- | --- | --- |
@@ -627,6 +687,25 @@ Until then that call returns an ambiguity result naming both RDR-084
 candidates, which is honest but not the requested synthesis. Phase 2 builds
 and verifies the active-project tier as part of A5, and its proof includes the
 unmodified call.
+
+How the active-project tier decides (added 2026-10-26, nexus-jypmj.2.4,
+approved by Sam). The session's project is reliable only in Claude Code, where
+the server starts in the session's project directory and that directory maps
+to a registered catalog owner; Desktop and Cowork start it elsewhere, so there
+the tier never applies and the caller passes `owner` or `project`. A reliable
+project qualifies an unqualified source the way an explicit owner would, but
+it is a guess about intent, so the question's own words can overrule it. If
+the question names a different registered project, or carries a title of two
+or more distinctive words that fits another project's document and not the
+session project's, the tier declines and the result is the ambiguity naming
+every candidate; the title never picks a document. With no such evidence, a
+reliable session resolves its own project's RDR and discloses the inference.
+If the session's project holds no such RDR, resolution falls back to the
+unqualified lookup and the answer text says the active project was not used.
+An inferred owner never narrows the secondary streams. RDR ids read from the
+question text go through the same tiers as a `source` binding, at most three
+per request (a calibration parameter for Phase 2 measurement), and a range
+such as "RDR-078 through RDR-095" is disclosed as not expanded.
 
 `scope` cannot carry the qualifier for this call: it takes one token, either a
 corpus prefix such as `rdr` or a catalog subtree such as `1.2`
@@ -913,7 +992,7 @@ independent of prose fluency.
 | --- | --- | --- | --- | --- | --- |
 | `complete` | every required facet has evidence | `answered` | the answer | `success_count` | allowed |
 | `partial` | at least one required facet is unsupported or contradicted, and a usable answer exists | `insufficient_evidence` | a notice naming each unresolved facet, followed by the answer | `success_count` | blocked |
-| `unavailable` | no usable answer can be produced | an existing non-answer shape (for example `no_evidence`) | the existing non-answer notice and chunk references | `failure_count` | blocked |
+| `unavailable` | no usable answer can be produced | `uncovered` when retrieval returned evidence and none of it covered a required facet (prose with no covered facet included); `no_evidence` when no retrieval result reached the reduction | the existing non-answer notice and chunk references | `failure_count` | blocked |
 | `unassessed` | the request has no facets, or the coverage assessment itself failed | `answered` | the answer, as today | `success_count` | as today |
 
 A **usable answer** exists when the terminal generation returned prose that
@@ -1183,14 +1262,16 @@ more context is useful.
 ### Consequences
 
 - More requests may fall through to inline planning when the only similar saved
-  plan has the wrong answer shape. That is an intended precision/latency trade,
-  and its size is unknown until Phase 2 measures it: an `unknown` request
-  can use only curated synthesis or unknown plans, plan 473 is the only
+  plan has the wrong answer shape. That is an intended precision/latency trade.
+  Phase 2 measured its size: replayed over 143 real runs, the gate removes the
+  selected plan from 50% of runs with first-pass kinds, 42% with Opus and 38%
+  with Haiku extraction (the shipped configuration). Plan 473 is the only
   `lookup` builtin, and every existing grown plan decodes to `unknown`.
 - Source reservation gives less space to secondary evidence. It should improve
   source-grounded answers but may reduce broad contextual discovery unless the
   caller asks for it.
-- Coverage extraction and repair add model and retrieval work on some calls.
+- Coverage extraction and repair add model and retrieval work. Request
+  extraction runs on about two thirds of real requests (one Haiku call each).
   The one-repair bound and existing call budgets prevent an open-ended loop.
 - Explicit answer-kind declarations add a small authoring obligation to builtin
   plans. Unknown grown plans remain supported rather than forcing a migration
@@ -1318,7 +1399,11 @@ extracted, and an explicit `project="ART"` or `owner="1.2"` binding resolves
 without guessing. The recorded question has no `ART` token, so this binding is
 required rather than implied. The unmodified call, with no binding, resolves
 through the active-project tier when the server session's project is ART, and
-returns an ambiguity result otherwise. Lookup-only plan 473 is ineligible, and
+returns an ambiguity result otherwise: from an unreliable host, and from a
+reliable session of another project, where the question's ART title vetoes the
+inference (see "How the active-project tier decides" in section 1). A
+title-less question from a reliable session of another project resolves that
+project's RDR, disclosed as inferred. Lookup-only plan 473 is ineligible, and
 unknown-grown plans cannot bypass the gate. A generic route or inline planner
 receives the coverage request. No facet-coverage guarantee is claimed.
 
@@ -1386,6 +1471,15 @@ first phase that claims the complete motivating behavior.
    be excluded. The thresholds are set from the baseline measurement before
    the gate is enabled. All grown plans decode to `unknown` today, so report
    the drop in plan reuse on broad requests as its own number.
+   As run (2026-10-27): the thresholds were set after the gate-on measurement,
+   not before it. The golden baseline is in-sample, since the classifier was
+   written with those requests in view, so a threshold drawn from it bounds
+   nothing out of sample. A blind held-out set was written first, then all
+   three kind sources were measured gate-off and gate-on, then the thresholds
+   were set; three of them sit at the measured values (T2
+   `nexus/rdr232-phase2-thresholds`). The only measured fall in wrong-shape
+   admission is in-sample (golden 4 of 24 to 0, one of them a synthetic clone
+   of plan 473); on the held-out set it is 1 of 29 before and after.
 7. Build and verify the active-project tier of source resolution (A5).
 
 ### Phase 3: Bounded repair and quality reporting
@@ -1558,7 +1652,8 @@ The evaluation has three layers:
 2. **Golden-set comparison**: report the baseline and new eligible-plan recall,
    wrong-shape admission, source/facet coverage, and scope leakage. Ship only
    if wrong-shape admission and scope leakage fall without a material loss of
-   eligible-plan recall on lookup fixtures.
+   eligible-plan recall on lookup fixtures. For Phase 2 this was measured
+   in-sample only; see Phase 2 step 6, "As run".
 3. **Live canary**: rerun a small, labeled set including ART RDR-084 against the
    actual service, compare structured evidence and final answers, and record
    model/latency/cost. This complements rather than replaces deterministic
@@ -1571,8 +1666,9 @@ measurement exists.
 ### Performance Expectations
 
 Containment should reduce hydrated context and secondary evidence on crowded
-runs. Request extraction is deterministic-first; the optional single structured
-call has separately measured cost and timeout. Facet assessment is grouped per
+runs. Request extraction is deterministic-first; the single structured call
+(on by default, Haiku) has separately measured cost and timeout: about
+0.002 USD, p50 4 s and p95 7 s, 0 of 112 calls failed in measurement. Facet assessment is grouped per
 evidence stream, with the repair and reassessment bounded to one cycle. Measure
 invocation rates, facets per call, incremental latency, and cost against the
 current run records. No throughput target is asserted without a baseline.
@@ -1743,3 +1839,6 @@ remain coherent without it.
   verified in production (research 19-21). Section 2a adds the owner-narrowing
   rule for secondary streams (nexus-jypmj.1.18), approved by Sam.
 - 2026-10-26: Section 2a replaces the subtree forwarding sentence with the shipped subtree-filter rule (nexus-jypmj.1.16), approved by Sam.
+- 2026-10-26: Section 1 states how the active-project tier decides (reliability, the project-name and title veto, the fallback notice, question-text sources, the range disclosure) and the Phase 2 proof states what "otherwise" means for the unmodified call (nexus-jypmj.2.4), approved by Sam.
+- 2026-10-27: Phase 2 measured and enabled (nexus-jypmj.2.8, nexus-jypmj.12), approved by Sam. Section 1: a lookup includes several connected facts from one passage of one source; the directional rule is recorded as a measured limit; request extraction is on by default with Haiku and turning it off puts the gate in shadow. Trade-offs and Performance Expectations carry the measured fall-through and extraction cost. Phase 2 step 6 records that the thresholds were set after measuring, and why.
+- 2026-10-27: Section 4's coverage-state table row for `unavailable` names the new `uncovered` shape for evidence that covered no facet and keeps `no_evidence` for zero retrieval results, per Sam's ruling (nexus-jypmj.3.12), added with the shape in nexus-jypmj.3.3.

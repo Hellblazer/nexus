@@ -27,6 +27,7 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
+from nexus.catalog.types import ManifestRow
 from nexus.db.t3 import T3Database
 from nexus.errors import BatchWriteFailedError, IndexRunVerifyRefused
 from nexus.pdf_chunker import TextChunk
@@ -56,7 +57,7 @@ def writer(monkeypatch):
     return install_streaming_writer(monkeypatch)
 
 
-def _extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False):
+def _extract(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None, allow_degraded=False, on_heartbeat=None):
     if on_page:
         on_page(0, "Page 0 content.", {"page_number": 1, "text_length": 15})
     return ExtractionResult(
@@ -77,12 +78,23 @@ def _t3(*, update_side_effect):
 
 
 def _run(db, t3, path="/tail.pdf"):
-    with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+    # nexus-ahm18: the post-pass reads the document's own manifest; the writer double sends none. The
+    # patch is a spy: a run that selected by content_hash instead (doc_id not passed through) fails
+    # the assertion below instead of passing for the wrong reason.
+    manifest_reads: list[tuple[str, str]] = []
+
+    def _own_rows(doc_id, collection):
+        manifest_reads.append((doc_id, collection))
+        return [ManifestRow(position=0, chash="abc123_0")]
+
+    with patch(_P_EXT) as ME, patch(_P_CHK) as MC, patch("nexus.pipeline_stages._own_manifest_rows", side_effect=_own_rows):
         ME.return_value.extract.side_effect = _extract
         MC.return_value.chunk.return_value = [TextChunk(text="chunk 0 text", chunk_index=0,
                                                         metadata={"page_number": 1})]
-        return pipeline_index_pdf(Path(path), _H, "docs__test", t3, db=db,
-                                  embed_fn=lambda t, m: ([[0.1] * 4 for _ in t], m), corpus="test")
+        n = pipeline_index_pdf(Path(path), _H, "docs__test", t3, db=db,
+                               embed_fn=lambda t, m: ([[0.1] * 4 for _ in t], m), corpus="test")
+    assert manifest_reads and all(d and c == "docs__test" for d, c in manifest_reads), manifest_reads
+    return n
 
 
 def _leave_a_finished_upload(db, writer) -> None:

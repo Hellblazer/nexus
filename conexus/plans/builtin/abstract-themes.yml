@@ -44,6 +44,8 @@ optional_bindings:
 default_bindings:
   corpus: all
   limit: 30
+# RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
+answer_kind: synthesis
 tags: builtin-template,rdr-098,nexus-ldnp,abstract-qa,community-summary
 plan_json:
   steps:

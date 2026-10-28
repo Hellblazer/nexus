@@ -40,6 +40,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from concurrent.futures import Future
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 
@@ -1971,6 +1972,13 @@ def _note_request(exc: BaseException, method: str, path: str) -> None:
     exc.add_note(f"request: {method} {base}{path}")
 
 
+def is_unregistered_collection_error(exc: VectorServiceError) -> bool:
+    """Whether *exc* is the engine's typed 422 for a collection with no catalog row (keyed on the
+    ``reason`` field, with the wording fallback for an engine that predates it), as against a store
+    that could not be read."""
+    return _unregistered_collection_message(exc.code or 0, exc.engine_body) is not None
+
+
 def _unregistered_collection_message(code: int, err: Any) -> str | None:
     """A readable message for the engine's typed "not registered" 422, or None.
 
@@ -2518,6 +2526,43 @@ def _take_embeddings(envelope: dict, payload: Any) -> None:
         decoded.append(raw)
     envelope["embedding_dim"] = dim
     envelope["result_embeddings"] = decoded
+
+
+@dataclass(frozen=True)
+class ExpireReport:
+    """What one TTL sweep did (nexus-6pfgb.15).
+
+    *chunks_deleted* is the engine's own count of chunks removed (a chunk another live note
+    still holds is kept and not counted). *notes_tombstoned* counts the notes that lapsed on
+    their own catalog TTL and were retired, whether or not their chunks went with them.
+    *failures* are ``(tumbler, reason)`` for a lapsed note that could not be retired; it is left
+    live and whole, and its chunks are not deleted. *row_ttl_unattributed* counts chunks whose
+    row TTL lapsed but that several notes hold, or that one note holds whose TTL the catalog does
+    not record and whose own write the row is not, so the row (the last writer's) cannot say which
+    note expires: they are left alone. *catalog_ttl_stale* are ``(tumbler, title)`` of lapsed notes
+    left live because a chunk row naming the note records a later put than its catalog TTL keys do
+    (a re-put by a client older than nexus-6pfgb.5, or by a writer that bypasses the catalog hook,
+    nexus-6pfgb.30); a re-put with this client, or ``nx store delete --title``, settles each.
+    """
+
+    chunks_deleted: int
+    notes_tombstoned: int
+    failures: tuple[tuple[str, str], ...] = ()
+    row_ttl_unattributed: int = 0
+    catalog_ttl_stale: tuple[tuple[str, str], ...] = ()
+
+
+class ExpireIncompleteError(RuntimeError):
+    """A lapsed note could not be retired. Carries the sweep's :class:`ExpireReport`."""
+
+    def __init__(self, report: ExpireReport) -> None:
+        self.report = report
+        named = "; ".join(f"{t}: {why}" for t, why in report.failures)
+        super().__init__(
+            f"{len(report.failures)} lapsed note(s) were not retired and stay live ({named}); "
+            f"the sweep deleted {report.chunks_deleted} chunk(s) and retired "
+            f"{report.notes_tombstoned} note(s). Run it again once the cause is fixed."
+        )
 
 
 class VectorServiceError(RuntimeError):
@@ -6093,7 +6138,62 @@ class HttpVectorClient:
                 break
 
     def expire(self) -> int:
+        """Delete all expired entries from ``knowledge__*`` collections; the number of chunks deleted.
+
+        :meth:`expire_report` does the work and says more (notes retired, notes that could not be);
+        this raises :class:`ExpireIncompleteError` when a lapsed note could not be retired, so a
+        caller that wants only the count never reads a partial sweep as a clean one.
+        """
+        report = self.expire_report()
+        if report.failures:
+            raise ExpireIncompleteError(report)
+        return report.chunks_deleted
+
+    def expire_report(self) -> ExpireReport:
         """Delete all expired entries from ``knowledge__*`` collections.
+
+        WHOSE TTL (nexus-6pfgb.15). A chunk row is one per chunk text, so its ``ttl_days`` and
+        ``indexed_at`` are the last writer's: of two notes with the same text, whichever was put
+        last decided what this sweep saw for both. Each note is now judged by its own catalog
+        entry (:mod:`nexus.catalog.note_ttl`): ``meta.ttl_days`` counted from ``meta.put_at``,
+        both written at the note's own put (nexus-6pfgb.5). ``ttl_days`` absent or ``0`` (the
+        retraction value a permanent re-put writes) is permanent; the catalog's ``0`` is never
+        handed to :func:`~nexus.metadata_schema.is_expired`. ``put_at``, not the entry's
+        ``indexed_at``, is the clock: the engine refreshes ``indexed_at`` on every manifest
+        write, heals and backfills included, which would push a TTL later each time.
+
+        Each lapsed note goes through the note delete path of ``nx store delete --title``
+        (:func:`~nexus.catalog.store_hook.reap_lapsed_note_documents`: manifest retracted, then
+        the document tombstoned, all or nothing per note), and only then are its chunks sent to
+        :meth:`batch_delete`, whose engine anti-join keeps any chunk another live note still
+        holds. The count returned is the engine's, so a lapsed note whose chunk a co-owner keeps
+        is tombstoned and adds 0.
+
+        The chunk-row scan below remains for what the catalog cannot judge: a chunk with no
+        live owner (an orphan) goes, as before (nexus-wbfpw.10). A chunk with exactly one live
+        owner that carries no TTL keys of its own (put before they existed) is judged by the row
+        only when the row is that note's own write: its ``catalog_doc_id`` is the owner's tumbler and its
+        ``title`` the owner's (:func:`~nexus.catalog.note_ttl.row_written_by`; the title because an
+        ``.nxexp`` import keeps the source box's stamp while the destination mints its own tumblers). A row is the last writer's and is not
+        rewritten when a co-owner leaves, so a legacy note left alone by the sweep that retired its
+        keyed co-owner would otherwise be judged by that co-owner's lapsed TTL on the next sweep. A
+        row that names another writer, or none, is counted in ``row_ttl_unattributed`` and left
+        alone. A chunk several notes hold, or one note that does have catalog keys, is never judged
+        by the row (the catalog pass above decides it), and a row that lapsed over several notes
+        without keys is counted too.
+
+        THE CATALOG'S KEYS CAN BE STALE (nexus-6pfgb.30). ``meta.ttl_days``/``put_at`` are written only by
+        the put path of a client that has nexus-6pfgb.5. A re-put by an older client, or by any writer
+        that bypasses the catalog hook (the ``.nxexp`` import), rewrites the chunk row and leaves the keys
+        as they were, so a note its owner made permanent could look lapsed. Before a lapsed note is
+        retired its own chunk rows are read (:meth:`_note_rows`; those stamped with the note's tumbler
+        or carrying its title, :func:`~nexus.catalog.note_ttl.row_names_note`); one whose TTL is not
+        the catalog's, or whose ``indexed_at`` is later than the catalog's clock by more than five minutes, records a put the catalog missed, and the note is NOT retired:
+        it is reported in ``catalog_ttl_stale``. Rows that cannot be read fail closed: the note stays and
+        is reported in ``failures``. A row another note wrote last says nothing about this note, so a
+        permanent re-put by an older client that a co-owner of the same text then overwrote is not seen.
+
+        The rest of this docstring is the row scan's history.
 
         nexus-h8rf6.5: was missing entirely — ``nx store expire`` crashed
         with ``AttributeError`` in service mode. T3Database parity: this
@@ -6201,11 +6301,18 @@ class HttpVectorClient:
         method's own docstring above), the exact silent-leak shape this
         method exists to close.
         """
-        from nexus.catalog.store_hook import reap_catalog_manifest_for_chashes  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.catalog import note_ttl  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred to avoid import cycle
+            live_note_owners,
+            reap_catalog_manifest_for_chashes,
+            reap_lapsed_note_documents,
+        )
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
         from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
-        now_iso = datetime.now(UTC).isoformat()
+        now = datetime.now(UTC)
+        now_iso = now.isoformat()
         # nexus-tk070.p6b (RDR-194 D5): $gt 0, not $ne 0 — see this method's
         # own docstring for the full derivation (the $ne:null translation
         # this flip might suggest is vacuous server-side; $gt 0 is the
@@ -6213,45 +6320,163 @@ class HttpVectorClient:
         ttl_where = {"ttl_days": {"$gt": 0}}
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         total = 0
-        for entry in self.list_collections():
-            name = entry.get("name", "")
-            # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `entry`
-            # already carries `content_type` when a catalog row backs this
-            # name (list_collections() joins it -- the SAME fetch this
-            # loop already made, never a second lookup, and never
-            # nexus.corpus's name-parsing primitives). A collection with
-            # no row is simply skipped this pass -- a background TTL
-            # sweep must not guess, matching T3Database.expire's
-            # identical filter.
-            if entry.get("content_type") != "knowledge":
-                continue
-            expired_ids: list[str] = []
-            offset = 0
-            while True:
-                result = _post(
-                    "/v1/vectors/get",
-                    {
-                        "collection": name,
-                        "where": ttl_where,
-                        "include": ["metadatas"],
-                        "limit": page_limit,
-                        "offset": offset,
-                        "include_non_live": True,
-                    },
-                    tenant=self._tenant,
+        notes = 0
+        unattributed = 0
+        failures: list[tuple[str, str]] = []
+        ttl_stale: list[tuple[str, str]] = []
+        # Opened on first use, so a sweep with no knowledge collection never touches the catalog.
+        reader_box: list[Any] = []
+
+        def catalog_reader():
+            if not reader_box:
+                reader_box.append(make_catalog_reader())
+            return reader_box[0]
+
+        try:
+            for entry in self.list_collections():
+                name = entry.get("name", "")
+                # RDR-204 Phase 3 repoint (nexus-ft04v.26), class (c): `entry`
+                # already carries `content_type` when a catalog row backs this
+                # name (list_collections() joins it -- the SAME fetch this
+                # loop already made, never a second lookup, and never
+                # nexus.corpus's name-parsing primitives). A collection with
+                # no row is simply skipped this pass -- a background TTL
+                # sweep must not guess, matching T3Database.expire's
+                # identical filter.
+                if entry.get("content_type") != "knowledge":
+                    continue
+                expired_row_ids: list[str] = []
+                expired_row_meta: dict[str, dict] = {}  # the lapsed rows' metadata, for row_written_by
+                offset = 0
+                while True:
+                    result = _post(
+                        "/v1/vectors/get",
+                        {
+                            "collection": name,
+                            "where": ttl_where,
+                            "include": ["metadatas"],
+                            "limit": page_limit,
+                            "offset": offset,
+                            "include_non_live": True,
+                        },
+                        tenant=self._tenant,
+                    )
+                    page_ids = result.get("ids", []) or []
+                    metas = result.get("metadatas", []) or []
+                    for doc_id, meta in zip(page_ids, metas):
+                        if isinstance(meta, dict) and is_expired(meta, now_iso=now_iso):
+                            expired_row_ids.append(doc_id)
+                            expired_row_meta[doc_id] = meta
+                    offset += len(page_ids)
+                    if len(page_ids) < page_limit:
+                        break  # last page (short or empty)
+
+                reader = catalog_reader()
+                # Which of the row-lapsed chunks the row may judge (see this method's docstring).
+                targets: dict[str, None] = {}
+                legacy_ids: list[str] = []
+                if expired_row_ids and reader is None:
+                    targets.update(dict.fromkeys(expired_row_ids))  # no catalog (SQLite opt-out): as before
+                elif expired_row_ids:
+                    owners_by = live_note_owners(reader, name, expired_row_ids)
+                    for chash in expired_row_ids:
+                        owners = owners_by.get(chash, [])
+                        if not owners:
+                            targets[chash] = None  # an orphan: nothing live to protect (nexus-wbfpw.10)
+                        elif len(owners) == 1 and (
+                            owners[0].content_type == "knowledge" and not owners[0].file_path
+                            and not note_ttl.has_own_keys(owners[0].meta)
+                            and note_ttl.row_written_by(
+                                owners[0].tumbler, expired_row_meta.get(chash), owner_title=owners[0].title)
+                        ):
+                            # one note, no TTL of its own on record, and the row is that note's own write
+                            legacy_ids.append(chash)
+                            targets[chash] = None
+                        elif not all(note_ttl.has_own_keys(o.meta) for o in owners):
+                            # the row is the last writer's, and the catalog cannot say it was this owner
+                            unattributed += 1
+                        # else: every owner has its own TTL on record; the catalog pass below decides
+
+                # The notes whose own TTL has lapsed, each retired through the note delete path.
+                reaped = (
+                    reap_lapsed_note_documents(name, now=now, row_reader=lambda ids, _n=name: self._note_rows(_n, ids))
+                    if reader is not None else None
                 )
-                page_ids = result.get("ids", []) or []
-                metas = result.get("metadatas", []) or []
-                for doc_id, meta in zip(page_ids, metas):
-                    if isinstance(meta, dict) and is_expired(meta, now_iso=now_iso):
-                        expired_ids.append(doc_id)
-                offset += len(page_ids)
-                if len(page_ids) < page_limit:
-                    break  # last page (short or empty)
-            if expired_ids:
-                reap_catalog_manifest_for_chashes(expired_ids, expected_collection=name)
-                total += self.batch_delete(name, expired_ids)
-        return total
+                held: set[str] = set()
+                if reaped is not None:
+                    notes += len(reaped.documents)
+                    failures.extend(reaped.failures)
+                    ttl_stale.extend(reaped.stale)
+                    held = set(reaped.held)
+                    targets.update(dict.fromkeys(c for c in reaped.chashes if c not in held))
+
+                if legacy_ids:
+                    reap_catalog_manifest_for_chashes(legacy_ids, expected_collection=name)
+                if targets:
+                    total += self.batch_delete(name, list(targets))
+        finally:
+            if reader_box and reader_box[0] is not None:
+                reader_box[0].close()
+        if notes or unattributed or failures or ttl_stale:
+            _log.info(
+                "store_expire_swept", notes_tombstoned=notes, chunks_deleted=total,
+                row_ttl_unattributed=unattributed, failures=len(failures), catalog_ttl_stale=len(ttl_stale),
+            )
+        return ExpireReport(total, notes, tuple(failures), unattributed, tuple(ttl_stale))
+
+    def _note_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        """``chash -> chunk-row metadata`` for the chunks of *collection* named by *chashes* that it holds
+        (a chash with no live row is absent; the note being judged is live, so its chunks are). Pages at 300 ids per request. Raises on any
+        service failure: the caller (the TTL sweep's guard, nexus-6pfgb.30) treats "could not read" as
+        "do not retire", never as "no row"."""
+        return {doc_id: meta for doc_id, _doc, meta in self._store_get_pages(collection, chashes)}
+
+    def chunk_rows(self, collection: str, chashes: list[str]) -> dict[str, dict]:
+        """``chash -> row`` for the live chunks of *collection* named by *chashes*, each row the flat
+        shape :meth:`get_by_id` returns (``id``, ``content`` and the metadata fields). A chash with no
+        live row is absent. Pages at 300 ids per request.
+
+        Unlike :meth:`get_by_id`, which reads any service failure as "no such chunk", this raises
+        :class:`VectorServiceError`: the recovery-bundle export (nexus-6pfgb.36) must not report a
+        piece it could not read as a piece that is gone."""
+        return {
+            doc_id: {"id": doc_id, "content": doc, **meta}
+            for doc_id, doc, meta in self._store_get_pages(collection, chashes)
+        }
+
+    def _store_get_pages(self, collection: str, chashes: list[str]) -> Iterator[tuple[str, str, dict]]:
+        """``(id, document, metadata)`` for each live row of *collection* named by *chashes*, 300 ids
+        per ``/v1/vectors/store-get`` request. Raises :class:`VectorServiceError` on any service
+        failure and when the engine reports more matched rows than it returned; an engine that sends no
+        ``count`` gets the once-per-process ``store_get_count_unreported`` warning instead."""
+        page = 300
+        for start in range(0, len(chashes), page):
+            batch = chashes[start:start + page]
+            result = _post(
+                "/v1/vectors/store-get",
+                {"collection": collection, "ids": batch, "limit": len(batch)},
+                tenant=self._tenant,
+            )
+            ids = result.get("ids") or []
+            docs = result.get("documents") or []
+            metas = result.get("metadatas") or []
+            # nexus-hdx2u: this call bypasses _ServiceCollectionStub.get, so it repeats that tripwire. An
+            # engine-reported count above the rows returned means rows were dropped, and a dropped row
+            # would read as "no later put" (the sweep would retire the note) or as a missing piece of a
+            # note (the export would leave it out): raise, so the callers' guards hold.
+            reported = result.get("count")
+            if isinstance(reported, int) and not isinstance(reported, bool) and reported > len(ids):
+                raise VectorServiceError(
+                    f"store-get for collection '{collection}': engine reports {reported} matched-live rows "
+                    f"for this batch but returned only {len(ids)} (batch size {len(batch)})."
+                )
+            if "count" not in result:
+                # nexus-6pfgb.33: an engine before nexus-hdx2u E3 sends no count, so a dropped row is
+                # invisible here; say so once per process, as the collection stub does.
+                _warn_store_get_count_unreported(collection)
+            for i, (doc_id, meta) in enumerate(zip(ids, metas)):
+                if isinstance(meta, dict):
+                    yield doc_id, (docs[i] if i < len(docs) and docs[i] is not None else ""), meta
 
     def collection_info(self, name: str) -> dict:
         """Return ``{"count": N, "metadata": {}}`` for *name*.

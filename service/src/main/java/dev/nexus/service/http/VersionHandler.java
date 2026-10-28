@@ -34,6 +34,7 @@ import java.util.function.Supplier;
  *  "process_uptime_seconds":420,
  *  "process_start_time":"2026-09-12T09:00:00Z",
  *  "nx_answer_run_complete_supported":true,
+ *  "nx_answer_run_summary_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -309,6 +310,30 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * RDR-232 Phase 3 (nexus-jypmj.3.4) capability advertisement: does this
+     * engine store the optional {@code run_summary} object on {@code
+     * POST /v1/telemetry/nx_answer_runs/record} and {@code /complete} (column
+     * {@code nx_answer_runs.run_summary}, changeset telemetry-016-1) and return
+     * it from {@code /query}?
+     *
+     * <p>An independent flag rather than a third line on {@link
+     * #appendNxAnswerStepsCapabilityField}: an engine that has {@code /complete}
+     * but not the column answers false here, and a client that gated on the
+     * older flags would send a summary the old engine drops without an error
+     * (the handler reads named fields, so HTTP 200 is no evidence of
+     * persistence). Always present, always {@code true} on an engine carrying
+     * the column, like the other two.
+     *
+     * <p>Like every new {@code /version} field it stays invisible to cloud
+     * clients until the public conexus edge allowlists it (the {@code
+     * nx_answer_steps_supported} precedent, nexus-04sff); the engine-release
+     * pre-tag check 3e names this as paired conexus work.
+     */
+    static void appendNxAnswerRunSummaryCapabilityField(StringBuilder body) {
+        body.append(",\"nx_answer_run_summary_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -486,6 +511,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-nyry9.9 / RDR-203 P2: both flags always present, always true on any
         // engine carrying the corresponding handler.
         appendNxAnswerStepsCapabilityField(body);
+        // RDR-232 P3 (nexus-jypmj.3.4): its own flag, true on any engine with the run_summary column.
+        appendNxAnswerRunSummaryCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

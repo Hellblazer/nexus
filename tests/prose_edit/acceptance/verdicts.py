@@ -89,11 +89,10 @@ from pathlib import Path
 from typing import Any
 
 Obj = dict[str, Any]
-ALLOWED_BASH = (
-    "python3 .claude/skills/prose-edit/scripts/brief.py",
-    "python3 .claude/skills/prose-edit/scripts/memory.py",
-    "python3 .claude/skills/prose-edit/scripts/review.py",
-)
+# The skill's three scripts, by the prefix it types: the plugin root is filled in at load (nexus-scmcs), so the
+# directory in front of skills/prose-edit/scripts/ is whatever the plugin was loaded from.
+# Unquoted and with no leading ./: a quoted or ./ path is a shape the permission rule does not match.
+ALLOWED_BASH = re.compile(r"python3 (?!\./)[^\s'\"]*skills/prose-edit/scripts/(?:brief|memory|review)\.py(?=\s|$)")
 FX = "tests/prose_edit/fixtures/"
 DOCS: dict[str, str | None] = {
     "xanadu": "docs/exploration/xanadu-in-nexus.md", "linda": "docs/exploration/linda-in-nexus.md",
@@ -308,7 +307,7 @@ def editor_reply(events: list[Obj]) -> Obj | None:
 
 
 def is_allowed_bash(command: str) -> bool:
-    return command.strip().startswith(ALLOWED_BASH)
+    return ALLOWED_BASH.match(command.strip()) is not None
 
 
 def words(text: str) -> Counter[str]:

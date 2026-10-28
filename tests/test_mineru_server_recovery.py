@@ -262,6 +262,10 @@ def test_the_isolated_dispatch_routes_a_409_through_the_decision(
 def test_the_broken_server_is_replaced_once_per_cooldown(
     ext: PDFExtractor, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The spawn policy is asked BEFORE the cooldown is claimed (nexus-tr1rj.2: a process that may
+    # not restart never spends the machine's cooldown), so the suite's autostart kill-switch has to
+    # be lifted for the claim to be reached; the restart itself is replaced.
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
     restart = MagicMock(return_value=True)
     monkeypatch.setattr(ext, "_restart_mineru_server", restart)
     assert ext._restart_broken_mineru_server(dict(_SERVER)) is True
@@ -446,6 +450,8 @@ def test_a_machine_resource_error_is_not_bisected_and_reaches_the_caller_unwrapp
         "pymupdf.open", return_value=mock_ctx,
     ), patch(
         "nexus.config.get_mineru_page_batch", return_value=2,
+    ), patch(
+        "nexus.config.get_mineru_page_timeout_s", return_value=30,
     ), patch.object(ext, "_mineru_run_isolated", isolated):
         with pytest.raises(MineruMachineResourceError, match="no semaphores left"):
             ext._extract_with_mineru(Path("/tmp/math.pdf"), formula_count=9, on_formula_oom="fail")

@@ -102,9 +102,9 @@ class TestBehaviourPreserved:
 
     def test_chroma_collections_unchanged(self):
         assert uri_for("knowledge__delos", "/papers/aleph.pdf") == (
-            "chroma://knowledge__delos//papers/aleph.pdf"
+            "nx-note://knowledge__delos//papers/aleph.pdf"
         )
-        assert uri_for("future__x", "src") == "chroma://future__x/src"
+        assert uri_for("future__x", "src") == "nx-note://future__x/src"
 
     def test_empty_source_path_is_none(self):
         assert uri_for("rdr__nexus", "") is None

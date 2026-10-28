@@ -1446,6 +1446,243 @@ class AspectRepositoryTest {
         }
     }
 
+    // ── reclaim counts as an attempt (RDR-235 Gap 2, nexus-j67ix.2) ──────────────
+
+    @Test @Order(49)
+    void reclaimStale_incrementsRetryCount_andReturnsRowToPendingBelowCap() throws Exception {
+        String tenant = "reclaim-count-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-below.pdf", 0);
+
+        int reclaimed = repo.reclaimStale(tenant, 0);
+
+        assertThat(reclaimed).as("the one stale row is reclaimed").isEqualTo(1);
+        var row = readQueueRow(tenant, "rc-below.pdf");
+        assertThat(row.status()).as("below the cap a reclaimed row returns to pending").isEqualTo("pending");
+        assertThat(row.retryCount()).as("a reclaim is an attempt: retry_count + 1").isEqualTo(1);
+        assertThat(row.lastAttemptAt()).as("pending reclaim clears last_attempt_at, as before").isNull();
+        assertThat(row.lastError()).as("a pending reclaim writes no error").isNull();
+    }
+
+    @Test @Order(49)
+    void reclaimStale_accumulatesAcrossRepeatedReclaims() throws Exception {
+        String tenant = "reclaim-accum-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-accum.pdf", 0);
+        for (int i = 1; i <= 3; i++) {
+            assertThat(repo.reclaimStale(tenant, 0)).isEqualTo(1);
+            assertThat(readQueueRow(tenant, "rc-accum.pdf").retryCount())
+                .as("reclaim #" + i).isEqualTo(i);
+            assertThat(repo.claimNext(tenant)).as("reclaimed row claims again").isPresent();
+        }
+    }
+
+    @Test @Order(49)
+    void reclaimStale_atCap_marksRowFailed_likeMarkFailed() throws Exception {
+        String tenant = "reclaim-cap-tenant-" + System.nanoTime();
+        // The worker's rule (aspect_worker._mark_retry_or_fail_routed): a failure seen at
+        // retry_count >= cap is terminal, and markFailed then increments retry_count.
+        enqueueAndClaim(tenant, "rc-cap.pdf", AspectRepository.RETRY_MAX_ATTEMPTS);
+
+        int reclaimed = repo.reclaimStale(tenant, 0);
+
+        assertThat(reclaimed).as("the stale row is counted as reclaimed").isEqualTo(1);
+        var row = readQueueRow(tenant, "rc-cap.pdf");
+        assertThat(row.status()).as("a reclaim at the cap is terminal").isEqualTo("failed");
+        assertThat(row.retryCount()).as("retry_count + 1, exactly as markFailed")
+            .isEqualTo(AspectRepository.RETRY_MAX_ATTEMPTS + 1);
+        assertThat(row.lastError()).as("the reason names the reclaim cap, so an operator can tell it from a worker-reported failure")
+            .isEqualTo(AspectRepository.RECLAIM_CAP_ERROR);
+        assertThat(row.lastAttemptAt()).as("last_attempt_at is kept at the cap, as markFailed leaves it").isNotNull();
+        assertThat(repo.claimNext(tenant)).as("a failed row is never claimed again").isEmpty();
+        assertThat(repo.pendingCount(tenant)).isZero();
+    }
+
+    @Test @Order(49)
+    void reclaimStale_justBelowCap_stillPending() throws Exception {
+        String tenant = "reclaim-cap-1-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-cap1.pdf", AspectRepository.RETRY_MAX_ATTEMPTS - 1);
+
+        assertThat(repo.reclaimStale(tenant, 0)).isEqualTo(1);
+
+        var row = readQueueRow(tenant, "rc-cap1.pdf");
+        assertThat(row.status()).isEqualTo("pending");
+        assertThat(row.retryCount()).isEqualTo(AspectRepository.RETRY_MAX_ATTEMPTS);
+    }
+
+    @Test @Order(49)
+    void reclaimStale_mixedBatch_failsOnlyTheRowsAtCap_andLeavesFreshRowsAlone() throws Exception {
+        String tenant = "reclaim-mixed-tenant-" + System.nanoTime();
+        registerFixtureDoc(tenant, "rc-doc");
+        registerFixtureCollection(tenant, "rc-coll");
+        for (String sp : new String[]{"m-low.pdf", "m-cap.pdf", "m-fresh.pdf"}) {
+            var body = new java.util.LinkedHashMap<String, Object>();
+            body.put("collection", "rc-coll");
+            body.put("source_path", sp);
+            body.put("doc_id", "rc-doc");
+            repo.enqueue(tenant, body);
+        }
+        setRetryCount(tenant, "m-cap.pdf", AspectRepository.RETRY_MAX_ATTEMPTS);
+        setRetryCount(tenant, "m-low.pdf", 2);
+        setRetryCount(tenant, "m-fresh.pdf", AspectRepository.RETRY_MAX_ATTEMPTS);
+        assertThat(repo.claimBatch(tenant, 3)).hasSize(3);
+        // Age two of the three claims past the window; the third stays fresh.
+        setLastAttemptAt(tenant, "m-fresh.pdf", OffsetDateTime.now(ZoneOffset.UTC));
+        setLastAttemptAt(tenant, "m-low.pdf", OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10));
+        setLastAttemptAt(tenant, "m-cap.pdf", OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10));
+
+        assertThat(repo.reclaimStale(tenant, 300)).as("only the two stale rows").isEqualTo(2);
+
+        assertThat(readQueueRow(tenant, "m-low.pdf").status()).isEqualTo("pending");
+        assertThat(readQueueRow(tenant, "m-low.pdf").retryCount()).isEqualTo(3);
+        assertThat(readQueueRow(tenant, "m-cap.pdf").status()).isEqualTo("failed");
+        var fresh = readQueueRow(tenant, "m-fresh.pdf");
+        assertThat(fresh.status()).as("a row inside the window is untouched").isEqualTo("in_progress");
+        assertThat(fresh.retryCount()).isEqualTo(AspectRepository.RETRY_MAX_ATTEMPTS);
+    }
+
+    @Test @Order(49)
+    void reclaimStale_atCap_leavesNextRetryAtAlone() throws Exception {
+        String tenant = "reclaim-cap-nra-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-nra.pdf", AspectRepository.RETRY_MAX_ATTEMPTS);
+        OffsetDateTime backoff = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10)
+            .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        setNextRetryAt(tenant, "rc-nra.pdf", backoff);
+
+        repo.reclaimStale(tenant, 0);
+
+        assertThat(readNextRetryAt(tenant, "rc-nra.pdf").toInstant())
+            .as("neither reclaim outcome writes next_retry_at (markFailed does not)")
+            .isEqualTo(backoff.toInstant());
+    }
+
+    // ── uncounted reclaim (nexus-j67ix.3): the daemon's stop sweep does not spend an attempt ──
+
+    @Test @Order(49)
+    void reclaimStale_uncounted_belowCap_leavesRetryCountAndLastErrorAlone() throws Exception {
+        String tenant = "reclaim-nocount-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-nc-below.pdf", 2);
+        setLastError(tenant, "rc-nc-below.pdf", "earlier worker failure");
+
+        int reclaimed = repo.reclaimStale(tenant, 0, false);
+
+        assertThat(reclaimed).as("the one stale row is reclaimed").isEqualTo(1);
+        var row = readQueueRow(tenant, "rc-nc-below.pdf");
+        assertThat(row.status()).isEqualTo("pending");
+        assertThat(row.retryCount()).as("an uncounted reclaim spends no attempt").isEqualTo(2);
+        assertThat(row.lastAttemptAt()).as("pending reclaim clears last_attempt_at").isNull();
+        assertThat(row.lastError()).as("last_error is untouched").isEqualTo("earlier worker failure");
+        assertThat(repo.claimNext(tenant)).as("the row claims again").isPresent();
+    }
+
+    @Test @Order(49)
+    void reclaimStale_uncounted_atCap_returnsRowToPending_neverFailed() throws Exception {
+        String tenant = "reclaim-nocount-cap-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-nc-cap.pdf", AspectRepository.RETRY_MAX_ATTEMPTS);
+
+        int reclaimed = repo.reclaimStale(tenant, 0, false);
+
+        assertThat(reclaimed).isEqualTo(1);
+        var row = readQueueRow(tenant, "rc-nc-cap.pdf");
+        assertThat(row.status()).as("an uncounted reclaim is never the row's fault: pending even at the cap")
+            .isEqualTo("pending");
+        assertThat(row.retryCount()).isEqualTo(AspectRepository.RETRY_MAX_ATTEMPTS);
+        assertThat(row.lastError()).as("no RECLAIM_CAP_ERROR is written").isNull();
+        assertThat(row.lastAttemptAt()).isNull();
+    }
+
+    @Test @Order(49)
+    void reclaimStale_uncounted_leavesNextRetryAtAlone_andFreshRowsInProgress() throws Exception {
+        String tenant = "reclaim-nocount-nra-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-nc-nra.pdf", 1);
+        OffsetDateTime backoff = OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(10)
+            .truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        setNextRetryAt(tenant, "rc-nc-nra.pdf", backoff);
+
+        assertThat(repo.reclaimStale(tenant, 300, false))
+            .as("a row claimed just now is inside a 300 s window and is not reclaimed").isZero();
+        assertThat(readQueueRow(tenant, "rc-nc-nra.pdf").status()).isEqualTo("in_progress");
+
+        assertThat(repo.reclaimStale(tenant, 0, false)).isEqualTo(1);
+        assertThat(readNextRetryAt(tenant, "rc-nc-nra.pdf").toInstant())
+            .as("the uncounted mode leaves next_retry_at alone (the counted mode is pinned by reclaimStale_leavesNextRetryAtUnchanged_andRowImmediatelyClaimable)").isEqualTo(backoff.toInstant());
+    }
+
+    @Test @Order(49)
+    void reclaimStale_twoArgOverload_stillCounts() throws Exception {
+        String tenant = "reclaim-overload-tenant-" + System.nanoTime();
+        enqueueAndClaim(tenant, "rc-ov.pdf", 0);
+
+        assertThat(repo.reclaimStale(tenant, 0)).isEqualTo(1);
+
+        assertThat(readQueueRow(tenant, "rc-ov.pdf").retryCount())
+            .as("the two-arg overload delegates with countAttempt=true").isEqualTo(1);
+    }
+
+    private void setLastError(String tenant, String sourcePath, String err) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            int rows = DSL.using(su, SQLDialect.POSTGRES)
+                .update(ASPECT_EXTRACTION_QUEUE)
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR, err)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+                .execute();
+            assertThat(rows).as("setLastError must update exactly one row").isEqualTo(1);
+        }
+    }
+
+    /** Enqueue one row, give it {@code retryCount}, and claim it into in_progress. */
+    private void enqueueAndClaim(String tenant, String sourcePath, int retryCount) throws SQLException {
+        registerFixtureDoc(tenant, "rc-doc");
+        registerFixtureCollection(tenant, "rc-coll");
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection", "rc-coll");
+        body.put("source_path", sourcePath);
+        body.put("doc_id", "rc-doc");
+        repo.enqueue(tenant, body);
+        setRetryCount(tenant, sourcePath, retryCount);
+        assertThat(repo.claimNext(tenant)).as("setup: row claims into in_progress").isPresent();
+    }
+
+    private void setRetryCount(String tenant, String sourcePath, int n) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            int rows = DSL.using(su, SQLDialect.POSTGRES)
+                .update(ASPECT_EXTRACTION_QUEUE)
+                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT, n)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+                .execute();
+            assertThat(rows).as("setRetryCount must update exactly one row").isEqualTo(1);
+        }
+    }
+
+    private void setLastAttemptAt(String tenant, String sourcePath, OffsetDateTime ts) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            int rows = DSL.using(su, SQLDialect.POSTGRES)
+                .update(ASPECT_EXTRACTION_QUEUE)
+                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, ts)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+                .execute();
+            assertThat(rows).as("setLastAttemptAt must update exactly one row").isEqualTo(1);
+        }
+    }
+
+    private record QueueRow(String status, int retryCount, String lastError, OffsetDateTime lastAttemptAt) {}
+
+    private QueueRow readQueueRow(String tenant, String sourcePath) throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(ASPECT_EXTRACTION_QUEUE.STATUS, ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                        ASPECT_EXTRACTION_QUEUE.LAST_ERROR, ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT)
+                .from(ASPECT_EXTRACTION_QUEUE)
+                .where(ASPECT_EXTRACTION_QUEUE.TENANT_ID.eq(tenant).and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.eq(sourcePath)))
+                .fetch();
+            assertThat(rows).as("queue row must exist").hasSize(1);
+            var r = rows.get(0);
+            return new QueueRow(r.get(ASPECT_EXTRACTION_QUEUE.STATUS), r.get(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT),
+                r.get(ASPECT_EXTRACTION_QUEUE.LAST_ERROR), r.get(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT));
+        }
+    }
+
     // ── CONCURRENCY: claim_next distinctness ────────────────────────────────────
 
     @Test @Order(45)

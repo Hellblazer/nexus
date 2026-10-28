@@ -607,11 +607,12 @@ def reseed_cmd(force: bool, insert_only: bool) -> None:
     friction, not safety.
 
     \b
-    A rewritten row is re-created, so its match/use counters reset —
-    correct, since those counters described the superseded text. Rows
-    tagged grown/ad-hoc are never rewritten, and library rows with no
-    template on disk are left alone; both cases are reported rather than
-    acted on.
+    A row whose description is unchanged is rewritten in place (same id),
+    so its match/use counters survive. Only a changed description
+    re-creates the row, and its counters reset then — correct, since
+    those counters described the superseded text. Rows tagged
+    grown/ad-hoc are never rewritten, and library rows with no template
+    on disk are left alone; both cases are reported rather than acted on.
     """
     reconcile = not insert_only
     # seed_plan_templates writes through T2Database.plans, which is

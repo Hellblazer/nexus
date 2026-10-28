@@ -14,6 +14,7 @@ file.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import threading
@@ -30,6 +31,7 @@ import nexus.aspect_extractor as aspect_extractor
 import nexus.search_engine as search_engine
 from nexus import mcp_infra
 from nexus.db import http_vector_client
+from nexus.mcp import plan_cache_registry
 from nexus.service_handles import SharedClientSlot
 from tests import _ddl_counter, _engine_substrate, _storage_touch_guard, _tenant_pool
 from tests._engine_substrate import drop_test_tenant, ensure_engine, mint_test_tenant
@@ -361,18 +363,24 @@ def test_python_client_caches_are_reset_on_every_lease(
         search_engine._poisoned_collections.add("code__leaked__x__v1")
         aspect_extractor._ENGINE_ASPECTS_ENABLED_CACHE["code__leaked__x__v1"] = (time.monotonic(), True, True)
         http_vector_client._lease_cache = ("http://leaked", "tok")
+        # The matcher's process-wide plan cache holds the plan ids of the library it was filled from. A reset deletes
+        # that library and the next seed gets new ids (plans.id is a sequence), so a cache left from lease A makes
+        # every cosine hit in lease B a deleted plan and plan_match falls back to FTS.
+        plan_cache_registry.get_plan_cache_registry()._cache = object()
 
     def clean() -> bool:
         return (not search_engine._poisoned_collections
                 and not aspect_extractor._ENGINE_ASPECTS_ENABLED_CACHE
-                and http_vector_client._lease_cache is None)
+                and http_vector_client._lease_cache is None
+                and plan_cache_registry._registry is None)
 
     monkeypatch.setattr(search_engine, "_poisoned_collections", set())
     monkeypatch.setattr(aspect_extractor, "_ENGINE_ASPECTS_ENABLED_CACHE", {})
     monkeypatch.setattr(http_vector_client, "_lease_cache", None)
+    monkeypatch.setattr(plan_cache_registry, "_registry", None)
     pool = make_pool()
     leak()
-    assert not clean(), "control: the three caches hold state before the lease"
+    assert not clean(), "control: the four caches hold state before the lease"
     with pool.lease():
         assert clean(), "a lease starts with the caches a previous test left emptied"
         leak()  # this test pollutes them
@@ -421,19 +429,50 @@ def test_the_pool_is_on_unless_the_flag_is_exactly_zero_and_the_marker_opts_a_te
         assert _tenant_pool.enabled({_tenant_pool.ENV_FLAG: value}) is want, value
     assert _tenant_pool.enabled({}) is True, "the pool is on by default (nexus-7zloy)"
 
+    @contextlib.contextmanager
+    def mint(_s: Any) -> Iterator[str]:
+        yield "MINT"
+
+    def entered(cm: Any) -> Any:
+        if isinstance(cm, str):
+            return cm
+        with cm as value:
+            return value
+
     monkeypatch.setattr(_tenant_pool, "get_pool", lambda s: type("P", (), {"lease": staticmethod(lambda owner="": "POOL")})())
-    monkeypatch.setattr(_engine_substrate, "minted_test_tenant", lambda s: "MINT")
+    monkeypatch.setattr(_engine_substrate, "minted_test_tenant", mint)
+    monkeypatch.setattr(_tenant_pool, "reset_client_caches", lambda: None)
     monkeypatch.setitem(_tenant_pool._entries, "pooled", 0)
     monkeypatch.setitem(_tenant_pool._entries, "fresh", 0)
     state: dict[str, Any] = {}
     monkeypatch.setenv(_tenant_pool.ENV_FLAG, "0")
-    assert _tenant_pool.tenant_lease(state, _Req(set())) == "MINT"
+    assert entered(_tenant_pool.tenant_lease(state, _Req(set()))) == "MINT"
     assert _tenant_pool._entries == {"pooled": 0, "fresh": 0}, "off: nothing is counted"
     monkeypatch.delenv(_tenant_pool.ENV_FLAG, raising=False)
-    assert _tenant_pool.tenant_lease(state, _Req(set())) == "POOL"
-    assert _tenant_pool.tenant_lease(state, _Req({"fresh_tenant"})) == "MINT"
-    assert _tenant_pool.tenant_lease(state, None) == "POOL"
+    assert entered(_tenant_pool.tenant_lease(state, _Req(set()))) == "POOL"
+    assert entered(_tenant_pool.tenant_lease(state, _Req({"fresh_tenant"}))) == "MINT"
+    assert entered(_tenant_pool.tenant_lease(state, None)) == "POOL"
     assert _tenant_pool._entries == {"pooled": 2, "fresh": 1}
+
+
+def test_a_minted_tenant_also_starts_and_ends_with_the_client_caches_emptied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pool-off and ``fresh_tenant`` path mints a new tenant whose plans get new ids, so a plan cache (or any
+    client cache) left by the previous test is as stale there as after a pool wipe."""
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def mint(_s: Any) -> Iterator[str]:
+        events.append("mint")
+        yield "MINT"
+        events.append("drop")
+
+    monkeypatch.setattr(_engine_substrate, "minted_test_tenant", mint)
+    monkeypatch.setattr(_tenant_pool, "reset_client_caches", lambda: events.append("reset"))
+    monkeypatch.setenv(_tenant_pool.ENV_FLAG, "0")
+    with _tenant_pool.tenant_lease({}, _Req({"fresh_tenant"})) as value:
+        assert value == "MINT"
+        events.append("body")
+    assert events == ["reset", "mint", "body", "drop", "reset"]
 
 
 def test_the_end_of_session_report_fails_a_dirty_pool_tenant_and_a_vacuous_run(

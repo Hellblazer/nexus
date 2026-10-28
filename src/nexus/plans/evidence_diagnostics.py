@@ -45,6 +45,7 @@ from typing import Any
 
 import structlog
 
+from nexus.plans.coverage_repair import NOTE_PREFIX
 from nexus.plans.evidence import ScopeConstraint
 from nexus.plans.reserved_stream import ReservedStream, strip_source_note
 from nexus.plans.traversal_policy import capped_traversal_count
@@ -55,6 +56,7 @@ __all__ = [
     "ReducerInputRecorder",
     "active_recorder",
     "build_evidence_diagnostics",
+    "capture_reducer_input",
     "log_evidence_diagnostics",
     "note_reducer_input",
     "plan_tools",
@@ -73,6 +75,11 @@ GRAPH_TOOLS: frozenset[str] = frozenset({"traverse", "search_graph_hop"})
 UNATTRIBUTED = ""
 
 _SOURCE_PRIMARY_FIRST = ("missing", "partial", "covered")
+
+#: The coverage boundary's note to the terminal generation (``coverage_repair.NOTE_PREFIX``) is counted as its own
+#: ``reducer_input.by_stream`` entry, not as an unattributed input.
+COVERAGE_NOTE_PREFIX = NOTE_PREFIX
+COVERAGE_NOTE_STREAM = "coverage_note"
 
 
 # ── the reducer-input recorder ────────────────────────────────────────────────────────────────────────────
@@ -134,11 +141,35 @@ def set_recorder_step(index: int | None) -> None:
         rec.set_step(index)
 
 
+_CAPTURE: ContextVar[list[list[str]] | None] = ContextVar("nexus_reducer_input_capture", default=None)
+
+
+@contextlib.contextmanager
+def capture_reducer_input() -> Iterator[list[list[str]]]:
+    """Collect, in order, every list the runner's hydration reports through :func:`note_reducer_input`
+    inside the block (nexus-jypmj.3.1).
+
+    The coverage boundary hydrates the terminal reduction's input itself and needs the final list, with
+    the reserved stream merged and the cap applied, before the operator joins it into one string. This
+    is independent of the active :class:`ReducerInputRecorder` (which keeps only the first consumer's
+    input) and of nesting: the capture sits beside the recorder, it does not replace it.
+    """
+    sink: list[list[str]] = []
+    token = _CAPTURE.set(sink)  # type: ignore[arg-type]
+    try:
+        yield sink
+    finally:
+        _CAPTURE.reset(token)
+
+
 def note_reducer_input(items: Sequence[Any]) -> None:
-    """No-op without a recorder."""
+    """No-op without a recorder or a capture."""
     rec = _ACTIVE.get()
     if rec is not None:
         rec.note(items)
+    sink = _CAPTURE.get()
+    if sink is not None:
+        sink.append([i for i in items if isinstance(i, str)])
 
 
 def plan_tools(plan_json: Any) -> list[str]:
@@ -231,6 +262,10 @@ def _attribute(
         if hit is not None:
             out.append(_Attribution(hit.stream, hit.collection, hit.doc_id, hit.source))
             continue
+        if text.startswith(COVERAGE_NOTE_PREFIX):
+            # the coverage boundary's note to the generator: not retrieved evidence, so not an unattributed input
+            out.append(_Attribution(COVERAGE_NOTE_STREAM, UNATTRIBUTED))
+            continue
         found = index.get(hashlib.sha256(strip_source_note(text).encode("utf-8")).hexdigest())
         out.append(_Attribution(found[0], found[1]) if found else _Attribution("unattributed", UNATTRIBUTED))
     return out
@@ -254,6 +289,7 @@ def build_evidence_diagnostics(
     reducer_expected: bool = True,
     dropped_scope: str = "",
     owner_resolution: Mapping[str, Any] | None = None,
+    request_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``evidence_diagnostics`` object for one run (see the module docstring).
 
@@ -267,6 +303,8 @@ def build_evidence_diagnostics(
     with no scope in force the check says ``not_evaluated`` and names it, never ``not_applicable``.
     *owner_resolution* is the request's :meth:`OwnerResolution.to_wire` (nexus-jypmj.1.18): it lets
     ``scope_check.owner_narrowing`` say that owner narrowing was not applied, and why.
+    *request_coverage* is :meth:`~nexus.plans.request_coverage.RequestCoverage.diagnostics_summary` (nexus-jypmj.2.2):
+    counts and closed names only, carried as ``request_coverage`` and ``None`` when the caller did not build one.
     """
     corpus_of_step = {int(a["step_index"]): a.get("corpus", "") for a in resolved_args if "step_index" in a}
     streams: dict[str, _Stream] = {"vector": _Stream({}, []), "graph": _Stream({}, [])}
@@ -345,6 +383,7 @@ def build_evidence_diagnostics(
         "traversals": traversals,
         "capped_traversals": capped_traversal_count(steps),
         "reserved": _reserved_wire(reserved),
+        "request_coverage": dict(request_coverage) if request_coverage is not None else None,
     }
 
 
@@ -354,13 +393,16 @@ def _reducer_wire(rec: ReducerInputRecorder, att: Sequence[_Attribution], scope:
     by_collection: dict[str, int] = {}
     for a in att:
         by_stream[a.stream] = by_stream.get(a.stream, 0) + 1
-        if a.stream in ("t2", "unattributed"):
+        if a.stream in ("t2", "unattributed", COVERAGE_NOTE_STREAM):
             continue
         by_stream_collection.setdefault(a.stream, {})
         by_stream_collection[a.stream][a.collection] = by_stream_collection[a.stream].get(a.collection, 0) + 1
         by_collection[a.collection] = by_collection.get(a.collection, 0) + 1
     # An item is unattributed when no stream produced it, or when its stream is known but not its collection.
-    unattributed = sum(1 for a in att if a.stream != "t2" and (a.stream == "unattributed" or a.collection == UNATTRIBUTED))
+    unattributed = sum(
+        1 for a in att
+        if a.stream not in ("t2", COVERAGE_NOTE_STREAM) and (a.stream == "unattributed" or a.collection == UNATTRIBUTED)
+    )
     attributed = {c: n for c, n in by_collection.items()}
     inside, outside = _scope_counts(scope, attributed)
     return {
@@ -661,6 +703,7 @@ def log_evidence_diagnostics(diag: Mapping[str, Any], *, plan_id: int) -> None:
     source = diag["source_check"]
     scope = diag["scope_check"]
     reserved = diag.get("reserved") or {}
+    coverage = diag.get("request_coverage") or {}
     _log.info(
         "nx_answer_evidence_diagnostics",
         plan_id=plan_id,
@@ -683,4 +726,9 @@ def log_evidence_diagnostics(diag: Mapping[str, Any], *, plan_id: int) -> None:
         reserved_over_share_dropped=reserved.get("over_share_dropped"),
         reserved_dropped_before_terminal=(reserved.get("dropped_before_terminal") or {}).get("missing"),
         reserved_secondary_cut=reserved.get("secondary_cut"),
+        coverage_kind=coverage.get("answer_kind"),
+        coverage_facets=coverage.get("facets"),
+        coverage_constraints=coverage.get("constraints"),
+        coverage_ambiguities=len(coverage.get("ambiguities") or ()),
+        coverage_wants_lifecycle=coverage.get("wants_lifecycle_stream"),
     )

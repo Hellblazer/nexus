@@ -24,7 +24,7 @@ Methodology:
    knowledge__art and knowledge__agentic-scholar each have a single
    multi-chunk doc which is insufficient diversity).
 2. Reassemble each via :func:`nexus.aspect_readers.read_source` with a
-   ``chroma://`` URI — exercises the chunk_index sort + concatenation
+   ``nx-note://`` URI — exercises the chunk_index sort + concatenation
    + pagination path (273 / 408 / 209 chunks well past
    ``QUOTAS.MAX_QUERY_RESULTS = 300`` for two of the three).
 3. Verify ordering: assemble independently via direct chroma query +
@@ -173,9 +173,8 @@ def _has_signal(record) -> bool:
 
 def main() -> int:
     from nexus.aspect_extractor import extract_aspects
-    from nexus.aspect_readers import ReadFail, ReadOk, read_source
+    from nexus.aspect_readers import ReadFail, ReadOk, note_uri, read_source
     from nexus.mcp_infra import get_t3
-    from urllib.parse import quote
 
     t3 = get_t3()
 
@@ -191,7 +190,7 @@ def main() -> int:
         print(f"\n[{i}/{len(PAPERS)}] {label} ({collection})")
 
         # Reassemble via aspect_readers (the path under test).
-        uri = f"chroma://{collection}/{quote(sp, safe='/')}"
+        uri = note_uri(collection, sp, quote_rest=True)
         result = read_source(uri, t3=t3)
         if isinstance(result, ReadFail):
             print(f"  read_source FAIL: reason={result.reason}, detail={result.detail}")

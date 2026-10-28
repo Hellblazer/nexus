@@ -66,6 +66,8 @@ Route mapping (matches TelemetryHandler Java):
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -101,6 +103,15 @@ def normalize_since_filter(since: str) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def _parse_instant(value: Any) -> datetime | None:
+    """An ISO-8601 instant as an aware UTC ``datetime`` (``Z`` or an offset; naive means UTC), or ``None``."""
+    try:
+        dt = datetime.fromisoformat(str(value).strip())
+    except ValueError:
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
 
 #: Default tenant matching TenantConstants.DEFAULT_TENANT in the Java service.
 DEFAULT_TENANT: str = "default"
@@ -399,6 +410,46 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     #: operation), not a bug — see the class docstring for the full account.
     _version_capabilities_cache: dict[str, Any] | None = None
 
+    #: RDR-232 Phase 3 (nexus-jypmj.3.5): the longest a probed ``/version`` body is trusted. A cached flag is
+    #: not durable proof across an engine rollback, so a store that outlives this interval re-reads it. The
+    #: stamp is set only by a probe this class made; a cache assigned by hand (tests, the 404 downgrade)
+    #: carries none and does not expire. 300 s keeps the one-probe-per-process budget for a short-lived
+    #: store (``t2_ctx`` makes a fresh one per call) and bounds the staleness of a long-lived one.
+    _CAPABILITY_TTL_S: float = 300.0
+    _version_capabilities_fetched_at: float | None = None
+    #: The clock the interval is measured on; a test replaces it on the instance.
+    _capability_clock: Callable[[], float] = staticmethod(time.monotonic)
+
+    def _probe_version(self) -> dict[str, Any]:
+        """One ``GET /version`` read, stamped into the cache. NEVER raises: a failed or unreachable probe
+        caches ``{}`` (residual 10), the same negative result the first probe cached."""
+        try:
+            resp = self._get("/version")
+        except Exception as exc:  # noqa: BLE001 — capability probe must never raise; caller degrades to the unsupported path
+            _log.warning("nx_answer_version_capabilities_probe_failed", error=str(exc))
+            caps: dict[str, Any] = {}
+        else:
+            caps = resp if isinstance(resp, dict) else {}
+        self._version_capabilities_cache = caps
+        self._version_capabilities_fetched_at = self._capability_clock()
+        return caps
+
+    def _refresh_version_capabilities(self) -> bool:
+        """Re-read ``/version`` now and report whether the body differs from the cached one (RDR-232 Phase 3:
+        a run-summary readback that disagrees with the flag calls this, so an engine rolled back under a
+        running client stops being believed). Logs the change. NEVER raises."""
+        before = self._version_capabilities_cache
+        after = self._probe_version()
+        changed = before is not None and before != after
+        if changed:
+            _log.warning(
+                "nx_answer_version_capabilities_changed",
+                run_summary_supported=bool(after.get("nx_answer_run_summary_supported")),
+                run_complete_supported=bool(after.get("nx_answer_run_complete_supported")),
+                steps_supported=bool(after.get("nx_answer_steps_supported")),
+            )
+        return changed
+
     def _version_capabilities(self) -> dict[str, Any]:
         """One cached ``GET /version`` body per store instance. NEVER raises.
 
@@ -420,17 +471,12 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         degrades to "unsupported" against an empty dict, matching that
         contract.
         """
-        if self._version_capabilities_cache is not None:
-            return self._version_capabilities_cache
-        try:
-            resp = self._get("/version")
-        except Exception as exc:  # noqa: BLE001 — capability probe must never raise; caller degrades to the unsupported path
-            _log.warning("nx_answer_version_capabilities_probe_failed", error=str(exc))
-            self._version_capabilities_cache = {}
-            return {}
-        caps = resp if isinstance(resp, dict) else {}
-        self._version_capabilities_cache = caps
-        return caps
+        cached = self._version_capabilities_cache
+        if cached is not None:
+            fetched_at = self._version_capabilities_fetched_at
+            if fetched_at is None or self._capability_clock() - fetched_at < self._CAPABILITY_TTL_S:
+                return cached
+        return self._probe_version()
 
     def _supports_nx_answer_steps(self) -> bool:
         """Capability probe (RDR-196 .p1d): does the engine THIS store talks
@@ -495,6 +541,49 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         return bool(self._version_capabilities().get("nx_answer_run_complete_supported"))
 
+    def _supports_nx_answer_run_summary(self) -> bool:
+        """RDR-232 Phase 3 (nexus-jypmj.3.5): does the engine THIS store talks to keep a ``run_summary`` on
+        the run row (``GET /version``'s ``nx_answer_run_summary_supported``, engine-service 0.1.167+)?
+
+        The strict reading: only a JSON ``true`` counts. An absent flag, a non-boolean, a non-2xx response
+        and a transport failure all read as unsupported, which is the safe direction because an engine that
+        predates the column answers HTTP 200 to a ``run_summary`` it silently discards, so a 200 is no
+        evidence of persistence and the only honest course against such an engine is not to send the field.
+        The public cloud edge trims ``/version`` to an allowlist; until it lists this flag a cloud client
+        reads unsupported here too (engine-release pre-tag check 3e), which is the same safe answer.
+
+        Reads the same cached body as the other flags, refreshed after :attr:`_CAPABILITY_TTL_S` or on
+        :meth:`_refresh_version_capabilities`. NEVER raises.
+        """
+        return self._version_capabilities().get("nx_answer_run_summary_supported") is True
+
+    def _run_summary_for_wire(self, run_summary: Mapping[str, Any] | None, *, site: str) -> dict[str, Any] | None:
+        """*run_summary* as a plain dict when it can go on the wire, else ``None`` with the reason logged:
+        the engine does not keep it (unsupported), or it is over the engine's cap (a 400 there would lose the
+        whole run record). ``None`` input is not an event."""
+        if run_summary is None:
+            return None
+        if not self._supports_nx_answer_run_summary():
+            _log.warning(
+                "nx_answer_run_summary_unsupported_by_engine", site=site,
+                consequence="run row recorded without a run summary",
+            )
+            return None
+        from nexus.plans.run_summary import ENGINE_RUN_SUMMARY_LIMIT_BYTES, canonical_json  # noqa: PLC0415 — deferred; keeps the store import-light
+
+        try:
+            size = len(canonical_json(run_summary).encode("utf-8"))
+        except ValueError as exc:
+            _log.warning("nx_answer_run_summary_unserializable", site=site, error=str(exc))
+            return None
+        if size > ENGINE_RUN_SUMMARY_LIMIT_BYTES:
+            _log.warning(
+                "nx_answer_run_summary_oversize", site=site, bytes=size, limit=ENGINE_RUN_SUMMARY_LIMIT_BYTES,
+                consequence="run row recorded without a run summary",
+            )
+            return None
+        return dict(run_summary)
+
     def _downgrade_nx_answer_run_complete_support(self) -> None:
         """RDR-203 D5 404-downgrade guard: a 404 from ``/complete`` against a
         cache that answered ``True`` means the probe was right when read
@@ -530,8 +619,17 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         cost_usd: float | None,
         duration_ms: int,
         steps: list[dict[str, Any]] | None = None,
+        run_summary: Mapping[str, Any] | None = None,
+        created_at: str | None = None,
     ) -> None:
         """Record an nx_answer run. Calls ``POST /v1/telemetry/nx_answer_runs/record``.
+
+        ``run_summary`` (RDR-232 Phase 3, nexus-jypmj.3.5): the version-1 summary object, put on the wire
+        ONLY when :meth:`_supports_nx_answer_run_summary` says the engine keeps it and it fits the engine's
+        cap; otherwise the record is exactly today's (the drop is logged, there is no second write). With a
+        summary on the wire, *created_at* (an ISO-8601 instant the caller stamped once) is sent too, so the
+        caller can find this row again on readback (:meth:`_read_nx_answer_run_summary`); it is not sent
+        without one. HTTP 200 does not mean the engine kept the summary; the caller confirms by readback.
 
         ``cost_usd`` is ``float | None`` (RDR-196 .p1d, nexus-nyry9.10):
         ``None`` means the caller could not determine a real cost (no step
@@ -581,6 +679,11 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                     step_count=len(steps),
                     consequence="run row recorded without per-step telemetry",
                 )
+        wire_summary = self._run_summary_for_wire(run_summary, site="record")
+        if wire_summary is not None:
+            payload["run_summary"] = wire_summary
+            if created_at:
+                payload["created_at"] = created_at
         self._post("/v1/telemetry/nx_answer_runs/record", payload)
 
     def record_nx_answer_run_complete(
@@ -596,6 +699,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         created_at: str,
         steps: list[dict[str, Any]] | None,
         success: bool,
+        run_summary: Mapping[str, Any] | None = None,
     ) -> None:
         """RDR-203 D1/D5 (nexus-dt2tu.3): the one composite POST replacing the
         client's (run_start, record, run_outcome) triple against a
@@ -634,6 +738,10 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         (``"success"``/``"failure"``, D1) — derived here from *success*
         rather than accepted as a string, so this method's own signature
         cannot pass the engine a value it would 400 on.
+
+        ``run_summary`` (RDR-232 Phase 3, nexus-jypmj.3.5): as on :meth:`record_nx_answer_run`, sent only
+        when the engine keeps it and it fits the cap, and written in the run row's own INSERT, so it stays
+        inside the one transaction.
         """
         payload: dict[str, Any] = {
             "question":           question,
@@ -647,7 +755,49 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "steps":              steps,
             "outcome":            "success" if success else "failure",
         }
+        wire_summary = self._run_summary_for_wire(run_summary, site="complete")
+        if wire_summary is not None:
+            payload["run_summary"] = wire_summary
         self._post("/v1/telemetry/nx_answer_runs/complete", payload)
+
+    def _read_nx_answer_run_summary(
+        self, *, question: str, created_at: str, final_text: str | None = None, duration_ms: int | None = None,
+        step_count: int | None = None, limit: int = 50,
+    ) -> tuple[bool, list[Any]]:
+        """RDR-232 Phase 3 readback: ``(row_found, [run_summary, ...])`` for the run written with this
+        ``(question, created_at)``. A READ (``GET /v1/telemetry/nx_answer_runs/query?since=<created_at>``), never
+        a second write.
+
+        The engine reports ``created_at`` to the SECOND (``utcIso`` truncates), so the instant is matched
+        at second resolution, which two runs of one question in one second can share. ``final_text``,
+        ``duration_ms`` and ``step_count``, when given, narrow the candidates to the run written; a caller that
+        still finds more than one gets every candidate's summary and decides (the run is persisted if any of
+        them is its own). A redacted run (question ``"[redacted]"``) is matched the same way. An engine
+        that predates the column returns rows with no ``run_summary`` key, which reads as ``None`` per row.
+        Raises on a transport failure; the caller decides what an unreadable row means.
+        """
+        resp = self._get(
+            "/v1/telemetry/nx_answer_runs/query",
+            params={"since": normalize_since_filter(created_at), "limit": limit},
+        )
+        rows = resp.get("rows") if isinstance(resp, dict) else None
+        want = _parse_instant(created_at)
+        want_second = want.replace(microsecond=0) if want is not None else None
+        found: list[Any] = []
+        for row in rows or []:
+            if not isinstance(row, dict) or row.get("question") != question:
+                continue
+            got = _parse_instant(row.get("created_at"))
+            if want_second is None or got is None or got.replace(microsecond=0) != want_second:
+                continue
+            if final_text is not None and row.get("final_text") != final_text:
+                continue
+            if duration_ms is not None and row.get("duration_ms") != duration_ms:
+                continue
+            if step_count is not None and row.get("step_count") != step_count:
+                continue
+            found.append(row.get("run_summary"))
+        return bool(found), found
 
     def query_nx_answer_runs(
         self,
@@ -1381,11 +1531,13 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         cost_usd: float | None,
         duration_ms: int,
         created_at: str,
+        run_summary: Mapping[str, Any] | None = None,
     ) -> None:
         """Fidelity-preserving import of one nx_answer_runs row.
 
         Uses ``POST /v1/telemetry/import`` with ``table=nx_answer_runs``.
-        DO NOTHING on ETL dedup conflict.
+        DO NOTHING on ETL dedup conflict. ``run_summary`` (RDR-232 Phase 3) rides along under the same
+        capability rule as the live record: sent only to an engine that keeps it.
         """
         payload: dict[str, Any] = {
             "table":      "nx_answer_runs",
@@ -1401,6 +1553,9 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["matched_confidence"] = matched_confidence
         if cost_usd is not None:
             payload["cost_usd"] = cost_usd
+        wire_summary = self._run_summary_for_wire(run_summary, site="import")
+        if wire_summary is not None:
+            payload["run_summary"] = wire_summary
         self._post("/v1/telemetry/import", payload)
 
     def import_hook_failure(
@@ -1482,6 +1637,18 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not rows:
             return 0
+        if table == "nx_answer_runs" and any(isinstance(r, dict) and r.get("run_summary") is not None for r in rows):
+            # RDR-232 Phase 3: a summary only goes to an engine that keeps it (and fits the cap); a copy is
+            # sent without it otherwise, and the caller's rows stay as they were.
+            rows = [
+                {**r, "run_summary": self._run_summary_for_wire(r.get("run_summary"), site="import_batch")}
+                if isinstance(r, dict) and r.get("run_summary") is not None else r
+                for r in rows
+            ]
+            rows = [
+                {k: v for k, v in r.items() if k != "run_summary"} if isinstance(r, dict) and "run_summary" in r and r["run_summary"] is None else r
+                for r in rows
+            ]
         resp = self._post("/v1/telemetry/import_batch", {"table": table, "rows": rows})
         return int(resp.get("imported", 0))
 

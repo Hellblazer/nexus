@@ -22,6 +22,14 @@ command — with a per-step breakdown (``--steps``) and a three-way
 executed-ok / executed-failed / degenerate split of the listed rows. See
 ``answer_runs_cmd``'s own docstring (what ``--help`` actually renders) for
 the default-population statement.
+
+RDR-232 Phase 3 (nexus-jypmj.3.3) adds a fourth population beside those three:
+**insufficient-evidence**, a partial answer returned behind the
+``[insufficient-evidence: <n> unresolved]`` notice. It is read from the run
+summary the row carries (``coverage_partial``), which survives ``trace=False``
+redaction, and from the notice itself when a row has no summary and its text is
+visible. See ``_row_is_insufficient_evidence`` for the rule and
+``docs/cli-reference.md`` § nx answer-runs for the reader-facing text.
 """
 from __future__ import annotations
 
@@ -238,6 +246,9 @@ _WELL_FORMED_DEGENERATE_CLASSES: frozenset[str] = frozenset({
     "non_answer/ranking_only", "non_answer/operator_payload",
     "non_answer/retrieval_only",
     "non_answer/listing", "non_answer/empty",
+    # RDR-232 Phase 3 (nexus-jypmj.3.3): the coverage-decided non-answers carry the notice too. Without these
+    # a row with executed steps would fall through to executed-ok.
+    "non_answer/uncovered", "non_answer/no_evidence",
 })
 
 _NON_ANSWER_NOTICE_RE = _re.compile(r"^\[non-answer: ([a-z_]+)\]")
@@ -500,6 +511,45 @@ def _row_is_continuation_report(row: dict) -> bool:
     return _marker_carries_parseable_id(
         str(row.get("final_text") or ""), NX_ANSWER_CONTINUATION_REPORT_MARKER_PREFIX,
     )
+
+
+def _row_is_insufficient_evidence(row: dict) -> bool:
+    """Whether *row* is a partial answer returned with the insufficient-evidence notice (RDR-232 section 4,
+    nexus-jypmj.3.3; gate critique S1).
+
+    The notice opens the recorded text, but a ``trace=False`` row records ``[redacted]``, so the text cannot
+    classify it. The rule, in order:
+
+    1. A row that carries a run summary with the coverage counts is bucketed from the summary, for both
+       ``trace`` values: a successful ``nx_answer`` run whose ``coverage_partial`` is 1. The summary is the
+       record of the state the call RETURNED (a partial ledger whose prose was no usable answer is recorded
+       ``unavailable``), so text that merely opens like the notice cannot override it, and a partial ledger on
+       a run that did not succeed (budget exhausted, error, hand-off) is not an insufficient-evidence result.
+    2. Without a summary (an engine that predates the column, or a row written before it), a row whose text is
+       visible (``trace=True``) is bucketed by the notice's prefix at the start of the text.
+    3. A ``trace=False`` row without a summary has nothing left to read and stays redacted, as documented in
+       the command's help text.
+    """
+    summary = row.get("run_summary")
+    if isinstance(summary, dict) and "coverage_partial" in summary:
+        return (
+            summary.get("kind") == "nx_answer"
+            and summary.get("outcome") == "success"
+            and summary.get("coverage_partial") == 1
+        )
+    from nexus.plans.answer_shape import INSUFFICIENT_EVIDENCE_NOTICE_PREFIX  # noqa: PLC0415 - deferred: keep CLI startup fast
+
+    return str(row.get("final_text") or "").startswith(INSUFFICIENT_EVIDENCE_NOTICE_PREFIX)
+
+
+def _split_insufficient_evidence(rows: "list[dict]") -> "tuple[list[dict], list[dict]]":
+    """``(insufficient_evidence_rows, the_rest)``: the bucket is taken off BEFORE the four-way split, so these
+    rows are in none of executed-ok, executed-failed, handed-off or degenerate."""
+    bucket: list[dict] = []
+    rest: list[dict] = []
+    for r in rows:
+        (bucket if _row_is_insufficient_evidence(r) else rest).append(r)
+    return bucket, rest
 
 
 def _split_four_way(
@@ -881,6 +931,24 @@ def answer_runs_cmd(
     must never silently re-enter an aggregate meant to answer "what does a
     normal run cost/take". Pass ``--include-failed`` to fold
     executed-failed rows into the ``--steps`` breakdown too.
+
+    RDR-232 Phase 3 (nexus-jypmj.3.3): a partial answer, returned with the
+    ``[insufficient-evidence: <n> unresolved]`` notice ahead of the prose, is
+    its own **insufficient-evidence** bucket, in none of the others (and
+    so outside the executed-ok latency and ``--steps`` aggregates). A row that
+    carries a run summary is bucketed from it, for ``trace=True`` and
+    ``trace=False`` rows alike: a successful ``nx_answer`` run whose
+    ``coverage_partial`` count is 1. A row without a summary (an engine that
+    predates the run summary column, or a row written before it) is bucketed
+    from the notice itself when its text is visible (``trace=True``); a
+    ``trace=False`` row without a summary has its text redacted, so it stays
+    redacted: it is counted where it was before and is not recognizable as
+    insufficient-evidence. ``--json`` carries the bucket as
+    ``insufficient_evidence_count``. The two coverage non-answers,
+    ``uncovered`` (evidence found, none of it covering a requested part) and
+    ``no_evidence`` (nothing usable reached the reduction), are not in this
+    bucket: they carry the ``[non-answer: <shape>]`` notice and are counted as
+    degenerate classes ``non_answer/uncovered`` and ``non_answer/no_evidence``.
     """
     # nexus-spbay: validate/normalize --since BEFORE the service try-block —
     # a bad value must fail as a usage error naming the value, never fall
@@ -968,10 +1036,12 @@ def _emit_report(
     telemetry_store: Any = None,
 ) -> None:
     rows = result.get("rows") or []
+    # RDR-232 Phase 3 (nexus-jypmj.3.3): partial answers are their own bucket, taken off before the four-way split.
+    insufficient_evidence_rows, split_rows = _split_insufficient_evidence(rows)
     (
         executed_ok_rows, executed_failed_rows, handed_off_rows,
         degenerate_by_class, report_event_rows,
-    ) = _split_four_way(rows)
+    ) = _split_four_way(split_rows)
     degenerate_count = sum(len(v) for v in degenerate_by_class.values())
     degenerate_breakdown = {k: len(v) for k, v in degenerate_by_class.items()}
     # RDR-200 §Telemetry (nexus-4e75w.5): continuation runs are NEVER
@@ -1048,6 +1118,8 @@ def _emit_report(
             "executed_failed_count": len(executed_failed_rows),
             "degenerate_count": degenerate_count,
             "degenerate_breakdown": degenerate_breakdown,
+            # RDR-232 Phase 3 (nexus-jypmj.3.3): partial answers returned with the insufficient-evidence notice.
+            "insufficient_evidence_count": len(insufficient_evidence_rows),
             "executed_ok_avg_duration_ms": executed_ok_avg_duration_ms,
             "executed_ok_latency_buckets": executed_ok_latency_buckets,
             # RDR-200 §Telemetry (nexus-4e75w.5): the fourth split bucket
@@ -1136,7 +1208,8 @@ def _emit_report(
     click.echo(
         f"  of the {len(rows)} row(s) shown: executed-ok {len(executed_ok_rows)}, "
         f"executed-failed {len(executed_failed_rows)}, "
-        f"handed-off {len(handed_off_rows)}, degenerate {degenerate_count}"
+        f"handed-off {len(handed_off_rows)}, "
+        f"insufficient-evidence {len(insufficient_evidence_rows)}, degenerate {degenerate_count}"
     )
     for cls in sorted(degenerate_breakdown):
         click.echo(f"    degenerate/{cls}: {degenerate_breakdown[cls]}")

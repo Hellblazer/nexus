@@ -23,8 +23,9 @@
 #                       of plan 473 (nexus-jypmj.1.14) is named "grown:hybrid-factual-lookup-473"; it
 #                       is listed wherever "lookup:hybrid-factual-lookup" is, since it has 473's body.
 #                       The clone stands for ONE Phase 2 exit clause, "unknown-grown plans cannot
-#                       bypass the gate" (it is stored ad-hoc,grown and carries no answer-kind
-#                       declaration). It does NOT measure the clause "473 is ineligible" (a
+#                       bypass the gate" (it is stored ad-hoc,grown and declares kind unknown:
+#                       the fixture stamps it {unknown, grown} like nx_answer's grow site,
+#                       replacing the lookup its source template declares since nexus-jypmj.2.1). It does NOT measure the clause "473 is ineligible" (a
 #                       builtin-tagged row that declares lookup). Plan 473's builtin origin is inferred
 #                       from RDR-232 line 1606 and T2 nexus_rdr/189-research-11; no live read was made.
 #

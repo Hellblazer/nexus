@@ -195,9 +195,9 @@ _NOT_SENDERS: dict[str, str] = {
     "nexus/db/data_token.py": "token mint (POST to the mint endpoint)",
     "nexus/db/http_engine_status.py": "engine probe: GET /v1/status",
     "nexus/db/managed_endpoint.py": "engine probe: GET /version",
+    "nexus/db/serving_engine_version.py": "engine probe: GET /version (the one probe; mcp/channel delegates to it and makes no call of its own), RDR-231 note-write guard",
     "nexus/db/pooled_http.py": "connection-pool transport of http_vector_client; the sender is that module's _request_once",
     "nexus/health.py": "probes: PyPI, GET /v1/_whoami, health",
-    "nexus/mcp/channel.py": "engine probe: GET /version",
     "nexus/upgrade_ladder/provisioning.py": "engine probes: GET /version, /health",
     # test seams over an in-process fake: no engine
     "nexus/db/inmemory_pipeline.py": "MockTransport over an in-process engine",

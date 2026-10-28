@@ -35,6 +35,7 @@ from enum import Enum
 __all__ = [
     "AnswerShape",
     "NON_ANSWER_SHAPES",
+    "INSUFFICIENT_EVIDENCE_NOTICE_PREFIX",
     "ANSWERING_OPERATORS",
     "is_answering_operator",
     "classify_answer_shape",
@@ -45,8 +46,10 @@ __all__ = [
 class AnswerShape(str, Enum):
     """What ``final_text`` structurally IS.
 
-    ``ANSWERED`` is the only shape a caller should read as prose. The rest
-    are non-answers the tool can name without a model call.
+    ``ANSWERED`` and ``INSUFFICIENT_EVIDENCE`` are the two shapes that carry
+    prose (RDR-232 section 4, nexus-jypmj.3.3): the second is an answer with
+    a stable marker notice ahead of it naming the facets the evidence did not
+    settle. The rest are non-answers the tool can name without a model call.
     """
 
     #: A terminal operator step ran and produced text that is not one of
@@ -93,6 +96,18 @@ class AnswerShape(str, Enum):
     #: there was nothing to reduce. Set directly, like ``PLANNER_ERROR``
     #: (nexus-f9kxd).
     NO_EVIDENCE = "no_evidence"
+    #: RDR-232 section 4 (nexus-jypmj.3.3): the coverage state was ``partial`` and a usable answer exists, so
+    #: ``final_text`` is the marker notice (``[insufficient-evidence: <n> unresolved]``, then the unresolved
+    #: facets) followed by the prose. NOT in :data:`NON_ANSWER_SHAPES`: that set couples ``success=False``, no
+    #: plan growth and a notice in place of the prose, and a partial answer needs only the no-grow effect,
+    #: which ``nx_answer`` applies through an explicit flag. Set by ``nx_answer`` from the coverage state,
+    #: never by :func:`classify_answer_shape`.
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    #: RDR-232 section 4 (nexus-jypmj.3.3, Sam's ruling nexus-jypmj.3.12): retrieval returned evidence and none
+    #: of it covered a facet the request asked for, so there is no usable answer. Distinct from ``NO_EVIDENCE``
+    #: (zero retrieval results). The coverage boundary skips terminal generation for it; prose generated anyway
+    #: (a ledger that could not rule a facet out) is withheld. Set by ``nx_answer``, like ``NO_EVIDENCE``.
+    UNCOVERED = "uncovered"
 
 
 #: Every shape that is not an answer. ``nx_answer`` records these as
@@ -109,6 +124,7 @@ NON_ANSWER_SHAPES: frozenset[AnswerShape] = frozenset({
     AnswerShape.PLANNER_ERROR,
     AnswerShape.ERROR,
     AnswerShape.NO_EVIDENCE,
+    AnswerShape.UNCOVERED,
 })
 
 #: Operators whose bare terminal output IS an answer: prose composed from
@@ -215,6 +231,13 @@ def classify_answer_shape(final_text: str | None) -> AnswerShape:
     return AnswerShape.ANSWERED
 
 
+#: Opening of the partial-answer notice (RDR-232 section 4, nexus-jypmj.3.3): ``[insufficient-evidence: <n>
+#: unresolved]``. ``nx answer-runs`` keys on this prefix on the read side for a row whose text is visible
+#: (a ``trace=True`` row without a run summary), so keep it stable. The marker line carries a count and no
+#: question text, so it survives ``trace=False`` redaction wherever the text itself is kept.
+INSUFFICIENT_EVIDENCE_NOTICE_PREFIX: str = "[insufficient-evidence:"
+
+
 #: Text-mode notice prefix for a non-answer. ``nx answer-runs`` keys on
 #: this prefix on the read side (a code-templated marker, the same
 #: convention as the budget-exhausted and continuation markers), so keep
@@ -242,11 +265,27 @@ def render_non_answer_notice(
     list, can still hydrate what was found rather than being pointed at
     something it does not receive (substantive critique, 2026-09-06).
     """
-    head = (
-        f"{NON_ANSWER_NOTICE_PREFIX} {shape.value}] The plan (plan_id={plan_id}, "
-        f"{step_count} steps) retrieved evidence but produced no synthesized "
-        "answer. Nothing was reduced."
-    )
+    if shape is AnswerShape.NO_EVIDENCE:
+        # RDR-232 nexus-jypmj.3.3: the coverage boundary found no usable evidence reached the reduction.
+        head = (
+            f"{NON_ANSWER_NOTICE_PREFIX} {shape.value}] The plan (plan_id={plan_id}, "
+            f"{step_count} steps) ran, but no usable evidence reached the reduction. "
+            "Nothing was reduced."
+        )
+    elif shape is AnswerShape.UNCOVERED:
+        # nexus-jypmj.3.12: generation is skipped before it runs, or its prose is withheld after it; this head is
+        # true in both cases.
+        head = (
+            f"{NON_ANSWER_NOTICE_PREFIX} {shape.value}] The plan (plan_id={plan_id}, "
+            f"{step_count} steps) retrieved evidence, but none of it covered a requested part of the "
+            "question, so no answer is given."
+        )
+    else:
+        head = (
+            f"{NON_ANSWER_NOTICE_PREFIX} {shape.value}] The plan (plan_id={plan_id}, "
+            f"{step_count} steps) retrieved evidence but produced no synthesized "
+            "answer. Nothing was reduced."
+        )
     refs = [r for r in (chunk_refs or []) if r]
     if not refs:
         return f"{head} Use search/query directly."

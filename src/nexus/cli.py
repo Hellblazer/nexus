@@ -92,6 +92,7 @@ class _StorageBackendGuardGroup(click.Group):
 
         from nexus._log_safe_url import ServiceUrlUserinfoError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
+        from nexus.config import PdfConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -135,6 +136,13 @@ class _StorageBackendGuardGroup(click.Group):
             # nexus-xzeml: a refused token-admin call is a credential problem
             # the operator has to act on, not a crash.
             raise click.ClickException("\n".join(exc.lines)) from exc
+        except PdfConfigError as exc:
+            # RDR-237 (nexus-tr1rj.2): a [pdf] integer setting holds no integer. Any verb that
+            # reads the pdf config (nx index pdf, nx dt index, nx dt capture, nx doctor) gets
+            # here; the message names the setting, a traceback buried it.
+            raise click.ClickException(
+                f"{exc}. Set it with `nx config set pdf.{exc.key}=<integer>`."
+            ) from exc
 
 
 @click.group(cls=_StorageBackendGuardGroup)

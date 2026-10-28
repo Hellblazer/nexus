@@ -789,3 +789,67 @@ class TestLocalRegisterManyParity:
             repo_root=str(tmp_path / "rm-empty"),
         )
         assert cat.register_many(owner, []) == []
+
+
+# ── nexus-6pfgb.21 round 3: the holder count is the OWNER count ──────────────
+#
+# Storage-free: the catalog's answers are stand-ins. The engine path is
+# tests/integration/test_6pfgb21_bib_enrich_by_manifest.py.
+
+_FIRST_CHASH = "ab" * 32
+
+
+def test_live_holders_of_chunk_has_one_slot_per_owner_even_for_one_the_catalog_did_not_resolve() -> None:
+    """Two live documents hold the chunk but only one resolved to an entry. The answer has two
+    slots (the unresolved one is None), so a caller that checks ``len > 1`` sees a shared chunk."""
+    from nexus.commands.catalog import _live_holders_of_chunk
+
+    cat = MagicMock()
+    entry = MagicMock(title="Holder Title")
+    cat.resolve_many.return_value = {"1.1.1": entry}
+    with patch(
+        "nexus.catalog.orphan_backfill.live_owners_in_collection",
+        return_value={_FIRST_CHASH: ["1.1.1", "1.1.2"]},
+    ):
+        held_by = _live_holders_of_chunk(cat, "docs__paper-x", _FIRST_CHASH)
+
+    assert len(held_by) == 2
+    assert held_by == [entry, None]
+
+
+def _papers_dry_run(owners: list[str], resolved: dict, capsys) -> tuple[int, str]:
+    from nexus.commands.catalog import _backfill_papers
+
+    cat = MagicMock()
+    cat.resolve_many.return_value = resolved
+    col = MagicMock()
+    col.get.return_value = {"ids": [_FIRST_CHASH], "metadatas": [{"title": "Chunk Row Title"}]}
+    t3 = MagicMock()
+    t3.list_collections.return_value = [{"name": "docs__paper-x", "count": 3}]
+    t3.get_or_create_collection.return_value = col
+    with patch("nexus.commands.catalog._owner_by_name", return_value=None), \
+            patch(
+                "nexus.catalog.orphan_backfill.live_owners_in_collection",
+                return_value={_FIRST_CHASH: owners},
+            ):
+        count = _backfill_papers(cat, t3, dry_run=True)
+    return count, capsys.readouterr().out
+
+
+def test_paper_backfill_skips_a_collection_whose_first_chunk_has_an_unresolved_second_owner(capsys) -> None:
+    """Two live owners, one resolved: the first chunk is shared, so the collection is skipped
+    and the resolved holder's title is NOT used (it read len==1 when it filtered on resolved)."""
+    count, out = _papers_dry_run(["1.1.1", "1.1.2"], {"1.1.1": MagicMock(title="Holder Title")}, capsys)
+
+    assert count == 0, out
+    assert "its first chunk is held by 2 documents" in out
+    assert "Holder Title" not in out
+
+
+def test_paper_backfill_reads_the_sole_resolved_holder(capsys) -> None:
+    """The control: one live owner, resolved, so its catalog title is the one registered."""
+    holder = MagicMock(title="Holder Title", bib_authors="Real", author="", bib_year=2021, year=0)
+    count, out = _papers_dry_run(["1.1.1"], {"1.1.1": holder}, capsys)
+
+    assert count == 1, out
+    assert "Would register paper: Holder Title" in out

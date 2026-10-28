@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-231 (bead nexus-bivz3.5): a note's stored source_uri moves from chroma://<collection>/<title> to
+    nx-note://<collection>/<title>. This is the one-time backfill of the rows already stored; the engine and
+    client changes that mint the new spelling are other beads of the same epic.
+
+    WHAT IS A NOTE. A source_uri that opens with chroma:// whose collection segment (the text after the scheme
+    up to the next slash) does not open with rdr__, docs__ or code__. A chroma://rdr__..., docs__... or code__...
+    value is residue left by indexing, never a note, and keeps its spelling. The prefix list is NoteUri.
+    FILE_ROUTED_PREFIXES and the "file_routed_prefixes" of service/src/test/resources/note-uri-corpus.json;
+    NoteUriBackfillPredicateParityTest runs the three predicates below over every row of that corpus in Postgres
+    and reads this file back to prove it carries the same text.
+
+    THREE PREDICATES, over a column c:
+      direct   starts_with(c, 'chroma://') and the collection segment is not file-routed;
+      nx-note  the same on the nx-note:// spelling (the corpus check only; this changeset never selects on it);
+      export   nxexp://<T>/chroma://<c>/<rest>, the identity a cross-collection import stores for a note
+               (src/nexus/exporter.py stores nxexp://<target>/<original source_uri>), with <c> not file-routed.
+               Once the client mints nx-note://, a re-import builds nxexp://<T>/nx-note://<c>/<rest> and would miss
+               an unrewritten row and mint a duplicate, so the export form is rewritten too (Sam's ruling S6).
+
+    THE PREDICATES AS TEXT, over the column source_uri (the pre-tag census, bead nexus-bivz3.18, copies these
+    lines exactly; NoteUriBackfillPredicateParityTest pins each line to the SQL below and to the corpus):
+      direct:  starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+      nx-note: starts_with(source_uri, 'nx-note://') AND NOT (starts_with(split_part(substr(source_uri, 11), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 11), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 11), '/', 1), 'code__'))
+      export:  source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'))
+
+    SCHEME ONLY (Sam's ruling S7). A note whose URI names a collection it no longer lives in (chroma://X/t on a
+    row in collection Y) becomes nx-note://X/t. The collection segment is NOT repaired here: many such notes
+    already have a duplicate at the Y spelling, so a repair would collide on ux_catalog_documents_live_source_uri
+    and halt boot on installs that never ran a census, and the RDR forbids an automatic merge inside a changeset.
+    The census bead counts these rows and a follow-on repair bead fixes them.
+
+    THE GUARD. The rewrite is injective and no rewritten value can equal an unrewritten one, so a single UPDATE
+    cannot trip the unique index (tenant_id, source_uri) WHERE deleted_at IS NULL AND source_uri is not '' on
+    catalog_documents, unless a LIVE row already holds the nx-note:// spelling of a LIVE note (a twin: one note
+    stored under both spellings). document_aspects and document_highlights have no unique constraint on
+    source_uri. The guard counts live twins, for the direct and the export form alike, BEFORE the first UPDATE;
+    when it finds any it raises and the transaction takes the three NO FORCE toggles with it, so no row changed
+    and FORCE is still set on all three tables. A tombstoned twin does not count (the unique index ignores
+    tombstoned rows), and a twin in another tenant is not one (the index is per tenant).
+
+    RECOVERY FROM A HALT. Liquibase runs before the HTTP server binds (Main.java), so a halted engine serves
+    nothing and cannot run the merge itself. Decision 1 of the RDR forbids running an older engine BELOW the
+    release tag over rows this backfill rewrote; an aborted backfill rewrote none, so the previous engine binary
+    can start, merge each pair with POST /v1/catalog/merge, and stop; the new engine is then started again and
+    the backfill passes. The steps for cloud and local installs are in docs/migration-runbook.md, section "If the
+    RDR-231 note-URI backfill halts startup", and the RAISE text cites that section by its published URL (a PyPI
+    install has no repo-relative path to open); NoteUriBackfillPredicateParityTest checks the anchor resolves.
+
+    SHAPE. aspects-004-1's NO FORCE / FORCE layout (the migration owner is not BYPASSRLS, so under FORCE RLS with
+    no tenant GUC an untoggled statement sees zero rows and the backfill would silently do nothing) and
+    fk-004-0-reconcile-precount's single-transaction DO block (splitStatements="false": the whole text is one
+    statement string in one transaction). Toggled NO FORCE in the order catalog_documents, document_aspects,
+    document_highlights; restored in reverse. The toggles take an ACCESS EXCLUSIVE lock on the three tables for
+    the transaction, so the pre-tag census records each tenant's row counts to estimate the lock time.
+
+    Live and tombstoned rows are both rewritten, so a later restore finds its note. Rewriting document_aspects
+    rows fires trg_document_aspects_updated_at, so their updated_at becomes the backfill time.
+
+    Empty rollback (Sam, 2026-10-24, RDR-231 Decision 1): an older engine binary never runs Liquibase rollback,
+    so a reverse rewrite would protect no real downgrade.
+
+    The note-uri-corpus parity, the abort path (a planted twin changes nothing and leaves FORCE set) and the
+    rewrite itself are proved by NoteUriBackfillPredicateParityTest and NoteUriBackfillMigrationTest, and the
+    data leg of SchemaUpgradeRehearsalIntegrationTest seeds and effect-asserts it under FORCE RLS.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="note-uri-001-1" author="nexus-bivz3.5">
+        <comment>RDR-231 backfill (nexus-bivz3.5): rewrites note source_uris from chroma://&lt;collection&gt;/&lt;title&gt; to nx-note://&lt;collection&gt;/&lt;title&gt;, and nxexp://&lt;target&gt;/chroma://&lt;collection&gt;/... to nxexp://&lt;target&gt;/nx-note://&lt;collection&gt;/..., when the collection is not file-routed (rdr__, docs__, code__ stay). Scheme only: the collection segment is never repaired. A guard aborts the transaction, changing nothing, when a live note has a live twin in the nx-note:// spelling. DATA EFFECT: UPDATEs nexus.catalog_documents.source_uri, nexus.document_aspects.source_uri and nexus.document_highlights.source_uri for every live and tombstoned note row, in one transaction; irreversible (the old spelling is not recorded and the rollback is empty).</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_highlights NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    n BIGINT;
+BEGIN
+    SELECT count(*) INTO n
+      FROM nexus.catalog_documents o
+      JOIN nexus.catalog_documents t
+        ON t.tenant_id = o.tenant_id
+       AND t.deleted_at IS NULL
+       AND t.source_uri = CASE WHEN starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(o.source_uri, 10) WHEN o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(o.source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE o.source_uri END
+     WHERE o.deleted_at IS NULL
+       AND (starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__'))
+            OR o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')));
+    IF n &gt; 0 THEN
+        RAISE EXCEPTION 'RDR-231 note-URI backfill halted and nothing was changed: % live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup', n;
+    END IF;
+END $$;
+
+UPDATE nexus.catalog_documents
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_aspects
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_highlights
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+ALTER TABLE nexus.document_highlights FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+        </sql>
+        <rollback>
+            <!-- Empty by decision (RDR-231 Decision 1, Sam 2026-10-24): an older engine binary never runs
+                 Liquibase rollback, so a reverse rewrite would protect no real downgrade. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

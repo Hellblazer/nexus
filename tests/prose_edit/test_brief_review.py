@@ -463,7 +463,7 @@ def test_the_skill_is_explicit_only_deletes_work_on_every_stop_and_splits_stdin_
     assert "A successful apply has already deleted WORK" in text  # the copy lives in WORK until the author answers
     assert "The flags are the first line. The text is everything after the first newline." in text
     assert "For a stdin run pass only `-` and the flags to `parse`." in text
-    assert "| `-- <path>` or `./<path>` | A file named `rejections` or `exemplar`. |" in text
+    assert "| `-- <path>` or `./<path>` | A file named `rejections`, `exemplar` or `setup`. |" in text
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -493,7 +493,7 @@ def test_the_skill_never_lets_the_model_pick_a_genre_and_the_agent_greps_by_glob
     row = next(ln for ln in skill.splitlines() if ln.strip().startswith("| exit 1, stderr contains `no genre`"))
     assert "Never choose a genre yourself." in row and "End your turn with that question" in row
     agent = _agent()
-    assert "Pass each entry as the Grep `glob`, with `path` left at the repository root." in agent
+    assert "Pass each entry as the Grep `glob`, with `path` set to the repository root" in agent
 
 
 def test_a_failed_helper_stops_the_model_without_naming_an_action_to_avoid() -> None:

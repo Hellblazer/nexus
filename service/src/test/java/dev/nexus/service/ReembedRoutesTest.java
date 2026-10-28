@@ -43,6 +43,7 @@ import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-210 Phase 6 Step 2 (bead nexus-f98bg): the re-embed control routes on {@code /v1/vectors/reembed}, through a real
@@ -1105,10 +1106,57 @@ class ReembedRoutesTest {
         assertThat(rows.get(0)).containsKeys("job_id", "source_collection", "target_collection", "state",
             "disposition", "failure_reason", "last_error", "doc_cursor", "documents_moved", "documents_skipped",
             "chunks_embedded", "chunks_reused", "tokens_billed", "token_cap", "keep_source", "force_delete",
-            "started_at", "updated_at", "finished_at");
-        assertThat(rows.get(0)).containsEntry("state", "planned");
+            "started_at", "updated_at", "finished_at", "skipped_documents");
+        assertThat(rows.get(0)).containsEntry("state", "planned").containsEntry("skipped_documents", List.of());
         assertThat(rows.get(1)).containsEntry("state", "aborted");
         assertThat(post(t, "/status", "").statusCode()).as("POST on status").isEqualTo(405);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void statusNamesEachSkippedDocumentWithItsReasonAndHolder() throws Exception {
+        // RDR-231 step 4: the job report lists each skipped document; a taken source_uri carries its holder.
+        Tn t = tenant("statusskips");
+        UUID jobId = id(startOk(t, t.src()));
+        advance(t, jobId, "running");
+        jobs.advanceAfterBatch(t.tenant(), jobId, new ReembedJobRepository.BatchResult(List.of(
+            new ReembedJobRepository.Skip("rt.a.d1", "source_uri_taken", "rt.a.holder"),
+            new ReembedJobRepository.Skip("rt.a.d2", "tombstoned")), 0, 0, 0, null));
+
+        var rows = statusJobs(get(t, "/status"));
+
+        assertThat(rows.get(0)).containsEntry("documents_skipped", 2);
+        List<Map<String, Object>> skipped = (List<Map<String, Object>>) rows.get(0).get("skipped_documents");
+        assertThat(skipped).hasSize(2);
+        assertThat(skipped.get(0)).containsEntry("doc_id", "rt.a.d1").containsEntry("reason", "source_uri_taken")
+            .containsEntry("holder", "rt.a.holder");
+        assertThat(skipped.get(1)).containsEntry("doc_id", "rt.a.d2").containsEntry("reason", "tombstoned")
+            .containsEntry("holder", null);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void statusSplitsOnlyTheKnownHolderReason_aColonInTheHolderOrAnotherReasonSurvives() throws Exception {
+        // The holder rides in the free-text reason column as reason:holder. Only the one holder-bearing reason is
+        // split, and what follows its first colon is the holder whole, whatever it contains.
+        Tn t = tenant("statuscolon");
+        UUID jobId = id(startOk(t, t.src()));
+        advance(t, jobId, "running");
+        jobs.advanceAfterBatch(t.tenant(), jobId, new ReembedJobRepository.BatchResult(List.of(
+            new ReembedJobRepository.Skip("rt.c.d1", "source_uri_taken", "ns:holder:7"),
+            new ReembedJobRepository.Skip("rt.c.d2", "future:reason")), 0, 0, 0, null));
+
+        var rows = statusJobs(get(t, "/status"));
+
+        List<Map<String, Object>> skipped = (List<Map<String, Object>>) rows.get(0).get("skipped_documents");
+        assertThat(skipped).hasSize(2);
+        assertThat(skipped.get(0)).containsEntry("doc_id", "rt.c.d1").containsEntry("reason", "source_uri_taken")
+            .containsEntry("holder", "ns:holder:7");
+        assertThat(skipped.get(1)).as("a reason that merely contains a colon is not split")
+            .containsEntry("doc_id", "rt.c.d2").containsEntry("reason", "future:reason").containsEntry("holder", null);
+        assertThatThrownBy(() -> new ReembedJobRepository.Skip("rt.c.d3", "tombstoned", "someone"))
+            .as("only the source_uri_taken skip carries a holder")
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     // ── a kept_tombstoned re-entry (a start whose source is a finished job's kept source) ───

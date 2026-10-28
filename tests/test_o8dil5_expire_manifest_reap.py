@@ -62,8 +62,12 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
 
     # Real production catalog registration (commands/store.py put_cmd's
     # exact call) -- mints the tumbler, no file_path, content_type=knowledge.
+    # nexus-6pfgb.15: the note's own TTL lives in its catalog entry (ttl_days
+    # and the put time it counts from), which is what the sweep reads; the
+    # chunk row below carries the same lapsed TTL as a belt-and-braces twin.
     tumbler, created = catalog_store_hook_tracked(
         title=title, doc_id=chash, collection_name=_COLLECTION,
+        ttl_days=1, put_at=_old_iso(),
     )
     assert created is True
 

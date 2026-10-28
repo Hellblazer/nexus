@@ -157,8 +157,64 @@ public final class ReembedJobRepository {
                               String cursor) {
     }
 
+    /** The one skip reason that names a holder: the document's rewritten source_uri is held by another document. */
+    public static final String REASON_SOURCE_URI_TAKEN = "source_uri_taken";
+
     /** A document the runner left in the source this pass, with the reason. */
-    public record Skip(String docId, String reason) {
+    public record Skip(String docId, String reason, String holder) {
+
+        public Skip {
+            if (holder != null && !holder.isEmpty() && !REASON_SOURCE_URI_TAKEN.equals(reason)) {
+                throw new IllegalArgumentException("only a " + REASON_SOURCE_URI_TAKEN + " skip carries a holder: "
+                    + reason);
+            }
+        }
+
+        public Skip(String docId, String reason) {
+            this(docId, reason, null);
+        }
+
+        /**
+         * The text kept in {@code reembed_job_moves.reason}: the reason, then {@code :} and the holder's document id
+         * when there is one (RDR-231: a skip for a taken source_uri names the document that holds it). The column is
+         * free text, so this needs no DDL; {@link SkippedDocument} splits it again for the job report.
+         */
+        String stored() {
+            return holder == null || holder.isEmpty() ? reason : reason + HOLDER_SEPARATOR + holder;
+        }
+    }
+
+    private static final String HOLDER_SEPARATOR = ":";
+
+    /** One document the job left in the source, for the job report: its id, why, and (RDR-231) who holds its URI. */
+    public record SkippedDocument(String docId, String reason, String holder) {
+    }
+
+    /** The most skipped documents the job report lists; {@code documents_skipped} carries the full count. */
+    public static final int SKIPPED_REPORT_LIMIT = 1000;
+
+    /**
+     * The documents the job skipped, in document order, at most {@link #SKIPPED_REPORT_LIMIT}: the job report's
+     * per-document listing. A {@link #REASON_SOURCE_URI_TAKEN} reason recorded with a holder ({@link Skip#stored}) comes
+     * back split at the first separator; every other reason comes back whole.
+     */
+    public List<SkippedDocument> skippedDocuments(String tenant, UUID jobId) {
+        return scope.withTenant(tenant, ctx -> ctx.select(REEMBED_JOB_MOVES.DOC_ID, REEMBED_JOB_MOVES.REASON)
+            .from(REEMBED_JOB_MOVES)
+            .where(REEMBED_JOB_MOVES.TENANT_ID.eq(tenant))
+            .and(REEMBED_JOB_MOVES.JOB_ID.eq(jobId))
+            .and(REEMBED_JOB_MOVES.OUTCOME.eq(OUTCOME_SKIPPED))
+            .orderBy(REEMBED_JOB_MOVES.DOC_ID)
+            .limit(SKIPPED_REPORT_LIMIT)
+            .fetch(r -> {
+                String stored = r.value2() == null ? "" : r.value2();
+                // Only the holder-bearing reason is split: what follows its separator is the holder whole (a holder may
+                // contain the separator), and any other reason is kept whole (it may contain one too).
+                String prefix = REASON_SOURCE_URI_TAKEN + HOLDER_SEPARATOR;
+                return stored.startsWith(prefix)
+                    ? new SkippedDocument(r.value1(), REASON_SOURCE_URI_TAKEN, stored.substring(prefix.length()))
+                    : new SkippedDocument(r.value1(), stored, null);
+            }));
     }
 
     /**
@@ -535,7 +591,7 @@ public final class ReembedJobRepository {
                         .set(REEMBED_JOB_MOVES.JOB_ID, jobId)
                         .set(REEMBED_JOB_MOVES.DOC_ID, skip.docId())
                         .set(REEMBED_JOB_MOVES.OUTCOME, OUTCOME_SKIPPED)
-                        .set(REEMBED_JOB_MOVES.REASON, skip.reason())
+                        .set(REEMBED_JOB_MOVES.REASON, skip.stored())
                         .set(REEMBED_JOB_MOVES.PASS_NUMBER, pass.get())
                         .set(REEMBED_JOB_MOVES.AT, clock())
                         .execute();
@@ -545,7 +601,7 @@ public final class ReembedJobRepository {
                     // skipped-to-moved.
                     ctx.update(REEMBED_JOB_MOVES)
                         .set(REEMBED_JOB_MOVES.OUTCOME, OUTCOME_SKIPPED)
-                        .set(REEMBED_JOB_MOVES.REASON, skip.reason())
+                        .set(REEMBED_JOB_MOVES.REASON, skip.stored())
                         .set(REEMBED_JOB_MOVES.PASS_NUMBER, pass.get())
                         .set(REEMBED_JOB_MOVES.AT, clock())
                         .where(REEMBED_JOB_MOVES.TENANT_ID.eq(tenant))

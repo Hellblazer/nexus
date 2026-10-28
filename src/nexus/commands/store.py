@@ -19,7 +19,7 @@ from nexus.corpus import (
 )
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
-from nexus.errors import PutOversizedError
+from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
 from nexus.ttl import parse_ttl
 
 
@@ -162,8 +162,9 @@ def put_cmd(
             category=category, session_id=session_id, source_agent=agent,
             ttl_days=ttl_days,
         )
-    except PutOversizedError as exc:
-        # put_note refuses an over-quota note before it mints a catalog row.
+    except (PutOversizedError, NoteUriEngineTooOldError) as exc:
+        # put_note refuses an over-quota note, or one the serving engine is too old to hold
+        # (RDR-231, nexus-bivz3.13), before it mints a catalog row.
         raise click.ClickException(str(exc)) from exc
     finally:
         file_heartbeat.disarm()
@@ -199,11 +200,11 @@ def put_cmd(
         click.echo(superseded)
 
 
-# nexus-8g79.10 (V1): catalog_store_hook moved to
-# ``nexus.catalog.store_hook`` (lower layer) so MCP infra can invoke
-# without the MCP layer reaching up into this CLI module. Re-exported
-# here under the legacy private name for back-compat.
-from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook  # noqa: E402
+# nexus-8g79.10 (V1): catalog_store_hook moved to ``nexus.catalog.store_hook``
+# (lower layer) so MCP infra can invoke without the MCP layer reaching up into
+# this CLI module. The legacy private re-export (``_catalog_store_hook``) is
+# gone (RDR-231, nexus-bivz3.15): it registered a note without the serving-engine
+# floor check, and nothing in ``src/`` called it.
 # nexus-spujb: ``get_cmd`` reads a split note back whole.
 from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa: E402
 # RDR-223 P2.6 (nexus-z0o2p.16): ``put_cmd`` writes through
@@ -528,7 +529,21 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
 
     if json_out:
         import json  # noqa: PLC0415 — stdlib import kept branch-local
-        click.echo(json.dumps({**entry, "collection": col_name}, indent=2))
+        out = {**entry, "collection": col_name}
+        if entry.get("extraction_method"):
+            # RDR-237: the text form prints the degraded pages of the catalog document(s) holding
+            # this chunk, so the machine form carries them too, as `degraded_pages`: a list of
+            # {tumbler, title, extraction_pages}, ONLY when some document has any (a clean or
+            # non-PDF chunk's JSON is unchanged). A script finding degraded documents reads this
+            # instead of scraping the text line.
+            from nexus.catalog.store_hook import degraded_pages_for_chunk  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+            rows, _n = degraded_pages_for_chunk(col_name, entry["id"])
+            if rows:
+                out["degraded_pages"] = [
+                    {"tumbler": t, "title": title, "extraction_pages": pages} for t, title, pages in rows
+                ]
+        click.echo(json.dumps(out, indent=2))
     else:
         title = entry.get("title", "")
         tags = entry.get("tags", "")
@@ -548,6 +563,11 @@ def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
             click.echo(f"Indexed:    {indexed_at}")
         if extraction_method:
             click.echo(f"Extractor:  {extraction_method}")
+            # RDR-237: same line as the MCP store_get, from the same helper.
+            from nexus.catalog.store_hook import degraded_pages_lines  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+            for line in degraded_pages_lines(col_name, entry["id"]):
+                click.echo(line)
         click.echo(f"\n{entry.get('content', '')}")
 
 
@@ -786,9 +806,49 @@ def _delete_by_title(
 
 @store.command("expire")
 def expire_cmd() -> None:
-    """Remove T3 knowledge__ entries whose TTL has expired."""
-    count = _t3().expire()
-    click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
+    """Remove T3 knowledge__ entries whose TTL has expired.
+
+    Each note is judged by its own TTL and its own put time, kept in its catalog entry (nexus-6pfgb.15),
+    not by the chunk row it shares with any note of identical text. A lapsed note is retired; its chunk
+    is deleted only when no other live note holds it.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — command-local; keeps CLI startup flat
+
+    db = _t3()
+    if not isinstance(db, HttpVectorClient):  # the in-memory facade (tests) has no catalog to judge notes by
+        count = db.expire()
+        click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
+        return
+    report = db.expire_report()
+    count = report.chunks_deleted
+    held = len(report.catalog_ttl_stale)
+    held_text = f" {held} lapsed {'note' if held == 1 else 'notes'} held, not retired." if held else ""
+    click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.{held_text}")
+    if report.notes_tombstoned:
+        n = report.notes_tombstoned
+        click.echo(f"{n} {'note' if n == 1 else 'notes'} retired; {count} {'chunk' if count == 1 else 'chunks'} deleted.")
+    if report.row_ttl_unattributed:
+        click.echo(
+            f"{report.row_ttl_unattributed} chunk(s) carry a lapsed TTL on the chunk row but are held by "
+            "several notes, or by one note whose own TTL the catalog does not record and whose write the "
+            "row is not, so none was judged by it.",
+            err=True,
+        )
+    if report.catalog_ttl_stale:
+        for tumbler, title in report.catalog_ttl_stale:
+            click.echo(
+                f"  note {tumbler} ({title!r}) has lapsed in the catalog but was NOT retired: a chunk row of it "
+                "records a later put than its catalog TTL (the cause may be an older client or an import). "
+                "It never expires until it is re-put with this client (with or without --ttl) or deleted "
+                "with nx store delete --title.",
+                err=True,
+            )
+    if report.failures:
+        for tumbler, why in report.failures:
+            click.echo(f"  note {tumbler} was NOT retired: {why}", err=True)
+        raise click.ClickException(
+            f"{len(report.failures)} lapsed note(s) were not retired and stay live; run it again once fixed."
+        )
 
 
 def _echo_left_out(result: dict) -> None:

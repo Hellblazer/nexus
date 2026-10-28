@@ -1,0 +1,26 @@
+{
+  "_comment": "RDR-231 (nexus-bivz3.1): the one note-URI corpus. NoteUriCorpusTest (Java), the client's is_note_uri(canonical_note_uri(u)) test and the backfill predicate's SQL test all read this file. is_note answers 'is this a note, in either spelling'; canonical is NoteUri.canonical / canonical_note_uri. A residue row exists for every prefix in file_routed_prefixes.",
+  "file_routed_prefixes": ["rdr__", "docs__", "code__"],
+  "rows": [
+    {"uri": "chroma://knowledge__nexus/decision-2026-10-26", "is_note": true, "canonical": "nx-note://knowledge__nexus/decision-2026-10-26"},
+    {"uri": "nx-note://knowledge__nexus/decision-2026-10-26", "is_note": true, "canonical": "nx-note://knowledge__nexus/decision-2026-10-26"},
+    {"uri": "chroma://knowledge__1-1__voyage-context-3__v1/a/b c", "is_note": true, "canonical": "nx-note://knowledge__1-1__voyage-context-3__v1/a/b c"},
+    {"uri": "chroma://rdr__1-1__voyage-context-3__v1/docs/rdr/rdr-231.md", "is_note": false, "canonical": "chroma://rdr__1-1__voyage-context-3__v1/docs/rdr/rdr-231.md"},
+    {"uri": "chroma://docs__1-1__voyage-context-3__v1/docs/catalog.md", "is_note": false, "canonical": "chroma://docs__1-1__voyage-context-3__v1/docs/catalog.md"},
+    {"uri": "chroma://code__1-1__voyage-code-3__v1/src/nexus/cli.py", "is_note": false, "canonical": "chroma://code__1-1__voyage-code-3__v1/src/nexus/cli.py"},
+    {"uri": "nx-note://docs__1-1__voyage-context-3__v1/docs/catalog.md", "is_note": false, "canonical": "nx-note://docs__1-1__voyage-context-3__v1/docs/catalog.md"},
+    {"uri": "chroma://c", "is_note": true, "canonical": "nx-note://c"},
+    {"uri": "chroma:///t", "is_note": true, "canonical": "nx-note:///t"},
+    {"uri": "nx-note://c", "is_note": true, "canonical": "nx-note://c"},
+    {"uri": "chroma://", "is_note": true, "canonical": "nx-note://"},
+    {"uri": "nxexp://knowledge__export/chroma://knowledge__nexus/decision", "is_note": false, "canonical": "nxexp://knowledge__export/nx-note://knowledge__nexus/decision"},
+    {"uri": "nxexp://knowledge__export/chroma://c", "is_note": false, "canonical": "nxexp://knowledge__export/nx-note://c"},
+    {"uri": "nxexp://knowledge__export/chroma://rdr__1-1__voyage-context-3__v1/docs/rdr/rdr-231.md", "is_note": false, "canonical": "nxexp://knowledge__export/chroma://rdr__1-1__voyage-context-3__v1/docs/rdr/rdr-231.md"},
+    {"uri": "nxexp://knowledge__export/nx-note://knowledge__nexus/decision", "is_note": false, "canonical": "nxexp://knowledge__export/nx-note://knowledge__nexus/decision"},
+    {"uri": "nxexp://knowledge__export/paper.pdf", "is_note": false, "canonical": "nxexp://knowledge__export/paper.pdf"},
+    {"uri": "file:///Users/someone/paper.pdf", "is_note": false, "canonical": "file:///Users/someone/paper.pdf"},
+    {"uri": "https://example.org/chroma://knowledge__x/y", "is_note": false, "canonical": "https://example.org/chroma://knowledge__x/y"},
+    {"uri": "nx-scratch://session/abc", "is_note": false, "canonical": "nx-scratch://session/abc"},
+    {"uri": "", "is_note": false, "canonical": ""}
+  ]
+}

@@ -19,6 +19,7 @@ import json
 import shlex
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import msgpack
@@ -172,7 +173,7 @@ def test_locate_owner_group_position_and_uri_synthesis():
     assert groups["file:///a"] is group
     assert group["content_type"] == "knowledge"
 
-    # Title-only owner (no source_uri): synthesizes the SAME chroma://
+    # Title-only owner (no source_uri): synthesizes the SAME nx-note://
     # convention catalog_store_hook_tracked uses for a title-only note.
     group, position = _locate_owner_group(groups, {"title": "B"}, **kw)
     synthesized = uri_for(target, "B")
@@ -837,3 +838,87 @@ def test_the_printed_delete_command_quotes_a_hostile_title(t2_service_env, tmp_p
     assert cli.exit_code == 0, cli.output
     [line] = [ln.strip() for ln in cli.output.splitlines() if ln.strip().startswith("nx store delete")]
     assert shlex.split(line) == ["nx", "store", "delete", "-c", coll, "--title", title], line
+
+
+# ── RDR-231: an old export carries chroma://, the store holds nx-note:// ─────
+
+
+def test_locate_owner_group_keys_a_legacy_note_owner_by_its_stored_form():
+    """RDR-231 Test Plan row 564: an owner record from an old export spells a note
+    ``chroma://``; the group (its key and ``source_uri``) is the stored ``nx-note://``
+    form, so the two spellings of one note are ONE group and nothing downstream sees
+    the legacy one."""
+    target = "knowledge__x__bge-base-en-v15-768__v1"
+    groups: dict = {}
+    kw = dict(fallback_source_uri="nxexp://col/f", fallback_title="f",
+              fallback_content_type="knowledge", target_collection=target)
+
+    old, _ = _locate_owner_group(
+        groups, {"source_uri": "chroma://knowledge__src/n", "title": "n", "position": 0}, **kw,
+    )
+    new, _ = _locate_owner_group(
+        groups, {"source_uri": "nx-note://knowledge__src/n", "title": "n", "position": 1}, **kw,
+    )
+    assert old is new
+    assert list(groups) == ["nx-note://knowledge__src/n"]
+    assert old["source_uri"] == "nx-note://knowledge__src/n"
+
+    # File-routed residue is not a note: left as the export wrote it.
+    residue, _ = _locate_owner_group(
+        groups, {"source_uri": "chroma://code__src/whoops", "title": "r"}, **kw,
+    )
+    assert residue["source_uri"] == "chroma://code__src/whoops"
+
+
+class _UriRecordingReader:
+    """by_source_uri against a dict of stored rows; remembers every lookup."""
+
+    def __init__(self, rows: dict):
+        self.rows = rows
+        self.looked_up: list[str] = []
+
+    def by_source_uri(self, uri: str):
+        self.looked_up.append(uri)
+        return self.rows.get(uri)
+
+
+class _RegisteringWriter:
+    def __init__(self):
+        self.registered: list[dict] = []
+
+    def register(self, **kw):
+        self.registered.append(kw)
+        return "9.9.1"
+
+
+def test_resolve_owner_document_builds_the_cross_collection_identity_from_the_stored_form():
+    """Critique Significant 6: the cross-collection copy's identity is
+    ``nxexp://<target>/<canonical_note_uri(source_uri)>``. A group still carrying
+    the legacy spelling (a caller other than _locate_owner_group) finds the stored
+    copy under the ``nx-note://`` form and registers nothing."""
+    target = "knowledge__t__bge-base-en-v15-768__v1"
+    stored_note = SimpleNamespace(tumbler="1.1.7", physical_collection="knowledge__src")
+    stored_copy = SimpleNamespace(tumbler="1.1.8", physical_collection=target)
+    reader = _UriRecordingReader({
+        "nx-note://knowledge__src/n": stored_note,
+        f"nxexp://{target}/nx-note://knowledge__src/n": stored_copy,
+    })
+    writer = _RegisteringWriter()
+    group = {"source_uri": "chroma://knowledge__src/n", "title": "n", "content_type": "knowledge"}
+
+    tumbler = exporter_mod._resolve_owner_document(group, target, "1.1", reader, writer)
+
+    assert tumbler == "1.1.8"
+    assert reader.looked_up == [
+        "nx-note://knowledge__src/n", f"nxexp://{target}/nx-note://knowledge__src/n",
+    ]
+    assert writer.registered == []
+
+    # Nothing stored under the target yet: the registration carries the stored form.
+    reader = _UriRecordingReader({"nx-note://knowledge__src/n": stored_note})
+    exporter_mod._resolve_owner_document(group, target, "1.1", reader, writer)
+    assert [r["source_uri"] for r in writer.registered] == [
+        f"nxexp://{target}/nx-note://knowledge__src/n",
+    ]
+
+

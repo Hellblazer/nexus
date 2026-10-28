@@ -88,7 +88,7 @@ class _FakeExtractor:
     calls: list[str] = []
 
     def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
-                allow_degraded=False):
+                allow_degraded=False, on_heartbeat=None):
         self.calls.append(str(pdf_path))
         pos, bounds = 0, []
         for i, line in enumerate(self.lines):
@@ -1317,6 +1317,51 @@ def test_a_failed_post_pass_is_finished_by_a_rerun_that_sends_only_the_stamp(
     assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
     assert _index_state(doc) == "complete"
     assert _pipeline_rows(path) == [], "the buffer goes after the stamp landed"
+
+
+def test_a_rerun_post_pass_updates_every_chunk_of_its_manifest_including_one_another_pdf_restamped(
+    tmp_path, fake_pdf, monkeypatch,
+) -> None:
+    """nexus-ahm18: A and B share one chunk. A uploaded, its post-pass failed (the buffer is kept), then B
+    uploaded and restamped the shared chunk (its row now carries B's ``content_hash``). A's rerun runs the
+    post-pass again. Selected by ``content_hash`` it would update A's own chunks and miss the shared one;
+    selected by A's manifest it updates all of them, and none of B's own chunks."""
+    import nexus.pipeline_stages as ps
+    from nexus.doc_indexer import _sha256
+
+    shared = "ahm18 shared chunk text"
+    lines_a = _lines("ahm18-a", 6) + [shared]
+    lines_b = _lines("ahm18-b", 6) + [shared]
+    path_a, path_b = _write_pdf(tmp_path, "ahm18-a"), _write_pdf(tmp_path, "ahm18-b")
+    a_own, b_own, s_chash = [_sha(x) for x in lines_a[:-1]], [_sha(x) for x in lines_b[:-1]], _sha(shared)
+
+    fake_pdf(lines_a)
+    with monkeypatch.context() as failing:
+        failing.setattr(ps, "_enrich_metadata_from_extraction", lambda *a, **kw: False)
+        _index(path_a, "ahm18-a", streaming="always")
+    fake_pdf(lines_b)
+    _index(path_b, "ahm18-b", streaming="always")
+
+    before = _stored_metadata(_COLLECTION, a_own + b_own + [s_chash])
+    assert before[s_chash]["content_hash"] == _sha256(path_b), "non-vacuity: B restamped the shared chunk"
+    assert all(before[c]["content_hash"] == _sha256(path_a) for c in a_own), "A's own chunks carry A's hash"
+    assert "extraction_method" not in before[a_own[0]], "A's failed post-pass wrote nothing"
+    title_b = before[b_own[0]]["title"]
+
+    fake_pdf(lines_a)
+    _index(path_a, "ahm18-a", streaming="always")
+
+    after = _stored_metadata(_COLLECTION, a_own + b_own + [s_chash])
+    title_a = after[a_own[0]]["title"]
+    assert title_a != title_b, "non-vacuity: the two PDFs resolve different titles"
+    assert all(after[c]["title"] == title_a and after[c]["extraction_method"] == "docling" for c in a_own)
+    # The shared chunk is A's too: its manifest names it, and B restamped it, so it is written
+    # non-destructively (title and extraction_method replaced, nothing deleted or blanked; the unit
+    # tests pin the rest). The value is the last writer's (A's, now), until the catalog carries it
+    # (nexus-6pfgb.6); invert this assertion when the chunk-row keys are retired (nexus-6pfgb.27).
+    assert after[s_chash]["title"] == title_a and after[s_chash]["extraction_method"] == "docling"
+    assert all(after[c]["title"] == title_b for c in b_own), "no chunk A does not own is touched"
+    assert all(after[c].get("extraction_method") == before[c].get("extraction_method") for c in b_own)
 
 
 # ── decision D2: the stamp is the last thing a non-streaming path does ───────────────────

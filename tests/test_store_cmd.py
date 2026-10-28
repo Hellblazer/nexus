@@ -552,10 +552,69 @@ def test_store_list_shows_16char_ids(runner, mock_store):
 
 
 def test_store_expire_reports_count(runner, mock_store):
-    mock_store.expire.return_value = 3
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415 — only these expire pins use it
+
+    mock_store.expire_report.return_value = ExpireReport(chunks_deleted=3, notes_tombstoned=0)
     result = runner.invoke(main, ["store", "expire"])
     assert result.exit_code == 0
-    assert "3" in result.output
+    assert "Expired 3 entries." in result.output
+    assert "retired" not in result.output
+
+
+def test_store_expire_names_the_notes_it_retired_beside_the_chunks_it_deleted(runner, mock_store):
+    """nexus-6pfgb.15: a lapsed note whose chunk a permanent note shares is tombstoned and deletes
+    nothing; "Expired 0 entries." alone would read as a sweep that did nothing. The line states the two
+    counts and guesses no cause for the difference (two notes sharing one chunk give 2 notes, 1 chunk
+    with nothing kept)."""
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(chunks_deleted=0, notes_tombstoned=1)
+    result = runner.invoke(main, ["store", "expire"])
+    assert result.exit_code == 0
+    assert "Expired 0 entries." in result.output
+    assert "1 note retired; 0 chunks deleted." in result.output
+    assert "kept" not in result.output
+
+
+def test_store_expire_exits_non_zero_when_a_lapsed_note_could_not_be_retired(runner, mock_store):
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(
+        chunks_deleted=1, notes_tombstoned=1, failures=(("1.1.7", "not tombstoned (RuntimeError: refused)"),))
+    result = runner.invoke(main, ["store", "expire"])
+    assert result.exit_code != 0
+    assert "1.1.7" in result.output and "NOT retired" in result.output
+
+
+def test_store_expire_names_a_note_left_live_by_a_stale_catalog_ttl_and_the_remedy(runner, mock_store):
+    """nexus-6pfgb.30: a lapsed note whose own chunk row records a later put is not retired; the operator
+    is told which note and how to settle it, and the run still exits 0 (nothing failed, nothing was lost)."""
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(
+        chunks_deleted=0, notes_tombstoned=0, catalog_ttl_stale=(("1.1.9", "meeting-notes"),))
+    result = runner.invoke(main, ["store", "expire"])
+    assert result.exit_code == 0
+    assert "1.1.9" in result.output and "meeting-notes" in result.output and "NOT retired" in result.output
+    assert "re-put with this client" in result.output and "nx store delete --title" in result.output
+    # the cause is a possibility, not a diagnosis (a slow put or a restored stamp gives the same result)
+    assert "may be an older client or an import" in result.output
+    assert "never expires until" in result.output
+    # a scheduled sweep reads stdout: the held count is on the summary line there, not only on stderr
+    assert "Expired 0 entries. 1 lapsed note held, not retired." in result.stdout
+
+
+def test_store_expire_summary_counts_every_held_note_and_says_nothing_when_none_were_held(runner, mock_store):
+    from nexus.db.http_vector_client import ExpireReport  # noqa: PLC0415
+
+    mock_store.expire_report.return_value = ExpireReport(
+        chunks_deleted=0, notes_tombstoned=0, catalog_ttl_stale=(("1.1.8", "a"), ("1.1.9", "b")))
+    result = runner.invoke(main, ["store", "expire"])
+    assert "Expired 0 entries. 2 lapsed notes held, not retired." in result.stdout
+
+    mock_store.expire_report.return_value = ExpireReport(chunks_deleted=2, notes_tombstoned=1)
+    result = runner.invoke(main, ["store", "expire"])
+    assert "held" not in result.output
 
 
 # ── nx collection ────────────────────────────────────────────────────────────

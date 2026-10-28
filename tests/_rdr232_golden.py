@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,27 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 BUILTIN_PLANS = REPO / "conexus" / "plans" / "builtin"
-GOLDEN_PATH = REPO / "bench" / "queries" / "golden_v1.yaml"
+GOLDEN_V1_PATH = REPO / "bench" / "queries" / "golden_v1.yaml"
+#: The blind out-of-sample set (nexus-jypmj.2.8), in the golden_v1 format.
+HELDOUT_PATH = REPO / "bench" / "queries" / "golden_heldout_v1.yaml"
+#: Names another golden set for the harness to read (absolute, or relative to the repository root); unset or
+#: blank is golden_v1. The ART RDR-084 journey needs that set's G06 request, so it fails on a set without it.
+GOLDEN_PATH_ENV = "NX_RDR232_GOLDEN_PATH"
+
+
+def golden_path(environ: "Mapping[str, str] | None" = None) -> Path:
+    """The golden set the harness reads: golden_v1 unless *environ* (default ``os.environ``) names another."""
+    raw = str((os.environ if environ is None else environ).get(GOLDEN_PATH_ENV, "")).strip()
+    if not raw:
+        return GOLDEN_V1_PATH
+    path = Path(raw)
+    path = path if path.is_absolute() else REPO / path
+    if not path.is_file():
+        raise FileNotFoundError(f"{GOLDEN_PATH_ENV} names {raw!r}, which is not a file ({path})")
+    return path
+
+
+GOLDEN_PATH = golden_path()
 
 #: The model token of the collections the fixture writes (the local posture's embedder).
 MODEL_TOKEN = "bge-base-en-v15-768__v1"
@@ -499,8 +521,9 @@ def seed_grown_473_clone(library, *, origin_question: str) -> int:
     plans cannot bypass the gate. It does NOT exercise the clause "473 is ineligible" (a builtin-tagged row
     that declares lookup): the builtin is not selected for the incident request in this fixture. Plan 473's
     builtin origin is inferred from RDR-232 line 1606 and T2 nexus_rdr/189-research-11; no live read was
-    made. The test file pins that the clone's ``plan_json`` has no answer-kind key, so the Phase 2 change
-    that adds one to the builtin template (which this clone copies) turns that pin red at a known point.
+    made. Phase 2 (nexus-jypmj.2.1) declares ``lookup`` on the builtin template this clone copies; the clone
+    is stamped with ``grown_plan_json(..., route_kind=None, route_source=None)``, exactly what ``nx_answer``
+    stores for a grown plan today, and the test file pins that it decodes (unknown, grown).
 
     The plan body, binding declarations, default bindings and description are the seeded builtin's own
     (``desired_row_for_template``, the loader's row builder), so the clone runs exactly as 473 ran.
@@ -514,6 +537,7 @@ def seed_grown_473_clone(library, *, origin_question: str) -> int:
     seed loader's reconcile key, and a clone saved under it overwrites the builtin row, so it is refused
     (``ValueError``) when it equals any builtin's description after whitespace normalization.
     """
+    from nexus.plans.answer_kind import grown_plan_json
     from nexus.plans.schema import canonical_dimensions_json
     from nexus.plans.seed_loader import desired_row_for_template
 
@@ -525,8 +549,14 @@ def seed_grown_473_clone(library, *, origin_question: str) -> int:
 
     template = yaml.safe_load((BUILTIN_PLANS / "hybrid-factual-lookup.yml").read_text(encoding="utf-8"))
     row = desired_row_for_template(template)
+    # Phase 2 (nexus-jypmj.2.1) declares `lookup` on the template this clone copies. nx_answer saves a grown
+    # plan whose route was unknown as {unknown, grown} (grown_plan_json replaces the template's declaration),
+    # so the clone is stamped the same way: it stays an unknown-kind grown plan and keeps measuring
+    # "unknown-grown plans cannot bypass the gate". TestPhase2Tripwire pins the stamp.
     return int(library.save_plan(
-        query=origin_question, plan_json=row.plan_json, outcome="success",
+        query=origin_question,
+        plan_json=grown_plan_json(row.plan_json, route_kind=None, route_source=None),
+        outcome="success",
         tags="ad-hoc,grown", project="", ttl=None, scope="personal", scope_tags=GROWN_473_SCOPE_TAGS,
         verb="lookup", name=GROWN_473_STRATEGY,
         dimensions=canonical_dimensions_json(
@@ -576,13 +606,20 @@ class PlanSelection:
     selected: str | None
     candidates: list[str]
     confidences: list[float | None]
+    #: The plan ids the matcher offered, in order (nexus-jypmj.2.3).
+    plan_ids: list[int] = field(default_factory=list)
 
 
 def observe_plan_selection(
-    library, question: str, *, scope: str = "", bindings: dict[str, Any] | None = None,
+    library, question: str, *, scope: str = "", bindings: dict[str, Any] | None = None, eligibility=None,
+    min_confidence: float | None = None, derive_category_verb: bool = True,
 ) -> PlanSelection:
-    """What the UNMODIFIED matcher offers and picks for *question*, called as ``nx_answer`` calls it
-    (same bindings, availability set, floor, ``n`` and category verb). A plan miss selects ``None``."""
+    """What the matcher offers and picks for *question*, called as ``nx_answer`` calls it
+    (same bindings, availability set, floor, ``n`` and category verb). A plan miss selects ``None``.
+    *eligibility* is the answer-kind filter (nexus-jypmj.2.3); none, as before, is the unmodified matcher.
+    *min_confidence* replaces the production floor (a test that wants every candidate the matcher examined).
+    *derive_category_verb* False passes no category verb, which closes the below-floor category route (the matcher
+    then falls through from cosine to FTS when no cosine hit clears *min_confidence*)."""
     from nexus.mcp.core import _PLAN_MATCH_MIN_CONFIDENCE, _nx_answer_caller_bindings, _nx_answer_match_is_hit
     from nexus.mcp_infra import get_t1_plan_cache
     from nexus.plans.matcher import plan_match
@@ -592,12 +629,14 @@ def observe_plan_selection(
     cache = get_t1_plan_cache(populate_from=library)
     matches = plan_match(
         question, library=library, cache=cache, dimensions=None, scope_preference=scope,
-        context=None, min_confidence=_PLAN_MATCH_MIN_CONFIDENCE, n=5,
-        available_bindings=available, category_verb=infer_verb(question),
+        context=None, min_confidence=_PLAN_MATCH_MIN_CONFIDENCE if min_confidence is None else min_confidence, n=5,
+        available_bindings=available, category_verb=infer_verb(question) if derive_category_verb else None, eligibility=eligibility,
     )
     keys = [plan_label_key(m.dimensions, m.tags) for m in matches]
     hit = bool(matches) and _nx_answer_match_is_hit(matches[0].confidence, threshold=_PLAN_MATCH_MIN_CONFIDENCE)
-    return PlanSelection(keys[0] if hit else None, keys, [m.confidence for m in matches])
+    return PlanSelection(
+        keys[0] if hit else None, keys, [m.confidence for m in matches], [m.plan_id for m in matches],
+    )
 
 
 def library_match(library, question: str, *, scope: str = "", bindings: dict[str, Any] | None = None,
@@ -726,7 +765,7 @@ def golden_source_bindings(q, owners: dict[str, str] | None = None) -> tuple[dic
     project ``ART``, which *owners* maps to an owner tumbler (``owner`` binding; a project with no
     mapping is not guessed and travels as the ``project`` binding). A bare id (``RDR-049``) has no
     qualifier, so its binding carries no owner: where sibling files share the number it resolves to
-    candidates, and what to do about that is nexus-xho6c's decision, not made here. A label that is not
+    the file whose frontmatter carries the id (nexus-xho6c). A label that is not
     an RDR id or a tumbler (the paper title ``HybridRAG``, G05) is returned in the second list and is
     scored by its label only.
     """

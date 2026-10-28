@@ -44,6 +44,7 @@ import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Query;
 import org.jooq.Record;
+import org.jooq.Record3;
 import org.jooq.ResultQuery;
 import org.jooq.SelectField;
 import org.jooq.Table;
@@ -808,7 +809,7 @@ public final class CatalogRepository {
             // a fresh INSERT at a new tumbler carrying an already-live source_uri, and an
             // insert whose PK conflict is cleanly HANDLED and whose DO UPDATE arm then
             // moves that source_uri onto a second live row. Both reproduce on PG 17.
-            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
+            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
             ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -820,7 +821,7 @@ public final class CatalogRepository {
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
                        nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
-                       nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
+                       nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
                        ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
@@ -888,7 +889,9 @@ public final class CatalogRepository {
      * owner-scoped file_path idempotency, unguarded — the honest residual).
      */
     public static String deriveSourceUri(String sourceUri, String filePath, String repoRoot) {
-        if (!sourceUri.isEmpty() || filePath.isEmpty()) return sourceUri;
+        // RDR-231: a legacy chroma:// note URI is stored as nx-note://, so the idempotency
+        // lookup, the insert and the race-loser lookup all see the stored spelling.
+        if (!sourceUri.isEmpty() || filePath.isEmpty()) return NoteUri.canonical(sourceUri);
         java.nio.file.Path p = java.nio.file.Paths.get(filePath);
         if (!p.isAbsolute()) {
             if (repoRoot == null || repoRoot.isEmpty()) return "";
@@ -930,8 +933,9 @@ public final class CatalogRepository {
      * with a non-empty {@code repoRoot} enforce the check; {@code "curator"}
      * owners and pre-existing repo owners with no {@code repoRoot} pass
      * through. Only {@code file://} URIs carry a filesystem identity to
-     * compare — {@code chroma://}, {@code https://}, etc. pass through
-     * unchanged. {@code allowCrossProject} is the wire form of the local
+     * compare — {@code https://}, {@code nx-note://} and every other scheme pass
+     * through unchanged (a legacy {@code chroma://} note URI was already stored as {@code nx-note://} by the
+     * 3-arg overload). {@code allowCrossProject} is the wire form of the local
      * arm's {@code NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1} escape hatch (see
      * {@code src/nexus/catalog/types.py:143}): the CLIENT reads its own
      * environment and populates this field, since the server has no access
@@ -1876,12 +1880,6 @@ public final class CatalogRepository {
     }
 
     /**
-     * Update mutable document fields. Only non-null fields in the map are updated.
-     * Refuses to update tombstoned documents (returns 0).
-     * Silently strips {@code deleted_at} from the input map — callers must use
-     * {@code document_trash} / {@code document_restore} to manage the tombstone column.
-     */
-    /**
      * Settable columns for {@link #updateDocument} (wave review, SQL audit CRITICAL):
      * request JSON keys become SET targets via {@code DSL.field(DSL.name(...))}, so
      * WITHOUT this whitelist any body key was an arbitrary-column write from
@@ -1899,10 +1897,28 @@ public final class CatalogRepository {
         "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
         "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi", "bib_enriched_at");
 
+    /**
+     * Update mutable document fields. Only non-null fields in the map are updated.
+     * Refuses to update tombstoned documents (returns 0).
+     * Silently strips {@code deleted_at} from the input map — callers must use
+     * {@code document_trash} / {@code document_restore} to manage the tombstone column.
+     *
+     * <p>RDR-231: a collection move (the fields set a non-blank {@code physical_collection} and no non-null
+     * {@code source_uri}) rewrites a note's URI to name the new collection, and a rewrite onto a URI a live
+     * document already holds is refused before anything is written ({@link SourceUriCollision}, 409). The alias is
+     * resolved once, and shared with the SET builder; an update that is not a move resolves it only in the SET builder.
+     */
     public int updateDocument(String tenant, String tumbler, Map<String, Object> fields) {
         if (fields.isEmpty()) return 0;
         return tenantScope.withTenant(tenant, ctx -> {
-            Query query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields);
+            String movedTo = moveTarget(fields);
+            Map<String, String> resolved = null;
+            if (movedTo != null) {
+                String target = aliasTarget(ctx, tenant, tumbler, fields, null);
+                resolved = Map.of(tumbler, target);
+                refuseCollectionMoveCollisions(ctx, tenant, Map.of(target, movedTo));
+            }
+            Query query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields, resolved);
             return query == null ? 0 : query.execute();
         });
     }
@@ -1949,6 +1965,10 @@ public final class CatalogRepository {
      * aborting the whole call — the caller's existing per-file try/except
      * ghost-class-isolation contract depends on partial-batch survivability.
      *
+     * <p>RDR-231: if any entry moves a note's collection onto a URI a live document already holds, or two
+     * entries rewrite to one URI, the WHOLE request is refused before anything is written
+     * ({@link SourceUriCollision}, 409); a refusal is not a per-entry {@code -1}.
+     *
      * @return per-index update counts aligned 1:1 with the input list:
      *         {@code 1} updated, {@code 0} not found/tombstoned/no-op,
      *         {@code -1} malformed entry (build-time rejection, never sent).
@@ -1967,6 +1987,22 @@ public final class CatalogRepository {
                 if (upd.get("tumbler") instanceof String t && !t.isBlank()) batchTumblers.add(t);
             }
             Map<String, String> aliasTargets = batchAliasTargets(ctx, tenant, batchTumblers);
+
+            // RDR-231: every row's collection-move collision is checked before the batch is built;
+            // one refusal refuses the whole request (409) and nothing is written. Per target tumbler a move in
+            // ANY entry counts (two entries may address one document), the last move's collection standing.
+            Map<String, String> moves = new LinkedHashMap<>();
+            for (var upd : updates) {
+                if (upd.get("tumbler") instanceof String t && !t.isBlank()) {
+                    Map<String, Object> f = new LinkedHashMap<>(upd);
+                    f.remove("tumbler");
+                    String movedTo = moveTarget(f);
+                    if (movedTo != null) {
+                        moves.put(aliasTarget(ctx, tenant, t, f, aliasTargets), movedTo);
+                    }
+                }
+            }
+            refuseCollectionMoveCollisions(ctx, tenant, moves);
 
             for (int i = 0; i < updates.size(); i++) {
                 var upd = updates.get(i);
@@ -2002,13 +2038,6 @@ public final class CatalogRepository {
     }
 
     /**
-     * Shared SET-clause builder for {@link #updateDocument} and
-     * {@link #updateDocumentsMany} — same column whitelist, same
-     * {@code deleted_at}-strip, same {@code meta} jsonb-merge semantics.
-     * Returns {@code null} when *fields* yields no settable column (mirrors
-     * {@code updateDocument}'s 0-row short-circuit).
-     */
-    /**
      * The row an update ADDRESSED at *tumbler* must actually write (nexus-ekaxn).
      *
      * <p>An update addressed to an ALIAS must land on the CANONICAL target, not
@@ -2030,6 +2059,57 @@ public final class CatalogRepository {
         if (fields.containsKey("alias_of")) return tumbler;
         if (prefetched != null) return prefetched.getOrDefault(tumbler, tumbler);
         return resolveAliasTarget(ctx, tenant, tumbler);
+    }
+
+    /**
+     * RDR-231: the collection a field map MOVES a document to, or null when it is not a move: it sets
+     * {@code physical_collection} (non-blank) and carries no non-null {@code source_uri}. A caller's own non-null
+     * source_uri is stored as sent, canonicalized, and takes no part in the move rewrite or its check; an explicit
+     * JSON null counts as absent, as the SET builder skips a null value.
+     */
+    private static String moveTarget(Map<String, Object> fields) {
+        return fields.get("physical_collection") instanceof String c && !c.isBlank()
+                && fields.get("source_uri") == null ? c : null;
+    }
+
+    /**
+     * RDR-231: refuse a collection update whose note URI rewrite would land on a URI a live
+     * document already holds, or on one another row of the same request rewrites to. A row whose
+     * URI the move leaves unchanged (file://, https://, nxexp://, a note already there) is skipped,
+     * so a document never collides with itself. Two reads for the whole request: the moving rows,
+     * then the holders of every rewritten URI.
+     */
+    private static void refuseCollectionMoveCollisions(DSLContext ctx, String tenant, Map<String, String> moves) {
+        if (moves.isEmpty()) return;
+        Map<String, String> rewrittenBy = new LinkedHashMap<>();  // rewritten URI -> moving tumbler
+        for (var r : ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_DOCUMENTS.TUMBLER.in(moves.keySet()))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch()) {
+            String newColl = moves.get(r.value1());
+            String rewritten = NoteUri.moveTo(r.value2(), r.value3(), newColl);
+            if (rewritten == null || rewritten.equals(r.value2())) continue;
+            String other = rewrittenBy.putIfAbsent(rewritten, r.value1());
+            if (other != null) {
+                throw new SourceUriCollision("moving document " + r.value1() + " to " + newColl,
+                    rewritten, other, newColl + " (moved by the same request)");
+            }
+        }
+        if (rewrittenBy.isEmpty()) return;
+        for (var h : ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                .from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_DOCUMENTS.SOURCE_URI.in(rewrittenBy.keySet()))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch()) {
+            String mover = rewrittenBy.get(h.value1());
+            if (!h.value2().equals(mover)) {
+                throw new SourceUriCollision("moving document " + mover + " to " + moves.get(mover),
+                    h.value1(), h.value2(), h.value3());
+            }
+        }
     }
 
     /**
@@ -2070,6 +2150,13 @@ public final class CatalogRepository {
         return buildUpdateDocumentQuery(ctx, tenant, tumbler, fields, null);
     }
 
+    /**
+     * Shared SET-clause builder for {@link #updateDocument} and
+     * {@link #updateDocumentsMany} — same column whitelist, same
+     * {@code deleted_at}-strip, same {@code meta} jsonb-merge semantics.
+     * Returns {@code null} when *fields* yields no settable column (mirrors
+     * {@code updateDocument}'s 0-row short-circuit).
+     */
     // TOMBSTONE-FILTER-WIDEN (nexus-mqd6t): the ctx.update(CATALOG_DOCUMENTS)
     // initiator below and its .where(...DELETED_AT.isNull()...) guard are
     // different Java statements -- the SET clause is built across a loop over
@@ -2131,11 +2218,25 @@ public final class CatalogRepository {
                                        : more.set(CATALOG_DOCUMENTS.BIB_ENRICHED_AT, ts);
                 continue;
             }
+            if ("source_uri".equals(e.getKey())) {
+                // RDR-231: the caller's URI in its stored spelling.
+                String uri = NoteUri.canonical(String.valueOf(e.getValue()));
+                more = (more == null) ? step.set(CATALOG_DOCUMENTS.SOURCE_URI, uri) : more.set(CATALOG_DOCUMENTS.SOURCE_URI, uri);
+                continue;
+            }
             @SuppressWarnings("unchecked")
             Field<Object> f = (Field<Object>) DSL.field(DSL.name("catalog_documents", e.getKey()));
             more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
         }
         if (more == null) return null;
+        // RDR-231 collection update: a moved note's URI names its new collection. The old collection
+        // is the row's own physical_collection, read by the SET from the pre-UPDATE row, never a
+        // caller value. A caller-sent source_uri was stored above instead.
+        String movedTo = moveTarget(fields);
+        if (movedTo != null) {
+            more = more.set(CATALOG_DOCUMENTS.SOURCE_URI,
+                NoteUri.moveTo(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, movedTo));
+        }
         // nexus-e4gel / nexus-zq79 F4: when the caller does NOT name chunk_count,
         // re-derive it from the manifest — the manifest IS the count's source of
         // truth (nexus-b6enc F5, already enforced by writeManifestRows /
@@ -3200,7 +3301,8 @@ public final class CatalogRepository {
             String tenant, String uri, int limit, int offset) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(NoteUri.canonical(uri))  // RDR-231
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .limit(limit > 0 ? limit : NO_LIMIT)
                .offset(offset)
@@ -3408,48 +3510,8 @@ public final class CatalogRepository {
     }
 
     /**
-     * Update physical_collection for one document.
-     *
-     * <p>nexus-eldyi: guarded — silent 0-row no-op on a tombstoned target
-     * (unlike the manifest writers above, no typed refusal here: this method
-     * already returns the real {@code int} rows-affected, so a caller reading
-     * 0 gets the honest answer without needing an exception to surface it).
-     *
-     * <p>nexus-11gh6 rev 2 §3.2 (Hal Q1): does NOT take the sweep gate.
-     * This touches ONLY {@code catalog_documents.physical_collection} — it
-     * never writes {@code catalog_document_chunks} or any {@code
-     * chunks_<dim>} row, so it cannot itself make a chash newly
-     * "referenced" in a collection's scope. The stale denormalized stamp
-     * on any EXISTING manifest row (nexus-x6kdz: {@code
-     * catalog_document_chunks.collection}) is corrected only by a
-     * SUBSEQUENT manifest write ({@link #writeManifestRows} / {@link
-     * #appendManifestChunks} / the import paths), which DO take the gate.
-     * Contrast {@link #renameCollectionTxn}, which bulk-repoints {@code
-     * catalog_document_chunks.collection} (and, on its canonical branch,
-     * {@code chunks_<dim>.collection}) directly and therefore needs it.
-     */
-    public int updateDocumentCollection(String tenant, String tumbler, String newCollection) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection)
-               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
-        );
-    }
-
-    /** Update physical_collection for many documents. Guarded like the
-     *  single-doc form above (nexus-eldyi). See {@link
-     *  #updateDocumentCollection}'s javadoc (nexus-11gh6 rev 2 §3.2) for
-     *  why this needs no sweep gate either. */
-    public int updateDocumentsCollectionBatch(String tenant, List<String> tumblers, String newCollection) {
-        if (tumblers.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newCollection)
-               .where(CATALOG_DOCUMENTS.TUMBLER.in(tumblers).and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).execute()
-        );
-    }
-
-    /**
      * Set alias_of for a document. Guarded — silent 0-row no-op on a
-     * tombstoned target (nexus-eldyi; see updateDocumentCollection).
+     * tombstoned target (nexus-eldyi).
      *
      * <p><b>Locking (nexus-z4rpi round 4, batch-4 item 2).</b> Takes {@link
      * #lockDocumentRow} FOR UPDATE on *tumbler* before writing, giving this
@@ -4791,8 +4853,7 @@ public final class CatalogRepository {
      * return an UNRELATED count (deleted catalog_document_chunks rows, not
      * the guarded documents-row update), so a silent no-op here would
      * misreport success on a data-bearing write; a per-int-return-value
-     * writer (updateDocumentCollection, updateDocumentsCollectionBatch,
-     * setAlias) does not need this — the caller already sees the honest 0.
+     * writer (setAlias) does not need this — the caller already sees the honest 0.
      *
      * <p>"Tumbler unknown" itself is no longer a single, universal contract
      * across these three (RDR-191 nexus-s13u0). {@link #purgeManifest} does
@@ -4847,6 +4908,14 @@ public final class CatalogRepository {
 
     /** The closed {@code reason} a refused document move reports (RDR-210 Phase 6 Step 1). */
     public static final String MOVE_PRECONDITION_FAILED = "move_precondition_failed";
+
+    /**
+     * RDR-231 step 4: the stable prefix of the {@code reason} a re-embed move reports when the document's rewritten
+     * {@code source_uri} is held by another live document ({@link SourceUriCollision}, passed through by {@link
+     * #failureDetail}). The holder's tumbler follows the prefix; the re-embed runner maps the prefix to a per-document
+     * skip that keeps the holder.
+     */
+    public static final String MOVE_SOURCE_URI_TAKEN = "move refused: source_uri taken by ";
 
     /**
      * RDR-210 Phase 6 Step 1: a document move was refused because the document is no longer what the
@@ -6390,8 +6459,12 @@ public final class CatalogRepository {
      */
     private static void completeMove(DSLContext ctx, String tenant, String docId, String target, String source,
                                      int[] counts) {
+        // RDR-231 step 4: the pre-check in the re-embed runner keeps a taken URI from reaching here at all; this is
+        // the backstop for a holder that appeared since. Before any UPDATE, so nothing has moved when it throws.
+        requireMoveUriFree(ctx, tenant, docId, source, target);
         int pointed = ctx.update(CATALOG_DOCUMENTS)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, target)
+            .set(CATALOG_DOCUMENTS.SOURCE_URI, NoteUri.moveTo(CATALOG_DOCUMENTS.SOURCE_URI, source, target))
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
@@ -6411,6 +6484,7 @@ public final class CatalogRepository {
             .execute();
         counts[0] = ctx.update(DOCUMENT_ASPECTS)
             .set(DOCUMENT_ASPECTS.COLLECTION, target)
+            .set(DOCUMENT_ASPECTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_ASPECTS.SOURCE_URI, source, target))
             .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)
                    .and(DOCUMENT_ASPECTS.COLLECTION.eq(source))
                    .and(DOCUMENT_ASPECTS.DOC_ID.eq(docId)))
@@ -6433,10 +6507,75 @@ public final class CatalogRepository {
             .execute();
         counts[4] = ctx.update(DOCUMENT_HIGHLIGHTS)
             .set(DOCUMENT_HIGHLIGHTS.COLLECTION, target)
+            .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_HIGHLIGHTS.SOURCE_URI, source, target))
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)
                    .and(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(source))
                    .and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)))
             .execute();
+    }
+
+    /**
+     * RDR-231 step 4, the single-document check of a re-embed move: when the document's {@code source_uri} would
+     * be rewritten onto one a LIVE document already holds, throw {@link SourceUriCollision} (holder = that
+     * document's tumbler) before anything moves. Only live holders count, because catalog-016 constrains only live
+     * rows; a tombstoned holder does not block. A tombstoned moving document is not checked here: the first
+     * UPDATE refuses it with its own typed exception.
+     */
+    private static void requireMoveUriFree(DSLContext ctx, String tenant, String docId, String source,
+                                           String target) {
+        var hit = moveUriCollisions(ctx, tenant, source, target, m -> m.TUMBLER.eq(docId))
+            .stream().findFirst().orElse(null);
+        if (hit != null) {
+            throw new SourceUriCollision("re-embedding " + source + " into " + target, hit.value2(), hit.value3(),
+                hit.value4());
+        }
+    }
+
+    /**
+     * The one pre-check of a move from {@code source} to {@code target} (the re-embed move and the collection rename
+     * and re-home): the live documents selected by {@code movingRows} (a condition over the moving-row alias) whose
+     * {@code source_uri} the move would rewrite onto a URI another live document holds, as (moving tumbler, the
+     * URI, holder tumbler, holder's collection), in moving-tumbler order. The callers differ only in who moves: the
+     * re-embed move names tumblers, a rename or re-home takes the source collection's own documents. A document whose
+     * URI is not rewritten (not a note of {@code source}) never appears; only live rows count on both sides, because
+     * catalog-016 constrains only live rows, and both sides carry an explicit tenant predicate beside RLS.
+     */
+    private static org.jooq.Result<org.jooq.Record4<String, String, String, String>> moveUriCollisions(
+            DSLContext ctx, String tenant, String source, String target,
+            java.util.function.Function<dev.nexus.service.jooq.nexus.tables.CatalogDocuments, Condition> movingRows) {
+        var moving = CATALOG_DOCUMENTS.as("moving");
+        var holder = CATALOG_DOCUMENTS.as("holder");
+        Field<String> rewritten = NoteUri.moveTo(moving.SOURCE_URI, source, target);
+        return ctx.select(moving.TUMBLER, holder.SOURCE_URI, holder.TUMBLER, holder.PHYSICAL_COLLECTION)
+            .from(moving).join(holder).on(holder.TENANT_ID.eq(tenant).and(holder.SOURCE_URI.eq(rewritten)))
+            .where(moving.TENANT_ID.eq(tenant))
+            .and(movingRows.apply(moving))
+            .and(moving.DELETED_AT.isNull())
+            .and(rewritten.ne(moving.SOURCE_URI))
+            .and(holder.DELETED_AT.isNull())
+            .and(holder.TUMBLER.ne(moving.TUMBLER))
+            .orderBy(moving.TUMBLER)
+            .fetch();
+    }
+
+    /**
+     * RDR-231 step 4, the re-embed runner's check before it embeds: for each of {@code docIds} whose rewritten
+     * {@code source_uri} a live document holds, the holder's tumbler. One query for the batch. A document whose
+     * URI is free, is not a note of {@code source}, or is tombstoned is absent. {@link #completeMove} repeats the
+     * check per document as a backstop for a holder that appears after this read.
+     */
+    public Map<String, String> moveUriHolders(String tenant, String source, String target,
+                                              java.util.Collection<String> docIds) {
+        if (docIds.isEmpty()) {
+            return Map.of();
+        }
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, String> out = new LinkedHashMap<>();
+            for (var r : moveUriCollisions(ctx, tenant, source, target, m -> m.TUMBLER.in(docIds))) {
+                out.putIfAbsent(r.value1(), r.value3());
+            }
+            return out;
+        });
     }
 
     /**
@@ -6844,6 +6983,13 @@ public final class CatalogRepository {
         // (case "23503" -> "foreign key violation (doc_id not registered?)")
         // before catalog_document_chunks.collection went NOT NULL; the
         // message here says the same thing in our own words instead.
+        // RDR-231 step 4: a re-embed move whose rewritten source_uri a live document holds. The reason is a stable
+        // prefix and the holder's tumbler (schema metadata, not the driver message), which the re-embed runner turns
+        // into a per-document skip that names the holder.
+        if (e instanceof SourceUriCollision collision && collision.holder() != null) {
+            out.put("reason", MOVE_SOURCE_URI_TAKEN + collision.holder());
+            return out;
+        }
         if ((e instanceof IllegalArgumentException || e instanceof TombstonedDocumentException
                 || e instanceof DocumentNotFoundException || e instanceof MovePreconditionFailedException)
                 && e.getMessage() != null) {
@@ -9432,13 +9578,24 @@ public final class CatalogRepository {
     }
 
     /**
-     * nexus-sis0m.3: the rename would rewrite a document's {@code chroma://<old>/...}
+     * nexus-sis0m.3: the rename would rewrite a document's {@code nx-note://<old>/...}
      * source_uri onto one a LIVE document elsewhere already holds. The live-URI index
      * (catalog-016) would reject the UPDATE as a 500; this names the URI instead, and the
-     * handler maps it to 409. Nothing has moved when it is thrown.
+     * handler maps it to 409. Nothing has moved when it is thrown. RDR-231: every move (rename,
+     * re-home, collection update, re-embed move) throws it; {@code holder} is the live holder's
+     * tumbler and the message names the operation.
      */
     public static final class SourceUriCollision extends RuntimeException {
-        public SourceUriCollision(String message) { super(message); }
+        private final String holder;
+
+        public SourceUriCollision(String operation, String uri, String holder, String holderCollection) {
+            super(operation + " would rewrite a document's source_uri to " + uri + ", which live document "
+                + holder + " in " + holderCollection + " already holds. Delete or re-title that document, then "
+                + "try again.");
+            this.holder = holder;
+        }
+
+        public String holder() { return holder; }
     }
 
     /**
@@ -9654,9 +9811,29 @@ public final class CatalogRepository {
         return false;
     }
 
-    /** Postgres {@code starts_with}: a literal prefix test, unlike LIKE where '_' matches any char. */
-    private static Condition uriStartsWith(Field<String> uri, String prefix) {
-        return DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, uri, DSL.val(prefix)));
+    /** The source_uri column of a collection-scoped table that carries one, else null. */
+    private static Field<String> noteUriColumn(CollectionScopedTable t) {
+        if (t.table() == CATALOG_DOCUMENTS) return CATALOG_DOCUMENTS.SOURCE_URI;
+        if (t.table() == DOCUMENT_ASPECTS) return DOCUMENT_ASPECTS.SOURCE_URI;
+        if (t.table() == DOCUMENT_HIGHLIGHTS) return DOCUMENT_HIGHLIGHTS.SOURCE_URI;
+        return null;
+    }
+
+    /**
+     * RDR-231: refuse a rename or re-home of {@code source} onto {@code target} when a note URI of {@code source}'s own
+     * documents, rewritten by {@link NoteUri#moveTo}, a different live document already holds: throws {@link
+     * SourceUriCollision} naming the first such holder. Only the collection's OWN documents move
+     * (physical_collection = source): a stale URI naming {@code source} on a document in another collection is not the
+     * move's to touch (critique of a11876053). A tombstoned mover is not checked: it cannot collide under catalog-016.
+     */
+    private static void requireCollectionUrisFree(DSLContext ctx, String tenant, String source, String target,
+                                                  String operation) {
+        var hit = moveUriCollisions(ctx, tenant, source, target,
+            m -> m.PHYSICAL_COLLECTION.eq(source).and(NoteUri.namesCollection(m.SOURCE_URI, source)))
+            .stream().findFirst().orElse(null);
+        if (hit != null) {
+            throw new SourceUriCollision(operation, hit.value2(), hit.value3(), hit.value4());
+        }
     }
 
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
@@ -9775,31 +9952,11 @@ public final class CatalogRepository {
                 throw new CollectionMergeRefused("target collection already exists: " + newName);
             }
 
-            // nexus-sis0m.3: the chroma://X/ -> chroma://Y/ source_uri rewrite below must not
-            // land on a URI a live document already holds (the catalog-016 partial unique
-            // index would abort the transaction with an opaque 500). Checked here, in this
-            // transaction and before anything moves, so the refusal leaves X untouched.
-            String oldUriPrefix = "chroma://" + oldName + "/";
-            String newUriPrefix = "chroma://" + newName + "/";
-            var moving = CATALOG_DOCUMENTS.as("moving");
-            var holder = CATALOG_DOCUMENTS.as("holder");
-            // Only X's OWN documents move (physical_collection = X). A stale chroma://X/ URI on
-            // a document living in some other collection (left by a rename before this fix,
-            // then X's name reused) is not this rename's to touch (critique of a11876053).
-            var collision = ctx.select(holder.SOURCE_URI, holder.TUMBLER, holder.PHYSICAL_COLLECTION)
-                .from(moving).join(holder).on(holder.SOURCE_URI.eq(
-                    DSL.val(newUriPrefix).concat(DSL.substring(moving.SOURCE_URI, oldUriPrefix.length() + 1))))
-                .where(moving.PHYSICAL_COLLECTION.eq(oldName))
-                .and(uriStartsWith(moving.SOURCE_URI, oldUriPrefix))
-                .and(holder.DELETED_AT.isNull())
-                .limit(1)
-                .fetchOne();
-            if (collision != null) {
-                throw new SourceUriCollision(
-                    "renaming " + oldName + " to " + newName + " would rewrite a document's source_uri to "
-                    + collision.value1() + ", which live document " + collision.value2() + " in "
-                    + collision.value3() + " already holds. Delete or re-title that document, then rename again.");
-            }
+            // nexus-sis0m.3: the note source_uri rewrite below must not land on a URI a live
+            // document already holds (the catalog-016 partial unique index would abort the
+            // transaction with an opaque 500). Checked here, in this transaction and before
+            // anything moves, so the refusal leaves X untouched.
+            requireCollectionUrisFree(ctx, tenant, oldName, newName, "renaming " + oldName + " to " + newName);
             // nexus-sis0m.3: Y's content_type and owner_id are the client's, derived from Y's
             // name (see the 6-arg renameCollection); absent, they are X's. Copying X's
             // unconditionally left a renamed knowledge collection carrying X's subject as its
@@ -9967,7 +10124,7 @@ public final class CatalogRepository {
             // contradicting the fix 120 lines above. The handler now permits exactly one
             // revive: a tombstone whose superseded_by names the collection being renamed
             // (nexus-v6za0). Every other non-live target 409s.
-            // nexus-sis0m.3: a knowledge note's identity is chroma://<collection>/<title>, so
+            // nexus-sis0m.3: a knowledge note's identity is nx-note://<collection>/<title> (RDR-231; chroma:// before it), so
             // the URI must follow the collection or a re-put into Y misses its own document
             // and mints a duplicate. Three columns hold such a URI (the enumeration is pinned
             // by CatalogRenameIdentityCascadeTest against information_schema, not by this
@@ -9976,22 +10133,21 @@ public final class CatalogRepository {
             // documents under the old name, tombstoned or not, or a later restore points at a
             // retired collection name (see TombstoneFilterGateTest.TOMBSTONE_EXEMPT). Scoped to rows the re-home loop
             // above just moved to Y (the target held nothing before, per the emptiness check),
-            // so a foreign row carrying a stale chroma://X/ URI is left alone.
+            // so a foreign row carrying a stale X-named URI is left alone.
+            // RDR-231: NoteUri.moveTo rewrites both note spellings (nx-note://X/ and chroma://X/)
+            // and leaves residue and every other value unchanged.
             counts.put("catalog_documents_source_uri", ctx.update(CATALOG_DOCUMENTS)
-                .set(CATALOG_DOCUMENTS.SOURCE_URI, DSL.val(newUriPrefix)
-                    .concat(DSL.substring(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, NoteUri.moveTo(CATALOG_DOCUMENTS.SOURCE_URI, oldName, newName))
                 .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(newName))
-                .and(uriStartsWith(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix)).execute());
+                .and(NoteUri.namesCollection(CATALOG_DOCUMENTS.SOURCE_URI, oldName)).execute());
             counts.put("document_aspects_source_uri", ctx.update(DOCUMENT_ASPECTS)
-                .set(DOCUMENT_ASPECTS.SOURCE_URI, DSL.val(newUriPrefix)
-                    .concat(DSL.substring(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_ASPECTS.SOURCE_URI, oldName, newName))
                 .where(DOCUMENT_ASPECTS.COLLECTION.eq(newName))
-                .and(uriStartsWith(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix)).execute());
+                .and(NoteUri.namesCollection(DOCUMENT_ASPECTS.SOURCE_URI, oldName)).execute());
             counts.put("document_highlights_source_uri", ctx.update(DOCUMENT_HIGHLIGHTS)
-                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, DSL.val(newUriPrefix)
-                    .concat(DSL.substring(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, NoteUri.moveTo(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName, newName))
                 .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(newName))
-                .and(uriStartsWith(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix)).execute());
+                .and(NoteUri.namesCollection(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName)).execute());
 
             counts.put("catalog_collections_superseded",
                 ctx.update(CATALOG_COLLECTIONS)
@@ -10189,6 +10345,10 @@ public final class CatalogRepository {
                 // carrying reason=collection_model_mismatch, the contract the route documents.
                 throw new CollectionModelMismatchException(source, sourceModel, target, targetModel);
             }
+            // RDR-231: the move rewrites note URIs from source to target (moveScopedTable). If a live
+            // document would land on a URI a live document already holds, nothing moves: chunks and
+            // manifest rows move by table and are keyed by chash, so one document cannot be held back.
+            requireCollectionUrisFree(ctx, tenant, source, target, "re-homing " + source + " onto " + target);
 
             Map<String, Integer> moved = new LinkedHashMap<>();
             Map<String, Integer> leftBehind = new LinkedHashMap<>();
@@ -10337,7 +10497,13 @@ public final class CatalogRepository {
     private int moveScopedTable(DSLContext ctx, CollectionScopedTable t, String source,
                                 String target, Map<String, Integer> leftBehind) {
         Condition where = movableAtSource(ctx, t, source, target);
-        int movedRows = ctx.update(t.table()).set(t.collection(), target).where(where).execute();
+        var set = ctx.update(t.table()).set(t.collection(), target);
+        Field<String> uri = noteUriColumn(t);
+        if (uri != null) {
+            // RDR-231: a moved note's URI names its new collection, in the same UPDATE.
+            set = set.set(uri, NoteUri.moveTo(uri, source, target));
+        }
+        int movedRows = set.where(where).execute();
         // Whatever still names the source in a table we just moved is, by construction,
         // a row the collision predicate excluded. Count it so "done" can never be read
         // as "nothing was left behind".
@@ -11435,13 +11601,13 @@ public final class CatalogRepository {
                 for (var d : batch) {
                     String metaJson = jsonOrNull(d.get("metadata"));
                     // Same identity guard as doImportDocument (nexus-0ehwe arbiter class).
-                    guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
+                    guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
                     insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                             nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
                             nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
                             nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                             jsonbVal(metaJson),
-                            nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
+                            nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
                             ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                             nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                             nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
@@ -11483,7 +11649,7 @@ public final class CatalogRepository {
         {
             // nexus-0ehwe arbiter class: address-arbitrated, and the DO UPDATE arm sets
             // source_uri — so both arms are exposed to ux_catalog_documents_live_source_uri.
-            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), nne(s(d, "source_uri")));
+            guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
             ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -11495,7 +11661,7 @@ public final class CatalogRepository {
                        nne(s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
                        nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
-                       nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), nne(s(d,"source_uri")),
+                       nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
                        ni(i(d,"bib_year"), 0), nne(s(d,"bib_authors")),
                        nne(s(d,"bib_venue")), ni(i(d,"bib_citation_count"), 0),
                        nne(s(d,"bib_semantic_scholar_id")), nne(s(d,"bib_openalex_id")),
@@ -12268,6 +12434,9 @@ public final class CatalogRepository {
 
     /** Non-null empty: returns "" if null. */
     private static String nne(String v) { return v != null ? v : ""; }
+
+    /** RDR-231: a caller's document source_uri in its stored spelling (a legacy note URI becomes nx-note://). */
+    private static String sourceUriOf(Map<String, Object> d) { return NoteUri.canonical(nne(s(d, "source_uri"))); }
 
     /**
      * nexus-4j80w: {@code upsertLink}'s created_at default. The client never

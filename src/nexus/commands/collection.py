@@ -1226,12 +1226,18 @@ def reindex_cmd(name: str, force: bool) -> None:
     # the failure used to be a per-file warning AFTER the collection was gone:
     # "Re-indexed: N -> 0 chunks", exit 0, the data deleted. ensure_or_exit
     # installs (and re-runs this command) or exits 69/75/70 with nothing deleted.
+    # RDR-237: the extractor is the ``pdf.extractor`` setting (this verb has no flag), read only
+    # when a PDF is to be re-indexed; ``pymupdf`` needs none of the stack, so the gate lets it by,
+    # and the loop below hands the same choice to ``index_pdf``.
+    pdf_extractor = ""
     if candidate_type in ("docs", "knowledge") and any(
         sp.lower().endswith(".pdf") and Path(sp).exists() for sp in source_paths
     ):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.config import get_pdf_extractor  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-        pdf_stack.ensure_or_exit("nx collection reindex")
+        pdf_extractor = get_pdf_extractor()
+        pdf_stack.ensure_or_exit("nx collection reindex", extractor=pdf_extractor)
 
     # 3. Delete collection — via the canonical cascade, exactly like
     # `nx collection delete` (nexus-sjb52: the old direct
@@ -1375,7 +1381,7 @@ def reindex_cmd(name: str, force: bool) -> None:
             try:
                 # nexus-8143o: force_re_embed left at its default False -- the collection was just DELETED above, so every chash here is new and there is nothing to skip.
                 if p.suffix.lower() == ".pdf":
-                    index_pdf(p, corpus=corpus, collection_name=name, force=True)
+                    index_pdf(p, corpus=corpus, collection_name=name, force=True, extractor=pdf_extractor or "auto")
                 else:
                     index_markdown(p, corpus=corpus, collection_name=name, force=True)
                 indexed += 1
@@ -1884,6 +1890,12 @@ def _job_line(job: dict) -> str:
     )
     if job.get("last_error"):
         line += f"\n    last error: {job['last_error']}"
+    # RDR-231: each skipped document with its reason; a source_uri the sibling already holds names the holder.
+    for skipped in job.get("skipped_documents") or ():
+        holder = skipped.get("holder")
+        line += f"\n    skipped {skipped.get('doc_id')}: {skipped.get('reason')}" + (
+            f" (source_uri held by {holder})" if holder else ""
+        )
     counts = job.get("delete_counts")
     if isinstance(counts, dict):
         line += (

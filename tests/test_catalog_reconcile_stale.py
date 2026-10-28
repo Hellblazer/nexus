@@ -18,6 +18,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
+from nexus.aspect_readers import FILE_ROUTED_PREFIXES
 from nexus.cli import main
 from nexus.commands.catalog_cmds import reconcile_stale as reconcile_stale_mod
 
@@ -350,9 +351,30 @@ class TestClassification:
         full classification pipeline."""
         chroma = _FakeEntry(
             "3.1.1", "Chroma", physical_collection="knowledge__x", chunk_count=9,
-            source_uri="chroma://knowledge__x/Chroma",
+            source_uri="nx-note://knowledge__x/Chroma",
         )
-        assert reconcile_stale_mod._store_put_signature_reason(chroma) == "chroma_uri"
+        assert reconcile_stale_mod._store_put_signature_reason(chroma) == "note_uri"
+
+        # RDR-231: a legacy chroma:// note (not yet rewritten by the backfill)
+        # is the same note: the classifier answers in either spelling.
+        legacy_spelling = _FakeEntry(
+            "3.1.0", "Legacy", physical_collection="knowledge__x", chunk_count=9,
+            source_uri="chroma://knowledge__x/Legacy",
+        )
+        assert reconcile_stale_mod._store_put_signature_reason(legacy_spelling) == "note_uri"
+
+        # RDR Test Plan row 562: a chroma:// row under a FILE-ROUTED collection
+        # is migration residue, no longer counted as store-put-origin (the bare
+        # prefix test counted it before RDR-231). Every file-routed prefix.
+        for prefix in FILE_ROUTED_PREFIXES:
+            for scheme in ("chroma://", "nx-note://"):
+                residue = _FakeEntry(
+                    "3.1.9", "Residue", physical_collection=f"{prefix}x", chunk_count=9,
+                    source_uri=f"{scheme}{prefix}x/whoops",
+                )
+                assert reconcile_stale_mod._store_put_signature_reason(residue) is None, (
+                    prefix, scheme,
+                )
 
         single_chunk = _FakeEntry(
             "3.1.2", "Single Chunk", physical_collection="knowledge__x", chunk_count=1,
@@ -384,7 +406,7 @@ class TestClassification:
         )
         assert reconcile_stale_mod._store_put_signature_reason(wrong_collection) is None
 
-        # non-chroma:// source_uri: not the store_put signature.
+        # non-note source_uri: not the store_put signature.
         other_uri = _FakeEntry(
             "3.1.6", "DEVONthink", physical_collection="knowledge__x", chunk_count=1,
             source_uri="x-devonthink-item://ABC",
@@ -442,12 +464,12 @@ class TestClassification:
     def test_post_sdp0u_store_put_doc_classifies_store_put_origin_not_exempt(self, tmp_path):
         """nexus-sdp0u fix-round (round-1 critique SIGNIFICANT #4), UPDATED
         by the nexus-0y0gk critique fix-round: a post-fix ``store_put``
-        document carries a synthesized ``chroma://<collection>/<title>``
+        document carries a synthesized ``nx-note://<collection>/<title>``
         ``source_uri`` — so a zero-count one of these can no longer satisfy
         ``_classify_never_chunked``'s ``rdr145_exempt`` predicate (which
         requires BOTH file_path and source_uri empty). This pins the
         DELIBERATE resulting classification: ``store_put_origin``/
-        ``chroma_uri`` — recognizable-but-anomalous (manifests write
+        ``note_uri`` — recognizable-but-anomalous (manifests write
         synchronously at put time; failures surface loudly, so a post-fix
         store_put doc still at chunk_count==0 IS worth investigating), but
         no longer collapsed into the generic ``unresolvable_provenance``
@@ -459,7 +481,7 @@ class TestClassification:
         entry = _FakeEntry(
             "5.1.1", "Post-Fix Note", physical_collection="knowledge__sdp0u",
             chunk_count=0,
-            source_uri="chroma://knowledge__sdp0u/Post-Fix Note",
+            source_uri="nx-note://knowledge__sdp0u/Post-Fix Note",
         )
         assert reconcile_stale_mod._classify_never_chunked(entry) == "unclassified"
 
@@ -472,7 +494,8 @@ class TestClassification:
         assert report["zero_count_unresolvable_provenance"] == []
         store_put_origin = report["zero_count_store_put_origin"]
         assert {r["tumbler"] for r in store_put_origin} == {"5.1.1"}
-        assert store_put_origin[0]["reason"] == "chroma_uri"
+        assert store_put_origin[0]["reason"] == "note_uri"
+
 
     @pytest.mark.t2_tenant
     def test_dishonest_never_appears_in_any_action_list(self, tmp_path):
@@ -518,11 +541,11 @@ class TestClassification:
                 "9.1.3", "Dishonest Unresolvable", physical_collection="code__d",
                 chunk_count=1,
             ),
-            # dishonest / store_put_origin (chroma_uri): the nexus-sdp0u
+            # dishonest / store_put_origin (note_uri): the nexus-sdp0u
             # synthesized source_uri signature, regardless of chunk_count.
             _FakeEntry(
                 "9.1.4", "Dishonest Store-Put Chroma", physical_collection="knowledge__d",
-                chunk_count=5, source_uri="chroma://knowledge__d/Dishonest Store-Put Chroma",
+                chunk_count=5, source_uri="nx-note://knowledge__d/Dishonest Store-Put Chroma",
             ),
             # dishonest / store_put_origin (knowledge_single_chunk_no_path):
             # chunk_count==1, knowledge__*, neither file_path nor source_uri.
@@ -565,7 +588,7 @@ class TestClassification:
 
         chroma_row = dishonest_by_tumbler["9.1.4"]
         assert chroma_row["origin"] == "store_put_origin"
-        assert chroma_row["reason"] == "chroma_uri"
+        assert chroma_row["reason"] == "note_uri"
 
         single_chunk_row = dishonest_by_tumbler["9.1.5"]
         assert single_chunk_row["origin"] == "store_put_origin"

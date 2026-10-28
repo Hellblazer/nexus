@@ -595,6 +595,9 @@ def _mock_pymupdf(page_count: int):
     mock_doc.__len__ = MagicMock(return_value=page_count)
     mock_doc.__enter__ = MagicMock(return_value=mock_doc)
     mock_doc.__exit__ = MagicMock(return_value=False)
+    # Every page has an empty text layer. Left a MagicMock, get_text() hands the normaliser a
+    # non-string and rung 3's broad except swallows the TypeError.
+    mock_doc.__getitem__.return_value.get_text.return_value = ""
     mock_pymupdf = MagicMock()
     mock_pymupdf.open = MagicMock(return_value=mock_doc)
     return patch.dict("sys.modules", {"pymupdf": mock_pymupdf})
@@ -616,6 +619,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(pages), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=batch),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", return_value=isolated_return) as mock_iso,
         ):
             extractor._extract_with_mineru(dummy_pdf)
@@ -653,6 +657,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(5), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
         ):
             result = extractor._extract_with_mineru(dummy_pdf)
@@ -674,23 +679,41 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(5), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
         ):
             extractor._extract_with_mineru(dummy_pdf)
         ranges = [c.args[1:] for c in mock_iso.call_args_list]
         assert ranges == [(0, None), (0, 2), (2, 5)]  # bisected once, halves OK
 
-    def test_oom_retry_single_page_propagates(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
+    def test_a_single_page_failing_everywhere_no_longer_propagates(
+        self, extractor: PDFExtractor, dummy_pdf: Path,
+    ) -> None:
+        """RDR-237: a page failing both rungs descends (rung 3, rung 4) instead of
+        failing the document. Here every page fails with a failure that carries no
+        worker facts (class ``unclassified``, never counted by the breaker) and
+        none has a text layer, so the document ends with a named reason, and
+        Docling is nowhere on the path."""
+        from structlog.testing import capture_logs
+
+        from nexus.errors import UnextractableContentError
+
         with (
+            capture_logs() as logs,
             _mock_pymupdf(3), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=1),
             patch.object(extractor, "_mineru_run_isolated",
                          side_effect=RuntimeError("MinerU subprocess exited with code -9")),
             patch.object(extractor, "_extract_with_docling",
-                         side_effect=RuntimeError("Docling fallback also failed")),
+                         side_effect=RuntimeError("Docling fallback also failed")) as docling,
         ):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(UnextractableContentError, match="every page.*unextracted"):
                 extractor._extract_with_mineru(dummy_pdf)
+        docling.assert_not_called()
+        assert not [e for e in logs if e.get("event") == "mineru_page_text_layer_unreadable"], (
+            "the pages ended unextracted because they have no text, not because reading raised"
+        )
+        assert [e for e in logs if e.get("event") == "mineru_page_rung_failed"], "the ladder ran"
 
     def test_oom_retry_structlog_event(self, extractor: PDFExtractor, dummy_pdf: Path) -> None:
         ok_return = ("text", [], [])
@@ -706,6 +729,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(5), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated),
             patch("nexus.pdf_extractor._log") as mock_log,
         ):
@@ -724,6 +748,7 @@ class TestAdaptivePageRanges:
         with (
             _mock_pymupdf(10), _mock_do_parse(),
             patch("nexus.config.get_mineru_page_batch", return_value=5),
+            patch("nexus.config.get_mineru_page_timeout_s", return_value=30),
             patch.object(extractor, "_mineru_run_isolated", side_effect=mock_isolated) as mock_iso,
         ):
             result = extractor._extract_with_mineru(dummy_pdf)

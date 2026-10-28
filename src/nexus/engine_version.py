@@ -681,7 +681,7 @@ from __future__ import annotations
 #: plan and status routes, cutover), the engine plan/start refusing a target
 #: model it cannot serve (nexus-q6t89), the rename without the cross_model
 #: branch (nexus-avjrb) and memory-005-1 (a partial index on nexus.memory).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 165)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 167)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
@@ -740,6 +740,30 @@ CHANNEL_SUBSCRIBER_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 129)
 #: safe only in the client release whose pin names a dual engine. That constant is also the managed
 #: floor, so the tag is deployed to the cloud engine before such a release ships.
 DUAL_EMBEDDER_FIRST_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 161)
+
+#: RDR-231 (nexus-bivz3.13, critique Significant 4): the first engine version that can hold a note
+#: whose ``source_uri`` is ``nx-note://`` (the engine half of the note source-URI scheme change).
+#: Below it, the client refuses every NOTE write -- MCP ``store_put``, ``nx store put``, ``nx memory
+#: promote``, the recovery-bundle import and the exporter's ``import_collection`` -- before the catalog
+#: register and the T3 write (:func:`nexus.db.serving_engine_version.require_note_uri_engine`).
+#: Aspect and highlight upserts and the reads are NOT covered: an aspect/highlight upsert has no
+#: unique key on ``source_uri`` (the backfill leaves ``nx-note://`` rows as they are and they join the
+#: note once it is backfilled), and a read writes nothing.
+#:
+#: Independent of :data:`REQUIRED_ENGINE_VERSION` for the same reason
+#: :data:`CHANNEL_ANNOUNCE_MIN_ENGINE_VERSION` is: it names a FEATURE floor on the engine that is
+#: actually SERVING, which on a local install lags the pinned dependency until convergence runs
+#: (``nx daemon restart-stale``), and on the managed engine until it is upgraded. A probe that
+#: resolves NO version (a dev or blank jar reports none; an unreachable engine) does not refuse: it
+#: logs one warning per process. The protection is therefore best-effort, and the backfill guard is
+#: the backstop. This is the corrected form of RDR-231 Critical Assumption 2, whose "true by
+#: construction" holds only when the check fires.
+#:
+#: ``(0, 0, 0)`` would mean UNSET (the guard inert: no probe, no refusal). Set to
+#: engine-service-v0.1.167, the tag that carries note-uri-001-1 (nexus-bivz3.20; v0.1.166 was tagged but never published, its mac-arm64 leg having failed on an already-pruned JDK). Every script that stamps the gate jar stamps ``max(REQUIRED_ENGINE_VERSION,
+#: NOTE_URI_MIN_ENGINE_VERSION)``, so a develop install pinned to an older engine refuses note writes
+#: until the engine tag, and the gate jar itself is never refused.
+NOTE_URI_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 167)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

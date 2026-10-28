@@ -11,9 +11,10 @@ A "reference-only" catalog document is one whose ``source_uri`` names an
 EXTERNAL resource — any scheme other than ``file://`` (a repo-local path,
 whose freshness a filesystem sync/reindex sweep already covers, not this
 check): ``https://``, ``obsidian://``, ``x-devonthink-item://``,
-``nx-scratch://``, ``chroma://`` (content-addressed — always reads
+``nx-scratch://``, ``nx-note://`` (content-addressed — always reads
 'fresh', walked for completeness but never contributes a stale/dangling
-row). Sampling draws up to ``sample`` such documents (seeded like
+row). A ``chroma://`` row is residue (RDR-231): no stat handler claims it,
+so it reads 'unknown' and never fails the check. Sampling draws up to ``sample`` such documents (seeded like
 ``--check-embeddings``: today's UTC date by default, so the same day
 reproduces the same sample) and stats each through ``stat_source`` with ONE
 shared ``httpx.Client``, reusing the recorded ``ETag``
