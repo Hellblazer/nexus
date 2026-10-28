@@ -184,19 +184,6 @@ def test_a_rerun_adopts_and_backfills_a_document_registered_with_a_relative_path
 
 
 @pytest.mark.t2_tenant
-def test_a_relative_path_document_stamped_for_another_directory_is_not_adopted_or_overwritten(tmp_path):
-    root, f = _non_git_rdr_dir(tmp_path)
-    cat = ActiveCatalog()
-    corpus = f"plain-{_next()}"
-    other = "file:///elsewhere/other-dir/" + _REL
-    legacy = _legacy_doc(corpus, source_uri=other)
-    mine = _register(f, root, corpus)
-    assert mine and mine != legacy
-    assert cat.resolve(legacy).source_uri == other, "another directory's document is left as it was"
-    assert cat.resolve(mine).source_uri == _raw_uri(f)
-
-
-@pytest.mark.t2_tenant
 def test_the_markdown_hook_finds_the_preflight_document_and_backfills_a_legacy_one(tmp_path):
     """`_catalog_markdown_hook` runs after the pre-flight with the same base_path: it must look the
     document up by the same identity, or it mints a second one under the relative path."""
@@ -227,3 +214,96 @@ def test_the_markdown_hook_alone_registers_the_absolute_path(tmp_path):
     cat = ActiveCatalog()
     doc = cat.by_source_uri(_raw_uri(f))
     assert doc is not None and doc.file_path == str(f.resolve()), doc
+
+
+# --- fix round 3: a moved directory, a directory that becomes a repo, the hook's advisory stamp ---
+
+
+def _move(root: Path, dest_parent: Path) -> Path:
+    import shutil
+
+    dest_parent.mkdir(parents=True)
+    dest = dest_parent / root.name
+    shutil.move(str(root), str(dest))
+    return dest
+
+
+@pytest.mark.t2_tenant
+def test_a_legacy_document_adopted_before_the_directory_moved_is_reused_and_restamped(tmp_path):
+    """A non-git document's identity is its location (as `nx index md`), but a LEGACY relative-path row
+    is the one case the new location can still claim: the path it holds is gone, so nobody else is
+    using the row. Minting a second document here left the first as an orphan."""
+    root, f = _non_git_rdr_dir(tmp_path / "a", "notes")
+    cat = ActiveCatalog()
+    corpus = f"plain-{_next()}"
+    legacy = _legacy_doc(corpus)
+    assert _register(f, root, corpus) == legacy
+    old_uri = cat.resolve(legacy).source_uri
+    assert old_uri == _raw_uri(f)
+    root2 = _move(root, tmp_path / "b")
+    f2 = root2 / _REL
+    assert _register(f2, root2, corpus) == legacy, "the moved directory minted a second document"
+    assert cat.resolve(legacy).source_uri == _raw_uri(f2), "the row must follow the file to its new location"
+
+
+@pytest.mark.t2_tenant
+def test_a_legacy_document_stamped_with_a_path_that_still_exists_is_not_adopted(tmp_path):
+    other_root, other_f = _non_git_rdr_dir(tmp_path / "other", "notes")
+    root, f = _non_git_rdr_dir(tmp_path / "mine", "notes")
+    cat = ActiveCatalog()
+    corpus = f"plain-{_next()}"
+    legacy = _legacy_doc(corpus, source_uri=_raw_uri(other_f))
+    mine = _register(f, root, corpus)
+    assert mine and mine != legacy
+    assert cat.resolve(legacy).source_uri == _raw_uri(other_f)
+
+
+@pytest.mark.t2_tenant
+def test_an_absolute_registered_document_whose_directory_moved_becomes_a_new_document(tmp_path):
+    """The documented rule: a non-git document registered by absolute path is identified by that
+    path, as with `nx index md`. A move makes a new document at the new path and leaves the old one
+    for `nx catalog reconcile-stale`."""
+    root, f = _non_git_rdr_dir(tmp_path / "a", "notes")
+    cat = ActiveCatalog()
+    corpus = f"plain-{_next()}"
+    first = _register(f, root, corpus)
+    root2 = _move(root, tmp_path / "b")
+    f2 = root2 / _REL
+    second = _register(f2, root2, corpus)
+    assert second and second != first
+    assert cat.resolve(first).source_uri == _raw_uri(f), "the old document is left as it was"
+    assert cat.resolve(second).source_uri == _raw_uri(f2)
+
+
+@pytest.mark.t2_tenant
+def test_a_non_git_directory_that_later_becomes_a_git_repo_converges_on_the_same_document(tmp_path):
+    import subprocess
+
+    root, f = _non_git_rdr_dir(tmp_path, f"later-{_next()}")
+    ActiveCatalog()
+    corpus = f"plain-{_next()}"
+    first = _register(f, root, corpus)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    assert _register(f, root, corpus) == first
+
+
+@pytest.mark.t2_tenant
+def test_the_markdown_hook_still_updates_the_chunk_count_when_the_source_uri_stamp_collides(tmp_path):
+    """The source_uri stamp is advisory: a second live document already holding that URI
+    (catalog-016) must not stop chunk_count / indexed_at from being written."""
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    root, f = _non_git_rdr_dir(tmp_path)
+    cat = ActiveCatalog()
+    corpus = f"plain-{_next()}"
+    legacy = _legacy_doc(corpus)
+    squatter_corpus = f"squat-{_next()}"
+    squatter_owner = cat.register_owner(squatter_corpus, "curator")
+    cat.register(
+        owner=squatter_owner, title="squatter", content_type="rdr", file_path="elsewhere/x.md",
+        corpus=squatter_corpus, physical_collection=_COLLECTION, chunk_count=0, source_uri=_raw_uri(f),
+    )
+    _catalog_markdown_hook(f, _COLLECTION, "rdr", corpus, 4, base_path=root)
+    doc = cat.resolve(legacy)
+    assert doc.chunk_count == 4 and doc.indexed_at, (doc.chunk_count, doc.indexed_at)
+

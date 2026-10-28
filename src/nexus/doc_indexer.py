@@ -708,13 +708,19 @@ def _curator_identity(file_path: Path, base_path: Path | None) -> tuple[str, str
     return absolute, make_relative(file_path, base_path), "file://" + absolute
 
 
-def _find_curator_document(reader, owner, fp: str, legacy_fp: str, source_uri: str):
+def _find_curator_document(reader, owner, fp: str, legacy_fp: str, source_uri: str, writer=None):
     """The existing curator Document for *fp*, or one registered under *legacy_fp* before njn1a.
 
-    A legacy relative-path document is adopted only when it holds no ``source_uri`` or this file's own:
-    another directory with the same basename shares the curator owner and the relative path, and a
-    document stamped for that directory is not this file's (nexus-njn1a). It is left as it is and a
-    warning names it.
+    A non-git document's identity is its location, as for ``nx index md``: one registered by absolute
+    path that later moves is a new document at its new path, and the old one is left for
+    ``nx catalog reconcile-stale``. A LEGACY relative-path row is the one case the new location can
+    still claim. It is adopted when it holds no ``source_uri``, or this file's own, or a ``file://``
+    path that no longer exists on disk (it was this directory before a move, and nothing else uses
+    the row). With *writer* the row is re-stamped with this file's *source_uri* in the last case.
+
+    It is left as it is, with a warning that names what is known, when the path it holds still exists
+    (another directory with the same basename shares the curator owner and the relative path,
+    nexus-njn1a) or is not a ``file://`` URI that can be checked.
     """
     existing = reader.by_file_path(owner, fp)
     if existing is not None or not legacy_fp:
@@ -725,9 +731,24 @@ def _find_curator_document(reader, owner, fp: str, legacy_fp: str, source_uri: s
     held = getattr(legacy, "source_uri", "") or ""
     if held in ("", source_uri):
         return legacy
+    held_path = held[len("file://"):] if held.startswith("file://") else ""
+    if held_path and not Path(held_path).exists():
+        _log.info(
+            "curator_legacy_document_adopted_after_move",
+            tumbler=str(legacy.tumbler), file_path=legacy_fp, held_source_uri=held, this_source_uri=source_uri,
+        )
+        if writer is not None:
+            try:
+                writer.update(legacy.tumbler, source_uri=source_uri)
+            except Exception:  # noqa: BLE001 — boundary catch: advisory re-stamp, never discards the adopted tumbler
+                _log.warning(
+                    "doc_source_uri_restamp_failed", tumbler=str(legacy.tumbler), file_path=legacy_fp, exc_info=True,
+                )
+        return legacy
     _log.warning(
-        "curator_legacy_document_belongs_elsewhere",
+        "curator_legacy_document_not_adopted",
         tumbler=str(legacy.tumbler), file_path=legacy_fp, held_source_uri=held, this_source_uri=source_uri,
+        held_path_exists=True if held_path else None,
     )
     return None
 
@@ -1110,15 +1131,17 @@ def _register_or_lookup_doc_id(
                 )
             return (str(existing_by_uri.tumbler), False) if with_created else str(existing_by_uri.tumbler)
 
-        existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri)
+        existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri, writer)
+        from_repo_owner = False
         if existing is None:
             # nexus-tqudo: the curator namespace cannot see a row a
             # prior `nx index repo` registered under the REPO owner.
             # Look there before minting, or one physical file ends up
             # with two catalog Documents.
             existing = _repo_owner_document_for(reader, file_path)
+            from_repo_owner = existing is not None
         if existing is not None:
-            if derived_source_uri and not getattr(existing, "source_uri", ""):
+            if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
                 # nexus-njn1a: a document an earlier release registered without its source_uri
                 # (the same curator-owner case) gets it on the next run. Advisory, like the
                 # reconcile write below: the tumbler is already resolved.
@@ -3645,10 +3668,12 @@ def _catalog_markdown_hook(
         # identity and would mint a second Document for the same source).
         existing = reader.by_source_uri(source_uri) if source_uri else None
         if existing is None:
-            existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri)
+            existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri, writer)
+        from_repo_owner = False
         if existing is None:
             # nexus-tqudo: same cross-owner blind spot as the pre-flight.
             existing = _repo_owner_document_for(reader, md_path)
+            from_repo_owner = existing is not None
         if existing is not None:
             # nexus-t952k half 2: mirror pipeline_stages._catalog_pdf_hook —
             # a real repoint (old != new, old non-empty so a never-indexed
@@ -3673,11 +3698,20 @@ def _catalog_markdown_hook(
                 update_kwargs["title"] = title
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
-            if derived_source_uri and not getattr(existing, "source_uri", ""):
+            writer.update(existing.tumbler, **update_kwargs)
+            if derived_source_uri and not from_repo_owner and not getattr(existing, "source_uri", ""):
                 # nexus-njn1a: a curator document an earlier release registered by a relative path has
                 # no source_uri; the absolute one the engine derives for a new document goes on it.
-                update_kwargs["source_uri"] = derived_source_uri
-            writer.update(existing.tumbler, **update_kwargs)
+                # A separate, advisory write: another live document may already hold that URI
+                # (catalog-016), and the refusal must not drop the chunk_count / indexed_at above. Never
+                # on a repo-owner document, whose URI is the repo's (a worktree path is not its own).
+                try:
+                    writer.update(existing.tumbler, source_uri=derived_source_uri)
+                except Exception:  # noqa: BLE001 — boundary catch: advisory backfill, the update above already landed
+                    _log.warning(
+                        "doc_source_uri_backfill_failed",
+                        tumbler=str(existing.tumbler), file_path=fp, exc_info=True,
+                    )
             if old_physical_collection and old_physical_collection != collection_name:
                 _log.warning(
                     "catalog_physical_collection_repointed",
@@ -3833,7 +3867,9 @@ def index_markdown(
     (i.e. produced under a heading).  Default False preserves existing int behavior.
 
     When *base_path* is provided, ``source_path`` in T3 chunk metadata is
-    stored relative to *base_path* instead of absolute (RDR-060).
+    stored relative to *base_path* instead of absolute (RDR-060). The catalog ``file_path`` follows the
+    owner: relative for a repo owner, the ABSOLUTE path for a curator owner (nexus-njn1a, see
+    :func:`_curator_identity`).
 
     Pass *source_uri* (nexus-y8qtj) to resolve catalog identity by URI
     INSTEAD of by file path — see :func:`index_pdf` for the full
@@ -4087,8 +4123,9 @@ def batch_index_markdowns(
     ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
     chunks upserted (0 for skipped/failed) and *elapsed_s* is wall time.
 
-    When *base_path* is provided, ``source_path`` in T3 chunk metadata and
-    catalog ``file_path`` are stored relative to *base_path* (RDR-060).
+    When *base_path* is provided, ``source_path`` in T3 chunk metadata is stored relative to *base_path*
+    (RDR-060). The catalog ``file_path`` is relative only for a repo owner; a curator owner registers the
+    absolute path (nexus-njn1a, see :func:`_curator_identity`).
     """
     results: dict[str, str] = {}
     for path in paths:
