@@ -1173,3 +1173,93 @@ def test_parity_cause_vocabulary_matches_dropped_writes():
         "registry (nexus.dropped_writes.NAMED_DROP_CAUSES) -- update "
         "whichever side is missing the other's causes"
     )
+
+
+# ---------------------------------------------------------------------------
+# nexus-njn1a finding 9: the routing_events POST timed out at volume against
+# a managed (HTTPS, WAN) engine. A cold HTTPS request to the cloud edge costs
+# 240-410 ms before the engine does any work (curl -w: connect 80 ms, TLS
+# 80-250 ms, first byte 240-410 ms), so a 250 ms budget was structurally below
+# one round trip: 641 of the 650 drops on the shakedown box were
+# cause=timeout. urlopen's timeout is per socket operation, so the fix is a
+# real total deadline (a worker thread joined for the budget) with a budget
+# that fits the hook's 5 s timeout, not a bigger per-op number alone.
+# ---------------------------------------------------------------------------
+
+
+def _slow_engine(delay: float):
+    """A loopback server that answers the routing_events POST after *delay*."""
+    import http.server
+    import threading
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            _time.sleep(delay)
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):  # noqa: ARG002
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_post_routing_event_tolerates_a_wan_scale_round_trip(tmp_path, monkeypatch):
+    """An engine that takes 0.6 s to answer (a cold HTTPS round trip to the
+    managed edge) is delivered, not dropped as a timeout."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    drop_path = tmp_path / "dropped_writes.jsonl"
+    monkeypatch.setenv("NX_DROPPED_WRITES_LOG_PATH", str(drop_path))
+    srv = _slow_engine(0.6)
+    try:
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", str(srv.server_address[1]))
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "t")
+        lib = _load_lib()
+        lib.log_routing_event(rule="r", outcome="deny")
+    finally:
+        srv.shutdown()
+    assert _drop_records(drop_path) == []
+
+
+def test_post_routing_event_total_deadline_bounds_a_hung_engine(tmp_path, monkeypatch):
+    """urlopen's timeout is per socket operation (connect, TLS, send, read),
+    so a stalled engine could hold the hook for several budgets. The call
+    returns 'timeout' within the stated budget even when urlopen itself
+    would block far longer."""
+    _isolate_endpoint_discovery(tmp_path, monkeypatch)
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "9")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "t")
+    lib = _load_lib()
+    import urllib.request as _ur
+
+    monkeypatch.setattr(_ur, "urlopen", lambda req, timeout=None: _time.sleep(5))
+    t0 = _time.monotonic()
+    cause = lib._post_routing_event_http({"rule": "r"}, timeout=0.3)
+    elapsed = _time.monotonic() - t0
+    assert cause == "timeout"
+    assert elapsed < 1.5, f"returned after {elapsed:.2f}s; the deadline is not total"
+
+
+def test_post_routing_event_budget_fits_inside_the_hook_timeout():
+    """The POST runs before the deny envelope is emitted, so a budget at or
+    above the hook's own timeout lets the host kill the guard before it
+    denies. Every registered routing hook keeps at least 2 s of headroom."""
+    lib = _load_lib()
+    hooks = json.loads((PROJECT_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
+    timeouts = []
+    for groups in hooks["hooks"].values():
+        for group in groups:
+            for h in group.get("hooks", []):
+                if "scripts/routing/" in " ".join(h.get("args", [])):
+                    timeouts.append(h["timeout"])
+    assert timeouts, "no routing hook found in hooks.json (vacuous)"
+    budget = lib._ROUTING_POST_BUDGET_S
+    assert budget >= 1.0, "below a cold HTTPS round trip to the managed edge"
+    assert budget + 2.0 <= min(timeouts)

@@ -2947,7 +2947,7 @@ nexus-gjv9b PART 3. Used at the 30-day soak review
 matchers (zero fires), or overly broad blocks (high block rate).
 
 **Writer swap (nexus-gjv9b PART 2, 2026-09):** the routing hooks record
-to the engine's `routing_events` table now (best-effort, ~250ms POST via
+to the engine's `routing_events` table now (best-effort POST via
 `urllib`, no `nexus` import — see `conexus/hooks/scripts/routing/_lib.py`'s
 `log_routing_event`), not the JSONL log this command reads by default. Use
 `--from-store` to read the table instead — an unreachable service exits
@@ -6142,7 +6142,11 @@ figures were hand-assembled by composing several existing readers on
    hit vs. inline-planner fallback, the fixed-edge latency histogram
    (`answer-runs`'s own `_BUCKET_ORDER` — one definition), and the
    oldest/newest event timestamp — the instrument behind the 08-27
-   capture's headline "zero rows since \<ts\>" finding.
+   capture's headline "zero rows since \<ts\>" finding. With `--since`
+   these two are the oldest and newest rows inside the window, not the
+   all-time ones; the text form prints them as `oldest_in_window=` and
+   `newest_in_window=` beside the all-time `total=` (the JSON keys stay
+   `oldest_created_at` and `newest_created_at`).
 2. **Tier writes** since `--since` (or all-time) — by tier, by tool, by
    agent, plus the null-agent share as a number.
 3. **relevance_log** — row count, oldest/newest event timestamp (`GET

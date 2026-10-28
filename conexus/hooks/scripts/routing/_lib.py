@@ -71,7 +71,7 @@ audited in the telemetry log so over-use is visible.
 
 WRITER SWAP (nexus-gjv9b PART 2, Sam directive 2026-08-20):
 ``log_routing_event`` records to the engine's ``routing_events`` table
-now (best-effort POST via ``urllib``, ~250ms timeout), not the JSONL
+now (best-effort POST via ``urllib``, 1.5 s total budget), not the JSONL
 log below -- see that function's own docstring for the full design
 decision (metered drop on service-down, never a JSONL fallback). The
 JSONL append and rotation machinery was deleted at PART 3 (2026-09-05):
@@ -581,7 +581,21 @@ _STATIC_CAUSE_NAMES = frozenset({
 })
 
 
-def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> str:
+#: Total budget (seconds) for the routing_events POST (nexus-njn1a finding 9).
+#: A cold HTTPS request to the managed edge costs 240-410 ms (connect ~80 ms,
+#: TLS 80-250 ms, first byte 240-410 ms, measured with curl), so the former
+#: 0.25 s per-socket-operation timeout sat below one round trip and 641 of
+#: the 650 drops on the shakedown box were ``timeout``. 1.5 s is a few round
+#: trips of headroom. It must stay well under the 5 s ``timeout`` hooks.json
+#: gives the routing hooks, because the POST runs BEFORE the deny envelope is
+#: emitted: a host kill mid-POST would let the gated command through.
+#: ``tests/test_routing_hooks.py`` pins both ends.
+_ROUTING_POST_BUDGET_S: float = 1.5
+
+
+def _post_routing_event_http(
+    record: dict, *, timeout: float = _ROUTING_POST_BUDGET_S,
+) -> str:
     """Best-effort ``POST /v1/telemetry/routing_events/record`` via
     ``urllib`` (no ``httpx``/``requests`` dependency — this script runs
     under the system interpreter, RDR-121 § Contract). Returns ``""`` on
@@ -606,10 +620,36 @@ def _post_routing_event_http(record: dict, *, timeout: float = 0.25) -> str:
     exception's ``str()`` to work with) — this is why the cause travels
     through to :func:`_record_dropped_routing_event` explicitly rather
     than being re-derived from the error string on the far side.
+
+    *timeout* is a TOTAL deadline for the whole exchange (nexus-njn1a
+    finding 9), enforced by joining a worker thread, not the per-socket-
+    operation timeout ``urlopen`` takes. The exchange runs before the
+    guard emits its deny, so it must end well inside the hook's own 5 s
+    timeout; see :data:`_ROUTING_POST_BUDGET_S`.
     """
     base_url, token = _engine_endpoint()
     if base_url is None:
         return "unresolvable"
+    import threading  # noqa: PLC0415 — stdlib, only needed on this path
+
+    result: list[str] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            _post_routing_event_once(record, base_url, token, timeout)
+        ),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive() or not result:
+        return "timeout"
+    return result[0]
+
+
+def _post_routing_event_once(
+    record: dict, base_url: str, token: str, timeout: float,
+) -> str:
+    """One POST attempt; returns the cause string (``""`` on 2xx). Never raises."""
     try:
         import urllib.error  # noqa: PLC0415 — stdlib, only needed on this path
         import urllib.request  # noqa: PLC0415 — stdlib, only needed on this path
@@ -739,7 +779,7 @@ def log_routing_event(
     Never raises; the hook's own exit code NEVER depends on this call.
 
     Best-effort, fire-and-forget: POSTs to the engine with a SHORT
-    (~250ms) timeout via :func:`_post_routing_event_http`; on ANY
+    (1.5 s total) budget via :func:`_post_routing_event_http`; on ANY
     failure (unresolvable endpoint -- no live supervisor lease, no
     config.yml credentials, no NX_SERVICE_* env, per
     :func:`_engine_endpoint` -- timeout, non-2xx), degrades to
