@@ -1013,8 +1013,11 @@ the counter column applies; for an inline-planned run the growth column does.
 
 The partial notice opens with a stable marker, `[insufficient-evidence:
 <n> unresolved]`, so `nx answer-runs`, which classifies rows by their
-recorded text (`commands/answer_runs.py:226`), can bucket them; the marker
-survives `trace=False` redaction because it carries no question text.
+recorded text (`commands/answer_runs.py:226`), can bucket them. As built, a
+row is bucketed from its run summary's `coverage_partial` count when the
+summary is present, for either `trace` value; without a summary only a
+`trace=True` row can be bucketed by its marker, because a `trace=False` row's
+recorded text is redacted whole.
 `nx_answer` sets `answer_shape` from the coverage state, not by classifying
 the final text.
 
@@ -1062,7 +1065,9 @@ Assessment cost is bounded independently of facet count. Group facets into one
 structured assessment per evidence stream, with a calibrated cap on facets per
 call and one repair/reassessment cycle. The motivating six-facet request must
 not imply six unconditional model calls. Record assessment calls, facets per
-call, and incremental cost/latency in the run summary.
+call, and assessment latency in the run summary. As built, assessment USD is
+not a summary field: it is in the run's step records (the `operator_check`
+steps numbered past the plan's own steps).
 
 The boundary must be runner-owned, before terminal reduction. Two adjacent
 operator steps bundle and expose only their terminal result, so adding
@@ -1094,7 +1099,10 @@ The repair path gets its own allowance inside the original monotonic deadline
 and one shared USD accumulator spanning prefix, assessment, repair, and
 reduction. It is not a second full plan budget. Existing USD enforcement checks
 before segments and is a stop-line rather than a hard ceiling; unknown-cost
-steps remain a disclosed accounting limitation. Record coverage/repair usage in
+steps remain a disclosed accounting limitation. As built, the continuation
+fallback re-run, which re-executes the plan without the cut, repays the prefix,
+assessment and repair against the same remaining USD; this is logged, not
+prevented. Record coverage/repair usage in
 the existing step accounting vocabulary rather than inventing an unversioned
 step source. If repair is unaffordable, skip it and generate once from the
 evidence already held; the result then follows the coverage-state table above
@@ -1134,7 +1142,9 @@ becomes `persistence=dropped` with a warning, never silent success. New client
 existing record, and exposes `persistence=unsupported` in the live envelope.
 An old engine may silently discard unknown keys, so HTTP 200 is not evidence
 of persistence. Old client + new engine is unchanged because the column and
-wire field are nullable. Returned coverage and persisted coverage are distinct
+wire field are nullable. As built, two further states: `unverified` when a
+summary was sent and no readback was requested (a text-mode call never reads
+back), and `not_recorded` when no run record was written. Returned coverage and persisted coverage are distinct
 states. Readback is a read, not a second telemetry write or update.
 
 #### 5. Evaluation before tuning
@@ -1507,6 +1517,24 @@ first phase that claims the complete motivating behavior.
    Phase 1. Keep the deterministic containment and eligibility gates even if
    model-assisted repair does not justify its cost.
 
+As run (2026-10-27): steps 1 to 3 are built (nexus-jypmj.3.1 to .3.6); step 4
+is nexus-jypmj.3.10. The coverage check ships off and `NX_ANSWER_COVERAGE=1`
+opts in: the Phase 3 review found that turning it on before step 4 measured
+it contradicted Phase 1 step 7 and the Phase 2 precedent, so the default flips
+only after nexus-jypmj.3.10 and Sam's approval. Departures from section 4, each
+stated in the code and the published docs: an assessor reply with no usable
+evidence record leaves its facets `unassessed`, not `unsupported`; a facet
+with both supporting and contradicting evidence is covered and marked
+`conflicted`; prose is kept as `insufficient_evidence` while any facet is
+unassessed, so `uncovered` needs every facet known; the reassessment after the
+repair reads only the evidence the repair added; a partial ledger hands
+generation a coverage note naming the unresolved facets, which is how the
+"explicit list" of step 4 reaches it; ids that come back but hydrate to
+nothing give `no_evidence` and a failure; the envelope's `coverage` object
+carries the state after the post-generation decision. The run summary
+persists only on engine-service-v0.1.166 and later; the deployed engine
+reports `unsupported`.
+
 ### Day 2 Operations
 
 No new collection, database table, or credential is proposed. One additive
@@ -1586,7 +1614,7 @@ library, and composite telemetry surfaces.
 - **Scenario**: Execution succeeds but required evidence is missing —
   **Verify**: `answer_shape="insufficient_evidence"`, coverage is `partial`,
   the text opens with the `[insufficient-evidence: ...]` marker followed by
-  the prose, the run-summary outcome is `coverage_partial`, and the run is not
+  the prose, the run summary's `coverage_partial` count is 1, and the run is not
   a quality exemplar. On a library plan `success_count` increments; on an
   inline-planned run the no-grow flag blocks growth. `nx answer-runs` puts the
   row in its own bucket.
@@ -1846,3 +1874,4 @@ remain coherent without it.
 - 2026-10-27: Phase 2 measured and enabled (nexus-jypmj.2.8, nexus-jypmj.12), approved by Sam. Section 1: a lookup includes several connected facts from one passage of one source; the directional rule is recorded as a measured limit; request extraction is on by default with Haiku and turning it off puts the gate in shadow. Trade-offs and Performance Expectations carry the measured fall-through and extraction cost. Phase 2 step 6 records that the thresholds were set after measuring, and why.
 - 2026-10-27: Section 4's coverage-state table row for `unavailable` names the new `uncovered` shape for evidence that covered no facet and keeps `no_evidence` for zero retrieval results, per Sam's ruling (nexus-jypmj.3.12), added with the shape in nexus-jypmj.3.3.
 - 2026-10-27: Section 4 counts a contradicted facet toward a usable answer: the definition and the `unavailable` row say covered or contradicted, so a contradiction-only result is `partial` with the contradiction named ahead of the prose, per Sam's ruling (nexus-jypmj.3.13).
+- 2026-10-27: Phase 3 As run recorded (the coverage check ships off until nexus-jypmj.3.10 and Sam's approval; the section 4 departures as built), and section 4 and the Test Plan corrected where they misdescribed the build (marker bucketing under trace=False, assessment USD in step records, the continuation fallback repay, the unverified and not_recorded persistence states, the coverage_partial count), approved by Sam.
