@@ -1142,6 +1142,7 @@ def index_cmd(
     if any(Path(p).suffix.lower() == ".pdf" for _uuid, p in records):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
+        pdf_stack.refuse_bad_mineru_bounds(extractor)
         pdf_stack.ensure_or_exit("nx dt index", extractor=extractor)
 
     indexed = 0
@@ -2091,6 +2092,7 @@ def capture_cmd(
     if _capture_is_pdf(url, doi, file_path, capture_type):
         from nexus import pdf_stack  # noqa: PLC0415 — deferred import (startup cost)
 
+        pdf_stack.refuse_bad_mineru_bounds(extractor)
         pdf_stack.ensure_or_exit("nx dt capture", extractor=extractor)
 
     if url:

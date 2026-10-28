@@ -262,6 +262,8 @@ class TestPdfExtractorRestartUsesResolver:
         extractor._MINERU_MAX_RESTARTS = 3
         # RDR-237: the restart beats a progress heartbeat first; with no run bound, none.
         extractor._heartbeat = None
+        # nexus-tr1rj.25: the restart prints a "replacing it" line through this when a caller set one.
+        extractor._restart_announce = None
         return extractor
 
     def test_restart_uses_resolver_path(self, tmp_path: Path, monkeypatch) -> None:

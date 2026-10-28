@@ -570,6 +570,31 @@ def _progress(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)  # noqa: T201 — gated interactive stderr progress; structured event emitted above via _log.info
 
 
+def _restart_skip_text(reason: str, pid: object) -> str:
+    """The progress sentence for a timed-out server that was NOT replaced (nexus-tr1rj.25).
+
+    *reason* is what ``PDFExtractor._restart_broken_mineru_server`` recorded. After a skip the old
+    server is still the registered one; the caller marks it down, so later pages run in a
+    subprocess until the re-check finds it answering.
+    """
+    from nexus._mineru_health import BROKEN_RESTART_COOLDOWN_S  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    if reason == "failed":
+        head = f"tried to replace it (pid {pid}) and the replacement did not come up"
+    else:
+        why = {
+            "cooldown": (
+                f"a server was already replaced on this machine in the last "
+                f"{int(BROKEN_RESTART_COOLDOWN_S)} s"
+            ),
+            "refused": "this run's restart limit is spent or the spawn policy forbids a restart",
+            "no-pid": "its pid is not recorded",
+            "unreadable": "the process behind that pid could not be identified, so nothing was stopped",
+        }.get(reason, "no restart happened")
+        head = f"not replacing it (pid {pid}): {why}"
+    return f"{head}; later pages run in a subprocess for now."
+
+
 # nexus-2fyb code-review R5-I2: chained exceptions from MinerU/httpx can
 # include the configured pdf.mineru_server_url. If a user (mis-)configured
 # that URL with embedded credentials (http://user:pass@host/...), those
@@ -1676,6 +1701,12 @@ class PDFExtractor:
         # RDR-237: the pages of the consecutive rung-1 server requests that timed out, for the
         # restart rule (reset by any rung-1 server request that did not time out, and by a restart).
         self._server_timeout_pages: list[str] = []
+        # Why the last _restart_broken_mineru_server call replaced nothing (nexus-tr1rj.25); ""
+        # when it replaced the server or has not run.
+        self._restart_skipped: str = ""
+        # The line a restart prints once it is decided (nexus-tr1rj.25); set only around the
+        # timed-out-server restart, which knows the pages. None: nothing is announced.
+        self._restart_announce: Callable[[], None] | None = None
 
     def _beat(self) -> None:
         """Call the progress callback, if the caller gave one (RDR-237).
@@ -2724,9 +2755,12 @@ class PDFExtractor:
 
                     identity = classify_server_pid(replace_pid)
                     if identity == "unreadable":
-                        # Inconclusive: signal nothing, keep the file.
+                        # Inconclusive: signal nothing, keep the file. Nothing was attempted, which
+                        # the caller's progress line says (nexus-tr1rj.25).
                         _log.warning("mineru_replace_pid_unreadable", pid=replace_pid)
+                        self._restart_skipped = "unreadable"
                         return False
+                    self._announce_restart()
                     if identity == "mineru":
                         outcome = stop_server_group(replace_pid)
                         _log.warning("mineru_broken_server_stopped",
@@ -2743,6 +2777,7 @@ class PDFExtractor:
                     if info is not None:
                         _pid_file_path().unlink(missing_ok=True)
                     port = get_mineru_configured_fixed_port() or _find_free_port()
+                    self._announce_restart()
                     proc = spawn_server_process(port)
                     if proc is None:
                         _log.warning("mineru_restart_failed",
@@ -2787,6 +2822,14 @@ class PDFExtractor:
         _log.info("mineru_server_restarted",
                   pid=proc.pid if proc is not None else info["pid"], port=port)
         return True
+
+    def _announce_restart(self) -> None:
+        """Print the restart's "replacing it" line, once, at the point where the stop and the
+        spawn are about to start: a restart skipped before this never prints it, and the health
+        wait that follows (up to 60 s) is no longer silent (nexus-tr1rj.25)."""
+        announce, self._restart_announce = self._restart_announce, None
+        if announce is not None:
+            announce()
 
     def _mark_mineru_server_down(self) -> None:
         """Stop using the server for now: pages take the subprocess path until the re-check
@@ -2852,12 +2895,29 @@ class PDFExtractor:
                 "mineru_server_timeout_restart", pages=timed_out, old_pid=info.get("pid"),
                 slots=_mineru_server_slots(),
             )
-            _progress(
-                f"  MinerU server timed out on page(s) {', '.join(timed_out)} — replacing it "
-                f"(pid {info.get('pid')})."
+            self._restart_skipped = ""
+            # "replacing it" is printed from inside the restart, once it is decided (after the
+            # budget, the spawn policy, the machine-wide cooldown and the pid check have let it
+            # through), so a skipped restart never says it and a long health wait is not silent.
+            # The outcome line follows (nexus-tr1rj.25).
+            pages = ", ".join(timed_out)
+            self._restart_announce = lambda: _progress(
+                f"  MinerU server timed out on page(s) {pages} — replacing it (pid {info.get('pid')})."
             )
-            if self._restart_broken_mineru_server(info):
+            try:
+                restarted = self._restart_broken_mineru_server(info)
+            finally:
+                self._restart_announce = None
+            if restarted:
+                _progress(
+                    f"  MinerU server timed out on page(s) {pages} — replaced it "
+                    f"(old pid {info.get('pid')})."
+                )
                 return
+            _progress(
+                f"  MinerU server timed out on page(s) {', '.join(timed_out)} — "
+                f"{_restart_skip_text(self._restart_skipped, info.get('pid'))}"
+            )
         else:
             _log.warning(
                 "mineru_server_timeout_not_restartable", pages=timed_out, url=url,
@@ -2987,15 +3047,22 @@ class PDFExtractor:
         that comes after it would burn the cooldown on a restart that never happens."""
         from nexus._mineru_health import claim_broken_restart  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+        self._restart_skipped = ""
         if info is None or not isinstance(info.get("pid"), int):
+            self._restart_skipped = "no-pid"
             return False
         if self._restart_refused():
+            self._restart_skipped = "refused"
             return False
         if not claim_broken_restart():
             _log.warning("mineru_broken_restart_in_cooldown")
+            self._restart_skipped = "cooldown"
             return False
         _log.warning("mineru_server_broken_restarting", pid=info["pid"])
-        return self._restart_mineru_server(replace_pid=info["pid"])
+        restarted = self._restart_mineru_server(replace_pid=info["pid"])
+        if not restarted and not self._restart_skipped:
+            self._restart_skipped = "failed"  # attempted: the pid check, the stop or the spawn ran
+        return restarted
 
     def _mineru_run_subprocess(
         self, pdf_path: Path, start: int, end: int | None, formula_enable: bool = True,

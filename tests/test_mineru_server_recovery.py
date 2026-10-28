@@ -296,6 +296,198 @@ def test_the_broken_server_is_replaced_once_per_cooldown(
     restart.assert_called_once()
 
 
+@pytest.fixture
+def timed_out_server(
+    registered_server: dict, ext: PDFExtractor, monkeypatch: pytest.MonkeyPatch,
+) -> PDFExtractor:
+    """An extractor whose registered server just timed out: every gate of ``_restart_timed_out_server``
+    is open (registered URL, spawn policy, restart budget) and the restart itself is a stub, so what
+    decides the outcome is the machine-wide cooldown stamp (real, in the isolated config dir)."""
+    monkeypatch.delenv("NEXUS_PDF_PROGRESS_QUIET", raising=False)
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
+    monkeypatch.setattr("nexus.config.get_mineru_server_url", lambda: "http://127.0.0.1:8010")
+    monkeypatch.setattr("nexus.daemon.mineru_lifecycle.spawn_policy_allows", lambda *a, **k: True)
+    monkeypatch.setattr(ext, "_restart_mineru_server", MagicMock(return_value=True))
+    return ext
+
+
+def test_the_replacing_line_is_printed_only_when_the_server_is_replaced(
+    timed_out_server: PDFExtractor, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """nexus-tr1rj.25: a restart inside the machine-wide cooldown replaces nothing, and the line
+    that said "replacing it (pid N)" went out before the cooldown was asked."""
+    ext = timed_out_server
+    ext._mineru_server_up = True
+    ext._server_timeout_pages.append("1")
+    ext._restart_timed_out_server()  # claims the cooldown and replaces the server
+    first = capsys.readouterr().err
+    assert "replaced it (old pid 31337)" in first and "not replacing" not in first
+    assert ext._mineru_server_up is True, "a replaced server stays in use"
+
+    ext._server_timeout_pages.append("2")
+    ext._restart_timed_out_server()  # inside the cooldown: skipped
+    second = capsys.readouterr().err
+    assert "— replacing it" not in second and "replaced it" not in second
+    assert "not replacing it (pid 31337)" in second and "120 s" in second
+    assert ext._restart_mineru_server.call_count == 1, "the second call restarted nothing"
+    assert ext._mineru_server_up is False, "a skipped restart marks the server down for the re-check"
+
+
+def test_a_replacement_that_does_not_come_up_is_not_called_a_skip(
+    timed_out_server: PDFExtractor, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(timed_out_server, "_restart_mineru_server", MagicMock(return_value=False))
+    timed_out_server._server_timeout_pages.append("1")
+    timed_out_server._restart_timed_out_server()
+    err = capsys.readouterr().err
+    assert "tried to replace it (pid 31337) and the replacement did not come up" in err
+    assert "replaced it" not in err and "cooldown" not in err
+
+
+def test_a_restart_the_budget_refuses_says_so_and_attempts_nothing(
+    timed_out_server: PDFExtractor, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """nexus-tr1rj.25: the "refused" skip (this extractor's restart limit is spent, or the spawn
+    policy forbids a restart) has its own sentence; it was the one branch no test read."""
+    ext = timed_out_server
+    ext._mineru_server_restarts = ext._MINERU_MAX_RESTARTS
+    ext._server_timeout_pages.append("4")
+    ext._restart_timed_out_server()
+    err = capsys.readouterr().err
+    assert (
+        "not replacing it (pid 31337): this run's restart limit is spent or the spawn policy "
+        "forbids a restart; later pages run in a subprocess for now."
+    ) in err
+    assert "tried to replace" not in err and "— replacing it" not in err
+    ext._restart_mineru_server.assert_not_called()
+    assert ext._mineru_server_up is False
+
+
+@pytest.mark.parametrize("reason, fragment", [
+    ("refused", "this run's restart limit is spent or the spawn policy forbids a restart"),
+    ("cooldown", "already replaced on this machine in the last 120 s"),
+    ("no-pid", "its pid is not recorded"),
+    ("unreadable", "could not be identified, so nothing was stopped"),
+    ("failed", "tried to replace it (pid 7) and the replacement did not come up"),
+])
+def test_each_skip_reason_has_its_own_sentence(reason: str, fragment: str) -> None:
+    text = pe._restart_skip_text(reason, 7)
+    assert fragment in text and text.endswith("later pages run in a subprocess for now.")
+    assert ("tried to replace" in text) == (reason == "failed"), "only an attempted restart is said to have been tried"
+
+
+@pytest.fixture
+def real_restart_timed_out(
+    ext: PDFExtractor, restart_world: dict, monkeypatch: pytest.MonkeyPatch,
+) -> tuple[PDFExtractor, list[tuple[str, str]]]:
+    """The REAL ``_restart_timed_out_server`` -> ``_restart_broken_mineru_server`` ->
+    ``_restart_mineru_server`` chain over ``restart_world``'s stubbed process, pid file and health
+    endpoint. ``events`` records the progress lines and the health polls in the order they happen."""
+    events: list[tuple[str, str]] = []
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
+    monkeypatch.setattr("nexus.config.get_mineru_server_url", lambda: "http://127.0.0.1:8010")
+    monkeypatch.setattr(pe, "_progress", lambda msg: events.append(("progress", msg.strip())))
+    ok = MagicMock(status_code=200)
+    monkeypatch.setattr(pe.httpx, "get", lambda *a, **k: events.append(("health", "")) or ok)
+    ext._server_timeout_pages.append("5")
+    return ext, events
+
+
+def _progress_lines(events: list[tuple[str, str]]) -> list[str]:
+    return [text for kind, text in events if kind == "progress"]
+
+
+def test_a_restart_that_happens_says_so_before_the_health_wait_and_again_after_it(
+    real_restart_timed_out, restart_world: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ext, events = real_restart_timed_out
+    monkeypatch.setattr(_mineru_spawn, "classify_server_pid", lambda pid: "mineru")
+    stopped_after: list[int] = []
+    monkeypatch.setattr(
+        _mineru_spawn, "stop_server_group",
+        lambda pid, **k: stopped_after.append(len(events)) or restart_world["stopped"].append(pid) or "exited",
+    )
+    ext._restart_timed_out_server()
+    assert stopped_after == [1], "the old server's stop (a SIGTERM grace) starts after the announcement"
+
+    kinds = [k for k, _ in events]
+    assert kinds[0] == "progress" and kinds.index("health") > 0 and kinds[-1] == "progress", events
+    assert kinds.count("progress") == 2
+    first, last = _progress_lines(events)
+    assert first == "MinerU server timed out on page(s) 5 — replacing it (pid 31337)."
+    assert last == "MinerU server timed out on page(s) 5 — replaced it (old pid 31337)."
+    assert events.index(("progress", first)) < kinds.index("health"), "announced before the wait"
+    assert restart_world["stopped"] == [31337] and len(restart_world["spawned"]) == 1
+
+
+def test_a_restart_over_a_registered_pid_that_is_already_dead_also_announces_before_the_spawn(
+    real_restart_timed_out, restart_world: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other route into the spawn: the registered pid is gone, so nothing is stopped."""
+    ext, events = real_restart_timed_out
+    monkeypatch.setattr("nexus._mineru_pid.is_process_alive", lambda pid: False)
+    monkeypatch.setattr(_mineru_spawn, "classify_server_pid", lambda pid: pytest.fail("classified a dead pid"))
+    spawned_after: list[int] = []
+    real_spawn = _mineru_spawn.spawn_server_process
+    monkeypatch.setattr(
+        _mineru_spawn, "spawn_server_process",
+        lambda port: spawned_after.append(len(events)) or real_spawn(port),
+    )
+    ext._restart_timed_out_server()
+
+    first, last = _progress_lines(events)
+    assert "— replacing it (pid 31337)." in first and "— replaced it (old pid 31337)." in last
+    assert spawned_after == [1], "the announcement was already printed when the spawn started"
+    assert restart_world["stopped"] == []
+
+
+def test_a_restart_that_fails_says_replacing_then_that_it_did_not_come_up(
+    real_restart_timed_out, restart_world: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ext, events = real_restart_timed_out
+    monkeypatch.setattr(_mineru_spawn, "classify_server_pid", lambda pid: "mineru")
+    monkeypatch.setattr(_mineru_spawn, "spawn_server_process", lambda port: None)  # mineru-api not found
+    ext._restart_timed_out_server()
+
+    first, last = _progress_lines(events)
+    assert "— replacing it (pid 31337)." in first
+    assert "tried to replace it (pid 31337) and the replacement did not come up" in last
+    assert [k for k, _ in events] == ["progress", "progress"], "it failed before any health poll"
+
+
+def test_a_restart_skipped_in_the_cooldown_prints_no_replacing_line(
+    real_restart_timed_out, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ext, events = real_restart_timed_out
+    monkeypatch.setattr("nexus._mineru_health.claim_broken_restart", lambda: False)
+    ext._restart_timed_out_server()
+
+    (only,) = _progress_lines(events)
+    assert "not replacing it (pid 31337)" in only and "replacing it (pid 31337)." not in only
+    assert [k for k, _ in events] == ["progress"], "no health wait, no announcement"
+
+
+def test_a_pid_that_cannot_be_identified_is_reported_as_nothing_attempted(
+    real_restart_timed_out, restart_world: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-tr1rj.25: ``_restart_mineru_server`` returns False when the live command of the
+    registered pid cannot be read. Nothing was stopped or spawned, so the line must not say it
+    tried to replace the server and the replacement did not come up."""
+    ext, events = real_restart_timed_out
+    monkeypatch.setattr(_mineru_spawn, "classify_server_pid", lambda pid: "unreadable")
+    ext._restart_timed_out_server()
+
+    (only,) = _progress_lines(events)
+    assert only == (
+        "MinerU server timed out on page(s) 5 — not replacing it (pid 31337): the process behind "
+        "that pid could not be identified, so nothing was stopped; later pages run in a subprocess for now."
+    )
+    assert "did not come up" not in only and "tried to replace" not in only
+    assert restart_world["stopped"] == [] and restart_world["spawned"] == []
+    assert [k for k, _ in events] == ["progress"]
+    assert ext._restart_announce is None, "a leftover announcement would fire on the next, unrelated restart"
+
+
 def test_there_is_nothing_to_replace_without_a_registered_server(
     ext: PDFExtractor, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

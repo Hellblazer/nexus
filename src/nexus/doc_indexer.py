@@ -2766,6 +2766,14 @@ def index_pdf(
 
     # The explicit ``pymupdf`` extractor (RDR-237) needs none of it: PyMuPDF is a core dependency.
     pdf_stack.require("index_pdf", extractor=extractor)
+    # nexus-tr1rj.24: the same for an unusable MinerU time limit (RDR-237). The check at the start
+    # of extraction runs after the pre-flight registration below, so a --force re-index of a
+    # complete document would flip it to failed and delete its chunks before the refusal.
+    _bounds_problem = pdf_stack.mineru_bounds_problem(extractor)
+    if _bounds_problem is not None:
+        from nexus.pdf_extractor import MineruBoundsError  # noqa: PLC0415 — circular-dep avoidance, deferred
+
+        raise MineruBoundsError(_bounds_problem)
     content_hash = _sha256(pdf_path)
     # RDR-152 Seam B: resolve the write client BEFORE the collection-name
     # fallback below (moved up, nexus-o5x2c) — see _index_document /

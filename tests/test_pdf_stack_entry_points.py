@@ -474,3 +474,181 @@ def test_dt_capture_of_a_non_pdf_never_asks(runner, capture_bed, monkeypatch, ar
     monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: [(kw["uuids"][0], "/captured.md")])
     result = runner.invoke(main, ["dt", "capture", *argv])
     assert calls == [], result.output
+
+
+# ── an unusable MinerU time limit stops every entry BEFORE it writes (nexus-tr1rj.24) ─────────────
+#
+# pdf.mineru_page_timeout_s x pdf.mineru_page_batch above 240 s is refused where a MinerU extraction
+# starts, which is after the catalog row is written: a --force re-index of a complete document flipped
+# it to failed and deleted its chunks before the refusal. Each entry now asks first, on the stack
+# gate's own footing: the same message the extraction gives, exit 1, nothing registered or purged.
+# tests/integration/test_rdr237_bounds_preflight.py holds the engine-backed pin (row and chunks).
+
+_BOUNDS = "pdf.mineru_page_timeout_s (180 s) x pdf.mineru_page_batch (2) = 360 s"
+
+
+@pytest.fixture
+def bad_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """180 s x a batch of 2: 360 s, over the 240 s a MinerU attempt may run."""
+    monkeypatch.setattr("nexus.config.get_mineru_page_timeout_s", lambda repo_root=None: 180)
+    monkeypatch.setattr("nexus.config.get_mineru_page_batch", lambda repo_root=None: 2)
+
+
+@pytest.fixture
+def stack_untouched(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """``ensure`` as a trip wire: the bounds are asked before the stack, so a refusal never
+    reaches (or installs) it. The list holds every entry that asked."""
+    ensure, calls = _ensure_raising(AssertionError("the stack gate must not be reached"))
+    monkeypatch.setattr(pdf_stack, "ensure", ensure)
+    return calls
+
+
+@pytest.mark.parametrize("flags", [["--extractor", "mineru"], []], ids=["flag", "setting-default"])
+def test_index_pdf_refuses_a_bad_mineru_limit_before_the_stack_gate_and_writes_nothing(
+    runner, fake_pdf, bad_bounds, stack_untouched, flags,
+) -> None:
+    with patch("nexus.doc_indexer.index_pdf") as index_pdf:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--force", *flags])
+    assert result.exit_code == 1, result.output
+    assert _BOUNDS in result.output and "Error:" in result.output
+    assert stack_untouched == []
+    index_pdf.assert_not_called()
+
+
+def test_index_pdf_dir_refuses_a_bad_mineru_limit_before_the_stack_gate(runner, tmp_path, bad_bounds, stack_untouched) -> None:
+    (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4")
+    with patch("nexus.doc_indexer.index_pdf") as index_pdf, patch("nexus.doc_indexer.batch_index_pdfs") as batch:
+        result = runner.invoke(main, ["index", "pdf", "--dir", str(tmp_path)])
+    assert result.exit_code == 1 and _BOUNDS in result.output, result.output
+    assert stack_untouched == []
+    index_pdf.assert_not_called()
+    batch.assert_not_called()
+
+
+def test_index_pdf_dir_with_no_pdf_does_not_ask_about_the_limit(runner, tmp_path, bad_bounds) -> None:
+    result = runner.invoke(main, ["index", "pdf", "--dir", str(tmp_path)])
+    assert result.exit_code == 0 and "No PDF files found" in result.output, result.output
+
+
+def test_a_bad_mineru_limit_does_not_touch_a_pymupdf_run(runner, fake_pdf, bad_bounds, stack_untouched) -> None:
+    """The limit concerns MinerU only: the text-only extractor needs neither it nor the stack."""
+    with patch("nexus.doc_indexer.index_pdf", return_value={"chunks": 3, "pages": [], "title": "", "author": ""}) as index_pdf:
+        result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--extractor", "pymupdf"])
+    assert result.exit_code == 0, result.output
+    index_pdf.assert_called_once()
+    assert stack_untouched == []
+
+
+def test_dt_index_refuses_a_bad_mineru_limit_before_the_first_record(runner, bad_bounds, stack_untouched, monkeypatch) -> None:
+    monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: [("U1", "/a.md"), ("U2", "/b.pdf")])
+    index_record = MagicMock()
+    monkeypatch.setattr("nexus.commands.dt._index_record", index_record)
+    result = runner.invoke(main, ["dt", "index", "--uuid", "U1"])
+    assert result.exit_code == 1 and _BOUNDS in result.output, result.output
+    assert stack_untouched == []
+    index_record.assert_not_called()
+
+
+@pytest.mark.parametrize("argv", _PDF_CAPTURES)
+def test_dt_capture_refuses_a_bad_mineru_limit_before_devonthink_is_touched(
+    runner, capture_bed, bad_bounds, stack_untouched, argv,
+) -> None:
+    result = runner.invoke(main, ["dt", "capture", *argv])
+    assert result.exit_code == 1 and _BOUNDS in result.output, result.output
+    assert stack_untouched == []
+    assert capture_bed.touched == []
+
+
+def test_collection_reindex_refuses_a_bad_mineru_limit_before_it_purges_the_collection(
+    runner, reindex_bed, bad_bounds, stack_untouched,
+) -> None:
+    with patch("nexus.doc_indexer.index_pdf") as index_pdf:
+        result = runner.invoke(main, ["collection", "reindex", "docs__papers", "--force"])
+    assert result.exit_code == 1 and _BOUNDS in result.output, result.output
+    reindex_bed.purge.assert_not_called()
+    assert "Deleting collection" not in result.output
+    assert stack_untouched == []
+    index_pdf.assert_not_called()
+
+
+def test_collection_reindex_of_markdown_only_does_not_ask_about_the_limit(runner, reindex_bed, bad_bounds) -> None:
+    reindex_bed.sources = [str(reindex_bed.md)]
+    with patch("nexus.doc_indexer.index_markdown", return_value=1):
+        result = runner.invoke(main, ["collection", "reindex", "docs__papers", "--force"])
+    assert _BOUNDS not in result.output, result.output
+    reindex_bed.purge.assert_called_once()
+
+
+def test_mineru_start_does_not_ask_about_the_limit(runner, bad_bounds, monkeypatch) -> None:
+    """`nx mineru start` extracts nothing: the stack gate is its only gate."""
+    ensure, calls = _ensure_raising(_REFUSED)
+    monkeypatch.setattr(pdf_stack, "ensure", ensure)
+    with patch("nexus.commands.mineru.spawn_server_process"):
+        result = runner.invoke(main, ["mineru", "start"])
+    assert result.exit_code == 69 and calls == ["nx mineru start"], result.output
+
+
+# ── the repo walk ────────────────────────────────────────────────────────────
+
+
+def test_the_repo_walk_holds_the_pdfs_that_need_indexing_on_a_bad_mineru_limit_and_exits_nothing(
+    bad_bounds, stack_untouched, tmp_path, capsys,
+) -> None:
+    """A MinerU problem stops MinerU work and keeps the unrelated work (nexus-tr1rj.13): the walk
+    returns the PDFs it holds, named in the skipped record and a phase line, and the run goes on
+    to index code and prose. It does not exit; the CLI ends the run non-zero afterwards."""
+    from nexus.indexer import _hold_pdfs_without_stack
+
+    needs, current = tmp_path / "needs.pdf", tmp_path / "current.pdf"
+    phases: list[str] = []
+    held = _hold_pdfs_without_stack(
+        [needs, current], tmp_path, on_phase=phases.append, probe=lambda paths: [needs], extractor="mineru",
+    )
+    assert held == [needs], "only the PDF that needs extracting is held"
+    assert pdf_stack.skipped_count() == 1
+    assert len(phases) == 1 and _BOUNDS in phases[0] and "1 PDF(s) NOT indexed" in phases[0], phases
+    # --force: no probe, every PDF is re-extracted, so every PDF is held
+    assert _hold_pdfs_without_stack([needs, current], tmp_path, probe=None, extractor="mineru") == [needs, current]
+    assert stack_untouched == [], "the stack was neither asked nor installed"
+
+
+def test_a_late_bounds_hold_merges_with_the_early_one_and_prints_no_second_phase_line(
+    bad_bounds, tmp_path,
+) -> None:
+    from nexus.indexer import _hold_pdfs_without_stack
+
+    early, late = tmp_path / "early.pdf", tmp_path / "late.pdf"
+    phases: list[str] = []
+    held = _hold_pdfs_without_stack(
+        [late], tmp_path, on_phase=phases.append, already_held=[early], extractor="mineru",
+    )
+    assert held == [late]
+    assert pdf_stack.skipped_count() == 2, "the record is the union of the early and the late hold"
+    assert phases == [], "the line was printed by the early hold"
+
+
+def test_the_repo_walk_lets_current_pdfs_and_pymupdf_pass_a_bad_mineru_limit(bad_bounds, monkeypatch, tmp_path) -> None:
+    from nexus.indexer import _hold_pdfs_without_stack
+
+    monkeypatch.setattr(pdf_stack, "ensure", lambda entry: Outcome.PRESENT)
+    pdf = tmp_path / "a.pdf"
+    # every PDF is indexed and unchanged: nothing is extracted, so the setting is not asked about
+    assert _hold_pdfs_without_stack([pdf], tmp_path, probe=lambda paths: [], extractor="mineru") == []
+    probe = MagicMock(side_effect=AssertionError("pymupdf never reaches MinerU, so the probe is not run for the limit"))
+    assert _hold_pdfs_without_stack([pdf], tmp_path, probe=probe, extractor="pymupdf") == []
+
+
+# ── the library backstop ─────────────────────────────────────────────────────
+
+
+def test_index_pdf_refuses_a_bad_mineru_limit_before_it_registers_or_writes(bad_bounds, fake_pdf, monkeypatch) -> None:
+    from nexus.doc_indexer import index_pdf
+    from nexus.pdf_extractor import MineruBoundsError
+
+    monkeypatch.setattr(pdf_stack, "require", lambda *a, **k: None)
+    t3 = MagicMock()
+    with patch("nexus.doc_indexer._register_or_lookup_doc_id", side_effect=AssertionError("registered")) as register:
+        with pytest.raises(MineruBoundsError, match="pdf.mineru_page_batch"):
+            index_pdf(fake_pdf, "tr1rj24", t3=t3, collection_name="docs__tr1rj24__bge-base-en-v15-768__v1", force=True)
+    register.assert_not_called()
+    assert t3.method_calls == [], "nothing reached the vector store"

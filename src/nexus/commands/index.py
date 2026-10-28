@@ -1919,6 +1919,11 @@ def index_repo_cmd(
                 f"installing it here. Code and prose were indexed. "
                 f"Run: {pdf_stack.repair_command()}   then re-run `nx index repo`."
             )
+        # nexus-tr1rj.24: PDFs held because the MinerU time limit is unusable. Code, prose and RDR
+        # files were indexed; the held PDFs are listed and the run ends non-zero (a MinerU problem
+        # stops MinerU work only, like the stop of nexus-tr1rj.13).
+        _bounds_failure = _report_mineru_bounds_hold(stats or {})
+        _run_failure = _run_failure or _bounds_failure
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             # nexus-wbfpw.29 round 3 (round 6: same VERIFIED set the
@@ -2867,6 +2872,26 @@ def _report_mineru_stop(stats: dict) -> click.ClickException | None:
     )
 
 
+def _report_mineru_bounds_hold(stats: dict) -> click.ClickException | None:
+    """nexus-tr1rj.24: list the PDFs ``nx index repo`` held because ``pdf.mineru_page_timeout_s`` x
+    ``pdf.mineru_page_batch`` is unusable (``stats['pdf_mineru_bounds_held_paths']``, set by
+    ``indexer._run_index``), and return the exception that ends the run non-zero, or ``None`` when
+    nothing was held. The listing names the first 20; the rest are counted."""
+    held = [Path(p).name for p in stats.get("pdf_mineru_bounds_held_paths") or ()]
+    if not held:
+        return None
+    problem = (stats.get("pdf_mineru_bounds_problem") or "the MinerU time limit is unusable").rstrip(". ")
+    click.echo(f"Held: {len(held)} PDF(s) NOT indexed, {problem}")
+    for name in held[:20]:
+        click.echo(f"  {name}: held (not registered, not indexed)")
+    if len(held) > 20:
+        click.echo(f"  ... and {len(held) - 20} more")
+    return click.ClickException(
+        f"{len(held)} PDF(s) were NOT indexed: {problem}. Code, prose and RDR files were indexed. "
+        f"Fix the setting (or use pdf.extractor pymupdf) and re-run `nx index repo`."
+    )
+
+
 def _fold_in_mineru_stop(run_failure: click.ClickException | None, stats: dict) -> click.ClickException | None:
     """nexus-tr1rj.13: report a MinerU stop and combine it with the run's earlier failure, the first
     one winning the exit. The report is called FIRST and always: ``run_failure or _report_mineru_stop(...)``
@@ -3221,6 +3246,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     # asks after it knows there is at least one PDF to index. The explicit
     # ``--extractor pymupdf`` (RDR-237) needs none of it: the gate returns at once.
     if dir_path is None:
+        # nexus-tr1rj.24: an unusable MinerU time limit stops here, before the catalog row or a
+        # chunk is touched (the check inside extraction comes after the row is written).
+        pdf_stack.refuse_bad_mineru_bounds(extractor)
         pdf_stack.ensure_or_exit("nx index pdf", extractor=extractor)
 
     # ── Batch mode (--dir) ──────────────────────────────────────────────
@@ -3265,6 +3293,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         if skipped:
             click.echo(f"Filtered {skipped} PDF(s) via gitignore/.nexus.yml patterns")
 
+        pdf_stack.refuse_bad_mineru_bounds(extractor)
         pdf_stack.ensure_or_exit("nx index pdf --dir", extractor=extractor)
 
         if collection is not None:

@@ -1238,6 +1238,8 @@ def reindex_cmd(name: str, force: bool) -> None:
         from nexus.config import get_pdf_extractor  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         pdf_extractor = get_pdf_extractor()
+        # nexus-tr1rj.24: before the purge, with the stack gate.
+        pdf_stack.refuse_bad_mineru_bounds(pdf_extractor)
         pdf_stack.ensure_or_exit("nx collection reindex", extractor=pdf_extractor)
 
     # 3. Delete collection — via the canonical cascade, exactly like

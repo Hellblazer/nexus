@@ -582,6 +582,32 @@ def require(entry: str = "PDF extraction", *, extractor: str = "") -> None:
     raise PdfStackMissingError(_remedy(entry, st, None))
 
 
+def mineru_bounds_problem(extractor: str = "") -> str | None:
+    """Why the MinerU time limits cannot be used as set, or ``None`` (RDR-237, nexus-tr1rj.24).
+
+    ``None`` when *extractor* is the explicit ``pymupdf`` (MinerU is never reached) or when
+    ``pdf.mineru_page_timeout_s`` x ``pdf.mineru_page_batch`` is usable. Read at call time through
+    :func:`nexus.config.mineru_attempt_bound_problem`, the one place the pair is judged. The same
+    rule runs at the start of a MinerU extraction, but by then the catalog row is written: this
+    is the question every PDF entry asks first, before it writes anything.
+    """
+    if not needs_stack(extractor):
+        return None
+    import nexus.config as _config  # noqa: PLC0415 — deferred; module attribute so a patched check is seen
+
+    return _config.mineru_attempt_bound_problem()
+
+
+def refuse_bad_mineru_bounds(extractor: str = "") -> None:
+    """The CLI form of :func:`mineru_bounds_problem`: print ``Error: <problem>`` on stderr and exit 1,
+    the message and status an unusable setting always had, before anything is registered or
+    written. Returns at once for ``pymupdf`` and for settings that can be used."""
+    problem = mineru_bounds_problem(extractor)
+    if problem is not None:
+        _say(f"Error: {problem}")
+        raise SystemExit(1)
+
+
 def _windows_runtime_gap(
     platform: str | None = None,
     config_dir: str | None = None,
