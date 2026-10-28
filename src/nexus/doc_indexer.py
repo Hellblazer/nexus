@@ -1012,6 +1012,7 @@ def _register_or_lookup_doc_id(
                 f"it from there (nx index repo <primary>, or this command on the "
                 f"primary's path)."
             )
+        derived_source_uri = ""  # set only for a curator owner given a base_path (nexus-njn1a)
         if home is not None:
             owner, fp, content_type = home
             if corpus:
@@ -1028,6 +1029,14 @@ def _register_or_lookup_doc_id(
             else:
                 owner = writer.register_owner(owner_name, "curator")
             fp = make_relative(file_path, base_path) if base_path else str(file_path)
+            if base_path:
+                # nexus-njn1a (finding 12): a curator owner has no repo_root, so the engine cannot
+                # turn the relative ``fp`` into the ``file://`` source_uri it derives for an
+                # absolute one; the document registered with none, and `nx enrich aspects` then
+                # skipped it as ``unattributable_identity``. The directory the caller named IS the
+                # root: stamp the file's own absolute URI. Never the ``source_uri`` argument below,
+                # which is a lookup key that fails loud on a miss (nexus-y8qtj).
+                derived_source_uri = Path(file_path).resolve().as_uri()
 
         # nexus-y8qtj: source_uri-keyed resolution takes priority over the
         # file_path lookup below, and is fail-loud rather than falling
@@ -1068,6 +1077,17 @@ def _register_or_lookup_doc_id(
             # with two catalog Documents.
             existing = _repo_owner_document_for(reader, file_path)
         if existing is not None:
+            if derived_source_uri and not getattr(existing, "source_uri", ""):
+                # nexus-njn1a: a document an earlier release registered without its source_uri
+                # (the same curator-owner case) gets it on the next run. Advisory, like the
+                # reconcile write below: the tumbler is already resolved.
+                try:
+                    writer.update(existing.tumbler, source_uri=derived_source_uri)
+                except Exception:  # noqa: BLE001 — boundary catch: advisory backfill, never discards a resolved tumbler
+                    _log.warning(
+                        "doc_source_uri_backfill_failed",
+                        tumbler=str(existing.tumbler), file_path=fp, exc_info=True,
+                    )
             # nexus-2t63u: reconcile a stale ``physical_collection`` EARLY,
             # before the tumbler is returned and threaded into this run's
             # chunk/manifest writes. Without this, a path-based re-index
@@ -1226,7 +1246,7 @@ def _register_or_lookup_doc_id(
             year=year,
             author=author,
             source_mtime=source_mtime,
-            source_uri=source_uri,
+            source_uri=source_uri or derived_source_uri,
             with_created=True,
         )
         # created_from_register_result/tumbler_from_register_result handle
