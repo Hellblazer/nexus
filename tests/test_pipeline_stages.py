@@ -869,7 +869,9 @@ class TestPipelineIndexPdf:
         assert total == 2
         mock_t3.upsert_chunks_with_embeddings.assert_not_called()
         (w,) = writer.instances
-        assert [len(r) for r, _ in w.batches] == [2]
+        # The uploader polls while the chunker still writes, so a poll between the two chunks'
+        # buffer writes sends them as two batches; the split is timing, the order is the contract.
+        assert [row["position"] for rows, _ in w.batches for row in rows] == [0, 1]
         # The stamp is the orchestrator's, after the post-passes: the writer finished, then it was
         # stamped complete.
         assert writer.events[-2:] == [("finish",), ("complete",)]
