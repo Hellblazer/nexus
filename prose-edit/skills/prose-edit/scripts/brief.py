@@ -136,7 +136,7 @@ GENRE_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
     ("changelog", frozenset({"changelog", "changes"})),
     ("rdr", frozenset({"rdr", "adr", "decision"})),
     ("how-to", frozenset({"runbook", "operation", "migration", "guide", "howto", "how to", "tutorial"})),
-    ("exploration-essay", frozenset({"postmortem", "exploration", "essay", "field report"})),
+    ("exploration-essay", frozenset({"postmortem", "exploration", "essay", "field report", "blog", "post", "article"})),
 )
 DEFAULT_SUGGESTION = "reference-doc"
 # After the suggested genre, the other five best-first: the nearest kinds of writing come first, so the two options

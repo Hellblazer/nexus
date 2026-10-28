@@ -113,7 +113,7 @@ def test_the_accept_option_leads_with_the_reason_and_the_changed_words_not_a_cut
 
 def test_reject_them_all_covers_only_the_offered_edits_and_claims_no_storage_on_a_stdin_run() -> None:
     step11 = _step(11)
-    assert "covers only the edits the accept questions offered" in step11
+    assert "covers only the editor's own edits the accept questions offered" in step11
     assert "never an overflow edit" in step11
     assert "on a stdin run none is stored" in step11
     assert '"Reject them all" (each is stored as a rejection' not in step11
@@ -312,3 +312,22 @@ def test_setup_runs_clean_as_a_script(prose: Prose) -> None:
     proc = run_brief(prose, "setup")
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["root"]
+
+
+# confirmation round on 8153fd54e
+
+
+def test_the_genres_question_says_what_a_genre_is_and_one_candidate_skips_it() -> None:
+    step = _setup_run()
+    assert '"A genre is the kind of writing a document is; it sets what the editor looks for' in step
+    assert "When it holds one candidate, skip the `Genres` question" in step
+
+
+def test_reject_them_all_never_covers_an_edit_the_author_added() -> None:
+    # review.py refuses --reject of an author's own edit, so the option must leave those held
+    assert "never an edit the author added through the answer route" in SKILL_TEXT
+    assert "When any edit offered in the accept questions went unticked" in SKILL_TEXT
+
+
+def test_a_stdin_run_without_a_genre_asks_instead_of_stopping() -> None:
+    assert "except a stdin run whose stderr says `needs --genre`" in SKILL_TEXT

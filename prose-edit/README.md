@@ -10,7 +10,7 @@ Type these in Claude Code, in order, in your own repository:
 
 1. `/plugin marketplace add Hellblazer/nexus` adds the marketplace both plugins come from.
 2. `/plugin install conexus@nexus-plugins` installs `conexus`, which provides the Nexus that prose-edit keeps its memory in.
-3. `/conexus:setup` checks what Nexus is missing and asks one question: where to run it (this machine, a managed service, or the command line only). The install runs in the background and the first download is about a gigabyte, so it takes a few minutes. Run `/conexus:setup` again to see how far it is; it reports that nothing is missing when it is done.
+3. `/conexus:setup` checks what Nexus is missing and asks one question: where to run it (this machine, a managed service, or the command line only); pick this machine unless someone gave you a service address and a token. The install runs in the background and the first download is about a gigabyte, so it takes a few minutes. Run `/conexus:setup` again to see how far it is; it reports that nothing is missing when it is done.
 4. `/plugin install conexus-prose-edit@nexus-plugins` installs this plugin.
 5. Start a new session, or run `/reload-plugins`, so the new plugin loads.
 6. `/conexus-prose-edit:prose-edit setup` is a short guided session of choices: it asks only about what is missing and ends with "Ready." and a command to try on one of your own documents.

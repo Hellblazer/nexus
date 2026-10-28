@@ -166,6 +166,9 @@ def test_setup_caps_the_candidates_at_eight_and_counts_the_rest(prose: Prose) ->
         ("docs/changes/", "changelog"),
         ("docs/address-book/", "reference-doc"),
         ("docs/api/", "reference-doc"),
+        ("src/content/blog/", "exploration-essay"),
+        ("posts/", "exploration-essay"),
+        ("articles/", "exploration-essay"),
     ],
 )
 def test_the_suggestion_follows_the_folder_name(folder: str, genre: str) -> None:
