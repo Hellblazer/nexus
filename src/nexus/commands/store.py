@@ -20,6 +20,7 @@ from nexus.corpus import (
 from nexus.db import make_t3
 from nexus.db.t3 import T3Database
 from nexus.errors import NoteUriEngineTooOldError, PutOversizedError
+from nexus.metadata_schema import ttl_listing_label
 from nexus.ttl import parse_ttl
 
 
@@ -294,7 +295,6 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     # cheap count); the rows listed are live ones, so after a delete the
     # two differ (shakeout 7.64.1 F10). Name it rather than imply live.
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n" + also)
-    from nexus.metadata_schema import ttl_listing_label  # noqa: PLC0415 — deferred, matches this module's convention
     for e in entries:
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
         title = (e.get("title") or "")[:40]

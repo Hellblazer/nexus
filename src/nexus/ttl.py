@@ -1,9 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import re
 
-#: 100 years; beyond this datetime arithmetic overflows. The one cap every TTL writer applies
-#: (``nx store put --ttl`` refuses above it; a bundle import clamps to it).
+#: 100 years: a policy cap, not an overflow point (a date plus a TTL overflows near 2.9M days, and
+#: ``timedelta`` itself holds 999,999,999). The one cap every TTL writer applies: ``nx store put --ttl``,
+#: ``put_note``, ``write_note`` and ``T3Database.put`` refuse above it, and a bundle import clamps to it.
 MAX_TTL_DAYS = 36500
+
+
+def refuse_ttl_over_cap(ttl_days: int | None) -> None:
+    """Raise ``ValueError`` for a ``ttl_days`` above :data:`MAX_TTL_DAYS` (``None`` passes).
+
+    The sibling of each writer's ``<= 0`` refusal: it runs before any side effect, so a TTL the CLI
+    would not accept cannot reach a row through the library or an import.
+    """
+    if ttl_days is not None and ttl_days > MAX_TTL_DAYS:
+        raise ValueError(
+            f"ttl_days={ttl_days} is invalid: it exceeds the maximum of {MAX_TTL_DAYS} days (100 years); "
+            "omit the argument or pass None for a permanent entry"
+        )
 
 
 def parse_ttl(s: str | None) -> int | None:

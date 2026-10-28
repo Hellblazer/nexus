@@ -5,8 +5,11 @@ repo gave `nx enrich aspects` nothing to attribute.
 The documents registered under a curator owner, which carries no repo_root, with a path relative
 to the directory and no source_uri. `nx enrich aspects` then logged
 `aspect_uri_for_relative_without_root` and skipped every document as `unattributable_identity`.
-The registration now stamps the file's absolute `file://` source_uri (the directory is the root),
-and a re-run backfills a document an earlier run registered without one.
+
+The registration now carries the file's ABSOLUTE path, as `nx index md` / `nx index pdf` do, so the
+engine derives the raw `file://<abspath>` source_uri itself (never a percent-encoded `as_uri()` form),
+and two non-git directories with the same basename get distinct documents. A document an earlier
+release registered with a relative path and no source_uri is adopted and backfilled on the next run.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ from tests._catalog_fixture_ops import ActiveCatalog
 
 _COLLECTION = "rdr__1-1__test-embed-768__v1"
 _SEQ = [0]
+_REL = "docs/rdr/rdr-901-example.md"
 
 
 def _next() -> int:
@@ -25,12 +29,17 @@ def _next() -> int:
     return _SEQ[0]
 
 
-def _non_git_rdr_dir(tmp_path: Path) -> tuple[Path, Path]:
-    root = tmp_path / f"plain-{_next()}"
+def _non_git_rdr_dir(tmp_path: Path, name: str | None = None) -> tuple[Path, Path]:
+    root = tmp_path / (name or f"plain-{_next()}")
     (root / "docs" / "rdr").mkdir(parents=True)
-    f = root / "docs" / "rdr" / "rdr-901-example.md"
+    f = root / _REL
     f.write_text("# RDR-901\n\nbody\n")
     return root, f
+
+
+def _raw_uri(f: Path) -> str:
+    """The engine's spelling: ``file://`` + the absolute path, no percent-encoding."""
+    return "file://" + str(f.resolve())
 
 
 def _register(f: Path, root: Path, corpus: str) -> str:
@@ -42,14 +51,61 @@ def _register(f: Path, root: Path, corpus: str) -> str:
 
 
 @pytest.mark.t2_tenant
-def test_a_document_in_a_non_git_rdr_dir_carries_its_absolute_source_uri(tmp_path):
+def test_a_document_in_a_non_git_rdr_dir_carries_its_absolute_path_and_raw_source_uri(tmp_path):
     root, f = _non_git_rdr_dir(tmp_path)
     cat = ActiveCatalog()
     doc_id = _register(f, root, f"plain-{_next()}")
     assert doc_id
     doc = cat.resolve(doc_id)
-    assert doc.file_path == "docs/rdr/rdr-901-example.md", doc.file_path
-    assert doc.source_uri == f.resolve().as_uri(), doc.source_uri
+    assert doc.file_path == str(f.resolve()), doc.file_path
+    assert doc.source_uri == _raw_uri(f), doc.source_uri
+
+
+@pytest.mark.t2_tenant
+def test_a_directory_with_a_space_and_a_non_ascii_name_gets_the_raw_uri_not_the_encoded_one(tmp_path):
+    """Path.as_uri() would stamp file:///.../my%20docs%20%C3%A9/..., which the engine's own derivation
+    and `_doc_id_for_path` (both raw) never match."""
+    root, f = _non_git_rdr_dir(tmp_path, f"my docs é-{_next()}")
+    cat = ActiveCatalog()
+    doc_id = _register(f, root, f"plain-{_next()}")
+    doc = cat.resolve(doc_id)
+    assert " " in doc.source_uri and "é" in doc.source_uri and "%" not in doc.source_uri, doc.source_uri
+    assert doc.source_uri == _raw_uri(f)
+    from nexus.doc_indexer import _doc_id_for_path
+
+    assert _doc_id_for_path(f) == doc_id, "the staleness gate's read-only lookup must find the document"
+
+
+@pytest.mark.t2_tenant
+def test_two_non_git_dirs_with_the_same_basename_get_distinct_documents(tmp_path):
+    """The curator owner is keyed by the directory's basename (index_rdr_cmd passes corpus=basename),
+    so a relative fp collided across the two; the absolute one does not."""
+    root_a, fa = _non_git_rdr_dir(tmp_path / "one", "notes")
+    root_b, fb = _non_git_rdr_dir(tmp_path / "two", "notes")
+    assert root_a.name == root_b.name and fa != fb
+    cat = ActiveCatalog()
+    corpus = f"plain-{_next()}"
+    a = _register(fa, root_a, corpus)
+    b = _register(fb, root_b, corpus)
+    assert a and b and a != b, (a, b)
+    assert cat.resolve(a).source_uri == _raw_uri(fa)
+    assert cat.resolve(b).source_uri == _raw_uri(fb)
+    assert _register(fa, root_a, corpus) == a and _register(fb, root_b, corpus) == b
+
+
+@pytest.mark.t2_tenant
+def test_a_git_repo_rdr_dir_registers_as_before(tmp_path):
+    """A file inside a git repo takes the repo owner's identity (a repo-relative path); this change
+    touches the curator branch only."""
+    import subprocess
+
+    root, f = _non_git_rdr_dir(tmp_path, f"repo-{_next()}")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    cat = ActiveCatalog()
+    doc_id = _register(f, root, f"repo-corpus-{_next()}")
+    assert doc_id
+    doc = cat.resolve(doc_id)
+    assert doc.file_path == _REL, doc.file_path
 
 
 @pytest.fixture
@@ -79,7 +135,7 @@ def test_enrich_aspects_attributes_a_non_git_rdr_document(tmp_path, aspects_env,
     from nexus.commands.enrich import enrich
     from nexus.db.t2 import T2Database
 
-    root, f = _non_git_rdr_dir(tmp_path)
+    root, f = _non_git_rdr_dir(tmp_path, f"asp dir é-{_next()}")
     doc_id = _register(f, root, f"plain-{_next()}")
     assert doc_id
 
@@ -100,18 +156,74 @@ def test_enrich_aspects_attributes_a_non_git_rdr_document(tmp_path, aspects_env,
     with T2Database(aspects_env) as db:
         rows = db.document_aspects.list_by_collection(_COLLECTION)
     assert len(rows) == 1
-    assert rows[0].source_uri == f.resolve().as_uri(), rows[0].source_uri
+    assert rows[0].source_uri == _raw_uri(f), rows[0].source_uri
+
+
+def _legacy_doc(corpus: str, *, source_uri: str = "") -> str:
+    """A curator document as 7.88.0 registered it: a path relative to the directory, and (when the
+    engine could not derive one) no source_uri."""
+    cat = ActiveCatalog()
+    owner = cat.register_owner(corpus, "curator")
+    res = cat.register(
+        owner=owner, title="legacy", content_type="rdr", file_path=_REL, corpus=corpus,
+        physical_collection=_COLLECTION, chunk_count=0, source_uri=source_uri,
+    )
+    return str(res[0] if isinstance(res, tuple) else res)
 
 
 @pytest.mark.t2_tenant
-def test_a_rerun_backfills_a_document_registered_without_a_source_uri(tmp_path):
+def test_a_rerun_adopts_and_backfills_a_document_registered_with_a_relative_path_and_no_source_uri(tmp_path):
     root, f = _non_git_rdr_dir(tmp_path)
     cat = ActiveCatalog()
     corpus = f"plain-{_next()}"
-    doc_id = _register(f, root, corpus)
-    # an earlier release registered it with no source_uri
-    cat.update(cat.resolve(doc_id).tumbler, source_uri="")
-    assert cat.resolve(doc_id).source_uri == ""
+    legacy = _legacy_doc(corpus)
+    assert cat.resolve(legacy).source_uri == ""
     again = _register(f, root, corpus)
-    assert again == doc_id, "a re-run must not mint a second document"
-    assert cat.resolve(doc_id).source_uri == f.resolve().as_uri()
+    assert again == legacy, "a re-run must not mint a second document"
+    assert cat.resolve(legacy).source_uri == _raw_uri(f)
+
+
+@pytest.mark.t2_tenant
+def test_a_relative_path_document_stamped_for_another_directory_is_not_adopted_or_overwritten(tmp_path):
+    root, f = _non_git_rdr_dir(tmp_path)
+    cat = ActiveCatalog()
+    corpus = f"plain-{_next()}"
+    other = "file:///elsewhere/other-dir/" + _REL
+    legacy = _legacy_doc(corpus, source_uri=other)
+    mine = _register(f, root, corpus)
+    assert mine and mine != legacy
+    assert cat.resolve(legacy).source_uri == other, "another directory's document is left as it was"
+    assert cat.resolve(mine).source_uri == _raw_uri(f)
+
+
+@pytest.mark.t2_tenant
+def test_the_markdown_hook_finds_the_preflight_document_and_backfills_a_legacy_one(tmp_path):
+    """`_catalog_markdown_hook` runs after the pre-flight with the same base_path: it must look the
+    document up by the same identity, or it mints a second one under the relative path."""
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    root, f = _non_git_rdr_dir(tmp_path)
+    cat = ActiveCatalog()
+    corpus = f"plain-{_next()}"
+    fresh = _register(f, root, corpus)
+    _catalog_markdown_hook(f, _COLLECTION, "rdr", corpus, 3, base_path=root)
+    assert cat.resolve(fresh).chunk_count == 3, "the hook updated the pre-flight document"
+
+    root2, f2 = _non_git_rdr_dir(tmp_path)
+    corpus2 = f"plain-{_next()}"
+    legacy = _legacy_doc(corpus2)
+    _catalog_markdown_hook(f2, _COLLECTION, "rdr", corpus2, 2, base_path=root2)
+    doc = cat.resolve(legacy)
+    assert doc.chunk_count == 2 and doc.source_uri == _raw_uri(f2), (doc.chunk_count, doc.source_uri)
+
+
+@pytest.mark.t2_tenant
+def test_the_markdown_hook_alone_registers_the_absolute_path(tmp_path):
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    root, f = _non_git_rdr_dir(tmp_path, f"hook dir é-{_next()}")
+    corpus = f"plain-{_next()}"
+    _catalog_markdown_hook(f, _COLLECTION, "rdr", corpus, 1, base_path=root)
+    cat = ActiveCatalog()
+    doc = cat.by_source_uri(_raw_uri(f))
+    assert doc is not None and doc.file_path == str(f.resolve()), doc

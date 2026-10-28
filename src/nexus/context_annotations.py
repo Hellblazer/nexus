@@ -26,6 +26,9 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from nexus.catalog.note_ttl import note_ttl_days
+from nexus.metadata_schema import chunk_ttl_days
+
 #: The response-level instruction, first line of every text render. It
 #: states only what the reader can act on from the lines below: the ranking
 #: itself is vector similarity with boosts that apply only where configured
@@ -121,8 +124,6 @@ def annotate(
         published_year = 0
     if published_year > 0:
         tokens.append(f"published {published_year}")
-    from nexus.metadata_schema import chunk_ttl_days  # noqa: PLC0415 — deferred, matches this module's convention
-
     # A row's ttl_days is whatever a writer stored: a bool, a string, NaN or a value past timedelta's
     # range is permanent here, as in the expiry sweep (nexus-njn1a).
     ttl_days = int(chunk_ttl_days(metadata.get("ttl_days")) or 0)
@@ -192,8 +193,6 @@ def entry_facts(entry: Any) -> dict[str, Any]:
         facts["bib_year"] = year
     meta = getattr(entry, "meta", None)
     if isinstance(meta, Mapping) and meta.get("ttl_days") is not None:
-        from nexus.catalog.note_ttl import note_ttl_days  # noqa: PLC0415 — deferred, matches this module's convention
-
         # the note's own TTL as the expiry sweep reads it: a bool, NaN or out-of-range value is permanent
         if days := note_ttl_days(meta):
             facts["ttl_days"] = days

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+from nexus.catalog.types import make_relative
 from nexus.checkpoint import delete_checkpoint
 from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import embedding_model_row_preferred, ensure_collection_registered, index_model_for_collection
@@ -685,6 +686,52 @@ def _stamp_finished_upload(doc_id: str, content_hash: str, chunk_count: int) -> 
             close()
 
 
+def _curator_identity(file_path: Path, base_path: Path | None) -> tuple[str, str, str]:
+    """``(fp, legacy_fp, source_uri)`` a CURATOR-owned document registers and is looked up by.
+
+    nexus-njn1a (finding 12). A curator owner has no ``repo_root``, so a path relative to *base_path*
+    gave the engine nothing to derive a ``source_uri`` from, and ``nx enrich aspects`` skipped the
+    document as ``unattributable_identity``. With a *base_path* the document now registers the way
+    ``nx index md`` / ``nx index pdf`` register one: by its ABSOLUTE path, and the engine derives the
+    raw ``file://<abspath>`` itself (``CatalogRepository.deriveSourceUri``). *source_uri* here is that
+    same raw spelling, never ``Path.as_uri()``'s percent-encoded one, so a backfill and
+    :func:`_doc_id_for_path` agree with the engine. An absolute path also keeps two directories with
+    the same basename (and so the same curator owner) apart, which a relative one did not.
+
+    *legacy_fp* is the relative path a document registered under before this change, ``""`` when there
+    is no *base_path*. With no *base_path* nothing changes: ``fp`` is ``str(file_path)`` and the
+    engine derives the URI for an absolute one.
+    """
+    if not base_path:
+        return str(file_path), "", ""
+    absolute = str(Path(file_path).resolve())
+    return absolute, make_relative(file_path, base_path), "file://" + absolute
+
+
+def _find_curator_document(reader, owner, fp: str, legacy_fp: str, source_uri: str):
+    """The existing curator Document for *fp*, or one registered under *legacy_fp* before njn1a.
+
+    A legacy relative-path document is adopted only when it holds no ``source_uri`` or this file's own:
+    another directory with the same basename shares the curator owner and the relative path, and a
+    document stamped for that directory is not this file's (nexus-njn1a). It is left as it is and a
+    warning names it.
+    """
+    existing = reader.by_file_path(owner, fp)
+    if existing is not None or not legacy_fp:
+        return existing
+    legacy = reader.by_file_path(owner, legacy_fp)
+    if legacy is None:
+        return None
+    held = getattr(legacy, "source_uri", "") or ""
+    if held in ("", source_uri):
+        return legacy
+    _log.warning(
+        "curator_legacy_document_belongs_elsewhere",
+        tumbler=str(legacy.tumbler), file_path=legacy_fp, held_source_uri=held, this_source_uri=source_uri,
+    )
+    return None
+
+
 def _repo_owner_document_for(reader, abs_path):
     """An existing catalog Document for *abs_path* under its REPO owner, if any.
 
@@ -955,7 +1002,6 @@ def _register_or_lookup_doc_id(
     reader = None
     writer = None
     try:
-        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.types)
         from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
             make_catalog_reader,
             make_catalog_writer,
@@ -1012,7 +1058,7 @@ def _register_or_lookup_doc_id(
                 f"it from there (nx index repo <primary>, or this command on the "
                 f"primary's path)."
             )
-        derived_source_uri = ""  # set only for a curator owner given a base_path (nexus-njn1a)
+        derived_source_uri = legacy_fp = ""  # set only for a curator owner given a base_path (nexus-njn1a)
         if home is not None:
             owner, fp, content_type = home
             if corpus:
@@ -1028,15 +1074,10 @@ def _register_or_lookup_doc_id(
                 owner = owner_t
             else:
                 owner = writer.register_owner(owner_name, "curator")
-            fp = make_relative(file_path, base_path) if base_path else str(file_path)
-            if base_path:
-                # nexus-njn1a (finding 12): a curator owner has no repo_root, so the engine cannot
-                # turn the relative ``fp`` into the ``file://`` source_uri it derives for an
-                # absolute one; the document registered with none, and `nx enrich aspects` then
-                # skipped it as ``unattributable_identity``. The directory the caller named IS the
-                # root: stamp the file's own absolute URI. Never the ``source_uri`` argument below,
-                # which is a lookup key that fails loud on a miss (nexus-y8qtj).
-                derived_source_uri = Path(file_path).resolve().as_uri()
+            # nexus-njn1a (finding 12): register by the absolute path, as `nx index md` does (see
+            # _curator_identity). Never stamp the ``source_uri`` argument below, which is a lookup key
+            # that fails loud on a miss (nexus-y8qtj).
+            fp, legacy_fp, derived_source_uri = _curator_identity(file_path, base_path)
 
         # nexus-y8qtj: source_uri-keyed resolution takes priority over the
         # file_path lookup below, and is fail-loud rather than falling
@@ -1069,7 +1110,7 @@ def _register_or_lookup_doc_id(
                 )
             return (str(existing_by_uri.tumbler), False) if with_created else str(existing_by_uri.tumbler)
 
-        existing = reader.by_file_path(owner, fp)
+        existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri)
         if existing is None:
             # nexus-tqudo: the curator namespace cannot see a row a
             # prior `nx index repo` registered under the REPO owner.
@@ -3549,7 +3590,6 @@ def _catalog_markdown_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog.types import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
         # nexus-e9ru2 (sibling of nexus-f1itv): no local is_initialized
@@ -3575,7 +3615,8 @@ def _catalog_markdown_hook(
         else:
             owner = writer.register_owner(owner_name, "curator")
 
-        fp = make_relative(md_path, base_path) if base_path else str(md_path)
+        # nexus-njn1a: the same absolute identity the pre-flight registered (_curator_identity).
+        fp, legacy_fp, derived_source_uri = _curator_identity(md_path, base_path)
         # Known TOCTOU window (Reviewer B/I-3): this stat happens AFTER the
         # markdown content was read for chunking earlier in the pipeline.
         # A concurrent write between content-read and this stat stores an
@@ -3604,7 +3645,7 @@ def _catalog_markdown_hook(
         # identity and would mint a second Document for the same source).
         existing = reader.by_source_uri(source_uri) if source_uri else None
         if existing is None:
-            existing = reader.by_file_path(owner, fp)
+            existing = _find_curator_document(reader, owner, fp, legacy_fp, derived_source_uri)
         if existing is None:
             # nexus-tqudo: same cross-owner blind spot as the pre-flight.
             existing = _repo_owner_document_for(reader, md_path)
@@ -3632,6 +3673,10 @@ def _catalog_markdown_hook(
                 update_kwargs["title"] = title
             if year and not getattr(existing, "year", 0):
                 update_kwargs["year"] = year
+            if derived_source_uri and not getattr(existing, "source_uri", ""):
+                # nexus-njn1a: a curator document an earlier release registered by a relative path has
+                # no source_uri; the absolute one the engine derives for a new document goes on it.
+                update_kwargs["source_uri"] = derived_source_uri
             writer.update(existing.tumbler, **update_kwargs)
             if old_physical_collection and old_physical_collection != collection_name:
                 _log.warning(

@@ -146,11 +146,13 @@ _WHERE_GET_DEFAULT_LIMIT = 10
 _EMBED_PROBE_BATCH = 10
 
 
-#: nexus-hdx2u E4: log ``_ServiceCollectionStub.get``'s count-unreported
-#: notice once per process, not once per call — same log-once shape as
-#: ``_store_get_truncated_logged`` above (a full-repo run against a
-#: pre-E3 engine would otherwise emit this WARNING once per batch).
-_store_get_count_unreported_logged: bool = False
+#: nexus-hdx2u E4: log the count-unreported notice once per process, not once
+#: per call — same log-once shape as ``_store_get_truncated_logged`` above (a
+#: full-repo run against a pre-E3 engine would otherwise emit this WARNING once
+#: per batch). Keyed by the *heuristic* flag (nexus-njn1a): the stub ``get`` and
+#: the paged reader print different text, so each prints once and neither
+#: silences the other.
+_store_get_count_unreported_logged: set[bool] = set()
 
 
 def _warn_store_get_count_unreported(collection: str, *, heuristic: bool = True) -> None:
@@ -171,11 +173,10 @@ def _warn_store_get_count_unreported(collection: str, *, heuristic: bool = True)
     sweep's guard and the recovery export), which applies no heuristic: with no
     ``count`` it cannot see a dropped row at all, and the message says so.
     """
-    global _store_get_count_unreported_logged
-    if _store_get_count_unreported_logged:
+    if heuristic in _store_get_count_unreported_logged:
         _log.debug("store_get_count_unreported", collection=collection)
         return
-    _store_get_count_unreported_logged = True
+    _store_get_count_unreported_logged.add(heuristic)
     if heuristic:
         fallback = (
             "Degrading to the pre-count store_get_truncated_at_limit "

@@ -106,6 +106,7 @@ from nexus.mcp.operator_requests import (
     build_summarize_request,
     build_verify_request,
 )
+from nexus.metadata_schema import ttl_listing_label
 from nexus.ttl import parse_ttl
 from nexus.tuple_directory import (
     DirectoryResolutionError,
@@ -6754,7 +6755,6 @@ def store_list(
         ]
         if also:
             lines.append(also)
-        from nexus.metadata_schema import ttl_listing_label  # noqa: PLC0415 — deferred, matches this module's convention
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
             title = (e.get("title") or "")[:40]

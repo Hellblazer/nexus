@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -63,6 +64,7 @@ from nexus.aspect_readers import (
 from nexus.catalog.note_ttl import row_may_give_tags, row_written_by
 from nexus.catalog.types import CatalogEntry
 from nexus.errors import NoteUriEngineTooOldError
+from nexus.ttl import MAX_TTL_DAYS
 
 _log = structlog.get_logger(__name__)
 
@@ -223,15 +225,22 @@ def _positive_ttl(value: Any) -> int | None:
 
     Catalog meta stores ``0`` as the retraction sentinel and ``put_note`` raises on it, and the chunk
     row spells permanent as ``None``, absent or (a legacy row) ``0``: all of them read as permanent.
-    A ``bool`` is not a number of days. A value above :data:`nexus.ttl.MAX_TTL_DAYS` is clamped to it:
-    ``nx store put --ttl`` refuses such a TTL, and a bundle record must not carry one past that cap
-    into the catalog and the chunk row (nexus-njn1a), where date arithmetic on it overflows.
+    A ``bool`` is not a number of days, and neither is a float or a string. A value above
+    ``timedelta.max.days`` is permanent, the reading every reader of a row makes of it
+    (:func:`nexus.metadata_schema.chunk_ttl_days`, :func:`nexus.catalog.note_ttl.note_ttl_days`), so a
+    row that never lapses does not come back as one that lapses in a century. A value from
+    :data:`nexus.ttl.MAX_TTL_DAYS` + 1 up to that range is clamped to the cap, with a warning naming
+    the original: ``put_note`` refuses a larger TTL, and ``nx store put --ttl`` never wrote one
+    (nexus-njn1a).
     """
-    from nexus.ttl import MAX_TTL_DAYS  # noqa: PLC0415 — deferred, matches this module's convention
-
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
-    return min(value, MAX_TTL_DAYS)
+    if value > timedelta.max.days:
+        return None
+    if value > MAX_TTL_DAYS:
+        _log.warning("recovery_bundle_ttl_clamped", ttl_days=value, clamped_to=MAX_TTL_DAYS)
+        return MAX_TTL_DAYS
+    return value
 
 
 def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:

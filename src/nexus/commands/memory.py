@@ -12,7 +12,7 @@ from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.commands._helpers import read_stdin_utf8, t2_handle
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
-from nexus.ttl import parse_ttl
+from nexus.ttl import MAX_TTL_DAYS, parse_ttl
 
 _log = structlog.get_logger(__name__)
 
@@ -565,6 +565,8 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
                 - datetime.now(timezone.utc)
             )
             ttl_days = max(1, math.ceil(remaining / timedelta(days=1)))
+            # the MCP memory_put takes any integer ttl; put_note refuses above the 36500-day cap (nexus-njn1a)
+            ttl_days = min(ttl_days, MAX_TTL_DAYS)
 
         # RDR-223 P2.7 (nexus-z0o2p.17): the promoted note goes to the engine
         # as ONE write_manifest_many request through note_write.put_note (the

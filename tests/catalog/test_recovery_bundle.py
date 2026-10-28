@@ -940,6 +940,22 @@ def test_two_notes_sharing_a_chunk_each_export_their_own_tags_category_and_ttl(f
     assert summary.note_keys_unrecovered == 0
 
 
+def test_an_export_normalises_a_catalog_ttl_the_note_writer_would_refuse(fake_catalog, tmp_path):
+    """nexus-njn1a: the export side of the TTL rule. A catalog meta ttl_days past timedelta's range is
+    permanent (what every reader makes of it); one between the 36500-day cap and that range is capped, so
+    the bundle never carries a TTL its own import (put_note) would refuse."""
+    url, state = fake_catalog
+    t3 = _FakeT3()
+    _shared_pair(
+        state, t3,
+        a_meta={"tags": "", "category": "", "ttl_days": 10**12, "source_agent": "agent-a"},
+        b_meta={"tags": "", "category": "", "ttl_days": 40_000, "source_agent": "agent-b"},
+    )
+    _summary, docs = _export_docs(url, t3, tmp_path)
+    assert docs["note-a"]["ttl_days"] is None
+    assert docs["note-b"]["ttl_days"] == 36500
+
+
 def test_a_retracted_or_absent_ttl_exports_as_permanent(fake_catalog, tmp_path):
     """Catalog meta stores ttl_days 0 as the retraction sentinel; the row's 30 (B's) is not A's."""
     url, state = fake_catalog

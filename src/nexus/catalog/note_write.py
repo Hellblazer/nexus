@@ -107,6 +107,7 @@ from nexus.catalog.write_outcome import (
 )
 from nexus.db.limits import QUOTAS
 from nexus.errors import BatchWriteFailedError, CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
+from nexus.ttl import refuse_ttl_over_cap
 
 _log = structlog.get_logger(__name__)
 
@@ -350,6 +351,7 @@ def write_note(
         raise ValueError(
             f"ttl_days={ttl_days} is invalid: omit the argument or pass None for a permanent entry "
             "— ttl_days must be a positive integer number of days (0 does NOT mean permanent; None does)")
+    refuse_ttl_over_cap(ttl_days)
 
     from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — deferred: circular-dep avoidance
 
@@ -661,6 +663,7 @@ def put_note(
         raise ValueError(
             f"ttl_days={ttl_days} is invalid: omit the argument or pass None for a permanent entry "
             "— ttl_days must be a positive integer number of days (0 does NOT mean permanent; None does)")
+    refuse_ttl_over_cap(ttl_days)
     if not content:
         raise ValueError("put_note: 'content' is required (an empty note has nothing to store)")
     # RDR-231 (nexus-bivz3.13): refuse a note write the serving engine cannot hold, BEFORE any engine

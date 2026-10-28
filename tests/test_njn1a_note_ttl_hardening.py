@@ -10,6 +10,7 @@ the 36500-day cap ``nx store put --ttl`` enforces.
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,6 +64,35 @@ def test_a_bad_ttl_row_does_not_abort_the_listing(lister) -> None:
     assert len(good) == 1 and "expires 2026-01-31" in good[0], out
 
 
+#: a ttl_days a timedelta can hold whose expiry DATE does not fit in a datetime (about 2.9M days from 2026
+#: on): chunk_ttl_days keeps it, and the listing must still read it as permanent, as the CHANGELOG says.
+OVERFLOWING_DATE_TTLS = [3_000_000, 10**8, 999_999_999]
+
+
+@pytest.mark.parametrize("ttl", OVERFLOWING_DATE_TTLS)
+def test_ttl_listing_label_reads_an_expiry_past_the_calendar_as_permanent(ttl) -> None:
+    from nexus.metadata_schema import ttl_listing_label
+
+    assert ttl_listing_label(ttl, INDEXED) == "permanent"
+    assert ttl_listing_label(float(ttl), INDEXED) == "permanent"
+
+
+@pytest.mark.parametrize("lister", [_cli_list, _mcp_list], ids=["cli", "mcp"])
+def test_a_calendar_overflowing_ttl_lists_as_permanent(lister) -> None:
+    rows = [{"id": f"{i:064x}", "title": f"t{i}", "indexed_at": INDEXED, "ttl_days": ttl}
+            for i, ttl in enumerate(OVERFLOWING_DATE_TTLS)]
+    out = lister(rows)
+    listed = [ln for ln in out.splitlines() if ln.startswith("  ") and INDEXED[:10] in ln]
+    assert len(listed) == len(rows) and all("permanent" in ln and "ttl " not in ln for ln in listed), out
+
+
+def test_ttl_listing_label_keeps_ttl_nd_for_an_unparseable_stamp() -> None:
+    from nexus.metadata_schema import ttl_listing_label
+
+    assert ttl_listing_label(30, "not-a-date") == "ttl 30d"
+    assert ttl_listing_label(30, "") == "permanent"
+
+
 def test_chunk_ttl_days_follows_the_is_expired_rules() -> None:
     from nexus.metadata_schema import chunk_ttl_days
 
@@ -80,10 +110,49 @@ def test_positive_ttl_caps_at_the_store_put_maximum() -> None:
     assert parse_ttl(f"{MAX_TTL_DAYS}d") == MAX_TTL_DAYS
     assert _positive_ttl(MAX_TTL_DAYS) == MAX_TTL_DAYS
     assert _positive_ttl(MAX_TTL_DAYS + 1) == MAX_TTL_DAYS
-    assert _positive_ttl(10**12) == MAX_TTL_DAYS
+    assert _positive_ttl(timedelta.max.days) == MAX_TTL_DAYS
     assert _positive_ttl(30) == 30
     for permanent in (0, -1, None, "30", 3.0, True):
         assert _positive_ttl(permanent) is None, permanent
+
+
+def test_positive_ttl_reads_a_value_no_date_can_hold_as_permanent() -> None:
+    """A TTL above timedelta's range is the same permanent the readers (chunk_ttl_days, note_ttl_days)
+    make of it; clamping it to 36500 would turn a never-lapses row into one that lapses in a century."""
+    from nexus.catalog.recovery_bundle import _positive_ttl
+
+    for permanent in (timedelta.max.days + 1, 10**12, 10**30, float("inf"), float("nan"), -float("inf")):
+        assert _positive_ttl(permanent) is None, permanent
+
+
+def test_positive_ttl_logs_the_original_value_when_it_clamps() -> None:
+    from structlog.testing import capture_logs
+
+    from nexus.catalog.recovery_bundle import _positive_ttl
+
+    with capture_logs() as logs:
+        assert _positive_ttl(40_000) == 36500
+        assert _positive_ttl(30) == 30
+        assert _positive_ttl(10**12) is None
+    clamped = [e for e in logs if e["event"] == "recovery_bundle_ttl_clamped"]
+    assert len(clamped) == 1 and clamped[0]["log_level"] == "warning", logs
+    assert clamped[0]["ttl_days"] == 40_000 and clamped[0]["clamped_to"] == 36500
+
+
+def test_the_note_writers_refuse_a_ttl_past_the_store_put_maximum() -> None:
+    """put_note, write_note and T3Database.put refuse above MAX_TTL_DAYS as they refuse <= 0, before any
+    side effect; nx store put --ttl and the MCP store_put already cap through parse_ttl."""
+    from nexus.catalog.note_write import put_note, write_note
+    from nexus.db.t3 import T3Database
+    from nexus.ttl import MAX_TTL_DAYS
+
+    over = MAX_TTL_DAYS + 1
+    with pytest.raises(ValueError, match=f"ttl_days={over}"):
+        put_note(content="njn1a", collection=COLLECTION, ttl_days=over)
+    with pytest.raises(ValueError, match=f"ttl_days={over}"):
+        write_note(catalog_doc_id="1.1.1", collection=COLLECTION, pieces=["x"], ttl_days=over)
+    with pytest.raises(ValueError, match=f"ttl_days={over}"):
+        object.__new__(T3Database).put(collection=COLLECTION, content="njn1a", ttl_days=over)
 
 
 def test_bundle_import_hands_the_note_writer_a_capped_ttl(monkeypatch) -> None:
@@ -102,10 +171,32 @@ def test_bundle_import_hands_the_note_writer_a_capped_ttl(monkeypatch) -> None:
     monkeypatch.setattr(rb, "target_collection_for", lambda recorded, t3: "knowledge__njn1a__bge-base-en-v15-768__v1")
     monkeypatch.setattr(note_write, "put_note", _put_note)
     rec = {"record": "knowledge_doc", "collection": "knowledge__njn1a", "title": "njn1a-ttl",
-           "content": "body", "tags": "", "category": "", "ttl_days": 10**12}
+           "content": "body", "tags": "", "category": "", "ttl_days": 40_000}
     with pytest.raises(_Stop):
         rb._default_import_doc(object(), rec)
     assert seen["ttl_days"] == 36500
+
+
+def test_bundle_import_reads_a_ttl_past_timedelta_as_permanent(monkeypatch) -> None:
+    from nexus.catalog import note_write
+    from nexus.catalog import recovery_bundle as rb
+
+    class _Stop(Exception):
+        pass
+
+    seen: dict = {}
+
+    def _put_note(**kwargs):
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(rb, "target_collection_for", lambda recorded, t3: "knowledge__njn1a__bge-base-en-v15-768__v1")
+    monkeypatch.setattr(note_write, "put_note", _put_note)
+    rec = {"record": "knowledge_doc", "collection": "knowledge__njn1a", "title": "njn1a-ttl",
+           "content": "body", "tags": "", "category": "", "ttl_days": 10**12}
+    with pytest.raises(_Stop):
+        rb._default_import_doc(object(), rec)
+    assert seen["ttl_days"] is None
 
 
 def test_context_annotations_read_a_bad_ttl_as_permanent() -> None:

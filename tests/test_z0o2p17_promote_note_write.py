@@ -202,6 +202,25 @@ class TestStored:
         assert (kw["content"], kw["title"], kw["tags"]) == ("z0o2p17 ttl body", "z0o2p17-ttl", "promoted")
         assert kw["ttl_days"] in (9, 10), "the remaining window of a 10-day entry, never a reset or 0"
 
+    def test_a_t2_ttl_past_the_store_put_maximum_promotes_capped(self, t2, local_t3, monkeypatch):
+        """nexus-njn1a: the MCP memory_put takes any integer ttl, and put_note now refuses one above
+        36500 days; promote caps it instead of failing a note nx store put would have stored."""
+        from nexus.catalog import note_write
+
+        seen: list[dict] = []
+        real = note_write.put_note
+
+        def spy(**kw):
+            seen.append(kw)
+            return real(**kw)
+
+        monkeypatch.setattr(note_write, "put_note", spy)
+        row_id = t2.put(project="proj", title="z0o2p17-bigttl", content="z0o2p17 big ttl body", ttl=40000)
+        result = _promote(t2, local_t3, row_id)
+        assert result.exit_code == 0, result.output
+        (kw,) = seen
+        assert kw["ttl_days"] == 36500
+
     def test_the_post_store_chains_fire_once_and_skip_the_manifest_hook(self, t2, local_t3, monkeypatch):
         """The request wrote the manifest, so the batch chain must not write it again; the stamp follows the chains."""
         from nexus import hook_registry as hr

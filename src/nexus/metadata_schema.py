@@ -510,7 +510,9 @@ def ttl_listing_label(ttl_days: Any, indexed_at: str) -> str:
         return "permanent"
     try:
         return f"expires {(datetime.fromisoformat(indexed_at) + timedelta(days=days)).date().isoformat()}"
-    except (ValueError, OverflowError):  # an unparseable stamp, or a date past datetime's range
+    except OverflowError:  # an expiry date past datetime's range (about 2.9M days on): it never lapses
+        return "permanent"
+    except ValueError:  # an unparseable stamp: the TTL is real but cannot be dated
         return f"ttl {days}d"
 
 

@@ -811,7 +811,7 @@ class TestServiceCollectionStubGetCountField:
     def _reset_count_unreported_flag(self, monkeypatch):
         import nexus.db.http_vector_client as hvc
 
-        monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", False)
+        monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", set())
 
     def test_count_absent_warns_once_and_does_not_raise(self, monkeypatch):
         from structlog.testing import capture_logs
