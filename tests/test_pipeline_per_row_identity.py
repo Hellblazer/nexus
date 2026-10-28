@@ -16,6 +16,7 @@ is monkeypatched here: the leftover is seeded exactly as a crash between
 """
 from __future__ import annotations
 
+import contextlib
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, create_autospec, patch
@@ -27,6 +28,7 @@ from nexus.catalog.types import ManifestRow
 
 from nexus.db.t3 import T3Database
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
+from nexus import pipeline_stages
 from nexus.pipeline_stages import pipeline_index_pdf
 from tests._owner_write_double import install_streaming_writer
 from tests.pipeline_fake_engine import FakePipelineEngine, make_fake_engine_db
@@ -91,7 +93,10 @@ def _document_manifest(monkeypatch) -> None:
     )
 
 
-def _run(engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str, *, force: bool = False):
+def _run(
+    engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str, *, force: bool = False,
+    patch_here: bool = True,
+):
     hooks = MagicMock()
     # The uploader leaves the manifest hook out (the writer writes the manifest with the chunks) by
     # taking ``without_batch`` of the registry; the double answers with itself.
@@ -107,9 +112,15 @@ def _run(engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str
     result: dict = {}
 
     def _go() -> None:
-        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
-            ME.return_value.extract.side_effect = _fx(2, _er(2))
-            MC.return_value.chunk.return_value = fc
+        # ``patch_here=False``: the caller holds the extractor and chunker patches. Two threads that
+        # each enter ``patch`` on the same module global restore it out of order, and the later
+        # exit puts the other thread's mock back for the rest of the worker (it broke the RDR-237
+        # pymupdf resume tests on the 7.88.0 release suite).
+        with (patch(_P_EXT) if patch_here else contextlib.nullcontext()) as ME, \
+                (patch(_P_CHK) if patch_here else contextlib.nullcontext()) as MC:
+            if patch_here:
+                ME.return_value.extract.side_effect = _fx(2, _er(2))
+                MC.return_value.chunk.return_value = fc
             result["total"] = pipeline_index_pdf(
                 Path(pdf_path), _HASH, collection, t3,
                 db=_client_for(engine), embed_fn=_embed, corpus="test",
@@ -179,13 +190,21 @@ class TestSecondDocumentSharingTheBytes:
         results: dict[str, tuple] = {}
 
         def _one(path: str, doc_id: str) -> None:
-            results[path] = _run(engine, path, "docs__test", doc_id=doc_id)
+            results[path] = _run(engine, path, "docs__test", doc_id=doc_id, patch_here=False)
 
-        ta = threading.Thread(target=_one, args=("/docs/x.pdf", "1.9.6"), daemon=True)
-        tb = threading.Thread(target=_one, args=("/docs/y.pdf", "1.9.7"), daemon=True)
-        ta.start(); tb.start()
-        ta.join(timeout=45); tb.join(timeout=45)
+        # One patch, entered and left on this thread, for both runs: see ``_run``.
+        real_extractor = pipeline_stages.PDFExtractor
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(2, _er(2))
+            MC.return_value.chunk.return_value = _tc(
+                ("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}),
+                ("chunk 1", 1, {"page_number": 2, "chunk_type": "text"}))
+            ta = threading.Thread(target=_one, args=("/docs/x.pdf", "1.9.6"), daemon=True)
+            tb = threading.Thread(target=_one, args=("/docs/y.pdf", "1.9.7"), daemon=True)
+            ta.start(); tb.start()
+            ta.join(timeout=45); tb.join(timeout=45)
         assert not ta.is_alive() and not tb.is_alive()
+        assert pipeline_stages.PDFExtractor is real_extractor, "the patch is undone once, in order"
         assert {results["/docs/x.pdf"][0], results["/docs/y.pdf"][0]} == {2}
         assert results["/docs/x.pdf"][2].fire_batch.call_args.kwargs["catalog_doc_id"] == "1.9.6"
         assert results["/docs/y.pdf"][2].fire_batch.call_args.kwargs["catalog_doc_id"] == "1.9.7"
