@@ -1,0 +1,293 @@
+# RDR-232 item-by-facet oracle labels v1 (nexus-jypmj.3.10). Format and scoring: scripts/bench/rdr232_oracle.py.
+#
+# Labels say which retrieved item bears on which golden facet, independently of any assessor. They are NEVER read
+# off a coverage ledger (that would score the assessor with itself). Three provenances:
+#   fixture       the authored piece labels of the ART RDR-084 fixture (tests/_rdr232_golden.py). The content is
+#                 synthetic, so these labels score runs over the FIXTURE corpus (a local engine), not the live ART
+#                 RDR-084 in the cloud tenant.
+#   ground_truth  a single-facet request's hand `ground_truth` grade-3 documents (golden_v1.yaml) support its facet.
+#                 Document-level: an item is matched by a substring of its document path.
+#   human         todo: true until a human labels items.
+# Regenerate the fixture and ground_truth entries with `python scripts/bench/rdr232_oracle.py scaffold --write`
+# (tests/test_rdr232_oracle.py pins that the committed entries equal the derivation). Edit `human` entries by hand.
+oracle_version: 1
+golden_set_version: 1
+requests:
+  G01-lookup-tumblers:
+    provenance: ground_truth
+    items:
+    - doc_path_contains: rdr-049-
+      closed: false
+      facets:
+        introducing-rdr: supports
+  G02-lookup-chash:
+    provenance: ground_truth
+    items:
+    - doc_path_contains: rdr-086-
+      closed: false
+      facets:
+        introducing-rdr: supports
+  G03-lookup-taxonomy:
+    provenance: ground_truth
+    items:
+    - doc_path_contains: rdr-070-
+      closed: false
+      facets:
+        introducing-rdr: supports
+  G04-lookup-min-confidence:
+    provenance: human
+    todo: true
+    items: []
+  G05-lookup-hybridrag-cap:
+    provenance: human
+    todo: true
+    items: []
+  G06-synthesis-art-rdr084:
+    provenance: fixture
+    items:
+    - chash: a6629e03f56abd5f7e72294094b764a064c1e878877cb9be0292481060d7694d
+      closed: true
+      note: '# RDR-084: LIST PARSE Canonical Consolidation'
+      facets: {}
+    - chash: 2b400e6bed1b97fe7c907cdc70e08972f29bcaf982883aa609e6f50378ae01e6
+      closed: true
+      note: '## Context'
+      facets: {}
+    - chash: 5a87725a1003e670ed034fa3829196f67e432814cd4a6af984a7b8b6b45bc5d6
+      closed: true
+      note: '## Locked Architecture'
+      facets:
+        locked-architecture: supports
+    - chash: fe087c1852eda26e62b034906ef2c18bf72e9ab4c0a36d0e5bd500097a048e4f
+      closed: true
+      note: '## Locked Architecture (layering)'
+      facets:
+        locked-architecture: supports
+    - chash: 1073819fb2e43ea0d1c902134e28d92fe95ff98dbb825c304d4da5c440e4637d
+      closed: true
+      note: '## Numerical Conventions'
+      facets:
+        numerical-conventions: supports
+    - chash: 912819b40d4bb541b266b92b4b6d7be57138d9d4fae2a4b894585e57d0c62076
+      closed: true
+      note: '## Evidence'
+      facets:
+        evidence: supports
+    - chash: 1db9c4766f2f2b39271df2f5e149f7cad17091e8fe9792301672b84b3b63c0ce
+      closed: true
+      note: '## Evidence (benchmarks)'
+      facets:
+        evidence: supports
+    - chash: 110636831b8b36460679fb1ed9d0921d4c76f5f0d62f226ccc277d408fe30804
+      closed: true
+      note: '## Gate History'
+      facets:
+        gate-history: supports
+    - chash: 921a975b0e9abae0b940cc882ac2de5182c921bc61ab15bc753540c810bf3247
+      closed: true
+      note: '## Gate History (acceptance)'
+      facets:
+        gate-history: supports
+    - chash: 11ea8f41d9206fcccdffe1798e92168057db1896a55b3ff25988b02a1d3c2abe
+      closed: true
+      note: '## Implementation State'
+      facets:
+        implementation-state: supports
+    - chash: 1482ce056557600d58fae05a6db618d9fe155020d86dabfd4c434387475958c5
+      closed: true
+      note: '## Implementation State (verification)'
+      facets:
+        implementation-state: supports
+    - chash: 3fcb586cbd924114623d2469b345a25b46fc8bdf73a7f000fd6d47fbd12afea4
+      closed: true
+      note: '## Open by Design'
+      facets:
+        open-by-design: supports
+  G07-synthesis-rdr155:
+    provenance: human
+    todo: true
+    items: []
+  G08-synthesis-tiers:
+    provenance: human
+    todo: true
+    items: []
+  G09-synthesis-retrieval-evolution:
+    provenance: human
+    todo: true
+    items: []
+  G10-discovery-link-types:
+    provenance: human
+    todo: true
+    items: []
+  G11-discovery-chash:
+    provenance: human
+    todo: true
+    items: []
+  G12-discovery-papers:
+    provenance: human
+    todo: true
+    items: []
+  G13-comparison-hooks:
+    provenance: human
+    todo: true
+    items: []
+  G14-comparison-embedders:
+    provenance: human
+    todo: true
+    items: []
+  G15-comparison-harnesses:
+    provenance: human
+    todo: true
+    items: []
+  G16-audit-rdr210:
+    provenance: human
+    todo: true
+    items: []
+  G17-audit-nx-answer-docs:
+    provenance: human
+    todo: true
+    items: []
+  G18-audit-traverse-cap:
+    provenance: human
+    todo: true
+    items: []
+  G19-debug-traverse-empty-ids:
+    provenance: human
+    todo: true
+    items: []
+  G20-debug-wrong-plan:
+    provenance: human
+    todo: true
+    items: []
+  G21-debug-shm:
+    provenance: human
+    todo: true
+    items: []
+  G22-unknown-plan-matching:
+    provenance: human
+    todo: true
+    items: []
+  G23-unknown-chunking:
+    provenance: human
+    todo: true
+    items: []
+  G24-unknown-search-slow:
+    provenance: human
+    todo: true
+    items: []
+  H01:
+    provenance: human
+    todo: true
+    items: []
+  H02:
+    provenance: human
+    todo: true
+    items: []
+  H03:
+    provenance: human
+    todo: true
+    items: []
+  H04:
+    provenance: human
+    todo: true
+    items: []
+  H05:
+    provenance: human
+    todo: true
+    items: []
+  H06:
+    provenance: human
+    todo: true
+    items: []
+  H07:
+    provenance: human
+    todo: true
+    items: []
+  H09:
+    provenance: human
+    todo: true
+    items: []
+  H10:
+    provenance: human
+    todo: true
+    items: []
+  H11:
+    provenance: human
+    todo: true
+    items: []
+  H12:
+    provenance: human
+    todo: true
+    items: []
+  H13:
+    provenance: human
+    todo: true
+    items: []
+  H14:
+    provenance: human
+    todo: true
+    items: []
+  H15:
+    provenance: human
+    todo: true
+    items: []
+  H16:
+    provenance: human
+    todo: true
+    items: []
+  H17:
+    provenance: human
+    todo: true
+    items: []
+  H18:
+    provenance: human
+    todo: true
+    items: []
+  H19:
+    provenance: human
+    todo: true
+    items: []
+  H20:
+    provenance: human
+    todo: true
+    items: []
+  H21:
+    provenance: human
+    todo: true
+    items: []
+  H22:
+    provenance: human
+    todo: true
+    items: []
+  H23:
+    provenance: human
+    todo: true
+    items: []
+  H24:
+    provenance: human
+    todo: true
+    items: []
+  H25:
+    provenance: human
+    todo: true
+    items: []
+  H26:
+    provenance: human
+    todo: true
+    items: []
+  H27:
+    provenance: human
+    todo: true
+    items: []
+  H28:
+    provenance: human
+    todo: true
+    items: []
+  H29:
+    provenance: human
+    todo: true
+    items: []
+  H30:
+    provenance: human
+    todo: true
+    items: []

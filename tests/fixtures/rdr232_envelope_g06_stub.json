@@ -1,0 +1,818 @@
+{
+ "answer_shape": "insufficient_evidence",
+ "budget_exhausted_at_step": null,
+ "budget_warnings": [
+  {
+   "detail": "3 of 7 executed step(s) reported no cost_usd \u2014 the running spend could not include them, so the budget_usd_remaining check may not have caught an overrun for this run",
+   "kind": "unknown-cost"
+  }
+ ],
+ "chunks": [
+  {
+   "chash": "a6629e03f56abd5f7e72294094b764a064c1e878877cb9be0292481060d7694d",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "a6629e03f56abd5f7e72294094b764a064c1e878877cb9be0292481060d7694d"
+  },
+  {
+   "chash": "2b400e6bed1b97fe7c907cdc70e08972f29bcaf982883aa609e6f50378ae01e6",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "2b400e6bed1b97fe7c907cdc70e08972f29bcaf982883aa609e6f50378ae01e6"
+  },
+  {
+   "chash": "5a87725a1003e670ed034fa3829196f67e432814cd4a6af984a7b8b6b45bc5d6",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "5a87725a1003e670ed034fa3829196f67e432814cd4a6af984a7b8b6b45bc5d6"
+  },
+  {
+   "chash": "fe087c1852eda26e62b034906ef2c18bf72e9ab4c0a36d0e5bd500097a048e4f",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "fe087c1852eda26e62b034906ef2c18bf72e9ab4c0a36d0e5bd500097a048e4f"
+  },
+  {
+   "chash": "1073819fb2e43ea0d1c902134e28d92fe95ff98dbb825c304d4da5c440e4637d",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "1073819fb2e43ea0d1c902134e28d92fe95ff98dbb825c304d4da5c440e4637d"
+  },
+  {
+   "chash": "912819b40d4bb541b266b92b4b6d7be57138d9d4fae2a4b894585e57d0c62076",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "912819b40d4bb541b266b92b4b6d7be57138d9d4fae2a4b894585e57d0c62076"
+  },
+  {
+   "chash": "1db9c4766f2f2b39271df2f5e149f7cad17091e8fe9792301672b84b3b63c0ce",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "1db9c4766f2f2b39271df2f5e149f7cad17091e8fe9792301672b84b3b63c0ce"
+  },
+  {
+   "chash": "110636831b8b36460679fb1ed9d0921d4c76f5f0d62f226ccc277d408fe30804",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "110636831b8b36460679fb1ed9d0921d4c76f5f0d62f226ccc277d408fe30804"
+  },
+  {
+   "chash": "921a975b0e9abae0b940cc882ac2de5182c921bc61ab15bc753540c810bf3247",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "921a975b0e9abae0b940cc882ac2de5182c921bc61ab15bc753540c810bf3247"
+  },
+  {
+   "chash": "11ea8f41d9206fcccdffe1798e92168057db1896a55b3ff25988b02a1d3c2abe",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "11ea8f41d9206fcccdffe1798e92168057db1896a55b3ff25988b02a1d3c2abe"
+  },
+  {
+   "chash": "1482ce056557600d58fae05a6db618d9fe155020d86dabfd4c434387475958c5",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "1482ce056557600d58fae05a6db618d9fe155020d86dabfd4c434387475958c5"
+  },
+  {
+   "chash": "3fcb586cbd924114623d2469b345a25b46fc8bdf73a7f000fd6d47fbd12afea4",
+   "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+   "distance": 0.1,
+   "id": "3fcb586cbd924114623d2469b345a25b46fc8bdf73a7f000fd6d47fbd12afea4"
+  }
+ ],
+ "continuation": null,
+ "cost_usd": 0.0,
+ "coverage": {
+  "anchors": [
+   {
+    "chash": "a6629e03f56abd5f7e72294094b764a064c1e878877cb9be0292481060d7694d",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e1",
+    "kind": "chunk",
+    "stream": "vector",
+    "t2_record_id": "",
+    "tumbler": "1.1.0"
+   },
+   {
+    "chash": "2b400e6bed1b97fe7c907cdc70e08972f29bcaf982883aa609e6f50378ae01e6",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e2",
+    "kind": "chunk",
+    "stream": "vector",
+    "t2_record_id": "",
+    "tumbler": "1.1.1"
+   },
+   {
+    "chash": "5a87725a1003e670ed034fa3829196f67e432814cd4a6af984a7b8b6b45bc5d6",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e3",
+    "kind": "chunk",
+    "stream": "vector",
+    "t2_record_id": "",
+    "tumbler": "1.1.2"
+   },
+   {
+    "chash": "fe087c1852eda26e62b034906ef2c18bf72e9ab4c0a36d0e5bd500097a048e4f",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e4",
+    "kind": "chunk",
+    "stream": "vector",
+    "t2_record_id": "",
+    "tumbler": "1.1.3"
+   },
+   {
+    "chash": "1073819fb2e43ea0d1c902134e28d92fe95ff98dbb825c304d4da5c440e4637d",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e5",
+    "kind": "chunk",
+    "stream": "vector",
+    "t2_record_id": "",
+    "tumbler": "1.1.4"
+   },
+   {
+    "chash": "912819b40d4bb541b266b92b4b6d7be57138d9d4fae2a4b894585e57d0c62076",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e6",
+    "kind": "chunk",
+    "stream": "vector",
+    "t2_record_id": "",
+    "tumbler": "1.1.5"
+   },
+   {
+    "chash": "1db9c4766f2f2b39271df2f5e149f7cad17091e8fe9792301672b84b3b63c0ce",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e7",
+    "kind": "chunk",
+    "stream": "vector",
+    "t2_record_id": "",
+    "tumbler": "1.1.6"
+   },
+   {
+    "chash": "110636831b8b36460679fb1ed9d0921d4c76f5f0d62f226ccc277d408fe30804",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e8",
+    "kind": "chunk",
+    "stream": "graph",
+    "t2_record_id": "",
+    "tumbler": "1.1.0"
+   },
+   {
+    "chash": "921a975b0e9abae0b940cc882ac2de5182c921bc61ab15bc753540c810bf3247",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e9",
+    "kind": "chunk",
+    "stream": "graph",
+    "t2_record_id": "",
+    "tumbler": "1.1.1"
+   },
+   {
+    "chash": "11ea8f41d9206fcccdffe1798e92168057db1896a55b3ff25988b02a1d3c2abe",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e10",
+    "kind": "chunk",
+    "stream": "graph",
+    "t2_record_id": "",
+    "tumbler": "1.1.2"
+   },
+   {
+    "chash": "1482ce056557600d58fae05a6db618d9fe155020d86dabfd4c434387475958c5",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e11",
+    "kind": "chunk",
+    "stream": "graph",
+    "t2_record_id": "",
+    "tumbler": "1.1.3"
+   },
+   {
+    "chash": "3fcb586cbd924114623d2469b345a25b46fc8bdf73a7f000fd6d47fbd12afea4",
+    "collection": "rdr__1-1__bge-base-en-v15-768__v1",
+    "item_id": "e12",
+    "kind": "chunk",
+    "stream": "graph",
+    "t2_record_id": "",
+    "tumbler": "1.1.4"
+   }
+  ],
+  "assessment": {
+   "accepted_records": 9,
+   "call_log": [
+    [
+     "vector",
+     6,
+     "support",
+     3,
+     0
+    ],
+    [
+     "graph",
+     6,
+     "support",
+     6,
+     0
+    ]
+   ],
+   "calls": 2,
+   "detail": "",
+   "facets_per_call": [
+    6,
+    6
+   ],
+   "failure_cause": "none",
+   "latency_ms": 0,
+   "outcome": "ok",
+   "raised_calls": 0,
+   "rejected_records": 0,
+   "reply_by_stream": {
+    "graph": {
+     "all_rejected": 0,
+     "neutral_or_contradict": 0,
+     "no_records": 0,
+     "raised": 0,
+     "support": 1
+    },
+    "vector": {
+     "all_rejected": 0,
+     "neutral_or_contradict": 0,
+     "no_records": 0,
+     "raised": 0,
+     "support": 1
+    }
+   },
+   "reply_classes": {
+    "all_rejected": 0,
+    "neutral_or_contradict": 0,
+    "no_records": 0,
+    "raised": 0,
+    "support": 2
+   },
+   "skipped_items": 0,
+   "streams": [
+    "vector",
+    "graph"
+   ],
+   "unusable_calls": 0
+  },
+  "assessment_calls": 2,
+  "assessment_outcome": "ok",
+  "corpus_counts": {
+   "anchors": 12,
+   "by_collection": {
+    "rdr__1-1__bge-base-en-v15-768__v1": 12
+   },
+   "by_stream": {
+    "graph": 5,
+    "vector": 7
+   }
+  },
+  "covered_facet_ids": [
+   "f1",
+   "f2",
+   "f4",
+   "f5",
+   "f6"
+  ],
+  "facets": {
+   "contradicted": 0,
+   "covered": 5,
+   "unassessed": 0,
+   "unsupported": 1
+  },
+  "facets_conflicted": 1,
+  "facets_per_call": [
+   6,
+   6
+  ],
+  "facets_required": 6,
+  "findings": [
+   {
+    "evidence_ids": [
+     "e3",
+     "e4"
+    ],
+    "facet_id": "f1",
+    "reason": "",
+    "state": "covered"
+   },
+   {
+    "evidence_ids": [
+     "e12",
+     "e5"
+    ],
+    "facet_id": "f2",
+    "reason": "conflicted",
+    "state": "covered"
+   },
+   {
+    "evidence_ids": [],
+    "facet_id": "f3",
+    "reason": "no_supporting_evidence",
+    "state": "unsupported"
+   },
+   {
+    "evidence_ids": [
+     "e8",
+     "e9"
+    ],
+    "facet_id": "f4",
+    "reason": "",
+    "state": "covered"
+   },
+   {
+    "evidence_ids": [
+     "e10",
+     "e11"
+    ],
+    "facet_id": "f5",
+    "reason": "",
+    "state": "covered"
+   },
+   {
+    "evidence_ids": [
+     "e12"
+    ],
+    "facet_id": "f6",
+    "reason": "",
+    "state": "covered"
+   }
+  ],
+  "primary_source": {
+   "sources": 0,
+   "state": "not_named"
+  },
+  "reason": "unresolved_facets",
+  "rejected_records": 0,
+  "repair": {
+   "detail": "the targeted queries found nothing not already held",
+   "facet_ids": [
+    "f3"
+   ],
+   "items_found": 0,
+   "items_merged": 0,
+   "latency_ms": 0,
+   "noted_facets": 2,
+   "outcome": "no_new_evidence",
+   "queries": 1
+  },
+  "repair_entered": true,
+  "repair_facets": 1,
+  "repair_items_found": 0,
+  "repair_items_merged": 0,
+  "repair_noted_facets": 2,
+  "repair_outcome": "no_new_evidence",
+  "repair_queries": 1,
+  "requested_facet_ids": [
+   "f1",
+   "f2",
+   "f3",
+   "f4",
+   "f5",
+   "f6"
+  ],
+  "residual_gaps": [
+   {
+    "facet_id": "f3",
+    "reason": "no_supporting_evidence",
+    "state": "unsupported"
+   }
+  ],
+  "rounds": 1,
+  "scope": {
+   "conflict_steps": [],
+   "detail": "",
+   "state": "not_applicable"
+  },
+  "skip_generation": false,
+  "sources": [],
+  "state": "partial",
+  "unassessed_by_cause": {
+   "budget_skip": 0,
+   "deadline_skip": 0,
+   "other": 0,
+   "raised_call": 0,
+   "unusable_reply": 0
+  }
+ },
+ "dropped_reduce_steps": [],
+ "evidence_diagnostics": {
+  "capped_traversals": 0,
+  "reducer_input": {
+   "by_collection": {
+    "rdr__1-1__bge-base-en-v15-768__v1": 12
+   },
+   "by_stream": {
+    "coverage_note": 1,
+    "graph": 5,
+    "vector": 7
+   },
+   "by_stream_collection": {
+    "graph": {
+     "rdr__1-1__bge-base-en-v15-768__v1": 5
+    },
+    "vector": {
+     "rdr__1-1__bge-base-en-v15-768__v1": 7
+    }
+   },
+   "chars": 4181,
+   "in_scope": null,
+   "items": 13,
+   "out_of_scope": null,
+   "step": 3,
+   "unattributed": 0
+  },
+  "request_coverage": {
+   "ambiguities": [
+    "source_unqualified"
+   ],
+   "answer_kind": "synthesis",
+   "constraint_kinds": [
+    "citation",
+    "no_current_code",
+    "temporal_qualification"
+   ],
+   "constraints": 3,
+   "current_code_requested": false,
+   "extraction": "disabled",
+   "facets": 6,
+   "kind_decision": "heuristic",
+   "named_sources": 0,
+   "source_origin": "question",
+   "wants_lifecycle_stream": true,
+   "whole_question": false
+  },
+  "reserved": null,
+  "scope_check": {
+   "conflict_steps": [],
+   "conflict_traversals": [],
+   "detail": "",
+   "examined": 0,
+   "out_of_scope": 0,
+   "owner_narrowing": {
+    "applied": false,
+    "not_applied": null,
+    "owners": [],
+    "removed_total": 0,
+    "skipped_steps": [],
+    "steps": [],
+    "unattributed": []
+   },
+   "recorded_reasons": [],
+   "reducer_out_of_scope": 0,
+   "reducer_unattributed": 1,
+   "scope": "",
+   "scope_kind": "none",
+   "state": "not_applicable",
+   "streams_out_of_scope": {},
+   "unattributed_refs": 0,
+   "violations": []
+  },
+  "skipped_steps": [],
+  "source_check": {
+   "reducer_input_recorded": true,
+   "sources": [],
+   "state": "not_applicable",
+   "unresolved": []
+  },
+  "streams": {
+   "graph": {
+    "by_collection": {
+     "rdr__1-1__bge-base-en-v15-768__v1": 5
+    },
+    "in_scope": null,
+    "out_of_scope": null,
+    "references": 5,
+    "steps": [
+     {
+      "corpus": null,
+      "step_index": 1,
+      "tool": "traverse"
+     }
+    ]
+   },
+   "primary": {
+    "by_collection": {},
+    "by_source": {},
+    "in_scope": null,
+    "out_of_scope": null,
+    "references": 0
+   },
+   "t2": {
+    "by_project": {},
+    "references": 0
+   },
+   "vector": {
+    "by_collection": {
+     "rdr__1-1__bge-base-en-v15-768__v1": 7
+    },
+    "in_scope": null,
+    "out_of_scope": null,
+    "references": 7,
+    "steps": [
+     {
+      "corpus": "rdr",
+      "step_index": 0,
+      "tool": "search"
+     }
+    ]
+   }
+  },
+  "traversals": [
+   {
+    "contained": null,
+    "dropped_cap": null,
+    "dropped_out_of_owner": null,
+    "dropped_out_of_scope": null,
+    "dropped_role": null,
+    "nodes_retained": null,
+    "nodes_walked": null,
+    "owner_unattributed": null,
+    "owners": null,
+    "policy_applied": true,
+    "policy_failed": null,
+    "possibly_truncated": null,
+    "scope_conflict": null,
+    "step_index": 1,
+    "widened": false
+   }
+  ]
+ },
+ "evidence_request": null,
+ "final_text": "[insufficient-evidence: 1 unresolved]\nThe evidence did not settle these parts of the request; the answer below does not cover them:\n  - f3 (no supporting evidence found): the evidence\nThe evidence conflicts on these parts; the answer below follows the supporting evidence:\n  - f2 (the evidence conflicts): numerical conventions\n\nthe answer\n[budget warning (unknown-cost): 3 of 7 executed step(s) reported no cost_usd \u2014 the running spend could not include them, so the budget_usd_remaining check may not have caught an overrun for this run]",
+ "lifecycle_stream": null,
+ "named_sources": null,
+ "plan_choice": {
+  "basis": "search=retrieval(zero-cost); traverse=retrieval(zero-cost); store_get_many=retrieval(zero-cost); generate=static-fallback(thin-history)",
+  "candidate_count": 1,
+  "candidates": [
+   {
+    "basis": "search=retrieval(zero-cost); traverse=retrieval(zero-cost); store_get_many=retrieval(zero-cost); generate=static-fallback(thin-history)",
+    "confidence": 0.9,
+    "in_band": true,
+    "plan_id": 7,
+    "predicted_cost_usd": 0.23,
+    "predicted_ms": 11000
+   }
+  ],
+  "chosen_plan_id": 7,
+  "predicted_cost_usd": 0.23
+ },
+ "plan_eligibility": {
+  "branches": {
+   "category_route": {
+    "examined": 0,
+    "excluded": 0,
+    "reasons": {}
+   },
+   "cosine": {
+    "examined": 0,
+    "excluded": 0,
+    "reasons": {}
+   },
+   "fts": {
+    "examined": 0,
+    "excluded": 0,
+    "reasons": {}
+   }
+  },
+  "builtins_checked": null,
+  "enforced": true,
+  "excluded_plan_ids": [],
+  "excluded_total": 0,
+  "fallback_reason": null,
+  "kind_decision": "heuristic",
+  "library_check": "unreadable",
+  "request_kind": "synthesis",
+  "returned": {
+   "eligible": 0,
+   "total": 1
+  },
+  "selected": {
+   "eligible": false,
+   "kind": "unknown",
+   "plan_id": 7,
+   "provenance": "unattested",
+   "reason": "untrusted_unknown_plan",
+   "route": null
+  },
+  "shadow_reason": null,
+  "undeclared_builtin_names": [],
+  "undeclared_builtins": null
+ },
+ "plan_id": 7,
+ "primary_evidence": null,
+ "request_coverage": {
+  "active_project": null,
+  "active_project_tier": "wired",
+  "ambiguities": [
+   {
+    "code": "source_unqualified",
+    "detail": "RDR-084 has no project qualifier: no owner or project binding and no catalog-subtree scope (scope 'rdr' is a corpus, not a project). The active-project tier runs after this derivation (evidence_request.active_project says what it did); without it a project that shares this number cannot be told apart.",
+    "subject": "RDR-084"
+   }
+  ],
+  "answer_kind": "synthesis",
+  "constraints": [
+   {
+    "id": "c1",
+    "kind": "temporal_qualification",
+    "text": "Distinguish facts at the RDR's 2026-07-30 acceptance from later records"
+   },
+   {
+    "id": "c2",
+    "kind": "citation",
+    "text": "cite source documents"
+   },
+   {
+    "id": "c3",
+    "kind": "no_current_code",
+    "text": "do not infer current code status beyond the retrieved evidence"
+   }
+  ],
+  "current_code_requested": false,
+  "derive_ms": null,
+  "explicit_scope": {
+   "kind": "none",
+   "value": ""
+  },
+  "extraction": {
+   "calls": 0,
+   "cost_usd": null,
+   "latency_ms": null,
+   "outcome": "disabled",
+   "timeout_s": null
+  },
+  "facets": [
+   {
+    "id": "f1",
+    "origin": "clause",
+    "source_hints": [],
+    "text": "the locked architecture",
+    "topics": []
+   },
+   {
+    "id": "f2",
+    "origin": "clause",
+    "source_hints": [],
+    "text": "numerical conventions",
+    "topics": []
+   },
+   {
+    "id": "f3",
+    "origin": "clause",
+    "source_hints": [],
+    "text": "the evidence",
+    "topics": []
+   },
+   {
+    "id": "f4",
+    "origin": "clause",
+    "source_hints": [],
+    "text": "gate history supporting them",
+    "topics": [
+     "gate"
+    ]
+   },
+   {
+    "id": "f5",
+    "origin": "clause",
+    "source_hints": [],
+    "text": "the implementation work recorded as complete or pending",
+    "topics": [
+     "status"
+    ]
+   },
+   {
+    "id": "f6",
+    "origin": "clause",
+    "source_hints": [],
+    "text": "what remains open by design",
+    "topics": []
+   }
+  ],
+  "facets_certain": true,
+  "kind_decision": "heuristic",
+  "named_source_count": 0,
+  "named_sources": [],
+  "source_hint_count": 0,
+  "source_hints": [],
+  "source_origin": "question",
+  "source_ranges": [],
+  "subject": [
+   "Synthesize RDR-084, LIST PARSE Canonical Consolidation"
+  ],
+  "wants_lifecycle_stream": true
+ },
+ "reserved_stream": null,
+ "run_summary": {
+  "detail": "digest_match",
+  "digest": "sha256:ff0373ebae8ae0bccddeb6acad46f75b9de2f28f3f43b8e6e9d5955ec2c47482",
+  "persisted_coverage_state": "partial",
+  "persistence": "persisted",
+  "returned_coverage_state": "partial",
+  "version": 1
+ },
+ "scope_diagnostics": [],
+ "scope_normalized": null,
+ "step_count": 4,
+ "steps": [
+  {
+   "bundled_steps": [],
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": null,
+   "cost_usd": 0.0,
+   "elapsed_ms": 0,
+   "input_tokens": 0,
+   "model": null,
+   "ok": true,
+   "operator": "search",
+   "output_tokens": 0,
+   "source": "sql",
+   "step_index": 0
+  },
+  {
+   "bundled_steps": [],
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": null,
+   "cost_usd": 0.0,
+   "elapsed_ms": 0,
+   "input_tokens": 0,
+   "model": null,
+   "ok": true,
+   "operator": "traverse",
+   "output_tokens": 0,
+   "source": "sql",
+   "step_index": 1
+  },
+  {
+   "bundled_steps": [],
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": null,
+   "cost_usd": 0.0,
+   "elapsed_ms": 0,
+   "input_tokens": 0,
+   "model": null,
+   "ok": true,
+   "operator": "store_get_many",
+   "output_tokens": 0,
+   "source": "sql",
+   "step_index": 2
+  },
+  {
+   "bundled_steps": [],
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": null,
+   "cost_usd": null,
+   "elapsed_ms": 0,
+   "input_tokens": null,
+   "model": null,
+   "ok": true,
+   "operator": "operator_check",
+   "output_tokens": null,
+   "source": "llm",
+   "step_index": 4
+  },
+  {
+   "bundled_steps": [],
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": null,
+   "cost_usd": null,
+   "elapsed_ms": 0,
+   "input_tokens": null,
+   "model": null,
+   "ok": true,
+   "operator": "operator_check",
+   "output_tokens": null,
+   "source": "llm",
+   "step_index": 5
+  },
+  {
+   "bundled_steps": [],
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": null,
+   "cost_usd": 0.0,
+   "elapsed_ms": 0,
+   "input_tokens": 0,
+   "model": null,
+   "ok": true,
+   "operator": "search",
+   "output_tokens": 0,
+   "source": "sql",
+   "step_index": 6
+  },
+  {
+   "bundled_steps": [],
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": null,
+   "cost_usd": null,
+   "elapsed_ms": 0,
+   "input_tokens": null,
+   "model": null,
+   "ok": true,
+   "operator": "generate",
+   "output_tokens": null,
+   "source": "llm",
+   "step_index": 3
+  }
+ ],
+ "truncated_chars": null
+}
