@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4944
+provisioned_tests = 4945
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
@@ -58,6 +58,11 @@ tolerance_tests = 0
 # tests/test_rdr232_reserved_bindings.py, consolidated from 16 tenant cases to 4: the nx_answer bindings test, the
 # plan-library save-path refusal, the saved-plan exclusion on the T1 and FTS match paths, and project ART resolving
 # through the real catalog owner registry. Each fails with its code deleted; the DDL-per-run ratchet is untouched.
+# 4944 -> 4945 (nexus-njn1a, 2026-10-28, under Sam's 2026-10-25 ruling): develop CI 40718316879 (80c5fd49b) counted
+# 4961, +17. tests/test_njn1a_non_git_rdr_dir_attributable.py (13, live catalog through the index paths) moved to
+# the integration marker in this commit, outside python_unit. tests/test_z0o2p17_promote_note_write.py's four
+# promote-TTL-cap cases (40000, 10**8, 2**31-1, 10**12) are folded into one test; the module marks every test
+# t2_tenant because each promote writes a real note through put_note, so that one test needs its tenant.
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default

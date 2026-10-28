@@ -203,8 +203,12 @@ class TestStored:
         assert kw["ttl_days"] in (9, 10), "the remaining window of a 10-day entry, never a reset or 0"
 
     def test_a_t2_ttl_past_the_store_put_maximum_promotes_capped(self, t2, local_t3, monkeypatch):
-        """nexus-njn1a: the MCP memory_put takes any integer ttl, and put_note now refuses one above
-        36500 days; promote caps it instead of failing a note nx store put would have stored."""
+        """nexus-njn1a: the MCP memory_put takes any integer ttl, and put_note refuses one above 36500 days, so
+        promote caps it instead of failing a note nx store put would have stored. ``base_ts + timedelta(days=ttl)``
+        raises OverflowError from ~3M days (past year 9999) and a timedelta cannot hold 10**9, so the cap was
+        unreachable for exactly the entries that most need it. 10**12 does not fit the engine's int32 ttl column,
+        so each value is handed to the command by a proxy over the T2 handle. One test for every value: each
+        test in this module mints a tenant (tests/storage_touch_ceiling.toml)."""
         from nexus.catalog import note_write
 
         seen: list[dict] = []
@@ -215,52 +219,35 @@ class TestStored:
             return real(**kw)
 
         monkeypatch.setattr(note_write, "put_note", spy)
-        row_id = t2.put(project="proj", title="z0o2p17-bigttl", content="z0o2p17 big ttl body", ttl=40000)
-        result = _promote(t2, local_t3, row_id)
-        assert result.exit_code == 0, result.output
-        (kw,) = seen
-        assert kw["ttl_days"] == 36500
 
-    @pytest.mark.parametrize("big_ttl", [10**8, 2**31 - 1, 10**12])
-    def test_a_t2_ttl_too_large_for_date_arithmetic_promotes_capped(self, t2, local_t3, monkeypatch, big_ttl):
-        """nexus-njn1a: ``base_ts + timedelta(days=ttl)`` raises OverflowError from ~3M days (past year
-        9999) and a timedelta cannot hold 10**9, so the cap was unreachable for exactly the entries that
-        most need it. 10**12 does not fit the engine's int32 ttl column, so every value here is handed to
-        the command by a proxy over the T2 handle instead of being stored."""
-        from nexus.catalog import note_write
+        for big_ttl in (40000, 10**8, 2**31 - 1, 10**12):
+            row_id = t2.put(
+                project="proj", title=f"z0o2p17-bigttl-{big_ttl}", content=f"z0o2p17 big ttl body {big_ttl}", ttl=40000,
+            )
 
-        seen: list[dict] = []
-        real = note_write.put_note
+            class _Memory:
+                def __init__(self, inner): self._inner = inner
+                def __getattr__(self, name): return getattr(self._inner, name)
+                def get(self, _ttl=big_ttl, **kw):
+                    entry = self._inner.get(**kw)
+                    return {**entry, "ttl": _ttl} if entry else entry
 
-        def spy(**kw):
-            seen.append(kw)
-            return real(**kw)
+            class _Handle:
+                def __init__(self, inner): self._inner = inner
+                def __enter__(self): self._inner.__enter__(); return self
+                def __exit__(self, *exc): return self._inner.__exit__(*exc)
+                @property
+                def memory(self): return _Memory(self._inner.memory)
+                def __getattr__(self, name): return getattr(self._inner, name)
 
-        monkeypatch.setattr(note_write, "put_note", spy)
-        row_id = t2.put(project="proj", title="z0o2p17-hugettl", content="z0o2p17 huge ttl body", ttl=40000)
-
-        class _Memory:
-            def __init__(self, inner): self._inner = inner
-            def __getattr__(self, name): return getattr(self._inner, name)
-            def get(self, **kw):
-                entry = self._inner.get(**kw)
-                return {**entry, "ttl": big_ttl} if entry else entry
-
-        class _Handle:
-            def __init__(self, inner): self._inner = inner
-            def __enter__(self): self._inner.__enter__(); return self
-            def __exit__(self, *exc): return self._inner.__exit__(*exc)
-            @property
-            def memory(self): return _Memory(self._inner.memory)
-            def __getattr__(self, name): return getattr(self._inner, name)
-
-        with patch("nexus.commands.memory.t2_handle", side_effect=lambda: _Handle(t2.open())), \
-             patch("nexus.db.make_t3", return_value=local_t3):
-            result = CliRunner().invoke(main, [
-                "memory", "promote", str(row_id), "--collection", "fixture-subject"])
-        assert result.exit_code == 0, result.output
-        (kw,) = seen
-        assert kw["ttl_days"] == 36500
+            seen.clear()
+            with patch("nexus.commands.memory.t2_handle", side_effect=lambda: _Handle(t2.open())), \
+                 patch("nexus.db.make_t3", return_value=local_t3):
+                result = CliRunner().invoke(main, [
+                    "memory", "promote", str(row_id), "--collection", "fixture-subject"])
+            assert result.exit_code == 0, (big_ttl, result.output)
+            (kw,) = seen
+            assert kw["ttl_days"] == 36500, big_ttl
 
     def test_the_post_store_chains_fire_once_and_skip_the_manifest_hook(self, t2, local_t3, monkeypatch):
         """The request wrote the manifest, so the batch chain must not write it again; the stamp follows the chains."""

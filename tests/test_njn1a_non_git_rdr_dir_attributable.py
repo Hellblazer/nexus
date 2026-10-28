@@ -19,6 +19,11 @@ import pytest
 
 from tests._catalog_fixture_ops import ActiveCatalog
 
+# Every test here drives the live catalog through the index paths, so each mints a tenant; under the
+# integration marker they are outside the python_unit tenant ceiling (the RDR-237 catalog-hook precedent)
+# and CI's integration-affected job runs the file when it or doc_indexer changes (nexus-njn1a).
+pytestmark = pytest.mark.integration
+
 _COLLECTION = "rdr__1-1__test-embed-768__v1"
 _SEQ = [0]
 _REL = "docs/rdr/rdr-901-example.md"
