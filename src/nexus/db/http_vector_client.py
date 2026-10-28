@@ -153,7 +153,7 @@ _EMBED_PROBE_BATCH = 10
 _store_get_count_unreported_logged: bool = False
 
 
-def _warn_store_get_count_unreported(collection: str) -> None:
+def _warn_store_get_count_unreported(collection: str, *, heuristic: bool = True) -> None:
     """Log-once notice: a ``store-get`` response omitted the engine-side
     ``count`` field (nexus-hdx2u E3/E4).
 
@@ -162,15 +162,31 @@ def _warn_store_get_count_unreported(collection: str) -> None:
     boundary, simply does not send. This is NOT gated behind a
     ``REQUIRED_ENGINE_VERSION`` floor bump (that conversion — treating an
     absent ``count`` as fail-loud rather than degrade — is a deliberate
-    future floor decision, not part of this fix): the client degrades to
-    the pre-existing ``_warn_store_get_truncated_at_limit`` heuristic,
-    which stays the only truncation signal on such an engine.
+    future floor decision, not part of this fix).
+
+    *heuristic* names the caller's fallback (nexus-njn1a). ``True`` is
+    ``_ServiceCollectionStub.get``, which degrades to the pre-existing
+    ``_warn_store_get_truncated_at_limit`` heuristic, the only truncation signal
+    it has on such an engine. ``False`` is ``_store_get_pages`` (the expiry
+    sweep's guard and the recovery export), which applies no heuristic: with no
+    ``count`` it cannot see a dropped row at all, and the message says so.
     """
     global _store_get_count_unreported_logged
     if _store_get_count_unreported_logged:
         _log.debug("store_get_count_unreported", collection=collection)
         return
     _store_get_count_unreported_logged = True
+    if heuristic:
+        fallback = (
+            "Degrading to the pre-count store_get_truncated_at_limit "
+            "heuristic, which is the only truncation signal on this engine"
+        )
+    else:
+        fallback = (
+            "This read path (the TTL sweep's guard, the recovery export) has no "
+            "truncation heuristic to fall back to, so a row the engine drops from "
+            "a page cannot be detected here"
+        )
     _log.warning(
         "store_get_count_unreported",
         collection=collection,
@@ -178,8 +194,7 @@ def _warn_store_get_count_unreported(collection: str) -> None:
             "the engine's /v1/vectors/store-get response omitted the "
             '"count" field (matched-LIVE rows before LIMIT) — a pre-'
             "nexus-hdx2u-E3 engine, or a rolling deploy window straddling "
-            "the version boundary. Degrading to the pre-count "
-            "store_get_truncated_at_limit heuristic; no REQUIRED_ENGINE_"
+            f"the version boundary. {fallback}; no REQUIRED_ENGINE_"
             "VERSION floor is enforced for this field yet. Logged once "
             "per process — further occurrences in this run are DEBUG."
         ),
@@ -6473,7 +6488,7 @@ class HttpVectorClient:
             if "count" not in result:
                 # nexus-6pfgb.33: an engine before nexus-hdx2u E3 sends no count, so a dropped row is
                 # invisible here; say so once per process, as the collection stub does.
-                _warn_store_get_count_unreported(collection)
+                _warn_store_get_count_unreported(collection, heuristic=False)
             for i, (doc_id, meta) in enumerate(zip(ids, metas)):
                 if isinstance(meta, dict):
                     yield doc_id, (docs[i] if i < len(docs) and docs[i] is not None else ""), meta

@@ -119,3 +119,25 @@ def test_chunk_rows_raises_when_the_engine_reports_more_rows_than_it_returned(wi
     state["rows"] = {"a" * 64: {"doc": "x", "meta": {}}}
     with pytest.raises(VectorServiceError, match="matched-live rows"):
         _client().chunk_rows(_COLLECTION, ["a" * 64])
+
+
+@pytest.mark.parametrize("read", ["chunk_rows", "_note_rows"])
+def test_the_paged_reader_count_warning_does_not_claim_a_heuristic(wire, monkeypatch, read):
+    """nexus-njn1a (7.88.0 shakedown F7): ``_store_get_pages`` applies no truncation heuristic, so its
+    count-unreported warning must not say it degrades to one; the collection stub's still does."""
+    monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", False)
+    _calls, state = wire
+    state["rows"] = {"a" * 64: {"doc": "x", "meta": {"title": "t"}}}
+    with capture_logs() as logs:
+        getattr(_client(), read)(_COLLECTION, ["a" * 64])
+    (event,) = [e for e in logs if e["event"] == "store_get_count_unreported"]
+    assert "Degrading" not in event["detail"], event["detail"]
+    assert "no truncation heuristic" in event["detail"], event["detail"]
+
+
+def test_the_collection_stub_count_warning_still_names_its_heuristic(monkeypatch):
+    monkeypatch.setattr(hvc, "_store_get_count_unreported_logged", False)
+    with capture_logs() as logs:
+        hvc._warn_store_get_count_unreported(_COLLECTION)
+    (event,) = [e for e in logs if e["event"] == "store_get_count_unreported"]
+    assert "Degrading to the pre-count store_get_truncated_at_limit heuristic" in event["detail"]
