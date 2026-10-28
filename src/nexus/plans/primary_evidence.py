@@ -53,12 +53,13 @@ import structlog
 from nexus.catalog.rdr_canonical import (
     group_rdr_candidates,
     is_in_repo,
+    rdr_frontmatter_id,
     rdr_key_of,
     rdr_source_prefix,
     resolve_canonical_tumbler,
 )
 from nexus.catalog.tumbler import Tumbler
-from nexus.catalog.types import CatalogEntry, ManifestRow
+from nexus.catalog.types import RDR_FRONTMATTER_ID_META_KEY, CatalogEntry, ManifestRow
 from nexus.plans.evidence import EvidenceRequest, OwnerResolution, SourceRange, SourceRef, SourceRefError
 
 _log = structlog.get_logger(__name__)
@@ -687,27 +688,29 @@ def _file_frontmatter_id(entry: CatalogEntry, source_prefix: str = "") -> Frontm
     except (OSError, ValueError, UnicodeDecodeError):
         return FrontmatterId.unknown(FILE_ABSENT)
     try:
-        from nexus.aspect_extractor import _split_rdr_frontmatter  # noqa: PLC0415 — deferred: the extractor module is heavy; the one parser the aspect row uses
-
-        data, body = _split_rdr_frontmatter(text)
+        parsed, raw = rdr_frontmatter_id(text)  # the one rule the aspect row and the registration stamp use
     except Exception as exc:  # noqa: BLE001 — an unparseable header is unknown, never a failure
         _log.warning("named_source_frontmatter_file_parse_failed", error=type(exc).__name__)
         return FrontmatterId.unknown(FILE_PARSE_FAILED)
-    if text.lstrip().startswith("---") and not data and body == text:
+    if not parsed:
         return FrontmatterId.unknown(FILE_PARSE_FAILED)  # an opening fence with no closing one
-    return FrontmatterId.of(data.get("id"))
+    return FrontmatterId.of(raw)
 
 
 def recorded_frontmatter_id(get_aspect: Callable[[str, float], Any] | None) -> FrontmatterIdLookup:
-    """The id source for :func:`resolve_named_sources`: the document's ``document_aspects`` row, then its file.
+    """The id source for :func:`resolve_named_sources`: the document's registration ``meta``, then its
+    ``document_aspects`` row, then its file.
 
-    The RDR indexer records the frontmatter ``id`` neither on the catalog document (``meta`` holds the
-    content hash) nor on its chunks (the frontmatter is stripped before chunking). The one place it is
-    recorded is the deterministic ``rdr-frontmatter-v1`` aspect row (``extras["rdr_id"]``), in the engine's
-    T2 in local and cloud mode alike, filled asynchronously by the aspect worker. *get_aspect* is
-    ``(doc_id, timeout) -> AspectRecord | None`` (the store's ``get_by_doc_id``).
+    The RDR indexer writes the frontmatter ``id`` onto the catalog document when it registers (or updates)
+    the document (``meta[RDR_FRONTMATTER_ID_META_KEY]``, nexus-jypmj.7), so the id is there for every
+    registration made since, in local and cloud mode, with no wait on the aspect worker and no extra call: the
+    entry is already in hand. A registration that predates the stamp (or whose header did not parse) has no
+    key and falls through. Next is the deterministic ``rdr-frontmatter-v1`` aspect row (``extras["rdr_id"]``),
+    in the engine's T2, filled asynchronously by the aspect worker; a re-index or ``nx enrich aspects`` fills
+    either. *get_aspect* is ``(doc_id, timeout) -> AspectRecord | None`` (the store's ``get_by_doc_id``), keyed
+    by the catalog tumbler string.
 
-    A row is authoritative only when it shows the frontmatter was parsed: written by the RDR extractor, with
+    An aspect row is authoritative only when it shows the frontmatter was parsed: written by the RDR extractor, with
     a confidence and non-empty ``extras``. A row without them (an extractor that failed leaves null fields;
     rows written before nexus-xho6c have empty ``extras`` on every document) says nothing about the header,
     and neither does a row from another extractor or no row: the lookup then reads the file under the
@@ -718,6 +721,9 @@ def recorded_frontmatter_id(get_aspect: Callable[[str, float], Any] | None) -> F
 
     def lookup(entry: CatalogEntry, timeout: float, source_prefix: str = "") -> FrontmatterId:
         nonlocal store_failed
+        meta = entry.meta
+        if isinstance(meta, dict) and RDR_FRONTMATTER_ID_META_KEY in meta:
+            return FrontmatterId.of(meta[RDR_FRONTMATTER_ID_META_KEY])
         reasons: list[str] = []
         if get_aspect is not None and not store_failed:
             try:

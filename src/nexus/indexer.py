@@ -1176,8 +1176,16 @@ def _catalog_progress(
         write(stripped + "\n")
 
 
-def _register_time_meta(rel_path: str, file_hash: str) -> dict | None:
+#: Sentinel for "the registration's meta has no such key" in a stamp comparison.
+_STAMP_MISSING = object()
+
+
+def _register_time_meta(rel_path: str, file_hash: str, extra: dict | None = None) -> dict | None:
     """Build a register/update-time ``meta`` dict for *rel_path*.
+
+    *extra* (nexus-jypmj.7) carries stamps the caller read from the file's content: today the RDR frontmatter
+    id (:func:`nexus.catalog.rdr_canonical.rdr_frontmatter_meta`). It is merged in last and never replaces
+    the content hash.
 
     nexus-4jj40 (RDR-200 Phase 1c evidence hygiene, review round 3):
     stamps :data:`nexus.catalog.types.NON_EVIDENTIARY_META_KEY` for a
@@ -1197,6 +1205,8 @@ def _register_time_meta(rel_path: str, file_hash: str) -> dict | None:
         meta["content_hash"] = file_hash
     if is_fixture_path(rel_path):
         meta[NON_EVIDENTIARY_META_KEY] = True
+    for key, value in (extra or {}).items():
+        meta.setdefault(key, value)
     return meta or None
 
 
@@ -1531,9 +1541,22 @@ def _catalog_hook(
 
             # Per-file content hash for rename detection (RDR-060 E7)
             try:
-                file_hash = _hl.sha256(abs_path.read_bytes()).hexdigest()
+                raw_bytes = abs_path.read_bytes()
+                file_hash = _hl.sha256(raw_bytes).hexdigest()
             except OSError:
-                file_hash = ""
+                raw_bytes, file_hash = b"", ""
+
+            # nexus-jypmj.7: the RDR's frontmatter id is recorded on the catalog document, synchronously, so
+            # the named-source sibling rule does not wait for the aspect worker. The header is read from the
+            # bytes just hashed; a header that does not parse stamps nothing.
+            rdr_stamp: dict = {}
+            if content_type == "rdr" and raw_bytes:
+                from nexus.catalog import rdr_canonical  # noqa: PLC0415 — deferred: read at call time so a test can replace the stamp
+
+                try:
+                    rdr_stamp = rdr_canonical.rdr_frontmatter_meta(raw_bytes.decode("utf-8"))
+                except UnicodeDecodeError:
+                    rdr_stamp = {}
 
             try:
                 existing = (
@@ -1550,7 +1573,7 @@ def _catalog_hook(
                         "file_path": rel_path,
                         "physical_collection": collection_name,
                         "head_hash": head_hash,
-                        "meta": _register_time_meta(rel_path, file_hash),
+                        "meta": _register_time_meta(rel_path, file_hash, rdr_stamp),
                         "source_mtime": source_mtime,
                     }))
                 else:
@@ -1573,11 +1596,18 @@ def _catalog_hook(
                         bool(file_hash)
                         and existing.meta.get("content_hash", "") != file_hash
                     )
+                    # nexus-jypmj.7: a registration that lacks the RDR frontmatter stamp (made before the stamp
+                    # existed) or carries a different one is written once, so a plain re-index fills it; the
+                    # next run finds it equal and writes nothing.
+                    stamp_stale = any(
+                        existing.meta.get(k, _STAMP_MISSING) != v for k, v in rdr_stamp.items()
+                    )
                     changed = (
                         existing.head_hash != head_hash
                         or existing.physical_collection != collection_name
                         or existing.source_mtime != source_mtime
                         or content_hash_changed
+                        or stamp_stale
                     )
                     if content_type == "rdr" and content_hash_changed:
                         relink_rdr_tumblers.append(existing.tumbler)
@@ -1594,7 +1624,7 @@ def _catalog_hook(
                             "tumbler": str(existing.tumbler),
                             "head_hash": head_hash,
                             "physical_collection": collection_name,
-                            "meta": _register_time_meta(rel_path, file_hash),
+                            "meta": _register_time_meta(rel_path, file_hash, rdr_stamp),
                             "source_mtime": source_mtime,
                         }))
                     file_to_doc_id[abs_path] = str(existing.tumbler)

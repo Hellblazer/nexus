@@ -1299,6 +1299,19 @@ def _register_or_lookup_doc_id(
             tumbler_from_register_result,
         )
         _conflict = find_cross_owner_conflict(reader, fp)
+        # nexus-jypmj.7: an RDR is registered with its frontmatter id on the document (the same stamp the repo
+        # indexer writes), so the named-source sibling rule reads it without the aspect worker. Passed only
+        # when there is one, so a writer double that predates ``meta`` is untouched for every other type.
+        _register_extra: dict = {}
+        if content_type == "rdr":
+            from nexus.catalog.rdr_canonical import rdr_frontmatter_meta  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+
+            try:
+                _stamp = rdr_frontmatter_meta(file_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                _stamp = {}
+            if _stamp:
+                _register_extra["meta"] = _stamp
         _write_result = writer.register(
             owner=owner,
             title=title or file_path.stem,
@@ -1312,6 +1325,7 @@ def _register_or_lookup_doc_id(
             source_mtime=source_mtime,
             source_uri=source_uri or derived_source_uri,
             with_created=True,
+            **_register_extra,
         )
         # created_from_register_result/tumbler_from_register_result handle
         # a test double's ``writer.register`` fake (several exist, predating
