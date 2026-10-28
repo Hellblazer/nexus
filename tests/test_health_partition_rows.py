@@ -154,14 +154,19 @@ _LAYOUT = ["P|chunks|4|8", "P|taxonomy_centroids|4|8"]
 _HEALTHY = ["K|2||", "R|4||"]
 
 
-def test_every_row_is_not_applicable_without_pg_credentials(tmp_path):
+def test_without_pg_credentials_a_local_box_is_not_applicable_and_a_managed_one_warns(tmp_path):
+    """A local box with no credentials has nothing to check; a managed box has a check this client cannot run, and
+    an unperformed check warns, never a checkmark (Sam 2026-10-28 on nexus-g7ijj, nexus-njn1a)."""
     for local in (True, False):
         with patch("nexus.config.is_local_mode", return_value=local):
             results = h._check_tenant_model_partitions(creds_path=tmp_path / "pg_credentials")
         assert tuple(r.label for r in results) == LABELS
         for r in results:
-            assert r.ok and not r.warn and not r.fatal
-            assert r.detail.startswith("not applicable")
+            assert not r.fatal
+            if local:
+                assert r.ok and not r.warn and r.detail.startswith("not applicable")
+            else:
+                assert not r.ok and r.warn and h.is_managed_not_probeable(r)
 
 
 def test_every_row_is_not_applicable_when_the_parents_are_not_partitioned(tmp_path):
