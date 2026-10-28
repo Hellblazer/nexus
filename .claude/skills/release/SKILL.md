@@ -28,7 +28,7 @@ MVV and the local-service gate, behind one preflight. Steps that remain:
 0, 0c, 1, 2, 3, 4, 4a, 5, 6d, 7, 8, 8a, 9, 10, 11, 11b, 11c, 12.
 
 **RDR-237 prerequisite (the release that first carries MinerU-only extraction).**
-That release (Docling removed, every PDF through MinerU, no default-on MinerU
+That release (every PDF through MinerU, the old extractor removed, no default-on MinerU
 end-to-end check in PR CI) has one more prerequisite, checked before Step 1 and not
 discovered at Step 11c: the RDR-237 Minimum Viable Validation (nexus-tr1rj.6, real
 MinerU on the laptop and chas, numbers in T2 `nexus_rdr/237-mvv-<date>`) must be done
