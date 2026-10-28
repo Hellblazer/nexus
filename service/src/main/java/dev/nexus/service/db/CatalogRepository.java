@@ -4548,7 +4548,41 @@ public final class CatalogRepository {
     public Map<String, Object> graphBFS(String tenant, List<String> seeds,
                                          List<String> linkTypes, String direction, int maxDepth,
                                          boolean includeHeuristic) {
-        if (seeds == null || seeds.isEmpty()) return Map.of("nodes", List.of(), "edges", List.of());
+        return graphBFS(tenant, seeds, linkTypes, direction, maxDepth, includeHeuristic, null);
+    }
+
+    /**
+     * BFS graph traversal with an optional scope predicate that runs BEFORE the node cut
+     * (RDR-232 section 3, nexus-jypmj.1.13).
+     *
+     * <p>THE DEFECT THIS CLOSES. The cut keeps the 500 lowest {@code (min_depth, tumbler)} nodes of the whole
+     * reachable set, so a scoped caller whose walk reaches hundreds of out-of-scope documents (code, mostly)
+     * received a response those documents had already filled; the client dropped them afterwards and could
+     * not give the slots back (measured: 243 of the 500 nodes of one live walk were out of scope).
+     *
+     * <p>WHAT {@code scope} DOES. When non-null, every NON-SEED node the predicate does not admit is removed
+     * from the ordered set before the cut, so the 500 slots are spent on in-scope nodes only. It does not
+     * stop the walk: an out-of-scope node still RELAYS (A -> R -> B reaches B), because the client has always
+     * judged scope on the nodes it keeps, never on the path. The consequence is stated, not hidden: an edge
+     * is returned only when both endpoints survive, so a node reached only through a removed relay arrives
+     * without an edge, and the client ranks it by what is left (no link distance, role {@code related}).
+     * Seeds are never removed: they are the documents the walk starts from, and the client applies the
+     * scope to them itself.
+     *
+     * <p>THE MARKER. A non-null {@code scope} adds {@code scope_filter:{applied:true, kind, value,
+     * dropped_out_of_scope:N}} to the result; {@code N} counts the nodes the predicate removed. A null
+     * {@code scope} adds nothing, so a request without the predicate is byte-identical to before. An engine
+     * that predates this method ignores the request key and returns no marker, which is how a client tells
+     * "the predicate ran" from "the predicate was ignored" without trusting the HTTP status.
+     */
+    public Map<String, Object> graphBFS(String tenant, List<String> seeds,
+                                         List<String> linkTypes, String direction, int maxDepth,
+                                         boolean includeHeuristic, GraphScopeFilter scope) {
+        if (seeds == null || seeds.isEmpty()) {
+            return scope == null
+                ? Map.of("nodes", List.of(), "edges", List.of())
+                : Map.of("nodes", List.of(), "edges", List.of(), "scope_filter", scope.marker(0));
+        }
         int depth = Math.min(Math.max(maxDepth, 1), 3);
         final List<String> effectiveTypes =
             (linkTypes != null && !linkTypes.isEmpty()) ? linkTypes
@@ -4574,6 +4608,9 @@ public final class CatalogRepository {
             Set<String> visited = new LinkedHashSet<>(seeds);
             List<Map<String, Object>> edges = new ArrayList<>();
             Set<String> frontier = new LinkedHashSet<>(seeds);
+            // nexus-jypmj.1.13: physical_collection of every non-seed node the walk saw (filled only when a
+            // scope predicate is present); a seed need not appear on any edge and is never judged.
+            Map<String, String> collectionOf = new java.util.HashMap<>();
 
             for (int d = 0; d < depth && !frontier.isEmpty(); d++) {
                 Set<String> next = new LinkedHashSet<>();
@@ -4592,7 +4629,10 @@ public final class CatalogRepository {
                 }
 
                 var rows = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
-                                       CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META)
+                                       CATALOG_LINKS.FROM_SPAN, CATALOG_LINKS.TO_SPAN, CATALOG_LINKS.CREATED_BY, CATALOG_LINKS.CREATED_AT, F_LNK_META,
+                                       // nexus-jypmj.1.13: both endpoints' collections ride the join the
+                                       // walk already makes, so the scope predicate costs no extra query.
+                                       fromDocs.PHYSICAL_COLLECTION, toDocs.PHYSICAL_COLLECTION)
                               .from(CATALOG_LINKS)
                               .join(fromDocs).on(fromDocs.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER))
                               .join(toDocs).on(toDocs.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER))
@@ -4606,6 +4646,10 @@ public final class CatalogRepository {
                     edges.add(lm);
                     String fromT = (String) lm.get("from_tumbler");
                     String toT   = (String) lm.get("to_tumbler");
+                    if (scope != null) {
+                        collectionOf.putIfAbsent(fromT, r.value10());
+                        collectionOf.putIfAbsent(toT, r.value11());
+                    }
                     if (!visited.contains(fromT)) { next.add(fromT); visited.add(fromT); depthOf.put(fromT, d + 1); }
                     if (!visited.contains(toT))   { next.add(toT);   visited.add(toT);   depthOf.put(toT, d + 1); }
                 }
@@ -4618,7 +4662,19 @@ public final class CatalogRepository {
             // (min_depth, tumbler) before truncating means the lowest-depth
             // nodes always survive and the surviving 500 are deterministic
             // across repeated calls on the same graph.
-            List<String> ordered = visited.stream()
+            // nexus-jypmj.1.13: the scope predicate runs HERE, before the cut, so the 500 slots below are
+            // spent on nodes the caller can use. Seeds (depth 0) are exempt.
+            final Set<String> seedSet = new java.util.HashSet<>(seeds);
+            int droppedOutOfScope = 0;
+            List<String> candidates = new ArrayList<>(visited.size());
+            for (String t : visited) {
+                if (scope != null && !seedSet.contains(t) && !scope.admits(collectionOf.get(t), t)) {
+                    droppedOutOfScope++;
+                } else {
+                    candidates.add(t);
+                }
+            }
+            List<String> ordered = candidates.stream()
                 .sorted(Comparator
                     .comparingInt((String t) -> depthOf.getOrDefault(t, Integer.MAX_VALUE))
                     .thenComparing(Comparator.naturalOrder()))
@@ -4642,7 +4698,9 @@ public final class CatalogRepository {
                            .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(surviving)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                            .fetch().map(r -> docRowFromRecord(r.intoMap()));
             }
-            return Map.of("nodes", nodes, "edges", survivingEdges);
+            if (scope == null) return Map.of("nodes", nodes, "edges", survivingEdges);
+            return Map.of("nodes", nodes, "edges", survivingEdges,
+                          "scope_filter", scope.marker(droppedOutOfScope));
         });
     }
 
@@ -8166,6 +8224,31 @@ public final class CatalogRepository {
      * @return {@code {docId -> [manifest rows ordered by position]}}
      */
     public Map<String, List<Map<String, Object>>> getManifestMany(String tenant, List<String> docIds) {
+        return getManifestMany(tenant, docIds, null, null);
+    }
+
+    /**
+     * {@link #getManifestMany(String, List)} with an optional per-document row limit (nexus-jypmj.6): a
+     * document longer than {@code maxRowsPerDoc} is returned as an even sample of that many rows
+     * ({@link ManifestRowSample}), and every returned document's TRUE live row
+     * count, so a caller can tell a sample from a whole manifest; it is filled into {@code rowCountsOut} when
+     * that is non-null. {@code maxRowsPerDoc} {@code null} means no limit and no counts. The database read is the same as without a limit; the limit bounds what crosses the
+     * wire, which is what the client's row budget meters.
+     */
+    public Map<String, List<Map<String, Object>>> getManifestMany(String tenant, List<String> docIds,
+                                                                  Integer maxRowsPerDoc,
+                                                                  Map<String, Integer> rowCountsOut) {
+        var all = getManifestManyAll(tenant, docIds);
+        if (maxRowsPerDoc == null) return all;
+        Map<String, List<Map<String, Object>>> sampled = new LinkedHashMap<>();
+        for (var e : all.entrySet()) {
+            if (rowCountsOut != null) rowCountsOut.put(e.getKey(), e.getValue().size());
+            sampled.put(e.getKey(), ManifestRowSample.of(e.getValue(), maxRowsPerDoc));
+        }
+        return sampled;
+    }
+
+    private Map<String, List<Map<String, Object>>> getManifestManyAll(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return Map.of();
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,

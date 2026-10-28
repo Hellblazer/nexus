@@ -118,6 +118,7 @@ def _within_epsilon(a: float, b: float) -> bool:
 def _costs_agree(
     run_cost: "float | None", step_sum: "float | None", *, planner_share_allowed: bool = False,
     extraction_cost: "float | None" = None,
+    planner_cost: "float | None" = None,
 ) -> bool:
     """Whether a row's own ``cost_usd`` and the sum of its step costs
     agree within the relative/sub-cent epsilon. Both ``None`` (unknown vs
@@ -135,11 +136,23 @@ def _costs_agree(
     at or above the step sum agrees, and a known run cost agrees with no known step cost. A run
     cost below its steps is still a drop.
 
-    The allowance is one-sided on purpose (nexus-jypmj.4): the planner's own cost is not stored, so
-    ``run_cost - step_sum`` cannot be told from an over-count and no upper bound on it is sound.
-    Catching an over-count needs ``planner_cost_usd`` persisted on the run, a stored-run schema
-    change that was ruled out for this bead.
+    *planner_cost* (nexus-jypmj.5) is the planner's share as the run stored it
+    (``nx_answer_runs.planner_cost_usd``), and it makes the check TWO-SIDED for a ``plan_id`` 0 run: the run
+    cost must equal the step sum plus the planner share (a step sum of nothing known counts as zero, the
+    way the writer adds only what it knows). Without it (a row written before the field, by an older client,
+    or read from an older engine) the allowance above is one-sided on purpose: the planner's cost is not
+    stored, so ``run_cost - step_sum`` cannot be told from an over-count and no upper bound on it is sound.
+    A library-plan run has no planner share, so a stored one is not read for it.
     """
+    if planner_share_allowed and planner_cost is not None:
+        if run_cost is None:
+            return False
+        run_cost_expected = (step_sum or 0.0) + planner_cost
+        epsilon = max(
+            _COST_EPSILON_ABS_FLOOR,
+            _COST_EPSILON_REL * max(abs(run_cost), abs(run_cost_expected)),
+        )
+        return abs(run_cost - run_cost_expected) <= epsilon
     if run_cost is None and step_sum is None:
         return True
     if planner_share_allowed and run_cost is not None:
@@ -766,8 +779,12 @@ def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
         plan_key = str(plan_id) if plan_id is not None else "fallback"
         run_cost = row.get("cost_usd")
         step_sum = _row_step_cost_sum(row)
+        planner_cost = row.get("planner_cost_usd")  # nexus-jypmj.5: None for a row that stored none
+        if isinstance(planner_cost, bool) or not isinstance(planner_cost, (int, float)):
+            planner_cost = None
         if not _costs_agree(
             run_cost, step_sum, planner_share_allowed=plan_id == 0, extraction_cost=_row_extraction_cost(row),
+            planner_cost=planner_cost,
         ):
             violations.append({
                 "id": row.get("id"), "run_cost_usd": run_cost,

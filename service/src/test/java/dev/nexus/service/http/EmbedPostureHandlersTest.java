@@ -323,6 +323,25 @@ class EmbedPostureHandlersTest {
     }
 
     @Test
+    void version_throughTheRealHandler_advertisesTheGraphScopeFilterCapability() throws Exception {
+        // nexus-jypmj.1.13: the fragment method is unit-tested in VersionHandlerReleaseVersionTest; this
+        // proves the handler's body actually calls it.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("catalog_graph_scope_filter_supported").asBoolean()).isTrue();
+    }
+
+    @Test
+    void version_throughTheRealHandler_advertisesTheManifestRowLimitAndPlannerCostCapabilities() throws Exception {
+        // nexus-jypmj.6 and nexus-jypmj.5: the fragment methods are unit-tested in
+        // VersionHandlerReleaseVersionTest; this proves the handler's body actually calls them.
+        JsonNode body = get("/version", new VersionHandler(refusingPool(),
+                router(fakeBge(), "pa-key", EmbeddingProfile.VOYAGE)));
+        assertThat(body.get("catalog_manifest_row_limit_supported").asBoolean()).isTrue();
+        assertThat(body.get("nx_answer_planner_cost_supported").asBoolean()).isTrue();
+    }
+
+    @Test
     void theTwoRoutesRenderTheSameThreeKeys() throws Exception {
         EmbedPosture posture = posture(false, true, EmbeddingProfile.BGE);
         JsonNode status = get("/v1/status", new StatusHandler(router(null, "pa-key", EmbeddingProfile.BGE))

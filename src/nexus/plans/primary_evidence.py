@@ -198,6 +198,11 @@ class NamedSourceCatalog(Protocol):
     def get_manifests(self, doc_ids: list[str]) -> dict[str, list[ManifestRow]]: ...
 
 
+#: ``(doc_ids, max_rows_per_doc) -> (manifests, true row counts)``, or ``None`` when the engine did not honour the
+#: limit (nexus-jypmj.6; ``HttpCatalogClient.get_manifests_sampled``). A document longer than the limit comes back
+#: as an even sample of that many rows; the counts hold every returned document's TRUE live row count.
+ManifestSampler = Callable[[list[str], int], "tuple[dict[str, list[ManifestRow]], dict[str, int]] | None"]
+
 #: ``(collection, chashes) -> {chash: text}``. Text only: the T3 chunk row's metadata
 #: (``section_title`` and the rest) is the last writer's and never crosses this boundary.
 ChunkFetcher = Callable[[str, Sequence[str]], Mapping[str, str]]
@@ -1355,11 +1360,34 @@ def _picks(rows: list[_Row], quota: int) -> list[_Row]:
     return [rows[i] for i in chosen]
 
 
+def _fair_row_limit(wants: Sequence[int], budget: int) -> int:
+    """The water-fill level over *wants* (recorded chunk counts) for a row *budget*: the largest per-document
+    limit ``L >= 1`` with ``sum(min(want, L)) <= budget``. Documents under the level are read whole and the
+    larger ones share what is left, the split ``_water_fill`` makes on rows already read. Over budget even at
+    one row a document, the level is 1."""
+    ordered = sorted(max(w, 1) for w in wants)
+    left = budget
+    for k, w in enumerate(ordered):
+        share = left // (len(ordered) - k)
+        if w > share:
+            return max(1, share)
+        left -= w
+    return ordered[-1] if ordered else 1
+
+
 def _read_manifests(
     cat: NamedSourceCatalog, docs: Sequence[ResolvedSource], caps: PrimaryEvidenceCaps, *,
-    end: float, clock: Callable[[], float], caps_hit: list[str],
-) -> tuple[dict[str, list[ManifestRow]], set[str], dict[str, str]]:
-    """``(manifests, failed, unread)``: the manifests of *docs* pulled under the read cap (nexus-jypmj.1.17).
+    end: float, clock: Callable[[], float], caps_hit: list[str], sampler: ManifestSampler | None = None,
+) -> tuple[dict[str, list[ManifestRow]], set[str], dict[str, str], dict[str, int]]:
+    """``(manifests, failed, unread, row_counts)``: the manifests of *docs* pulled under the read cap (nexus-jypmj.1.17).
+
+    *sampler* (nexus-jypmj.6) is the engine's per-document row limit. When the recorded chunk counts together
+    exceed ``caps.max_manifest_rows_read`` it replaces the smallest-first read below: ONE request for every
+    document, at the water-fill level of the recorded counts, so a large source is sampled instead of dropped
+    and each document answers with its true row count (``row_counts``, the second sampled result). Within the
+    cap, with no sampler, with one the engine did not honour (``None``), or with one that raised, the read is
+    the smallest-first one below, exactly as before (a request that failed there fails again per document,
+    through the handling below). ``row_counts`` is empty on the unsampled path.
 
     ``get_manifests`` has no row limit, so the cap acts on what is requested. The documents go in
     ascending order of the chunk count the catalog RECORDS for them, grouped into calls whose recorded
@@ -1379,6 +1407,17 @@ def _read_manifests(
     manifests: dict[str, list[ManifestRow]] = {}
     failed: set[str] = set()
     unread: dict[str, str] = {}
+    if sampler is not None and order and sum(max(tumblers[t], 0) for t in order) > caps.max_manifest_rows_read:
+        limit = _fair_row_limit([tumblers[t] for t in order], caps.max_manifest_rows_read)
+        try:
+            sampled = sampler(list(order), limit)
+        except Exception as exc:  # noqa: BLE001 — the limit is an optimisation; the smallest-first read below answers (and reports its own failure per document)
+            _log.warning("primary_evidence_manifest_sampler_failed", error=str(exc))
+            sampled = None
+        if sampled is not None:
+            got, counts = sampled
+            return dict(got), failed, unread, dict(counts)
+        # the engine did not honour the limit, or the request failed: fall through to the smallest-first read
     pulled = i = 0
     while i < len(order):
         if i and (pulled >= caps.max_manifest_rows_read or clock() >= end):
@@ -1403,7 +1442,7 @@ def _read_manifests(
             break
         manifests.update(got)
         pulled += sum(len(rows) for rows in got.values())
-    return manifests, failed, unread
+    return manifests, failed, unread, {}
 
 
 def select_primary_evidence(
@@ -1414,10 +1453,15 @@ def select_primary_evidence(
     caps: PrimaryEvidenceCaps | None = None,
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    manifest_sampler: ManifestSampler | None = None,
 ) -> PrimaryEvidence:
     """Read each resolved source's manifest, hydrate its chunks and select the evidence.
 
     Never raises. Everything cut by a cap, sampled, missing or unlabelled is on the result.
+
+    *manifest_sampler* is the engine's per-document row limit (:data:`ManifestSampler`, nexus-jypmj.6); the
+    caller passes one only for an engine that advertises it. ``None`` is the smallest-first read of
+    nexus-jypmj.1.17.
 
     *deadline* is an absolute time on *clock* (the caller's own budget); the read also stops at
     ``caps.max_seconds`` from its start. No manifest read or chunk fetch is started past it (``deadline``
@@ -1434,7 +1478,9 @@ def select_primary_evidence(
     if clock() >= end:
         return PrimaryEvidence(caps_hit=("deadline",), caps=caps)
     caps_hit: list[str] = []
-    manifests, manifest_failed, manifest_unread = _read_manifests(cat, docs, caps, end=end, clock=clock, caps_hit=caps_hit)
+    manifests, manifest_failed, manifest_unread, engine_row_counts = _read_manifests(
+        cat, docs, caps, end=end, clock=clock, caps_hit=caps_hit, sampler=manifest_sampler,
+    )
 
     # 1. rows per document, then a row allowance per document (small documents whole,
     #    the rest share what is left, sampled evenly)
@@ -1443,6 +1489,11 @@ def select_primary_evidence(
         rows = sorted((r for r in manifests.get(d.tumbler or "", []) if r.chash), key=lambda r: r.position)
         all_rows.append(rows)
     true_counts = [len(r) for r in all_rows]
+    # A document the engine sampled (nexus-jypmj.6) arrives short: its true row count is the engine's, and the
+    # sample is a cap hit like any other cut by the read cap.
+    engine_total = [max(engine_row_counts.get(d.tumbler or "", 0), true_counts[k]) for k, d in enumerate(docs)]
+    if any(engine_total[k] > true_counts[k] for k in range(len(docs))):
+        caps_hit.append("max_manifest_rows_read")
     for k, read_allow in enumerate(_water_fill(caps.max_manifest_rows_read, true_counts)):
         if true_counts[k] > read_allow:
             all_rows[k] = [all_rows[k][i] for i in _spread(range(true_counts[k]), read_allow)]
@@ -1500,7 +1551,7 @@ def select_primary_evidence(
     coverage_base: list[dict[str, Any]] = []
     for k, d in enumerate(docs):
         rows = all_rows[k]
-        n_rows = true_counts[k]
+        n_rows = engine_total[k]
         hydrated = [
             r for r in sampled[k]
             if (r.collection or d.collection or "", r.chash) in texts

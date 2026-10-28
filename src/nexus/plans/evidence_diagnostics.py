@@ -236,7 +236,8 @@ def _scope_counts(scope: ScopeConstraint, by_collection: Mapping[str, int]) -> t
 
 def _traversal_summary(index: int, report: Mapping[str, Any]) -> dict[str, Any]:
     keys = ("policy_applied", "policy_failed", "possibly_truncated", "contained", "nodes_walked", "nodes_retained",
-            "dropped_out_of_scope", "dropped_out_of_owner", "owners", "owner_unattributed", "dropped_role", "dropped_cap", "scope_conflict")
+            "dropped_out_of_scope", "dropped_out_of_owner", "owners", "owner_unattributed", "dropped_role", "dropped_cap", "scope_conflict",
+            "scope_prefilter", "engine_dropped_out_of_scope", "secondary_omitted")
     return {"step_index": index, **{k: report.get(k) for k in keys}, "widened": report.get("widened") is not None}
 
 

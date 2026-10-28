@@ -145,3 +145,75 @@ def test_the_cost_consistency_check_allows_the_planner_share_on_an_ad_hoc_run_on
     assert len(violations(_row(0, 0.01, [STEP_COST]))) == 1, "a run below its own steps is still a drop"
     assert violations(_row(0, STEP_COST, [STEP_COST])) == [], "rows written before the planner share agree as before"
     assert violations(_row(None, None, [None])) == [], "both unknown still agrees"
+
+
+# ── nexus-jypmj.5: the planner's share is stored on the run, so the check is two-sided ───────────────────────
+
+
+def _persisted_kwargs(db) -> dict:
+    for name in ("record_nx_answer_run_complete", "record_nx_answer_run"):
+        mock = getattr(db.telemetry, name)
+        if mock.call_args is not None:
+            return dict(mock.call_args.kwargs)
+    raise AssertionError("no nx_answer_runs record was written")
+
+
+@pytest.mark.asyncio
+async def test_a_plan_miss_run_is_stored_with_the_planner_cost_and_a_plan_hit_without_one() -> None:
+    result, db = await _run(miss=True)
+    kwargs = _persisted_kwargs(db)
+    assert kwargs["planner_cost_usd"] == pytest.approx(PLANNER_COST)
+    steps_cost = sum(s["cost_usd"] for s in result["steps"] if s["cost_usd"] is not None)
+    assert kwargs["cost_usd"] == pytest.approx(kwargs["planner_cost_usd"] + steps_cost), "the stored parts add up to the stored whole"
+
+    _hit, db_hit = await _run(miss=False)
+    assert "planner_cost_usd" not in _persisted_kwargs(db_hit), "a plan-match hit has no planner dispatch: nothing is sent"
+
+
+def _planner_row(plan_id, run_cost, step_costs, planner_cost):
+    row = _row(plan_id, run_cost, step_costs)
+    if planner_cost is not _ABSENT:
+        row["planner_cost_usd"] = planner_cost
+    return row
+
+
+_ABSENT = object()
+
+
+def _violations(*rows):
+    from nexus.commands.answer_runs import _step_breakdown
+
+    return _step_breakdown(list(rows))["cost_consistency_violations"]
+
+
+def test_with_the_planner_cost_stored_the_check_is_two_sided() -> None:
+    both = PLANNER_COST + STEP_COST
+    assert _violations(_planner_row(0, both, [STEP_COST], PLANNER_COST)) == [], "planner + steps is the run cost"
+    assert len(_violations(_planner_row(0, both + 0.25, [STEP_COST], PLANNER_COST))) == 1, "an over-count the one-sided check accepted"
+    assert len(_violations(_planner_row(0, both - 0.10, [STEP_COST], PLANNER_COST))) == 1, "a run below planner + steps is a drop"
+    assert len(_violations(_planner_row(0, STEP_COST, [STEP_COST], PLANNER_COST))) == 1, "the planner's share is missing from the run cost"
+
+
+def test_with_the_planner_cost_stored_and_no_known_step_cost_the_run_cost_is_the_planner_cost() -> None:
+    assert _violations(_planner_row(0, PLANNER_COST, [None], PLANNER_COST)) == []
+    assert len(_violations(_planner_row(0, PLANNER_COST * 2, [None], PLANNER_COST))) == 1
+    assert len(_violations(_planner_row(0, None, [None], PLANNER_COST))) == 1, "a stored planner cost with no run cost disagrees"
+
+
+def test_a_stored_zero_planner_cost_is_a_measured_free_planner_not_an_absent_one() -> None:
+    assert _violations(_planner_row(0, STEP_COST, [STEP_COST], 0.0)) == []
+    assert len(_violations(_planner_row(0, STEP_COST + 0.25, [STEP_COST], 0.0))) == 1, "zero pins the upper bound"
+
+
+@pytest.mark.parametrize("planner", [_ABSENT, None], ids=["key-absent", "null"])
+def test_a_run_with_no_stored_planner_cost_keeps_the_one_sided_check(planner) -> None:
+    """Rows written before the field (or by an older client, or read from an older engine) have no planner cost."""
+    both = PLANNER_COST + STEP_COST
+    assert _violations(_planner_row(0, both, [STEP_COST], planner)) == []
+    assert _violations(_planner_row(0, both + 0.25, [STEP_COST], planner)) == [], "no upper bound is sound without the field"
+    assert len(_violations(_planner_row(0, 0.01, [STEP_COST], planner))) == 1, "a run below its own steps is still a drop"
+
+
+def test_a_stored_planner_cost_on_a_library_plan_run_does_not_widen_its_exact_check() -> None:
+    assert len(_violations(_planner_row(7, PLANNER_COST + STEP_COST, [STEP_COST], PLANNER_COST))) == 1
+    assert _violations(_planner_row(7, STEP_COST, [STEP_COST], PLANNER_COST)) == []

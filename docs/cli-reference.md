@@ -5435,7 +5435,12 @@ executed-failed with `--include-failed`; see above):
   call is part of the run's cost too (nexus-jypmj.9) and belongs to no step: a
   row whose run summary records an extraction cost agrees at the step sum plus that
   cost (exact, so an over-count is still flagged) or, for a row written by a release
-  that left the call out of the run cost, at the step sum alone. `by_plan` medians
+  that left the call out of the run cost, at the step sum alone. A plan-miss run
+  that stored its out-of-step share (`planner_cost_usd`, nexus-jypmj.5; the planner
+  call plus the extraction call) is checked from both sides: its run cost must equal
+  the step sum plus that share, so an over-count is flagged too. A row with no
+  stored share (written before the field, by an older client, or read from an
+  engine without the column) keeps the one-sided check above. `by_plan` medians
   stay step sums, so they remain comparable with the predicted cost.
 
 A step's `cost_usd` of `None` ("unknown", not a measured cost — see
@@ -5936,8 +5941,14 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   - `traversals`: one summary per `traverse` step (`policy_applied`,
     `policy_failed`, `possibly_truncated`, `contained`, `nodes_walked`,
     `nodes_retained`, `dropped_out_of_scope`, `dropped_out_of_owner`, `owners`,
-    `owner_unattributed`, `dropped_role`, `dropped_cap`, `scope_conflict`, `widened`); `capped_traversals`: how many came back at the engine's 500-node
-    cap (the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13).
+    `owner_unattributed`, `dropped_role`, `dropped_cap`, `scope_conflict`, `scope_prefilter`,
+    `engine_dropped_out_of_scope`, `secondary_omitted`, `widened`); `capped_traversals`: how many came back at the
+    engine's 500-node cap (the count nexus-jypmj.1.12 posts on nexus-jypmj.1.13). `scope_prefilter` is `applied` when
+    the engine ran the caller's scope before its cut (it advertises `catalog_graph_scope_filter_supported` and its
+    reply carried the `scope_filter` marker; `engine_dropped_out_of_scope` counts what it removed), `not_scoped` for a
+    run with no restricting scope, and `unavailable` otherwise: an engine without the predicate, or an edge that
+    trims the flag. An `unavailable` scoped walk that may have been cut at the cap sets `secondary_omitted` and
+    returns only its seed documents as graph evidence, never `contained`; one that was not cut is unchanged.
   - `reserved`: `{items, merged, over_share_dropped, deduped_secondary,
     secondary_cut, capped, dropped_before_terminal}`, the `reserved_stream`
     report in brief; `null` when no stream was built.

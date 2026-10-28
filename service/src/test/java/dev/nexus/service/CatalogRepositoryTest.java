@@ -1,6 +1,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.GraphScopeFilter;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
@@ -1271,6 +1272,171 @@ class CatalogRepositoryTest {
             root.detachAppender(logs);
             logs.stop();
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-jypmj.1.13 — the allowed-collection predicate runs BEFORE the node cap
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private static final String SF_IN  = "rdr__sf__voyage-context-3__v1";
+    private static final String SF_OUT = "code__sf__voyage-code-3__v1";
+
+    private void sfDoc(String tenant, String tumbler, String collection) {
+        repo.upsertDocument(tenant, Map.of("tumbler", tumbler,
+            "title", "sf " + tumbler, "content_type", collection.startsWith("rdr") ? "rdr" : "code",
+            "corpus", "x", "physical_collection", collection));
+    }
+
+    private void sfLink(String tenant, String from, String to) {
+        repo.upsertLink(tenant, Map.of("from_tumbler", from, "to_tumbler", to,
+            "link_type", "cites", "created_by", "test"));
+    }
+
+    /**
+     * nexus-jypmj.1.13: 520 out-of-scope documents sort ahead of 12 in-scope ones at the same depth.
+     * Without a predicate the (min_depth, tumbler) cut keeps the first 500 and the in-scope evidence is
+     * gone; with one, the predicate removes the out-of-scope nodes first, so every in-scope node survives.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphBFS_scopeFilter_runsBeforeTheNodeCap_soInScopeEvidenceSurvives() {
+        String tenant = "bfs-sf-" + System.nanoTime();
+        String seed = "sf.seed";
+        sfDoc(tenant, seed, SF_IN);
+        for (int i = 0; i < 520; i++) {
+            String t = String.format("sf.a.%04d", i);
+            sfDoc(tenant, t, SF_OUT);
+            sfLink(tenant, seed, t);
+        }
+        List<String> inScope = new java.util.ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            String t = String.format("sf.z.%02d", i);
+            inScope.add(t);
+            sfDoc(tenant, t, SF_IN);
+            sfLink(tenant, seed, t);
+        }
+
+        var unfiltered = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1);
+        assertThat(tumblersOf((List<Map<String, Object>>) unfiltered.get("nodes")))
+            .as("control: with no predicate the cut keeps the 500 lowest tumblers and drops every in-scope node")
+            .hasSize(500).doesNotContainAnyElementsOf(inScope);
+        assertThat(unfiltered).as("no predicate, no marker: the response is unchanged").doesNotContainKey("scope_filter");
+
+        var filtered = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1, false,
+            GraphScopeFilter.ofCollections(Set.of(SF_IN)));
+        var nodes = tumblersOf((List<Map<String, Object>>) filtered.get("nodes"));
+        assertThat(nodes).as("the predicate ran before the cut: the seed and all 12 in-scope documents")
+            .containsExactlyInAnyOrder(concat(seed, inScope));
+        var marker = (Map<String, Object>) filtered.get("scope_filter");
+        assertThat(marker).containsEntry("applied", true).containsEntry("kind", "collections")
+            .containsEntry("collection_count", 1).containsEntry("dropped_out_of_scope", 520);
+        var edges = (List<Map<String, Object>>) filtered.get("edges");
+        assertThat(edges).as("only edges between surviving nodes are returned").hasSize(12)
+            .allMatch(e -> nodes.contains((String) e.get("to_tumbler")));
+    }
+
+    /** The cap still applies inside the scope: 600 in-scope documents give 500, and the marker counts only what the predicate removed. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphBFS_scopeFilter_stillCapsTheInScopeNodes() {
+        String tenant = "bfs-sf-cap-" + System.nanoTime();
+        String seed = "sfc.seed";
+        sfDoc(tenant, seed, SF_IN);
+        for (int i = 0; i < 600; i++) {
+            String t = String.format("sfc.in.%04d", i);
+            sfDoc(tenant, t, SF_IN);
+            sfLink(tenant, seed, t);
+        }
+        sfDoc(tenant, "sfc.out", SF_OUT);
+        sfLink(tenant, seed, "sfc.out");
+
+        var result = repo.graphBFS(tenant, List.of(seed), List.of("cites"), "out", 1, false,
+            GraphScopeFilter.ofCollections(Set.of(SF_IN)));
+        var nodes = tumblersOf((List<Map<String, Object>>) result.get("nodes"));
+        assertThat(nodes).hasSize(500).doesNotContain("sfc.out").contains(seed);
+        assertThat((Map<String, Object>) result.get("scope_filter")).containsEntry("dropped_out_of_scope", 1);
+    }
+
+    /** A seed is never removed by the predicate, the walk still relays through an out-of-scope node, and the subtree kind judges the tumbler. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphBFS_scopeFilter_keepsSeeds_andJudgesSubtreeOnTheTumbler() {
+        String tenant = "bfs-sf-seed-" + System.nanoTime();
+        sfDoc(tenant, "7.1.1", SF_OUT);   // seed, out of the rdr scope
+        sfDoc(tenant, "7.2.1", SF_IN);    // relay, in another subtree
+        sfDoc(tenant, "7.1.2", SF_OUT);   // in the seed's subtree
+        sfLink(tenant, "7.1.1", "7.2.1");
+        sfLink(tenant, "7.2.1", "7.1.2");
+
+        var byCollection = repo.graphBFS(tenant, List.of("7.1.1"), List.of("cites"), "out", 2, false,
+            GraphScopeFilter.ofCollections(Set.of(SF_IN)));
+        assertThat(tumblersOf((List<Map<String, Object>>) byCollection.get("nodes")))
+            .as("the seed stays although its collection is out of scope; the out-of-scope 7.1.2 is removed")
+            .containsExactlyInAnyOrder("7.1.1", "7.2.1");
+
+        var bySubtree = repo.graphBFS(tenant, List.of("7.1.1"), List.of("cites"), "out", 2, false,
+            GraphScopeFilter.ofSubtree("7.1"));
+        assertThat(tumblersOf((List<Map<String, Object>>) bySubtree.get("nodes")))
+            .as("the subtree kind admits 7.1.2 (reached through the out-of-subtree relay 7.2.1) and drops the relay itself")
+            .containsExactlyInAnyOrder("7.1.1", "7.1.2");
+        assertThat((Map<String, Object>) bySubtree.get("scope_filter"))
+            .containsEntry("kind", "subtree").containsEntry("subtree", "7.1").containsEntry("dropped_out_of_scope", 1);
+    }
+
+    /** An empty allowed set is a legal filter that admits no collection: only the seeds survive, and the marker says the filter ran. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void graphBFS_scopeFilter_emptyCollectionSetKeepsOnlySeeds() {
+        String tenant = "bfs-sf-empty-" + System.nanoTime();
+        sfDoc(tenant, "sfe.seed", SF_IN);
+        sfDoc(tenant, "sfe.child", SF_IN);
+        sfLink(tenant, "sfe.seed", "sfe.child");
+
+        var result = repo.graphBFS(tenant, List.of("sfe.seed"), List.of("cites"), "out", 1, false,
+            GraphScopeFilter.ofCollections(Set.of()));
+        assertThat(tumblersOf((List<Map<String, Object>>) result.get("nodes"))).containsExactly("sfe.seed");
+        assertThat((Map<String, Object>) result.get("scope_filter"))
+            .containsEntry("applied", true).containsEntry("dropped_out_of_scope", 1);
+    }
+
+    @Test
+    void graphScopeFilter_parse_acceptsTheTwoShapes_andRefusesTheRest() {
+        assertThat(GraphScopeFilter.ofCollections(Set.of("a__b__c__v1")).admits("a__b__c__v1", "1.1")).isTrue();
+        assertThat(GraphScopeFilter.ofCollections(Set.of("a__b__c__v1")).admits("a__b__c__v1x", "1.1"))
+            .as("exact membership, not a prefix").isFalse();
+        assertThat(GraphScopeFilter.ofCollections(Set.of("a")).admits(null, "1.1"))
+            .as("a document with no collection is not inside a collection set").isFalse();
+        assertThat(GraphScopeFilter.ofSubtree("1.2").admits(null, "1.2")).isTrue();
+        assertThat(GraphScopeFilter.ofSubtree("1.2").admits(null, "1.2.9")).isTrue();
+        assertThat(GraphScopeFilter.ofSubtree("1.2").admits(null, "1.20.9")).as("a segment match").isFalse();
+        assertThat(GraphScopeFilter.parse(null)).isNull();
+        assertThat(GraphScopeFilter.parse(Map.of("collections", List.of("a", "b"))).admits("b", "9")).isTrue();
+        assertThat(GraphScopeFilter.parse(Map.of("subtree", "1.2")).admits("x", "1.2.3")).isTrue();
+        for (Object bad : List.of(
+                "rdr",
+                Map.of(),
+                Map.of("collections", List.of("a"), "subtree", "1.2"),
+                Map.of("collections", "a"),
+                Map.of("collections", List.of(" ")),
+                Map.of("collections", List.of(7)),
+                Map.of("subtree", "rdr"),
+                Map.of("subtree", 1.2),
+                Map.of("kind", "corpus_prefix", "value", "rdr"))) {
+            assertThatThrownBy(() -> GraphScopeFilter.parse(bad))
+                .as("scope_filter=" + bad).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("scope_filter");
+        }
+        var tooMany = new java.util.HashSet<String>();
+        for (int i = 0; i <= GraphScopeFilter.MAX_COLLECTIONS; i++) tooMany.add("c" + i);
+        assertThatThrownBy(() -> GraphScopeFilter.ofCollections(tooMany))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("max");
+    }
+
+    private static String[] concat(String first, List<String> rest) {
+        var all = new java.util.ArrayList<String>();
+        all.add(first);
+        all.addAll(rest);
+        return all.toArray(String[]::new);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

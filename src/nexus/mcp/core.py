@@ -9170,6 +9170,11 @@ def traverse(
         warnings.append(f"traverse: dropped unparseable seeds {unparsed!r}")
 
     kw = dict(depth=depth, direction=direction, link_types=effective_types or None)
+    if parsed_policy is not None:
+        # nexus-jypmj.1.13: hand the engine the scope as a predicate it applies before its node cut.
+        scope_filter = _engine_scope_filter(catalog, parsed_policy.allowed_collections)
+        if scope_filter is not None:
+            kw["scope_filter"] = scope_filter
     if len(seed_tumblers) == 1:
         result = catalog.graph(seed_tumblers[0], **kw)
     else:
@@ -9177,9 +9182,13 @@ def traverse(
 
     nodes = result.get("nodes") or []
     if parsed_policy is not None:
+        marker = result.get("scope_filter") if isinstance(result, dict) else None
         return _traverse_with_policy(
             catalog, nodes, result.get("edges") or [], seed_tumblers, parsed_policy,
             direction=direction, warnings=warnings,
+            # The marker is the only evidence the predicate ran: a 200 from an engine that ignored the key
+            # carries none, and then the walk is reported as the old engine's.
+            engine_scope=marker if isinstance(marker, dict) and marker.get("applied") is True else None,
         )
     tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
     collections = sorted({
@@ -9228,6 +9237,48 @@ def traverse(
     return out
 
 
+def _engine_scope_filter(catalog: Any, scope: Any) -> "dict | None":
+    """The ``scope_filter`` predicate for the engine's ``/traverse``, or ``None`` when none can or need be sent.
+
+    None for an unrestricting scope (none, ``all``), for a catalog that does not advertise
+    ``catalog_graph_scope_filter_supported`` (an engine, or an edge that trims ``/version``, without the
+    predicate; a catalog handle with no probe at all; a test double: only a real ``True`` counts), and for a
+    scope that cannot be expressed as one request. A subtree is sent as its tumbler prefix and one full
+    collection name as itself. A corpus prefix is resolved against the registry to the registered collections
+    it admits (``ScopeConstraint.admits``, the one place the prefix rule lives), so the engine only ever compares
+    names. A registry that cannot be read, or one that names more collections than the engine accepts, sends
+    nothing: the walk is then the old engine's and is disclosed as such.
+    """
+    from nexus.plans import traversal_policy as tp  # noqa: PLC0415 — deferred, like traverse's other imports
+
+    if not tp.is_scoped(scope):
+        return None
+    try:
+        probe = getattr(catalog, "supports_graph_scope_filter", None)
+        supported = callable(probe) and probe() is True
+    except Exception as exc:  # noqa: BLE001 — a capability probe never fails the walk; the old-engine path is the answer
+        _log.warning("traverse_scope_filter_probe_failed", error=str(exc))
+        return None
+    if not supported:
+        return None
+    if scope.kind == "subtree":
+        return {"subtree": scope.value}
+    if scope.kind == "collection":
+        return {"collections": [scope.value]}
+    try:
+        names = sorted({
+            str(row["name"]) for row in catalog.list_collections()
+            if isinstance(row, dict) and row.get("name") and scope.admits(str(row["name"]))
+        })
+    except Exception as exc:  # noqa: BLE001 — no predicate we could not build is sent; the walk is disclosed as unscoped-by-engine
+        _log.warning("traverse_scope_filter_registry_failed", scope=scope.value, error=str(exc))
+        return None
+    if len(names) > tp.MAX_SCOPE_FILTER_COLLECTIONS:
+        _log.warning("traverse_scope_filter_too_many_collections", scope=scope.value, collections=len(names))
+        return None
+    return {"collections": names}
+
+
 def _traverse_policy_failed(reason: str, *, warnings: list[str] | None = None) -> dict:
     """The graph stream a failed traversal policy leaves: nothing, with a warning (RDR-232 s3).
 
@@ -9244,7 +9295,7 @@ def _traverse_policy_failed(reason: str, *, warnings: list[str] | None = None) -
 
 def _traverse_with_policy(
     catalog: Any, nodes: list, edges: list, seeds: list, policy: Any,
-    *, direction: str, warnings: list[str],
+    *, direction: str, warnings: list[str], engine_scope: "dict | None" = None,
 ) -> dict:
     """``traverse`` under a :class:`~nexus.plans.traversal_policy.TraversalPolicy` (RDR-232 s3).
 
@@ -9262,7 +9313,9 @@ def _traverse_with_policy(
             from nexus.plans.owner_narrowing import collection_kind  # noqa: PLC0415 — deferred, like traverse's other imports
 
             kinds = {c: collection_kind(c) for c in {str(getattr(n, "physical_collection", "") or "") for n in nodes}}
-        selection = tp.select_documents(nodes, edges, seeds, policy, direction=direction, collection_kinds=kinds)
+        selection = tp.select_documents(
+            nodes, edges, seeds, policy, direction=direction, collection_kinds=kinds, engine_scope=engine_scope,
+        )
     except Exception as exc:  # noqa: BLE001 — any policy failure omits the graph stream; it never widens
         return _traverse_policy_failed(f"{type(exc).__name__}: {exc}", warnings=warnings)
     report = selection.report
@@ -9276,6 +9329,13 @@ def _traverse_with_policy(
         warnings.append(
             f"traverse: the engine returned {report['nodes_walked']} nodes, its {tp.MAX_GRAPH_NODES}-node cap; "
             "the walk is possibly truncated and is not reported as contained"
+        )
+    if report["secondary_omitted"]:
+        warnings.append(
+            "traverse: the engine cut this scoped walk at its node cap without the scope predicate "
+            "(catalog_graph_scope_filter_supported absent, or its scope_filter marker missing from the reply), "
+            "so the cut may have spent its slots on out-of-scope documents; secondary graph evidence omitted, "
+            "only the seed documents are returned"
         )
 
     manifests: dict[str, list] = {}
@@ -10122,6 +10182,8 @@ def _nx_answer_record_run(
         if summary is not None:
             created_at = _utc_now_iso()
             extra = {"run_summary": summary, "created_at": created_at}
+    if planner_cost_usd is not None:
+        extra["planner_cost_usd"] = planner_cost_usd  # nexus-jypmj.5: absent for a plan-match hit, never 0.0
     try:
         telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
@@ -10778,6 +10840,23 @@ async def _nx_answer_lifecycle_stream(
         return LifecycleStream.unavailable(resolution, f"{type(exc).__name__} opening T2")
 
 
+def _manifest_sampler(cat: Any) -> "Callable[[list[str], int], Any] | None":
+    """The catalog's per-document manifest row limit (nexus-jypmj.6), or ``None`` when it has none to offer:
+    the catalog must advertise ``catalog_manifest_row_limit_supported`` (a real ``True``: a handle with no
+    probe, a test double and an edge that trims ``/version`` all read as an engine without it) and expose
+    ``get_manifests_sampled``. The named-source read then keeps its smallest-first order."""
+    if cat is None:
+        return None
+    try:
+        probe = getattr(cat, "supports_manifest_row_limit", None)
+        sample = getattr(cat, "get_manifests_sampled", None)
+        if callable(probe) and callable(sample) and probe() is True:
+            return sample
+    except Exception as exc:  # noqa: BLE001 — a capability probe never fails the read; the old path is the answer
+        _log.warning("nx_answer_manifest_sampler_probe_failed", error=str(exc))
+    return None
+
+
 async def _nx_answer_primary_stream(
     resolution: NamedSourceResolution | None,
     lifecycle: "LifecycleStream | None" = None,
@@ -10811,8 +10890,15 @@ async def _nx_answer_primary_stream(
     try:
         cat = _get_catalog()
         fetch = t3_chunk_fetcher(_get_t3())
+
+        def _read() -> "PrimaryEvidence":
+            # The capability probe is a (cached) HTTP read, so it runs here with the rest of the blocking I/O.
+            return select_primary_evidence(
+                resolution, cat=cat, fetch_chunks=fetch, deadline=deadline, manifest_sampler=_manifest_sampler(cat),
+            )
+
         evidence = await asyncio.wait_for(
-            asyncio.to_thread(select_primary_evidence, resolution, cat=cat, fetch_chunks=fetch, deadline=deadline),
+            asyncio.to_thread(_read),
             timeout=_nx_answer_seconds_left(resolution.caps.max_seconds, deadline),
         )
     except asyncio.TimeoutError:
@@ -11133,6 +11219,7 @@ def _nx_answer_record_complete(
                 step_count=step_count, final_text=text, cost_usd=cost_usd,
                 duration_ms=duration_ms, created_at=created_at, steps=wire_steps,
                 success=success, **({"run_summary": summary} if summary is not None else {}),
+                **({"planner_cost_usd": planner_cost_usd} if planner_cost_usd is not None else {}),
             )
             if run_summary is not None:
                 run_summary.settle(
@@ -11184,6 +11271,8 @@ def _nx_answer_record_complete(
     if summary is not None:
         stamp = stamp or _utc_now_iso()
         extra = {"run_summary": summary, "created_at": stamp}
+    if planner_cost_usd is not None:
+        extra["planner_cost_usd"] = planner_cost_usd  # nexus-jypmj.5
     try:
         db.telemetry.record_nx_answer_run(
             question=q, plan_id=plan_id, matched_confidence=matched_confidence,
