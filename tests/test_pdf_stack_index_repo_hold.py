@@ -66,7 +66,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def _hide_stack(monkeypatch: pytest.MonkeyPatch, *, policy: str = "refuse") -> None:
     monkeypatch.setenv(pdf_stack.POLICY_ENV, policy)
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "docling, MinerU and torch are not installed"))
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "MinerU and torch are not installed"))
     monkeypatch.setattr(
         pdf_stack, "install_plan",
         lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND),

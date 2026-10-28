@@ -50,7 +50,7 @@ for pin in pins[: cfg.get("limit", 10**9)]:
         continue
     if pdf and name in cfg.get("drop_in_pdf", ()):
         continue
-    if not pdf and name in ("docling-slim", "mineru", "torch") and not cfg.get("stack_in_bare"):
+    if not pdf and name in ("mineru", "torch") and not cfg.get("stack_in_bare"):
         continue
     rows.append((name, version))
 (bundle / "uv.lock").write_text("version = 1\\n" + "".join(
@@ -117,7 +117,7 @@ def test_both_variants_are_locked_bare_then_with_the_pdf_setting_and_both_are_na
     assert "bare: " in verdict and "pdf: " in verdict and verdict.count("pins held") == 2
 
 
-@pytest.mark.parametrize("missing", ["torch", "mineru", "docling-slim"])
+@pytest.mark.parametrize("missing", ["torch", "mineru"])
 def test_a_pdf_lock_without_the_pdf_stack_fails(tmp_path: Path, missing: str) -> None:
     proc, _ = _gate(tmp_path, drop_in_pdf=[missing])
     assert proc.returncode == 1 and "pdf: the PDF stack is not in the lock" in proc.stdout and missing in proc.stdout

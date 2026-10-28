@@ -142,10 +142,10 @@ QUESTION_TABLE: str = (
 )
 
 #: What the sizes are, and the one line for the slim install (nexus-2k66t.4.9). The savings are the
-#: 7.86.0 measurement's: dropping docling, MinerU and torch takes about 285 MB off the download on
+#: 7.86.0 measurement's: dropping MinerU and torch takes about 285 MB off the download on
 #: macOS, 390 MB on Linux, and about 1.0 GB off the disk on macOS, 1.3 GB on Linux.
 SIZES_NOTE: str = (
-    "These sizes include PDF support (docling, MinerU and torch). They were measured on 7.86.0 on macOS and Linux; "
+    "These sizes include PDF support (MinerU and torch). They were measured on 7.86.0 on macOS and Linux; "
     "Windows was not measured. They are not a promise."
 )
 SLIM_LINE: str = (
@@ -324,7 +324,7 @@ AUTOSTART_DESCRIPTION: str = (
 )
 
 SLIM_DESCRIPTION: str = (
-    "true only if the user asked to leave PDF support (docling, MinerU and torch) out of the install. Omit it otherwise: "
+    "true only if the user asked to leave PDF support (MinerU and torch) out of the install. Omit it otherwise: "
     "omitted installs everything, except that it resumes an unfinished slim run as slim. false installs everything even then, "
     "which is the answer for a user who left PDF support out in an earlier run and now wants it. "
     "A slim install fetches PDF support the first time a PDF is indexed."

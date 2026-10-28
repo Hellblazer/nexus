@@ -4,7 +4,7 @@ test_mineru_path_indexes_table_values_as_text against MinerU's default
 MINERU_MODEL_SOURCE ("huggingface"), so a cold cache pulled ~1-3GB of
 pipeline weights straight from the HuggingFace hub on every miss (run
 34975576187 timed out at 45 minutes inside that download). The fix mirrors
-prime-docling: a composite action (.github/actions/prime-mineru) that
+prime-bge-onnx: a composite action (.github/actions/prime-mineru) that
 restores our own self-hosted release asset from actions/cache, writes
 MinerU's local-models config, and exports MINERU_MODEL_SOURCE=local so the
 client never resolves through the hub.
@@ -149,7 +149,7 @@ def test_prime_mineru_action_never_reaches_huggingface() -> None:
     """WE HOST THESE. No step in this action may issue a network call to the
     HuggingFace hub — that is precisely the network call nexus-ggonw exists
     to eliminate. The action's own prose is allowed to NAME huggingface
-    (explaining what it avoids, same as prime-docling's own description);
+    (explaining what it avoids, same as the sibling actions' descriptions);
     what must be absent is an actual host/URL a step would resolve."""
     action = _load_action()
     steps = action["runs"]["steps"]

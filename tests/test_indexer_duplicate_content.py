@@ -507,7 +507,7 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
     the shared chash.
 
     The PDFExtractor + PDFChunker boundary is patched so the test runs
-    in milliseconds without exercising Docling/MinerU. The dedup path
+    in milliseconds without exercising MinerU. The dedup path
     being verified lives downstream of the chunker (in
     ``T3Database._write_batch`` and the manifest write hook), so a
     deterministic chunker stub is sufficient, and avoids depending on
@@ -529,7 +529,7 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
 
     fake_extracted_text = duplicate_text + "\n\n" + duplicate_text
     fake_extraction_metadata = {
-        "extraction_method": "docling",
+        "extraction_method": "mineru",
         "page_count": 2,
         "format": "markdown",
         "page_boundaries": [0, len(duplicate_text) + 2],

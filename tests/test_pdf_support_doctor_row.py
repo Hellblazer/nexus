@@ -51,15 +51,15 @@ def _stack(monkeypatch, status: str, detail: str = "") -> None:
     monkeypatch.setattr(pdf_stack, "state", lambda: StackState(status, detail))
 
 
-def test_present_is_a_pass_followed_by_the_docling_module_row(monkeypatch) -> None:
+def test_present_is_a_pass_followed_by_the_mineru_module_row(monkeypatch) -> None:
     _stack(monkeypatch, "present", "5 distributions on their pins")
     rows = health._check_pdf_support()
-    assert [r.label for r in rows] == ["PDF support", "PDF extraction (docling)"]
+    assert [r.label for r in rows] == ["PDF support", "PDF extraction (mineru)"]
     assert rows[0].ok and rows[0].detail == "5 distributions on their pins"
 
 
 def test_absent_is_informational_never_red_and_names_the_command(monkeypatch) -> None:
-    _stack(monkeypatch, "absent", "docling, MinerU and torch are not installed")
+    _stack(monkeypatch, "absent", "MinerU and torch are not installed")
     (row,) = health._check_pdf_support()
     assert row.label == "PDF support"
     assert row.ok and not row.warn and not row.fatal, "a fresh install is not a failure"
@@ -217,7 +217,7 @@ def test_present_but_the_windows_runtime_lacks_atomic_wait_is_red_with_the_redis
     _stack(monkeypatch, "present", "5 distributions on their pins")
     monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("base_only", r"C:\cfg\service"))
     rows = health._check_pdf_support()
-    assert [r.label for r in rows] == ["PDF support"], "no docling-importable row on a stack that cannot load"
+    assert [r.label for r in rows] == ["PDF support"], "no mineru-importable row on a stack that cannot load"
     (row,) = rows
     assert not row.ok
     assert "msvcp140_atomic_wait.dll" in row.detail
@@ -262,7 +262,7 @@ def test_the_red_row_runs_the_real_gap_probe_and_does_not_tell_an_installed_stac
 
 
 def test_absent_on_a_gap_box_says_the_gap_and_the_remedy_not_the_install_command(monkeypatch, tmp_path) -> None:
-    _stack(monkeypatch, "absent", "docling, MinerU and torch are not installed")
+    _stack(monkeypatch, "absent", "MinerU and torch are not installed")
     monkeypatch.setattr(pdf_stack, "_windows_runtime_gap", lambda *a, **k: ("base_only", str(tmp_path / "svc")))
     (row,) = health._check_pdf_support()
     assert row.label == "PDF support" and not row.ok and row.warn, "a warning, not a plain pass"
@@ -335,7 +335,7 @@ def test_headless_only_is_the_healthy_shape(monkeypatch) -> None:
 
 def test_a_slim_install_does_not_report_opencv(monkeypatch) -> None:
     """No PDF stack, so the OpenCV pair is not this box's business: the row stays the informational pass."""
-    _stack(monkeypatch, "absent", "docling, MinerU and torch are not installed")
+    _stack(monkeypatch, "absent", "MinerU and torch are not installed")
     _opencv(monkeypatch, "opencv-python", "opencv-python-headless")
     setattr_in(monkeypatch, health, "sys.platform", "linux")
     (row,) = health._check_pdf_support()

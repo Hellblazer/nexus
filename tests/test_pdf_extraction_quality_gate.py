@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-wi1uv: post-extraction text-quality sanity gate.
 
-``nx index pdf --extractor docling`` (the documented safe recovery from a
-MinerU failure) can complete and report success while producing
-space-stripped, unsearchable text ("istheasetofthe"). These tests cover
+An extractor can complete and report success while producing
+space-stripped, unsearchable text ("istheasetofthe") (the nexus-5xn3k incident). These tests cover
 the calibrated signal function (:func:`assess_extraction_quality`) in
 isolation and the gate wired into :meth:`PDFExtractor.extract`.
 """
@@ -33,7 +32,7 @@ def dummy_pdf(tmp_path: Path) -> Path:
 
 
 # Real healthy prose, repeated to clear the 500-char minimum — drawn from
-# tests/fixtures/bft-to-smr.pdf's abstract (Docling extraction, verbatim).
+# tests/fixtures/bft-to-smr.pdf's abstract (layout-extractor output, verbatim).
 _HEALTHY_PROSE = (
     "We present a new algorithm for state machine replication that is "
     "built around a leader-driven consensus primitive. This algorithm "
@@ -75,7 +74,7 @@ Above, $\mathbf{W_{V}^{1}}$ is meant to isolate the ${\mathbf{}}v_{i}$ embedding
 
 def _strip_spaces_per_line(text: str) -> str:
     """Reproduce the incident's exact failure signature: intra-line spaces
-    removed, line breaks preserved (matches how docling's per-page markdown
+    removed, line breaks preserved (matches how a per-page markdown
     degrades when word-boundary whitespace collapses)."""
     return "\n".join(line.replace(" ", "") for line in text.split("\n"))
 
@@ -140,7 +139,7 @@ class TestAssessExtractionQuality:
 # route through ──────────────────────────────────────────────────────────
 
 
-def _make_result(text: str, method: str = "docling") -> ExtractionResult:
+def _make_result(text: str, method: str = "mineru") -> ExtractionResult:
     return ExtractionResult(
         text=text,
         metadata={"extraction_method": method, "page_count": 1, "page_boundaries": []},
@@ -148,60 +147,53 @@ def _make_result(text: str, method: str = "docling") -> ExtractionResult:
 
 
 class TestExtractGateWiring:
-    def test_docling_healthy_output_passes_through(self, extractor, dummy_pdf):
-        with patch.object(extractor, "_extract_with_docling", return_value=_make_result(_HEALTHY_TEXT)):
-            result = extractor.extract(dummy_pdf, extractor="docling")
+    def test_mineru_healthy_output_passes_through(self, extractor, dummy_pdf):
+        with patch.object(extractor, "_extract_with_mineru", return_value=_make_result(_HEALTHY_TEXT)):
+            result = extractor.extract(dummy_pdf)
         assert result.text == _HEALTHY_TEXT
         assert result.metadata["quality_gate_passed"] is True
 
-    def test_docling_garbage_output_raises(self, extractor, dummy_pdf):
-        with patch.object(extractor, "_extract_with_docling", return_value=_make_result(_GARBAGE_TEXT)):
-            with pytest.raises(ExtractionQualityError, match="quality gate"):
-                extractor.extract(dummy_pdf, extractor="docling")
-
     def test_mineru_garbage_output_raises(self, extractor, dummy_pdf):
-        """The gate is extractor-agnostic — MinerU output is gated exactly
-        like Docling's, never special-cased."""
-        with patch.object(extractor, "_extract_with_mineru", return_value=_make_result(_GARBAGE_TEXT, "mineru")):
-            with pytest.raises(ExtractionQualityError):
-                extractor.extract(dummy_pdf, extractor="mineru")
+        """The gate is extractor-agnostic: MinerU output is gated, never special-cased."""
+        with patch.object(extractor, "_extract_with_mineru", return_value=_make_result(_GARBAGE_TEXT)):
+            with pytest.raises(ExtractionQualityError, match="quality gate"):
+                extractor.extract(dummy_pdf)
 
-    def test_pymupdf_fallback_garbage_output_raises(self, extractor, dummy_pdf):
-        """docling raising falls back to PyMuPDF (_extract_normalized) —
-        that fallback's output is gated too."""
-        with patch.object(extractor, "_extract_with_docling", side_effect=RuntimeError("boom")):
-            with patch.object(extractor, "_extract_normalized", return_value=_make_result(_GARBAGE_TEXT, "pymupdf_normalized")):
-                with pytest.raises(ExtractionQualityError):
-                    extractor.extract(dummy_pdf, extractor="docling")
+    def test_pymupdf_extractor_garbage_output_raises(self, extractor, dummy_pdf):
+        """The explicit text-only extractor's output is gated too."""
+        with patch.object(extractor, "_extract_pymupdf", return_value=_make_result(_GARBAGE_TEXT, "pymupdf")):
+            with pytest.raises(ExtractionQualityError):
+                extractor.extract(dummy_pdf, extractor="pymupdf")
 
     def test_allow_degraded_bypasses_the_raise(self, extractor, dummy_pdf):
-        with patch.object(extractor, "_extract_with_docling", return_value=_make_result(_GARBAGE_TEXT)):
-            result = extractor.extract(dummy_pdf, extractor="docling", allow_degraded=True)
+        with patch.object(extractor, "_extract_with_mineru", return_value=_make_result(_GARBAGE_TEXT)):
+            result = extractor.extract(dummy_pdf, allow_degraded=True)
         assert result.text == _GARBAGE_TEXT
         assert result.metadata["quality_gate_passed"] is False
         assert result.metadata["quality_gate_overridden"] is True
 
     def test_allow_degraded_default_is_false(self, extractor, dummy_pdf):
         """The override must be opt-in, never the default posture."""
-        with patch.object(extractor, "_extract_with_docling", return_value=_make_result(_GARBAGE_TEXT)):
+        with patch.object(extractor, "_extract_with_mineru", return_value=_make_result(_GARBAGE_TEXT)):
             with pytest.raises(ExtractionQualityError):
-                extractor.extract(dummy_pdf, extractor="docling")
-
-    def test_auto_mode_low_formula_docling_path_gated(self, extractor, dummy_pdf):
-        """auto mode's <5-formula branch returns the Docling probe result
-        directly — confirm that exit point is gated too."""
-        with patch("nexus.pdf_extractor._has_formulas_quick", return_value=0):
-            with patch.object(extractor, "_extract_with_docling", return_value=_make_result(_GARBAGE_TEXT)):
-                with pytest.raises(ExtractionQualityError):
-                    extractor.extract(dummy_pdf, extractor="auto")
+                extractor.extract(dummy_pdf)
 
     def test_error_message_names_remedy(self, extractor, dummy_pdf):
-        with patch.object(extractor, "_extract_with_docling", return_value=_make_result(_GARBAGE_TEXT)):
+        with patch.object(extractor, "_extract_with_mineru", return_value=_make_result(_GARBAGE_TEXT)):
             with pytest.raises(ExtractionQualityError) as exc_info:
-                extractor.extract(dummy_pdf, extractor="docling")
+                extractor.extract(dummy_pdf)
         msg = str(exc_info.value)
         assert "--allow-degraded-extraction" in msg
-        assert "mineru" in msg.lower()
+        assert "--extractor mineru" not in msg, "MinerU just produced the garbage; do not send the user back to it"
+
+    def test_the_text_only_extractor_remedy_does_not_send_the_user_to_the_pdf_stack_first(
+        self, extractor, dummy_pdf,
+    ):
+        with patch.object(extractor, "_extract_pymupdf", return_value=_make_result(_GARBAGE_TEXT, "pymupdf")):
+            with pytest.raises(ExtractionQualityError) as exc_info:
+                extractor.extract(dummy_pdf, extractor="pymupdf")
+        msg = str(exc_info.value)
+        assert "--allow-degraded-extraction" in msg and "needs the PDF stack" in msg
 
 
 # ── quality_gate_overridden durability (nexus-wi1uv round-2) ────────────────
@@ -244,7 +236,7 @@ class TestQualityGateOverriddenPropagation:
             ext_cls.return_value.extract.return_value = ExtractionResult(
                 text=_GARBAGE_TEXT,
                 metadata={
-                    "extraction_method": "docling",
+                    "extraction_method": "mineru",
                     "page_count": 1,
                     "format": "markdown",
                     "page_boundaries": [],
@@ -281,7 +273,7 @@ class TestQualityGateOverriddenPropagation:
             ext_cls.return_value.extract.return_value = ExtractionResult(
                 text=_HEALTHY_TEXT,
                 metadata={
-                    "extraction_method": "docling",
+                    "extraction_method": "mineru",
                     "page_count": 1,
                     "format": "markdown",
                     "page_boundaries": [],
@@ -310,7 +302,7 @@ class TestQualityGateOverriddenPropagation:
         result = ExtractionResult(
             text=_GARBAGE_TEXT,
             metadata={
-                "extraction_method": "docling", "page_count": 1,
+                "extraction_method": "mineru", "page_count": 1,
                 "quality_gate_overridden": True,
             },
         )
@@ -336,7 +328,7 @@ class TestQualityGateOverriddenPropagation:
 
         result = ExtractionResult(
             text=_HEALTHY_TEXT,
-            metadata={"extraction_method": "docling", "page_count": 1},
+            metadata={"extraction_method": "mineru", "page_count": 1},
         )
         col = MagicMock()
         col.get.return_value = {"ids": ["c1"], "metadatas": [{"title": "old"}]}
@@ -365,7 +357,7 @@ class TestBoundaryBehaviorShortDocuments:
     (which need enough samples); mean_token_len applies unconditionally.
     """
 
-    # Real prose (Docling extraction of tests/fixtures/bft-to-smr.pdf's
+    # Real prose (extractor output for tests/fixtures/bft-to-smr.pdf's
     # abstract), truncated to the critic's reported boundary length.
     _SHORT_HEALTHY = (
         "We present a new algorithm for state machine replication that is "

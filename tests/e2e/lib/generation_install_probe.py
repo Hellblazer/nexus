@@ -217,13 +217,13 @@ def build_generation(
 
 #: The modules the ``pdf`` extra installs (nexus.pdf_stack.STACK_MODULES, restated: this
 #: probe runs as a script and imports nothing from the package under test).
-PDF_STACK_MODULES = ("docling", "mineru", "torch", "torchvision", "pdftext")
+PDF_STACK_MODULES = ("mineru", "torch", "torchvision", "pdftext")
 
 
 def requested_pdf_extra(source: str, extras: str = "") -> bool:
     """Whether the install asks for the ``pdf`` extra: in the spec (``conexus[pdf]``,
     ``conexus[local,pdf]``, ``/path/to.whl[pdf]``) or in the *extras* handed to the installer.
-    A plain ``conexus`` with no extras is slim since nexus-2k66t.4.2: docling, MinerU, torch,
+    A plain ``conexus`` with no extras is slim since nexus-2k66t.4.2: MinerU, torch,
     torchvision and pdftext are an extra, which the installers ask for by default since
     nexus-2k66t.4.9 and a ``--slim`` run leaves out."""
     if "pdf" in {part.strip() for part in extras.split(",")}:
@@ -466,8 +466,8 @@ def main() -> int:
     )
 
     # (7b) nexus-2k66t.4.2: is the PDF stack here, and is that what the source
-    # spec asked for? A plain `conexus` is SLIM (no docling, MinerU, torch,
-    # torchvision, pdftext); `conexus[pdf]` has all five. A mix is a broken
+    # spec asked for? A plain `conexus` is SLIM (no MinerU, torch,
+    # torchvision, pdftext); `conexus[pdf]` has all four. A mix is a broken
     # install. Checked both ways so neither shape passes for the other.
     found_proc = subprocess.run(
         [str(generation / "bin" / "python"), "-c",
@@ -483,7 +483,7 @@ def main() -> int:
         f"the generation's PDF stack is {mode} and the source spec {'asks for' if expect_pdf else 'does not ask for'} the pdf extra",
         f"the generation's PDF stack is {mode} ({sorted(present)}) but the source spec {source!r} "
         f"{'asks for' if expect_pdf else 'does not ask for'} the pdf extra: a slim spec must install none of "
-        "docling/mineru/torch/torchvision/pdftext, a pdf spec all of them (nexus-2k66t.4.2)",
+        "mineru/torch/torchvision/pdftext, a pdf spec all of them (nexus-2k66t.4.2)",
     )
 
     # (8) nexus-kard5 (GH #1533 follow-on): the generation's OWN resolve of

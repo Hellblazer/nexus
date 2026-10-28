@@ -127,7 +127,7 @@ def parse_where(
         # silently overwrites on a repeated equality key — `--where k=a
         # --where k=b` used to land on k=b with zero signal that k=a was
         # ever requested (e.g. scoping extraction_method=mineru AND
-        # extraction_method=mineru+docling-degraded, which is not an AND
+        # extraction_method=pymupdf, which is not an AND
         # at all — no chunk can equal both). ChromaDB's equality filter
         # has no single-key OR/$in at this layer yet (tracked as
         # nexus-4gzc8); today the correct way to scope "any of several

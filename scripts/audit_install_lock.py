@@ -45,8 +45,8 @@ ACKNOWLEDGED: dict[str, str] = {}
 ACKNOWLEDGED_AT_VERSION: dict[str, tuple[str, str]] = {
     "pillow": (
         "12.3.0",
-        "every fix is in pillow 13.0.0 (released 2026-10-16); fastembed through 0.9.0 and "
-        "docling-slim through 2.139.0 declare pillow<13, so the lock cannot take it yet (nexus-13z79)",
+        "every fix is in pillow 13.0.0 (released 2026-10-16); fastembed through 0.9.0 "
+        "declares pillow<13, so the lock cannot take it yet (nexus-13z79)",
     ),
     "transformers": (
         "4.57.6",

@@ -46,7 +46,7 @@ def fake_pdf(tmp_path: Path) -> Path:
 
 
 _REFUSED = PdfStackMissingError(
-    "PDF support is not installed: nx index pdf needs docling and MinerU, and nothing was written. "
+    "PDF support is not installed: nx index pdf needs MinerU, and nothing was written. "
     "Run: nx self install --extras pdf",
 )
 

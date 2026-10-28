@@ -574,14 +574,13 @@ def test_a_product_above_240_s_refuses_before_any_page_and_names_both_settings(t
     assert world.events == [], "nothing ran: no request, no worker, not even a heartbeat"
 
 
-def test_the_refusal_is_not_wrapped_on_the_auto_path(tmp_path, monkeypatch) -> None:
+def test_the_refusal_is_not_wrapped_on_the_default_path(tmp_path, monkeypatch) -> None:
     world = World(tmp_path, 4)
     ext = PDFExtractor()
-    with world.active(monkeypatch=monkeypatch, page_timeout=100, batch=3), \
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10):
+    with world.active(monkeypatch=monkeypatch, page_timeout=100, batch=3):
         with pytest.raises(MineruBoundsError) as info:
-            ext.extract(world.pdf, extractor="auto")
-    assert str(info.value).startswith("pdf.mineru_page_timeout_s"), "no 'contains formulas ... failed' prefix"
+            ext.extract(world.pdf)
+    assert str(info.value).startswith("pdf.mineru_page_timeout_s"), "no 'MinerU extraction failed' prefix"
 
 
 @pytest.mark.parametrize("timeout_s,batch,ok", [
@@ -1148,22 +1147,18 @@ def test_a_rung_2_server_answer_does_not_end_a_rung_1_streak(tmp_path, monkeypat
     assert restart["pages"] == ["2", "4"]
 
 
-@pytest.mark.parametrize("path", ["docling", "auto without formulas"])
-def test_the_240_s_check_does_not_fire_on_a_path_that_never_reaches_mineru(tmp_path, monkeypatch, path) -> None:
-    """A product above 240 s concerns MinerU only: a run the Docling path serves is untouched, and
-    the check is not even asked."""
+def test_the_240_s_check_does_not_fire_on_a_path_that_never_reaches_mineru(tmp_path, monkeypatch) -> None:
+    """A product above 240 s concerns MinerU only: a run the text-only extractor serves is untouched,
+    and the check is not even asked."""
     world = World(tmp_path, 2)
     ext = PDFExtractor()
     clean = ExtractionResult(text="A clean page of ordinary prose, long enough to pass the gate. " * 6)
     with world.active(monkeypatch=monkeypatch, page_timeout=100, batch=3), \
             patch("nexus.config.mineru_attempt_bound_problem", wraps=mineru_attempt_bound_problem) as asked, \
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=0), \
-            patch.object(PDFExtractor, "_extract_with_docling", return_value=clean) as docling:
-        result = ext.extract(
-            world.pdf, extractor="docling" if path == "docling" else "auto", allow_degraded=True,
-        )
+            patch.object(PDFExtractor, "_extract_pymupdf", return_value=clean) as pymupdf:
+        result = ext.extract(world.pdf, extractor="pymupdf", allow_degraded=True)
 
-    assert result is clean and docling.call_count == 1, "Docling served the run"
+    assert result is clean and pymupdf.call_count == 1, "the text-only extractor served the run"
     asked.assert_not_called()
     assert world.events == [], "no MinerU request, worker or heartbeat"
     with world.active(monkeypatch=monkeypatch, page_timeout=100, batch=3):

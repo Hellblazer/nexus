@@ -64,7 +64,7 @@ class _Chunker(threading.Thread):
 def _extractor_class(script):
     """A ``PDFExtractor`` stand-in: ``script(on_page, on_heartbeat)`` plays the extraction."""
     class Extractor:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             assert on_heartbeat is not None, "extractor_loop must hand the extractor a heartbeat"
             script(on_page, on_heartbeat)

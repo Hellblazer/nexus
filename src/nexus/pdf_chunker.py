@@ -2,8 +2,8 @@
 """PDF text chunker with sentence-boundary awareness, page tracking, and
 section-type classification.
 
-Section detection rationale (RDR-089 follow-up): MinerU and Docling
-emit markdown with ``#``-prefixed headings; PyMuPDF emits raw text but
+Section detection rationale (RDR-089 follow-up): MinerU
+emits markdown with ``#``-prefixed headings; PyMuPDF emits raw text but
 academic papers carry ``1 Introduction`` / ``2.3 Method`` numbered
 headings consistently. Both styles are detected here so every chunk
 gets ``section_type`` (one of ``abstract`` / ``introduction`` /
@@ -42,8 +42,8 @@ _TABLE_RE = re.compile(r"<table\b.*?</table>", re.DOTALL | re.IGNORECASE)
 _ROW_END = "</tr>"
 _DEFAULT_OVERLAP = 0.20
 
-# Heading detectors. Order matters: markdown wins because MinerU/Docling
-# already emit clean ``# Heading`` lines; numbered academic headings are
+# Heading detectors. Order matters: markdown wins because MinerU
+# already emits clean ``# Heading`` lines; numbered academic headings are
 # the PyMuPDF fallback.
 _MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 # Numbered academic heading: optional leading whitespace, 1-3 dotted
@@ -86,7 +86,7 @@ def _extract_headings(text: str) -> list[tuple[int, str]]:
 
     Detects three heading styles:
 
-    * Markdown ``# Heading`` (MinerU / Docling output)
+    * Markdown ``# Heading`` (MinerU output)
     * Numbered academic ``1.2 Method`` (PyMuPDF on academic papers)
     * Bare-word section labels (``Abstract``, ``References``, ...)
 

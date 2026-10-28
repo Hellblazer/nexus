@@ -640,7 +640,7 @@ class TestRealRepoNonVacuityFloor:
             ("rdr-185-single-ladder-convergent-upgrade", "rdr-159-guided-upgrade-migration"),
             # nexus-f9bgu.3, 15f4c7a94: RDR-224 (native Windows) superseded RDR-218.
             ("rdr-224-native-windows-support", "rdr-218-windows-platform-support"),
-            # f6939b0b9: RDR-237 (MinerU-only extraction) supersedes RDR-044 (Docling-first).
+            # f6939b0b9: RDR-237 (MinerU-only extraction) supersedes RDR-044 (the earlier extractor routing).
             ("rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder", "rdr-044-math-aware-pdf-extraction"),
         }, f"exact supersedes pairs mismatch: got {supersedes_pairs}"
 

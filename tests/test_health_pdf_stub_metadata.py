@@ -136,7 +136,7 @@ def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
 
 def test_healthy_pdf_chunks_pass_with_a_count(t2_service_env) -> None:
     _seed(make_t3(), [
-        ("healthy one", _meta(title="Paper", extraction_method="docling")),
+        ("healthy one", _meta(title="Paper", extraction_method="mineru")),
         ("legacy one", _meta(title="Old Paper")),
     ])
 

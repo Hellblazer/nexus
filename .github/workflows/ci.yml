@@ -564,7 +564,7 @@ jobs:
     # n0ful): the shard divides only
     # RECORDED TEST time (~206s/leg, balanced via .test_durations.json). The
     # fixed per-leg setup pipeline — JDK/GraalVM, PG bundle, uv sync, HF +
-    # docling cache restore (or a COLD FETCH on a cache miss), ci_warm_docling.py,
+    # model cache restore (or a COLD FETCH on a cache miss),
     # service-jar download — is paid by EVERY shard independently, not
     # divided by the shard count, and is exactly what drove both prior emergency bumps
     # (nexus-cxsbs: cold model fetch; nexus-aqbrk: the engine arm). On top of
@@ -575,7 +575,7 @@ jobs:
     #
     # History (pre-sharding, single-process full-suite budget): at 20m a
     # v5.4.2 release run timed out DURING the cache upload (tests had already
-    # passed). Raised 25->30 (nexus-cxsbs) to absorb the HF/docling model cache
+    # passed). Raised 25->30 (nexus-cxsbs) to absorb the HF model cache
     # save (~hundreds of MB) and a cold-cache model fetch on the first run
     # after a uv.lock bump. Raised 30->45 (nexus-aqbrk) for the ENGINE arm,
     # which measured 17:05 locally versus 13:33 for the since-deleted SQLite
@@ -760,20 +760,12 @@ jobs:
         if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
-          # DOCLING NO LONGER USES THIS. Its layout/TableFormer/CodeFormula
-          # models come from our OWN hosted mirror (release asset
-          # ci-assets-docling-v1) via NEXUS_DOCLING_ARTIFACTS_PATH — see the
-          # "Prime docling artifacts" step below (.github/actions/prime-docling).
-          # Anonymous HuggingFace fetches
-          # were the recurring "docling flake" (nexus-cxsbs): runners keep no
-          # layer cache, so a cache MISS re-fetched ~1.1GB from HF and failed on
-          # CAS data-processing errors / resets / 429s. Same reason the bge-768
-          # ONNX is self-hosted as ci-assets-bge-768-v1.
-          # This cache remains for the OTHER HF-backed models that still resolve
-          # through the hub: the cross-encoder reranker and (under -m slow)
-          # MinerU's weights.
+          # Holds the HF-backed models that resolve through the hub: the cross-encoder
+          # reranker and (under -m slow) MinerU's weights. Anonymous HuggingFace fetches
+          # failed often enough (nexus-cxsbs) that the bge-768 ONNX is self-hosted as
+          # ci-assets-bge-768-v1; these two remain on the hub.
           path: ~/.cache/huggingface
-          # Key on uv.lock so a docling/transformers bump (new model) busts it;
+          # Key on uv.lock so a mineru/transformers bump (new model) busts it;
           # restore-keys seeds from the last cache so unchanged models persist.
           key: huggingface-models-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
@@ -856,46 +848,6 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
         run: uv sync --group dev
-
-      - name: Prime docling artifacts (cache or self-hosted asset)
-        # WE HOST THESE. Nothing here may reach HuggingFace.
-        #
-        # History (nexus-cxsbs / nexus-c7gnx): docling loads layout +
-        # TableFormer + CodeFormula LAZILY at convert() time, so an anonymous HF
-        # fetch happened mid-suite. When it failed it fell back to PyMuPDF and
-        # produced ~21 baffling extraction_method=='docling' assertion failures.
-        # The mitigation was an up-front warm with 3 retries — but each attempt
-        # costs ~25 minutes, so a genuine HF outage could not recover inside the
-        # job timeout: it burned 30 minutes and got CANCELLED (observed
-        # 2026-07-31 on PR #1433, pytest 3.12, "CAS data processing error"). A
-        # retry budget larger than the job budget is decoration.
-        #
-        # nexus-tl7bu: the one deterministic download of OUR release asset had
-        # no actions/cache in front of it, so every shard re-fetched the ~1GB
-        # tarball on EVERY run (measured 2026-09-03: 20 minutes on a single
-        # shard, cancelling it under the job timeout). Same composite-action
-        # shape as the self-hosted bge-768 ONNX (prime-bge-onnx,
-        # ci-assets-bge-768-v1): cache the extracted directory keyed on the
-        # asset tag, fetch only on a cache miss. NEXUS_DOCLING_ARTIFACTS_PATH
-        # points docling at the extracted dir so it never resolves through the
-        # hub at all.
-        uses: ./.github/actions/prime-docling
-        with:
-          persistent-home: ${{ runner.environment == 'self-hosted' }}
-
-      - name: Verify docling extracts from the mirrored models
-        # NON-VACUITY: proves docling actually performed the extraction
-        # (extraction_method == 'docling'), so a silently-empty or wrong-shaped
-        # artifacts dir fails HERE instead of degrading to PyMuPDF mid-suite.
-        # No retry loop: there is no network fetch left to be flaky, so a
-        # failure now means the artifacts are wrong and retrying cannot help.
-        env:
-          UV_PROJECT_ENVIRONMENT: ${{ steps.sharedvenv.outputs.venv || format('{0}/.venv', github.workspace) }}
-          # With the shared venv uv must not sync: the shared packages are invisible to its scan
-          # and a sync would install them all into the thin venv. '0', never '': uv rejects an
-          # empty boolean.
-          UV_NO_SYNC: ${{ steps.sharedvenv.outputs.used == 'true' && '1' || '0' }}
-        run: uv run python scripts/ci_warm_docling.py
 
       - name: Run tests (shard ${{ matrix.shard }}/6)
         # nexus-n0ful: pytest-split partitions the SAME collection every leg
@@ -1235,7 +1187,7 @@ jobs:
     # serial on 2026-10-05), with the engine substrate, because a dozen of
     # those files need it (test_rdr_preamble among them). On a code push the
     # shard matrix and the lint leg already run every one of these, so it
-    # skips. The substrate setup mirrors the `test` job minus docling and
+    # skips. The substrate setup mirrors the `test` job minus
     # the HF cache, which no selected file reaches.
     name: pytest (docs readers)
     runs-on: ubuntu-latest
@@ -1376,7 +1328,7 @@ jobs:
     # substrate, PG, or the service jar. Measured locally 2026-08-06:
     # collection alone was ~8s (11733/13101 items, a corpus less than half
     # today's); this job pays that plus per-item skip overhead for the
-    # rest, not fixture/engine cost — no service-jar / PG-bundle / docling
+    # rest, not fixture/engine cost — no service-jar / PG-bundle
     # provisioning steps below, unlike the `test` matrix.
     name: pytest (mode-declarations census)
     runs-on: ubuntu-latest
@@ -1468,8 +1420,8 @@ jobs:
     # A service/ or shared-fixture change selects nothing by itself; those move
     # every integration test at once and the nightly covers them.
     #
-    # Same environment as the shard matrix (jar, pinned PG bundle, bge-768,
-    # docling), not the nightly's throwaway service. Files that need what no
+    # Same environment as the shard matrix (jar, pinned PG bundle, bge-768),
+    # not the nightly's throwaway service. Files that need what no
     # hosted runner has are listed with reasons in
     # scripts/assert_integration_affected_ran.py's ALL_SKIP_ALLOWED; files a
     # dedicated job already runs are listed in the selector's
@@ -1596,12 +1548,6 @@ jobs:
         # Asks the exact function tests/db/conftest.py consults, so a stamp
         # the fixtures would reject fails here, by name, before the run.
         run: uv run python -c "import sys; from tests.db._service_fixture import unstamped_jar_skip_reason as r; reason = r(); sys.exit(reason) if reason else print('jar stamped')"
-
-      - name: Prime docling artifacts (cache or self-hosted asset)
-        uses: ./.github/actions/prime-docling
-
-      - name: Verify docling extracts from the mirrored models
-        run: uv run python scripts/ci_warm_docling.py
 
       - name: Collect the affected selection
         id: collect

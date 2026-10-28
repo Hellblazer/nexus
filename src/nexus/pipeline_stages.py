@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 import structlog
 
+from nexus.config import DEFAULT_EXTRACTOR
 from nexus.embed_window import window_for_collection
 from nexus.errors import UploadStalledError
 from nexus.pdf_chunker import PDFChunker
@@ -189,8 +190,7 @@ def extractor_loop(
     content_hash: str,
     db: HttpPipelineDB,
     cancel: threading.Event,
-    extractor: str = "auto",
-    on_formula_oom: str = "fail",
+    extractor: str = DEFAULT_EXTRACTOR,
     extraction_done: threading.Event | None = None,
     allow_degraded_extraction: bool = False,
 ) -> ExtractionResult:
@@ -314,7 +314,7 @@ def extractor_loop(
     ext = PDFExtractor()
     try:
         result = ext.extract(
-            pdf_path, extractor=extractor, on_formula_oom=on_formula_oom, on_page=on_page,
+            pdf_path, extractor=extractor, on_page=on_page,
             allow_degraded=allow_degraded_extraction, on_heartbeat=on_heartbeat,
         )
     except PipelineCancelled:
@@ -1737,8 +1737,7 @@ def pipeline_index_pdf(
     *,
     db: HttpPipelineDB | None = None,
     embed_fn: EmbedFn | None = None,
-    extractor: str = "auto",
-    on_formula_oom: str = "fail",
+    extractor: str = DEFAULT_EXTRACTOR,
     corpus: str = "",
     target_model: str = "voyage-context-3",
     git_meta: dict | None = None,
@@ -2014,7 +2013,7 @@ def pipeline_index_pdf(
             try:
                 extract_future = pool.submit(
                     _extractor_loop_bound_to_cancel, pdf_path, content_hash, db, cancel,
-                    extractor=extractor, on_formula_oom=on_formula_oom,
+                    extractor=extractor,
                     extraction_done=extraction_done,
                     allow_degraded_extraction=allow_degraded_extraction,
                 )
@@ -2259,7 +2258,7 @@ def pipeline_index_pdf(
 
         # Catalog hook: register PDF in catalog (opt-in, graceful absence)
         # 2026-08-19: this used to read ``metadata["title"]`` / ``["author"]`` —
-        # keys no extractor writes (``docling_title``/``pdf_title``/``pdf_author``
+        # keys no extractor writes (``pdf_title``/``pdf_author``
         # are the real ones) — so every streamed PDF registered as its filename
         # stem with no author. One shared chain for all PDF title resolution.
         #
@@ -2417,7 +2416,7 @@ def _enrich_metadata_from_extraction(
     *doc_id* a selection of no chunk while *chunks_uploaded* is positive fails the
     post-pass (``post_pass_selected_no_chunks``): zero rows examined is not a pass.
 
-    Resolves source_title (docling_title → pdf_title → filename) and
+    Resolves source_title (pdf_title → first heading → filename) and
     source_author — matching the batch path in doc_indexer._pdf_chunks.
     *title_override* (nexus-1uov1), when non-empty, wins over that
     resolution — see :func:`nexus.doc_indexer._pdf_chunks`'s docstring

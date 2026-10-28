@@ -283,7 +283,7 @@ def test_a_single_row_code_like_math_table_is_still_flagged() -> None:
 # false-positive measurement against REAL indexed table text, not just
 # synthetic fixtures. Method: read-only store_get of 7 real papers already
 # indexed in the live knowledge__* collections (both mineru- and
-# docling-extracted, math-and-RL-heavy on purpose: KnowFeat, HRNN, Self-Aware
+# pymupdf-extracted, math-and-RL-heavy on purpose: KnowFeat, HRNN, Self-Aware
 # Vector Embeddings, Verbalizable Representations/Global Workspace,
 # Conservative Q-Learning, On Prediction Using Variable Order Markov Models,
 # The Context-Tree Weighting Method), run through _code_like_math_defects

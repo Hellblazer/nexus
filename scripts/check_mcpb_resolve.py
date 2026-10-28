@@ -54,9 +54,9 @@ STAGER = REPO / "scripts" / "stage_mcpb_constraints.py"
 MIN_LOCKED = 100
 #: ... and at least this many of the staged pins must be the locked version of a locked package.
 MIN_HELD = 80
-#: The pdf variant locks the PDF stack on top (docling, MinerU, torch and theirs).
+#: The pdf variant locks the PDF stack on top (MinerU, torch and theirs).
 MIN_LOCKED_PDF = 170
-PDF_REQUIRED = ("docling-slim", "mineru", "torch")
+PDF_REQUIRED = ("mineru", "torch")
 UV_TIMEOUT_S = 900
 
 _IGNORE = shutil.ignore_patterns(".venv", "uv.lock", "__pycache__", "*.pyc", "constraints.txt", "*.mcpb")

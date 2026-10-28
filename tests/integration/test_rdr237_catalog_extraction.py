@@ -53,7 +53,7 @@ class _LadderExtractor:
     trip_after: int | None = None
     calls: list[str] = []
 
-    def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+    def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                 allow_degraded=False, on_heartbeat=None):
         self.calls.append(str(pdf_path))
         pos, bounds = 0, []

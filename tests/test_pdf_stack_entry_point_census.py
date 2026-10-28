@@ -199,7 +199,7 @@ def test_index_pdf_on_a_slim_box_refuses_and_touches_neither_store_nor_catalog(m
 
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
     pdf_stack.reset_cache()
-    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "docling, MinerU and torch are not installed"))
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "MinerU and torch are not installed"))
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF-1.4 not empty")
     register = MagicMock(side_effect=AssertionError("registered a catalog row before the stack check"))

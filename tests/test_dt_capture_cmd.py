@@ -117,8 +117,8 @@ def test_doi_capture_downloads_pdf_and_indexes(runner, monkeypatch) -> None:
 
 
 def test_capture_forwards_extractor_to_index(runner, monkeypatch) -> None:
-    """nexus-pxxyn: nx dt capture --extractor docling reaches the PDF indexer
-    (so a formula-heavy captured PDF can use the docling recovery)."""
+    """nexus-pxxyn: nx dt capture --extractor reaches the PDF indexer (so a captured PDF
+    can use the text-only extractor)."""
     from nexus.cli import main
     monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page",
@@ -129,9 +129,45 @@ def test_capture_forwards_extractor_to_index(runner, monkeypatch) -> None:
     monkeypatch.setattr("nexus.commands.dt._index_record",
                         lambda uuid, path, **kw: (seen.update(kw) or True, 1))
     result = runner.invoke(main, ["dt", "capture", "https://e.com",
-                                  "--type", "pdf", "--extractor", "docling"])
+                                  "--type", "pdf", "--extractor", "pymupdf"])
     assert result.exit_code == 0, result.output
-    assert seen.get("extractor") == "docling"
+    assert seen.get("extractor") == "pymupdf"
+
+
+@pytest.mark.parametrize("name", ["auto", "docling"])
+def test_capture_runs_an_older_extractor_name_as_mineru(runner, monkeypatch, name) -> None:
+    """RDR-237: the older names are aliases for mineru, resolved before the capture starts."""
+    from nexus.cli import main
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_capture_web_page",
+                        lambda url, **kw: "PDF-UUID")
+    monkeypatch.setattr("nexus.commands.dt._gather_records",
+                        lambda **kw: [(kw["uuids"][0], "/captured.pdf")])
+    seen = {}
+    monkeypatch.setattr("nexus.commands.dt._index_record",
+                        lambda uuid, path, **kw: (seen.update(kw) or True, 1))
+    result = runner.invoke(main, ["dt", "capture", "https://e.com",
+                                  "--type", "pdf", "--extractor", name])
+    assert result.exit_code == 0, result.output
+    assert seen.get("extractor") == "mineru"
+
+
+def test_capture_prints_the_older_name_notice_before_it_touches_devonthink(runner, monkeypatch) -> None:
+    """The alias is resolved at the top of the verb, so a capture that stops at once (DEVONthink not
+    running) still told the user once that their older name now runs as mineru."""
+    from nexus import config as nexus_config
+    from nexus.cli import main
+
+    nexus_config._NOTICES_SHOWN.clear()
+    monkeypatch.setattr("nexus.commands.dt._is_darwin", lambda: True)
+    monkeypatch.setattr("nexus.mcp_client.devonthink.available", lambda **k: False)
+    try:
+        result = runner.invoke(main, ["dt", "capture", "https://e.com", "--extractor", "docling"])
+    finally:
+        notices = [ln for ln in result.output.splitlines() if ln.startswith("notice:")]
+        nexus_config._NOTICES_SHOWN.clear()
+    assert result.exit_code != 0 and "requires DEVONthink" in result.output
+    assert len(notices) == 1 and "--extractor says 'docling'" in notices[0]
 
 
 def test_doi_without_email_warns(runner, monkeypatch) -> None:

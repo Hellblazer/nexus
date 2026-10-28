@@ -28,6 +28,7 @@ import click
 import structlog
 
 import nexus.devonthink as dt_mod
+from nexus.config import DEFAULT_EXTRACTOR, EXTRACTOR_CHOICES, resolve_extractor
 from nexus.devonthink import DTNotAvailableError, _is_darwin
 
 _log = structlog.get_logger(__name__)
@@ -215,7 +216,7 @@ def _index_record(
     collection: str | None,
     corpus: str,
     dry_run: bool,
-    extractor: str = "auto",
+    extractor: str = DEFAULT_EXTRACTOR,
     force: bool = False,
     force_re_embed: bool = False,
 ) -> tuple[bool, int] | tuple[bool, int, list[int] | None, dict[str, list[int]], str]:
@@ -317,7 +318,7 @@ def _index_record(
     method = ""  # the extraction_method the run recorded (RDR-237)
     if ext == ".pdf":
         # nexus-pxxyn: thread the operator's --extractor choice through so the
-        # documented MinerU-failure recovery ("rerun with --extractor docling")
+        # documented text-only recovery ("rerun with --extractor pymupdf")
         # is actionable on the DT path. Markdown has no extractor backend.
         # nexus-i0cwh: return_metadata gives the pages that produced text,
         # the page-coverage check's input.
@@ -979,16 +980,15 @@ def dt() -> None:
 )
 @click.option(
     "--extractor",
-    type=click.Choice(["auto", "docling", "mineru", "pymupdf"], case_sensitive=False),
-    default="auto",
+    type=click.Choice(list(EXTRACTOR_CHOICES), case_sensitive=False),
+    default=DEFAULT_EXTRACTOR,
     show_default=True,
     help=(
-        "PDF extraction backend for file-backed records. ``mineru`` is "
-        "formula-aware but OOM-fails on some formula-dense pages; the recovery "
-        "is ``--extractor docling`` (formula-stripped, but always completes). "
-        "``auto`` picks mineru when formulas are detected, else docling. "
-        "``pymupdf`` reads only each page's text layer (no layout, tables or math) "
-        "and needs no PDF support; it is never chosen automatically."
+        "PDF extraction backend for file-backed records. ``mineru`` reads layout, "
+        "tables and math; a page it cannot read is retried without formulas, then "
+        "taken from its text layer. ``pymupdf`` reads only each page's text layer "
+        "(no layout, tables or math) and needs no PDF support; it is never chosen "
+        "automatically. ``auto`` and ``docling`` are older names that run as ``mineru``."
     ),
 )
 @click.option(
@@ -1057,6 +1057,7 @@ def index_cmd(
     Exactly one selector flag must be provided: ``--selection``,
     ``--tag``, ``--group``, ``--smart-group``, or one or more ``--uuid``.
     """
+    extractor = resolve_extractor(extractor, source="--extractor")
     if re_embed and not force:
         raise click.UsageError(
             "--re-embed requires --force -- a record the staleness check "
@@ -1967,11 +1968,11 @@ def _capture_is_pdf(url: str | None, doi: str | None, file_path: str | None, cap
 @click.option("--enrich", "enrich", is_flag=True, default=False,
               help="After indexing, run DT-CrossRef bib gap-fill over the collection (Layer C).")
 @click.option("--extractor",
-              type=click.Choice(["auto", "docling", "mineru", "pymupdf"], case_sensitive=False),
-              default="auto", show_default=True,
-              help="PDF extraction backend for the index step (docling = formula-stripped "
-                   "recovery when mineru OOM-fails on formula-dense PDFs; pymupdf = text layer "
-                   "only, needs no PDF support).")
+              type=click.Choice(list(EXTRACTOR_CHOICES), case_sensitive=False),
+              default=DEFAULT_EXTRACTOR, show_default=True,
+              help="PDF extraction backend for the index step (mineru = layout, tables and "
+                   "math; pymupdf = text layer only, needs no PDF support; auto and docling "
+                   "are older names that run as mineru).")
 @click.pass_context
 def capture_cmd(
     ctx: click.Context,
@@ -1998,6 +1999,7 @@ def capture_cmd(
     degrade silently when DEVONthink is absent), ``nx dt capture`` reports
     DT-required and exits NON-ZERO, because capture is impossible without DT.
     """
+    extractor = resolve_extractor(extractor, source="--extractor")
     if not _is_darwin():
         raise click.ClickException("DEVONthink integration is macOS-only")
 

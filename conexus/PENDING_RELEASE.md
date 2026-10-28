@@ -47,6 +47,8 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/commands/setup.md` (nexus-tr1rj.5): the install-size sentence names the PDF support as MinerU and torch; the PDF stack no longer includes the removed layout extractor.
+- `conexus/launch/nx_standin.py` (nexus-tr1rj.5): the same name list in the stand-in's sizes note and slim description, kept equal to the real server's (`src/nexus/mcp/setup_tools.py`).
 - `prose-edit/.claude-plugin/plugin.json` (nexus-scmcs): the new opt-in conexus-prose-edit plugin's manifest; /prose-edit moves out of the nexus repo's .claude/skills so it can run in any repository.
 - `prose-edit/agents/line-editor.md` (nexus-scmcs): the line-editor agent, moved from .claude/agents and dispatched as conexus-prose-edit:line-editor; a brief's Repository line roots every relative path it gives.
 - `prose-edit/skills/prose-edit/SKILL.md` (nexus-scmcs): the skill, moved from .claude/skills: script prefixes under ${CLAUDE_PLUGIN_ROOT} pre-approved by allowed-tools, an absolute path edits the checkout that holds it, and a `setup` run (Nexus and T2, the two temp-dir allow rules, genre map, exemplars).

@@ -314,7 +314,7 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # commands translate it to ClickException at the wrapper boundary.
     "UnchunkableContentError",
     # nexus-deyd5: fires from PDFExtractor._extract_normalized (pymupdf)
-    # and _extract_with_docling when extraction completes but yields zero
+    # and _extract_pymupdf when extraction completes but yields zero
     # usable text (an image-only PDF, a deliberately blank fixture, a
     # damaged text layer). Reachable from the same dt.py/index.py
     # per-record loops as ExtractionQualityError; also recognized

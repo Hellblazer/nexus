@@ -315,7 +315,7 @@ def perform_self_install(
         extras = _merge_extras(receipt.extras, new_extras)
     # nexus-2k66t.4.2, Sam 2026-10-23: an EXISTING install always carries the
     # PDF stack forward. A receipt written before `pdf` became an extra
-    # (installer_schema < 2) belongs to a box that has had docling and MinerU
+    # (installer_schema < 2) belongs to a box that has had the PDF stack
     # in every generation; the installer this process runs may be the new one
     # building the first post-split generation. Only a fresh install goes slim.
     if exact_extras is None:

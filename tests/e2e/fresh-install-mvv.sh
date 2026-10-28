@@ -334,8 +334,8 @@ _self_test() {
     _assert_eq "set diff isolates only the step-added chunk" "$new_id" "$(printf 'ff%.0s' $(seq 32))"
     out=$(printf 'ID: abc\nExtractor:  mineru\n' | _extractor_identity_verdict)
     _assert_eq "mineru-extracted chunk -> OK" "$out" "OK"
-    out=$(printf 'ID: abc\nExtractor:  docling\n' | _extractor_identity_verdict)
-    _assert_prefix "RED: silent substitution (docling) -> FAIL naming it" "$out" "FAIL|indexed chunk carries extraction_method='docling'"
+    out=$(printf 'ID: abc\nExtractor:  pymupdf_normalized\n' | _extractor_identity_verdict)
+    _assert_prefix "RED: silent substitution (pymupdf_normalized) -> FAIL naming it" "$out" "FAIL|indexed chunk carries extraction_method='pymupdf_normalized'"
 
     echo "== self-test: bash -n on this script itself =="
     if bash -n "${BASH_SOURCE[0]}"; then
@@ -395,7 +395,7 @@ if [ "$SELF_TEST" = 1 ]; then
 fi
 
 if [ "$PUBLISHED_MODE" = 1 ]; then
-    # nexus-2k66t.4.2: a plain `conexus` is SLIM (docling, MinerU, torch,
+    # nexus-2k66t.4.2: a plain `conexus` is SLIM (MinerU, torch,
     # torchvision and pdftext are the on-demand `pdf` extra). The opt-in formula
     # check parses a real PDF through MinerU on THIS uv-tool layer, which an
     # on-demand install cannot reach (it builds a generation), so that run
@@ -1222,7 +1222,7 @@ import importlib.util, os, sys
 from importlib.metadata import version
 from packaging.version import Version
 
-MODS = ("docling", "mineru", "torch", "torchvision", "pdftext")
+MODS = ("mineru", "torch", "torchvision", "pdftext")
 found = [m for m in MODS if importlib.util.find_spec(m)]
 if len(found) == len(MODS):
     pass
@@ -1230,7 +1230,7 @@ elif not found:
     if os.environ.get("EXPECT_PDF_STACK") == "1":
         print("expected the pdf extra (NX_MVV_FORMULA_PDF_CHECK=1) but none of the stack is installed")
         sys.exit(1)
-    print("SLIM install: none of docling/mineru/torch/torchvision/pdftext is installed (pdf extra on demand); pdftext/pypdfium2 bound not applicable bound_ok=n/a")
+    print("SLIM install: none of mineru/torch/torchvision/pdftext is installed (pdf extra on demand); pdftext/pypdfium2 bound not applicable bound_ok=n/a")
     sys.exit(0)
 else:
     print(f"PARTIAL PDF stack {found} -- a broken install, neither slim nor pdf")
@@ -1304,7 +1304,7 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
         # positional pick is the wrong document roughly half the time),
         # then read that chunk back and assert its Extractor field is
         # literally mineru -- belt-and-braces against a silent
-        # in-extractor fallback to docling/pymupdf.
+        # in-extractor fallback to pymupdf.
         FORMULA_IDS_DIR="$(mktemp -d "$WORK/formula-ids-XXXXXX")"
         # `|| true` on both snapshots (that gate's own shape): an
         # empty/first-use collection makes grep find zero matches (exit 1),

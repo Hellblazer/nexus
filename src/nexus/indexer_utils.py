@@ -624,7 +624,7 @@ def derive_title(path: Path, body: str | None) -> str:
     return " ".join(normalised) or stem
 
 
-# First-H1 candidates that are section headings, not titles. A MinerU/Docling
+# First-H1 candidates that are section headings, not titles. A MinerU
 # markdown body whose first ``# `` line is one of these has no title heading
 # (the real title was rendered as plain text or dropped); fall through to the
 # filename stem rather than stamp "Abstract" as the document title — the
@@ -647,18 +647,15 @@ def _h1_is_section_heading(h1: str) -> bool:
 def resolve_pdf_title(metadata: dict, pdf_path: Path, text: str | None) -> str:
     """Resolve a PDF's document title — the ONE chain for both PDF paths.
 
-    ``docling_title`` -> ``pdf_title`` (XMP) -> first H1 of *text* -> normalised
-    filename stem (:func:`derive_title`). The MinerU extractor reports both
-    metadata titles empty, so before 2026-08-19 its documents always fell to
+    ``pdf_title`` (XMP) -> first H1 of *text* -> normalised filename stem
+    (:func:`derive_title`). The MinerU extractor reports an empty ``pdf_title``,
+    so before 2026-08-19 its documents always fell to
     the stem (``papers/2512.11001.pdf`` -> ``"2512.11001"``) even though its
     markdown opens with ``# <title>``; passing the extracted text lets the
     H1 win. Used by ``doc_indexer._pdf_chunks`` and the streaming post-pass
     in ``pipeline_stages``.
     """
-    extracted = (
-        str(metadata.get("docling_title") or "").strip()
-        or str(metadata.get("pdf_title") or "").strip()
-    )
+    extracted = str(metadata.get("pdf_title") or "").strip()
     if extracted:
         return extracted
     if text:

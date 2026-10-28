@@ -454,18 +454,18 @@ def test_a_machine_resource_error_is_not_bisected_and_reaches_the_caller_unwrapp
         "nexus.config.get_mineru_page_timeout_s", return_value=30,
     ), patch.object(ext, "_mineru_run_isolated", isolated):
         with pytest.raises(MineruMachineResourceError, match="no semaphores left"):
-            ext._extract_with_mineru(Path("/tmp/math.pdf"), formula_count=9, on_formula_oom="fail")
+            ext._extract_with_mineru(Path("/tmp/math.pdf"))
     assert isolated.call_count == 1, "a split of the batch cannot fix a machine fault"
 
 
-def test_route_to_mineru_does_not_wrap_the_machine_error() -> None:
+def test_the_guarded_mineru_path_does_not_wrap_the_machine_error() -> None:
     ext = PDFExtractor()
     with patch.object(
         ext, "_extract_with_mineru",
         side_effect=MineruMachineResourceError("no semaphores left"),
     ):
         with pytest.raises(MineruMachineResourceError):
-            ext._route_to_mineru(Path("/tmp/m.pdf"), 9, on_page=None, on_formula_oom="fail")
+            ext._extract_with_mineru_guarded(Path("/tmp/m.pdf"), on_page=None)
 
 
 # ── _replace_server_with_deleted_cwd ─────────────────────────────────────────

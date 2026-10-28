@@ -5,7 +5,7 @@
 a core dependency, so it needs none of the PDF stack. Every test here runs with the stack genuinely
 absent: ``pdf_stack.state`` reports it missing, and trip wires fail the test if anything asks to install
 it (``pdf_stack.ensure``, ``_install_generation``) or touches MinerU (the server probe, the autostart,
-the MinerU and Docling extraction paths).
+the MinerU extraction path).
 
 * the extractor: text pages ``pymupdf-text``, an image-only page ``unextracted``, the document method
   ``pymupdf``, every page reported through ``on_page`` with its ``page_method``, an all-image document
@@ -85,7 +85,7 @@ def stack_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Trips:
     pdf_stack.reset_cache()
     monkeypatch.setattr(pdf_stack, "_find_spec", lambda name: False)
     monkeypatch.setattr(
-        pdf_stack, "state", lambda: pdf_stack.StackState("absent", "docling, MinerU and torch are not installed"),
+        pdf_stack, "state", lambda: pdf_stack.StackState("absent", "MinerU and torch are not installed"),
     )
     monkeypatch.setattr(
         pdf_stack, "install_plan", lambda: pdf_stack.InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND),
@@ -95,7 +95,6 @@ def stack_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Trips:
     monkeypatch.setattr(pdf_stack, "_install_generation", trips.forbid("pdf_stack._install_generation"))
     monkeypatch.setattr(PDFExtractor, "_mineru_server_available", trips.forbid("_mineru_server_available"))
     monkeypatch.setattr(PDFExtractor, "_extract_with_mineru", trips.forbid("_extract_with_mineru"))
-    monkeypatch.setattr(PDFExtractor, "_extract_with_docling", trips.forbid("_extract_with_docling"))
     monkeypatch.setattr(
         "nexus.daemon.mineru_lifecycle.ensure_mineru_running", trips.forbid("ensure_mineru_running"),
     )
@@ -322,11 +321,11 @@ def test_a_pdf_with_no_pages_says_so_and_is_not_told_to_be_ocred(stack_absent, t
 
 
 @pytest.mark.parametrize(
-    ("method", "names_mineru_first"), [("pymupdf", False), ("docling", True), ("mineru", True)],
+    ("method", "text_only"), [("pymupdf", True), ("mineru", False), ("mineru+degraded", False)],
 )
-def test_the_quality_gate_remedy_does_not_send_a_pymupdf_user_to_the_stack_extractor_first(
-    method, names_mineru_first,
-) -> None:
+def test_the_quality_gate_remedy_fits_the_extractor_that_produced_the_text(method, text_only) -> None:
+    """A text-only user is not sent to the stack extractor first; a MinerU user is not sent back to
+    MinerU, which is what just produced the garbage."""
     from nexus.errors import ExtractionQualityError
 
     garbage = pdfx.ExtractionResult(
@@ -338,17 +337,17 @@ def test_the_quality_gate_remedy_does_not_send_a_pymupdf_user_to_the_stack_extra
 
     message = str(err.value)
     assert f"extraction_method={method}" in message and "`--allow-degraded-extraction`" in message
-    if names_mineru_first:
-        assert "Remedy: retry with `--extractor mineru`" in message
-    else:
-        assert "Remedy: retry with" not in message
+    assert "Remedy: retry with" not in message
+    if text_only:
         assert "needs the PDF stack" in message, "`--extractor mineru` is named, with its cost, after the usable option"
+    else:
+        assert "--extractor mineru" not in message
 
 
 _STACK_BLOCKER = """
 import importlib.abc, sys
 
-BLOCKED = ("docling", "mineru", "torch", "torchvision", "pdftext")
+BLOCKED = ("mineru", "torch", "torchvision", "pdftext")
 
 
 class _Block(importlib.abc.MetaPathFinder):
@@ -399,7 +398,7 @@ def _run_blocked(tmp_path: Path, *args: str) -> tuple[int, str, str]:
 def test_the_pymupdf_path_imports_none_of_the_pdf_stack_even_where_it_is_installed(tmp_path) -> None:
     """The in-process tests simulate an absent stack by patching ``pdf_stack.state``; the stack's packages
     are still importable in this venv, so a stray ``import torch`` in the pymupdf path would pass them.
-    Here a fresh interpreter has a meta-path finder that refuses docling, mineru, torch, torchvision and
+    Here a fresh interpreter has a meta-path finder that refuses mineru, torch, torchvision and
     pdftext: importing the extractor module and extracting a PDF with ``pymupdf`` must not ask for any."""
     pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, None, _P3])
 
@@ -409,14 +408,14 @@ def test_the_pymupdf_path_imports_none_of_the_pdf_stack_even_where_it_is_install
     assert "METHOD=pymupdf PAGES=3" in out
 
 
-@pytest.mark.parametrize("module", ["docling", "mineru", "torch", "torchvision", "pdftext"])
+@pytest.mark.parametrize("module", ["mineru", "torch", "torchvision", "pdftext"])
 def test_the_stack_blocker_refuses_each_module_it_names(tmp_path, module) -> None:
     """The control for the test above: a blocker that blocked nothing would let it pass over a stray import."""
     code, _out, err = _run_blocked(tmp_path, "--import", module)
     assert code != 0 and f"BLOCKED stack import: {module}" in err
 
 
-@pytest.mark.parametrize("extractor", ["auto", "mineru", "docling"])
+@pytest.mark.parametrize("extractor", ["auto", "mineru"])
 def test_an_extractor_that_needs_the_stack_fails_at_once_naming_both_fixes_and_extracts_no_page(
     stack_absent, tmp_path, extractor,
 ) -> None:
@@ -435,28 +434,21 @@ def test_an_extractor_that_needs_the_stack_fails_at_once_naming_both_fixes_and_e
     assert stack_absent.calls == []
 
 
-@pytest.mark.parametrize("route", ["docling", "docling-fails", "formulas"])
-def test_auto_never_chooses_pymupdf(stack_absent, tmp_path, monkeypatch, route) -> None:
-    """``auto`` runs Docling (falling back to the plain PyMuPDF text), or MinerU for a math paper.
-    None of its routes is the explicit text-only extractor."""
+@pytest.mark.parametrize("name", ["auto", "mineru"])
+def test_no_name_but_pymupdf_chooses_the_text_only_extractor(stack_absent, tmp_path, monkeypatch, name) -> None:
+    """The older names run MinerU; none of the routes is the explicit text-only extractor."""
     pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, _P2])
     monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("present", ""))
     pdf_stack.reset_cache()
     monkeypatch.setattr(PDFExtractor, "_extract_pymupdf", stack_absent.forbid("_extract_pymupdf"))
     fake = pdfx.ExtractionResult(
-        text="x " * 40, metadata={"extraction_method": "docling", "page_count": 1, "page_boundaries": []},
-    )
-    monkeypatch.setattr(pdfx, "_has_formulas_quick", lambda p: 99 if route == "formulas" else 0)
-    monkeypatch.setattr(
-        PDFExtractor, "_extract_with_docling",
-        (lambda self, *a, **k: (_ for _ in ()).throw(RuntimeError("docling died")))
-        if route == "docling-fails" else (lambda self, *a, **k: fake),
+        text="x " * 40, metadata={"extraction_method": "mineru", "page_count": 1, "page_boundaries": []},
     )
     monkeypatch.setattr(PDFExtractor, "_extract_with_mineru", lambda self, *a, **k: fake)
 
-    result = PDFExtractor().extract(pdf, extractor="auto", allow_degraded=True)
+    result = PDFExtractor().extract(pdf, extractor=name, allow_degraded=True)
 
-    assert result.metadata["extraction_method"] != "pymupdf"
+    assert result.metadata["extraction_method"] == "mineru"
     assert "_extract_pymupdf" not in stack_absent.calls
 
 
@@ -466,8 +458,8 @@ def test_pdf_extractor_config_accepts_pymupdf_and_nothing_chooses_it_by_default(
         return nx_config.get_pdf_extractor()
 
     assert cfg({"extractor": "pymupdf"}) == "pymupdf"
-    assert cfg(None) == "auto", "the default is never the text-only extractor"
-    assert cfg({"extractor": "Pymupdf-ish"}) == "auto", "an unknown value still falls back to auto"
+    assert cfg(None) == "mineru", "the default is never the text-only extractor"
+    assert cfg({"extractor": "Pymupdf-ish"}) == "mineru", "an unknown value falls back to the default"
 
 
 @pytest.mark.parametrize("command", [["index", "pdf"], ["dt", "index"], ["dt", "capture"]])
@@ -487,7 +479,7 @@ def test_the_three_clis_offer_pymupdf_and_none_defaults_to_it(command) -> None:
 
 def test_needs_stack_is_false_only_for_pymupdf() -> None:
     assert pdf_stack.needs_stack("pymupdf") is False
-    for other in ("", "auto", "mineru", "docling", "PYMUPDF", "anything"):
+    for other in ("", "auto", "mineru", "PYMUPDF", "anything"):
         assert pdf_stack.needs_stack(other) is True
 
 
@@ -861,7 +853,7 @@ def test_dt_page_coverage_failure_for_pymupdf_says_an_image_page_is_expected_and
     with patch("nexus.doc_indexer.index_pdf", side_effect=_reporting(_REPORT)):
         result = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--extractor", "pymupdf"])
         monkeypatch.setattr(pdf_stack, "ensure", lambda entry: pdf_stack.Outcome.PRESENT)  # control: the stack is there
-        control = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--extractor", "auto"])
+        control = runner.invoke(main, ["dt", "index", "--uuid", "U1", "--extractor", "mineru"])
     assert "page coverage: 2 of 3 pages produced text" in result.output
     assert "an image page is expected to be missing" in result.output and "--allow-page-gap" in result.output
     assert "Re-run with --extractor mineru" not in result.output
@@ -1251,7 +1243,7 @@ def test_a_malformed_pdf_setting_does_not_stop_the_repo_walk_reading_the_extract
         nx_config, "load_config", lambda **kw: {"pdf": {"extractor": "pymupdf", "mineru_page_batch": "many"}},
     )
     with capture_logs() as cap:
-        assert _repo_pdf_extractor(Path("/repo")) == "auto"
+        assert _repo_pdf_extractor(Path("/repo")) == "mineru"
     (warning,) = [e for e in cap if e["event"] == "repo_pdf_extractor_config_unreadable"]
     assert "mineru_page_batch" in warning["error"], "the key is named"
 

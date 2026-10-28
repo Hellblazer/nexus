@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 from nexus.checkpoint import delete_checkpoint
+from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import embedding_model_row_preferred, ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
 from nexus.embed_window import window_for_collection
@@ -2306,8 +2307,7 @@ def _pdf_chunks(
     *,
     chunk_chars: int | None = None,
     bib_enrich_enabled: bool = False,
-    extractor: str = "auto",
-    on_formula_oom: str = "fail",
+    extractor: str = DEFAULT_EXTRACTOR,
     git_meta: dict | None = None,
     doc_id: str = "",
     allow_degraded_extraction: bool = False,
@@ -2344,8 +2344,9 @@ def _pdf_chunks(
     bibliographic metadata (year, venue, authors, citation count).  Disable
     for offline/air-gapped environments or bulk indexing.
 
-    *extractor* selects the PDF extraction backend (``"auto"``, ``"docling"``,
-    ``"mineru"``, or the explicit text-only ``"pymupdf"``).
+    *extractor* selects the PDF extraction backend (``"mineru"``, the default, or
+    the explicit text-only ``"pymupdf"``; ``"auto"`` and the retired name of the
+    removed extractor run as ``"mineru"``).
 
     *allow_degraded_extraction* (nexus-wi1uv) forwarded to
     :meth:`PDFExtractor.extract` — bypasses the post-extraction quality
@@ -2368,7 +2369,7 @@ def _pdf_chunks(
     # says both callers pass one; the bead (nexus-tr1rj.2) records the decision that there is
     # nothing to stamp.
     result = PDFExtractor().extract(
-        pdf_path, extractor=extractor, on_formula_oom=on_formula_oom,
+        pdf_path, extractor=extractor,
         allow_degraded=allow_degraded_extraction,
     )
     if extraction_stats is not None:
@@ -2555,8 +2556,7 @@ def index_pdf(
     return_metadata: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     enrich: bool = False,
-    extractor: str = "auto",
-    on_formula_oom: str = "fail",
+    extractor: str = DEFAULT_EXTRACTOR,
     streaming: str = "auto",
     hooks: "HookRegistry | None" = None,
     source_uri: str = "",
@@ -2657,7 +2657,7 @@ def index_pdf(
     Pass *allow_degraded_extraction=True* (nexus-wi1uv) to bypass the
     post-extraction text-quality gate (see
     :func:`nexus.pdf_extractor.assess_extraction_quality`) that otherwise
-    fails loud on space-stripped/garbage extraction output — e.g. docling
+    fails loud on space-stripped/garbage extraction output — e.g. an extractor
     completing "successfully" on a formula-dense page but running every
     word together. Default ``False``; surfaced as
     ``--allow-degraded-extraction`` on ``nx index pdf``. Threaded to both
@@ -2744,7 +2744,7 @@ def index_pdf(
     # looks_like_binary_content (a UTF-8 text sniff) does not apply
     # here -- every real PDF would misclassify as "binary" under that
     # check, which is not the defect this bead is about. Malformed-but-
-    # nonempty PDF extraction failures (docling/mineru/pymupdf errors)
+    # nonempty PDF extraction failures (mineru/pymupdf errors)
     # are a separate, already-handled concern (ExtractionQualityError /
     # IndexingError below) and are out of scope for this guard.
     from nexus.errors import IndexRunVerifyRefused, UnchunkableContentError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
@@ -2757,7 +2757,7 @@ def index_pdf(
             f"{pdf_path} is empty (0 bytes) and cannot be chunked"
         )
 
-    # nexus-2k66t.4.2, the library backstop: the PDF stack (docling, MinerU,
+    # nexus-2k66t.4.2, the library backstop: the PDF stack (MinerU,
     # torch) is an on-demand extra, and a slim install lacks it. Refuse HERE,
     # before the collection is created and before the pre-flight registration
     # below mints a catalog row, so a caller that skipped the CLI gates
@@ -2966,7 +2966,7 @@ def index_pdf(
             try:
                 count = pipeline_index_pdf(
                     pdf_path, content_hash, col_name, db,
-                    embed_fn=embed_fn, extractor=extractor, on_formula_oom=on_formula_oom,
+                    embed_fn=embed_fn, extractor=extractor,
                     corpus=corpus, target_model=target_model,
                     force=force,
                     force_re_embed=force_re_embed,
@@ -3189,7 +3189,7 @@ def index_pdf(
     # Extract and chunk the entire document
     now_iso = datetime.now(UTC).isoformat()
     chunk_fn = partial(
-        _pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor, on_formula_oom=on_formula_oom,
+        _pdf_chunks, bib_enrich_enabled=enrich, extractor=extractor,
         doc_id=doc_id, allow_degraded_extraction=allow_degraded_extraction,
         extraction_stats=_extraction_stats, title_override=title_override,
         collection_name=col_name,
@@ -3944,8 +3944,7 @@ def batch_index_pdfs(
     *,
     force: bool = False,
     on_file: Callable[[Path, int, float], None] | None = None,
-    extractor: str = "auto",
-    on_formula_oom: str = "fail",
+    extractor: str = DEFAULT_EXTRACTOR,
     hooks: "HookRegistry | None" = None,
 ) -> dict[str, str]:
     """Index multiple PDFs sequentially, returning per-file status.
@@ -3964,7 +3963,7 @@ def batch_index_pdfs(
         count: int = 0
         t0 = time.monotonic()
         try:
-            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, on_formula_oom=on_formula_oom, hooks=hooks)
+            raw = index_pdf(path, corpus, t3=t3, force=force, extractor=extractor, hooks=hooks)
             count = raw if isinstance(raw, int) else 0
             results[str(path)] = "indexed" if count else "skipped"
         except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller

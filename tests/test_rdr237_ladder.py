@@ -665,40 +665,39 @@ def test_a_page_that_never_counts_is_never_held(tmp_path: Path) -> None:
     assert at[("deliver", 0)] < at[("attempt", 2, 1)]
 
 
-# ── the default extractor=auto path keeps the ladder's outcomes typed ────────
+# ── the default extractor path keeps the ladder's outcomes typed ─────────────
 
 
-def _auto_extract(tmp_path: Path, page_texts: list[str], plan, *, breaker=3, on_page=None):
-    """``PDFExtractor.extract(extractor="auto")`` over a formula-routed PDF and the fake MinerU."""
+def _default_extract(tmp_path: Path, page_texts: list[str], plan, *, breaker=3, on_page=None):
+    """``PDFExtractor.extract()`` with the default extractor (MinerU) over the fake MinerU."""
     pdf = make_pdf(tmp_path / "doc.pdf", page_texts)
     ext = PDFExtractor()
-    with patch("nexus.pdf_extractor._has_formulas_quick", return_value=10), \
-         patch("nexus.pdf_extractor.do_parse", object()), \
+    with patch("nexus.pdf_extractor.do_parse", object()), \
          patch("nexus.config.get_mineru_page_batch", return_value=1), \
          patch("nexus.config.get_pdf_ladder_breaker", return_value=breaker), \
          patch.object(ext, "_mineru_run_isolated", side_effect=FakeMineru(plan)):
-        return ext.extract(pdf, extractor="auto", on_page=on_page)
+        return ext.extract(pdf, on_page=on_page)
 
 
-def test_the_auto_path_raises_the_breaker_unwrapped_with_the_window_dropped(tmp_path: Path) -> None:
+def test_the_default_path_raises_the_breaker_unwrapped_with_the_window_dropped(tmp_path: Path) -> None:
     """The pipeline reads the TYPE to keep the buffer; a RuntimeError here wiped it."""
     delivered: list[int] = []
     plan = both_rungs([2, 3, 4], A)
     with pytest.raises(MineruSystemicFailure) as info:
-        _auto_extract(tmp_path, TEXTS, plan, on_page=lambda i, t, m: delivered.append(i))
+        _default_extract(tmp_path, TEXTS, plan, on_page=lambda i, t, m: delivered.append(i))
 
     assert info.value.failure_class == "exit:1:ImportError: a"
     assert delivered == [0]
 
 
-def test_the_auto_path_raises_all_unextracted_as_unextractable_content(tmp_path: Path) -> None:
+def test_the_default_path_raises_all_unextracted_as_unextractable_content(tmp_path: Path) -> None:
     plan = both_rungs([1, 2], A)
     with pytest.raises(pdf_extractor.UnextractableContentError, match="every page.*unextracted"):
-        _auto_extract(tmp_path, ["", ""], plan, breaker=0)
+        _default_extract(tmp_path, ["", ""], plan, breaker=0)
 
 
 @pytest.mark.parametrize("stop", ["fenced", "cancelled"])
-def test_the_auto_path_does_not_wrap_a_stop_raised_by_the_callback(tmp_path: Path, stop: str) -> None:
+def test_the_default_path_does_not_wrap_a_stop_raised_by_the_callback(tmp_path: Path, stop: str) -> None:
     error = (
         PipelineRunFenced(
             "stale", pipeline_id=1, content_hash="h", run_epoch=1, current_epoch=2, remedy="",
@@ -709,22 +708,21 @@ def test_the_auto_path_does_not_wrap_a_stop_raised_by_the_callback(tmp_path: Pat
         raise error
 
     with pytest.raises(type(error)) as info:
-        _auto_extract(tmp_path, TEXTS[:2], {}, on_page=on_page)
+        _default_extract(tmp_path, TEXTS[:2], {}, on_page=on_page)
     assert info.value is error
 
 
-def test_the_auto_path_wraps_any_other_failure_and_does_not_advise_docling(tmp_path: Path) -> None:
+def test_the_default_path_wraps_any_other_failure_and_points_at_nx_doctor(tmp_path: Path) -> None:
     pdf = make_pdf(tmp_path / "doc.pdf", TEXTS[:2])
     ext = PDFExtractor()
-    with patch("nexus.pdf_extractor._has_formulas_quick", return_value=10), \
-         patch.object(ext, "_extract_with_mineru", side_effect=ValueError("page rewrite failed")):
+    with patch.object(ext, "_extract_with_mineru", side_effect=ValueError("page rewrite failed")):
         with pytest.raises(RuntimeError) as info:
-            ext.extract(pdf, extractor="auto")
+            ext.extract(pdf)
 
     msg = str(info.value)
     assert "MinerU extraction failed: ValueError: page rewrite failed" in msg
     assert "nx doctor" in msg
-    assert "--extractor docling" not in msg
+    assert "formulas" not in msg
 
 
 # ── the stderr line a failure class carries ──────────────────────────────────

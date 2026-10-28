@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The PDF stack on demand (nexus-2k66t.4.2).
 
-docling, MinerU, torch, torchvision and pdftext are the ``pdf`` extra. A fresh
+MinerU, torch, torchvision and pdftext are the ``pdf`` extra. A fresh
 install goes without them (57-65% of the download, 49% of the installed size);
 the first PDF index fetches them. An EXISTING install carries them forward on
 its first post-split upgrade (``install_layout.receipt_predates_pdf_split``).
@@ -63,8 +63,8 @@ _log = structlog.get_logger(__name__)
 #: Distributions that make up the stack, with the module a ``find_spec`` probe
 #: resolves for each. Pinned against ``pyproject.toml``'s ``pdf`` extra by
 #: ``tests/test_pdf_stack.py``.
-STACK_DISTS: tuple[str, ...] = ("docling-slim", "mineru", "torch", "torchvision", "pdftext")
-STACK_MODULES: tuple[str, ...] = ("docling", "mineru", "torch", "torchvision", "pdftext")
+STACK_DISTS: tuple[str, ...] = ("mineru", "torch", "torchvision", "pdftext")
+STACK_MODULES: tuple[str, ...] = ("mineru", "torch", "torchvision", "pdftext")
 
 POLICY_ENV = "NX_PDF_STACK"
 REEXEC_ENV = "NX_PDF_STACK_REEXEC"
@@ -315,7 +315,7 @@ def state() -> StackState:
                 "broken", "the receipt lists the pdf extra but none of the stack is installed",
                 tuple(missing),
             )
-        return StackState("absent", "docling, MinerU and torch are not installed")
+        return StackState("absent", "MinerU and torch are not installed")
     if missing:
         return StackState("broken", f"missing: {', '.join(missing)}", tuple(missing))
     pins = _pins(STACK_DISTS)
@@ -549,7 +549,7 @@ def _remedy(entry: str, st: StackState, plan: InstallPlan | None) -> str:
     why = plan.why[:1].upper() + plan.why[1:] if plan.why else ""
     text_only = text_only_remedy(entry)
     return (
-        f"{head}: {entry} needs docling and MinerU, and nothing was written. "
+        f"{head}: {entry} needs MinerU, and nothing was written. "
         f"{why + '. ' if why else ''}Run: {plan.command}" + (f"\n{text_only}" if text_only else "")
     )
 

@@ -1,114 +1,85 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Integration tests for PDFExtractor using real PDF fixture files.
+"""Integration tests for PDFExtractor's text-only extractor using real PDF fixture files.
 
-No patching of Docling or pymupdf — every test exercises the actual
-extraction pipeline against programmatically-generated fixture PDFs.
+No patching of pymupdf: every test exercises the actual extraction against
+programmatically-generated fixture PDFs. The default extractor (MinerU) needs the PDF stack and
+its models, so its end-to-end coverage lives in the ``slow`` tests and the release shakedown
+(nexus-jy4hd); this file runs everywhere.
 
-RDR-021: replaces 3-tier stack with Docling primary + pymupdf_normalized fallback.
+RDR-237 Phase 1 Step 3: these tests asserted a removed extractor's output; they now
+assert the explicit ``pymupdf`` extractor's, which reads each page's own text layer.
 """
 from pathlib import Path
-
-import pytest
 
 from nexus.pdf_extractor import PDFExtractor
 
 
-@pytest.fixture(autouse=True)
-def _require_docling(require_docling: None) -> None:
-    """nexus-c7gnx: every test here exercises the docling extraction path and
-    asserts extraction_method=='docling'. Skip cleanly when the models are
-    unavailable (local cold HF cache) instead of failing on the PyMuPDF
-    fallback. No-op in CI, which pre-fetches the models (ci.yml)."""
+def _extract(path: Path):
+    return PDFExtractor().extract(path, extractor="pymupdf")
 
 
 class TestExtractSimple:
     """Happy-path extraction of a single-page TrueType PDF."""
 
-    def test_extraction_method_is_docling(self, simple_pdf: Path) -> None:
-        result = PDFExtractor().extract(simple_pdf)
-        assert result.metadata["extraction_method"] == "docling"
+    def test_extraction_method_is_pymupdf(self, simple_pdf: Path) -> None:
+        assert _extract(simple_pdf).metadata["extraction_method"] == "pymupdf"
 
     def test_text_is_nonempty(self, simple_pdf: Path) -> None:
-        result = PDFExtractor().extract(simple_pdf)
-        assert result.text.strip()
+        assert _extract(simple_pdf).text.strip()
 
     def test_page_count_is_one(self, simple_pdf: Path) -> None:
-        result = PDFExtractor().extract(simple_pdf)
-        assert result.metadata["page_count"] == 1
+        assert _extract(simple_pdf).metadata["page_count"] == 1
 
-    def test_format_is_markdown(self, simple_pdf: Path) -> None:
-        result = PDFExtractor().extract(simple_pdf)
-        assert result.metadata["format"] == "markdown"
+    def test_format_is_normalized(self, simple_pdf: Path) -> None:
+        assert _extract(simple_pdf).metadata["format"] == "normalized"
 
 
 class TestExtractMultipage:
     """Page boundary tracking across a 3-page PDF."""
 
     def test_page_count_is_three(self, multipage_pdf: Path) -> None:
-        result = PDFExtractor().extract(multipage_pdf)
-        assert result.metadata["page_count"] == 3
+        assert _extract(multipage_pdf).metadata["page_count"] == 3
 
     def test_page_boundaries_has_three_entries(self, multipage_pdf: Path) -> None:
-        result = PDFExtractor().extract(multipage_pdf)
-        assert len(result.metadata["page_boundaries"]) == 3
+        assert len(_extract(multipage_pdf).metadata["page_boundaries"]) == 3
 
     def test_page_boundaries_have_correct_page_numbers(self, multipage_pdf: Path) -> None:
-        result = PDFExtractor().extract(multipage_pdf)
-        numbers = [b["page_number"] for b in result.metadata["page_boundaries"]]
+        numbers = [b["page_number"] for b in _extract(multipage_pdf).metadata["page_boundaries"]]
         assert numbers == [1, 2, 3]
 
+    def test_page_boundaries_tile_the_text_exactly(self, multipage_pdf: Path) -> None:
+        result = _extract(multipage_pdf)
+        position = 0
+        for boundary in result.metadata["page_boundaries"]:
+            assert boundary["start_char"] == position
+            position += boundary["page_text_length"]
+        assert position == len(result.text), "each page length counts its join newline except the last"
 
-class TestType3WithDocling:
-    """Type3 font PDFs are now handled by Docling (not routed to normalized fallback).
 
-    RDR-021: Docling's neural layout model extracts text regardless of font type;
-    the pymupdf4llm Type3 detection and fallback logic has been removed.
-    """
+class TestType3Fonts:
+    """A Type3-font PDF is read from its text layer like any other."""
 
-    def test_type3_pdf_uses_docling(self, type3_pdf: Path) -> None:
-        """Type3 fixture PDF is extracted by Docling (extraction_method = 'docling')."""
-        result = PDFExtractor().extract(type3_pdf)
-        assert result.metadata["extraction_method"] == "docling"
-
-    def test_type3_pdf_format_is_markdown(self, type3_pdf: Path) -> None:
-        result = PDFExtractor().extract(type3_pdf)
-        assert result.metadata["format"] == "markdown"
+    def test_type3_pdf_is_extracted_by_pymupdf(self, type3_pdf: Path) -> None:
+        result = _extract(type3_pdf)
+        assert result.metadata["extraction_method"] == "pymupdf"
+        assert result.metadata["format"] == "normalized"
 
 
 class TestDocumentMetadata:
-    """PDF document metadata keys are present; Docling extracts titles from content."""
+    """PDF document metadata keys are present, as strings."""
+
+    KEYS = (
+        "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords",
+        "pdf_creator", "pdf_producer", "pdf_creation_date", "pdf_mod_date",
+    )
 
     def test_all_pdf_meta_keys_present_and_string(self, simple_pdf: Path) -> None:
-        """All pdf_* and docling_* keys exist, are str, and are not None."""
-        result = PDFExtractor().extract(simple_pdf)
-        meta = result.metadata
-        for key in (
-            "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords",
-            "pdf_creator", "pdf_producer", "pdf_creation_date", "pdf_mod_date",
-            "docling_title",
-        ):
+        meta = _extract(simple_pdf).metadata
+        for key in self.KEYS:
             assert key in meta, f"Missing key: {key!r}"
-            assert meta[key] is not None, f"Key {key!r} is None"
             assert isinstance(meta[key], str), f"Key {key!r} is not a str"
 
-    def test_docling_does_not_expose_xmp_metadata(self, simple_pdf: Path) -> None:
-        """Docling path sets pdf_title/author/etc to '' (XMP not exposed by Docling)."""
-        result = PDFExtractor().extract(simple_pdf)
-        # Docling does not parse XMP/Info dict metadata; these are always empty.
-        assert result.metadata["pdf_title"] == ""
-        assert result.metadata["pdf_author"] == ""
-
-    def test_docling_title_key_present(self, simple_pdf: Path) -> None:
-        """docling_title key is always present in Docling output (may be empty string)."""
-        result = PDFExtractor().extract(simple_pdf)
-        assert "docling_title" in result.metadata
-        assert isinstance(result.metadata["docling_title"], str)
-
     def test_type3_pdf_has_all_metadata_keys(self, type3_pdf: Path) -> None:
-        """Docling extraction path emits all expected metadata keys."""
-        result = PDFExtractor().extract(type3_pdf)
-        meta = result.metadata
-        for key in ("pdf_title", "pdf_author", "pdf_subject", "pdf_keywords",
-                    "pdf_creator", "pdf_producer", "pdf_creation_date", "pdf_mod_date",
-                    "docling_title"):
-            assert key in meta, f"Docling path missing key: {key!r}"
+        meta = _extract(type3_pdf).metadata
+        for key in self.KEYS:
+            assert key in meta, f"pymupdf path missing key: {key!r}"

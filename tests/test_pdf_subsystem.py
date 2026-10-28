@@ -97,6 +97,23 @@ def ruled_table_pdf(pdf_fixtures_dir: Path) -> Path:
     return path
 
 
+def _regex_formula_markers(text: str) -> int:
+    """LaTeX formula markers in *text*: each ``$$..$$``-style block once, plus every command token.
+
+    This was ``pdf_extractor._count_formula_markers``, the routing heuristic of the removed auto
+    mode. The slow MinerU test below locks its value on a real paper, so the counting rule lives
+    here now, unchanged: blocks count once, and the commands inside them count again.
+    """
+    import re
+
+    blocks = (
+        r"\$\$.+?\$\$", r"\\\(.+?\\\)", r"\\\[.+?\\\]",
+        r"\\begin\{equation\*?\}.+?\\end\{equation\*?\}", r"\\begin\{align\*?\}.+?\\end\{align\*?\}",
+    )
+    commands = (r"\\frac\b", r"\\sum\b", r"\\int\b", r"\\prod\b", r"\\partial\b", r"\\nabla\b", r"\\mathbb\b", r"\\mathcal\b")
+    return sum(len(re.findall(p, text, re.DOTALL)) for p in blocks) + sum(len(re.findall(p, text)) for p in commands)
+
+
 def _fake_embed(chunks, model, api_key, input_type="document", timeout=120.0, on_progress=None):
     """Embedding stub: returns unit vectors without calling Voyage AI."""
     return [[0.1] * 5] * len(chunks), "test-local"
@@ -110,13 +127,14 @@ class TestPdfChunksMetadata:
     def test_simple_pdf_full_metadata(self, simple_pdf: Path) -> None:
         """AC-S1: Every chunk from simple.pdf carries the expected metadata values.
 
-        RDR-021: extraction_method is now 'docling'. source_title comes from
-        docling_title (content-extracted) or filename stem; pdf_title XMP metadata
-        is no longer populated by Docling.
+        RDR-237: runs the explicit ``pymupdf`` extractor, which needs no models, so extraction
+        is real and deterministic. extraction_method is 'pymupdf'; the title comes from the
+        PDF's XMP title, the first heading, or the filename stem.
         """
         content_hash = _sha256(simple_pdf)
         result = _pdf_chunks(
-            simple_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "mybook"
+            simple_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "mybook",
+            extractor="pymupdf",
         )
         assert result, "Expected at least one chunk from simple.pdf"
         for chunk_id, text, meta in result:
@@ -130,19 +148,17 @@ class TestPdfChunksMetadata:
             # page_count is dropped by normalize() — not in ALLOWED_TOP_LEVEL.
             assert "page_count" not in meta
             # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL and is
-            # threaded from ExtractionResult.metadata — simple_pdf is
-            # docling-extracted (or falls back to pymupdf_normalized on a
-            # cold docling model cache).
-            assert meta["extraction_method"] in ("docling", "pymupdf_normalized")
+            # threaded from ExtractionResult.metadata.
+            assert meta["extraction_method"] == "pymupdf"
             # RDR-108 Phase 3 (nexus-bdag): chunk_count / chunk_index /
             # doc_id retired from chunk metadata. Catalog manifest carries
             # the document-to-chunk binding instead.
             assert "chunk_count" not in meta
             assert "chunk_index" not in meta
             assert "doc_id" not in meta
-            # title (was source_title): Docling content-extracted or filename fallback
+            # title (was source_title): XMP title, first heading or filename fallback
             assert isinstance(meta["title"], str)
-            # source_author: Docling does not expose XMP author; may be empty
+            # source_author: from the PDF's author field; may be empty
             assert isinstance(meta["source_author"], str)
             assert meta["embedding_model"] == "model-ctx"
             assert isinstance(chunk_id, str) and chunk_id
@@ -157,7 +173,7 @@ class TestPdfChunksMetadata:
         override = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation"
         result = _pdf_chunks(
             simple_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "mybook",
-            title_override=override,
+            title_override=override, extractor="pymupdf",
         )
         assert result, "Expected at least one chunk from simple.pdf"
         for _chunk_id, _text, meta in result:
@@ -167,7 +183,8 @@ class TestPdfChunksMetadata:
         """AC-S2: page_number values are drawn from {1, 2, 3}; no zeros present."""
         content_hash = _sha256(multipage_pdf)
         result = _pdf_chunks(
-            multipage_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "test"
+            multipage_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "test",
+            extractor="pymupdf",
         )
         assert result
         page_numbers = {meta["page_number"] for _, _, meta in result}
@@ -180,8 +197,7 @@ class TestPdfChunksMetadata:
     def test_pdf_without_metadata_source_fields(self, tmp_path: Path) -> None:
         """AC-S2b: PDF with no embedded XMP metadata.
 
-        RDR-021: Docling path does not expose XMP metadata (pdf_author/date are '').
-        source_title falls back to filename stem when docling_title is also empty.
+        The author is empty and the title falls back to the first heading or the filename stem.
         """
         import pymupdf
         bare = tmp_path / "bare.pdf"
@@ -196,12 +212,14 @@ class TestPdfChunksMetadata:
         doc.close()
 
         content_hash = _sha256(bare)
-        result = _pdf_chunks(bare, content_hash, "test-model", "2026-01-01T00:00:00", "test")
+        result = _pdf_chunks(
+            bare, content_hash, "test-model", "2026-01-01T00:00:00", "test", extractor="pymupdf",
+        )
         assert result
         for _, _, meta in result:
-            # title (was source_title): docling_title may be empty; filename fallback
+            # title (was source_title): no XMP title; first heading or filename fallback
             assert isinstance(meta["title"], str)
-            # source_author: Docling doesn't expose XMP author
+            # source_author: the PDF has no author field
             assert meta["source_author"] == "", f"Expected '', got {meta['source_author']!r}"
             # source_date: not in ALLOWED_TOP_LEVEL — dropped by normalize().
             assert "source_date" not in meta
@@ -252,6 +270,7 @@ class TestIndexPdfPipeline:
         count = index_pdf(
             simple_pdf, corpus="test", t3=mock_t3,
             embed_fn=lambda texts, model: ([[0.1] * 5 for _ in texts], model),
+            extractor="pymupdf",
         )
 
         assert count > 0
@@ -295,6 +314,7 @@ class TestIndexPdfPipeline:
         count = index_pdf(
             simple_pdf, corpus="test", t3=mock_t3,
             embed_fn=lambda texts: [[0.1] * 5 for _ in texts],
+            extractor="pymupdf",
         )
 
         assert count == 0
@@ -446,33 +466,26 @@ class TestIndexPdfFileGitMetadata:
             assert meta.get("git_branch", "") == ""
 
 
-# ── RDR-021: Docling single-tier regression guard ────────────────────────────
+# ── RDR-237: one extractor per request, no conditional routing ──────────────
 
-class TestDoclingRegressionGuard:
-    """RDR-021 regression guard: Docling is the sole extraction tier.
+class TestSingleTierRegressionGuard:
+    """RDR-021 regression guard, restated for RDR-237: a request names one extractor and gets it.
 
-    Verifies that ruled-table PDFs are now handled by Docling directly
-    (no pdfplumber rescue tier, no Type3 detection, no 3-tier routing).
+    Ruled-table PDFs need no rescue tier, no Type3 detection and no routing. With the text-only
+    extractor the result is the PDF's own text layer on every PDF, whatever it contains; with
+    the default the result is MinerU's (covered by the ``slow`` tests below).
     """
 
-    @pytest.fixture(autouse=True)
-    def _require_docling(self, require_docling: None) -> None:
-        """nexus-c7gnx: these assert extraction_method=='docling'; skip cleanly
-        when the models are unavailable (local cold HF cache) instead of failing
-        on the silent PyMuPDF fallback. No-op in CI (models pre-fetched)."""
-
-    def test_ruled_table_pdf_uses_docling(self, ruled_table_pdf: Path) -> None:
-        """Ruled-table PDF (formerly pdfplumber rescue path) now uses Docling."""
-        result = PDFExtractor().extract(ruled_table_pdf)
-        assert result.metadata["extraction_method"] == "docling", (
-            f"Expected docling; got {result.metadata['extraction_method']!r}"
+    def test_ruled_table_pdf_uses_the_requested_extractor(self, ruled_table_pdf: Path) -> None:
+        result = PDFExtractor().extract(ruled_table_pdf, extractor="pymupdf")
+        assert result.metadata["extraction_method"] == "pymupdf", (
+            f"Expected pymupdf; got {result.metadata['extraction_method']!r}"
         )
 
-    def test_simple_pdf_uses_docling(self, simple_pdf: Path) -> None:
-        """Simple PDF uses Docling (single-tier, no conditional routing)."""
-        result = PDFExtractor().extract(simple_pdf)
-        assert result.metadata["extraction_method"] == "docling", (
-            f"Expected docling; got {result.metadata['extraction_method']!r}"
+    def test_simple_pdf_uses_the_requested_extractor(self, simple_pdf: Path) -> None:
+        result = PDFExtractor().extract(simple_pdf, extractor="pymupdf")
+        assert result.metadata["extraction_method"] == "pymupdf", (
+            f"Expected pymupdf; got {result.metadata['extraction_method']!r}"
         )
 
 
@@ -673,9 +686,8 @@ class TestFormulaPreservationOnRealPdf:
     # frozen invariant of (this PDF) × (pinned MinerU+conexus versions). If any
     # number drifts, the test fails and a human reviews the diff — that's the
     # correct fail-loud contract for fixture-based regression guards.
-    _EXPECTED_QUICK_SCREEN = 11             # _has_formulas_quick() return
     _EXPECTED_META_FORMULA_COUNT = 22       # MinerU's structured count (44 -> 22, nexus-v4xg7)
-    _EXPECTED_REGEX_MARKERS = 8             # (16 -> 8, nexus-v4xg7) _count_formula_markers — sum
+    _EXPECTED_REGEX_MARKERS = 8             # (16 -> 8, nexus-v4xg7) the regex marker count below — sum
                                             # of 2 $$..$$ blocks (counted as
                                             # blocks) + 6 \frac\b commands
                                             # (counted independently; 4 + 12
@@ -716,9 +728,8 @@ class TestFormulaPreservationOnRealPdf:
     # 1562 chars, 5 "efficient", no formulas. That gives 27 = 2 x 16 - 5 and
     # exact halves for every formula count; text predicts 2 x 30198 - 1562 =
     # 58834 against 58843, 9 chars unaccounted for. The pinned
-    # snippet is still present. _EXPECTED_QUICK_SCREEN is PyMuPDF-only and
-    # did not move. The history comments above describe deltas measured on
-    # the doubled text and are kept as the record of those changes.
+    # snippet is still present. The history comments above describe deltas
+    # measured on the doubled text and are kept as the record of those changes.
     _EXPECTED_TEXT_LENGTH = 30198           # full extracted text
     _EXPECTED_EFFICIENT_COUNT = 16          # "efficient" occurrences; 0 under MinerU 3.4.5
     _EXPECTED_PAGE_COUNT = 17               # MinerU pdf_info entries; PyMuPDF agrees
@@ -735,28 +746,12 @@ class TestFormulaPreservationOnRealPdf:
         r"\left(1-{\bigg(}1-{\frac{1}{m}}{\bigg)}^{kn}"
     )
 
-    def test_fixture_quick_screen_detects_formulas(self) -> None:
-        """Sanity: the fixture must produce exactly the locked formula count.
-        Drift indicates either the fixture changed, PyMuPDF behavior shifted,
-        or the math-Unicode set was edited — any of which invalidates the
-        downstream regression assertions and demands a human review.
-        """
-        from nexus.pdf_extractor import _has_formulas_quick
-
-        assert self._FIXTURE.exists(), f"missing fixture: {self._FIXTURE}"
-        actual = _has_formulas_quick(self._FIXTURE)
-        assert actual == self._EXPECTED_QUICK_SCREEN, (
-            f"_has_formulas_quick returned {actual}; locked value is "
-            f"{self._EXPECTED_QUICK_SCREEN}. If this is a legitimate change "
-            f"(fixture replaced, PyMuPDF upgraded, _MATH_UNICODE edited), "
-            f"update the constant and re-derive all sibling expected values."
-        )
-
-    def test_auto_raises_when_mineru_unavailable(self) -> None:
-        """Auto mode on a formula-bearing PDF must raise when the
-        formula-aware extractor (MinerU) is unavailable. Before this fix,
-        every install without the ``mineru`` extra silently received
-        formula-stripped Docling output stamped with formula_count=0."""
+    def test_mineru_unavailable_raises_instead_of_stripping_formulas(self) -> None:
+        """The default extractor on a formula-bearing PDF must raise when the formula-aware
+        extractor (MinerU) is unavailable. Before nexus-2fyb, every install without the
+        ``mineru`` extra silently received formula-stripped output stamped with
+        formula_count=0. RDR-237 removed the extractor that did that; this keeps the
+        contract: nothing else answers for a MinerU that cannot load."""
         from nexus.pdf_extractor import PDFExtractor
 
         extractor = PDFExtractor()
@@ -764,14 +759,13 @@ class TestFormulaPreservationOnRealPdf:
             extractor,
             "_extract_with_mineru",
             side_effect=ImportError("No module named 'mineru'"),
-        ):
+        ), patch("nexus.pdf_stack.missing_message", return_value=None):
             with pytest.raises(RuntimeError) as excinfo:
-                extractor.extract(self._FIXTURE, extractor="auto")
+                extractor.extract(self._FIXTURE)
         msg = str(excinfo.value)
-        assert "formulas" in msg
-        # mineru is a default dep since nexus-2fyb — missing = corrupt install
+        # mineru is part of the installed stack: missing = corrupt install
         assert "uv tool install --reinstall conexus" in msg
-        assert "--extractor docling" in msg
+        assert "--extractor pymupdf" in msg
 
     @pytest.mark.slow
     def test_mineru_path_preserves_formulas(
@@ -796,7 +790,7 @@ class TestFormulaPreservationOnRealPdf:
         ``|| true`` is gone), and the release process (AGENTS.md "Cutting
         a release" / docs/contributing.md § Release Process) invoked the
         shakedown UNCONDITIONALLY on every release (nexus-7g40u: a
-        diff-based trigger was tried and rejected -- MinerU/docling
+        diff-based trigger was tried and rejected -- MinerU
         version drift lands via ``uv.lock`` alone, with no matching
         ``pyproject.toml`` pin to diff against, so any trigger list is
         under-inclusive by construction) so that coverage is real rather
@@ -826,9 +820,9 @@ class TestFormulaPreservationOnRealPdf:
         """
         mineru_importorskip()
         _give_mineru_its_models(monkeypatch, tmp_path)
-        from nexus.pdf_extractor import PDFExtractor, _count_formula_markers
+        from nexus.pdf_extractor import PDFExtractor
 
-        result = PDFExtractor().extract(self._FIXTURE, extractor="auto")
+        result = PDFExtractor().extract(self._FIXTURE)
         assert result.metadata["extraction_method"] == "mineru", (
             f"expected mineru; got {result.metadata['extraction_method']!r}"
         )
@@ -853,7 +847,7 @@ class TestFormulaPreservationOnRealPdf:
         # Formula motifs — what chunkers/embedders/search actually see.
         assert text.count("$$") == self._EXPECTED_DOLLAR_DOLLAR_COUNT
         assert text.count(r"\frac") == self._EXPECTED_FRAC_COUNT
-        assert _count_formula_markers(text) == self._EXPECTED_REGEX_MARKERS
+        assert _regex_formula_markers(text) == self._EXPECTED_REGEX_MARKERS
 
         # Ligatures survive. MinerU 3.4.5 collapsed every "ff" to "f"
         # ("efficient" -> "eficient", 67 words in this paper, 0 left), which
@@ -904,7 +898,7 @@ class TestFormulaPreservationOnRealPdf:
         mineru_importorskip()
         from nexus.pdf_extractor import PDFExtractor
 
-        result = PDFExtractor().extract(self._TABLE_FIXTURE, extractor="mineru")
+        result = PDFExtractor().extract(self._TABLE_FIXTURE)
         assert result.metadata["extraction_method"] == "mineru"
         text = result.text
         assert "<table>" in text

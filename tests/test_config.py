@@ -286,7 +286,7 @@ def test_set_config_value_dict_intermediates_merge_not_replace(home: Path) -> No
     merged into (siblings preserved), never wholesale-replaced."""
     cfg = home / ".config" / "nexus" / "config.yml"
     cfg.parent.mkdir(parents=True)
-    cfg.write_text("pdf:\n  extractor: docling\n  timeout: 30\n")
+    cfg.write_text("pdf:\n  extractor: auto\n  timeout: 30\n")
 
     set_config_value("pdf.extractor", "mineru")
 
@@ -439,7 +439,7 @@ def test_empty_sections_read_as_empty_dicts(home: Path) -> None:
     (home / ".nexus.yml").write_text("tuning:\npdf:\n")
     cfg = cfgmod.load_config(repo_root=home)
     assert isinstance(cfg["tuning"], dict) and cfg["tuning"], "the default tuning section survives"
-    assert cfg["pdf"]["extractor"] == "auto"
+    assert cfg["pdf"]["extractor"] == "mineru"
     assert cfgmod.get_credential("service_url") == ""
     assert isinstance(cfgmod.is_local_mode(), bool)
     assert isinstance(cfgmod.get_tuning_config(repo_root=home).vector_weight, float)

@@ -2769,27 +2769,26 @@ def _check_orphan_pipelines() -> list[HealthResult]:
     )]
 
 
-#: What docling's PDF pipeline imports when it runs. `nx doctor` looks these up
-#: without importing them (torch alone costs seconds).
-_DOCLING_PIPELINE_MODULES: tuple[str, ...] = (
-    "docling", "docling_core", "docling_parse", "docling_ibm_models", "cv2", "torch", "torchvision",
-)
+#: What MinerU's pipeline backend imports when it runs. `nx doctor` looks these up
+#: without importing them (torch alone costs seconds). ``cv2`` is the module whose
+#: package directory goes missing when two OpenCV distributions own it.
+_MINERU_PIPELINE_MODULES: tuple[str, ...] = ("mineru", "cv2", "torch", "torchvision")
 
 
-def _check_docling_importable(
+def _check_mineru_importable(
     find_spec: Callable[[str], object | None] | None = None,
 ) -> list[HealthResult]:
-    """Every PDF without formulas is extracted by docling, and a docling
-    pass that dies on an import is an error, not a fallback
-    (``PDFExtractor._docling_not_importable``). This row says so before an
+    """Every PDF is extracted by MinerU unless the user chose ``--extractor pymupdf``, and a
+    MinerU pass that dies on an import is an error, not a fallback
+    (``PDFExtractor._extract_with_mineru_guarded``). This row says so before an
     index run does. It resolves each module with ``find_spec`` and imports
     nothing, which is enough for the failure seen in the field shape: a
     distribution still listed while its package directory is gone (two
     distributions owning ``cv2/``, one uninstalled).
 
-    Always applicable: these are required dependencies, so a fresh install
-    has them and the row is a pass there. *find_spec* is the resolver, for
-    tests; the default is ``importlib.util.find_spec``.
+    Only emitted once the PDF stack is present (``_check_pdf_support`` gates it): the stack
+    is an on-demand extra, so a box without it has its own row. *find_spec* is the resolver,
+    for tests; the default is ``importlib.util.find_spec``.
     """
     if find_spec is None:
         import importlib.util  # noqa: PLC0415 — deferred: only this check needs it
@@ -2797,7 +2796,7 @@ def _check_docling_importable(
         find_spec = importlib.util.find_spec
 
     missing: list[str] = []
-    for name in _DOCLING_PIPELINE_MODULES:
+    for name in _MINERU_PIPELINE_MODULES:
         try:
             found = find_spec(name) is not None
         except (ImportError, ValueError):
@@ -2806,19 +2805,96 @@ def _check_docling_importable(
             missing.append(name)
     if not missing:
         return [HealthResult(
-            label="PDF extraction (docling)", ok=True,
-            detail=f"{len(_DOCLING_PIPELINE_MODULES)} pipeline modules present",
+            label="PDF extraction (mineru)", ok=True,
+            detail=f"{len(_MINERU_PIPELINE_MODULES)} pipeline modules present",
         )]
     from nexus import install_advice  # noqa: PLC0415 — deferred import
 
     reinstall = install_advice.upgrade_command("uv tool install --reinstall conexus")
     return [HealthResult(
-        label="PDF extraction (docling)", ok=False,
-        detail=f"cannot find {', '.join(missing)}: indexing a PDF without formulas will fail",
+        label="PDF extraction (mineru)", ok=False,
+        detail=f"cannot find {', '.join(missing)}: indexing a PDF will fail",
         fix_suggestions=[
             f"Reinstall: {reinstall}",
             "In a source checkout: uv sync --reinstall-package opencv-python-headless (for a missing cv2)",
+            "For text only (no layout, tables or math) until it is repaired: --extractor pymupdf",
         ],
+    )]
+
+
+#: Directory-name prefixes the Docling extractor left in the Hugging Face hub cache
+#: (RDR-237 removed the extractor; nothing deletes its models).
+_LEFTOVER_DOCLING_CACHE_PREFIXES: tuple[str, ...] = (
+    "models--ds4sd--docling", "models--ds4sd--CodeFormula", "models--docling-project--",
+)
+
+
+def _hf_hub_cache_dir(environ: dict[str, str], home: Path) -> Path:
+    """Where ``huggingface_hub`` keeps downloaded models, by its own precedence."""
+    if environ.get("HF_HUB_CACHE"):
+        return Path(environ["HF_HUB_CACHE"])
+    if environ.get("HF_HOME"):
+        return Path(environ["HF_HOME"]) / "hub"
+    if environ.get("XDG_CACHE_HOME"):
+        return Path(environ["XDG_CACHE_HOME"]) / "huggingface" / "hub"
+    return home / ".cache" / "huggingface" / "hub"
+
+
+def _tree_bytes(root: Path) -> int:
+    """Bytes under *root*, links counted as links (a Hugging Face snapshot is symlinks to blobs)."""
+    total = 0
+    for base, _dirs, files in os.walk(root, followlinks=False):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(base, name)).st_size
+            except OSError:
+                continue
+    return total
+
+
+def _check_leftover_docling_cache(
+    environ: dict[str, str] | None = None, home: Path | None = None,
+) -> list[HealthResult]:
+    """RDR-237: a Docling model cache left behind by the extractor it removed.
+
+    Not applicable (no row) unless one exists, which is the case on a virgin box and on any
+    box that never ran Docling. When one does, a warning row (never red) gives its size, where it
+    is and the command that deletes it; nothing deletes it on its own. Looks in the Hugging Face hub
+    cache (by ``HF_HUB_CACHE``, ``HF_HOME``, ``XDG_CACHE_HOME``, else ``~/.cache/huggingface/hub``)
+    and at ``NEXUS_DOCLING_ARTIFACTS_PATH`` when set.
+    """
+    env = dict(os.environ) if environ is None else environ
+    try:
+        base = home if home is not None else Path.home()
+    except (RuntimeError, KeyError):
+        return []
+    found: list[Path] = []
+    cache = _hf_hub_cache_dir(env, base)
+    try:
+        if cache.is_dir():
+            found.extend(
+                sorted(
+                    entry for entry in cache.iterdir()
+                    if entry.is_dir() and entry.name.startswith(_LEFTOVER_DOCLING_CACHE_PREFIXES)
+                )
+            )
+    except OSError:
+        pass
+    artifacts = env.get("NEXUS_DOCLING_ARTIFACTS_PATH", "").strip()
+    if artifacts and Path(artifacts).is_dir():
+        found.append(Path(artifacts))
+    if not found:
+        return []
+    size_gb = sum(_tree_bytes(path) for path in found) / 1e9
+    where = ", ".join(str(path) for path in found)
+    if sys.platform == "win32":
+        delete = "; ".join(f'Remove-Item -Recurse -Force "{path}"' for path in found)
+    else:
+        delete = "rm -rf " + " ".join(shlex.quote(str(path)) for path in found)
+    return [HealthResult(
+        label="Docling model cache", ok=False, warn=True,
+        detail=f"{size_gb:.1f} GB left from the removed Docling extractor, unused: {where}",
+        fix_suggestions=[f"Delete it: {delete}"],
     )]
 
 
@@ -2846,8 +2922,8 @@ def _pdf_support_row_with_opencv(detail: str) -> HealthResult:
 
     nexus-11x9o: both write ``site-packages/cv2/``, so whichever installed last
     owns the directory. The non-headless build needs a system ``libGL.so.1``; on a
-    Linux box without it ``import cv2`` fails and every PDF (docling and MinerU
-    both import cv2) fails with it. The release's install overrides keep only the
+    Linux box without it ``import cv2`` fails and every PDF (MinerU
+    imports cv2) fails with it. The release's install overrides keep only the
     headless build, so a box with both was installed by a route that ignores uv
     overrides (a bare ``uv tool install``, pip, pipx). Red on Linux, a warning
     elsewhere (the non-headless build loads there, but the pair is still two
@@ -2881,7 +2957,7 @@ def _check_pdf_support() -> list[HealthResult]:
     use. One row says where this box stands.
 
     * present (every module resolves, every version is on its pin): a pass,
-      followed by the docling pipeline-module row, which is only meaningful
+      followed by the MinerU pipeline-module row, which is only meaningful
       once the stack is here.
     * not installed: informational, never red. A fresh install has no PDF
       stack by design; the first PDF index installs it. The row names the
@@ -2908,7 +2984,7 @@ def _check_pdf_support() -> list[HealthResult]:
             )]
         return [
             _pdf_support_row_with_opencv(st.detail),
-            *_check_docling_importable(),
+            *_check_mineru_importable(),
         ]
     plan = pdf_stack.install_plan()
     held = pdf_stack.skipped_count()
@@ -2969,13 +3045,13 @@ def _check_installer_rebuild() -> list[HealthResult]:
 
 
 def _check_mineru_server() -> list[HealthResult]:
-    """nexus-far1c: report whether math PDFs will GET a MinerU server —
+    """nexus-far1c: report whether PDFs will GET a MinerU server —
     not whether one happens to be running at this instant.
 
     nexus-h1jk wrote this check against the pre-nexus-1qdb9 model, in
     which MinerU was a long-lived server the operator started by hand
     and kept up; "not reachable" therefore meant "the in-process
-    subprocess fallback will run, and math PDFs will OOM". nexus-1qdb9
+    subprocess fallback will run, and large PDFs will OOM". nexus-1qdb9
     made the server spawn ON DEMAND during extraction
     (``ensure_mineru_running``) and this check was never reconciled with
     it. A correctly-idle server rendered a red ✗ asserting a fallback
@@ -3065,7 +3141,7 @@ def _check_mineru_server() -> list[HealthResult]:
             label="MinerU server", ok=False,
             detail=(
                 f"{url} unreachable and mineru-api is not installed here; "
-                "math PDFs fall back to the in-process subprocess (OOM-risk)"
+                "PDFs fall back to the in-process subprocess (OOM-risk)"
             ),
             fix_suggestions=[
                 # nexus-pffc4: layout-aware — the uv form rebuilds over the
@@ -3090,7 +3166,7 @@ def _check_mineru_server() -> list[HealthResult]:
     return [HealthResult(
         label="MinerU server", ok=False,
         detail=(
-            f"not running and will not autostart ({reason}); math PDFs "
+            f"not running and will not autostart ({reason}); PDFs "
             "fall back to the in-process subprocess (OOM-risk)"
         ),
         fix_suggestions=[
@@ -11970,6 +12046,7 @@ def run_health_checks(
     results.extend(_check_orphan_checkpoints())
     results.extend(_check_orphan_pipelines())
     results.extend(_check_pdf_support())
+    results.extend(_check_leftover_docling_cache())  # RDR-237; not applicable without a cache
     results.extend(_check_installer_rebuild())
     results.extend(_check_mineru_server())
     results.extend(_check_t2_schema_applied())

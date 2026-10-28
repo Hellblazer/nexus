@@ -149,11 +149,73 @@ def _tuning_from_dict(raw: dict[str, Any]) -> TuningConfig:
     )
 
 
+#: The extractors ``pdf.extractor`` and ``--extractor`` name (RDR-237). ``mineru`` is the default:
+#: layout- and math-aware, with a per-page fallback ladder. ``pymupdf`` is the explicit text-only
+#: extractor and is never chosen for the user.
+DEFAULT_EXTRACTOR = "mineru"
+EXTRACTORS: tuple[str, ...] = (DEFAULT_EXTRACTOR, "pymupdf")
+#: Values that configs and scripts written before RDR-237 carry. They run as ``mineru``.
+EXTRACTOR_ALIASES: tuple[str, ...] = ("auto", "docling")
+#: What the CLI choices and the config loader accept.
+EXTRACTOR_CHOICES: tuple[str, ...] = (*EXTRACTORS, *EXTRACTOR_ALIASES)
+
+#: Keys of the one-line notices already printed in this process (tests clear it).
+_NOTICES_SHOWN: set[str] = set()
+_NOTICES_LOCK = threading.Lock()
+
+
+def notice_once(key: str, message: str) -> bool:
+    """Print *message* to stderr and the log, the first time *key* is seen in this process.
+
+    The accessors that read ``[pdf]`` re-read the config on every call, and an indexing run calls
+    them per page, so a deprecation notice has to be remembered or it would print per page. Returns
+    whether this call printed it.
+    """
+    with _NOTICES_LOCK:
+        if key in _NOTICES_SHOWN:
+            return False
+        _NOTICES_SHOWN.add(key)
+    _log.warning("deprecation_notice", key=key, notice=message)
+    click.echo(message, err=True)
+    return True
+
+
+def resolve_extractor(value: str, *, source: str) -> str:
+    """The extractor to run for *value*: itself if it is ``mineru`` or ``pymupdf``, ``mineru`` for
+    one of the :data:`EXTRACTOR_ALIASES`, with a one-line notice once per process naming *source*.
+
+    Anything outside :data:`EXTRACTOR_CHOICES` raises :class:`ValueError`. The config loader falls an
+    unknown value back to the default before it gets here, and the CLI refuses one at parse time.
+    """
+    if value in EXTRACTORS:
+        return value
+    if value not in EXTRACTOR_ALIASES:
+        raise ValueError(f"extractor must be one of {', '.join(EXTRACTOR_CHOICES)}; got {value!r}")
+    notice_once(
+        "extractor-alias",
+        f"notice: {source} says {value!r}, which now runs as {DEFAULT_EXTRACTOR!r} "
+        f"(the only layout- and math-aware extractor); use {DEFAULT_EXTRACTOR!r}, "
+        f"or 'pymupdf' for text only.",
+    )
+    return DEFAULT_EXTRACTOR
+
+
+def note_formula_oom_ignored() -> None:
+    """The one-line notice for ``--on-formula-oom``, retired by RDR-237: the per-page ladder
+    handles a page whose formula model runs out of memory, so the flag does nothing. Accepted and
+    ignored for one release, once per process."""
+    notice_once(
+        "on-formula-oom",
+        "notice: --on-formula-oom is retired and ignored: a page whose MinerU attempt fails "
+        "is retried without formulas, then read from its PDF text layer.",
+    )
+
+
 @dataclass(frozen=True)
 class PDFConfig:
     """PDF extraction settings from ``[pdf]`` config section."""
 
-    extractor: str = "auto"
+    extractor: str = DEFAULT_EXTRACTOR
     mineru_server_url: str = "http://127.0.0.1:8010"
     #: nexus-1qdb9: the PDF pipeline may spawn a local MinerU server on
     #: demand when it routes a document to MinerU and none is running.
@@ -257,18 +319,21 @@ def _pdf_int(pdf: dict, key: str, default: int, *, floor: int) -> int:
 
 
 def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
-    """Load PDF config. Invalid ``extractor`` falls back to ``"auto"``.
+    """Load PDF config. The default ``extractor`` is ``"mineru"``; an invalid one falls back to it.
 
     ``pymupdf`` (RDR-237) is the explicit text-only extractor; it is only ever set here or with
-    ``--extractor``, never chosen for the user.
+    ``--extractor``, never chosen for the user. ``auto`` and ``docling``, which configs written
+    before RDR-237 carry, load as ``mineru`` with a one-line notice once per process.
 
     A ``[pdf]`` integer key that holds no integer raises :class:`PdfConfigError` (a
     ``ValueError``) naming the key."""
     pdf = load_config(repo_root=repo_root).get("pdf", {})
-    extractor = pdf.get("extractor", "auto")
-    if extractor not in ("auto", "docling", "mineru", "pymupdf"):
+    extractor = pdf.get("extractor", DEFAULT_EXTRACTOR)
+    if extractor not in EXTRACTOR_CHOICES:
         _log.warning("invalid pdf.extractor config", value=extractor)
-        extractor = "auto"
+        extractor = DEFAULT_EXTRACTOR
+    else:
+        extractor = resolve_extractor(extractor, source="pdf.extractor in your config")
     return PDFConfig(
         extractor=extractor,
         mineru_server_url=pdf.get("mineru_server_url", "http://127.0.0.1:8010"),
@@ -1276,7 +1341,7 @@ _DEFAULTS: dict[str, Any] = {
         "include_untracked": False,
     },
     "pdf": {
-        "extractor": "auto",
+        "extractor": DEFAULT_EXTRACTOR,
         "mineru_server_url": "http://127.0.0.1:8010",
         "mineru_table_enable": True,
         "mineru_page_batch": 1,

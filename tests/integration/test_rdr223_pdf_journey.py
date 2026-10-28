@@ -87,7 +87,7 @@ class _FakeExtractor:
     lines: list[str] = []
     calls: list[str] = []
 
-    def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+    def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                 allow_degraded=False, on_heartbeat=None):
         self.calls.append(str(pdf_path))
         pos, bounds = 0, []
@@ -98,7 +98,7 @@ class _FakeExtractor:
             pos += len(line) + 1
         return ExtractionResult(
             text="\n".join(self.lines),
-            metadata={"extraction_method": "docling", "page_count": len(self.lines),
+            metadata={"extraction_method": "mineru", "page_count": len(self.lines),
                       "page_boundaries": bounds, "table_regions": [], "format": "markdown"})
 
 
@@ -369,7 +369,7 @@ def test_the_streaming_run_stamps_complete_only_after_its_metadata_post_pass(tmp
     doc, _ = _register(path, "stamp-order")
     stored = hvc.HttpVectorClient().get_collection(_COLLECTION).get(
         ids=[_sha(lines[0])], include=["metadatas"])["metadatas"][0]
-    assert stored["extraction_method"] == "docling", "the post-pass ran before the document was stamped"
+    assert stored["extraction_method"] == "mineru", "the post-pass ran before the document was stamped"
     assert _index_state(doc) == "complete"
 
 
@@ -1354,12 +1354,12 @@ def test_a_rerun_post_pass_updates_every_chunk_of_its_manifest_including_one_ano
     after = _stored_metadata(_COLLECTION, a_own + b_own + [s_chash])
     title_a = after[a_own[0]]["title"]
     assert title_a != title_b, "non-vacuity: the two PDFs resolve different titles"
-    assert all(after[c]["title"] == title_a and after[c]["extraction_method"] == "docling" for c in a_own)
+    assert all(after[c]["title"] == title_a and after[c]["extraction_method"] == "mineru" for c in a_own)
     # The shared chunk is A's too: its manifest names it, and B restamped it, so it is written
     # non-destructively (title and extraction_method replaced, nothing deleted or blanked; the unit
     # tests pin the rest). The value is the last writer's (A's, now), until the catalog carries it
     # (nexus-6pfgb.6); invert this assertion when the chunk-row keys are retired (nexus-6pfgb.27).
-    assert after[s_chash]["title"] == title_a and after[s_chash]["extraction_method"] == "docling"
+    assert after[s_chash]["title"] == title_a and after[s_chash]["extraction_method"] == "mineru"
     assert all(after[c]["title"] == title_b for c in b_own), "no chunk A does not own is touched"
     assert all(after[c].get("extraction_method") == before[c].get("extraction_method") for c in b_own)
 

@@ -153,7 +153,7 @@ def test_a_pymupdf_rerun_over_a_tripped_mineru_run_records_the_mixture(tmp_path,
     path = _write_real_pdf(tmp_path, marker, [texts[0], texts[1], texts[2], None, texts[4]])
 
     class _TrippingMineru:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             for i in (0, 1):
                 on_page(i, texts[i], {"page_number": i + 1, "text_length": len(texts[i]), "page_method": "mineru"})

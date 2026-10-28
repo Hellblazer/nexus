@@ -867,7 +867,7 @@ def test_index_pdf_quality_gate_failure_exits_nonzero_with_remedy(runner, fake_p
     def _raise(*args, **kwargs):
         raise ExtractionQualityError(
             "PDF doc.pdf failed the post-extraction quality gate "
-            "(extraction_method=docling): whitespace_ratio=0.0114 < floor "
+            "(extraction_method=mineru): whitespace_ratio=0.0114 < floor "
             "0.05. Remedy: retry with `--extractor mineru`, or rerun with "
             "`--allow-degraded-extraction` to index it anyway."
         )
@@ -952,14 +952,13 @@ def test_index_pdf_mineru_ladder_failures_exit_nonzero_without_a_traceback(
     assert isinstance(result.exception, SystemExit), "a ClickException exits; it is not re-raised"
 
 
-def test_index_pdf_on_formula_oom_help_says_it_is_ignored(runner):
-    """RDR-237: the flag is accepted and ignored for one release; its help must not promise
-    that 'fail' aborts the document or that 'docling' degrades a page."""
+def test_index_pdf_help_no_longer_lists_the_retired_on_formula_oom_flag(runner):
+    """RDR-237: the flag is accepted and ignored for one release (tests/test_extractor_aliases.py),
+    and hidden from the help so nobody learns it now."""
     result = runner.invoke(main, ["index", "pdf", "--help"])
     flat = " ".join(result.output.split())
 
-    assert "--on-formula-oom" in flat
-    assert "Accepted and ignored for one release" in flat
+    assert "--on-formula-oom" not in flat
     assert "aborts the document" not in flat
     assert "degrades only THAT page" not in flat
 
@@ -1362,16 +1361,19 @@ def test_md_collection_no_warning_when_corpus_default(runner, fake_md):
 _PDF_STUB = {"chunks": 1, "pages": [], "title": "", "author": ""}
 
 
-@pytest.mark.parametrize("extractor", ["auto", "mineru", "docling"])
-def test_extractor_valid_values(runner, fake_pdf, extractor):
+@pytest.mark.parametrize("flag, expected", [
+    (None, "mineru"), ("mineru", "mineru"), ("pymupdf", "pymupdf"),
+    ("auto", "mineru"), ("docling", "mineru"),
+])
+def test_extractor_valid_values(runner, fake_pdf, flag, expected):
     args = ["index", "pdf", str(fake_pdf)]
-    if extractor != "auto":
-        args += ["--extractor", extractor]
+    if flag is not None:
+        args += ["--extractor", flag]
     with patch("nexus.doc_indexer.index_pdf", return_value=_PDF_STUB) as m:
         result = runner.invoke(main, args)
     assert result.exit_code == 0, result.output
     _, kw = m.call_args
-    assert kw["extractor"] == extractor
+    assert kw["extractor"] == expected
 
 
 def test_extractor_invalid_rejected(runner, fake_pdf):
@@ -2609,7 +2611,7 @@ def test_pdf_dir_batch_identity_drop_surfaces_as_failure_entry(runner, home):
 
     with patch("nexus.doc_indexer.index_pdf", side_effect=_fake_index_pdf):
         result = runner.invoke(
-            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "mineru"],
         )
 
     assert result.exit_code != 0, result.output
@@ -2646,7 +2648,7 @@ def test_pdf_dir_heartbeat_ticks_during_a_slow_file_by_default(runner, home, mon
 
     with patch("nexus.doc_indexer.index_pdf", side_effect=_slow_index_pdf):
         result = runner.invoke(
-            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "mineru"],
         )
 
     assert result.exit_code == 0, result.output
@@ -2664,7 +2666,7 @@ def test_pdf_dir_heartbeat_silent_on_a_fast_run(runner, home):
 
     with patch("nexus.doc_indexer.index_pdf", return_value=3):
         result = runner.invoke(
-            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "mineru"],
         )
 
     assert result.exit_code == 0, result.output
@@ -2688,7 +2690,7 @@ def test_pdf_dir_heartbeat_disarmed_after_batch_completes(runner, home, monkeypa
 
     with patch("nexus.doc_indexer.index_pdf", return_value=3):
         result = runner.invoke(
-            main, ["index", "pdf", "--dir", str(d), "--extractor", "docling"],
+            main, ["index", "pdf", "--dir", str(d), "--extractor", "mineru"],
         )
 
     assert result.exit_code == 0, result.output

@@ -16,7 +16,7 @@ from nexus.pdf_extractor import ExtractionResult, PDFExtractor
 
 
 def _fake_dispatch(pages: list[tuple[int, str]]):
-    def dispatch(self, pdf_path, *, extractor, on_formula_oom, on_page):
+    def dispatch(self, pdf_path, *, extractor, on_page):
         for number, text in pages:
             if on_page is not None:
                 on_page(number - 1, text, {"page_number": number, "text_length": len(text)})
@@ -29,7 +29,7 @@ def test_pages_with_text_excludes_empty_pages(monkeypatch, tmp_path: Path) -> No
     pdf.write_bytes(b"%PDF-1.4\n")
     monkeypatch.setattr(PDFExtractor, "_extract_dispatch", _fake_dispatch([(1, "hello " * 20), (2, ""), (3, "world " * 20)]))
     monkeypatch.setattr("nexus.pdf_extractor._enforce_extraction_quality", lambda *a, **k: None)
-    result = PDFExtractor().extract(pdf, extractor="docling")
+    result = PDFExtractor().extract(pdf, extractor="mineru")
     assert result.metadata["pages_with_text"] == [1, 3]
     assert result.metadata["page_count"] == 3
 
@@ -40,7 +40,7 @@ def test_caller_on_page_still_fires(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(PDFExtractor, "_extract_dispatch", _fake_dispatch([(1, "a" * 30), (2, "b" * 30)]))
     monkeypatch.setattr("nexus.pdf_extractor._enforce_extraction_quality", lambda *a, **k: None)
     seen: list[int] = []
-    PDFExtractor().extract(pdf, extractor="docling", on_page=lambda i, t, m: seen.append(m["page_number"]))
+    PDFExtractor().extract(pdf, extractor="mineru", on_page=lambda i, t, m: seen.append(m["page_number"]))
     assert seen == [1, 2]
 
 
@@ -49,7 +49,7 @@ def test_mineru_batch_metadata_counts_every_page_of_the_batch(monkeypatch, tmp_p
     pdf = tmp_path / "x.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
 
-    def dispatch(self, pdf_path, *, extractor, on_formula_oom, on_page):
+    def dispatch(self, pdf_path, *, extractor, on_page):
         on_page(0, "batch text " * 10, {"page_number": 1, "text_length": 100, "page_numbers": [1, 2, 3]})
         on_page(3, "", {"page_number": 4, "text_length": 0, "page_numbers": [4, 5]})
         return ExtractionResult(text="batch text", metadata={"page_count": 5})

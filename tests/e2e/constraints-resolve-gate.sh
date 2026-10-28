@@ -41,7 +41,7 @@
 # --no-config keeps the repo's [tool.uv] table out of it for the same reason.
 #
 # Checks that keep a green from being vacuous. (1) Every [pdf] compile must pin
-# docling-slim and mineru, the packages the extra exists for, and reach a pin
+# mineru and pdftext, the packages the extra exists for, and reach a pin
 # count near the real lock's (a half-resolve is a failure). (2) Each Linux [pdf]
 # cell must resolve torch to its backend's local version (+cpu, +cu130, +cu126).
 # (3) A NEGATIVE CONTROL: macOS 13 must NOT resolve, and must fail with uv's
@@ -74,7 +74,7 @@ CONSTRAINTS="${NX_RESOLVE_CONSTRAINTS:-$REPO_ROOT/src/nexus/_install/constraints
 MIN_PINS_DEFAULT="${NX_RESOLVE_MIN_PINS_DEFAULT:-110}"
 MIN_PINS_PDF="${NX_RESOLVE_MIN_PINS_PDF:-180}"
 # Every [pdf] compile must pin these (anchored regexes over the compiled output).
-PDF_REQUIRED=("^docling-slim==" "^mineru==")
+PDF_REQUIRED=("^mineru==" "^pdftext==")
 # The literal size of CELLS. Hard-coded on purpose: deleting a row must fail.
 EXPECTED=22
 

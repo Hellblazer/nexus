@@ -44,7 +44,7 @@ def _fake_pdf_chunks(overridden: bool):
             section_type="",
             tags="pdf",
             category="paper",
-            extraction_method="mineru" if overridden else "docling",
+            extraction_method="mineru+degraded" if overridden else "mineru",
             quality_gate_overridden=overridden,
         )
         # Two chunks, so the one-chunk batcher in _index refuses the file (oversize path).
@@ -122,7 +122,7 @@ def test_clean_force_reindex_clears_stale_quality_gate_override(
 
     meta = _stored(t3)
     assert "quality_gate_overridden" not in meta, meta
-    assert meta.get("extraction_method") == "docling", meta
+    assert meta.get("extraction_method") == "mineru", meta
 
 
 def test_without_delete_keys_the_stale_override_survives(

@@ -61,7 +61,7 @@ def test_ne_is_not_a_range_op():
 
 def test_same_key_equality_twice_raises() -> None:
     with pytest.raises(ValueError, match="extraction_method"):
-        parse_where(["extraction_method=mineru", "extraction_method=mineru+docling-degraded"])
+        parse_where(["extraction_method=mineru", "extraction_method=mineru+degraded"])
 
 
 def test_same_key_equality_twice_error_names_both_values() -> None:

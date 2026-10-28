@@ -54,7 +54,7 @@ def fake_pdf(home: Path) -> Path:
 def _run_dry_run(runner: CliRunner, pdf: Path) -> tuple[object, dict]:
     """Invoke ``--dry-run`` with ``index_pdf`` stubbed; capture its kwargs.
 
-    ``index_pdf`` does real extraction (Docling), which is integration-scope.
+    ``index_pdf`` does real extraction (MinerU), which is integration-scope.
     The contract under test is what the dry-run HANDS it, so stub it and
     inspect the call.
     """

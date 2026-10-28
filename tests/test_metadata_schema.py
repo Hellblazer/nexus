@@ -447,7 +447,7 @@ def test_normalize_output_fits_under_chroma_cap() -> None:
         "bib_citation_count": 10,
         "bib_semantic_scholar_id": "ss",
         "format": "pdf",
-        "extraction_method": "docling",
+        "extraction_method": "mineru",
         "filename": "p.pdf",
         "file_extension": ".pdf",
         "programming_language": "",

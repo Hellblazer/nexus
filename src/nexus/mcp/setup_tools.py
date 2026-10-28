@@ -60,7 +60,7 @@ LOCAL_SIZE_UP_TO: str = "about 0.8 GB to download (1.0 GB on Linux), 2.8 to 3.0 
 CLI_SIZE_UP_TO: str = "about 0.5 GB to download (0.6 GB on Linux), 2.0 to 2.3 GB on disk"
 
 SIZES_NOTE: str = (
-    "These sizes include PDF support (docling, MinerU and torch). They were measured on 7.86.0 on macOS and Linux; "
+    "These sizes include PDF support (MinerU and torch). They were measured on 7.86.0 on macOS and Linux; "
     "Windows was not measured. They are not a promise."
 )
 SLIM_LINE: str = (
@@ -111,7 +111,7 @@ AUTOSTART_DESCRIPTION: str = (
 )
 
 SLIM_DESCRIPTION: str = (
-    "true only if the user asked to leave PDF support (docling, MinerU and torch) out of the install. Omit it otherwise: "
+    "true only if the user asked to leave PDF support (MinerU and torch) out of the install. Omit it otherwise: "
     "omitted installs everything, except that it resumes an unfinished slim run as slim. false installs everything even then, "
     "which is the answer for a user who left PDF support out in an earlier run and now wants it. "
     "A slim install fetches PDF support the first time a PDF is indexed."

@@ -53,8 +53,7 @@ class TestMineruBuildResult:
     def test_extraction_method_reflects_ladder_degradation(self, dummy_pdf):
         """nexus-1oguj, RDR-237: when any page settled below rung 1 the recorded
         extraction_method must be the honest mixed aggregate, not a bare
-        'mineru' that overstates coverage (it was 'mineru+docling-degraded' when
-        the degrade was to Docling)."""
+        'mineru' that overstates coverage."""
         result = PDFExtractor._mineru_build_result(
             dummy_pdf, "# Title", [], [{"page_idx": 0, "para_blocks": []}],
             extraction_pages={"mineru-no-formula": [1]},
@@ -78,7 +77,7 @@ class TestMineruBuildResult:
             "page_boundaries", "format",
             "pdf_title", "pdf_author", "pdf_subject", "pdf_keywords",
             "pdf_creator", "pdf_producer", "pdf_creation_date", "pdf_mod_date",
-            "docling_title", "table_regions",
+            "table_regions",
         }
         missing = required_keys - result.metadata.keys()
         assert not missing, f"Missing metadata keys: {missing}"

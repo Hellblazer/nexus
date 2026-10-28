@@ -908,7 +908,7 @@ def _extract_identifiers_for_title(
     Shared by the OpenAlex direct-lookup path and the RDR-139 Layer C
     DT-CrossRef gap-fill so the chunk scan happens at most once per document.
 
-    Scans ALL chunks: Docling's reading-order extraction can put the page-1
+    Scans ALL chunks: a layout extractor's reading order can put the page-1
     DOI text into chunks 0-4 OR much deeper depending on column layout,
     abstract length, and figure placement (live evidence on knowledge__delos:
     9/15 papers have an extractable DOI somewhere in full text but only 2/15

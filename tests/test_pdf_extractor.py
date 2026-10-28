@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-021 + RDR-044: PDFExtractor — extraction backends and auto-detect routing."""
-import sys
+"""PDFExtractor: backend routing (MinerU by default, PyMuPDF on request), the PyMuPDF paths,
+and the failure messages (RDR-021, RDR-044, RDR-237 Phase 1 Step 3)."""
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -28,37 +28,7 @@ def _make_result(method: str, text: str = "some text") -> ExtractionResult:
     )
 
 
-def _make_mock_docling(pages: list[str], title: str = ""):
-    mock_doc = MagicMock()
-    mock_doc.num_pages.return_value = len(pages)
-    mock_doc.export_to_markdown.side_effect = pages
-
-    mock_result = MagicMock()
-    mock_result.document = mock_doc
-
-    mock_converter = MagicMock()
-    mock_converter.convert.return_value = mock_result
-    return mock_converter, mock_doc
-
-
-def _make_item(text: str, label: str, page_no: int) -> MagicMock:
-    prov = MagicMock()
-    prov.page_no = page_no
-    item = MagicMock()
-    item.text = text
-    item.label = label
-    item.prov = [prov]
-    return item
-
-
-def _make_typed_item(type_name: str, page_no: int = 1) -> MagicMock:
-    item = MagicMock()
-    type(item).__name__ = type_name
-    item.prov = [MagicMock(page_no=page_no)]
-    return item
-
-
-def _full_metadata(*, method="docling", formula_count=0, text_len=23, **overrides):
+def _full_metadata(*, method="mineru", formula_count=0, text_len=23, **overrides):
     base = {
         "extraction_method": method,
         "page_count": 1,
@@ -66,7 +36,6 @@ def _full_metadata(*, method="docling", formula_count=0, text_len=23, **override
         "formula_count": formula_count,
         "page_boundaries": [{"page_number": 1, "start_char": 0, "page_text_length": text_len}],
         "table_regions": [],
-        "docling_title": "",
         "pdf_title": "",
         "pdf_author": "",
         "pdf_subject": "",
@@ -97,194 +66,7 @@ def _mock_pymupdf_doc(pages_text: list[str], metadata: dict | None = None):
     return mock_pymupdf
 
 
-@pytest.fixture
-def docling_sys_modules():
-    mock_opts = MagicMock()
-    mock_pipeline = MagicMock()
-    mock_pipeline.PdfPipelineOptions.return_value = mock_opts
-    mock_docling = MagicMock()
-    mock_docling.PdfFormatOption = MagicMock()
-    modules = {
-        "docling": MagicMock(),
-        "docling.document_converter": mock_docling,
-        "docling.datamodel": MagicMock(),
-        "docling.datamodel.pipeline_options": mock_pipeline,
-    }
-    return modules, mock_opts, mock_docling
-
-
-# ── one converter per process (nexus-l4kbc) ─────────────────────────────────
-
-
-def test_extractors_share_one_converter_per_configuration(docling_sys_modules, tmp_path, monkeypatch):
-    """Callers build a PDFExtractor per PDF. Each DocumentConverter loads about 2 GB of models
-    that a dropped converter does not return, so the converter is built once per process for
-    each (fast or enriched, artifacts path) and every extractor gets that one."""
-    modules, _opts, mock_docling = docling_sys_modules
-    mock_docling.DocumentConverter.side_effect = lambda **_kw: object()
-    monkeypatch.delenv("NEXUS_DOCLING_ARTIFACTS_PATH", raising=False)
-    with patch.dict(sys.modules, modules):
-        first = PDFExtractor()._get_converter()
-        second = PDFExtractor()._get_converter()
-        assert second is first
-        assert mock_docling.DocumentConverter.call_count == 1
-
-        enriched = PDFExtractor()._get_converter(enriched=True)
-        assert enriched is not first
-        assert PDFExtractor()._get_converter(enriched=True) is enriched
-        assert mock_docling.DocumentConverter.call_count == 2
-
-        monkeypatch.setenv("NEXUS_DOCLING_ARTIFACTS_PATH", str(tmp_path))
-        elsewhere = PDFExtractor()._get_converter()
-        assert elsewhere is not first, "a different artifacts directory is a different converter"
-        assert mock_docling.DocumentConverter.call_count == 3
-
-
-def test_a_fake_docling_module_never_receives_or_replaces_the_real_converter(docling_sys_modules, monkeypatch):
-    """The shared table is keyed on the DocumentConverter class, so two different docling modules
-    (a test double and the real one, or two doubles) cannot hand each other their converter."""
-    monkeypatch.delenv("NEXUS_DOCLING_ARTIFACTS_PATH", raising=False)
-    modules, _opts, mock_docling = docling_sys_modules
-    with patch.dict(sys.modules, modules):
-        from_first_module = PDFExtractor()._get_converter()
-    other = MagicMock()
-    other.PdfFormatOption = MagicMock()
-    with patch.dict(sys.modules, {**modules, "docling.document_converter": other}):
-        from_second_module = PDFExtractor()._get_converter()
-    assert from_second_module is not from_first_module
-    assert other.DocumentConverter.call_count == 1 and mock_docling.DocumentConverter.call_count == 1
-
-
-# ── extract() primary path ──────────────────────────────────────────────────
-
-
-def test_extract_uses_docling_by_default(extractor, dummy_pdf):
-    expected = _make_result("docling")
-    with patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_docling:
-        result = extractor.extract(dummy_pdf)
-    mock_docling.assert_called_once_with(dummy_pdf, enriched=False)
-    assert result.metadata["extraction_method"] == "docling"
-
-
-@pytest.mark.parametrize("mode", ["docling", "auto"])
-def test_a_docling_import_failure_is_an_error_not_a_pymupdf_fallback(extractor, dummy_pdf, mode):
-    """A docling failure on one PDF falls back to PyMuPDF; a docling that cannot be IMPORTED is a
-    broken install, and falling back there quietly gives every PDF the plain extraction."""
-    boom = ModuleNotFoundError("No module named 'cv2'")
-    with (
-        patch("nexus.pdf_extractor._has_formulas_quick", return_value=0),
-        patch.object(extractor, "_extract_with_docling", side_effect=boom),
-        patch.object(extractor, "_extract_normalized") as fallback,
-    ):
-        with pytest.raises(RuntimeError, match="docling could not be loaded") as excinfo:
-            extractor.extract(dummy_pdf, extractor=mode)
-    assert excinfo.value.__cause__ is boom
-    assert "cv2" in str(excinfo.value) and "nx doctor" in str(excinfo.value)
-    assert "Reinstall with `" in str(excinfo.value), "the remedy is whatever install_advice names for this install"
-    fallback.assert_not_called()
-
-
-def test_extract_falls_back_on_docling_exception(extractor, dummy_pdf):
-    expected = _make_result("pymupdf_normalized")
-    with patch.object(extractor, "_extract_with_docling", side_effect=RuntimeError("crash")):
-        with patch.object(extractor, "_extract_normalized", return_value=expected) as mock_norm:
-            result = extractor.extract(dummy_pdf)
-    # nexus-i0cwh: extract() always passes its own pages_with_text collector
-    # as on_page (which forwards to the caller's, None here).
-    mock_norm.assert_called_once()
-    assert mock_norm.call_args.args == (dummy_pdf,)
-    assert callable(mock_norm.call_args.kwargs["on_page"])
-    assert result.metadata["extraction_method"] == "pymupdf_normalized"
-
-
-# ── _extract_with_docling — page boundaries ─────────────────────────────────
-
-
-def test_extract_with_docling_page_boundaries(extractor, dummy_pdf):
-    mock_converter, mock_doc = _make_mock_docling(["# Page 1", "", "## Page 3"])
-    extractor._converter_enriched = mock_converter
-
-    with patch.object(extractor, "_extract_title", return_value="Test Title"):
-        result = extractor._extract_with_docling(dummy_pdf)
-
-    boundaries = result.metadata["page_boundaries"]
-    assert len(boundaries) == 2
-    assert boundaries[0]["page_number"] == 1
-    assert boundaries[1]["page_number"] == 3
-    assert result.metadata["extraction_method"] == "docling"
-
-
-def test_extract_with_docling_boundary_positions(extractor, dummy_pdf):
-    page1 = "# Title\n\nBody text."   # 20 chars
-    page2 = "## Section\n\nMore."     # 18 chars
-    mock_converter, mock_doc = _make_mock_docling([page1, page2])
-    extractor._converter_enriched = mock_converter
-
-    with patch.object(extractor, "_extract_title", return_value=""):
-        result = extractor._extract_with_docling(dummy_pdf)
-
-    boundaries = result.metadata["page_boundaries"]
-    assert boundaries[0]["start_char"] == 0
-    assert boundaries[1]["start_char"] == boundaries[0]["page_text_length"]
-
-
-def test_extract_with_docling_raises_on_empty_output(extractor, dummy_pdf):
-    # nexus-deyd5: reclassified from a bare RuntimeError to
-    # UnextractableContentError (a nexus.errors.PER_RECORD_SURVIVABLE_
-    # EXCEPTIONS member) so a single unextractable file is skippable by
-    # run_file_loop instead of aborting the whole nx index repo run.
-    mock_converter, mock_doc = _make_mock_docling(["", "", ""])
-    extractor._converter_enriched = mock_converter
-    with pytest.raises(UnextractableContentError, match="empty output"):
-        extractor._extract_with_docling(dummy_pdf)
-
-
-def test_extract_with_docling_stores_title(extractor, dummy_pdf):
-    mock_converter, mock_doc = _make_mock_docling(["# Content"])
-    extractor._converter_enriched = mock_converter
-
-    with patch.object(extractor, "_extract_title", return_value="My Paper"):
-        result = extractor._extract_with_docling(dummy_pdf)
-    assert result.metadata["docling_title"] == "My Paper"
-
-
-# ── _extract_title ───────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize("items, iterate_side_effect, expected", [
-    pytest.param(
-        [("Some text block", "text", 1), ("My Great Paper", "title", 1), ("Other", "section_header", 1)],
-        None, "My Great Paper",
-        id="first_title_label",
-    ),
-    pytest.param(
-        [("Abstract", "section_header", 1), ("My Real Title", "title", 1)],
-        None, "My Real Title",
-        id="skips_abstract_keyword",
-    ),
-    pytest.param(
-        [("Page 2 Title", "title", 2), ("Short Title Here", "title", 1)],
-        None, "Short Title Here",
-        id="skips_page2_items",
-    ),
-    pytest.param(
-        [("Short title text", "text", 1)],
-        "two_passes", "Short title text",
-        id="fallback_short_text",
-    ),
-    pytest.param([], None, "", id="empty_returns_empty"),
-])
-def test_extract_title(extractor, items, iterate_side_effect, expected):
-    doc = MagicMock()
-    mock_items = [(_make_item(t, l, p), None) for t, l, p in items]
-    if iterate_side_effect == "two_passes":
-        doc.iterate_items.side_effect = [iter(mock_items), iter(mock_items)]
-    else:
-        doc.iterate_items.return_value = iter(mock_items)
-    assert extractor._extract_title(doc) == expected
-
-
-# ── _extract_normalized (fallback) ──────────────────────────────────────────
+# ── _extract_normalized (whole-document PyMuPDF read) ───────────────────────
 
 
 def test_extract_normalized_tracks_page_boundaries(extractor, dummy_pdf):
@@ -297,11 +79,11 @@ def test_extract_normalized_tracks_page_boundaries(extractor, dummy_pdf):
     assert result.metadata["extraction_method"] == "pymupdf_normalized"
 
 
-def test_extract_normalized_includes_docling_title_empty(extractor, dummy_pdf):
+def test_extract_normalized_reads_the_pdf_title(extractor, dummy_pdf):
+    """RDR-237: the title chain starts at ``pdf_title`` (XMP)."""
     mock_pymupdf = _mock_pymupdf_doc(["Some text here."], metadata={"title": "PDF Meta Title"})
     with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
         result = extractor._extract_normalized(dummy_pdf)
-    assert result.metadata["docling_title"] == ""
     assert result.metadata["pdf_title"] == "PDF Meta Title"
 
 
@@ -310,8 +92,8 @@ def test_extract_normalized_raises_on_empty_output(extractor, dummy_pdf):
     ExtractionResult with text='' when the PDF was image-only or
     extraction failed page-by-page. Downstream the empty text
     produced 0 chunks and the indexer reported success with no
-    chunks indexed (a silent failure mode). Symmetry with
-    _extract_with_docling: empty output is a hard error -- LOUD, per file
+    chunks indexed (a silent failure mode). Empty output is a hard
+    error -- LOUD, per file
     (nexus-aold's original intent), but nexus-deyd5 reclassified it from a
     bare RuntimeError to UnextractableContentError so run_file_loop treats
     it as a per-file skip rather than aborting the whole run."""
@@ -321,100 +103,14 @@ def test_extract_normalized_raises_on_empty_output(extractor, dummy_pdf):
             extractor._extract_normalized(dummy_pdf)
 
 
-# ── _get_converter lazy init ────────────────────────────────────────────────
-
-
-def test_get_converter_is_lazy(extractor):
-    assert extractor._converter is None
-
-
-@pytest.mark.parametrize("enriched", [False, True], ids=["fast", "enriched"])
-def test_get_converter_caches_instance(extractor, docling_sys_modules, enriched):
-    modules, _, _ = docling_sys_modules
-    with patch.dict("sys.modules", modules):
-        c1 = extractor._get_converter(enriched=enriched)
-        c2 = extractor._get_converter(enriched=enriched)
-    assert c1 is c2
-
-
-def test_get_converter_enriched_and_fast_are_separate(extractor, docling_sys_modules):
-    modules, _, mock_docling = docling_sys_modules
-    mock_docling.DocumentConverter.side_effect = [MagicMock(name="fast"), MagicMock(name="enriched")]
-    with patch.dict("sys.modules", modules):
-        fast = extractor._get_converter(enriched=False)
-        enriched = extractor._get_converter(enriched=True)
-    assert fast is not enriched
-
-
-# ── _normalize_whitespace_edge_cases ────────────────────────────────────────
-
-
 @pytest.mark.parametrize("input_text, expected", [
     ("hello\tworld", "hello world"),
-    ("word\u00a0\u00a0another", "word another"),
+    ("word  another", "word another"),
     ("a\n\n\n\n\nb", "a\n\n\nb"),
     ("a\n\n\nb", "a\n\n\nb"),
 ], ids=["tab", "nbsp", "excess_newlines", "three_newlines_preserved"])
 def test_normalize_whitespace(input_text, expected):
     assert _normalize_whitespace_edge_cases(input_text) == expected
-
-
-# ── RDR-044 Phase 0: formula detection + enrichment ────────────────────────
-
-
-@pytest.mark.parametrize("enriched, expected_flag", [
-    (True, True),
-    (False, False),
-    (None, False),
-], ids=["enriched_true", "enriched_false", "default_none"])
-def test_get_converter_formula_enrichment(extractor, docling_sys_modules, enriched, expected_flag):
-    modules, mock_opts, _ = docling_sys_modules
-    with patch.dict("sys.modules", modules):
-        if enriched is None:
-            extractor._get_converter()
-        else:
-            extractor._get_converter(enriched=enriched)
-    assert mock_opts.do_formula_enrichment is expected_flag
-
-
-@pytest.mark.parametrize("items, expected_count", [
-    ([("FormulaItem", 1), ("TextItem", 1), ("FormulaItem", 2)], 2),
-    ([("TextItem", 1)], 0),
-], ids=["two_formulas", "zero_formulas"])
-def test_formula_count_in_metadata(extractor, dummy_pdf, items, expected_count):
-    pages = ["# Page 1"] + (["## Page 2"] if any(p > 1 for _, p in items) else [])
-    mock_converter, mock_doc = _make_mock_docling(pages)
-    mock_doc.iterate_items.return_value = iter([
-        (_make_typed_item(name, page), None) for name, page in items
-    ])
-    extractor._converter_enriched = mock_converter
-
-    with patch.object(extractor, "_extract_title", return_value=""):
-        result = extractor._extract_with_docling(dummy_pdf)
-    assert result.metadata["formula_count"] == expected_count
-
-
-@pytest.mark.parametrize("item_type, expect_warning", [
-    ("FormulaItem", True),
-    ("TextItem", False),
-], ids=["warning_emitted", "no_warning"])
-def test_formula_structlog_warning(extractor, dummy_pdf, item_type, expect_warning):
-    mock_converter, mock_doc = _make_mock_docling(["# Content"])
-    mock_doc.iterate_items.return_value = iter([(_make_typed_item(item_type), None)])
-    extractor._converter_enriched = mock_converter
-
-    with patch.object(extractor, "_extract_title", return_value=""):
-        with patch("nexus.pdf_extractor._log") as mock_log:
-            extractor._extract_with_docling(dummy_pdf)
-
-    if expect_warning:
-        mock_log.warning.assert_any_call(
-            "formula_content_detected", formula_count=1, path=str(dummy_pdf),
-            source="docling",
-        )
-    else:
-        for call in mock_log.warning.call_args_list:
-            assert call[0][0] != "formula_content_detected"
 
 
 # ── _pdf_chunks has_formulas propagation ────────────────────────────────────
@@ -424,10 +120,9 @@ def test_formula_structlog_warning(extractor, dummy_pdf, item_type, expect_warni
     (3, False), (0, False), (0, True),
 ], ids=["positive_count", "zero_count", "missing_key"])
 def test_pdf_chunks_extracts_without_error_on_any_formula_count(formula_count, drop_key):
-    """``has_formulas`` is consumed pre-store for Docling→MinerU routing
-    (see ``pdf_extractor.PDFExtractor.extract``) but is NOT in
+    """``has_formulas`` is consumed pre-store but is NOT in
     ``ALLOWED_TOP_LEVEL`` — ``normalize()`` drops it before T3 storage,
-    so it's intentionally absent from chunk metadata. This test now
+    so it's intentionally absent from chunk metadata. This test
     verifies the indexer survives all ``formula_count`` shapes without
     asserting on the dropped field."""
     from nexus.doc_indexer import _pdf_chunks
@@ -447,256 +142,149 @@ def test_pdf_chunks_extracts_without_error_on_any_formula_count(formula_count, d
         assert "has_formulas" not in m
 
 
-# ── RDR-044 Phase 2: auto-detect routing ───────────────────────────────────
+# ── RDR-237: MinerU is the one layout-aware extractor ──────────────────────
 
 
-class TestAutoDetectRouting:
+class TestMineruIsTheDefault:
 
-    _docling = ExtractionResult(text="Docling text.", metadata=_full_metadata(formula_count=0))
-    _docling_f = ExtractionResult(text="Docling text.", metadata=_full_metadata(formula_count=10))
-    _mineru = ExtractionResult(text="MinerU text.", metadata=_full_metadata(method="mineru", formula_count=5, text_len=12))
+    _mineru = ExtractionResult(
+        text="MinerU text.", metadata=_full_metadata(method="mineru", formula_count=5, text_len=12),
+    )
 
-    def test_auto_uses_docling_when_no_formulas(self, extractor, dummy_pdf):
+    def test_extract_with_no_choice_runs_mineru_and_nothing_else(self, extractor, dummy_pdf):
         with (
-            patch.object(extractor, "_extract_with_docling", return_value=self._docling),
-            patch.object(extractor, "_extract_with_mineru") as mock_mineru,
+            patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as mineru,
+            patch.object(extractor, "_extract_pymupdf") as pymupdf,
+            patch.object(extractor, "_extract_normalized") as normalized,
         ):
-            result = extractor.extract(dummy_pdf, extractor="auto")
-        assert result.metadata["extraction_method"] == "docling"
-        mock_mineru.assert_not_called()
-
-    def test_auto_uses_mineru_when_formulas_detected(self, extractor, dummy_pdf):
-        with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
-            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
-            patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as m,
-        ):
-            result = extractor.extract(dummy_pdf, extractor="auto")
+            result = extractor.extract(dummy_pdf)
         assert result.metadata["extraction_method"] == "mineru"
-        m.assert_called_once()
-        assert m.call_args.args == (dummy_pdf,)
-        assert m.call_args.kwargs["formula_count"] == 10 and m.call_args.kwargs["on_formula_oom"] == "fail"
-        assert callable(m.call_args.kwargs["on_page"])  # nexus-i0cwh: the pages_with_text collector
+        mineru.assert_called_once()
+        assert mineru.call_args.args == (dummy_pdf,)
+        assert set(mineru.call_args.kwargs) == {"on_page"}  # no formula count, no formula-OOM choice
+        assert callable(mineru.call_args.kwargs["on_page"])  # nexus-i0cwh: the pages_with_text collector
+        pymupdf.assert_not_called()
+        normalized.assert_not_called()
 
-    def test_auto_skips_docling_when_quick_screen_already_routes(self, extractor, dummy_pdf):
-        # The 0.1s pymupdf screen settles the math case on its own; the
-        # 24s Docling pass is the non-math extraction and the MinerU branch
-        # discards it, so it must not run at all here.
-        with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=5),
-            patch("nexus.pdf_extractor._log") as mock_log,
-            patch.object(extractor, "_extract_with_docling") as mock_docling,
-            patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as m,
-        ):
-            result = extractor.extract(dummy_pdf, extractor="auto")
-        assert result.metadata["extraction_method"] == "mineru"
-        mock_docling.assert_not_called()
-        # The Docling pass used to be the only emitter of this event; the
-        # short-circuit must not silence it for the math case.
-        mock_log.warning.assert_any_call(
-            "formula_content_detected", formula_count=5,
-            path=str(dummy_pdf), source="quick_screen",
-        )
-        m.assert_called_once()
-        assert m.call_args.args == (dummy_pdf,)
-        assert m.call_args.kwargs["formula_count"] == 5 and m.call_args.kwargs["on_formula_oom"] == "fail"
-        assert callable(m.call_args.kwargs["on_page"])  # nexus-i0cwh: the pages_with_text collector
+    def test_the_quick_formula_screen_is_gone(self):
+        import nexus.pdf_extractor as module
 
-    def test_auto_docling_markers_still_route_when_screen_is_low(self, extractor, dummy_pdf):
-        # A paper whose math is rendered without Unicode operators: the
-        # screen stays under the threshold, Docling runs, and its LaTeX
-        # markers are what escalate.
+        for name in ("_has_formulas_quick", "_count_formula_markers", "_FORMULA_ROUTE_THRESHOLD"):
+            assert not hasattr(module, name), f"{name} belonged to the removed auto routing"
+
+    def test_pymupdf_runs_the_text_only_extractor_and_never_mineru(self, extractor, dummy_pdf):
         with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=2),
-            patch("nexus.pdf_extractor._count_formula_markers", return_value=9),
-            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f) as mock_docling,
-            patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as m,
+            patch.object(extractor, "_extract_with_mineru") as mineru,
+            patch.object(extractor, "_extract_pymupdf", return_value=_make_result("pymupdf")) as pymupdf,
         ):
+            result = extractor.extract(dummy_pdf, extractor="pymupdf")
+        assert result.metadata["extraction_method"] == "pymupdf"
+        pymupdf.assert_called_once()
+        mineru.assert_not_called()
+
+    def test_the_older_name_auto_runs_mineru(self, extractor, dummy_pdf):
+        with patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as mineru:
             result = extractor.extract(dummy_pdf, extractor="auto")
         assert result.metadata["extraction_method"] == "mineru"
-        mock_docling.assert_called_once()
-        m.assert_called_once()
-        assert m.call_args.args == (dummy_pdf,)
-        assert m.call_args.kwargs["formula_count"] == 9 and m.call_args.kwargs["on_formula_oom"] == "fail"
-        assert callable(m.call_args.kwargs["on_page"])  # nexus-i0cwh: the pages_with_text collector
+        mineru.assert_called_once()
 
-    def test_auto_raises_when_mineru_import_fails_on_formula_pdf(self, extractor, dummy_pdf):
-        """nexus-2fyb: ImportError branch — mineru is a default dep, so the
-        message MUST advise reinstalling conexus (corrupt install) and not a
-        non-existent ``[mineru]`` extra.
-        """
-        with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
-            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
-            patch.object(extractor, "_extract_with_mineru", side_effect=ImportError("No module named 'mineru'")),
-        ):
-            with pytest.raises(RuntimeError) as excinfo:
-                extractor.extract(dummy_pdf, extractor="auto")
-        msg = str(excinfo.value)
-        assert "formulas" in msg
-        assert "10" in msg  # formula count surfaced
-        assert "uv tool install --reinstall conexus" in msg  # corrupt-install hint
-        assert "--extractor docling" in msg  # opt-out hint
-        assert isinstance(excinfo.value.__cause__, ImportError)
-
-    def test_the_formula_reinstall_hint_follows_the_layout(
-        self, extractor, dummy_pdf, tmp_path, monkeypatch
-    ):
-        """nexus-utpuw.13. A DISTINCT call site from the one in
-        test_mineru_extractor.py — same helper, separate wiring, so it needs
-        its own falsifier or a mutation that unwires just this one passes.
-        conftest fences $HOME, so the test above only sees the legacy branch.
-        """
-        from tests import _generation_layout
-
-        _generation_layout.build(tmp_path, monkeypatch)
-        with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
-            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
-            patch.object(extractor, "_extract_with_mineru", side_effect=ImportError("No module named 'mineru'")),
-        ):
-            with pytest.raises(RuntimeError) as excinfo:
-                extractor.extract(dummy_pdf, extractor="auto")
-        msg = str(excinfo.value)
-        assert "nx self install" in msg
-        assert "uv tool" not in msg
-        assert "--extractor docling" in msg  # the opt-out must survive
-
-    def test_auto_raises_when_mineru_runtime_fails_on_formula_pdf(self, extractor, dummy_pdf):
-        """nexus-2fyb code-review C1: non-import failures (subprocess timeout,
-        OOM kill, mineru-api 5xx, httpx errors) MUST NOT advise reinstalling
-        — the install is fine and the failure is operational. RDR-237 dropped
-        the opt-out hint: the formula-stripped Docling it named is no recovery.
-        """
-        with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
-            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
-            patch.object(
-                extractor, "_extract_with_mineru",
-                side_effect=RuntimeError("MinerU subprocess timed out after 600s"),
-            ),
-        ):
-            with pytest.raises(RuntimeError) as excinfo:
-                extractor.extract(dummy_pdf, extractor="auto")
-        msg = str(excinfo.value)
-        assert "formulas" in msg
-        assert "10" in msg  # formula count surfaced
-        assert "MinerU extraction failed" in msg  # operational, not install
-        assert "subprocess timed out" in msg  # underlying cause surfaced
-        # MUST NOT misdirect the user to reinstall a healthy install:
-        assert "reinstall" not in msg.lower()
-        assert "--extractor docling" not in msg  # RDR-237: formula-stripped Docling is no recovery
-        assert "nx doctor" in msg
-        assert isinstance(excinfo.value.__cause__, RuntimeError)
-
-    def test_auto_raises_with_callback_does_not_replay(self, extractor, dummy_pdf):
-        """nexus-2fyb: the prior nexus-7ne1 on_page replay was a layered patch
-        on the silent-fallback bug. With the loud-raise fix the replay path is
-        moot — auto must abort cleanly without calling on_page when MinerU
-        fails on a formula-bearing PDF.
-        """
-        received: list[tuple] = []
-        def _on_page(page_idx: int, page_text: str, page_meta: dict) -> None:
-            received.append((page_idx, page_text, page_meta))
-
-        with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=10),
-            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
-            patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("MinerU 409")),
-        ):
-            with pytest.raises(RuntimeError):
-                extractor.extract(dummy_pdf, extractor="auto", on_page=_on_page)
-        assert received == [], "on_page must not fire when extraction is aborting"
-
-    def test_forced_docling_skips_mineru(self, extractor, dummy_pdf):
-        with (
-            patch.object(extractor, "_extract_with_docling", return_value=self._docling_f),
-            patch.object(extractor, "_extract_with_mineru") as mock_mineru,
-        ):
-            result = extractor.extract(dummy_pdf, extractor="docling")
-        assert result.metadata["extraction_method"] == "docling"
-        mock_mineru.assert_not_called()
-
-    def test_forced_mineru_skips_docling(self, extractor, dummy_pdf):
-        with (
-            patch.object(extractor, "_extract_with_docling") as mock_docling,
-            patch.object(extractor, "_extract_with_mineru", return_value=self._mineru),
-        ):
-            result = extractor.extract(dummy_pdf, extractor="mineru")
-        assert result.metadata["extraction_method"] == "mineru"
-        mock_docling.assert_not_called()
-
-    def test_forced_mineru_propagates_import_error(self, extractor, dummy_pdf):
-        """nexus-2fyb code-review I1: ``extractor='mineru'`` delegates straight
-        to ``_extract_with_mineru`` and propagates ImportError undecorated. The
-        message comes from ``_extract_with_mineru`` (the do_parse-is-None
-        branch), so this test pins down the entry-point contract: forced-mineru
-        ImportError surfaces ``uv tool install --reinstall conexus`` to the
-        caller, not the auto-mode RuntimeError-wrapping shape.
-        """
-        with patch("nexus.pdf_extractor.do_parse", None):
-            with pytest.raises(ImportError, match="uv tool install --reinstall conexus"):
-                extractor.extract(dummy_pdf, extractor="mineru")
-
-    def test_invalid_extractor_raises_value_error(self, extractor, dummy_pdf):
+    def test_an_unknown_extractor_is_refused(self, extractor, dummy_pdf):
         with pytest.raises(ValueError, match="extractor"):
             extractor.extract(dummy_pdf, extractor="invalid")
 
+    def test_on_formula_oom_is_no_longer_a_parameter(self, extractor, dummy_pdf):
+        with pytest.raises(TypeError):
+            extractor.extract(dummy_pdf, on_formula_oom="fail")  # type: ignore[call-arg]
 
-# ── on_page callback (RDR-048) ──────────────────────────────────────────────
+    def test_a_mineru_failure_is_not_answered_with_another_extractor(self, extractor, dummy_pdf):
+        """nexus-2fyb: no plainer extractor runs behind the user's back; the PDF fails by name."""
+        with (
+            patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("MinerU 409")),
+            patch.object(extractor, "_extract_normalized") as normalized,
+            patch.object(extractor, "_extract_pymupdf") as pymupdf,
+        ):
+            with pytest.raises(RuntimeError, match="MinerU extraction failed"):
+                extractor.extract(dummy_pdf)
+        normalized.assert_not_called()
+        pymupdf.assert_not_called()
 
+    def test_a_missing_import_on_an_installed_stack_names_the_reinstall_and_the_text_only_way(
+        self, extractor, dummy_pdf,
+    ):
+        """nexus-2fyb: ImportError branch. MinerU ships with the pdf extra, so with the stack present a
+        failed import means a corrupt install: advise reinstalling conexus, not a non-existent
+        ``[mineru]`` extra, and name the text-only extractor for a user who cannot repair it now."""
+        with patch.object(extractor, "_extract_with_mineru", side_effect=ImportError("No module named 'mineru'")):
+            with patch("nexus.pdf_stack.missing_message", return_value=None):
+                with pytest.raises(RuntimeError) as excinfo:
+                    extractor.extract(dummy_pdf)
+        msg = str(excinfo.value)
+        assert "uv tool install --reinstall conexus" in msg
+        assert "--extractor pymupdf" in msg
+        assert "formulas" not in msg  # the removed screen's wording
+        assert isinstance(excinfo.value.__cause__, ImportError)
 
-class TestOnPageCallbackDocling:
+    def test_a_missing_stack_is_reported_with_the_stack_message(self, extractor, dummy_pdf):
+        with patch.object(extractor, "_extract_with_mineru", side_effect=ImportError("No module named 'mineru'")):
+            with patch("nexus.pdf_stack.missing_message", return_value="PDF support is not installed: run X"):
+                with pytest.raises(RuntimeError) as excinfo:
+                    extractor.extract(dummy_pdf)
+        assert "PDF support is not installed: run X" in str(excinfo.value)
 
-    def test_callback_receives_pages_in_order(self, extractor, dummy_pdf):
-        pages = ["# Page One", "## Page Two", "### Page Three"]
-        mock_converter, _ = _make_mock_docling(pages)
-        extractor._converter_enriched = mock_converter
+    def test_the_reinstall_hint_follows_the_layout(self, extractor, dummy_pdf, tmp_path, monkeypatch):
+        """nexus-utpuw.13. A DISTINCT call site from the one in test_mineru_extractor.py — same helper,
+        separate wiring, so it needs its own falsifier or a mutation that unwires just this one passes.
+        conftest fences $HOME, so the test above only sees the legacy branch."""
+        from tests import _generation_layout
+
+        _generation_layout.build(tmp_path, monkeypatch)
+        with patch.object(extractor, "_extract_with_mineru", side_effect=ImportError("No module named 'mineru'")):
+            with patch("nexus.pdf_stack.missing_message", return_value=None):
+                with pytest.raises(RuntimeError) as excinfo:
+                    extractor.extract(dummy_pdf)
+        msg = str(excinfo.value)
+        assert "nx self install" in msg
+        assert "uv tool" not in msg
+
+    def test_a_runtime_failure_does_not_advise_reinstalling_a_healthy_install(self, extractor, dummy_pdf):
+        """nexus-2fyb code-review C1: non-import failures (subprocess timeout, OOM kill, mineru-api 5xx,
+        httpx errors) MUST NOT advise reinstalling — the install is fine and the failure is operational."""
+        with patch.object(
+            extractor, "_extract_with_mineru",
+            side_effect=RuntimeError("MinerU subprocess timed out after 600s"),
+        ):
+            with pytest.raises(RuntimeError) as excinfo:
+                extractor.extract(dummy_pdf)
+        msg = str(excinfo.value)
+        assert "MinerU extraction failed" in msg  # operational, not install
+        assert "subprocess timed out" in msg  # underlying cause surfaced
+        assert "reinstall" not in msg.lower()
+        assert "nx doctor" in msg
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+    def test_a_failure_does_not_replay_pages_to_the_callback(self, extractor, dummy_pdf):
+        """nexus-2fyb: MinerU failing aborts cleanly; no page is delivered from another extractor."""
         received: list[tuple] = []
 
-        with patch.object(extractor, "_extract_title", return_value=""):
-            extractor._extract_with_docling(
-                dummy_pdf, on_page=lambda idx, text, meta: received.append((idx, text, meta)),
-            )
+        def _on_page(page_idx: int, page_text: str, page_meta: dict) -> None:
+            received.append((page_idx, page_text, page_meta))
 
-        assert len(received) == 3
-        assert [r[0] for r in received] == [0, 1, 2]
-        assert received[0][1] == "# Page One"
+        with patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("MinerU 409")):
+            with pytest.raises(RuntimeError):
+                extractor.extract(dummy_pdf, on_page=_on_page)
+        assert received == [], "on_page must not fire when extraction is aborting"
 
-    def test_callback_metadata_has_page_number_and_length(self, extractor, dummy_pdf):
-        mock_converter, _ = _make_mock_docling(["Hello world"])
-        extractor._converter_enriched = mock_converter
-        received: list[dict] = []
+    def test_the_on_page_callback_reaches_mineru_through_the_collector(self, extractor, dummy_pdf):
+        cb = lambda *a: None  # noqa: E731
+        with patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as mineru:
+            extractor.extract(dummy_pdf, on_page=cb)
+        # nexus-i0cwh: the backend receives extract()'s pages_with_text collector, which forwards
+        # every call to the caller's callback.
+        forwarded = mineru.call_args.kwargs["on_page"]
+        assert forwarded is not cb and callable(forwarded)
 
-        with patch.object(extractor, "_extract_title", return_value=""):
-            extractor._extract_with_docling(
-                dummy_pdf, on_page=lambda idx, text, meta: received.append(meta),
-            )
-        assert received[0]["page_number"] == 1
-        assert received[0]["text_length"] == len("Hello world")
 
-    def test_callback_skips_empty_pages(self, extractor, dummy_pdf):
-        mock_converter, _ = _make_mock_docling(["# Page 1", "", "# Page 3"])
-        extractor._converter_enriched = mock_converter
-        received: list[int] = []
-
-        with patch.object(extractor, "_extract_title", return_value=""):
-            extractor._extract_with_docling(
-                dummy_pdf, on_page=lambda idx, text, meta: received.append(idx),
-            )
-        assert received == [0, 2]
-
-    @pytest.mark.parametrize("on_page", [None, lambda *a: None], ids=["none", "noop"])
-    def test_result_complete(self, extractor, dummy_pdf, on_page):
-        mock_converter, _ = _make_mock_docling(["# Page 1", "## Page 2"])
-        extractor._converter_enriched = mock_converter
-
-        with patch.object(extractor, "_extract_title", return_value="Title"):
-            result = extractor._extract_with_docling(dummy_pdf, on_page=on_page)
-
-        assert result.text == "# Page 1\n## Page 2"
-        assert len(result.metadata["page_boundaries"]) == 2
-        assert result.metadata["extraction_method"] == "docling"
+# ── on_page callback (RDR-048) ──────────────────────────────────────────────
 
 
 class TestOnPageCallbackPyMuPDF:
@@ -724,44 +312,3 @@ class TestOnPageCallbackPyMuPDF:
 
         assert result.text
         assert result.metadata["page_boundaries"]
-
-
-class TestOnPageCallbackExtract:
-
-    def test_extract_passes_on_page_to_docling(self, extractor, dummy_pdf):
-        expected = _make_result("docling")
-        cb = lambda *a: None  # noqa: E731
-        with patch.object(extractor, "_extract_with_docling", return_value=expected) as mock_d:
-            extractor.extract(dummy_pdf, extractor="docling", on_page=cb)
-        # nexus-i0cwh: the backend receives extract()'s pages_with_text
-        # collector, which forwards every call to the caller's callback.
-        mock_d.assert_called_once()
-        forwarded = mock_d.call_args.kwargs["on_page"]
-        assert forwarded is not cb and callable(forwarded)
-
-    def test_extract_passes_on_page_to_normalized_fallback(self, extractor, dummy_pdf):
-        expected = _make_result("pymupdf_normalized")
-        cb = lambda *a: None  # noqa: E731
-        with patch.object(extractor, "_extract_with_docling", side_effect=RuntimeError("fail")):
-            with patch.object(extractor, "_extract_normalized", return_value=expected) as mock_n:
-                extractor.extract(dummy_pdf, extractor="docling", on_page=cb)
-        mock_n.assert_called_once()
-        assert callable(mock_n.call_args.kwargs["on_page"])  # nexus-i0cwh: the collector wraps cb
-
-    def test_extract_auto_replays_on_page_for_docling_win(self, extractor, dummy_pdf):
-        pages = ["# Page One", "## Page Two"]
-        mock_converter, _ = _make_mock_docling(pages)
-        extractor._converter = mock_converter
-        received: list[tuple] = []
-
-        with (
-            patch("nexus.pdf_extractor._has_formulas_quick", return_value=0),
-            patch.object(extractor, "_extract_title", return_value=""),
-        ):
-            extractor.extract(
-                dummy_pdf, on_page=lambda idx, text, meta: received.append((idx, text)),
-            )
-
-        assert len(received) == 2
-        assert received[0][0] == 0
-        assert received[1][0] == 1

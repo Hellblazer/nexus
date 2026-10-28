@@ -7,7 +7,7 @@ into DT" to "the PDF is indexed in Nexus" without ever opening a
 terminal.
 
 **Before you arm a rule:** PDF support is an optional install. On a slim install the
-first PDF `nx dt index` fetches the PDF stack (docling, MinerU and torch, most of the
+first PDF `nx dt index` fetches the PDF stack (MinerU and torch, most of the
 install's download) or stops with exit 69, 75 or 70 and a command to run
 (`src/nexus/pdf_stack.py`). Inside a smart rule that is a silent multi-gigabyte
 background fetch or a failure you only see in the log. Run `nx self install --extras pdf`

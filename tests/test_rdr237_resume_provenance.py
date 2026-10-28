@@ -153,7 +153,7 @@ def _resume(monkeypatch, db, run_rungs: list[str], metadata: dict) -> Extraction
     """Run ``extractor_loop`` with an extractor that re-extracts every page, settling page ``i`` on ``run_rungs[i]``."""
 
     class Extractor:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             for i, rung in enumerate(run_rungs):
                 on_page(i, f"text {i}", {"page_number": i + 1, "text_length": 6, "page_method": rung})
@@ -285,10 +285,10 @@ def test_a_first_run_is_untouched(monkeypatch) -> None:
 
 
 def test_a_non_ladder_extractor_on_a_resume_is_untouched(monkeypatch) -> None:
-    """No ``page_method`` anywhere (docling, pymupdf): nothing to merge, the method stays as reported."""
+    """No ``page_method`` anywhere (a legacy value, pymupdf): nothing to merge, the method stays as reported."""
 
     class Extractor:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             for i in range(3):
                 on_page(i, f"text {i}", {"page_number": i + 1, "text_length": 6})
@@ -355,7 +355,7 @@ def test_the_buffered_page_text_is_not_kept_alive_while_the_extraction_runs(monk
     alive_during_extraction: list[bool] = []
 
     class Extractor:
-        def extract(self, pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+        def extract(self, pdf_path, *, extractor="mineru", on_page=None,
                     allow_degraded=False, on_heartbeat=None):
             gc.collect()
             alive_during_extraction.extend(r() is not None for r in refs)

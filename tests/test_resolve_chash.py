@@ -142,7 +142,7 @@ class TestResolveChashT2Hit:
         assert ref["chunk_text"] == "text-b"
 
     def test_newest_created_at_wins_when_no_preference(self, resolve_env):
-        """Re-indexing into a better collection (e.g. _docling variant) supersedes the old one.
+        """Re-indexing into a better collection (e.g. a _v2 variant) supersedes the old one.
 
         Uses explicit ``created_at`` timestamps rather than ``datetime.now()``
         so the test is deterministic on loaded CI — a prior iteration

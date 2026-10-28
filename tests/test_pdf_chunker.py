@@ -97,7 +97,7 @@ def test_pdf_chunker_no_duplicate_tail_chunk():
 
 
 def test_extract_headings_detects_markdown_headings():
-    """Markdown ``# Heading`` lines from MinerU/Docling are detected."""
+    """Markdown ``# Heading`` lines from MinerU are detected."""
     text = "# Abstract\n\nThis paper does X.\n\n## 1 Introduction\n\nBackground."
     headings = _extract_headings(text)
     titles = [h[1] for h in headings]

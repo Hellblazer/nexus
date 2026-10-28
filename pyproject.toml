@@ -148,51 +148,24 @@ dependencies = [
 # 0.7.4 vs 0.8.1, with onnxruntime also moving 1.24.2 -> 1.31.0: max abs diff
 # 1.3e-4, min cosine 0.9999996 (not bit-identical; stored vectors come from the
 # engine's own ONNX runtime, which is unaffected, so nothing re-embeds). pillow 13
-# stays out of reach: every fastembed through 0.9.0 and docling-slim cap
+# stays out of reach: every fastembed through 0.9.0 caps
 # pillow<13.
 local = ["fastembed>=0.8.1,<0.9"]
 # nexus-2k66t.4.2 (Sam, 2026-10-23): the PDF stack is an extra, fetched on demand.
-# docling, mineru, torch, torchvision and pdftext were 57-65% of the download and
-# 49% of the installed size (T2 nexus/install-weight-measurement-2026-10-23), and
+# mineru, torch, torchvision and pdftext, with the layout extractor RDR-237 later
+# removed, were 57-65% of the download and 49% of the installed size (T2 nexus/install-weight-measurement-2026-10-23), and
 # search and store never import them. A fresh install goes without them; the first
 # `nx index pdf` (or a PDF met by `nx index repo` / `nx dt index`) builds a new
 # generation with this extra, through nexus.pdf_stack. An EXISTING install carries
 # the stack forward on its first post-split upgrade (receipt installer_schema < 2).
-# pymupdf stays in the core dependencies: the formula screen and the doc indexer
-# use it. The dev dependency group includes this extra, so `uv sync`, CI and the
-# unit suite keep the stack. The comments below are the ones the same lines carried
+# pymupdf stays in the core dependencies: the doc indexer and the explicit
+# text-only extractor (`--extractor pymupdf`) use it. The dev dependency group
+# includes this extra, so `uv sync`, CI and the unit suite keep the stack. The comments below are the ones the same lines carried
 # as direct dependencies; nexus-2fyb's "default-on" reasoning is superseded by the
 # on-demand install, which refuses or installs and never degrades silently.
 pdf = [
-    # Same discipline as mineru: docling is the formula screen and the fallback
-    # extractor for every PDF; its output shape is gated, so the cap sits at the
-    # locked minor.
-    # nexus-13z79 (2026-10-24): 2.125.0 -> 2.132.0, still an exact patch. Seven
-    # advisories on 2.125.0 (PYSEC-2026-4209..4214, 4216; fixed in 2.131.0 and
-    # 2.132.0) sit in backends nexus never calls (HTML, JATS, METS-GBS, LaTeX,
-    # JSON_DOCLING input, external plugins), but the shipped lock should not
-    # carry them. Gated on torch 2.13 + mineru 3.1.11: the docling extraction
-    # tests (304 passed, none skipped), scripts/ci_warm_docling.py
-    # (extraction_method=docling) and both -m slow MinerU fixtures with their
-    # exact locked values. The MVV and the release shakedown still run at the
-    # release; they are the final gate for this bump.
-    # nexus-jpsn1: the slim distribution with only what nexus's PDF path
-    # exercises (PDF format, local models, the convert core that owns
-    # rtree). `docling` itself is a meta-package pulling
-    # docling-slim[standard]: rapidocr (nexus sets do_ocr=False), faker and
-    # polyfactory (test-data factories), 17 dists and 53 MB nothing here
-    # imports. Same import name, same locked minor. Dropped beside it:
-    # python-pptx (nexus never imports pptx; mineru's own pypptx-with-oxml
-    # owns the same `pptx/` tree, and two dists owning one package is the
-    # opencv collision shape again — a venv that had both needs
-    # `uv sync --reinstall-package pypptx-with-oxml` once, or `nx doctor`
-    # reports "cannot import name 'Presentation' from 'pptx'"),
-    # opencv-python-headless (zero `import cv2` here, and mineru requires
-    # the non-headless build unconditionally) and uuid7-standard (nothing
-    # references it).
-    "docling-slim[convert-core,format-pdf,models-local]>=2.132.0,<2.132.1",
-    # nexus-mt1tj: torch and torchvision are transitive (mineru[pipeline],
-    # docling) and nexus never imports them; they are declared here ONLY so
+    # nexus-mt1tj: torch and torchvision are transitive (mineru[pipeline])
+    # and nexus never imports them; they are declared here ONLY so
     # that [tool.uv.sources] below can route the Linux resolution to the
     # CPU index — uv applies sources to direct dependencies, never to
     # transitive ones.
@@ -202,8 +175,7 @@ pdf = [
     # torch 2.8.0 carried eight advisories (PYSEC-2025-203/204/206 and
     # 2026-2286 fixed in 2.9/2.10, PYSEC-2025-193/195 in 2.9.1/2.10, and
     # PYSEC-2025-194 torch.jit.script only in 2.13.0); 2.13 is the first minor
-    # with no advisory that has a fix. mineru (torch>=2.6,<3) and docling
-    # (torch>=2.2.2,<3) both admit it. One range on every platform: the
+    # with no advisory that has a fix. mineru (torch>=2.6,<3) admits it. One range on every platform: the
     # per-platform split existed only to keep each platform on its old minor.
     # Linux still resolves from the CPU index (+cpu). GPU opt-in
     # (NX_TORCH_BACKEND): torch 2.13 has no cu128 build, so cu128 no longer
@@ -212,8 +184,8 @@ pdf = [
     # Checked 2026-10-24 with uv pip compile --python-platform, py3.12 and 3.13.
     "torch>=2.13,<2.14",
     "torchvision>=0.28,<0.29",
-    # nexus-2fyb: MinerU is the formula-aware PDF extractor required by
-    # auto-mode whenever a PDF contains math. Previously gated behind a
+    # nexus-2fyb: MinerU is the formula-aware PDF extractor, and (RDR-237) the
+    # only layout-aware one: the default for every PDF. Previously gated behind a
     # [mineru] extra; the extras game produced silent formula loss for
     # weeks because fresh installs and reinstall-tool both skipped it.
     # Default-on is the only configuration that doesn't foot-cannon the
@@ -254,7 +226,7 @@ pdf = [
     # have no fixed release; the rest are fixed only in 5.x), so they stay
     # until a mineru release both admits transformers 5 and passes the gates
     # above. Pillow stays on 12.3.0 for a different reason: every fastembed
-    # through 0.9.0 and docling-slim cap pillow<13, and 13.0.0 (2026-10-16) is
+    # through 0.9.0 cap pillow<13, and 13.0.0 (2026-10-16) is
     # the only release that fixes the 37 advisories left on 12.3.0.
     "mineru[pipeline]>=3.1.11,<3.1.12",
     # nexus-gqrg0 (GH #1533) round 2: the override below only reaches an
@@ -269,10 +241,8 @@ pdf = [
     # an override: this entry lands in Requires-Dist, so it binds every
     # install path uv has, generation or bare uv-tool alike. torch above is
     # the precedent for a declared-but-never-imported dependency pinned
-    # here solely to steer resolution. Only mineru and
-    # docling-slim[format-pdf] (pinned above to pypdfium2 4.30.0, the
-    # locked pdftext-compatible pair) depend on pdftext; the bound affects
-    # nothing else. Keep in lockstep with the `[tool.uv]
+    # here solely to steer resolution. Only mineru
+    # depends on pdftext; the bound affects nothing else. Keep in lockstep with the `[tool.uv]
     # override-dependencies` entry below and `src/nexus/_install/overrides.txt`
     # (pinned identical by tests/test_install_source_wiring_pins.py) and
     # with tests/test_dependency_bounds_lint.py.
@@ -416,13 +386,12 @@ dev = [
 [tool.uv]
 # nexus-usppl: exclude PyAV. It is pulled transitively by MinerU's VLM backend
 # (mineru -> qwen-vl-utils -> av), which nexus never uses — nexus drives MinerU's
-# PIPELINE backend (`mineru.cli.common.do_parse`) and Docling, neither of which
-# imports `av`. PyAV vendors ffmpeg 62.x dylibs (libavdevice.62) that collide
+# PIPELINE backend (`mineru.cli.common.do_parse`), which does not import `av`. PyAV vendors ffmpeg 62.x dylibs (libavdevice.62) that collide
 # with opencv's bundled ffmpeg 61.x dylibs (libavdevice.61) inside a single
 # process, producing the macOS objc "Class AVFFrameReceiver implemented in both
 # ... may cause spurious casting failures and mysterious crashes" warning that
 # destabilises the PDF extraction stack. Verified safe: `import mineru`,
-# `mineru.cli.common`, `qwen_vl_utils`, `docling`, and `cv2` all import cleanly
+# `mineru.cli.common`, `qwen_vl_utils`, and `cv2` all import cleanly
 # with `av` absent (qwen-vl-utils imports av lazily on its unused video path).
 # The never-true marker drops `av` from resolution on every platform.
 override-dependencies = [
@@ -442,7 +411,7 @@ override-dependencies = [
     # by its unimernet formula model) require opencv-python-headless. Both
     # dists write site-packages/cv2/, so every install downloaded OpenCV twice
     # (36-74 MB per platform) and which cv2 won depended on install order.
-    # Headless stays: mineru and docling call no highgui function, and
+    # Headless stays: mineru calls no highgui function, and
     # headless needs no libGL on a Linux server. Like av above, this reaches
     # only override-reading resolves (this checkout, every generation build
     # through src/nexus/_install/overrides.txt, the .mcpb's uv sync); a bare

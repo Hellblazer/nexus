@@ -255,7 +255,7 @@ def fence_cache_env(real_home: Path) -> None:
       runs inside the e2e gate.
     * ``NX_ORT_NATIVE_DIR`` (nexus-8ool4): the ONNX Runtime native-library
       extraction root, written once per ``<version>-<os-arch>``.
-    * ``HF_HUB_CACHE``: the HuggingFace hub cache (docling and MinerU models,
+    * ``HF_HUB_CACHE``: the HuggingFace hub cache (MinerU models,
       ~500 MB cold). NOT ``HF_HOME``: that is the parent of ``token`` and
       ``stored_tokens``, which would expose the operator's HuggingFace
       credential. Defaults to ``<HF_HOME>/hub`` when the operator set

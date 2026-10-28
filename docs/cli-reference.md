@@ -168,37 +168,25 @@ catalog identity.
 |------|-------------|
 | `--dir DIR` | Index all PDFs in a directory (mutually exclusive with `PATH`) |
 | `--enrich` | Query Semantic Scholar for bibliographic metadata (year, venue, authors, citations). Off by default. Use `nx enrich bib <collection>` for bulk backfill |
-| `--extractor [auto\|docling\|mineru\|pymupdf]` | PDF extraction backend (default: `pdf.extractor` from `.nexus.yml`, else `auto`). `pymupdf` reads each page's own text layer and needs no PDF support (no layout, tables or math; an image-only page is `unextracted`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
-| `--on-formula-oom [fail\|docling]` | Accepted and ignored for one release (RDR-237). A page whose MinerU attempt fails is retried without formulas, then taken from its PyMuPDF text layer, whatever the value; the document no longer aborts for it (see the MinerU ladder below) |
+| `--extractor [mineru\|pymupdf]` | PDF extraction backend (default: `pdf.extractor` from `.nexus.yml`, else `mineru`). `auto` and `docling` are still accepted and run as `mineru`, with a one-line notice. `pymupdf` reads each page's own text layer and needs no PDF support (no layout, tables or math; an image-only page is `unextracted`). See [PDF Extraction Backends](#pdf-extraction-backends) below |
 | `--dry-run` | Preview extraction and chunking only — nothing is embedded, stored, or written (no API keys needed). Prints a chunk preview. Also registers no catalog document (nexus-uxg4u) — a preview never mints a Document row a subsequent refusal would leave behind. A real (non-dry) run that fails after registering a brand-new document rolls that registration back automatically; re-indexing a pre-existing document is left exactly as the completion fence marked it |
 | `--streaming [auto\|always\|never]` | Pipeline mode (default: `auto`). `auto` uses the streaming pipeline for all PDFs: pages and chunks are staged on the engine as they are produced, so a killed run (even a hard kill) is resumed by the next run without extracting the PDF again and without embedding anything twice (the rerun re-sends the document from its first chunk through a fresh write; the engine skips chunks it already holds), and a run that finished uploading and died before the completion stamp sends only the stamp; `never` forces the in-process path (extract and chunk the whole document first, then write it in batches with the same chunk-plus-owner write; a killed run restarts from the first chunk, extracts again, and re-embeds nothing) |
 | `--allow-degraded-extraction` | Accept extracted text that fails the post-extraction quality gate (nexus-wi1uv, see [Post-Extraction Quality Gate](#post-extraction-quality-gate) below) instead of failing the run |
 
 ### PDF Extraction Backends
 
-Most PDFs work fine with the default (`auto`). You only need to think about this if you're indexing **math-heavy academic papers** with equations.
+MinerU is the default and the only layout- and math-aware extractor. Every PDF goes straight to MinerU: there is no formula pre-screen and no second extractor to route to. If MinerU is not installed the run stops (see the exit codes below) rather than falling back to another extractor. `auto` and `docling` are still accepted for `pdf.extractor` and `--extractor`; both run as `mineru` and print a one-line notice once per process. Any other `pdf.extractor` value in a config file falls back to `mineru`.
 
-**How `auto` works:**
+MinerU reads the document in page batches. A page whose MinerU attempt fails is retried without formulas (rung 2), then read from its PDF text layer through PyMuPDF (rung 3), then recorded `unextracted` (rung 4). One bad page no longer aborts the document; see MinerU OOM resilience below for the details. Math-heavy PDFs get a `has_formulas: true` flag on their chunks (useful for filtering).
 
-1. Docling extracts the PDF and counts formula regions
-2. If **no formulas found** → done (uses Docling output as-is, zero overhead)
-3. If **formulas found** → tries MinerU for better LaTeX extraction
-4. If MinerU isn't installed → returns the Docling result anyway
+**Text only (`pymupdf`).** `--extractor pymupdf` (or `pdf.extractor: pymupdf`) reads each page's own text layer through PyMuPDF, a core dependency, so it installs, starts and probes nothing from the PDF stack. There is no layout, no table structure and no math. A page with no text layer (a scan) is recorded `unextracted`; a PDF with no text layer on any page fails. Nothing chooses it automatically. The run summary of `nx index pdf` and `nx dt index` names the extractor and lists the unextracted pages (`nx index repo` and `nx collection reindex` print no extraction summary); the catalog document records `extraction_method: pymupdf`, and a `pymupdf` rerun over pages a MinerU run left is recorded `mineru+degraded`, with its text-layer pages listed.
 
-**What you get without MinerU installed:**
-- All PDFs extract normally via Docling
-- Math-heavy PDFs get a `has_formulas: true` flag on their chunks (useful for filtering)
-- Formula regions are detected but not re-extracted with MinerU
+**What MinerU gives you:**
+- LaTeX extraction for display and inline equations, plus layout and tables
+- Large PDFs are split into page batches, each processed in an isolated
+  subprocess to prevent OOM on formula-dense documents
 
-**Text only (`pymupdf`).** `--extractor pymupdf` (or `pdf.extractor: pymupdf`) reads each page's own text layer through PyMuPDF, a core dependency, so it installs, starts and probes nothing from the PDF stack. There is no layout, no table structure and no math. A page with no text layer (a scan) is recorded `unextracted`; a PDF with no text layer on any page fails. `auto` never chooses it. The run summary of `nx index pdf` and `nx dt index` names the extractor and lists the unextracted pages (`nx index repo` and `nx collection reindex` print no extraction summary); the catalog document records `extraction_method: pymupdf`, and a `pymupdf` rerun over pages a MinerU run left is recorded `mineru+degraded`, with its text-layer pages listed.
-
-**What MinerU adds (optional):**
-- Superior LaTeX extraction for display and inline equations
-- ~2.9x faster than Docling's formula enrichment mode on equation-heavy papers
-- Large PDFs are automatically split into 5-page batches, each processed in
-  an isolated subprocess to prevent OOM on formula-dense documents
-
-**PDF support is the `pdf` extra, installed on demand** (nexus-2k66t.4.2). docling, MinerU, torch, torchvision and pdftext are 57 to 65% of the download and 49% of the installed size, and search and store never import them, so a fresh install leaves them out. The first PDF index installs them: [`nx index pdf`](#nx-index), `nx dt index` of a PDF record, `nx index repo` when its walk finds a PDF, and `nx mineru start` check first, before any catalog or T3 write, and either install the stack or stop. An install builds a new generation with the `pdf` extra at the version already running (never an upgrade) through the generation builder's own arguments: CPU torch on Linux, the packaged overrides, the constraints shipped in the wheel. The command then re-runs inside that generation, so it needs no second invocation. The receipt records the extra, so every later `nx self install` keeps it. MinerU's models download on its first use, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23).
+**PDF support is the `pdf` extra, installed on demand** (nexus-2k66t.4.2). MinerU, torch, torchvision and pdftext are 57 to 65% of the download and 49% of the installed size, and search and store never import them, so a fresh install leaves them out. The first PDF index installs them: [`nx index pdf`](#nx-index), `nx dt index` of a PDF record, `nx index repo` when its walk finds a PDF, and `nx mineru start` check first, before any catalog or T3 write, and either install the stack or stop. An install builds a new generation with the `pdf` extra at the version already running (never an upgrade) through the generation builder's own arguments: CPU torch on Linux, the packaged overrides, the constraints shipped in the wheel. The command then re-runs inside that generation, so it needs no second invocation. The receipt records the extra, so every later `nx self install` keeps it. MinerU's models download on its first use, about 1.2 GB (the unimernet formula model 776 MB, the layout model 205 MB, OCR about 180 MB; measured 2026-10-23).
 
 A PDF index never degrades quietly (nexus-2fyb: an opt-in extra once produced silent formula loss). When the stack is missing and cannot be installed, the command exits before writing anything:
 
@@ -222,7 +210,7 @@ Or add to `.nexus.yml` (per-repo) or `~/.config/nexus/config.yml` (global) direc
 
 ```yaml
 pdf:
-  extractor: mineru   # auto | docling | mineru | pymupdf
+  extractor: mineru   # mineru | pymupdf (auto and docling are accepted and run as mineru)
   mineru_page_batch: 1          # pages per MinerU subprocess (memory isolation)
   mineru_page_timeout_s: 180    # per-page wall-clock budget (× pages-in-range); × mineru_page_batch must be at most 240
   mineru_memory_ceiling_mb: 0   # 0 = disabled; Linux-only RLIMIT_AS cap (see below)
@@ -231,7 +219,7 @@ pdf:
 
 The `--extractor` flag overrides the config when passed explicitly.
 
-**Which commands read `pdf.extractor`.** `nx index pdf` (flag first, then the setting), `nx index repo` and `nx collection reindex` (the setting only; they have no flag). The last two used to run `auto` whatever the setting said; they now honour it, so a repo configured `mineru` sends every new or changed PDF to MinerU alone (strict, no Docling routing for papers without formulas) and one configured `docling` gets formula-stripped extraction. Already-indexed, unchanged PDFs are not re-extracted either way. `nx dt index` and `nx dt capture` read the `--extractor` flag only.
+**Which commands read `pdf.extractor`.** `nx index pdf` (flag first, then the setting), `nx index repo` and `nx collection reindex` (the setting only; they have no flag). A repo configured `pymupdf` indexes every new or changed PDF from its text layer alone, and the default sends every one to MinerU. Already-indexed, unchanged PDFs are not re-extracted either way. `nx dt index` and `nx dt capture` read the `--extractor` flag only.
 
 **Time limit of one MinerU attempt (RDR-237).** `mineru_page_timeout_s` times
 `mineru_page_batch` is the longest one attempt runs without a progress write, and a
@@ -252,9 +240,7 @@ error, a dropped server connection) is retried without formulas
 (`formula_enable=false`, recorded `mineru-no-formula`), then read from the PDF's
 own text layer (`pymupdf-text`), then recorded `unextracted`; the document
 finishes and `extraction_method` reads `mineru+degraded`, with the pages by rung
-in `extraction_pages`. `--on-formula-oom` is accepted and ignored for one
-release, and no longer changes this. When
-`pdf.ladder_breaker` consecutive pages (default 3) fail both MinerU attempts with
+in `extraction_pages`. When `pdf.ladder_breaker` consecutive pages (default 3) fail both MinerU attempts with
 the same cause (a timeout, or the same worker exit and stderr line) the install or
 the machine is failing, not the PDF: the document stops, naming the cause. The
 pages before that window stay in the kept buffer, so a rerun does not write them
@@ -271,21 +257,19 @@ aggressively, so set it generously (several GB).
 **Forcing a specific backend (one-off):**
 
 ```bash
-nx index pdf paper.pdf --extractor docling   # Always Docling (no MinerU attempt)
-nx index pdf paper.pdf --extractor mineru    # Always MinerU (fails if not installed)
+nx index pdf paper.pdf --extractor mineru    # MinerU (the default; stops if the PDF stack is not installed)
+nx index pdf paper.pdf --extractor pymupdf   # Page text layer only (no layout, tables or math)
 ```
 
 #### Post-extraction quality gate
 
-`--extractor docling` is the documented recovery when MinerU OOM-fails on a
-formula-dense page — but on some pages Docling (and, less often, MinerU)
-can complete "successfully" while producing **space-stripped, unsearchable
-text**: words run together (`istheasetofthe`), with heavy raw-LaTeX noise.
+An extractor can complete "successfully" on some pages while producing
+**space-stripped, unsearchable text**: words run together (`istheasetofthe`), with heavy raw-LaTeX noise.
 Nothing about the run looked wrong — it reported success, the chunks were
 indexed and embedded — the document just could not be found by search
 (nexus-wi1uv).
 
-Every extraction (MinerU, Docling, and the PyMuPDF fallback alike) now
+Every extraction (MinerU and the PyMuPDF text layer alike) now
 passes through one post-extraction sanity gate before chunking: three cheap
 signals — whitespace ratio, mean token length, and the fraction of
 abnormally long tokens — computed on the raw extracted text and compared
@@ -296,13 +280,13 @@ algorithm-heavy). A document whose signals cross the thresholds **fails the
 run** naming the failing signal(s), the measured value, and the remedy:
 
 ```
-PDF paper.pdf failed the post-extraction quality gate (extraction_method=docling):
+PDF paper.pdf failed the post-extraction quality gate (extraction_method=mineru):
 whitespace_ratio=0.0114 < floor 0.05. This is the space-stripped-garbage failure
 mode (nexus-wi1uv) — the extracted text is likely unsearchable if indexed.
-Remedy: retry with `--extractor mineru` (formula-aware, often avoids the
-corruption), or if this document is legitimately dense/unusual and you have
-reviewed the extracted text, rerun with `--allow-degraded-extraction` to
-index it anyway.
+Remedy: retry with `--extractor pymupdf` (the page text layer, which often
+avoids the corruption), or if this document is legitimately dense/unusual and
+you have reviewed the extracted text, rerun with `--allow-degraded-extraction`
+to index it anyway.
 ```
 
 **Blast radius of a failure differs by command.** `nx index pdf` (single
@@ -341,7 +325,7 @@ nx search "" --corpus docs --where quality_gate_overridden=true --files
 
 **Querying by extractor identity (`extraction_method`, nexus-1oguj).** Every
 PDF chunk's metadata carries which backend actually produced its text:
-`docling` | `mineru` | `pymupdf` | `pymupdf_normalized`, or the honest mixed aggregate
+`mineru` | `pymupdf`, or the honest mixed aggregate
 `mineru+degraded` when a page settled below the first MinerU attempt (RDR-237;
 the pages by rung are the catalog document's `meta.extraction_pages`, a map from rung
 to 1-based pages that the PDF hook writes on every extraction, `{}` when clean, so a
@@ -360,9 +344,10 @@ rung, so its rung cannot be known; such a resume logs `resume_provenance_unknown
 document and the count of buffered pages with no rung) and keeps the method at
 `mineru+degraded` rather than claim a clean `mineru`, and the map lists only the pages
 whose rung is known.
-Chunks written before RDR-237 may
-carry `mineru+docling-degraded` (a page degraded to Docling by
-`--on-formula-oom docling`, a flag that is now accepted and ignored for one release). This is what makes an extractor
+Documents indexed before RDR-237 keep the values they were written with:
+`docling`, `pymupdf_normalized`, and `mineru+docling-degraded` (a page degraded to
+Docling by an earlier release). They stay readable and
+queryable. This is what makes an extractor
 regression scopeable after the fact (e.g. "which documents did MinerU
 extract, so I can re-index just those").
 
@@ -373,10 +358,11 @@ nx search "" --corpus knowledge --where extraction_method=mineru --files
 - **Scoping "any mineru-touched document" is two queries today, not one.**
   `--where` equality has no single-key OR/`$in` yet (repeating the same key
   with different values is a caller error and now raises loudly — see
-  `--where` above) — `mineru` and `mineru+docling-degraded` are two distinct
-  exact values. Run one query per value and union the results client-side:
+  `--where` above) — `mineru`, `mineru+degraded` and, on documents indexed before
+  RDR-237, `mineru+docling-degraded` are distinct exact values. Run one query per
+  value and union the results client-side:
   `--where extraction_method=mineru` and
-  `--where extraction_method=mineru+docling-degraded` separately. Single-key
+  `--where extraction_method=mineru+degraded` separately. Single-key
   `$in` support is tracked as nexus-4gzc8.
 - **Absence of the key is not evidence of "not mineru."** `extraction_method`
   is a NEW-WRITES-ONLY field — chunks indexed before this fix carry no such
@@ -500,7 +486,7 @@ nx dt index --uuid 8EDC855D-213F-40AD-A9CF-9543CC76476B --force --re-embed
 | `--collection <name>` | T3 collection override. Wins over the extension-based default (e.g. `--collection knowledge__delos`) |
 | `--corpus <name>` | Corpus name used to derive the default collection (default: `dt`). PDFs route to `knowledge__<corpus>-papers` (paper-shaped, aspect-eligible); markdown notes route to `docs__<corpus>` |
 | `--dry-run` | Print records that would be indexed; make no T3 writes |
-| `--extractor [auto\|docling\|mineru\|pymupdf]` | PDF extraction backend for file-backed records (default `auto`; `nx dt` reads this flag only, never `pdf.extractor`). `pymupdf` reads each page's own text layer and needs no PDF support; a page with no text layer is left out, so page coverage fails unless `--allow-page-gap`. `mineru` is formula-aware but can OOM-fail on formula-dense pages; the recovery is `--extractor docling` (formula-stripped, always completes) |
+| `--extractor [mineru\|pymupdf]` | PDF extraction backend for file-backed records (default `mineru`; `auto` and `docling` are still accepted and run as `mineru`; `nx dt` reads this flag only, never `pdf.extractor`). `pymupdf` reads each page's own text layer and needs no PDF support; a page with no text layer is left out, so page coverage fails unless `--allow-page-gap`. `mineru` is formula-aware; a page whose MinerU attempt fails is retried without formulas, then read from its text layer, so the record still completes |
 | `--force` | Force re-indexing every record, bypassing the staleness check (re-chunks and re-sends every chunk in place) — same decoupled semantics as `nx index pdf --force` (nexus-8143o): does NOT by itself force a Voyage re-embed. Forwarded to `index_pdf`/`index_markdown`'s own `force` kwarg for both file-backed records and, with `--dt-content`, non-file-backed ones; catalog identity and tumbler are preserved (nexus-gup3b). Without it, an unchanged record prints `skipped: index fresh (use --force)` |
 | `--re-embed` | Requires `--force`. Also forces a Voyage re-embed of every chunk, even one whose text is unchanged (the pre-nexus-8143o `--force` behaviour). Forwarded to `index_pdf`/`index_markdown`'s own `force_re_embed` kwarg, same split as `nx index pdf`/`md`/`rdr`/`repo` |
 | `--allow-page-gap` | Accept a PDF whose extracted pages do not cover DEVONthink's `pageCount` (nexus-i0cwh). By default a gap is a per-record failure listed under `Failures:` with the missing page numbers, and the run exits non-zero; either way the gap is recorded on the catalog row as `meta.page_gap` (cleared on the next full-coverage run) |
@@ -3513,7 +3499,7 @@ Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + rea
 
 Then, corpus-integrity checks (both modes, all read-only, all degrade to a skip rather than crash `nx doctor`): dimension-orphaned collections (nexus-9tsdf, remedy `nx collection prune`); the embedding-profile rows (RDR-204 Day 2, nexus-ft04v.31, 7.38.0): the engine's install-scoped profile per content type (`GET /v1/catalog/embedding_profile`), the client's intent (`local.embed_model` plus key state) against it (a disagreement names the service restart, since the engine reads the model only at spawn), off-profile live collections (informational), and `disputed`, `dormant` and `quarantine` rows each with their remedy; an engine below the route reports the row as unread rather than clean; the re-embed job rows (nexus-s08oe): the off-profile row follows the job's rule and the *Re-embed jobs* row reports running and failed jobs (local mode; see [the re-embed job](#nx-collection-re-embed-job)); **the dangling-manifest ROW census RETIRED (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15)** — `nx doctor` used to run a corpus-wide "populated manifest whose ROWS no longer resolve to a T3 chunk" sweep via the engine's `manifest_verify_all()`; that function is DROPPED, and the check is removed entirely, because the manifest-chunk FK (`catalog_document_chunks -> nexus.chunks`, VALIDATEd) now REJECTS the dangling state at write time — there is no longer anything for a corpus-wide sweep to find. The per-document form (formerly `nx catalog manifest-verify`) is [retired](#nx-catalog-manifest-verify--retired) the same way; use `nx catalog verify --collection NAME` for the one surviving damaged-manifest detection surface (client-side, per document, independent of the retired engine function — see [nx catalog verify](#nx-catalog-verify)). The pre-backfill NULL-collection census (`manifest pre-backfill rows (collection IS NULL)`) is UNAFFECTED and still runs — the FK does not cover NULL-collection rows (`MATCH SIMPLE` exempts them), so that census remains live. **The `--check-dangling-links` / `--strict-dangling-links` flags are RETIRED (RDR-194 Phase P1, bead nexus-tk070.p1, 2026-08-15)**, the identical shape as the manifest-verify retirement above: `nx doctor` used to report `catalog_links` rows whose `from_tumbler`/`to_tumbler` resolved to no document at all (nexus-ysrwi, GH #1419 issue 7) via the engine's `GET /v1/catalog/links/orphaned`; the flags are gone because `fk_catalog_links_from_document`/`fk_catalog_links_to_document` (`catalog-032-links-tumbler-fk.xml`, ON DELETE CASCADE) now REJECT a link naming a tumbler with no `catalog_documents` row at write time, so that state is unreachable by construction. The underlying `GET /v1/catalog/links/orphaned` route and the `HttpCatalogClient.orphaned_links()` method are NOT retired — they still report the one case the FK deliberately does not cover (a link whose endpoint document exists but is TOMBSTONED, since soft delete does not fire `ON DELETE CASCADE`); there is simply no `nx doctor` flag surfacing it any more. `nx catalog purge-trash`'s stranded-chunk count (the opposite direction: existing T3 chunks with no live manifest referrer) is unrelated to any of the above and still runs; stale index-run fences — documents stranded in `index_state='indexing'` beyond 6 hours (safe but wasteful: every intervening `nx index` re-chunks and re-embeds at full cost; remedy `nx index repo <path> --force`; nexus-5xn3k.6); failed index runs with hidden chunks — documents stamped `index_state='failed'` whose run stored chunks but never wrote their manifest rows, so live(c) hides those chunks from every read (since RDR-223 every writer sends a chunk with its owner row, so a failed run no longer leaves such chunks and a failed run does not rebuild a manifest, nexus-z0o2p.35; this row finds the debris of runs made before that, or killed outright); remedy `nx catalog reconcile`, then re-index the source; PDF chunk metadata — PDF chunks still carrying the streaming uploader's placeholder metadata (empty `title`, no `extraction_method`), which means the extraction post-pass never landed or a late write overwrote it; readers keyed on the chunk title skip them silently (`nx enrich bib` is not one since nexus-6pfgb.21: it selects chunks through the catalog document's manifest). Scans every `knowledge__`/`docs__` collection with an engine-side filter, names each affected document by source URI (chunks whose source URI does not resolve, which includes chunks no manifest names, are listed apart by content hash), and names a collection it could not read as NOT CHECKED rather than counting it clean; remedy a `--force` re-index of the named document, then `nx enrich bib` (nexus-rte90, the detection half of nexus-w94eo); chash width-conformance — width-non-conformant chash rows (the GH #1414 class, `octet_length(chash) <> 32`) via the engine's tenant-scoped `GET /v1/catalog/chash/conformance` route (nexus-du2dw, RDR-180): reports per-dim (`embedding_<dim>` column of the unified `nexus.chunks` table) total/non-conformant/sample counts, names collections it cannot route to a dim instead of silently skipping them, and degrades honestly (loud skip, never a false clean) on a pre-route engine; and tumbler-allocator ("next_seq") drift — owners whose sequence counter has fallen at or below their own highest child. Self-heals per-owner on that owner's next registration (`nx index <path>`, the only remedy this check names); the engine also exposes an all-owners `sweepNextSeqDrift` converge route for the same drift class, not yet wired to a `nx` client verb (nexus-0ehwe).
 
-Then: Voyage AI key, git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, PDF extraction (docling) (the modules docling's PDF pipeline imports, among them `cv2` and `torch`, are present; a missing one is a hard failure, because a docling pass that cannot import is an indexing error, not a PyMuPDF fallback), T2 schema applied, T2 best-effort writes (the meter's only producer — the RDR-129 chash dual-write hook — is retired by RDR-187, so a nonzero count is reported as a frozen HISTORICAL count, never a warning), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). (The RDR-129 T2 daemon-singleton check is retired along with the T2 daemon it guarded — nexus-i711w Stage 2 sub-stage B; the single-writer invariant it enforced now belongs to Postgres, not to a pid count.) The Voyage credential line (`VOYAGE_API_KEY`) is informational only: it describes enrichment/engine-bootstrap config, never a serving requirement, and is never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. (The `CHROMA_*` credential rows retired with the migration machinery at RDR-155 P4b.)
+Then: Voyage AI key, git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, PDF extraction (mineru) (the modules MinerU imports, `mineru`, `cv2`, `torch` and `torchvision`, are present; a missing one is a hard failure, because a MinerU pass that cannot import is an indexing error, not a PyMuPDF fallback), a `Docling model cache` warning that appears only when a leftover Docling model cache (about 1.1 GB, in the Hugging Face hub cache or at `NEXUS_DOCLING_ARTIFACTS_PATH`) exists and prints the `rm -rf` command to remove it (nothing deletes it automatically), T2 schema applied, T2 best-effort writes (the meter's only producer — the RDR-129 chash dual-write hook — is retired by RDR-187, so a nonzero count is reported as a frozen HISTORICAL count, never a warning), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). (The RDR-129 T2 daemon-singleton check is retired along with the T2 daemon it guarded — nexus-i711w Stage 2 sub-stage B; the single-writer invariant it enforced now belongs to Postgres, not to a pid count.) The Voyage credential line (`VOYAGE_API_KEY`) is informational only: it describes enrichment/engine-bootstrap config, never a serving requirement, and is never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. (The `CHROMA_*` credential rows retired with the migration machinery at RDR-155 P4b.)
 
 Migration-report checks retired (RDR-155 P4b): the RDR-178 migration-report / write-divergence doctor rows died with the migration machinery; `<config>/migration-reports/*.json` files on disk remain as inert audit artifacts.
 
@@ -4471,7 +4457,7 @@ uv tool run --python 3.12 --from conexus==<version> nx self install --bootstrap 
 nexus-2k66t.4.9, so a new install has PDF support as 7.85.0 did; the throwaway
 environment that runs the command stays slim, and only the generation gets the
 extra. Leave it off, or pass `--slim` to the installers, for an install without
-docling, MinerU and torch; the first PDF index then fetches them.)
+MinerU and torch; the first PDF index then fetches them.)
 
 With the flag the command installs the released package from the package
 index, at the version of the `nx` that is running it, into a new

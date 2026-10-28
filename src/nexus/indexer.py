@@ -29,6 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.bounded_subprocess import run_bounded
+from nexus.config import DEFAULT_EXTRACTOR
 from nexus.corpus import index_model_for_collection, is_conformant_collection_name
 from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
@@ -2978,8 +2979,8 @@ def _repo_pdf_extractor(repo: Path) -> str:
     """The repo's ``pdf.extractor`` setting (RDR-237), for the stack gates and the PDF indexer.
 
     A ``[pdf]`` integer key that holds no integer raises ``PdfConfigError`` in the config loader.
-    The repo walk must not stop code and prose indexing for it, so it is logged and ``auto``
-    stands in: the extractor meets the same error on the first PDF it extracts and fails that
+    The repo walk must not stop code and prose indexing for it, so it is logged and the
+    default extractor stands in: the extractor meets the same error on the first PDF it extracts and fails that
     file, naming the key, exactly as before this read existed."""
     from nexus.config import PdfConfigError, get_pdf_extractor  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
 
@@ -2987,7 +2988,7 @@ def _repo_pdf_extractor(repo: Path) -> str:
         return get_pdf_extractor(repo)
     except PdfConfigError as exc:
         _log.warning("repo_pdf_extractor_config_unreadable", repo=str(repo), error=str(exc))
-        return "auto"
+        return DEFAULT_EXTRACTOR
 
 
 def _hold_pdfs_without_stack(
@@ -3300,7 +3301,7 @@ def _index_pdf_file(
     hooks: "HookRegistry | None" = None,
     batcher: object | None = None,
     force_re_embed: bool = False,
-    extractor: str = "auto",
+    extractor: str = DEFAULT_EXTRACTOR,
 ) -> int:
     """Index a single PDF file into the docs__ collection.
 
@@ -5510,7 +5511,7 @@ def _run_index(
     _pdf_held: list[Path] = []
     # RDR-237: the repo's ``pdf.extractor``, read once for the gates below and every PDF handed
     # to ``_index_pdf_file``. ``pymupdf`` needs none of the stack, so the gates let it by.
-    _pdf_extractor = _repo_pdf_extractor(repo) if pdf_files else "auto"
+    _pdf_extractor = _repo_pdf_extractor(repo) if pdf_files else DEFAULT_EXTRACTOR
     if pdf_files:
         _pdf_held = _hold_pdfs_without_stack(
             [f for _, f in pdf_files], repo, on_phase=on_phase,
@@ -7349,7 +7350,7 @@ def _run_index(
     # discarding already-staged-but-unflushed chunks (ChunkBatcher has no
     # __del__/atexit) and surfacing as an uncaught traceback instead of a
     # clean CLI exit — reachable on a routine corpus shape (a scanned-PDF
-    # archive: the default extractor never runs OCR, MinerU is opt-in).
+    # archive read while MinerU is missing or failing).
     # "Attempted" is the aggregate across all 4 categories, not just PDF —
     # a run-level verdict, matching how the skip count itself is already
     # aggregated via the shared _on_skip callback.

@@ -340,7 +340,7 @@ jobs:
         # weights from the hub on a cold cache — a ~1-3GB fetch that
         # cancelled the job inside the download at the old 45-minute budget
         # (run 34975576187). The composite action below mirrors
-        # prime-docling: restore our own self-hosted release asset from
+        # prime-bge-onnx: restore our own self-hosted release asset from
         # actions/cache, write MinerU's local-models config, and export
         # MINERU_MODEL_SOURCE=local so the client never reaches HuggingFace.
         uses: ./.github/actions/prime-mineru
