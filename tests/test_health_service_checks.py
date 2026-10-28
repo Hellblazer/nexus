@@ -188,9 +188,9 @@ class TestCheckStorageServiceHealth:
         """nexus-g7ijj: a managed deployment has no local pg_credentials by
         design (the store operator holds those, nexus-y3wuu) — the skip
         detail must say so, not the misleading "not configured" message.
-        nexus-njn1a finding 10: it is "not applicable" (ok, never a
-        warning), the doctor's convention for a row with nothing for this
-        client to check; the detail says "not applicable", not "performed"."""
+        Still ok=False/warn=True: a managed box's check was NOT performed
+        from this client, and doctor's checkmark must never render for an
+        unperformed check (Sam, 2026-10-28, nexus-njn1a / nexus-g7ijj)."""
         missing_creds = tmp_path / "pg_credentials"  # does not exist
 
         with patch("nexus.config.is_local_mode", return_value=False):
@@ -201,10 +201,11 @@ class TestCheckStorageServiceHealth:
             )
         assert len(results) == 1
         r = results[0]
-        assert r.ok is True and r.warn is False
+        assert r.ok is False
+        assert r.warn is True
         assert r.fatal is False
-        assert r.detail.startswith("not applicable: managed deployment")
-        assert "server-side" in r.detail
+        assert r.detail.startswith("managed deployment")
+        assert "store operator" in r.detail
         assert "y3wuu" in r.detail
         assert "not configured" not in r.detail
 
@@ -748,17 +749,19 @@ class TestCheckMigrationState:
     def test_no_pg_credentials_managed_mode_names_server_side_contract(self, tmp_path):
         """nexus-g7ijj: managed deployment -> server-side contract detail
         (nexus-y3wuu), never the misleading "not configured" message.
-        Not applicable (ok, no warning): nexus-njn1a finding 10."""
+        ok=False/warn=True — the check was not performed, so doctor's
+        checkmark must never render for it (nexus-njn1a / nexus-g7ijj)."""
         missing_creds = tmp_path / "pg_credentials"  # does not exist
 
         with patch("nexus.config.is_local_mode", return_value=False):
             results = _check_migration_state(creds_path=missing_creds)
         assert len(results) == 1
         r = results[0]
-        assert r.ok is True and r.warn is False
+        assert r.ok is False
+        assert r.warn is True
         assert not r.fatal
-        assert r.detail.startswith("not applicable: managed deployment")
-        assert "server-side" in r.detail
+        assert r.detail.startswith("managed deployment")
+        assert "store operator" in r.detail
         assert "y3wuu" in r.detail
         assert "not configured" not in r.detail
 
@@ -1252,17 +1255,19 @@ class TestCheckRlsPresent:
     def test_no_pg_credentials_managed_mode_names_server_side_contract(self, tmp_path):
         """nexus-g7ijj: managed deployment -> server-side contract detail
         (nexus-y3wuu), never the misleading "not configured" message.
-        Not applicable (ok, no warning): nexus-njn1a finding 10."""
+        ok=False/warn=True — the check was not performed, so doctor's
+        checkmark must never render for it (nexus-njn1a / nexus-g7ijj)."""
         missing_creds = tmp_path / "pg_credentials"  # does not exist
 
         with patch("nexus.config.is_local_mode", return_value=False):
             results = _check_rls_present(creds_path=missing_creds)
         assert len(results) == 1
         r = results[0]
-        assert r.ok is True and r.warn is False
+        assert r.ok is False
+        assert r.warn is True
         assert not r.fatal
-        assert r.detail.startswith("not applicable: managed deployment")
-        assert "server-side" in r.detail
+        assert r.detail.startswith("managed deployment")
+        assert "store operator" in r.detail
         assert "y3wuu" in r.detail
         assert "not configured" not in r.detail
 

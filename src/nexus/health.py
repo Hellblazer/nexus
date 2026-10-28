@@ -43,43 +43,42 @@ _WARN = "✗"
 _SOFT_WARN = "⚠"
 
 # nexus-g7ijj fix round: the managed/local "not probeable from here" detail
-# strings were duplicated verbatim across the service-check skip sites
-# (_check_storage_service_health, _check_migration_state, _check_rls_present
-# and the two tuples rows) — extracted once so a future wording change can't
-# drift between them. A managed box renders it through
-# ``_managed_not_applicable`` (a pass, "not applicable: ..."), a local box with
-# no pg_credentials through ``_LOCAL_MODE_NOT_CONFIGURED_DETAIL`` (a warning).
-_MANAGED_DEPLOYMENT_SKIP_DETAIL = (
-    "managed deployment — this check runs server-side with the "
-    "store operator's credentials (nexus-y3wuu); not probeable "
-    "from this client; skipping"
+# strings were duplicated verbatim across the service-check skip sites —
+# extracted once so a future wording change can't drift between them.
+# nexus-njn1a finding 10: one text now serves all eight rows that read the
+# database through local credentials (Storage service health, Schema
+# migrations, RLS policies, tuples.dead_tuple_ratio, tuples.sweep_freshness
+# and the three RDR-225 partition rows). A managed box renders it through
+# ``_managed_not_probeable`` (a warning, never a checkmark); a local box with
+# no pg_credentials through ``_LOCAL_MODE_NOT_CONFIGURED_DETAIL`` (also a warning).
+_MANAGED_NOT_PROBEABLE_DETAIL = (
+    "managed deployment — not probeable from this client, so this check was not run: it reads the database "
+    "with local admin credentials, which a managed deployment keeps with the store operator, and the "
+    "client-side diagnostic path is local-only by design (nexus-y3wuu); skipping. For the RDR-225 "
+    "partition rows the operator's read-only query is in docs/runbooks/rdr-225-cloud-deploy.md"
 )
 _LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials absent); skipping"
 
 
-def _managed_not_applicable(label: str) -> HealthResult:
+def _managed_not_probeable(label: str) -> HealthResult:
     """The one rendering of "this row reads local pg_credentials and a managed deployment has none"
-    (nexus-njn1a finding 10).
+    (nexus-njn1a finding 10; Sam's decision of 2026-10-28, recorded on nexus-g7ijj).
 
-    A pass, ``not applicable: managed deployment ...``, never a warning. This is the doctor's standing
-    convention for a row with nothing for this client to check (about thirty ``not applicable: ...`` rows, and
-    the three RDR-225 partition rows say so in as many words): a ⚠ asks the operator to do something, and on a
-    managed box nobody can, because the store operator holds the credentials and the engine checks itself
-    server-side (nexus-y3wuu). Before this the five storage rows warned on every cloud box while the three
-    partition rows, giving the same reason, passed, and the setup row needed a special case to stop that noise from
-    holding it up. A local box with no ``pg_credentials`` is a different fact (service mode is not
-    configured) and still warns.
+    A soft warning, ``ok=False, warn=True``, never a checkmark: the check was not performed, and doctor's
+    checkmark must never render for an unperformed check. A pass here is how a gate that reads these rows
+    (``upgrade_finish._poison_probe``) would take an unverified store for a clean one. Before this the five
+    storage rows warned on every cloud box while the three partition rows, for the same fact, passed as
+    "not applicable". The reason is :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, the same on all eight; recognise it
+    with :func:`is_managed_not_probeable`. A local box with no ``pg_credentials`` is a different fact (service
+    mode is not configured) and keeps its own text.
     """
-    return HealthResult(label=label, ok=True, detail=f"not applicable: {_MANAGED_DEPLOYMENT_SKIP_DETAIL}")
+    return HealthResult(label=label, ok=False, warn=True, detail=_MANAGED_NOT_PROBEABLE_DETAIL)
 
 
-# The RDR-225 partition rows read the database through local admin credentials. A managed engine has no
-# server-side equivalent of them (nexus-3wh8d.18 review), so the shared "runs server-side" text would be false.
-_MANAGED_PARTITION_ROWS_SKIP_DETAIL = (
-    "managed deployment — these rows read the database through local admin credentials and the engine runs no "
-    "equivalent; the operator verifies tenant leaves and model partitions with the read-only query in "
-    "docs/runbooks/rdr-225-cloud-deploy.md; skipping"
-)
+def is_managed_not_probeable(row: HealthResult) -> bool:
+    """True for a row that is the managed "check not run from this client" warning, whatever its ok/warn
+    rendering: the reason text is the marker, so a gate keyed on it does not depend on how the row is drawn."""
+    return row.detail == _MANAGED_NOT_PROBEABLE_DETAIL
 
 
 @dataclass
@@ -4283,8 +4282,8 @@ def _check_storage_service_health(
             # nexus-y3wuu: a managed deployment has no local pg_credentials
             # by design — the store operator holds those. Never claim "not
             # configured" for a box that IS configured, just not probeable
-            # from here; and never warn about it (nexus-njn1a finding 10).
-            return [_managed_not_applicable("Storage service health")]
+            # from here (nexus-njn1a finding 10: one shared warning).
+            return [_managed_not_probeable("Storage service health")]
         return [HealthResult(
             label="Storage service health",
             ok=False,
@@ -5155,8 +5154,10 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
     the profile against that list and warns when the profile's family is absent.
 
     The profile is the engine's own ``embedding_profile`` from the same ``/version`` body (what it seeded); an engine
-    that does not report one is read against this client's ``local_embed_profile()``, in local mode only, because a
-    managed engine has no bge files by design and the client's local intent says nothing about it. An engine that
+    that does not report one is read against this client's ``local_embed_profile()``, in local mode only, because
+    this client's local intent says nothing about what a managed engine was told. An engine that reports no
+    profile but lists models of both families is read as serving whichever profile it seeded (the managed cloud
+    engine does, measured on the live cloud on 2026-10-28; a managed engine in another mode may not). An engine that
     reports ``embedding_mode`` ``voyage`` and no profile is voyage-only whatever the client intends, so it reads as
     cannot tell. The fetch uses a short timeout (``_EMBEDDING_FAMILY_PROBE_TIMEOUT_S``).
 
@@ -5203,7 +5204,7 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
     prefix = _PROFILE_FAMILY_PREFIX.get(profile) if isinstance(profile, str) else None
     if prefix is None:
         served = ", ".join(models) or "no model"
-        if all(any(m.startswith(p) for m in models) for p in _PROFILE_FAMILY_PREFIX.values()):
+        if profile is None and all(any(m.startswith(p) for m in models) for p in _PROFILE_FAMILY_PREFIX.values()):
             # No profile to read, but both families are served, so whichever profile the engine seeded is served.
             return [HealthResult(label=label, ok=True, detail=(
                 f"embedding_mode {body.get('embedding_mode')}: the engine serves both families ({served}), "
@@ -5906,12 +5907,19 @@ def _settle_setup_row(results: list[HealthResult]) -> list[HealthResult]:
     for index, row in enumerate(results):
         if not isinstance(row, _SetupLastRun):
             continue
-        if all(other.ok for other in results if other is not row):
+        if all(other.ok or _benign_warning(other) for other in results if other is not row):
             results[index] = HealthResult(
                 label=_SETUP_LABEL, ok=True,
                 detail=f"the last setup run ended {row.ended}, and every other row of this sweep is fine. Log: {row.log}",
             )
     return results
+
+
+def _benign_warning(row: HealthResult) -> bool:
+    """A soft warning that says nothing is wrong: a managed deployment's row that cannot be probed from a
+    client by design (nexus-y3wuu), which warns on every cloud box. Without this a cloud box never reaches the
+    "every other row is fine" that lets the setup row stand down."""
+    return row.warn and not row.ok and is_managed_not_probeable(row)
 
 
 def _setup_failed_row(status: dict, log: Path) -> HealthResult:
@@ -6357,7 +6365,7 @@ def _check_migration_state(
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
         if not is_local_mode():
-            return [_managed_not_applicable("Schema migrations")]
+            return [_managed_not_probeable("Schema migrations")]
         return [HealthResult(
             label="Schema migrations",
             ok=False,
@@ -7074,7 +7082,7 @@ def _check_rls_present(
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
         if not is_local_mode():
-            return [_managed_not_applicable("RLS policies")]
+            return [_managed_not_probeable("RLS policies")]
         return [HealthResult(
             label="RLS policies",
             ok=False,
@@ -7419,10 +7427,12 @@ def _check_tenant_model_partitions(
     Reads the SAME local-only admin-psql path as ``_check_rls_present``, so no engine route or wire field is
     involved. These rows run on a local install only: a managed deployment has no ``pg_credentials`` here and the
     engine has no server-side equivalent (its boot check, ``ChunksIsolationCheck``, covers the RLS structure of
-    both trees and nothing about token tenants or registered models), so on a managed install they report "not
-    applicable" and the comparison is conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
-    never a warning) where there is nothing to compare: no ``pg_credentials`` (a virgin box, or a managed
-    deployment), parents that are not partitioned (an engine that predates RDR-225), no token tenant, or no
+    both trees and nothing about token tenants or registered models), so on a managed install all three are a
+    warning, ``ok=False, warn=True`` with the shared :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, because the check was
+    not run (Sam, 2026-10-28, nexus-g7ijj: a checkmark never renders for an unperformed check); the comparison is
+    conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
+    never a warning) where there is nothing to compare: no ``pg_credentials`` on a local box (a virgin box),
+    parents that are not partitioned (an engine that predates RDR-225), no token tenant, or no
     registered model. A finding is evaluated first; not applicable replaces only the outcome "nothing to
     check".
     """
@@ -7434,8 +7444,9 @@ def _check_tenant_model_partitions(
     if not creds_path.exists():
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
-        skip = _MANAGED_PARTITION_ROWS_SKIP_DETAIL if not is_local_mode() else _LOCAL_MODE_NOT_CONFIGURED_DETAIL
-        return _partition_rows(True, f"not applicable: {skip}")
+        if not is_local_mode():
+            return _partition_rows(False, _MANAGED_NOT_PROBEABLE_DETAIL, warn=True)
+        return _partition_rows(True, f"not applicable: {_LOCAL_MODE_NOT_CONFIGURED_DETAIL}")
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
         _read_credentials,
@@ -8408,9 +8419,9 @@ def _check_tuple_table_bloat(
     ``HttpTupleStore``'s ten RDR-205 operations expose or should — reads
     the SAME local-only ``pg_credentials`` admin-psql path
     ``_check_migration_state``/``_check_rls_present`` already use for
-    structural PG facts (LOCAL-ONLY by design, nexus-y3wuu; managed
-    deployments run this server-side, so on one this row reads "not applicable",
-    a pass, never a warning: nexus-njn1a finding 10). The
+    structural PG facts (LOCAL-ONLY by design, nexus-y3wuu; a managed
+    deployment has no ``pg_credentials`` here, so on one this row is a warning
+    that the check was not run, never a checkmark: nexus-njn1a finding 10). The
     query targets ``pg_stat_user_tables`` directly (a system view, always
     queryable) rather than the two tables themselves, so an engine whose
     Liquibase changesets predate ``tuples-001-baseline.xml`` reports zero
@@ -8428,7 +8439,7 @@ def _check_tuple_table_bloat(
     if not creds_path.exists():
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
         if not is_local_mode():
-            return [_managed_not_applicable(label)]
+            return [_managed_not_probeable(label)]
         return [HealthResult(label=label, ok=False, warn=True, detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL)]
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
@@ -8563,7 +8574,7 @@ def _check_tuple_sweep_freshness(
     if not creds_path.exists():
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
         if not is_local_mode():
-            return [_managed_not_applicable(label)]
+            return [_managed_not_probeable(label)]
         return [HealthResult(label=label, ok=False, warn=True, detail=_LOCAL_MODE_NOT_CONFIGURED_DETAIL)]
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import

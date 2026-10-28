@@ -182,6 +182,17 @@ def test_a_managed_dual_mode_engine_serving_both_families_is_green_and_says_so()
     assert "dual" in r.detail and "both" in r.detail and _BGE in r.detail
 
 
+def test_the_both_families_pass_needs_the_engine_to_name_no_profile() -> None:
+    """The profile-free "both families are served" answer is for an engine that named no profile. One that named
+    a profile this client does not recognise, or a local client whose own profile is unrecognised, is "cannot
+    tell", whatever else the engine lists (the guard is "profile is None", not merely "no known prefix")."""
+    both = [_BGE, "voyage-3", "voyage-code-3", "voyage-context-3"]
+    r = _row({"embedding_mode": "dual", "embedding_profile": "minilm", "embedding_models": both})
+    assert r.ok is True and not r.warn and "not applicable" in r.detail and "both" not in r.detail
+    r = _row({"embedding_mode": "dual", "embedding_models": both}, local=True, client_profile="minilm")
+    assert r.ok is True and not r.warn and "not applicable" in r.detail and "both" not in r.detail
+
+
 def test_a_dual_mode_engine_missing_one_family_is_not_called_served() -> None:
     """Both families must be in the served list for the profile-free answer: a degraded dual engine that lost
     its Voyage key lists bge only, and the row cannot say whether the seeded profile was served."""
