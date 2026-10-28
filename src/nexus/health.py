@@ -2893,14 +2893,17 @@ def _check_leftover_docling_cache(
     except OSError:
         pass
     tools_models = base / ".cache" / "docling" / "models"
-    if tools_models.is_dir():
-        found.append(tools_models)
     user_set: list[Path] = []  # a directory the user named: reported, never in a delete command
-    artifacts = env.get("NEXUS_DOCLING_ARTIFACTS_PATH", "").strip()
-    if artifacts:
-        path = _expand_cache_setting(artifacts, env, base)
-        if path.is_dir() and path not in found:
-            user_set.append(path)
+    try:  # an unreadable directory must not stop the doctor run
+        if tools_models.is_dir():
+            found.append(tools_models)
+        artifacts = env.get("NEXUS_DOCLING_ARTIFACTS_PATH", "").strip()
+        if artifacts:
+            path = _expand_cache_setting(artifacts, env, base)
+            if path.is_dir() and path not in found:
+                user_set.append(path)
+    except OSError:
+        pass
     if not found and not user_set:
         return []
     size_gb = sum(_tree_bytes(path)[0] for path in (*found, *user_set)) / 1e9

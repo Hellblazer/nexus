@@ -1869,7 +1869,7 @@ class PDFExtractor:
             raise RuntimeError(
                 f"PDF {pdf_path.name}: MinerU extraction failed: {type(exc).__name__}: "
                 f"{sanitized_msg}. Run `nx doctor` to check the MinerU install. For text only "
-                f"(no layout, tables or math), rerun with `--extractor pymupdf`."
+                f"(no layout, tables or math), rerun with `--extractor pymupdf` (or set `pdf.extractor: pymupdf`)."
             ) from exc
 
     # Page batch size is read from config via get_mineru_page_batch() (default 1).

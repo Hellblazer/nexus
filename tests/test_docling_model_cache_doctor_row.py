@@ -49,6 +49,31 @@ def test_a_leftover_cache_is_a_warning_with_its_size_its_path_and_the_delete_com
     assert layout.is_dir(), "the doctor reports the cache; it never deletes it"
 
 
+def test_the_row_names_the_size_the_cache_holds(tmp_path: Path) -> None:
+    """A sparse 1.5 GB file stands in for the weights: the row reads its size from the one tree
+    helper, so a size of zero (or the helper's completeness flag in place of its byte count) fails."""
+    hub = tmp_path / ".cache" / "huggingface" / "hub"
+    layout = _make_cache(hub, "models--ds4sd--docling-models")
+    with open(layout / "weights.safetensors", "wb") as fh:
+        fh.truncate(1_500_000_000)
+
+    [row] = health._check_leftover_docling_cache(environ={}, home=tmp_path)
+
+    assert "1.5 GB" in row.detail, row.detail
+
+
+def test_an_unreadable_docling_tools_directory_does_not_stop_the_doctor(tmp_path: Path, monkeypatch) -> None:
+    real_is_dir = Path.is_dir
+
+    def is_dir(self: Path) -> bool:
+        if self.name == "models" and self.parent.name == "docling":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    assert health._check_leftover_docling_cache(environ={}, home=tmp_path) == []
+
+
 def test_every_model_directory_the_old_extractor_downloaded_is_found(tmp_path: Path) -> None:
     hub = tmp_path / ".cache" / "huggingface" / "hub"
     names = (
