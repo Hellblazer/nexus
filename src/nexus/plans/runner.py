@@ -3283,7 +3283,11 @@ async def _plan_run_impl(
         started = time.monotonic()
         usage: list[Any] = []
         try:
-            with _dispatch_mod.ambient_usage_sink(usage):
+            # nexus-jypmj.3.14: the assessment is not a plan operator, so the reserved stream is out of scope
+            # for it. Otherwise the dispatcher's operator hydration lets the stream (still marked at the
+            # terminal step, fed by a rank) observe this call's payload as the terminal input and record every
+            # reserved item dropped, which the repair's second ledger then reads as a missing named source.
+            with _dispatch_mod.ambient_usage_sink(usage), reserved_scope(None):
                 raw = dispatch(ASSESSMENT_OPERATOR, {**args, "timeout": timeout})
                 result = await raw if inspect.iscoroutine(raw) else raw
             if not isinstance(result, dict):
