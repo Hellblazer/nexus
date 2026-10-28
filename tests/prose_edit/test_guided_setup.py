@@ -297,6 +297,14 @@ def test_the_skill_names_the_tool_and_says_a_question_ends_the_turns_work() -> N
         assert limit in asking, limit
 
 
+def test_a_session_without_the_choice_tool_asks_the_same_question_in_plain_text() -> None:
+    # a headless `claude -p` session (the acceptance runners) cannot answer AskUserQuestion; the skill must still ask
+    asking = SKILL_TEXT[SKILL_TEXT.index("\n## Asking the author\n") :]
+    asking = asking[: asking.find("\n## ", 5)]
+    assert "When `AskUserQuestion` is not available" in asking
+    assert "numbered list" in asking
+
+
 def test_the_setup_run_is_a_wizard_that_reads_the_new_fields(prose: Prose) -> None:
     run = _setup_run()
     assert "no_genre" not in SKILL_TEXT

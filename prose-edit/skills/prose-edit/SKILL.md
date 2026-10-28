@@ -146,6 +146,8 @@ Every question to the author goes through the `AskUserQuestion` tool, so the aut
 | Recommended option | List it first and end its label with `(Recommended)`. |
 | Several answers | `multiSelect: true`, for a question where the author may pick more than one. `preview` goes only on a single-select question. |
 
+When `AskUserQuestion` is not available (a headless `claude -p` session) or the call fails, ask the same question in plain text: the question, then its options as a numbered list with each description, the recommended one first. End your turn and read the author's reply as the choice. Never pick for the author because the tool is missing.
+
 What the author must read to choose (a stored passage, an entry, an edit) goes in the question text or an option's description, not only in your reply. The author's pick is the decision; text typed into "Other" is the author's own words.
 
 ## Setup run
