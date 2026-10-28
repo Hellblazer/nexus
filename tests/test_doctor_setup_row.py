@@ -291,9 +291,10 @@ def test_a_row_that_is_not_a_last_run_warning_is_left_alone(name: str, tmp_path:
 def test_the_managed_storage_row_that_cannot_be_probed_does_not_hold_the_warning(
     name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Review I1: in cloud mode the storage row always warns that it cannot probe the managed store, so a
-    rule that every other row be ok never let a cloud box's setup warning stand down. The row comes from the
-    real check in managed mode, not a copy of its text."""
+    """Review I1: in cloud mode the storage row cannot probe the managed store. It used to warn there, which
+    held a cloud box's setup warning up; nexus-njn1a finding 10 made it "not applicable" (a pass), so the
+    plain rule that every other row be ok now stands the warning down. The row comes from the real check in
+    managed mode, not a copy of its text."""
     import nexus.config  # noqa: PLC0415
     import nexus.health as health  # noqa: PLC0415
 
@@ -302,7 +303,8 @@ def test_the_managed_storage_row_that_cannot_be_probed_does_not_hold_the_warning
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(empty))
     monkeypatch.setattr(nexus.config, "is_local_mode", lambda: False)
     storage = health._check_storage_service_health()
-    assert storage and all(r.warn and not r.ok for r in storage), "premise: the managed storage row warns"
+    assert storage and all(r.ok and not r.warn for r in storage), "premise: the managed storage row is a pass"
+    assert all(r.detail.startswith("not applicable: managed deployment") for r in storage)
     row = _row(build_setup_dir(tmp_path, CASES[name]))
     (settled,) = [r for r in _settle_setup_row([_FINE, *storage, row]) if r.label == _LABEL]
     assert settled.ok is True, settled.detail
@@ -337,7 +339,7 @@ def test_the_real_sweep_carries_the_setup_row_and_settles_it_after_every_row_is_
     assert len(results) > 20, "premise: this is the whole sweep, not a stub"
     (row,) = [r for r in results if r.label == _LABEL]
     assert "the last setup run" in row.detail and str(setup / "setup.log") in row.detail
-    others_fine = all(r.ok or health._benign_warning(r) for r in results if r is not row)
+    others_fine = all(r.ok for r in results if r is not row)
     assert row.ok is others_fine, "the row stands down only when every other row of the sweep is fine"
 
 # -- the format, from both sides -----------------------------------------------------------------
