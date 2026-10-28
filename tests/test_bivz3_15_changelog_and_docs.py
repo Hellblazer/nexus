@@ -15,9 +15,12 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _unreleased() -> str:
+    """``## [Unreleased]`` plus the newest released section: the RDR-231 entry is pending on develop and
+    moves into the release section when that release is cut (7.88.0), and it must be in one of them."""
     text = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
     start = text.index("## [Unreleased]")
-    return text[start:text.index("\n## [", start + 1)]
+    newest = text.index("\n## [", start + 1)
+    return text[start:text.index("\n## [", newest + 1)]
 
 
 def test_the_code_label_is_note_uri() -> None:
@@ -34,7 +37,7 @@ def test_the_changelog_names_the_renamed_labels_and_the_old_engine_read_gap() ->
         "--check-references",                # doctor reads residue as unknown
         "analytic reads match no notes",     # stated plainly: an older engine
     ):
-        assert needle in entry, f"the Unreleased section of CHANGELOG.md no longer says: {needle!r}"
+        assert needle in entry, f"neither the Unreleased nor the newest release section of CHANGELOG.md says: {needle!r}"
 
 
 def test_the_cli_reference_uses_the_new_label() -> None:
