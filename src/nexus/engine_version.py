@@ -681,7 +681,7 @@ from __future__ import annotations
 #: plan and status routes, cutover), the engine plan/start refusing a target
 #: model it cannot serve (nexus-q6t89), the rename without the cross_model
 #: branch (nexus-avjrb) and memory-005-1 (a partial index on nexus.memory).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 165)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 167)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

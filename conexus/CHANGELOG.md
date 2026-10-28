@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.88.0] - 2026-10-28
+
+Plugin version aligned with conexus 7.88.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- **conexus-prose-edit ships as its own opt-in plugin** (nexus-scmcs). `/prose-edit` and its line-editor agent move out of the nexus repo's `.claude/` into `prose-edit/`, with a marketplace entry and a `setup` report; the version-lockstep hook's fallback plugin list names it. `prose-edit/**`, `conexus/hooks/scripts/version_lockstep_hook.py`.
+- **The upgrade skill no longer says a note's TTL is lost on an upgrade** (nexus-6pfgb.14); it names `nx store export`. `conexus/skills/upgrade/SKILL.md`.
+
 ## [7.87.1] - 2026-10-26
 
 Plugin version aligned with conexus 7.87.1, a plugin-only release off 7.87.0. These plugin changes become live at this pin.

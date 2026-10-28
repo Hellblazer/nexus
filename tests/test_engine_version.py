@@ -605,6 +605,8 @@ class TestRequiredEngineVersion:
         # floor is derived from it: a bump without a CHANGELOG pairing, or a
         # pairing without the bump, is the red. The trail above stays as
         # the provenance history.
+        # ->(0,1,167) 2026-10-28 for 7.88.0: pairs with engine-service-v0.1.167 (RDR-231 note-URI
+        # backfill, RDR-232 run summary, aspect-queue reclaim); v0.1.166 was tagged, never published.
         assert REQUIRED_ENGINE_VERSION == _floor_named_by_changelog(_CHANGELOG.read_text(encoding="utf-8"))
 
 
