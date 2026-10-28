@@ -46,10 +46,6 @@ ALLOWED: dict[str, str] = {
     "scripts/experiments/out/": "recorded experiment output",
     "scripts/spikes/": "recorded spike scripts and results",
     ".test_durations.json": "test ids of the alias tests and the leftover-cache doctor row tests carry the word",
-    # Held back until Sam's go: web/ publishes from develop on every push.
-    "web/index.html": "install-size text; web/ changes wait for Sam's go (nexus-tr1rj.5)",
-    "web/install.ps1": "install-size text; web/ changes wait for Sam's go (nexus-tr1rj.5)",
-    "web/install.sh": "install-size text; web/ changes wait for Sam's go (nexus-tr1rj.5)",
     # The tests that pin the above.
     "tests/test_docling_residual_lint.py": "this file",
     "tests/test_extractor_aliases.py": "the alias table and the title chain, which name the old values",

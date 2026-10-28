@@ -81,7 +81,7 @@
 # NX_MVV_SKIP_SLIM_LEG=1 to skip 9b; the run then says so. Legs 1-8 install the checkout's
 # wheel bare (the venv layer), which is slim by design and is what leg 8c asserts.
 #
-# Leg 8c (always-on, every mode, no NX_MVV_FORMULA_PDF_CHECK needed): a
+# Leg 8c (always-on, every mode, independent of the formula-PDF check): a
 # fresh resolve's own pdftext/pypdfium2 versions are asserted below the
 # GH #1533 bound directly against $PROBE_PYTHON -- no model weights, so
 # it costs nothing to run by default and closes the gap the pre-tag
@@ -89,15 +89,19 @@
 # cannot: that lint proves the LOCAL checkout's uv.lock is bounded, not
 # that a fresh --published resolve actually landed there.
 #
-# NX_MVV_FORMULA_PDF_CHECK=1 (opt-in, --published mode only; nexus-gqrg0 /
-# GH #1533): additionally indexes tests/fixtures/bft-to-smr.pdf through the
-# real MinerU path against the PUBLISHED dependency resolution, BEFORE leg 9
-# replaces the uv-tool shim with a generation, and asserts the ADDED chunk's
-# extraction_method is literally mineru (the nexus-jy4hd
-# chunk-id-set-diff shape, not a LaTeX-content grep). Off by default — it
-# pays a MinerU pipeline model download (~2-3 GB) that would dominate every
-# default MVV run. The release skill's Step 11c post-publish invocation is
-# where this is meant to run; see that step for the exact command.
+# The formula-PDF check (--published mode only; nexus-gqrg0 / GH #1533;
+# default-on since nexus-tr1rj.20, RDR-237): indexes tests/fixtures/bft-to-smr.pdf
+# through the real MinerU path against the PUBLISHED dependency resolution, BEFORE
+# leg 9 replaces the uv-tool shim with a generation, and asserts the ADDED chunk's
+# extraction_method is literally mineru (the nexus-jy4hd chunk-id-set-diff shape,
+# not a LaTeX-content grep). It pays a MinerU pipeline model download (~2-3 GB).
+# Every PDF goes to MinerU now, and PR CI carries no MinerU end-to-end check, so
+# this is the release's one: the release skill's Step 11c post-publish invocation
+# runs it. A skip needs a recorded reason: NX_MVV_FORMULA_PDF_CHECK=0 together with
+# NX_MVV_FORMULA_PDF_SKIP_REASON='<why>', else the script refuses (exit 2) before
+# it does anything; the summary block above the PASSED sentinel names the
+# skip and its reason. On the local-wheel layer the check does not apply (nothing
+# is published), so neither variable is read there.
 # Exit 0 == FRESH-INSTALL MVV PASSED (the literal sentinel on the last line).
 set -euo pipefail
 
@@ -394,14 +398,34 @@ if [ "$SELF_TEST" = 1 ]; then
     exit $?
 fi
 
+# nexus-tr1rj.20: the formula-PDF check is default-on in --published mode. FORMULA_PDF_CHECK_ON
+# is the one switch every later site reads (1 = run it). Turning it off takes
+# NX_MVV_FORMULA_PDF_CHECK=0 AND a non-empty NX_MVV_FORMULA_PDF_SKIP_REASON; a skip with no
+# reason is refused here, before any work, so it can never be a silent pass.
+FORMULA_PDF_CHECK_ON=0
+FORMULA_PDF_STATUS="not applicable (local-wheel layer)"
+if [ "$PUBLISHED_MODE" = 1 ]; then
+    if [ "${NX_MVV_FORMULA_PDF_CHECK:-1}" = "0" ]; then
+        if [ -z "${NX_MVV_FORMULA_PDF_SKIP_REASON:-}" ]; then
+            echo "refusing to skip the formula-PDF check without a reason: set NX_MVV_FORMULA_PDF_SKIP_REASON='<why>' alongside NX_MVV_FORMULA_PDF_CHECK=0 (nexus-tr1rj.20). It is the release's only end-to-end MinerU check." >&2
+            exit 2
+        fi
+        FORMULA_PDF_STATUS="SKIPPED (reason: $NX_MVV_FORMULA_PDF_SKIP_REASON)"
+    else
+        FORMULA_PDF_CHECK_ON=1
+        # "ran" is set at the summary, from FORMULA_PDF_CHECK_RAN, so it names what happened.
+        FORMULA_PDF_STATUS="did not run (check on, block not reached)"
+    fi
+fi
+
 if [ "$PUBLISHED_MODE" = 1 ]; then
     # nexus-2k66t.4.2: a plain `conexus` is SLIM (MinerU, torch,
-    # torchvision and pdftext are the on-demand `pdf` extra). The opt-in formula
+    # torchvision and pdftext are the on-demand `pdf` extra). The formula-PDF
     # check parses a real PDF through MinerU on THIS uv-tool layer, which an
     # on-demand install cannot reach (it builds a generation), so that run
-    # installs the extra up front.
+    # installs the extra up front (the default; a skip with a reason stays slim).
     _PKG_EXTRAS=""
-    [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ] && _PKG_EXTRAS="[pdf]"
+    [ "$FORMULA_PDF_CHECK_ON" = "1" ] && _PKG_EXTRAS="[pdf]"
     # PKG_BASE_SPEC: the same pin without the extra, for the overrides fetch.
     if [ -n "$PUBLISHED_VERSION" ]; then
         PKG_SPEC="conexus${_PKG_EXTRAS}==$PUBLISHED_VERSION"
@@ -682,7 +706,7 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
         if [ -n "$bad" ]; then
             _fail "the installed tool env carries the non-headless OpenCV build ($(basename "$bad")): it needs a system libGL.so.1 and shares cv2/ with opencv-python-headless, so MinerU's import cv2 fails on a Linux box without libGL; the install ignored the release's overrides (nexus-11x9o)"
         fi
-        if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ] && [ -z "$headless" ]; then
+        if [ "$FORMULA_PDF_CHECK_ON" = "1" ] && [ -z "$headless" ]; then
             _fail "the [pdf] install carries no opencv_python_headless dist-info under $TOOL_VENV, so the check for the non-headless build passed over nothing (vacuous; nexus-11x9o)"
         fi
         if [ -n "$headless" ]; then
@@ -1205,7 +1229,7 @@ echo "── 8c/10 always-on resolver bound: pdftext/pypdfium2 (nexus-gqrg0 roun
 # -- it does not prove a FRESH resolve (this journey's own install layer)
 # actually landed below the ceiling. No model weights needed, so this is
 # an always-on leg (part of the fixed leg count), not gated behind
-# NX_MVV_FORMULA_PDF_CHECK like the deep formula-index proof below. Runs
+# the formula-PDF switch like the deep formula-index proof below. Runs
 # against $PROBE_PYTHON (the uv-tool venv in --published mode, the plain
 # venv in the local-wheel default) BEFORE leg 9 replaces the shim with a
 # generation -- see generation_install_probe.py's matching assertion
@@ -1215,9 +1239,9 @@ echo "── 8c/10 always-on resolver bound: pdftext/pypdfium2 (nexus-gqrg0 roun
 # on-demand) pdftext is not installed, so there is no resolve to bound. The leg
 # then asserts the slim shape instead -- none of the five stack modules is
 # present -- and says SLIM in its output. It is never a quiet pass: a partial
-# stack fails, and the opt-in formula check (which installs conexus[pdf])
+# stack fails, and the formula-PDF check (which installs conexus[pdf])
 # requires the stack to be present.
-RESOLVER_BOUND_OUT="$(EXPECT_PDF_STACK="${NX_MVV_FORMULA_PDF_CHECK:-0}" "$PROBE_PYTHON" -c '
+RESOLVER_BOUND_OUT="$(EXPECT_PDF_STACK="$FORMULA_PDF_CHECK_ON" "$PROBE_PYTHON" -c '
 import importlib.util, os, sys
 from importlib.metadata import version
 from packaging.version import Version
@@ -1228,7 +1252,7 @@ if len(found) == len(MODS):
     pass
 elif not found:
     if os.environ.get("EXPECT_PDF_STACK") == "1":
-        print("expected the pdf extra (NX_MVV_FORMULA_PDF_CHECK=1) but none of the stack is installed")
+        print("expected the pdf extra (the formula-PDF check is on) but none of the stack is installed")
         sys.exit(1)
     print("SLIM install: none of mineru/torch/torchvision/pdftext is installed (pdf extra on demand); pdftext/pypdfium2 bound not applicable bound_ok=n/a")
     sys.exit(0)
@@ -1249,11 +1273,10 @@ if [ "$RESOLVER_BOUND_RC" -ne 0 ]; then
     _fail "the PDF-stack resolver leg failed in $PROBE_PYTHON (pdftext/pypdfium2 above the GH #1533 bound, a partial stack, or a missing expected pdf extra) -- $RESOLVER_BOUND_OUT"
 fi
 
-# ── formula-PDF index (opt-in, --published mode only; nexus-gqrg0 / GH #1533) ──
-# Not part of the fixed 10-leg count above (NX_MVV_FORMULA_PDF_CHECK=1 is an
-# explicit opt-in, never run by default) -- see the usage comment at the top
-# of this file for why it is gated instead of promoted into the numbered
-# journey. GH #1533: mineru's unbounded `pdftext>=0.6.3` let a fresh resolve
+# ── formula-PDF index (--published mode only; nexus-gqrg0 / GH #1533; default-on, nexus-tr1rj.20) ──
+# Not part of the fixed 10-leg count above (it applies to the published layer only,
+# and a recorded skip turns it off) -- see the usage comment at the top
+# of this file. GH #1533: mineru's unbounded `pdftext>=0.6.3` let a fresh resolve
 # install pdftext 0.7.x, whose PageChars dropped __iter__ while mineru's own
 # span_pre_proc.py still iterates it as a list -- import succeeded, `nx
 # doctor --check-mineru` reported healthy, and every real formula-PDF parse
@@ -1269,11 +1292,11 @@ fi
 # would exercise the GENERATION's python, not the uv-tool layer this block
 # means to prove.
 FORMULA_PDF_CHECK_RAN=0
-if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
+if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
     if [ "$PUBLISHED_MODE" != 1 ]; then
-        echo "  (NX_MVV_FORMULA_PDF_CHECK is only meaningful with --published; ignored on the local-wheel layer)"
+        echo "  (the formula-PDF check applies to --published only; not run on the local-wheel layer)"
     else
-        echo "── formula-PDF index via MinerU (opt-in, published bytes, uv-tool layer) ──"
+        echo "── formula-PDF index via MinerU (published bytes, uv-tool layer) ──"
         FORMULA_PDF_CHECK_RAN=1
         FIXTURE_PDF="$REPO_ROOT/tests/fixtures/bft-to-smr.pdf"
         [ -f "$FIXTURE_PDF" ] || _fail "fixture missing: $FIXTURE_PDF (nexus-gqrg0 formula-pdf check)"
@@ -1298,7 +1321,7 @@ if [ "${NX_MVV_FORMULA_PDF_CHECK:-0}" = "1" ]; then
             _fail "nx doctor --check-mineru (rc=$mineru_doctor_rc): ${MINERU_DOCTOR_VERDICT#FAIL|} — see $LOGS/mineru-doctor.log (nexus-gqrg0 class)"
         fi
 
-        # a since-deleted sandbox gate's proven identity shape (its 3b/11 step):
+        # a since-deleted sandbox gate's proven identity shape (its extractor-identity step):
         # snapshot chunk ids before, index, set-diff to isolate ONLY the
         # chunk THIS step added (the collection is chash-ordered, so a
         # positional pick is the wrong document roughly half the time),
@@ -1489,6 +1512,8 @@ VERSION_STRING="${VERSION_ALL%%$'\n'*}"
 # branch fired, and omitted (not a fabricated "0s") when it never ran.
 PROPAGATION_WAIT_SUFFIX=""
 [ -n "$PROPAGATION_WAIT_S" ] && PROPAGATION_WAIT_SUFFIX=" [PROPAGATION_WAIT_S=$PROPAGATION_WAIT_S]"
+[ "$FORMULA_PDF_CHECK_RAN" = 1 ] && FORMULA_PDF_STATUS="ran"
+echo "FRESH-INSTALL MVV formula-PDF check (MinerU, published bytes): $FORMULA_PDF_STATUS"
 echo "FRESH-INSTALL MVV leg 9b (slim generation): $SLIM_LEG"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     echo "FRESH-INSTALL MVV PASSED — conexus $VERSION_STRING (PUBLISHED artifact, uv-tool resolution layer)$PROPAGATION_WAIT_SUFFIX"

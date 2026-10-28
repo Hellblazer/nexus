@@ -358,10 +358,13 @@ jobs:
         # test_mineru_path_preserves_formulas is DESELECTED here — DECIDED
         # state, not pending (nexus-jy4hd, 2026-08-18): MinerU's first
         # invocation downloads ~2-3GB of model weights, and MinerU-end-to-end
-        # coverage is owned by the release shakedown's step 3b, which now
-        # indexes with an EXPLICIT --extractor mineru, doctor-precheck
-        # parsed, and a post-hoc extraction_method identity assert — a
-        # route-away or substitution reddens every release. The prime-mineru
+        # coverage is owned by the release's post-publish run of
+        # tests/e2e/fresh-install-mvv.sh --published (its formula-PDF check,
+        # default-on and required since nexus-tr1rj.20; the shakedown step 3b
+        # that held it was deleted), which indexes with an EXPLICIT
+        # --extractor mineru, doctor-precheck parsed, and a post-hoc
+        # extraction_method identity assert — a route-away or substitution
+        # reddens every release. The prime-mineru
         # mirror step above was added for test_mineru_path_indexes_table_values_as_text,
         # which does run here (nexus-ggonw); re-selecting the formula twin
         # is still nexus-jy4hd's decision to revisit, not a side effect.
