@@ -45,7 +45,7 @@ ALLOWED: dict[str, str] = {
     "service/src/test/": "test fixtures: docling is sample extraction_method data in catalog rows",
     "scripts/experiments/out/": "recorded experiment output",
     "scripts/spikes/": "recorded spike scripts and results",
-    ".test_durations.json": "test ids of this file and the alias tests carry the word",
+    ".test_durations.json": "test ids of the alias tests and the leftover-cache doctor row tests carry the word",
     # Held back until Sam's go: web/ publishes from develop on every push.
     "web/index.html": "install-size text; web/ changes wait for Sam's go (nexus-tr1rj.5)",
     "web/install.ps1": "install-size text; web/ changes wait for Sam's go (nexus-tr1rj.5)",
@@ -111,3 +111,9 @@ def test_the_allow_list_is_not_vacuous() -> None:
     assert unused == [], (
         f"allow-list entries whose files no longer name Docling (remove them, so a mention cannot come back unseen): {unused}"
     )
+
+
+def test_the_durations_file_keeps_no_id_of_a_removed_ci_action() -> None:
+    """A parametrisation over the removed ``prime-docling`` action left a stale id in the durations file."""
+    text = (REPO / ".test_durations.json").read_text(encoding="utf-8")
+    assert "prime-docling" not in text

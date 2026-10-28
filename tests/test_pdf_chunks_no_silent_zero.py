@@ -11,9 +11,9 @@ failure mode.
 
 Two guards cover the silent-zero case:
 
-1. ``_extract_normalized`` raises when PyMuPDF returns no text (the
+1. the PyMuPDF extractor raises when PyMuPDF returns no text (the
    silent fallback that used to mask extractor crashes). Tested in
-   ``test_pdf_extractor.py``.
+   ``test_rdr237_pymupdf_extractor.py``.
 
 2. ``_pdf_chunks`` raises when extraction succeeded with non-empty
    text but the chunker returned zero chunks. The previous
@@ -72,7 +72,7 @@ def test_pdf_chunks_returns_empty_when_extraction_empty(tmp_path: Path):
     reached, so the contract is just 'no silent zero from this layer
     when extraction was empty too'.
 
-    Today _extract_normalized and _extract_pymupdf both raise
+    Today _extract_pymupdf and the MinerU ladder both raise
     on empty extraction, so this case can only occur if a future
     extractor returns empty text without raising. Treat empty text
     + empty chunks as the legitimate (no-op) case so the new guard

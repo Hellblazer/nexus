@@ -476,17 +476,29 @@ class TestSingleTierRegressionGuard:
     the default the result is MinerU's (covered by the ``slow`` tests below).
     """
 
-    def test_ruled_table_pdf_uses_the_requested_extractor(self, ruled_table_pdf: Path) -> None:
-        result = PDFExtractor().extract(ruled_table_pdf, extractor="pymupdf")
-        assert result.metadata["extraction_method"] == "pymupdf", (
-            f"Expected pymupdf; got {result.metadata['extraction_method']!r}"
-        )
+    def test_ruled_table_pdf_is_read_as_its_text_layer_with_no_rescue_tier(self, ruled_table_pdf: Path) -> None:
+        """Every cell and the prose after the table come out of the text layer; MinerU is never asked."""
+        with patch.object(PDFExtractor, "_extract_with_mineru", side_effect=AssertionError("routed to MinerU")):
+            result = PDFExtractor().extract(ruled_table_pdf, extractor="pymupdf")
+        for cell in ("Column A", "Column B", "Value 1", "Value 2", "Data X", "Data Y"):
+            assert cell in result.text, f"{cell!r} missing from {result.text!r}"
+        assert "This document contains a ruled table above." in result.text
+        assert result.metadata["extraction_method"] == "pymupdf"
+        assert result.metadata["table_regions"] == [], "the text layer has no table structure"
+        assert result.metadata["extraction_pages"] == {"pymupdf-text": [1]}
 
-    def test_simple_pdf_uses_the_requested_extractor(self, simple_pdf: Path) -> None:
+    def test_simple_pdf_text_is_exactly_its_own_text_layer(self, simple_pdf: Path) -> None:
+        """The words out are the words PyMuPDF reads off the pages, in order, none added or dropped."""
+        import pymupdf
+
+        with pymupdf.open(simple_pdf) as doc:
+            direct = " ".join(page.get_text(sort=True) for page in doc).split()
+            pages = len(doc)
         result = PDFExtractor().extract(simple_pdf, extractor="pymupdf")
-        assert result.metadata["extraction_method"] == "pymupdf", (
-            f"Expected pymupdf; got {result.metadata['extraction_method']!r}"
-        )
+        assert direct, "the fixture must have a text layer for this to prove anything"
+        assert result.text.split() == direct
+        assert result.metadata["page_count"] == pages
+        assert [b["page_number"] for b in result.metadata["page_boundaries"]] == list(range(1, pages + 1))
 
 
 # ── nexus-gup3b: ff-ligature-drop regression guard ──────────────────────────

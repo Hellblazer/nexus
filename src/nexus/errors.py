@@ -50,8 +50,7 @@ class UnextractableContentError(NexusError):
     """A source file was opened and read successfully by an extractor but
     produced ZERO usable text (nexus-deyd5) — e.g. an image-only PDF, a
     deliberately blank test fixture, or a PDF whose text layer is damaged
-    (``PDFExtractor._extract_normalized``,
-    the "produced empty output" hard error nexus-aold added so this never
+    (the "produced empty output" hard error nexus-aold added so this never
     regresses to silent zero-chunk indexing).
 
     nexus-hg2dw extends this to ``prose_indexer.index_prose_file``'s

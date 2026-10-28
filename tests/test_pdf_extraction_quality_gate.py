@@ -529,3 +529,17 @@ Called from _index_one_pdf via _contain_transient_upsert(lambda: _contain_extrac
         ] * 3)
         report = assess_extraction_quality(identifiers)
         assert not report.passed
+
+
+def test_the_reference_sample_shows_the_remedy_the_gate_prints(dummy_pdf):
+    """docs/cli-reference.md quotes the gate's message for a MinerU document. The quote once kept a remedy the
+    code no longer printed ("retry with --extractor pymupdf"); it must stay the code's own words."""
+    import re
+
+    from nexus.pdf_extractor import _enforce_extraction_quality
+
+    with pytest.raises(ExtractionQualityError) as err:
+        _enforce_extraction_quality(_make_result(_GARBAGE_TEXT, "mineru"), dummy_pdf, allow_degraded=False)
+    remedy = str(err.value).split("Remedy: ", 1)[1]
+    docs = (Path(__file__).resolve().parent.parent / "docs" / "cli-reference.md").read_text()
+    assert " ".join(remedy.split()) in " ".join(re.sub(r"```", " ", docs).split()), remedy

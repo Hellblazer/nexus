@@ -28,7 +28,7 @@ class _PdfStackHeldFailure(click.ClickException):
 
 
 def _registry_path() -> Path:
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
 
     return nexus_config_dir() / "repos.json"
 
@@ -2402,7 +2402,7 @@ def _collections_from_registry_info(info: dict) -> list[str]:
     """
     from fnmatch import fnmatch  # noqa: PLC0415 — deliberate function-local import (stdlib, branch-local use)
 
-    from nexus.config import is_local_mode, load_config as _load_cfg  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import is_local_mode, load_config as _load_cfg  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
 
     cfg = _load_cfg()
     exclude_patterns = (
@@ -2665,7 +2665,7 @@ def run_collection_postprocessing(
     if not collections:
         return
 
-    from nexus.config import load_config as _load_cfg  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import load_config as _load_cfg  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import (heavy T3 dep deferred to call time)
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deliberate function-local import (daemon write proxy deferred to call time)
@@ -3102,7 +3102,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
 
     _log = structlog.get_logger(__name__)
 
-    from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
@@ -4000,7 +4000,7 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
     # The doc_indexer embed_fn contract is `(texts, model) → (embeddings, model)`.
     # LocalEmbeddingFunction's __call__ is a ChromaDB EF — `(input) → embeddings`.
     # We wrap it to match the indexer contract.
-    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance: nexus.config imports commands surface
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
     # nexus-b7s8t: only when the vector backend is opted OUT of service
     # mode. In service mode (local included) the engine embeds and the
     # client's vectors are discarded; batch_index_markdowns's own gate

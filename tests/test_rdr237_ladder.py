@@ -839,17 +839,15 @@ def test_the_page_count_is_the_pdfs_not_mineru_pdf_info() -> None:
 # ── rung 3: one page's text layer ────────────────────────────────────────────
 
 
-def test_the_text_layer_of_one_page_is_normalised_as_extract_normalized_does(tmp_path: Path) -> None:
+def test_the_text_layer_of_one_page_is_read_and_normalised(tmp_path: Path) -> None:
     pdf = make_pdf(tmp_path / "doc.pdf", ["alpha   one", "bravo two"])
-    whole = PDFExtractor()._extract_normalized(pdf)
 
     with pymupdf.open(pdf) as doc:
         pages = [pdf_extractor._pymupdf_page_text(p) for p in doc]
     at = [pdf_extractor._pymupdf_page_text_at(pdf, i) for i in (0, 1)]
 
     assert pages == at
-    assert "\n".join(pages) == whole.text
-    assert pages[0] == "alpha one", "runs of spaces collapse, as in the whole-document path"
+    assert pages == ["alpha one", "bravo two"], "runs of spaces collapse; each page is its own text layer"
 
 
 def test_the_page_normalisation_collapses_spaces_blank_lines_and_trailing_space() -> None:

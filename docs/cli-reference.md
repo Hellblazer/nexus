@@ -175,7 +175,7 @@ catalog identity.
 
 ### PDF Extraction Backends
 
-MinerU is the default and the only layout- and math-aware extractor. Every PDF goes straight to MinerU: there is no formula pre-screen and no second extractor to route to. If MinerU is not installed the run stops (see the exit codes below) rather than falling back to another extractor. `auto` and `docling` are still accepted for `pdf.extractor` and `--extractor`; both run as `mineru` and print a one-line notice once per process. Any other `pdf.extractor` value in a config file falls back to `mineru`.
+MinerU is the default and the only layout- and math-aware extractor. Every PDF goes straight to MinerU: there is no formula pre-screen and no second extractor to route to. If MinerU is not installed the run stops (see the exit codes below) rather than falling back to another extractor. `auto` and `docling` are still accepted for `pdf.extractor` and `--extractor`; both run as `mineru` and print a one-line notice once per process. Any other `pdf.extractor` value in a config file falls back to `mineru`. Every PDF now runs MinerU, about 4 to 10 s per page, and the first PDF on a box downloads about 1.2 GB of model weights. `nx index repo`, `nx collection reindex` and `nx dt index` run MinerU on every PDF they index; `--extractor pymupdf` (or `pdf.extractor: pymupdf`) is the fast, text-only choice.
 
 MinerU reads the document in page batches. A page whose MinerU attempt fails is retried without formulas (rung 2), then read from its PDF text layer through PyMuPDF (rung 3), then recorded `unextracted` (rung 4). One bad page no longer aborts the document; see MinerU OOM resilience below for the details. Math-heavy PDFs get a `has_formulas: true` flag on their chunks (useful for filtering).
 
@@ -283,11 +283,14 @@ run** naming the failing signal(s), the measured value, and the remedy:
 PDF paper.pdf failed the post-extraction quality gate (extraction_method=mineru):
 whitespace_ratio=0.0114 < floor 0.05. This is the space-stripped-garbage failure
 mode (nexus-wi1uv) — the extracted text is likely unsearchable if indexed.
-Remedy: retry with `--extractor pymupdf` (the page text layer, which often
-avoids the corruption), or if this document is legitimately dense/unusual and
-you have reviewed the extracted text, rerun with `--allow-degraded-extraction`
-to index it anyway.
+Remedy: if this document is legitimately dense/unusual and you have reviewed
+the extracted text, rerun with `--allow-degraded-extraction` to index it anyway;
+otherwise fix the PDF (re-export it, or OCR a scan) and index it again.
 ```
+
+When the extractor was `pymupdf`, the remedy instead says to rerun with
+`--allow-degraded-extraction` if the extracted text is acceptable, and that
+`--extractor mineru` reads the page images and needs the PDF stack.
 
 **Blast radius of a failure differs by command.** `nx index pdf` (single
 file or `--dir`) fails just that invocation/file — `--dir` continues the

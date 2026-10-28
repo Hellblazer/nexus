@@ -640,13 +640,46 @@ def _normalize_page_text(raw: str) -> str:
     return _normalize_whitespace_edge_cases(page_text)
 
 
+def _pdf_info_fields(info: dict | None) -> dict[str, str]:
+    """The ``pdf_*`` metadata keys, from a PyMuPDF ``doc.metadata`` dict (empty when it has none)."""
+    info = info or {}
+    return {
+        "pdf_title": str(info.get("title") or ""),
+        "pdf_author": str(info.get("author") or ""),
+        "pdf_subject": str(info.get("subject") or ""),
+        "pdf_keywords": str(info.get("keywords") or ""),
+        "pdf_creator": str(info.get("creator") or ""),
+        "pdf_producer": str(info.get("producer") or ""),
+        "pdf_creation_date": str(info.get("creationDate") or ""),
+        "pdf_mod_date": str(info.get("modDate") or ""),
+    }
+
+
+def _read_pdf_info(pdf_path: Path) -> dict[str, str]:
+    """A PDF's own title, author and the rest of its document information, through PyMuPDF.
+
+    The MinerU result carries these so a document's title chain starts at the title the PDF
+    declares (then its first heading, then its file name) and ``source_author`` is the PDF's
+    author, as they are for the text-only extractor. Opening the file only reads its
+    information dictionary. A file PyMuPDF cannot open gives empty fields: MinerU has the text,
+    and the metadata is the one thing this adds.
+    """
+    try:
+        import pymupdf  # lazy  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
+
+        with pymupdf.open(pdf_path) as doc:
+            return _pdf_info_fields(doc.metadata)
+    except Exception as exc:  # noqa: BLE001 — an unreadable information dictionary must not fail a document MinerU read
+        _log.debug("pdf_info_unreadable", path=str(pdf_path), error=f"{type(exc).__name__}: {exc}")
+        return _pdf_info_fields(None)
+
+
 def _pymupdf_page_text(page: Any) -> str:
     """One page's text layer through PyMuPDF, normalised (RDR-237 rung 3).
 
-    The same ``get_text(sort=True)`` and normalisation the whole-document
-    :meth:`PDFExtractor._extract_normalized` applies to every page, taken for a
-    single page: that method is built on this, and the explicit ``pymupdf``
-    extractor calls it for every page. ``""`` when the page has no text layer.
+    ``get_text(sort=True)`` and the whitespace normalisation, for a single page;
+    the explicit ``pymupdf`` extractor calls it for every page. ``""`` when the
+    page has no text layer.
     """
     return _normalize_page_text(page.get_text(sort=True))
 
@@ -1835,7 +1868,8 @@ class PDFExtractor:
             )
             raise RuntimeError(
                 f"PDF {pdf_path.name}: MinerU extraction failed: {type(exc).__name__}: "
-                f"{sanitized_msg}. Run `nx doctor` to check the MinerU install."
+                f"{sanitized_msg}. Run `nx doctor` to check the MinerU install. For text only "
+                f"(no layout, tables or math), rerun with `--extractor pymupdf`."
             ) from exc
 
     # Page batch size is read from config via get_mineru_page_batch() (default 1).
@@ -3313,14 +3347,7 @@ class PDFExtractor:
                 "page_boundaries": page_boundaries,
                 "table_regions": table_regions,
                 "table_defects": table_defects or [],
-                "pdf_title": "",
-                "pdf_author": "",
-                "pdf_subject": "",
-                "pdf_keywords": "",
-                "pdf_creator": "",
-                "pdf_producer": "",
-                "pdf_creation_date": "",
-                "pdf_mod_date": "",
+                **_read_pdf_info(pdf_path),
             },
         )
 
@@ -3332,8 +3359,8 @@ class PDFExtractor:
     ) -> ExtractionResult:
         """The explicit ``pymupdf`` extractor (RDR-237): every page's own text layer, nothing else.
 
-        Runs the ladder's one-page rung-3 read (:func:`_pymupdf_page_text`) on every page,
-        never the whole-document :meth:`_extract_normalized`. A page with a text layer settles
+        Runs the ladder's one-page rung-3 read (:func:`_pymupdf_page_text`) on every page.
+        A page with a text layer settles
         ``pymupdf-text``; a page without one (an image-only page, or one PyMuPDF cannot read)
         settles ``unextracted``. Like the MinerU ladder, ``on_page`` fires for EVERY page, an
         unextracted one with ``""``, each carrying ``page_method`` so the pipeline buffer can
@@ -3417,92 +3444,7 @@ class PDFExtractor:
                 "format": "normalized",
                 "page_boundaries": page_boundaries,
                 "table_regions": [],
-                "pdf_title": doc_meta.get("title", ""),
-                "pdf_author": doc_meta.get("author", ""),
-                "pdf_subject": doc_meta.get("subject", ""),
-                "pdf_keywords": doc_meta.get("keywords", ""),
-                "pdf_creator": doc_meta.get("creator", ""),
-                "pdf_producer": doc_meta.get("producer", ""),
-                "pdf_creation_date": doc_meta.get("creationDate", ""),
-                "pdf_mod_date": doc_meta.get("modDate", ""),
-                "formula_count": 0,
-            },
-        )
-
-    def _extract_normalized(
-        self,
-        pdf_path: Path,
-        *,
-        on_page: Callable[[int, str, dict], None] | None = None,
-    ) -> ExtractionResult:
-        """Extract via raw PyMuPDF with whitespace normalization."""
-        import pymupdf  # lazy  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-
-        text_parts: list[str] = []
-        page_boundaries: list[dict] = []
-        current_pos = 0
-
-        with pymupdf.open(pdf_path) as doc:
-            page_count = len(doc)
-            doc_meta = doc.metadata or {}
-            for page_num, page in enumerate(doc):
-                # Normalize per-page so page_boundaries match character positions
-                # in the final joined text (global normalization after the fact
-                # would shift boundaries unpredictably).
-                page_text = _pymupdf_page_text(page)
-                if page_text:
-                    page_boundaries.append(
-                        {
-                            "page_number": page_num + 1,
-                            "start_char": current_pos,
-                            # +1 includes the \n separator from "\n".join (same
-                            # rationale as everywhere else: contiguous ranges).
-                            "page_text_length": len(page_text) + 1,
-                        }
-                    )
-                    if on_page is not None:
-                        on_page(page_num, page_text, {"page_number": page_num + 1, "text_length": len(page_text)})
-                    text_parts.append(page_text)
-                    current_pos += len(page_text) + 1
-
-        text = "\n".join(text_parts)
-        if not text.strip():
-            # nexus-aold: silent zero-chunk indexing was the failure
-            # mode of large-PDF crashes that cascaded into
-            # the PyMuPDF fallback returning an empty result. Make
-            # it a hard error. The indexer's outer
-            # error path will surface this as a non-zero exit with
-            # a named failure mode (was: silent 0 chunks indexed).
-            # nexus-deyd5: reclassified from a bare RuntimeError. This is a
-            # per-file "cannot be extracted" condition, not a data-loss
-            # condition -- nothing was ever written for this file, so
-            # run_file_loop skips it (loud, counted, non-fatal) and
-            # continues the rest of the run instead of aborting it. Still a
-            # hard, LOUD failure for THIS file, per nexus-aold's original
-            # intent (no silent zero-chunk indexing) -- only the blast
-            # radius changed, not the visibility.
-            raise UnextractableContentError(
-                f"pymupdf produced empty output for {pdf_path.name} "
-                f"(page_count={page_count}); the PDF may be image-only "
-                "or have a damaged text layer. Try --extractor mineru "
-                "or rerun OCR before indexing."
-            )
-
-        return ExtractionResult(
-            text=text,
-            metadata={
-                "extraction_method": "pymupdf_normalized",
-                "page_count": page_count,
-                "format": "normalized",
-                "page_boundaries": page_boundaries,
-                "pdf_title": doc_meta.get("title", ""),
-                "pdf_author": doc_meta.get("author", ""),
-                "pdf_subject": doc_meta.get("subject", ""),
-                "pdf_keywords": doc_meta.get("keywords", ""),
-                "pdf_creator": doc_meta.get("creator", ""),
-                "pdf_producer": doc_meta.get("producer", ""),
-                "pdf_creation_date": doc_meta.get("creationDate", ""),
-                "pdf_mod_date": doc_meta.get("modDate", ""),
+                **_pdf_info_fields(doc_meta),
                 "formula_count": 0,
             },
         )

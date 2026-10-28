@@ -190,32 +190,24 @@ def test_no_tables_all_text():
 
 
 def test_pymupdf_fallback_all_text(tmp_path):
-    """PyMuPDF fallback path produces no table_regions; all chunks tagged as text."""
+    """The text-only PyMuPDF extractor produces no table_regions; all chunks tagged as text."""
+    import pymupdf
+
     pdf_path = tmp_path / "test.pdf"
-    pdf_path.write_bytes(b"fake pdf")
+    doc = pymupdf.open()
+    for _ in range(2):
+        doc.new_page().insert_text((72, 72), "Fallback text content. " * 8)
+    doc.save(str(pdf_path))
+    doc.close()
 
-    # Mock pymupdf so we don't need a real PDF
-    page_text = "Fallback text content. " * 50
+    result = PDFExtractor()._extract_pymupdf(pdf_path)
 
-    mock_page = MagicMock()
-    mock_page.get_text.return_value = page_text
-
-    mock_doc_ctx = MagicMock()
-    mock_doc_ctx.__enter__ = MagicMock(return_value=mock_doc_ctx)
-    mock_doc_ctx.__exit__ = MagicMock(return_value=False)
-    mock_doc_ctx.__len__ = MagicMock(return_value=1)
-    mock_doc_ctx.__iter__ = MagicMock(return_value=iter([mock_page]))
-    mock_doc_ctx.metadata = {}
-
-    extractor = PDFExtractor()
-    with patch("pymupdf.open", return_value=mock_doc_ctx):
-        result = extractor._extract_normalized(pdf_path)
-
-    assert result.metadata["extraction_method"] == "pymupdf_normalized"
-    assert "table_regions" not in result.metadata
+    assert result.metadata["extraction_method"] == "pymupdf"
+    assert result.metadata["table_regions"] == []
 
     # When fed to the chunker with no table_regions, all chunks are text
     chunker = PDFChunker(chunk_chars=400)
     chunks = chunker.chunk(result.text, result.metadata)
+    assert chunks
     for c in chunks:
         assert c.metadata.get("chunk_type") == "text"

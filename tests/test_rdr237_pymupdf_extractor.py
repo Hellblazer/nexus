@@ -200,7 +200,7 @@ def test_text_pages_are_pymupdf_text_an_image_only_page_is_unextracted_and_the_m
     assert stack_absent.calls == []
 
 
-def test_the_extractor_reads_each_page_with_the_one_page_function_not_the_whole_document_one(
+def test_the_extractor_reads_each_page_with_the_one_page_function(
     stack_absent, tmp_path, monkeypatch,
 ) -> None:
     pdf = _make_pdf(tmp_path / "doc.pdf", [_P1, _P2, _P3])
@@ -213,7 +213,6 @@ def test_the_extractor_reads_each_page_with_the_one_page_function_not_the_whole_
         return text
 
     monkeypatch.setattr(pdfx, "_pymupdf_page_text", spy)
-    monkeypatch.setattr(PDFExtractor, "_extract_normalized", stack_absent.forbid("_extract_normalized"))
 
     PDFExtractor().extract(pdf, extractor="pymupdf")
 

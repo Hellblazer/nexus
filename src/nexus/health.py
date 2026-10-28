@@ -2829,27 +2829,36 @@ _LEFTOVER_DOCLING_CACHE_PREFIXES: tuple[str, ...] = (
 )
 
 
+def _expand_cache_setting(value: str, environ: dict[str, str], home: Path) -> Path:
+    """*value* with a leading ``~`` and ``$VAR`` / ``${VAR}`` expanded, as ``huggingface_hub`` does.
+
+    Expanded against *environ* and *home* (not the process's own) so the answer is the caller's.
+    An unset variable is left as written, the way ``os.path.expandvars`` leaves it.
+    """
+    if value == "~" or value.startswith(("~/", "~\\")):
+        value = str(home) + value[1:]
+    return Path(re.sub(
+        r"\$(?:(\w+)|\{(\w+)\})",
+        lambda m: environ.get(m.group(1) or m.group(2), m.group(0)),
+        value,
+    ))
+
+
 def _hf_hub_cache_dir(environ: dict[str, str], home: Path) -> Path:
-    """Where ``huggingface_hub`` keeps downloaded models, by its own precedence."""
-    if environ.get("HF_HUB_CACHE"):
-        return Path(environ["HF_HUB_CACHE"])
+    """Where ``huggingface_hub`` keeps downloaded models, by its own precedence.
+
+    ``HF_HUB_CACHE``, then the legacy ``HUGGINGFACE_HUB_CACHE``, then ``$HF_HOME/hub``, then
+    ``$XDG_CACHE_HOME/huggingface/hub``, then ``~/.cache/huggingface/hub``. ``~`` and ``$VAR`` in
+    ``HF_HOME`` and in the two cache variables are expanded.
+    """
+    for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        if environ.get(name):
+            return _expand_cache_setting(environ[name], environ, home)
     if environ.get("HF_HOME"):
-        return Path(environ["HF_HOME"]) / "hub"
+        return _expand_cache_setting(environ["HF_HOME"], environ, home) / "hub"
     if environ.get("XDG_CACHE_HOME"):
         return Path(environ["XDG_CACHE_HOME"]) / "huggingface" / "hub"
     return home / ".cache" / "huggingface" / "hub"
-
-
-def _tree_bytes(root: Path) -> int:
-    """Bytes under *root*, links counted as links (a Hugging Face snapshot is symlinks to blobs)."""
-    total = 0
-    for base, _dirs, files in os.walk(root, followlinks=False):
-        for name in files:
-            try:
-                total += os.lstat(os.path.join(base, name)).st_size
-            except OSError:
-                continue
-    return total
 
 
 def _check_leftover_docling_cache(
@@ -2858,17 +2867,20 @@ def _check_leftover_docling_cache(
     """RDR-237: a Docling model cache left behind by the extractor it removed.
 
     Not applicable (no row) unless one exists, which is the case on a virgin box and on any
-    box that never ran Docling. When one does, a warning row (never red) gives its size, where it
-    is and the command that deletes it; nothing deletes it on its own. Looks in the Hugging Face hub
-    cache (by ``HF_HUB_CACHE``, ``HF_HOME``, ``XDG_CACHE_HOME``, else ``~/.cache/huggingface/hub``)
-    and at ``NEXUS_DOCLING_ARTIFACTS_PATH`` when set.
+    box that never ran Docling. When one does, a warning row (never red) gives its size and where
+    it is; nothing deletes it on its own. Looks in the Hugging Face hub cache (by ``HF_HUB_CACHE``,
+    ``HUGGINGFACE_HUB_CACHE``, ``HF_HOME``, ``XDG_CACHE_HOME``, else ``~/.cache/huggingface/hub``),
+    in ``docling-tools``' own default ``~/.cache/docling/models``, and at
+    ``NEXUS_DOCLING_ARTIFACTS_PATH`` when set. The first two are directories Docling made, and the
+    row prints the command that deletes them. ``NEXUS_DOCLING_ARTIFACTS_PATH`` is a directory the
+    user chose and may share, so the row names it and prints no delete command for it.
     """
     env = dict(os.environ) if environ is None else environ
     try:
         base = home if home is not None else Path.home()
     except (RuntimeError, KeyError):
         return []
-    found: list[Path] = []
+    found: list[Path] = []  # directories Docling created: safe to name in a delete command
     cache = _hf_hub_cache_dir(env, base)
     try:
         if cache.is_dir():
@@ -2880,21 +2892,35 @@ def _check_leftover_docling_cache(
             )
     except OSError:
         pass
+    tools_models = base / ".cache" / "docling" / "models"
+    if tools_models.is_dir():
+        found.append(tools_models)
+    user_set: list[Path] = []  # a directory the user named: reported, never in a delete command
     artifacts = env.get("NEXUS_DOCLING_ARTIFACTS_PATH", "").strip()
-    if artifacts and Path(artifacts).is_dir():
-        found.append(Path(artifacts))
-    if not found:
+    if artifacts:
+        path = _expand_cache_setting(artifacts, env, base)
+        if path.is_dir() and path not in found:
+            user_set.append(path)
+    if not found and not user_set:
         return []
-    size_gb = sum(_tree_bytes(path) for path in found) / 1e9
-    where = ", ".join(str(path) for path in found)
-    if sys.platform == "win32":
-        delete = "; ".join(f'Remove-Item -Recurse -Force "{path}"' for path in found)
-    else:
-        delete = "rm -rf " + " ".join(shlex.quote(str(path)) for path in found)
+    size_gb = sum(_tree_bytes(path)[0] for path in (*found, *user_set)) / 1e9
+    where = ", ".join(str(path) for path in (*found, *user_set))
+    fixes: list[str] = []
+    if found:
+        if sys.platform == "win32":
+            delete = "; ".join(f'Remove-Item -Recurse -Force "{path}"' for path in found)
+        else:
+            delete = "rm -rf " + " ".join(shlex.quote(str(path)) for path in found)
+        fixes.append(f"Delete it: {delete}")
+    for path in user_set:
+        fixes.append(
+            f"{path} is the directory NEXUS_DOCLING_ARTIFACTS_PATH names, one you set: check that it holds "
+            "only Docling models before you delete anything in it."
+        )
     return [HealthResult(
         label="Docling model cache", ok=False, warn=True,
         detail=f"{size_gb:.1f} GB left from the removed Docling extractor, unused: {where}",
-        fix_suggestions=[f"Delete it: {delete}"],
+        fix_suggestions=fixes,
     )]
 
 

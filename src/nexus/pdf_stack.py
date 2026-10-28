@@ -152,8 +152,8 @@ VCRT_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 #: Said once, on stderr, before uv starts (the design's wording).
 INSTALL_NOTICE = (
     "Installing PDF support for conexus {version}: about 285 MB (macOS) / 390 MB (Linux) "
-    "download, 1.0 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow on first "
-    "use: about 0.5 GB, plus 1.2 GB for the first PDF with formulas."
+    "download, 1.0 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow with "
+    "the first PDF you index: about 1.2 GB."
 )
 
 _SKIPPED_RECORD = "pdf-stack-skipped.json"

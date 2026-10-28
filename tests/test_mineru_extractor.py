@@ -288,3 +288,68 @@ class TestMineruErrorHandling:
         with patch("nexus.pdf_extractor.do_parse", None):
             with pytest.raises(ImportError, match="nx self install"):
                 extractor._extract_with_mineru(dummy_pdf)
+
+
+# ── the PDF's own title and author (RDR-237 review fix 1) ───────────────────
+
+
+def _pdf_with_metadata(path: Path, **metadata: str) -> Path:
+    import pymupdf
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "Body text of the paper.")
+    if metadata:
+        doc.set_metadata(metadata)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+class TestMineruResultCarriesThePdfsOwnMetadata:
+    """The removed second extractor wrote a real title for every non-math PDF; the MinerU path wrote ``pdf_title`` empty,
+    so a re-indexed PDF with no usable first heading got its file name and no author. Both extractors now
+    read the PDF's own information dictionary through PyMuPDF."""
+
+    @staticmethod
+    def _build(pdf: Path, text: str = "# A Heading\n\nBody."):
+        return PDFExtractor._mineru_build_result(
+            pdf, text, [], [{"page_idx": 0, "para_blocks": []}], per_page_lengths=[(0, len(text))], total_pages=1,
+        )
+
+    def test_title_author_and_the_rest_come_from_the_pdf(self, tmp_path):
+        pdf = _pdf_with_metadata(
+            tmp_path / "p.pdf", title="The Declared Title", author="A. Author", subject="A subject",
+            keywords="k1, k2", creator="LaTeX", producer="pdfTeX",
+        )
+        meta = self._build(pdf).metadata
+        assert meta["pdf_title"] == "The Declared Title"
+        assert meta["pdf_author"] == "A. Author"
+        assert meta["pdf_subject"] == "A subject" and meta["pdf_keywords"] == "k1, k2"
+        assert meta["pdf_creator"] == "LaTeX" and meta["pdf_producer"] == "pdfTeX"
+
+    def test_the_title_chain_is_metadata_then_first_heading_then_file_name(self, tmp_path):
+        from nexus.indexer_utils import resolve_pdf_title
+
+        declared = _pdf_with_metadata(tmp_path / "declared.pdf", title="The Declared Title")
+        result = self._build(declared)
+        assert resolve_pdf_title(result.metadata, declared, result.text) == "The Declared Title"
+
+        undeclared = _pdf_with_metadata(tmp_path / "undeclared.pdf")
+        result = self._build(undeclared)
+        assert resolve_pdf_title(result.metadata, undeclared, result.text) == "A Heading"
+
+        result = self._build(undeclared, text="no heading in this one")
+        assert resolve_pdf_title(result.metadata, undeclared, result.text) == "Undeclared"  # the normalised file name
+
+    def test_a_file_pymupdf_cannot_open_gives_empty_fields_not_an_error(self, tmp_path):
+        broken = tmp_path / "broken.pdf"
+        broken.write_bytes(b"not a pdf at all")
+        for pdf in (broken, tmp_path / "absent.pdf"):
+            meta = self._build(pdf).metadata
+            assert meta["pdf_title"] == "" and meta["pdf_author"] == ""
+            assert meta["pdf_creation_date"] == "" and meta["extraction_method"] == "mineru"
+
+    def test_the_text_only_extractor_reports_the_same_fields(self, tmp_path):
+        pdf = _pdf_with_metadata(tmp_path / "p.pdf", title="The Declared Title", author="A. Author")
+        meta = PDFExtractor()._extract_pymupdf(pdf).metadata
+        assert meta["pdf_title"] == "The Declared Title" and meta["pdf_author"] == "A. Author"

@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.errors import UnextractableContentError
 from nexus.pdf_extractor import PDFExtractor, ExtractionResult, _normalize_whitespace_edge_cases
 
 @pytest.fixture
@@ -47,60 +46,6 @@ def _full_metadata(*, method="mineru", formula_count=0, text_len=23, **overrides
     }
     base.update(overrides)
     return base
-
-
-def _mock_pymupdf_doc(pages_text: list[str], metadata: dict | None = None):
-    mock_pages = []
-    for text in pages_text:
-        p = MagicMock()
-        p.get_text.return_value = text
-        mock_pages.append(p)
-    mock_doc = MagicMock()
-    mock_doc.__enter__ = MagicMock(return_value=mock_doc)
-    mock_doc.__exit__ = MagicMock(return_value=False)
-    mock_doc.__iter__ = MagicMock(return_value=iter(mock_pages))
-    mock_doc.__len__ = MagicMock(return_value=len(pages_text))
-    mock_doc.metadata = metadata or {}
-    mock_pymupdf = MagicMock()
-    mock_pymupdf.open.return_value = mock_doc
-    return mock_pymupdf
-
-
-# ── _extract_normalized (whole-document PyMuPDF read) ───────────────────────
-
-
-def test_extract_normalized_tracks_page_boundaries(extractor, dummy_pdf):
-    mock_pymupdf = _mock_pymupdf_doc(["Page one text.", ""])
-    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        result = extractor._extract_normalized(dummy_pdf)
-    boundaries = result.metadata["page_boundaries"]
-    assert len(boundaries) == 1
-    assert boundaries[0]["page_number"] == 1
-    assert result.metadata["extraction_method"] == "pymupdf_normalized"
-
-
-def test_extract_normalized_reads_the_pdf_title(extractor, dummy_pdf):
-    """RDR-237: the title chain starts at ``pdf_title`` (XMP)."""
-    mock_pymupdf = _mock_pymupdf_doc(["Some text here."], metadata={"title": "PDF Meta Title"})
-    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        result = extractor._extract_normalized(dummy_pdf)
-    assert result.metadata["pdf_title"] == "PDF Meta Title"
-
-
-def test_extract_normalized_raises_on_empty_output(extractor, dummy_pdf):
-    """nexus-aold: PyMuPDF fallback used to silently return an
-    ExtractionResult with text='' when the PDF was image-only or
-    extraction failed page-by-page. Downstream the empty text
-    produced 0 chunks and the indexer reported success with no
-    chunks indexed (a silent failure mode). Empty output is a hard
-    error -- LOUD, per file
-    (nexus-aold's original intent), but nexus-deyd5 reclassified it from a
-    bare RuntimeError to UnextractableContentError so run_file_loop treats
-    it as a per-file skip rather than aborting the whole run."""
-    mock_pymupdf = _mock_pymupdf_doc(["", "", ""])
-    with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-        with pytest.raises(UnextractableContentError, match="empty"):
-            extractor._extract_normalized(dummy_pdf)
 
 
 @pytest.mark.parametrize("input_text, expected", [
@@ -155,7 +100,6 @@ class TestMineruIsTheDefault:
         with (
             patch.object(extractor, "_extract_with_mineru", return_value=self._mineru) as mineru,
             patch.object(extractor, "_extract_pymupdf") as pymupdf,
-            patch.object(extractor, "_extract_normalized") as normalized,
         ):
             result = extractor.extract(dummy_pdf)
         assert result.metadata["extraction_method"] == "mineru"
@@ -164,13 +108,17 @@ class TestMineruIsTheDefault:
         assert set(mineru.call_args.kwargs) == {"on_page"}  # no formula count, no formula-OOM choice
         assert callable(mineru.call_args.kwargs["on_page"])  # nexus-i0cwh: the pages_with_text collector
         pymupdf.assert_not_called()
-        normalized.assert_not_called()
 
     def test_the_quick_formula_screen_is_gone(self):
         import nexus.pdf_extractor as module
 
         for name in ("_has_formulas_quick", "_count_formula_markers", "_FORMULA_ROUTE_THRESHOLD"):
             assert not hasattr(module, name), f"{name} belonged to the removed auto routing"
+
+    def test_the_whole_document_pymupdf_reader_is_gone(self):
+        """``_extract_normalized`` had no caller once auto routing went; only tests kept it alive. The
+        ``pymupdf_normalized`` value it wrote stays readable on old documents, nothing writes it."""
+        assert not hasattr(PDFExtractor, "_extract_normalized")
 
     def test_pymupdf_runs_the_text_only_extractor_and_never_mineru(self, extractor, dummy_pdf):
         with (
@@ -200,12 +148,10 @@ class TestMineruIsTheDefault:
         """nexus-2fyb: no plainer extractor runs behind the user's back; the PDF fails by name."""
         with (
             patch.object(extractor, "_extract_with_mineru", side_effect=RuntimeError("MinerU 409")),
-            patch.object(extractor, "_extract_normalized") as normalized,
             patch.object(extractor, "_extract_pymupdf") as pymupdf,
         ):
             with pytest.raises(RuntimeError, match="MinerU extraction failed"):
                 extractor.extract(dummy_pdf)
-        normalized.assert_not_called()
         pymupdf.assert_not_called()
 
     def test_a_missing_import_on_an_installed_stack_names_the_reinstall_and_the_text_only_way(
@@ -260,6 +206,7 @@ class TestMineruIsTheDefault:
         assert "subprocess timed out" in msg  # underlying cause surfaced
         assert "reinstall" not in msg.lower()
         assert "nx doctor" in msg
+        assert "--extractor pymupdf" in msg, "an operational failure also names the text-only way out"
         assert isinstance(excinfo.value.__cause__, RuntimeError)
 
     def test_a_failure_does_not_replay_pages_to_the_callback(self, extractor, dummy_pdf):
@@ -282,33 +229,3 @@ class TestMineruIsTheDefault:
         # every call to the caller's callback.
         forwarded = mineru.call_args.kwargs["on_page"]
         assert forwarded is not cb and callable(forwarded)
-
-
-# ── on_page callback (RDR-048) ──────────────────────────────────────────────
-
-
-class TestOnPageCallbackPyMuPDF:
-
-    def test_callback_receives_pages_in_order(self, extractor, dummy_pdf):
-        mock_pymupdf = _mock_pymupdf_doc(["Page zero text", "Page one text"])
-        received: list[tuple] = []
-
-        with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-            extractor._extract_normalized(
-                dummy_pdf, on_page=lambda idx, text, meta: received.append((idx, text, meta)),
-            )
-
-        assert len(received) == 2
-        assert received[0][0] == 0
-        assert "Page zero text" in received[0][1]
-        assert received[0][2]["page_number"] == 1
-        assert received[1][2]["page_number"] == 2
-
-    def test_result_complete_with_callback(self, extractor, dummy_pdf):
-        mock_pymupdf = _mock_pymupdf_doc(["Some content"])
-
-        with patch.dict("sys.modules", {"pymupdf": mock_pymupdf}):
-            result = extractor._extract_normalized(dummy_pdf, on_page=lambda *a: None)
-
-        assert result.text
-        assert result.metadata["page_boundaries"]

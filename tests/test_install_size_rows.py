@@ -176,3 +176,23 @@ def test_the_on_demand_install_notice_gives_the_measured_sizes() -> None:
     assert "about 285 MB (macOS) / 390 MB (Linux) download" in INSTALL_NOTICE
     assert "1.0 GB (macOS) / 1.3 GB (Linux) on disk" in INSTALL_NOTICE
     assert "0.8 GB on disk" not in INSTALL_NOTICE
+
+
+def test_every_pdf_pays_the_one_model_download_and_no_text_says_otherwise() -> None:
+    """RDR-237: the old 0.5 GB was the removed extractor's models, fetched by the first PDF of any kind, and the 1.2 GB was
+    MinerU's, for a formula PDF. MinerU is the only extractor now, so the first PDF fetches its 1.2 GB and
+    nothing else. The notice, the README, the Desktop guide and the extension's setting say that."""
+    from nexus.pdf_stack import INSTALL_NOTICE
+
+    manifest = (REPO / "mcpb" / "manifest.json").read_text()
+    for name, text in (
+        ("INSTALL_NOTICE", INSTALL_NOTICE),
+        ("README.md", (REPO / "README.md").read_text()),
+        ("docs/desktop-deployment.md", (REPO / "docs" / "desktop-deployment.md").read_text()),
+        ("mcpb/manifest.json", manifest),
+    ):
+        assert "1.2 GB" in text and "model weights" in text.lower(), name
+        assert "first PDF with formulas" not in text, name
+        assert "0.5 GB of model weights" not in text and "about 0.5 GB, plus" not in text, name
+    assert "about 1.2 GB of model weights with the first PDF" in manifest
+    assert "about 1.2 GB." in INSTALL_NOTICE

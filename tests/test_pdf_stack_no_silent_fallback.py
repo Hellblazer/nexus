@@ -55,7 +55,7 @@ def dummy_pdf(tmp_path: Path) -> Path:
 def test_extract_refuses_before_any_backend_runs(absent, dummy_pdf, monkeypatch, mode) -> None:
     ex = PDFExtractor()
     ran: list[str] = []
-    for name in ("_extract_with_mineru", "_extract_normalized", "_extract_with_mineru_guarded", "_extract_pymupdf"):
+    for name in ("_extract_with_mineru", "_extract_with_mineru_guarded", "_extract_pymupdf"):
         monkeypatch.setattr(ex, name, lambda *a, _n=name, **k: ran.append(_n))
     with pytest.raises(PdfStackMissingError) as err:
         ex.extract(dummy_pdf, extractor=mode)
@@ -65,10 +65,9 @@ def test_extract_refuses_before_any_backend_runs(absent, dummy_pdf, monkeypatch,
 
 
 def test_a_pdf_is_not_read_as_plain_text_when_the_stack_is_absent(absent, dummy_pdf, monkeypatch) -> None:
-    """The nexus-2fyb shape: MinerU unavailable. The old failure was a quiet pymupdf_normalized result."""
+    """The nexus-2fyb shape: MinerU unavailable. The old failure was a quiet plain-text PyMuPDF result."""
     ex = PDFExtractor()
     ran: list[str] = []
-    monkeypatch.setattr(ex, "_extract_normalized", lambda *a, **k: ran.append("normalized"))
     monkeypatch.setattr(ex, "_extract_pymupdf", lambda *a, **k: ran.append("pymupdf"))
     with pytest.raises(PdfStackMissingError):
         ex.extract(dummy_pdf)

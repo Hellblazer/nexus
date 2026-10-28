@@ -647,13 +647,13 @@ def _h1_is_section_heading(h1: str) -> bool:
 def resolve_pdf_title(metadata: dict, pdf_path: Path, text: str | None) -> str:
     """Resolve a PDF's document title — the ONE chain for both PDF paths.
 
-    ``pdf_title`` (XMP) -> first H1 of *text* -> normalised filename stem
-    (:func:`derive_title`). The MinerU extractor reports an empty ``pdf_title``,
-    so before 2026-08-19 its documents always fell to
+    ``pdf_title`` (the title in the PDF's own metadata, which both extractors
+    now read through PyMuPDF) -> first H1 of *text* -> normalised filename stem
+    (:func:`derive_title`). Before 2026-08-19 a MinerU document always fell to
     the stem (``papers/2512.11001.pdf`` -> ``"2512.11001"``) even though its
     markdown opens with ``# <title>``; passing the extracted text lets the
-    H1 win. Used by ``doc_indexer._pdf_chunks`` and the streaming post-pass
-    in ``pipeline_stages``.
+    H1 win when the PDF declares no title. Used by ``doc_indexer._pdf_chunks``
+    and the streaming post-pass in ``pipeline_stages``.
     """
     extracted = str(metadata.get("pdf_title") or "").strip()
     if extracted:
