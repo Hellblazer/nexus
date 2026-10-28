@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
 
 from tests.prose_edit.conftest import ROOT, Prose, git
-from tests.prose_edit.test_brief import SKILL, _module, brief_ok, run_brief, seed
+from tests.prose_edit.test_brief import SKILL, _module, brief_ok, run_brief
 
 README = ROOT / "prose-edit" / "README.md"
 SKILL_TEXT = SKILL.read_text(encoding="utf-8")
@@ -37,7 +38,7 @@ def _put(root: Path, rel: str, text: str = "x\n") -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _layout(prose: Prose) -> None:
+def _layout(bare: Prose) -> None:
     """A repository that looks like someone else's: real docs beside tests, fixtures, hidden and script folders."""
     for rel in (
         "docs/runbooks/deploy.md",
@@ -49,19 +50,29 @@ def _layout(prose: Prose) -> None:
         "scripts/readme.md",
         ".github/pull_request_template.md",
     ):
-        _put(prose.cwd, rel)
-    git(prose.cwd, "add", "-A")
+        _put(bare.cwd, rel)
+    git(bare.cwd, "add", "-A")
 
 
-def _setup(prose: Prose) -> dict:
-    return json.loads(brief_ok(prose, "setup"))
+def _setup(bare: Prose, genre_map: list[str] | None = None) -> dict:
+    """The setup report, built in-process from the status `memory.py status` would give: no T2, no tenant.
+
+    `genre_map` is the repo layer's mapped folders. The wiring from the real `status` is covered by the T2-backed
+    test_plugin_packaging.py::test_setup_offers_what_no_genre_reaches_as_keys_a_genre_map_entry_takes and
+    test_allow_rule_setup.py::test_setup_reports_only_the_rule_the_user_settings_lack."""
+    status = {
+        "repo": bare.cwd.name,
+        "root": str(bare.cwd),
+        "genre_map": {"user": [], "repo": list(genre_map or [])},
+        "exemplars": {},
+    }
+    return _module().setup_report(sys.executable, {"reachable": True}, status)
 
 
-def _settings_with_rules(prose: Prose) -> None:
-    config = prose.tmp.parent / "claude-config"
+def _settings_with_rules(bare: Prose) -> None:
+    config = bare.tmp.parent / "claude-config"
     config.mkdir(exist_ok=True)
-    prose.env["CLAUDE_CONFIG_DIR"] = str(config)
-    rules = json.loads(brief_ok(prose, "setup"))["allow_rules"]["json"]
+    rules = {"permissions": {"allow": _module().allow_rules()}}
     (config / "settings.json").write_text(json.dumps(rules), encoding="utf-8")
 
 
@@ -98,9 +109,9 @@ def test_the_descriptions_say_how_the_editor_treats_the_genre() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_setup_offers_only_folders_that_look_like_documentation(prose: Prose) -> None:
-    _layout(prose)
-    report = _setup(prose)
+def test_setup_offers_only_folders_that_look_like_documentation(bare: Prose) -> None:
+    _layout(bare)
+    report = _setup(bare)
     assert "no_genre" not in report
     found = _candidates(report)
     assert set(found) == {"docs/runbooks/", "docs/postmortem/", "README.md"}
@@ -112,16 +123,16 @@ def test_setup_offers_only_folders_that_look_like_documentation(prose: Prose) ->
     assert [c["key"] for c in report["genre_candidates"]][0] == "docs/runbooks/"  # most files first
 
 
-def test_setup_suggests_a_genre_from_the_folder_name_and_ranks_all_six(prose: Prose) -> None:
-    _layout(prose)
-    found = _candidates(_setup(prose))
+def test_setup_suggests_a_genre_from_the_folder_name_and_ranks_all_six(bare: Prose) -> None:
+    _layout(bare)
+    found = _candidates(_setup(bare))
     assert found["docs/runbooks/"]["suggested"] == "how-to"
     assert found["docs/postmortem/"]["suggested"] == "exploration-essay"
     assert found["README.md"]["suggested"] == "reference-doc"
     for cand in found.values():
         assert cand["ranked"][0] == cand["suggested"]
         assert sorted(cand["ranked"]) == sorted(ALL_GENRES)
-        assert (prose.cwd / cand["sample"]).is_file()
+        assert (bare.cwd / cand["sample"]).is_file()
         assert cand["sample"].startswith(cand["key"]), cand
     assert found["docs/runbooks/"]["sample"] in {
         "docs/runbooks/deploy.md",
@@ -129,18 +140,18 @@ def test_setup_suggests_a_genre_from_the_folder_name_and_ranks_all_six(prose: Pr
     }
 
 
-def test_setup_prints_the_descriptions_the_skill_shows(prose: Prose) -> None:
-    _layout(prose)
-    assert _setup(prose)["genre_descriptions"] == _module().GENRE_DESCRIPTIONS
+def test_setup_prints_the_descriptions_the_skill_shows(bare: Prose) -> None:
+    _layout(bare)
+    assert _setup(bare)["genre_descriptions"] == _module().GENRE_DESCRIPTIONS
 
 
-def test_setup_caps_the_candidates_at_eight_and_counts_the_rest(prose: Prose) -> None:
+def test_setup_caps_the_candidates_at_eight_and_counts_the_rest(bare: Prose) -> None:
     for n in range(12):
-        _put(prose.cwd, f"docs/area{n:02d}/a.md")
-        _put(prose.cwd, f"docs/area{n:02d}/b.md")
-    _put(prose.cwd, "tests/t.md")
-    git(prose.cwd, "add", "-A")
-    report = _setup(prose)
+        _put(bare.cwd, f"docs/area{n:02d}/a.md")
+        _put(bare.cwd, f"docs/area{n:02d}/b.md")
+    _put(bare.cwd, "tests/t.md")
+    git(bare.cwd, "add", "-A")
+    report = _setup(bare)
     assert len(report["genre_candidates"]) == 8
     shown = sum(c["files"] for c in report["genre_candidates"])
     assert shown == 16
@@ -183,10 +194,9 @@ def test_a_root_file_is_keyed_by_its_own_name_and_changelog_suggests_changelog()
     assert mod.suggest_genre_for_key("README.md") == "reference-doc"
 
 
-def test_a_mapped_folder_stops_being_a_candidate(prose: Prose) -> None:
-    _layout(prose)
-    seed(prose, "repo", lists={"genre_map": ["docs/runbooks/=how-to"]})
-    assert "docs/runbooks/" not in _candidates(_setup(prose))
+def test_a_mapped_folder_stops_being_a_candidate(bare: Prose) -> None:
+    _layout(bare)
+    assert "docs/runbooks/" not in _candidates(_setup(bare, ["docs/runbooks/=how-to"]))
 
 
 # ---------------------------------------------------------------------------
@@ -194,44 +204,42 @@ def test_a_mapped_folder_stops_being_a_candidate(prose: Prose) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ready_needs_the_allow_rules_and_try_path_is_a_file_that_already_maps(prose: Prose) -> None:
-    _layout(prose)
-    report = _setup(prose)
+def test_ready_needs_the_allow_rules_and_try_path_is_a_file_that_already_maps(bare: Prose) -> None:
+    _layout(bare)
+    report = _setup(bare)
     assert report["ready"] is False and report["allow_rules"]["missing"]
     assert report["try_path"] == "docs/x.md"  # top-level docs/*.md is a built-in reference-doc
-    _settings_with_rules(prose)
-    assert _setup(prose)["ready"] is True
+    _settings_with_rules(bare)
+    assert _setup(bare)["ready"] is True
 
 
-def test_try_path_falls_back_to_the_top_candidates_sample(prose: Prose) -> None:
-    git(prose.cwd, "rm", "-q", "-f", "docs/x.md")
-    _layout(prose)
-    report = _setup(prose)
+def test_try_path_falls_back_to_the_top_candidates_sample(bare: Prose) -> None:
+    git(bare.cwd, "rm", "-q", "-f", "docs/x.md")
+    _layout(bare)
+    report = _setup(bare)
     assert report["try_path"] == report["genre_candidates"][0]["sample"]
 
 
-def test_try_path_is_the_mapped_file_once_the_author_has_mapped_a_folder(prose: Prose) -> None:
-    git(prose.cwd, "rm", "-q", "-f", "docs/x.md")
-    _layout(prose)
-    seed(prose, "repo", lists={"genre_map": ["docs/runbooks/=how-to"]})
-    report = _setup(prose)
+def test_try_path_is_the_mapped_file_once_the_author_has_mapped_a_folder(bare: Prose) -> None:
+    git(bare.cwd, "rm", "-q", "-f", "docs/x.md")
+    _layout(bare)
+    report = _setup(bare, ["docs/runbooks/=how-to"])
     assert report["try_path"] in {"docs/runbooks/deploy.md", "docs/runbooks/restore.md"}
     assert report["genres_in_use"] == ["how-to"]
     assert "docs/runbooks/" not in _candidates(report)
 
 
-def test_try_path_never_names_a_file_in_build_output(prose: Prose) -> None:
-    git(prose.cwd, "rm", "-q", "-f", "docs/x.md")
-    _put(prose.cwd, "dist/f.md")
-    _put(prose.cwd, "node_modules/pkg/readme.md")
-    git(prose.cwd, "add", "-A")
-    seed(prose, "repo", lists={"genre_map": ["dist/=how-to"]})
-    assert _setup(prose)["try_path"] is None
+def test_try_path_never_names_a_file_in_build_output(bare: Prose) -> None:
+    git(bare.cwd, "rm", "-q", "-f", "docs/x.md")
+    _put(bare.cwd, "dist/f.md")
+    _put(bare.cwd, "node_modules/pkg/readme.md")
+    git(bare.cwd, "add", "-A")
+    assert _setup(bare, ["dist/=how-to"])["try_path"] is None
 
 
-def test_a_repository_with_nothing_to_edit_reports_no_try_path(prose: Prose) -> None:
-    git(prose.cwd, "rm", "-q", "-f", "docs/x.md")
-    report = _setup(prose)
+def test_a_repository_with_nothing_to_edit_reports_no_try_path(bare: Prose) -> None:
+    git(bare.cwd, "rm", "-q", "-f", "docs/x.md")
+    report = _setup(bare)
     assert report["try_path"] is None and report["genre_candidates"] == []
 
 
@@ -240,9 +248,9 @@ def test_a_repository_with_nothing_to_edit_reports_no_try_path(prose: Prose) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_suggest_genre_gives_the_runtime_question_its_options(prose: Prose) -> None:
-    _layout(prose)
-    out = json.loads(brief_ok(prose, "suggest-genre", "docs/runbooks/deploy.md"))
+def test_suggest_genre_gives_the_runtime_question_its_options(bare: Prose) -> None:
+    _layout(bare)
+    out = json.loads(brief_ok(bare, "suggest-genre", "docs/runbooks/deploy.md"))
     assert out["path"] == "docs/runbooks/deploy.md"
     assert out["folder_key"] == "docs/runbooks/"
     assert out["suggested"] == "how-to" and out["ranked"][0] == "how-to"
@@ -250,9 +258,9 @@ def test_suggest_genre_gives_the_runtime_question_its_options(prose: Prose) -> N
     assert out["descriptions"] == _module().GENRE_DESCRIPTIONS
 
 
-def test_suggest_genre_keys_a_root_file_by_name_and_accepts_an_absolute_path(prose: Prose) -> None:
-    _layout(prose)
-    out = json.loads(brief_ok(prose, "suggest-genre", str(prose.cwd / "README.md")))
+def test_suggest_genre_keys_a_root_file_by_name_and_accepts_an_absolute_path(bare: Prose) -> None:
+    _layout(bare)
+    out = json.loads(brief_ok(bare, "suggest-genre", str(bare.cwd / "README.md")))
     assert (out["path"], out["folder_key"], out["suggested"]) == (
         "README.md",
         "README.md",
@@ -260,19 +268,21 @@ def test_suggest_genre_keys_a_root_file_by_name_and_accepts_an_absolute_path(pro
     )
 
 
-def test_suggest_genre_refuses_a_path_outside_the_repository(prose: Prose, tmp_path: Path) -> None:
+def test_suggest_genre_refuses_a_path_outside_the_repository(bare: Prose, tmp_path: Path) -> None:
     outside = tmp_path / "elsewhere.md"
     outside.write_text("x\n", encoding="utf-8")
-    proc = run_brief(prose, "suggest-genre", str(outside))
+    proc = run_brief(bare, "suggest-genre", str(outside))
     assert proc.returncode == 1 and "outside" in proc.stderr.lower()
     assert proc.stdout == ""
 
 
-def test_the_key_suggest_genre_prints_is_one_a_genre_map_entry_takes(prose: Prose) -> None:
-    _layout(prose)
-    key = json.loads(brief_ok(prose, "suggest-genre", "docs/postmortem/2026-01-outage.md"))["folder_key"]
-    seed(prose, "repo", lists={"genre_map": [f"{key}=exploration-essay"]})
-    assert prose.ok("genre-for", "docs/postmortem/2026-01-outage.md")["genre"] == "exploration-essay"
+def test_the_key_suggest_genre_prints_is_one_a_genre_map_entry_takes(bare: Prose) -> None:
+    # the T2-backed twin (setup's keys stored, then `genre-for` on the files) is in test_plugin_packaging.py
+    _layout(bare)
+    key = json.loads(brief_ok(bare, "suggest-genre", "docs/postmortem/2026-01-outage.md"))["folder_key"]
+    layers = [[], [f"{key}=exploration-essay"], [], []]
+    assert _module()._MEM.genre_for("docs/postmortem/2026-01-outage.md", layers) == "exploration-essay"
+    assert _module()._MEM.genre_for("docs/runbooks/deploy.md", layers) is None
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +319,7 @@ def test_a_session_without_the_choice_tool_asks_the_same_question_in_plain_text(
     assert "numbered list" in asking
 
 
-def test_the_setup_run_is_a_wizard_that_reads_the_new_fields(prose: Prose) -> None:
+def test_the_setup_run_is_a_wizard_that_reads_the_new_fields() -> None:
     run = _setup_run()
     assert "no_genre" not in SKILL_TEXT
     for field in ("genre_candidates", "unmapped_other", "ready", "try_path", "genres_in_use", "genre_descriptions"):

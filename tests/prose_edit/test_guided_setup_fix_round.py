@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests.prose_edit.conftest import Prose, git
-from tests.prose_edit.test_brief import _module, run_brief
+from tests.prose_edit.test_brief import _module
 from tests.prose_edit.test_guided_setup import (
     ALL_GENRES,
     README,
@@ -25,13 +25,13 @@ from tests.prose_edit.test_guided_setup import (
 )
 
 
-def _drop_seed_doc(prose: Prose) -> None:
+def _drop_seed_doc(bare: Prose) -> None:
     """The fixture repository tracks docs/x.md, a built-in reference-doc; setup ignores a tracked file that is gone."""
-    (prose.cwd / "docs" / "x.md").unlink()
+    (bare.cwd / "docs" / "x.md").unlink()
 
 
-def _stage(prose: Prose) -> None:
-    git(prose.cwd, "add", "-A")
+def _stage(bare: Prose) -> None:
+    git(bare.cwd, "add", "-A")
 
 
 # ---------------------------------------------------------------------------
@@ -140,28 +140,33 @@ def test_the_skill_never_stores_or_passes_an_other_answer_that_is_not_a_genre_na
     assert "is never stored; say so and ask that question again" in _setup_run()
 
 
-def _genre_map_entry(prose: Prose, *items: str):
-    return prose.run("add-entry", "--level", "repo", "--from-stdin", stdin={"scalars": {}, "lists": {"genre_map": list(items)}})
+def _genre_map_entry(bare: Prose, *items: str):
+    return bare.run("add-entry", "--level", "repo", "--from-stdin", stdin={"scalars": {}, "lists": {"genre_map": list(items)}})
 
 
+# add-entry refuses before it reaches T2: the `bare` fixture's nx cannot start, so a script that reached for T2 first
+# would end with exit 3 ("T2 unavailable") and not the refusal. That ordering is what keeps the valid entry beside
+# the bad one from being stored; the T2-backed writes of valid entries are test_memory.py's and
+# test_plugin_packaging.py's.
 @pytest.mark.parametrize("entry", ["docs/guides/=howto", "docs/guides/=How-To", "docs/guides/=", "docs/guides/", "=how-to", "docs/guides/=a genre"])
-def test_add_entry_refuses_a_genre_map_value_that_is_not_one_of_the_six(prose: Prose, entry: str) -> None:
-    proc = _genre_map_entry(prose, "notes/=how-to", entry)
-    assert proc.returncode == 1, proc.stdout
+def test_add_entry_refuses_a_genre_map_value_that_is_not_one_of_the_six(bare: Prose, entry: str) -> None:
+    proc = _genre_map_entry(bare, "notes/=how-to", entry)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
     assert "genre_map entry" in proc.stderr and "rdr" in proc.stderr and "commit-message" in proc.stderr
-    assert prose.ok("status")["genre_map"]["repo"] == []  # the valid one beside it was not stored either
+    assert "T2 unavailable" not in proc.stderr  # refused before any read of T2, so nothing was stored
 
 
-def test_add_entry_refuses_a_bad_genre_map_value_given_by_key_and_value_too(prose: Prose) -> None:
-    proc = prose.run("add-entry", "--level", "repo", "--key", "genre_map", "--value", "docs/=howto", "--list")
+def test_add_entry_refuses_a_bad_genre_map_value_given_by_key_and_value_too(bare: Prose) -> None:
+    proc = bare.run("add-entry", "--level", "repo", "--key", "genre_map", "--value", "docs/=howto", "--list")
     assert proc.returncode == 1 and "genre_map entry" in proc.stderr
-    assert prose.ok("status")["genre_map"]["repo"] == []
 
 
-def test_add_entry_still_takes_each_of_the_six_genres(prose: Prose) -> None:
-    entries = [f"area{i}/={g}" for i, g in enumerate(ALL_GENRES)]
-    prose.ok("add-entry", "--level", "repo", "--from-stdin", stdin={"scalars": {}, "lists": {"genre_map": entries}})
-    assert prose.ok("status")["genre_map"]["repo"] == entries
+def test_the_genre_map_check_names_the_bad_entry_and_passes_each_of_the_six_genres() -> None:
+    memory = _module()._MEM  # one module load: its UserError is the one its check raises
+    check = memory._check_genre_map_items
+    check([f"area{i}/={g}" for i, g in enumerate(ALL_GENRES)])
+    with pytest.raises(memory.UserError, match="docs/guides/=howto"):
+        check(["notes/=how-to", "docs/guides/=howto"])
 
 
 # ---------------------------------------------------------------------------
@@ -170,21 +175,21 @@ def test_add_entry_still_takes_each_of_the_six_genres(prose: Prose) -> None:
 
 
 @pytest.mark.parametrize("segment", ["src", "data", "examples", "resources", "commands", "out", "service"])
-def test_a_generic_folder_name_that_holds_real_docs_elsewhere_is_offered(prose: Prose, segment: str) -> None:
-    _put(prose.cwd, f"{segment}/content/guide.md")
-    _put(prose.cwd, f"{segment}/content/intro.md")
-    _stage(prose)
-    report = _setup(prose)
+def test_a_generic_folder_name_that_holds_real_docs_elsewhere_is_offered(bare: Prose, segment: str) -> None:
+    _put(bare.cwd, f"{segment}/content/guide.md")
+    _put(bare.cwd, f"{segment}/content/intro.md")
+    _stage(bare)
+    report = _setup(bare)
     assert f"{segment}/content/" in _candidates(report)
     assert _module().is_skipped(f"{segment}/content/guide.md") is False
 
 
-def test_a_repository_with_docs_only_under_src_content_gets_candidates_and_a_try_path(prose: Prose) -> None:
-    _drop_seed_doc(prose)
-    _put(prose.cwd, "src/content/guide.md")
-    _put(prose.cwd, "src/content/intro.md")
-    _stage(prose)
-    report = _setup(prose)
+def test_a_repository_with_docs_only_under_src_content_gets_candidates_and_a_try_path(bare: Prose) -> None:
+    _drop_seed_doc(bare)
+    _put(bare.cwd, "src/content/guide.md")
+    _put(bare.cwd, "src/content/intro.md")
+    _stage(bare)
+    report = _setup(bare)
     found = _candidates(report)
     assert set(found) == {"src/content/"} and found["src/content/"]["files"] == 2
     assert report["try_path"] in {"src/content/guide.md", "src/content/intro.md"}
@@ -193,21 +198,21 @@ def test_a_repository_with_docs_only_under_src_content_gets_candidates_and_a_try
 @pytest.mark.parametrize(
     "segment", ["dist", "build", "node_modules", "vendor", "site-packages", "__pycache__", "coverage", "target"]
 )
-def test_build_and_dependency_folders_are_never_offered_and_never_tried(prose: Prose, segment: str) -> None:
-    _drop_seed_doc(prose)
-    _put(prose.cwd, f"{segment}/pkg/readme.md")
-    _stage(prose)
-    report = _setup(prose)
+def test_build_and_dependency_folders_are_never_offered_and_never_tried(bare: Prose, segment: str) -> None:
+    _drop_seed_doc(bare)
+    _put(bare.cwd, f"{segment}/pkg/readme.md")
+    _stage(bare)
+    report = _setup(bare)
     assert report["genre_candidates"] == [] and report["try_path"] is None
     assert report["unmapped_other"] == 2  # the file and the .claude site-page sheet
 
 
 @pytest.mark.parametrize("rel", ["CONTRIBUTING.md", "tests/fixtures/f.md", "scripts/run.md"])
-def test_try_path_is_never_null_while_a_visible_document_exists(prose: Prose, rel: str) -> None:
-    _drop_seed_doc(prose)
-    _put(prose.cwd, rel)
-    _stage(prose)
-    report = _setup(prose)
+def test_try_path_is_never_null_while_a_visible_document_exists(bare: Prose, rel: str) -> None:
+    _drop_seed_doc(bare)
+    _put(bare.cwd, rel)
+    _stage(bare)
+    report = _setup(bare)
     assert report["genre_candidates"] == []
     assert report["try_path"] == rel
 
@@ -220,9 +225,9 @@ def test_the_try_line_is_the_absolute_path_in_single_quotes_and_unmapped_other_i
     assert "that many other Markdown and HTML files were not offered, they still work, and a run on one asks for a genre" in run
 
 
-def test_setup_reports_the_root_the_try_line_is_built_from(prose: Prose) -> None:
-    report = _setup(prose)
-    assert Path(report["root"]).resolve() == prose.cwd.resolve()
+def test_setup_reports_the_root_the_try_line_is_built_from(bare: Prose) -> None:
+    report = _setup(bare)
+    assert Path(report["root"]).resolve() == bare.cwd.resolve()
     assert (Path(report["root"]) / report["try_path"]).is_file()
 
 
@@ -231,11 +236,11 @@ def test_setup_reports_the_root_the_try_line_is_built_from(prose: Prose) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_root_files_other_than_the_readme_are_counted_not_offered(prose: Prose) -> None:
+def test_root_files_other_than_the_readme_are_counted_not_offered(bare: Prose) -> None:
     for rel in ("README.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "docs/runbooks/a.md"):
-        _put(prose.cwd, rel)
-    _stage(prose)
-    report = _setup(prose)
+        _put(bare.cwd, rel)
+    _stage(bare)
+    report = _setup(bare)
     assert set(_candidates(report)) == {"README.md", "docs/runbooks/"}
     assert report["unmapped_other"] == 3 + 1  # the three root files and the .claude site-page sheet
 
@@ -301,17 +306,6 @@ def test_the_readme_quick_start_gives_every_command_in_order() -> None:
     assert at == sorted(at), at
     assert "you can skip" not in text and "by number" not in text
     assert "ends with \"Ready.\"" in block
-
-
-# ---------------------------------------------------------------------------
-# the brief module stays usable as a script
-# ---------------------------------------------------------------------------
-
-
-def test_setup_runs_clean_as_a_script(prose: Prose) -> None:
-    proc = run_brief(prose, "setup")
-    assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout)["root"]
 
 
 # confirmation round on 8153fd54e

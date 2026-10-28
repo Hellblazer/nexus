@@ -137,6 +137,30 @@ def prose(repo: Path, tmp_path: Path, t2_service_env: str) -> Prose:
     return Prose(repo, env, calls)
 
 
+@pytest.fixture
+def bare(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Prose:
+    """`prose` without the tenant: the same scripts and repository, no engine behind them (nexus-scmcs).
+
+    For a test of what a script does before, or besides, its T2 read: `PROSE_EDIT_NX` is a command that cannot start,
+    so a script that does reach for T2 ends with its "T2 unavailable" exit (3) rather than reaching any store, and a
+    test that expects exit 1 therefore also pins that the script refused before touching T2. The user settings
+    directory is a fresh empty one (also in this process), so nothing reads the machine's own."""
+    env = os.environ.copy()
+    for name in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN"):
+        env.pop(name, None)
+    config = tmp_path / "claude-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    env["CLAUDE_CONFIG_DIR"] = str(config)
+    env["NEXUS_CONFIG_DIR"] = str(tmp_path / "cfg")
+    (tmp_path / "tmp").mkdir()
+    env["TMPDIR"] = str(tmp_path / "tmp")
+    env["PROSE_EDIT_PROJECT_PREFIX"] = PREFIX
+    env["PROSE_EDIT_NX"] = str(tmp_path / "no-such-nx")
+    env["PROSE_EDIT_TEST"] = "1"
+    env["PROSE_EDIT_NOW"] = "2026-09-29T17:15:03.482913Z"
+    return Prose(repo, env, tmp_path / "nx-calls.jsonl")
+
+
 def t2_titles(project: str) -> list[str]:
     with t2_handle() as db:
         return sorted(e["title"] for e in db.memory.list_entries(project=project))

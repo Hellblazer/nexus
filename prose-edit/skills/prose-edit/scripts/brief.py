@@ -1499,15 +1499,24 @@ def suggest_genre_for_key(key: str) -> str:
 def cmd_setup() -> Obj:
     """Everything a first run in this repository depends on, checked and reported; setup changes nothing itself."""
     nx = os.environ.get("PROSE_EDIT_NX", "nx")
-    out: Obj = {"nexus": {"command": nx, "found": shutil.which(shlex.split(nx)[0]) is not None}}
     try:
         status = memory_json(["status"])
-        out["t2"] = {"reachable": True}
+        t2: Obj = {"reachable": True}
     except Passthrough as exc:
         if exc.code != 3:
             raise
-        out["t2"] = {"reachable": False, "detail": str(exc)}
+        t2 = {"reachable": False, "detail": str(exc)}
         status = cast(Obj, memory_json(["repo"]))
+    return setup_report(nx, t2, status)
+
+
+def setup_report(nx: str, t2: Obj, status: Obj) -> Obj:
+    """The setup report for one repository, from what `memory.py status` (or `repo`, when T2 is unreachable) said.
+
+    Split from cmd_setup so everything after the T2 read can be driven without a T2: it takes the `nx` command, the
+    `t2` reachability record and the status object, and touches only the file system, git and the user settings."""
+    out: Obj = {"nexus": {"command": nx, "found": shutil.which(shlex.split(nx)[0]) is not None}}
+    out["t2"] = t2
     needed = allow_rules()
     present = _settings_allow()
     out["allow_rules"] = {
