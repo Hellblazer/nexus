@@ -8,7 +8,7 @@ rows) as a green "not applicable: managed deployment", for the same fact: this c
 Sam's decision (2026-10-28, recorded on nexus-g7ijj): every managed "not probeable from this client" row WARNS and
 never renders a checkmark. Doctor's checkmark must never render for an unperformed check. A passing row there is
 how ``upgrade_finish._poison_probe`` read an unverified store as clean (the code-review ship-blocker of round 1).
-All eight rows render ``ok=False, warn=True`` with one shared reason text (``health.managed_not_probeable``).
+All eight rows render ``ok=False, warn=True`` with one shared reason text (``health._managed_not_probeable``, recognised by ``health.is_managed_not_probeable``).
 """
 from __future__ import annotations
 

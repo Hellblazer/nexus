@@ -214,8 +214,14 @@ def test_the_not_applicable_detail_names_the_real_cause_on_a_managed_engine() ->
 
 
 def test_an_unrecognised_profile_value_is_not_applicable_never_a_guess() -> None:
-    r = _row({"embedding_profile": "minilm", "embedding_models": [_BGE]})
-    assert r.ok is True and not r.warn and "not applicable" in r.detail
+    """An engine that NAMED a profile this client does not recognise is told apart from one that named none:
+    the detail used to say "reports no embedding_profile" for both (nexus-njn1a confirmation review)."""
+    for local in (False, True):
+        r = _row({"embedding_profile": "minilm", "embedding_models": [_BGE]}, local=local, client_profile="bge")
+        assert r.ok is True and not r.warn and "not applicable" in r.detail
+        assert "reports embedding_profile 'minilm'" in r.detail
+        assert "does not recognise" in r.detail
+        assert "reports no embedding_profile" not in r.detail
 
 
 @pytest.mark.t2_tenant

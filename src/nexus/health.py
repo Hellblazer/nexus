@@ -5213,6 +5213,11 @@ def _check_embedding_family(version_body: object = _ENGINE_STATUS_UNSET) -> list
         # an unrecognised local profile, on a managed engine the client's local profile is never evidence.
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
+        engine_profile = body.get("embedding_profile")
+        if engine_profile is not None:
+            return [HealthResult(label=label, ok=True, detail=(
+                f"not applicable: the engine reports embedding_profile {engine_profile!r} "
+                f"(embedding_mode {body.get('embedding_mode')}), which this client does not recognise"))]
         if not is_local_mode():
             why = "a managed engine is not read against this client's local profile"
         elif body.get("embedding_mode") == "voyage":
