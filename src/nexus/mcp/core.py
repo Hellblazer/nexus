@@ -6754,23 +6754,15 @@ def store_list(
         ]
         if also:
             lines.append(also)
-        from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
+        from nexus.metadata_schema import ttl_listing_label  # noqa: PLC0415 — deferred, matches this module's convention
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
             title = (e.get("title") or "")[:40]
             tags = e.get("tags") or ""
-            ttl_days = e.get("ttl_days", 0)
             indexed_at_full = e.get("indexed_at") or ""
             indexed_at = indexed_at_full[:10]
-            if ttl_days and ttl_days > 0 and indexed_at_full:
-                try:
-                    exp = (datetime.fromisoformat(indexed_at_full)
-                           + timedelta(days=ttl_days)).date().isoformat()
-                    ttl_str = f"expires {exp}"
-                except ValueError:
-                    ttl_str = f"ttl {ttl_days}d"
-            else:
-                ttl_str = "permanent"
+            # Same reading as `nx store list` (nexus-njn1a): a ttl_days that cannot lapse is permanent.
+            ttl_str = ttl_listing_label(e.get("ttl_days"), indexed_at_full)
             tag_str = f"  [{tags}]" if tags else ""
             lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
         shown_end = offset + len(page)

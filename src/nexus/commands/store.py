@@ -294,25 +294,17 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
     # cheap count); the rows listed are live ones, so after a delete the
     # two differ (shakeout 7.64.1 F10). Name it rather than imply live.
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n" + also)
-    from datetime import datetime, timedelta  # noqa: PLC0415  — stdlib deferred to call site (datetime)
+    from nexus.metadata_schema import ttl_listing_label  # noqa: PLC0415 — deferred, matches this module's convention
     for e in entries:
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
         title = (e.get("title") or "")[:40]
         tags = e.get("tags") or ""
-        ttl_days = e.get("ttl_days", 0)
         indexed_at_full = e.get("indexed_at") or ""
         indexed_at = indexed_at_full[:10]
-        # Derive expiry from indexed_at + ttl_days (expires_at no longer
-        # stored — see metadata_schema.is_expired).
-        if ttl_days and ttl_days > 0 and indexed_at_full:
-            try:
-                exp = (datetime.fromisoformat(indexed_at_full)
-                       + timedelta(days=ttl_days)).date().isoformat()
-                ttl_str = f"expires {exp}"
-            except ValueError:
-                ttl_str = f"ttl {ttl_days}d"
-        else:
-            ttl_str = "permanent"
+        # Derive expiry from indexed_at + ttl_days (expires_at no longer stored). A row's ttl_days is
+        # whatever a writer stored: ttl_listing_label reads one that cannot lapse as permanent
+        # instead of aborting the listing (nexus-njn1a).
+        ttl_str = ttl_listing_label(e.get("ttl_days"), indexed_at_full)
         tag_str = f"  [{tags}]" if tags else ""
         click.echo(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
 

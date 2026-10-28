@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import re
 
+#: 100 years; beyond this datetime arithmetic overflows. The one cap every TTL writer applies
+#: (``nx store put --ttl`` refuses above it; a bundle import clamps to it).
+MAX_TTL_DAYS = 36500
+
 
 def parse_ttl(s: str | None) -> int | None:
     """Parse a TTL string to an integer number of days, or None for permanent.
@@ -19,7 +23,7 @@ def parse_ttl(s: str | None) -> int | None:
     if low in ("permanent", "never"):
         return None
 
-    _MAX_TTL_DAYS = 36500  # 100 years; beyond this datetime arithmetic overflows
+    _MAX_TTL_DAYS = MAX_TTL_DAYS
 
     if m := re.fullmatch(r"(\d+)d", low):
         days = int(m.group(1))

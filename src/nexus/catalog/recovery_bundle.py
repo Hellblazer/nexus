@@ -218,15 +218,20 @@ def select_store_put_documents(
 
 
 def _positive_ttl(value: Any) -> int | None:
-    """A ``ttl_days`` as the note writer takes it: a positive integer, else ``None`` (permanent).
+    """A ``ttl_days`` as the note writer takes it: a positive integer up to the 36500-day cap, else
+    ``None`` (permanent).
 
     Catalog meta stores ``0`` as the retraction sentinel and ``put_note`` raises on it, and the chunk
     row spells permanent as ``None``, absent or (a legacy row) ``0``: all of them read as permanent.
-    A ``bool`` is not a number of days.
+    A ``bool`` is not a number of days. A value above :data:`nexus.ttl.MAX_TTL_DAYS` is clamped to it:
+    ``nx store put --ttl`` refuses such a TTL, and a bundle record must not carry one past that cap
+    into the catalog and the chunk row (nexus-njn1a), where date arithmetic on it overflows.
     """
+    from nexus.ttl import MAX_TTL_DAYS  # noqa: PLC0415 — deferred, matches this module's convention
+
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
-    return value
+    return min(value, MAX_TTL_DAYS)
 
 
 def _own_note_keys(entry: CatalogEntry) -> dict[str, Any] | None:
