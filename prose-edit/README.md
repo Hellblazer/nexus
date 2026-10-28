@@ -1,16 +1,19 @@
 # conexus-prose-edit
 
-A line editor for your own prose. `/conexus-prose-edit:prose-edit <path>` reads a document, proposes up to ten numbered sentence edits with a reason each, and opens a marked-up copy. You accept, reject or hold each edit by number; only accepted edits change the file. A rejection is stored for that document so the editor does not propose it again, and the editor's description of the document's voice can be kept as its voice card for later runs.
+A line editor for your own prose. `/conexus-prose-edit:prose-edit <path>` reads a document, proposes up to ten numbered sentence edits with a reason each, and opens a marked-up copy. You accept, reject or leave each edit undecided by ticking choices in a short list; only accepted edits change the file. A rejection is stored for that document so the editor does not propose it again, and the editor's description of the document's voice can be kept as its voice card for later runs.
 
 It is not installed with `conexus`. Nothing changes for anyone who does not install it.
 
 ## Quick start
 
-1. Install `conexus` and run `/conexus:setup`. prose-edit keeps its memory in Nexus, and this gets Nexus installed and answering.
-2. Install this plugin: `/plugin install conexus-prose-edit@nexus-plugins`.
-3. Run `/conexus-prose-edit:prose-edit setup` and follow its prompts. It asks only about what is missing, offers a choice for each question, and ends with a document to try.
+Type these in Claude Code, in order, in your own repository:
 
-The rest of this page is detail you can skip on a first read.
+1. `/plugin marketplace add Hellblazer/nexus` adds the marketplace both plugins come from.
+2. `/plugin install conexus@nexus-plugins` installs `conexus`, which provides the Nexus that prose-edit keeps its memory in.
+3. `/conexus:setup` checks what Nexus is missing and asks one question: where to run it (this machine, a managed service, or the command line only). The install runs in the background and the first download is about a gigabyte, so it takes a few minutes. Run `/conexus:setup` again to see how far it is; it reports that nothing is missing when it is done.
+4. `/plugin install conexus-prose-edit@nexus-plugins` installs this plugin.
+5. Start a new session, or run `/reload-plugins`, so the new plugin loads.
+6. `/conexus-prose-edit:prose-edit setup` is a short guided session of choices: it asks only about what is missing and ends with "Ready." and a command to try on one of your own documents.
 
 ## Genres
 
@@ -49,7 +52,7 @@ Setup is a short guided session. It checks what is already in place, asks only a
 
 1. Nexus is installed and answers. If not, it says so and points you to `/conexus:setup`.
 2. Two permission rules for the temp folder where a run keeps its work files are in `~/.claude/settings.json`. A plugin cannot ship permission rules, so setup offers to add them (Claude Code asks you to approve that edit), or to print the JSON for you to add. Without them every read and write of a work file asks you, and the editor cannot read its brief.
-3. Which genre each documentation folder holds. The built-in map knows `docs/rdr/`, `docs/exploration/`, top-level `docs/*.md`, `web/*.html` and `CHANGELOG.md`. For up to eight other folders that look like documentation, setup suggests a genre and you pick it, pick another, or leave the folder unmapped. Folders such as tests, fixtures, scripts and hidden folders are not offered. A file no genre reaches makes a run ask which genre it is, and offers to remember the answer for its folder.
+3. Which genre each documentation folder holds. The built-in map knows `docs/rdr/`, `docs/exploration/`, top-level `docs/*.md`, `web/*.html` and `CHANGELOG.md`. For up to eight other folders that look like documentation, setup suggests a genre for each and asks once: use all the suggestions, go through the folders one by one (pick the suggestion, pick another, or leave the folder unmapped), or map nothing and be asked when you edit. Folders such as tests, fixtures, scripts, build output and hidden folders, and root files other than `README.md`, are not offered. A file no genre reaches makes a run ask which genre it is, and offers to remember the answer for its folder.
 4. One or two example passages per genre in use. The editor imitates them; a genre with none runs on the style sheet alone. You can add them later.
 
 Setup ends with "Ready." and a command to try on one of your own documents.

@@ -122,9 +122,13 @@ GENRE_DESCRIPTIONS: dict[str, str] = {
 }
 # Path segments that mark a folder as something other than prose to edit: setup does not offer them as a genre
 # candidate (they are counted in `unmapped_other`), and a hidden segment (a leading dot) is skipped the same way.
-SKIPPED_SEGMENTS = frozenset({
-    "tests", "test", "fixtures", "scripts", "src", "service", "agents", "skills", "commands", "hooks", "evals",
-    "examples", "resources", "node_modules", "out", "data", "archive", "infra", "vendor",
+# Generic names that hold real documentation in many repositories (src, data, examples, resources, commands, out,
+# service) are not here: a repository that keeps its docs there must still be offered them.
+BUILD_OUTPUT_SEGMENTS = frozenset({
+    "dist", "build", "node_modules", "vendor", "site-packages", "__pycache__", "coverage", "target",
+})
+SKIPPED_SEGMENTS = BUILD_OUTPUT_SEGMENTS | frozenset({
+    "tests", "test", "fixtures", "scripts", "agents", "skills", "hooks", "evals", "archive", "infra",
 })
 MAX_CANDIDATES = 8
 # Folder or file-name words that suggest a genre, tried in this order; no word means reference-doc.
@@ -132,7 +136,7 @@ GENRE_KEYWORDS: tuple[tuple[str, frozenset[str]], ...] = (
     ("changelog", frozenset({"changelog", "changes"})),
     ("rdr", frozenset({"rdr", "adr", "decision"})),
     ("how-to", frozenset({"runbook", "operation", "migration", "guide", "howto", "how to", "tutorial"})),
-    ("exploration-essay", frozenset({"postmortem", "exploration", "essay", "field report", "note", "notes"})),
+    ("exploration-essay", frozenset({"postmortem", "exploration", "essay", "field report"})),
 )
 DEFAULT_SUGGESTION = "reference-doc"
 # After the suggested genre, the other five best-first: the nearest kinds of writing come first, so the two options
@@ -1464,6 +1468,17 @@ def is_skipped(rel: str) -> bool:
     return any(seg.startswith(".") or seg.lower() in SKIPPED_SEGMENTS for seg in Path(rel).parts)
 
 
+def _is_build_output(rel: str) -> bool:
+    """A path that is hidden or sits under a build or dependency folder: never authored prose, never a Try suggestion."""
+    return any(seg.startswith(".") or seg.lower() in BUILD_OUTPUT_SEGMENTS for seg in Path(rel).parts)
+
+
+def _is_root_boilerplate(rel: str) -> bool:
+    """A root file other than README.md (CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md...): one question each would
+    swamp setup, and a run on one still asks for a genre."""
+    return "/" not in rel and rel.lower() != "readme.md"
+
+
 def _ranked(suggested: str) -> list[str]:
     return [suggested, *GENRE_NEIGHBOURS[suggested]]
 
@@ -1513,12 +1528,13 @@ def cmd_setup() -> Obj:
         groups: dict[str, list[str]] = {}  # unmapped documentation-looking files, by genre_map prefix
         mapped: list[tuple[str, str]] = []  # (genre, file) of files that already map and are not skipped
         other = 0
-        for f in (f for f in sorted(set(listed.split("\0"))) if f and (root / f).is_file()):
+        documents = [f for f in sorted(set(listed.split("\0"))) if f and (root / f).is_file()]
+        for f in documents:
             genre = _MEM.genre_for(f, override)
             if genre is not None:
                 if not is_skipped(f):
                     mapped.append((genre, f))
-            elif is_skipped(f):
+            elif is_skipped(f) or _is_root_boilerplate(f):
                 other += 1
             else:
                 groups.setdefault(folder_key(f), []).append(f)
@@ -1534,7 +1550,13 @@ def cmd_setup() -> Obj:
         out["genres_in_use"] = [g for g in TRY_ORDER if any(g == m[0] for m in mapped)]
         first = min(mapped, key=lambda m: (TRY_ORDER.index(m[0]) if m[0] in TRY_ORDER else len(TRY_ORDER), m[1]),
                     default=None)
-        out["try_path"] = first[1] if first else (candidates[0]["sample"] if candidates else None)
+        if first:
+            out["try_path"] = first[1]
+        elif candidates:
+            out["try_path"] = candidates[0]["sample"]
+        else:  # nothing maps and nothing is offered: any visible document still makes a trial (shallowest first)
+            spare = [f for f in documents if not _is_build_output(f)]
+            out["try_path"] = min(spare, key=lambda f: (f.count("/"), f), default=None)
     return out
 
 

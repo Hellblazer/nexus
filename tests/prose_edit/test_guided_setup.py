@@ -159,7 +159,7 @@ def test_setup_caps_the_candidates_at_eight_and_counts_the_rest(prose: Prose) ->
         ("docs/tutorials/", "how-to"),
         ("docs/field-report/", "exploration-essay"),
         ("docs/essays/", "exploration-essay"),
-        ("docs/notes/", "exploration-essay"),
+        ("docs/notes/", "reference-doc"),
         ("docs/design/adr/", "rdr"),
         ("docs/decisions/", "rdr"),
         ("docs/rdr-archive/", "rdr"),
@@ -217,11 +217,12 @@ def test_try_path_is_the_mapped_file_once_the_author_has_mapped_a_folder(prose: 
     assert "docs/runbooks/" not in _candidates(report)
 
 
-def test_try_path_never_names_a_file_in_a_skipped_folder(prose: Prose) -> None:
+def test_try_path_never_names_a_file_in_build_output(prose: Prose) -> None:
     git(prose.cwd, "rm", "-q", "-f", "docs/x.md")
-    _put(prose.cwd, "tests/fixtures/f.md")
+    _put(prose.cwd, "dist/f.md")
+    _put(prose.cwd, "node_modules/pkg/readme.md")
     git(prose.cwd, "add", "-A")
-    seed(prose, "repo", lists={"genre_map": ["tests/=how-to"]})
+    seed(prose, "repo", lists={"genre_map": ["dist/=how-to"]})
     assert _setup(prose)["try_path"] is None
 
 
@@ -342,14 +343,14 @@ def test_every_label_the_skill_marks_recommended_fits_the_tool_limits() -> None:
         assert len(label.split()) <= 5, label
 
 
-def test_the_readme_opens_with_a_three_step_quick_start_then_the_genre_table() -> None:
+def test_the_readme_opens_with_a_quick_start_then_the_genre_table() -> None:
     text = README.read_text(encoding="utf-8")
     quick = text.index("## Quick start")
     assert quick < text.index("## Install") and quick < text.index("## Set up")
     block = text[quick : text.index("\n## ", quick + 5)]
     assert "/conexus:setup" in block and "/conexus-prose-edit:prose-edit setup" in block
     assert "/plugin install conexus-prose-edit@nexus-plugins" in block
-    assert re.search(r"^1\. .*\n2\. .*\n3\. ", block, re.MULTILINE)
+    assert re.findall(r"^(\d+)\. ", block, re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
     assert "—" not in text
     for genre in ALL_GENRES:
         assert f"| `{genre}` |" in text
