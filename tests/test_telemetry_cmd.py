@@ -390,6 +390,27 @@ class TestNxAnswerRuns:
         result = CliRunner().invoke(baseline_cmd, ["--since", "2026-08-21T00:00:00Z"])
         assert "total=214 (+2 since 2026-08-21T00:00:00Z)" in result.stdout
 
+    def test_text_since_labels_oldest_and_newest_as_the_window_s_not_all_time(self, monkeypatch) -> None:
+        """nexus-njn1a finding 11: with --since, oldest_created_at is the oldest row INSIDE the window (the
+        windowed response), printed beside an all-time total=. An unlabelled ``oldest=`` read as the oldest row
+        ever; the text names it the window's. JSON keys are unchanged."""
+        from nexus.commands.telemetry_cmd import baseline_cmd
+
+        store = _FakeStore(
+            nar_since=_nar_result(
+                total=2, oldest_created_at="2026-08-22T01:00:00Z", newest_created_at="2026-08-26T01:00:00Z",
+            ),
+            nar_all_time=_nar_result(total=214, oldest_created_at="2026-07-01T00:00:00Z"),
+        )
+        _patch_all_ok(monkeypatch, store=store)
+        text = CliRunner().invoke(baseline_cmd, ["--since", "2026-08-21T00:00:00Z"]).stdout
+        assert "oldest_in_window=2026-08-22T01:00:00Z" in text
+        assert "newest_in_window=2026-08-26T01:00:00Z" in text
+        assert "oldest=" not in text.split("nx_answer runs:")[1].splitlines()[0]
+        js = json.loads(CliRunner().invoke(baseline_cmd, ["--json", "--since", "2026-08-21T00:00:00Z"]).stdout)
+        assert js["nx_answer_runs"]["oldest_created_at"] == "2026-08-22T01:00:00Z"
+        assert "oldest_in_window" not in js["nx_answer_runs"]
+
     def test_read_failure_renders_unavailable_and_stays_present_in_json(self, monkeypatch) -> None:
         import httpx
 
