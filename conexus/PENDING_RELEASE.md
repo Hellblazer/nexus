@@ -49,6 +49,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `prose-edit/skills/prose-edit/SKILL.md` (nexus-scmcs): the setup run is a guided wizard, and the run-time genre question, the accept and reject step and the step 13 offers are `AskUserQuestion` choice prompts instead of free-text questions.
 - `prose-edit/skills/prose-edit/scripts/brief.py` (nexus-scmcs): `setup` reports at most eight `genre_candidates` with `ready`, `try_path` and `unmapped_other` in place of `no_genre`; new `suggest-genre`; the genre description table the skill and the README share.
+- `prose-edit/skills/prose-edit/scripts/memory.py` (nexus-scmcs): `add-entry` refuses a `genre_map` entry whose genre is not one of the six and stores nothing from that call, so a mistyped genre cannot break later runs in a folder.
 - `conexus/commands/setup.md` (nexus-tr1rj.5): the install-size sentence names the PDF support as MinerU and torch; the PDF stack no longer includes the removed layout extractor.
 - `conexus/launch/nx_standin.py` (nexus-tr1rj.5): the same name list in the stand-in's sizes note and slim description, kept equal to the real server's (`src/nexus/mcp/setup_tools.py`).
 - `conexus/hooks/scripts/routing/_lib.py` (nexus-njn1a.1): the routing hooks send the `routing_events` write from a detached child, so a guard's deny or `routing-allow` escape is emitted without waiting on the engine; the child has a 5 s total deadline in place of the former 0.25 s per-socket timeout, and a failed write still lands one drop-meter record.
