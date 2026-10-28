@@ -2957,6 +2957,11 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     _eligibility.reset_library_memo()
     _eligibility._warned_libraries.clear()
     _switches.reset_warned()
+    # nexus-jypmj.16: the guard above makes every extraction in the suite fail (outcome ``error``), which is the
+    # failure run the process-level warning counts; each test starts with no run counted and the warning unspent.
+    from nexus.plans import request_coverage as _request_coverage  # noqa: PLC0415 — test-only import
+
+    _request_coverage.reset_extraction_health()
 
 
 @pytest.fixture(autouse=True)

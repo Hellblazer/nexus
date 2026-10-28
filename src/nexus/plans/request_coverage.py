@@ -65,6 +65,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -83,8 +84,10 @@ __all__ = [
     "Ambiguity",
     "Constraint",
     "ExtractionReport",
+    "FAILED_OUTCOMES",
     "Facet",
     "KIND_DECISIONS",
+    "PERSISTENT_FAILURE_THRESHOLD",
     "REQUEST_KINDS",
     "RequestCoverage",
     "SourceHint",
@@ -93,7 +96,9 @@ __all__ = [
     "extraction_enabled",
     "log_fields",
     "normalize_kind",
+    "note_extraction_outcome",
     "project_name_candidates",
+    "reset_extraction_health",
     "structured_extract",
 ]
 
@@ -1477,3 +1482,68 @@ async def structured_extract(
         coverage, answer_kind=new_kind, kind_decision=decision, facets=facets, facets_certain=certain,  # type: ignore[arg-type]
         extraction=report("ok" if changed else "unchanged"),
     )
+
+
+# ── a persistently failing extraction ────────────────────────────────────────────────────────────────────────
+
+#: Extraction outcomes that mean the call was made and gave nothing usable. ``ok`` and ``unchanged`` are the
+#: working outcomes; ``disabled``, ``not_needed`` and ``skipped_deadline`` made no call and say nothing.
+FAILED_OUTCOMES: frozenset[str] = frozenset({"error", "timeout", "invalid"})
+_WORKING_OUTCOMES: frozenset[str] = frozenset({"ok", "unchanged"})
+
+#: This many failed calls in a row, in one process, make the failure persistent (nexus-jypmj.16). One failure is a
+#: per-request event and stays silent: the request keeps its first-pass kind and the gate fails closed.
+PERSISTENT_FAILURE_THRESHOLD = 3
+
+_health_lock = threading.Lock()
+_consecutive_failures = 0
+_failing_warned = False
+
+
+def note_extraction_outcome(outcome: str, *, gate_enforcing: bool) -> bool:
+    """Count one request's extraction *outcome*; warn once per process when the failures are persistent.
+
+    A failed extraction leaves the request on its first-pass kind and the answer-kind gate keeps enforcing on it
+    (per-request fail-closed is the design). First-pass kinds alone are the regime that failed the held-out
+    lookup measurement, so a process in which the call fails every time (no ``claude`` CLI and no API key, an
+    ``openai_compat`` endpoint that answers outside the schema, a timeout every time) enforces in it with no
+    signal. After :data:`PERSISTENT_FAILURE_THRESHOLD` failures in a row this logs ``answer_kind_gate_extraction_failing``
+    once, the first time that happens while *gate_enforcing* (a gate in shadow loses nothing to it, and does not
+    use the warning up). A working outcome ends the run; an outcome with no call is ignored. Returns whether this
+    call logged the warning. Never raises.
+    """
+    global _consecutive_failures, _failing_warned  # noqa: PLW0603 — process-wide, like the other once-per-process latches
+    with _health_lock:
+        if outcome in _WORKING_OUTCOMES:
+            _consecutive_failures = 0
+            return False
+        if outcome not in FAILED_OUTCOMES:
+            return False
+        _consecutive_failures += 1
+        if _failing_warned or not gate_enforcing or _consecutive_failures < PERSISTENT_FAILURE_THRESHOLD:
+            return False
+        _failing_warned = True
+        failures = _consecutive_failures
+    _log.warning(
+        "answer_kind_gate_extraction_failing",
+        consecutive_failures=failures,
+        last_outcome=outcome,
+        consequence=(
+            "the answer-kind gate is enforcing on first-pass request kinds alone, the regime that lost "
+            "lookup recall in the held-out measurement; the latest extraction calls in this process all failed"
+        ),
+        remedy=(
+            "run `nx doctor` (row 'Answer-kind extraction') to see why; make an LLM backend available "
+            "(the claude CLI, or nx config set anthropic_api_key), or set NX_ANSWER_STRUCTURED_EXTRACT=0 "
+            "to run the gate in shadow, or NX_ANSWER_KIND_ELIGIBILITY=0 to switch it off"
+        ),
+    )
+    return True
+
+
+def reset_extraction_health() -> None:
+    """Forget the failure run and the spent warning (a test hook; the process-wide state is otherwise permanent)."""
+    global _consecutive_failures, _failing_warned  # noqa: PLW0603
+    with _health_lock:
+        _consecutive_failures = 0
+        _failing_warned = False

@@ -10040,10 +10040,12 @@ def _step_record_to_wire(step: Any) -> dict[str, Any]:
 
 def _run_cost_usd(step_records: list[Any] | None, planner_cost_usd: float | None = None) -> float | None:
     """The cost of one ``nx_answer`` run: every step's known cost plus the inline planner's own
-    dispatch cost (nexus-jypmj.1.20), or ``None`` when neither is known, never a fabricated zero.
+    dispatch cost (nexus-jypmj.1.20) and the structured request extraction's (nexus-jypmj.9), or ``None``
+    when none is known, never a fabricated zero.
 
     The envelope's ``cost_usd`` and the stored ``nx_answer_runs.cost_usd`` both come from here, so
-    they cannot disagree. A plan-match hit has no planner dispatch (``planner_cost_usd`` is ``None``).
+    they cannot disagree. *planner_cost_usd* is the out-of-step dispatch share (``_planner_cost_usd``):
+    ``None`` for a plan-match hit that made no extraction call.
     """
     known = [s.cost_usd for s in (step_records or []) if getattr(s, "cost_usd", None) is not None]
     if planner_cost_usd is not None:
@@ -10052,8 +10054,9 @@ def _run_cost_usd(step_records: list[Any] | None, planner_cost_usd: float | None
 
 
 def _planner_cost_usd(usage_sink: list[Any]) -> float | None:
-    """The summed known cost of the inline planner's dispatches captured in *usage_sink*, or ``None``
-    when none was captured or none reported a cost (a plan-match hit never dispatches a planner)."""
+    """The summed known cost of the dispatches captured in *usage_sink* (the inline planner's, and the
+    structured request extraction's, nexus-jypmj.9), or ``None`` when none was captured or none reported a
+    cost (a plan-match hit that made no extraction call dispatches nothing)."""
     known = [u.cost_usd for u in usage_sink if getattr(u, "cost_usd", None) is not None]
     return sum(known) if known else None
 
@@ -10312,6 +10315,7 @@ async def _nx_answer_request_coverage(
     explicit_kind: object,
     deadline: float | None,
     trace: bool,
+    usage_sink: "list[Any] | None" = None,
 ) -> "RequestCoverage":
     """Build the request's :class:`~nexus.plans.request_coverage.RequestCoverage` before ``plan_match``.
 
@@ -10323,6 +10327,10 @@ async def _nx_answer_request_coverage(
     The structured extraction (``NX_ANSWER_STRUCTURED_EXTRACT``, on by default, ``0`` turns it off) makes at most one
     direct dispatch under its own timeout, inside *deadline*, with its latency and cost in the coverage's
     ``extraction`` report. Never raises: a failure leaves the first-pass result.
+
+    *usage_sink* (nexus-jypmj.9) is the run's out-of-step dispatch sink (``nx_answer``'s ``_planner_usage_sink``):
+    the extraction call's usage is added to it, so the run's ``cost_usd`` (envelope and stored row, through
+    ``_run_cost_usd``) and the budget's running spend count the call like they count the inline planner's.
     """
     from dataclasses import replace  # noqa: PLC0415 — stdlib, branch-local
     from nexus.plans.request_coverage import (  # noqa: PLC0415 — deferred; matches this module's convention
@@ -10364,6 +10372,8 @@ async def _nx_answer_request_coverage(
             coverage, question, dispatch=_dispatch, timeout=timeout, enabled=True, usage_sink=sink,
             seconds_left=left, cleanup_grace=_TIMEOUT_CLEANUP_GRACE_SECONDS + 1.0,
         )
+        if usage_sink is not None:
+            usage_sink.extend(sink)  # a call that failed after the model answered was still billed
     else:
         coverage = replace(coverage, extraction=ExtractionReport("disabled"))
     # A logger fetched per call (as nx_answer does), so a test's log capture sees the event.
@@ -11930,6 +11940,7 @@ async def nx_answer(
     )
     from nexus.plans import eligibility as _eligibility  # noqa: PLC0415 — call-time module read so a test's patch of the constant is honored (RDR-232 nexus-jypmj.2.3)
     from nexus.plans.request_coverage import extraction_enabled as _extraction_enabled  # noqa: PLC0415 — deferred; the gate follows the extraction switch (nexus-jypmj.2.8)
+    from nexus.plans.request_coverage import note_extraction_outcome as _note_extraction_outcome  # noqa: PLC0415 — deferred; the process-level signal of a failing extraction (nexus-jypmj.16)
     from nexus.plans.matcher import plan_match as _plan_match  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.runner import plan_run as _plan_run  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
     from nexus.plans.verb_infer import infer_verb as _infer_verb  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -11986,7 +11997,9 @@ async def nx_answer(
     #: nexus-nyry9.21, closing the .r2 gap for the USD axis) via the
     #: ambient sink wrapped around the Step 1 miss-path dispatch below.
     #: Stays empty (spend 0.0) on a plan-match HIT — no planner dispatch
-    #: happens on that path.
+    #: happens on that path, unless the structured request extraction made
+    #: its call: nexus-jypmj.9 adds that call's usage here too, so it is in
+    #: the run's cost_usd and the budget's running spend (the name predates it).
     _planner_usage_sink: list = []
     #: Set once, in the pre-Step-2 budget check below, to
     #: `effective_budget_usd` minus whatever the planner already spent.
@@ -12090,6 +12103,7 @@ async def nx_answer(
     _request_coverage = await _nx_answer_request_coverage(
         question=question, scope=scope, evidence_request=_evidence_request, explicit_kind=_kind_hint,
         deadline=deadline, trace=trace,
+        usage_sink=_planner_usage_sink,  # nexus-jypmj.9: the extraction call is part of the run's cost and budget spend
     )
     # nexus-jypmj.1.4: resolve the named sources inside the owner qualifier
     # (bounded; nothing is guessed). The primary stream that reads the
@@ -12150,6 +12164,12 @@ async def nx_answer(
         shadow_reason=(
             "disabled_by_setting" if not _gate_on else None if _extract_on else "extraction_disabled"
         ),
+    )
+    # nexus-jypmj.16: a failed extraction leaves THIS request on its first-pass kind (the gate keeps enforcing,
+    # by design); a run of failures in one process is that regime every time, so it warns once per process.
+    _nx_answer_isolated(
+        "extraction_health", False, _note_extraction_outcome, _request_coverage.extraction.outcome,
+        gate_enforcing=_plan_eligibility.enforce,
     )
     # Set by the single_query fast path, which has no primary evidence stream: the
     # named-source notice then says so instead of implying the document was read.

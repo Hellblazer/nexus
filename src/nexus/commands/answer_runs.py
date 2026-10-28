@@ -110,12 +110,25 @@ _COST_EPSILON_REL = 0.005
 _COST_EPSILON_ABS_FLOOR = 1e-6
 
 
+def _within_epsilon(a: float, b: float) -> bool:
+    epsilon = max(_COST_EPSILON_ABS_FLOOR, _COST_EPSILON_REL * max(abs(a), abs(b)))
+    return abs(a - b) <= epsilon
+
+
 def _costs_agree(
     run_cost: "float | None", step_sum: "float | None", *, planner_share_allowed: bool = False,
+    extraction_cost: "float | None" = None,
 ) -> bool:
     """Whether a row's own ``cost_usd`` and the sum of its step costs
     agree within the relative/sub-cent epsilon. Both ``None`` (unknown vs
     unknown) trivially agree; exactly one ``None`` never agrees.
+
+    *extraction_cost* (nexus-jypmj.9) is the structured request extraction's cost as the row's run summary
+    records it. The call is no step's, and since nexus-jypmj.9 the run's ``cost_usd`` carries it, so a run with
+    a recorded extraction cost agrees at ``step_sum + extraction_cost`` (an exact share, not a one-sided
+    allowance: a library plan has no planner share, so an over-count is still caught) or, for a row written
+    by a release that left the call out of the run cost (7.88.0 recorded it in the summary only), at
+    ``step_sum``. Without a recorded extraction cost the rule is unchanged.
 
     *planner_share_allowed* (an inline-planned run, ``plan_id`` 0; nexus-jypmj.1.20): the run's
     ``cost_usd`` also carries the planner dispatch's own cost, which is no step's, so a run cost
@@ -134,13 +147,25 @@ def _costs_agree(
             return True
         if run_cost >= step_sum:
             return True
+    if extraction_cost is not None and extraction_cost > 0 and not planner_share_allowed and run_cost is not None:
+        base = step_sum or 0.0
+        return _within_epsilon(run_cost, base) or _within_epsilon(run_cost, base + extraction_cost)
     if run_cost is None or step_sum is None:
         return False
-    epsilon = max(
-        _COST_EPSILON_ABS_FLOOR,
-        _COST_EPSILON_REL * max(abs(run_cost), abs(step_sum)),
-    )
-    return abs(run_cost - step_sum) <= epsilon
+    return _within_epsilon(run_cost, step_sum)
+
+
+def _row_extraction_cost(row: dict) -> "float | None":
+    """The structured request extraction's cost a row's run summary records (``request.extraction.cost_usd``),
+    or ``None`` when the row has no summary, the summary lacks the block (cut for size) or the call reported no
+    cost."""
+    summary = row.get("run_summary")
+    request = summary.get("request") if isinstance(summary, dict) else None
+    extraction = request.get("extraction") if isinstance(request, dict) else None
+    cost = extraction.get("cost_usd") if isinstance(extraction, dict) else None
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost != cost:
+        return None
+    return float(cost)
 
 
 def _row_step_cost_sum(row: dict) -> "float | None":
@@ -741,7 +766,9 @@ def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
         plan_key = str(plan_id) if plan_id is not None else "fallback"
         run_cost = row.get("cost_usd")
         step_sum = _row_step_cost_sum(row)
-        if not _costs_agree(run_cost, step_sum, planner_share_allowed=plan_id == 0):
+        if not _costs_agree(
+            run_cost, step_sum, planner_share_allowed=plan_id == 0, extraction_cost=_row_extraction_cost(row),
+        ):
             violations.append({
                 "id": row.get("id"), "run_cost_usd": run_cost,
                 "step_cost_sum_usd": step_sum,

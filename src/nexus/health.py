@@ -3881,6 +3881,70 @@ def _check_llm_key_persistence() -> list[HealthResult]:
     )]
 
 
+def _check_answer_kind_extraction() -> list[HealthResult]:
+    """nexus-jypmj.16 (RDR-232): can the structured request extraction that feeds the answer-kind gate run here?
+
+    ``nx_answer`` makes one cheap model call (Haiku, measured) on the requests its deterministic pass leaves
+    open, and the answer-kind gate enforces on whatever kind comes back. When the call fails the request keeps
+    its first-pass kind and the gate keeps enforcing (per request, by design), and the first-pass-only regime is
+    the one that failed the held-out lookup measurement. A process in which the call fails every time warns once
+    in its log (``answer_kind_gate_extraction_failing``); this row reads the same preconditions without a model
+    call. Never prints a key.
+
+    * The extraction or the gate is switched off, or the box has no LLM backend at all (search and storage only;
+      the "LLM backend" row says so): not applicable, a pass. The fresh-install bar is zero warnings.
+    * A usable ``cli`` or ``anthropic`` backend: a pass naming the backend and the model.
+    * An ``openai_compat`` endpoint (it runs its configured model, not the measured one) or a backend setting
+      that cannot serve: a soft warning with the reason and the switches.
+    """
+    from nexus.operators.llm_backend import NO_BACKEND_MESSAGE, backend_status  # noqa: PLC0415 - deferred: keeps doctor startup light
+    from nexus.plans import eligibility as eligibility_mod  # noqa: PLC0415 - deferred, as above
+    from nexus.plans import request_coverage as coverage_mod  # noqa: PLC0415 - deferred, as above
+
+    label = "Answer-kind extraction"
+    try:
+        if not coverage_mod.extraction_enabled(os.environ):
+            return [HealthResult(
+                label=label, ok=True,
+                detail=f"not applicable: {coverage_mod.EXTRACT_ENV} is off, so the answer-kind gate runs in shadow",
+            )]
+        if not eligibility_mod.eligibility_enforced(os.environ):
+            return [HealthResult(
+                label=label, ok=True,
+                detail=f"not applicable: the answer-kind gate is off ({eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV})",
+            )]
+        status = backend_status()
+        model = coverage_mod.extraction_model(os.environ)
+    except Exception as exc:  # noqa: BLE001 - a doctor row must not crash `nx doctor`
+        return [HealthResult(label=label, ok=False, warn=True, detail=f"could not determine: {exc}")]
+    switches = [
+        f"set {coverage_mod.EXTRACT_ENV}=0 to run the answer-kind gate in shadow",
+        f"or set {eligibility_mod.ANSWER_KIND_ELIGIBILITY_ENV}=0 to switch it off",
+    ]
+    if status.available and status.name in ("cli", "anthropic"):
+        return [HealthResult(label=label, ok=True, detail=f"runs on {status.name} ({status.reason}), model {model}")]
+    if status.available:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"{status.name} backend ({status.reason}): the extraction runs on the endpoint's configured model, "
+                   f"not the measured {coverage_mod.DEFAULT_EXTRACT_MODEL}; a model that answers outside the closed "
+                   "schema leaves the request on its first-pass kind while the gate keeps enforcing on it "
+                   "(the regime that lost lookup recall in the held-out measurement)",
+            fix_suggestions=switches,
+        )]
+    if status.reason == NO_BACKEND_MESSAGE:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable: no LLM backend (no claude CLI, no anthropic_api_key); nx_answer's LLM steps are off",
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=f"{status.reason}. The extraction cannot run, so requests keep their first-pass kind while the "
+               "answer-kind gate keeps enforcing on it (the regime that lost lookup recall in the held-out measurement)",
+        fix_suggestions=["nx config set anthropic_api_key <key>", "or set llm.backend in ~/.config/nexus/config.yml", *switches],
+    )]
+
+
 def _check_mint_token() -> list[HealthResult]:
     """RDR-005 2a self-minting credential (nexus-wrwb7).
 
@@ -12026,6 +12090,7 @@ def run_health_checks(
     results.extend(_check_credential_persistence())
     results.extend(_check_llm_backend())  # nexus-2k66t.3 P2
     results.extend(_check_llm_key_persistence())  # nexus-2k66t.3 P2
+    results.extend(_check_answer_kind_extraction())  # nexus-jypmj.16
     results.extend(_check_mint_token())
     results.extend(_check_static_service_token())  # nexus-xzeml
 

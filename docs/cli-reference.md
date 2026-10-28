@@ -3500,7 +3500,7 @@ only; `--json` output shape is unchanged.
 
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
 
-**LLM backend (nexus-2k66t.3).** The "LLM backend" row names the backend the LLM steps use and why (`cli: claude is on PATH`, `anthropic: claude is not on PATH; the anthropic API is used (anthropic_api_key is set)`, `openai_compat: ...`) and never prints a key. A box with neither `claude` nor a key is reported as not applicable (a pass: search and storage work). It warns when `llm.backend` names a backend that cannot serve (`anthropic` without a key, an `openai_compat` without a base_url and model, an unknown value). The "LLM key persistence (GUI spawn)" row warns when the key the chosen backend would use is in shell env only, naming `nx config set anthropic_api_key "$ANTHROPIC_API_KEY"`; it stays silent when `claude` is the backend, so exporting `ANTHROPIC_API_KEY` for other reasons is not nagged.
+**LLM backend (nexus-2k66t.3).** The "LLM backend" row names the backend the LLM steps use and why (`cli: claude is on PATH`, `anthropic: claude is not on PATH; the anthropic API is used (anthropic_api_key is set)`, `openai_compat: ...`) and never prints a key. A box with neither `claude` nor a key is reported as not applicable (a pass: search and storage work). It warns when `llm.backend` names a backend that cannot serve (`anthropic` without a key, an `openai_compat` without a base_url and model, an unknown value). The "Answer-kind extraction" row (nexus-jypmj.16) says whether the structured request extraction that feeds the answer-kind gate can run here: it names the backend and model (`runs on cli (claude is on PATH), model haiku`), is not applicable (a pass) when `NX_ANSWER_STRUCTURED_EXTRACT` or `NX_ANSWER_KIND_ELIGIBILITY` is off or the box has no LLM backend at all, and warns for an `openai_compat` endpoint (it runs its configured model, not the measured Haiku) or a backend setting that cannot serve, because every request then keeps its first-pass kind while the gate enforces on it. It makes no model call. A process whose extraction calls keep failing also logs one `answer_kind_gate_extraction_failing` warning. The "LLM key persistence (GUI spawn)" row warns when the key the chosen backend would use is in shell env only, naming `nx config set anthropic_api_key "$ANTHROPIC_API_KEY"`; it stays silent when `claude` is the backend, so exporting `ANTHROPIC_API_KEY` for other reasons is not nagged.
 
 Data-token self-minting (nexus-wrwb7, RDR-005 2a): a `mint_token` presence + reachability check that always runs (not behind a `--check-*` flag). Unconfigured (the default — most installs) reports a loud-but-passing skip line, since self-minting is optional and the static `service_token` path runs unchanged. When `mint_token` IS configured it routes through `DataTokenManager`'s own process-wide, TTL-cached singleton (never a throwaway manager — nexus-ssqk9 fixed a residue-discipline bug where the check used to mint a FRESH token on every single `nx doctor` invocation) and reports which of three things happened on success, plus the granted TTL: MINTED a fresh token, REUSED one already live in-process, or REUSED one borrowed from the cross-process lease file (nexus-9c7t9, below). A real `nx doctor` invocation is its own fresh subprocess with an empty in-process cache, so its own two outcomes are "minted a fresh" (no lease existed yet, or it had gone stale) or "reused the cached (lease file)" (a prior `nx` invocation's mint is still fresh); "reused the cached (in-process)" is observable only inside a long-lived process such as the MCP server. Degrades to a soft warning (never fatal, never a silent "ok") on an unresolvable endpoint or a rejected mint. If the credential is bound to a tenant other than `"default"` (see `mint_tenant` above), configure `mint_tenant` too — the doctor check mints against `mint_tenant` (or `"default"`) exactly like every other call site; an unconfigured `mint_tenant` against a mint-locked credential bound to a different tenant surfaces as the same 403 the `mint_tenant` table entry above documents. The managed edge forwards the client's `Authorization` on `/v1` unvalidated (conexus-qomd), so a successful mint means the engine checked this credential and its tenant.
 
@@ -5431,8 +5431,12 @@ executed-failed with `--include-failed`; see above):
   planner (`plan_id` 0) also carries the planner dispatch's cost, which
   belongs to no step (nexus-jypmj.1.20): for those rows a run cost at or above
   the step sum agrees, and a known run cost agrees with no known step cost; a
-  run cost below its steps is still flagged. `by_plan` medians stay step sums,
-  so they remain comparable with the predicted cost.
+  run cost below its steps is still flagged. The structured request extraction's
+  call is part of the run's cost too (nexus-jypmj.9) and belongs to no step: a
+  row whose run summary records an extraction cost agrees at the step sum plus that
+  cost (exact, so an over-count is still flagged) or, for a row written by a release
+  that left the call out of the run cost, at the step sum alone. `by_plan` medians
+  stay step sums, so they remain comparable with the predicted cost.
 
 A step's `cost_usd` of `None` ("unknown", not a measured cost — see
 `StepRecord`'s own docstring, `plans/runner.py`) is excluded from every
@@ -5815,8 +5819,14 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   wins. `library_not_reseeded` means the plan library holds builtin templates with no
   answer-kind declaration: `library_check` is `checked`, `builtins_checked` is how
   many builtin rows a reseed can fix were examined, `undeclared_builtins` how many
-  of them lack the declaration and `undeclared_builtin_names` names up to 8 (run
-  `nx plan reseed`, or upgrade, which reconciles them). A builtin-tagged orphan that
+  of them lack the declaration and `undeclared_builtin_names` names up to 8, each as
+  `<name> (id <n>)` (several builtin rows share a name). Run `nx plan reseed`, or upgrade,
+  which reconciles them. If the state outlives a reseed, the reseed's own warnings say
+  why: a `seed load error` for a template means the installed conexus rejects it, and
+  only an upgraded conexus clears it; a `not reconciled` warning (`description already
+  belongs to library row id=N`) clears when row N is deleted (`nx plan delete N`) and
+  `nx plan reseed` is run again. The once-per-process warning in the log carries the same
+  text as its `remedy`. A builtin-tagged orphan that
   no shipped template describes is not counted: the seed loader leaves it in place, so
   a reseed could not fix it. A library with no such row enforces and says
   `builtins_checked` 0. `library_check` is `unreadable` (and the gate keeps enforcing)
