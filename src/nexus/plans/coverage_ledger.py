@@ -39,7 +39,7 @@ What the boundary does, in order:
    (every required facet known and none covered; contradicted is not covered) sets
    :attr:`CoverageResult.skip_generation`, which the runner honours by not dispatching the terminal
    reduction (Sam's ruling of 2026-10-25, nexus-jypmj.3.12). What lets generation proceed is one predicate,
-   :func:`counts_toward_a_usable_answer` (the all-contradicted rule, undecided: today only ``covered``). ``no_evidence`` stays reserved for zero
+   :func:`counts_toward_a_usable_answer` (``covered`` or ``contradicted``, Sam 2026-10-27). ``no_evidence`` stays reserved for zero
    retrieval results, which the existing zero-evidence path already answers, so a boundary that finds no
    anchors never skips generation. The ``AnswerShape`` value, the notice and the counters are
    nexus-jypmj.3.3's.
@@ -194,12 +194,12 @@ _UNUSABLE_DETAIL = "assessor_unusable"
 
 #: THE ALL-CONTRADICTED RULE (undecided; Sam is deciding it, RDR-232 critique S1). The finding states that count
 #: toward a usable answer: generation is skipped before it (``state_for``) and the prose is withheld after it
-#: (``coverage_outcome.decide_outcome``) when NO facet is in one of these states and none is unassessed. Today
-#: only ``covered``: a facet with only contradicting evidence is not usable, so a ledger of contradicted and
-#: unsupported facets is ``uncovered``. Adding ``contradicted`` makes a contradiction-only ledger ``partial`` with
-#: the contradicted facets named. Both sides read :func:`counts_toward_a_usable_answer`; this set is the one place
-#: to change.
-USABLE_ANSWER_FINDING_STATES: frozenset[str] = frozenset({"covered"})
+#: (``coverage_outcome.decide_outcome``) when NO facet is in one of these states and none is unassessed.
+#: ``covered`` and ``contradicted`` (Sam, 2026-10-27, nexus-jypmj.3.13): contradicting evidence is evidence the
+#: reduction must state, so a contradiction-only ledger is ``partial`` and the notice names the contradicted facets;
+#: only a ledger of unsupported facets is ``uncovered``. Both sides read :func:`counts_toward_a_usable_answer`;
+#: this set is the one place the rule lives.
+USABLE_ANSWER_FINDING_STATES: frozenset[str] = frozenset({"covered", "contradicted"})
 
 
 def counts_toward_a_usable_answer(state: str) -> bool:
@@ -583,11 +583,12 @@ def state_for(
     * observed but no anchors: ``unavailable`` (``no_evidence``, or ``scope_conflict`` when the caller's
       scope removed all of it); generation is NOT skipped, the existing zero-evidence path answers it.
     * every facet unassessed: ``unassessed``; the reason names why (failed, skipped for time or budget).
-    * every facet known and none counting toward a usable answer (:func:`counts_toward_a_usable_answer`; today
-      only ``covered``, so each unsupported or contradicted): ``unavailable`` / ``uncovered`` and generation is
-      skipped. A usable answer needs at least one such facet, and the nexus-jypmj.3.12 ruling skips generation
-      when the ledger has none. A contradicted facet beside a covered one is retained for the reduction
-      (``partial``). An unassessed facet is never known to be uncovered, so any unassessed facet keeps generation.
+    * every facet known and none counting toward a usable answer (:func:`counts_toward_a_usable_answer`:
+      ``covered`` or ``contradicted``, so every facet unsupported): ``unavailable`` / ``uncovered`` and generation
+      is skipped. A usable answer needs at least one such facet, and the nexus-jypmj.3.12 ruling skips generation
+      when the ledger has none. A contradicted facet is retained for the reduction (``partial``), alone or beside a
+      covered one (nexus-jypmj.3.13). An unassessed facet is never known to be uncovered, so any unassessed facet
+      keeps generation.
     * every facet covered: ``complete``. Otherwise ``partial``.
 
     The "usable answer" half of the table's ``partial`` and ``unavailable`` rows depends on the generated

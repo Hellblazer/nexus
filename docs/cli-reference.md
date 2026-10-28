@@ -5364,7 +5364,7 @@ every row is split three ways:
     `ranking_only`, `operator_payload` (filter, check, verify or groupby
     payload), `retrieval_only` (a search/query/traverse result payload),
     `listing`, `empty`, and, from RDR-232 Phase 3 (nexus-jypmj.3.3), `uncovered`
-    (evidence was retrieved and covered no requested part) and `no_evidence`
+    (evidence was retrieved and neither supported nor contradicted any requested part) and `no_evidence`
     (nothing usable reached the reduction). A row
     written by a post-fix client carries the `[non-answer: <shape>]`
     notice as its `final_text` and is named by that prefix; a pre-fix row
@@ -5487,11 +5487,12 @@ recorded as a failure, and no plan is grown from it (nexus-zy0kj). Of those,
 `planner_error` and `error` are set on a failure path; `no_evidence` means
 nothing usable reached the reduction (every retrieval step returned zero
 results, or a scope conflict removed it all); and `uncovered`
-(nexus-jypmj.3.12) means retrieval returned evidence and none of it covered a
-requested part, so no answer is given (terminal generation is skipped when the
-check has assessed every facet and found none covered, and prose generated
-anyway is withheld; while any facet is unassessed the prose is kept as
-`insufficient_evidence`). `None` on
+(nexus-jypmj.3.12) means retrieval returned evidence and none of it supported
+or contradicted a requested part, so no answer is given. Terminal generation is
+skipped when the check has assessed every facet and found each unsupported, and
+prose generated anyway is withheld. A contradicted part does not count as
+uncovered: it is reported ahead of the prose as `insufficient_evidence`
+(nexus-jypmj.3.13), as is prose while any facet is unassessed. `None` on
 paths that never classified: the single-step fast path, a continuation
 handoff and a budget-exhausted stop. The coverage check is off unless
 `NX_ANSWER_COVERAGE=1` is set (the default flips only after the Phase 3

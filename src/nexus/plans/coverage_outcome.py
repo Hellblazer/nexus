@@ -6,9 +6,10 @@ The runner's boundary (:mod:`nexus.plans.coverage_ledger`) decides the state BEF
 of RDR section 4's table depend on what generation returned, so they are applied here, after it:
 
 * a **usable answer** is prose that ``classify_answer_shape`` reads as ``answered`` AND at least one required facet
-  that counts toward one (``counts_toward_a_usable_answer``; today ``covered``) or one not yet assessed. ``partial`` with a usable answer is ``insufficient_evidence``; ``partial`` or ``complete`` without one
-  is ``unavailable``.
-* prose with no covered facet, every facet known, is ``uncovered`` (Sam's ruling, nexus-jypmj.3.12); with an
+  that counts toward one (``counts_toward_a_usable_answer``: ``covered`` or ``contradicted``, Sam 2026-10-27) or one
+  not yet assessed. ``partial`` with a usable answer is ``insufficient_evidence``; ``partial`` or ``complete``
+  without one is ``unavailable``.
+* prose with every facet known and each unsupported is ``uncovered`` (Sam's ruling, nexus-jypmj.3.12); with an
   unassessed facet the prose is kept as a partial answer; ``no_evidence`` stays reserved for evidence that never
   reached the reduction.
 

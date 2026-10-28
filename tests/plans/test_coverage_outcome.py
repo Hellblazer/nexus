@@ -80,10 +80,19 @@ def test_prose_with_no_covered_facet_but_an_unassessed_one_keeps_the_prose_as_pa
 def test_prose_with_no_covered_facet_and_none_unassessed_is_uncovered() -> None:
     """Sam's ruling (nexus-jypmj.3.12): prose with no covered facet, every facet known, is unavailable and its shape
     is ``uncovered``. (Reached when the skip switch is off or a ledger was built by hand: the boundary skips first.)"""
-    cov = _cov("partial", "unresolved_facets", (UNSUPPORTED, CONTRADICTED))
+    cov = _cov("partial", "unresolved_facets", (UNSUPPORTED, FacetFinding("f3", "unsupported", (), "no_supporting_evidence")))
     v = decide_outcome(cov, AnswerShape.ANSWERED)
     assert v.shape is AnswerShape.UNCOVERED and not v.success and v.no_grow
     assert v.coverage is not None and (v.coverage.state, v.coverage.reason) == ("unavailable", "uncovered")
+
+
+def test_prose_whose_only_settled_facet_is_contradicted_is_a_partial_answer() -> None:
+    """Sam's ruling 2026-10-27 (nexus-jypmj.3.13): a contradicted facet counts toward a usable answer, so the prose
+    is kept behind the notice, which names the contradiction; a success, never grown."""
+    cov = _cov("partial", "unresolved_facets", (UNSUPPORTED, CONTRADICTED))
+    v = decide_outcome(cov, AnswerShape.ANSWERED)
+    assert v.shape is AnswerShape.INSUFFICIENT_EVIDENCE and v.success and v.no_grow
+    assert v.coverage is not None and v.coverage.state == "partial"
 
 
 def test_a_skipped_generation_is_uncovered_failure() -> None:

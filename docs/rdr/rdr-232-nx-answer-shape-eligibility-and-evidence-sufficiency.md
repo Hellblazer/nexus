@@ -992,12 +992,15 @@ independent of prose fluency.
 | --- | --- | --- | --- | --- | --- |
 | `complete` | every required facet has evidence | `answered` | the answer | `success_count` | allowed |
 | `partial` | at least one required facet is unsupported or contradicted, and a usable answer exists | `insufficient_evidence` | a notice naming each unresolved facet, followed by the answer | `success_count` | blocked |
-| `unavailable` | no usable answer can be produced | `uncovered` when retrieval returned evidence and none of it covered a required facet (prose with no covered facet included); `no_evidence` when no retrieval result reached the reduction | the existing non-answer notice and chunk references | `failure_count` | blocked |
+| `unavailable` | no usable answer can be produced | `uncovered` when retrieval returned evidence and none of it supported or contradicted a required facet (prose with no such facet included); `no_evidence` when no retrieval result reached the reduction | the existing non-answer notice and chunk references | `failure_count` | blocked |
 | `unassessed` | the request has no facets, or the coverage assessment itself failed | `answered` | the answer, as today | `success_count` | as today |
 
 A **usable answer** exists when the terminal generation returned prose that
 `classify_answer_shape` reads as `answered` and at least one required facet
-is covered. Prose with no covered facet is `unavailable`. A repair or
+is covered or contradicted: contradicting evidence is evidence the reduction
+must state, so a contradiction is reported ahead of the prose rather than
+withheld (Sam, 2026-10-27, nexus-jypmj.3.13). Prose with no such facet is
+`unavailable`. A repair or
 reassessment call that fails after the first assessment succeeded leaves the
 first ledger in force, so the result is `partial` (or `complete`), not
 `unassessed`. A missing named source, or a scope conflict that removed all
@@ -1842,3 +1845,4 @@ remain coherent without it.
 - 2026-10-26: Section 1 states how the active-project tier decides (reliability, the project-name and title veto, the fallback notice, question-text sources, the range disclosure) and the Phase 2 proof states what "otherwise" means for the unmodified call (nexus-jypmj.2.4), approved by Sam.
 - 2026-10-27: Phase 2 measured and enabled (nexus-jypmj.2.8, nexus-jypmj.12), approved by Sam. Section 1: a lookup includes several connected facts from one passage of one source; the directional rule is recorded as a measured limit; request extraction is on by default with Haiku and turning it off puts the gate in shadow. Trade-offs and Performance Expectations carry the measured fall-through and extraction cost. Phase 2 step 6 records that the thresholds were set after measuring, and why.
 - 2026-10-27: Section 4's coverage-state table row for `unavailable` names the new `uncovered` shape for evidence that covered no facet and keeps `no_evidence` for zero retrieval results, per Sam's ruling (nexus-jypmj.3.12), added with the shape in nexus-jypmj.3.3.
+- 2026-10-27: Section 4 counts a contradicted facet toward a usable answer: the definition and the `unavailable` row say covered or contradicted, so a contradiction-only result is `partial` with the contradiction named ahead of the prose, per Sam's ruling (nexus-jypmj.3.13).

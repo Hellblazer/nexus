@@ -135,16 +135,30 @@ class TestAssessedRun:
 
     @pytest.mark.asyncio
     async def test_prose_with_no_covered_facet_and_every_facet_known_downgrades_to_unavailable_uncovered(self) -> None:
-        contradicted = FacetFinding("f3", "contradicted", ("e1",), "contradicted")
+        unsupported_too = FacetFinding("f3", "unsupported", (), "no_supporting_evidence")
         pr = PlanResult(
             steps=[{"ids": ["c1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"], "chunk_collections": ["rdr__1-1"]},
                    {"text": "A fluent answer built on nothing."}],
-            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, contradicted),
+            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, unsupported_too),
         )
         run = await _drive(plan_id=0, plan_result=pr, request=_request(2))
         cov = run.out["coverage"]
         assert (cov["state"], cov["reason"]) == ("unavailable", "uncovered")
-        assert _gaps(cov) == [("f2", "unsupported"), ("f3", "contradicted")]
+        assert _gaps(cov) == [("f2", "unsupported"), ("f3", "unsupported")]
+
+    @pytest.mark.asyncio
+    async def test_prose_whose_only_settled_facet_is_contradicted_stays_partial(self) -> None:
+        """nexus-jypmj.3.13: a contradicted facet counts toward a usable answer, so the envelope reports partial."""
+        contradicted = FacetFinding("f3", "contradicted", ("e1",), "contradicted")
+        pr = PlanResult(
+            steps=[{"ids": ["c1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"], "chunk_collections": ["rdr__1-1"]},
+                   {"text": "The evidence says the opposite."}],
+            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, contradicted),
+        )
+        run = await _drive(plan_id=0, plan_result=pr, request=_request(2))
+        assert run.out["answer_shape"] == "insufficient_evidence"
+        assert run.out["coverage"]["state"] == "partial"
+        assert "contradicts" in run.out["final_text"] and "The evidence says the opposite." in run.out["final_text"]
 
     @pytest.mark.asyncio
     async def test_prose_with_no_covered_facet_but_an_unassessed_one_stays_partial(self) -> None:

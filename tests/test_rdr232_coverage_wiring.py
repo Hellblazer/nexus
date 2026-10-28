@@ -440,11 +440,11 @@ class TestScenario5Uncovered:
     @pytest.mark.asyncio
     async def test_prose_with_no_covered_facet_and_none_unassessed_is_withheld_and_uncovered(self) -> None:
         """Generation ran (the skip was off) and every facet is known uncovered: the prose is withheld."""
-        contradicted = FacetFinding("f3", "contradicted", ("e1",), "contradicted")
+        unsupported_too = FacetFinding("f3", "unsupported", (), "no_supporting_evidence")
         pr = PlanResult(
             steps=[{"ids": ["c1"], "collections": ["rdr__1-1"], "chunk_text_hash": ["h1"], "chunk_collections": ["rdr__1-1"]},
                    {"text": "A fluent answer built on nothing."}],
-            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, contradicted),
+            coverage=_ledger_result("partial", "unresolved_facets", UNSUPPORTED, unsupported_too),
         )
         run = await _drive(plan_id=0, plan_result=pr, request=_request(2))
         assert run.out["answer_shape"] == "uncovered" and "fluent answer" not in run.out["final_text"]
