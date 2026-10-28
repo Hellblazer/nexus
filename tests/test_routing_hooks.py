@@ -1381,6 +1381,32 @@ def test_a_child_that_cannot_start_is_metered_and_the_deny_is_still_emitted(tmp_
     assert rec["cause"] == "other" and "could not be started" in rec["error"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in child is a POSIX shell script")
+def test_the_bearer_token_goes_to_the_child_over_stdin_never_argv(tmp_path):
+    """``ps`` shows argv to every user on the box, so the token must travel over stdin (nexus-njn1a.1
+    confirmation review). The stand-in interpreter records what the hook started it with."""
+    seen_argv, seen_stdin = tmp_path / "argv.txt", tmp_path / "stdin.txt"
+    fake = tmp_path / "fake-python"
+    fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > {seen_argv}\ncat > {seen_stdin}\n")
+    fake.chmod(0o755)
+    stub = (
+        f"import sys; sys.path.insert(0, {str(_ROUTING_DIR)!r}); import _lib\n"
+        f"sys.executable = {str(fake)!r}\n"
+        "_lib.log_routing_event(rule='r', outcome='deny')\n"
+    )
+    env = _hook_env(tmp_path, 1)
+    env["NX_SERVICE_TOKEN"] = "tok-SENTINEL-njn1a"
+    proc = subprocess.run([sys.executable, "-c", stub], capture_output=True, text=True, env=env, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    deadline = _time.monotonic() + 10
+    while not (seen_stdin.exists() and seen_stdin.read_text()) and _time.monotonic() < deadline:
+        _time.sleep(0.05)
+    argv = seen_argv.read_text()
+    assert "--post-routing-event" in argv, argv
+    assert "tok-SENTINEL-njn1a" not in argv
+    assert "tok-SENTINEL-njn1a" in seen_stdin.read_text()
+
+
 def test_an_unresolvable_endpoint_is_metered_by_the_hook_without_a_child(tmp_path, monkeypatch):
     """No endpoint is a local fact: it is metered synchronously, and no child is started for it."""
     _isolate_endpoint_discovery(tmp_path, monkeypatch)
