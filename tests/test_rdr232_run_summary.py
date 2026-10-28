@@ -202,7 +202,7 @@ class TestSummaryContent:
         assert s["coverage"]["assessment_calls"] == 2
         assert s["coverage"]["facets_per_call"] == [1, 1]
         assert s["coverage"]["assessment_latency_ms"] == 900
-        assert s["repair"] == {"attempts": 1, "facets_repairable": 1}
+        assert s["repair"] == {"attempts": 1, "facets_repairable": 1, "entered": False}  # `entered`: nexus-jypmj.3.10, additive
         assert _build(coverage=_coverage("partial", rounds=1))["repair"]["attempts"] == 0
 
     def test_request_kind_exclusions_streams_cost_and_latency(self):

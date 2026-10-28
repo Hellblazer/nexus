@@ -34,6 +34,15 @@ What the boundary does, in order:
    ``unsupported``, so a model that ignores the tag convention cannot make a withheld answer. "The items were
    read and nothing bears on the facet" is the assessor's neutral record (the instruction asks for one).
    A call that raises stops the assessment; no facet is then defaulted to covered.
+   **The measurement counters** (nexus-jypmj.3.10): every attempted call is logged as an :class:`AssessmentCall` with
+   a reply class (:data:`REPLY_CLASSES`: ``support``, ``neutral_or_contradict``, ``all_rejected``, ``no_records``,
+   ``raised``), so the classes can be counted per call and per stream; ``failure_cause`` splits a failed outcome into an
+   unusable reply and a raised call; an unassessed facet carries the reason it is unassessed
+   (``assessment_unusable``, ``assessment_skipped_deadline`` / ``_budget``, ``assessment_raised``, or the older
+   ``assessment_incomplete`` for an item the cap left unread), counted in :attr:`CoverageResult.unassessed_by_cause`;
+   a conflicted facet is counted in ``facets_conflicted`` (a subset of ``facets.covered``); and
+   :attr:`CoverageResult.repair_entered` says the run went into the repair step at all. None of this changes a
+   state, a skip or an outcome.
 4. **State.** :func:`state_for` computes ``coverage.state`` from the facet states (the section 4 table):
    ``complete``, ``partial``, ``unavailable`` or ``unassessed``. ``unavailable`` with reason ``uncovered``
    (every required facet known and none covered; contradicted is not covered) sets
@@ -134,9 +143,13 @@ __all__ = [
     "INSTRUCTION_MARKER",
     "MAX_FACETS_PER_ASSESSMENT_CALL",
     "MIN_ASSESSMENT_CALL_S",
+    "RAISED_REASON",
+    "REPLY_CLASSES",
     "STREAM_ORDER",
+    "UNASSESSED_CAUSES",
     "UNUSABLE_REASON",
     "USABLE_ANSWER_FINDING_STATES",
+    "AssessmentCall",
     "AssessmentReport",
     "BoundaryView",
     "CoverageBoundary",
@@ -189,8 +202,24 @@ _ROLES = frozenset({"supports", "contradicts", "neutral"})
 CONFLICTED_REASON = "conflicted"
 #: A finding's ``reason`` for a facet left ``unassessed`` because the assessor's reply for it was unusable.
 UNUSABLE_REASON = "assessment_unusable"
+#: A finding's ``reason`` for a facet left ``unassessed`` because the assessment call for it raised.
+RAISED_REASON = "assessment_raised"
 #: The ``AssessmentReport.detail`` prefix of an unusable reply.
 _UNUSABLE_DETAIL = "assessor_unusable"
+
+#: What one assessment call came back as (nexus-jypmj.3.10, Phase 3 critique S-B): ``support`` (at least one
+#: accepted record says an item supports a facet), ``neutral_or_contradict`` (accepted records, none supports),
+#: ``all_rejected`` (records came back and every one failed validation), ``no_records`` (an empty reply, or one that
+#: is not the check shape) and ``raised`` (the call itself raised). The first two are usable replies; the next two
+#: are an unusable reply; the last is a failed call.
+REPLY_CLASSES: tuple[str, ...] = ("support", "neutral_or_contradict", "all_rejected", "no_records", "raised")
+#: Why a facet is ``unassessed`` in the final ledger, counted in ``CoverageResult.unassessed_by_cause``.
+#: ``other`` is every reason not named here (the item cap left an item unread, an assessment never attempted).
+UNASSESSED_CAUSES: tuple[str, ...] = ("unusable_reply", "deadline_skip", "budget_skip", "raised_call", "other")
+_CAUSE_OF_REASON: dict[str, str] = {
+    UNUSABLE_REASON: "unusable_reply", "assessment_skipped_deadline": "deadline_skip",
+    "assessment_skipped_budget": "budget_skip", RAISED_REASON: "raised_call",
+}
 
 #: THE ALL-CONTRADICTED RULE (undecided; Sam is deciding it, RDR-232 critique S1). The finding states that count
 #: toward a usable answer: generation is skipped before it (``state_for``) and the prose is withheld after it
@@ -288,12 +317,34 @@ class ScopeRow:
 
 
 @dataclass(frozen=True)
+class AssessmentCall:
+    """One attempted assessment call, for the run summary (nexus-jypmj.3.10): the evidence stream it read, how many
+    facets it carried, what it came back as (one of :data:`REPLY_CLASSES`) and how many records the validation
+    accepted and rejected. No text."""
+
+    stream: str
+    facets: int
+    reply: str
+    accepted: int = 0
+    rejected: int = 0
+
+    def to_wire(self) -> list[Any]:
+        return [self.stream, self.facets, self.reply, self.accepted, self.rejected]
+
+
+@dataclass(frozen=True)
 class AssessmentReport:
     """What the facet assessment cost, for the run summary (nexus-jypmj.3.5): calls, facets per call.
 
     ``calls`` counts attempted calls (a failed call is one). ``rejected_records`` counts evidence records
     the validation dropped (an id outside the input, an unknown facet tag, an untagged quote or a bad role).
     ``skipped_items`` counts anchors a call could not carry. ``detail`` names why the assessment stopped.
+
+    The measurement counters (nexus-jypmj.3.10): ``call_log`` has one :class:`AssessmentCall` per attempted call, in
+    order, from which the reply classes are counted per call and per stream; ``accepted_records`` counts the records
+    the validation kept; ``unusable_calls`` counts calls that came back with no usable record (an empty reply, one
+    that is not the check shape, or only rejected records); ``raised_calls`` counts calls that raised. Together they
+    split ``outcome == "failed"`` into an unusable reply and a raised call (:attr:`failure_cause`).
     """
 
     outcome: AssessmentOutcome = "not_attempted"
@@ -304,6 +355,10 @@ class AssessmentReport:
     skipped_items: int = 0
     latency_ms: int = 0
     detail: str = ""
+    accepted_records: int = 0
+    unusable_calls: int = 0
+    raised_calls: int = 0
+    call_log: tuple[AssessmentCall, ...] = ()
 
     def merged_with(self, later: AssessmentReport) -> AssessmentReport:
         """The sum of two rounds; the later round's outcome and detail stand, except that a later round that
@@ -319,13 +374,48 @@ class AssessmentReport:
             rejected_records=self.rejected_records + later.rejected_records,
             skipped_items=self.skipped_items + later.skipped_items,
             latency_ms=self.latency_ms + later.latency_ms, detail=later.detail or self.detail,
+            accepted_records=self.accepted_records + later.accepted_records,
+            unusable_calls=self.unusable_calls + later.unusable_calls,
+            raised_calls=self.raised_calls + later.raised_calls,
+            call_log=self.call_log + later.call_log,
         )
+
+    def reply_classes(self) -> dict[str, int]:
+        """Attempted calls by reply class, every class present (zero included)."""
+        out = {c: 0 for c in REPLY_CLASSES}
+        for call in self.call_log:
+            out[call.reply] = out.get(call.reply, 0) + 1
+        return out
+
+    def reply_by_stream(self) -> dict[str, dict[str, int]]:
+        """Reply classes per evidence stream, for the streams that made a call, in order of first use."""
+        out: dict[str, dict[str, int]] = {}
+        for call in self.call_log:
+            row = out.setdefault(call.stream, {c: 0 for c in REPLY_CLASSES})
+            row[call.reply] = row.get(call.reply, 0) + 1
+        return out
+
+    @property
+    def failure_cause(self) -> str:
+        """What the failed calls were, over every round: ``raised_call``, ``unusable_reply``, ``mixed`` (both) or
+        ``none``. A skipped assessment (deadline, budget) is not a failure and reads ``none``."""
+        if self.raised_calls and self.unusable_calls:
+            return "mixed"
+        if self.raised_calls:
+            return "raised_call"
+        if self.unusable_calls:
+            return "unusable_reply"
+        return "none"
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "outcome": self.outcome, "calls": self.calls, "facets_per_call": list(self.facets_per_call),
             "streams": list(self.streams), "rejected_records": self.rejected_records,
             "skipped_items": self.skipped_items, "latency_ms": self.latency_ms, "detail": self.detail,
+            "accepted_records": self.accepted_records, "unusable_calls": self.unusable_calls,
+            "raised_calls": self.raised_calls, "failure_cause": self.failure_cause,
+            "reply_classes": self.reply_classes(), "reply_by_stream": self.reply_by_stream(),
+            "call_log": [c.to_wire() for c in self.call_log],
         }
 
 
@@ -376,6 +466,22 @@ class CoverageResult:
         notice say the evidence conflicts."""
         return tuple(f.facet_id for f in self.ledger.findings if f.state == "covered" and f.reason == CONFLICTED_REASON)
 
+    @property
+    def unassessed_by_cause(self) -> dict[str, int]:
+        """The unassessed facets of the final ledger by why they are unassessed (:data:`UNASSESSED_CAUSES`, every
+        cause present). The cause is read from the finding's reason, which ``_assess`` sets from what happened."""
+        out = {c: 0 for c in UNASSESSED_CAUSES}
+        for f in self.ledger.findings:
+            if f.state == "unassessed":
+                out[_CAUSE_OF_REASON.get(f.reason, "other")] += 1
+        return out
+
+    @property
+    def repair_entered(self) -> bool:
+        """Whether the boundary went into the repair step at all (a repairable gap and repair switched on), whatever
+        it then found: ``repair.outcome`` is ``not_attempted`` only when it did not."""
+        return self.repair.outcome != "not_attempted"
+
     def counts(self) -> dict[str, Any]:
         """The numbers the run summary carries: no text, no source label."""
         by_state = {s: 0 for s in ("covered", "unsupported", "contradicted", "unassessed")}
@@ -390,6 +496,9 @@ class CoverageResult:
             "repair_outcome": self.repair.outcome, "repair_facets": len(self.repair.facet_ids),
             "repair_queries": self.repair.queries, "repair_items_found": self.repair.items_found,
             "repair_items_merged": self.repair.items_merged, "repair_noted_facets": self.repair.noted_facets,
+            # nexus-jypmj.3.10: additive. ``facets.covered`` still counts a conflicted facet; this is the subset.
+            "facets_conflicted": len(self.conflicted_facet_ids), "unassessed_by_cause": self.unassessed_by_cause,
+            "repair_entered": self.repair_entered,
         }
 
     @property
@@ -1022,16 +1131,24 @@ class CoverageBoundary:
         tag_of = {f.id.lower(): f.id for f in facets}
         supports: dict[str, set[str]] = {f.id: set() for f in facets}
         contradicts: dict[str, set[str]] = {f.id: set() for f in facets}
-        incomplete: set[str] = set()
-        unusable: set[str] = set()
+        incomplete: dict[str, str] = {}  # facet id -> the finding reason for why it is not known
         calls, rejected, skipped_items = 0, 0, 0
+        accepted_total, unusable_n, raised_n = 0, 0, 0
+        call_log: list[AssessmentCall] = []
+
+        def mark(group: Sequence[Facet], reason: str, *, override: bool = False) -> None:
+            for f in group:
+                if override:
+                    incomplete[f.id] = reason
+                else:
+                    incomplete.setdefault(f.id, reason)
+
         per_call: list[int] = []
         used_streams: list[str] = []
         outcome: AssessmentOutcome = "ok"
         detail = ""
         started = time.monotonic()
         completed = 0  # calls whose reply carried at least one accepted record
-        unusable_calls = 0
         for pos, (stream, group) in enumerate(planned):
             usd = view.remaining_usd()
             remaining = view.remaining_seconds()
@@ -1046,7 +1163,7 @@ class CoverageBoundary:
                 outcome = stop if calls == 0 else "partial_failure"  # type: ignore[assignment]
                 detail = why
                 for _s, g in planned[pos:]:
-                    incomplete.update(f.id for f in g)
+                    mark(g, _UNASSESSED_REASON[stop])
                 break
             payload, included, omitted = _pack(by_stream[stream])
             skipped_items += omitted
@@ -1063,10 +1180,23 @@ class CoverageBoundary:
                 _log.warning("nx_answer_coverage_assessment_failed", stream=stream, error=type(exc).__name__)
                 outcome = "failed" if completed == 0 else "partial_failure"
                 detail = f"call {calls} on the {stream} stream failed: {type(exc).__name__}"
-                for _s, g in planned[pos:]:
-                    incomplete.update(f.id for f in g)
+                # A reply that is not the check shape is an unusable reply that stops the assessment; any other
+                # failure is a call that raised.
+                if isinstance(exc, _MalformedReply):
+                    unusable_n += 1
+                    call_log.append(AssessmentCall(stream, len(group), "no_records"))
+                    mark(group, UNUSABLE_REASON, override=True)
+                    for _s, g in planned[pos + 1:]:
+                        mark(g, UNUSABLE_REASON)
+                else:
+                    raised_n += 1
+                    call_log.append(AssessmentCall(stream, len(group), "raised"))
+                    for _s, g in planned[pos:]:
+                        mark(g, RAISED_REASON)
                 break
             accepted = 0
+            rejected_here = 0
+            call_supports = False
             # The call's own facets only: a tag for a facet this prompt never showed is rejected (N1).
             call_tags = {f.id.lower() for f in group}
             for rec in records:
@@ -1076,26 +1206,34 @@ class CoverageBoundary:
                 facet_id = tag_of.get(tag) if tag in call_tags else None
                 if item_id not in ids or role not in _ROLES or facet_id is None:
                     rejected += 1
+                    rejected_here += 1
                     continue
                 accepted += 1
                 if role == "supports":
+                    call_supports = True
                     supports[facet_id].add(str(item_id))
                 elif role == "contradicts":
                     contradicts[facet_id].add(str(item_id))
+            accepted_total += accepted
+            call_log.append(AssessmentCall(
+                stream, len(group),
+                "no_records" if not records else "all_rejected" if accepted == 0
+                else "support" if call_supports else "neutral_or_contradict",
+                accepted, rejected_here,
+            ))
             if accepted == 0:
                 # Nothing usable came back (no record, or none that validates): that says nothing about these
                 # facets, so they are not known. An unusable reply is a failed assessment, not "nothing supports".
-                unusable_calls += 1
-                incomplete.update(f.id for f in group)
-                unusable.update(f.id for f in group)
+                unusable_n += 1
+                mark(group, UNUSABLE_REASON, override=True)
                 detail = detail or (
                     f"{_UNUSABLE_DETAIL}: call {calls} on the {stream} stream returned {len(records)} record(s), none usable"
                 )
                 continue
             completed += 1
             if omitted:
-                incomplete.update(f.id for f in group)
-        if unusable_calls and outcome == "ok":
+                mark(group, "assessment_incomplete")
+        if unusable_n and outcome == "ok":
             outcome = "failed" if completed == 0 else "partial_failure"
         findings: dict[str, FacetFinding] = {}
         for f in facets:
@@ -1106,14 +1244,14 @@ class CoverageBoundary:
             elif con:
                 findings[f.id] = FacetFinding(f.id, "contradicted", tuple(sorted(con)), "contradicted")
             elif f.id in incomplete:
-                reason = UNUSABLE_REASON if f.id in unusable else _UNASSESSED_REASON.get(outcome, "assessment_incomplete")
-                findings[f.id] = FacetFinding(f.id, "unassessed", (), reason)
+                findings[f.id] = FacetFinding(f.id, "unassessed", (), incomplete[f.id])
             else:
                 findings[f.id] = FacetFinding(f.id, "unsupported", (), REPAIRABLE_REASON)
         report = AssessmentReport(
             outcome=outcome, calls=calls, facets_per_call=tuple(per_call), streams=tuple(used_streams),
             rejected_records=rejected, skipped_items=skipped_items,
             latency_ms=int((time.monotonic() - started) * 1000), detail=detail,
+            accepted_records=accepted_total, unusable_calls=unusable_n, raised_calls=raised_n, call_log=tuple(call_log),
         )
         return findings, report
 
@@ -1157,8 +1295,12 @@ def _hits(out: Any) -> list[RepairHit]:
     return [RepairHit(str(i), c, t, h) for i, c, t, h in zip(ids, cols, tums, hs, strict=True)]
 
 
+class _MalformedReply(ValueError):
+    """A check reply that is not the check shape: an unusable reply that stops the assessment, not a call that raised."""
+
+
 def _records(reply: Any) -> list[Mapping[str, Any]]:
     """The evidence records of a check reply; a reply that is not the check shape is a failed call."""
     if not isinstance(reply, Mapping) or not isinstance(reply.get("evidence"), list):
-        raise ValueError("operator_check reply has no evidence list")
+        raise _MalformedReply("operator_check reply has no evidence list")
     return [r for r in reply["evidence"] if isinstance(r, Mapping)]

@@ -26,7 +26,7 @@ import httpx
 import pytest
 
 from nexus.mcp.core import _nx_answer_record_complete, _nx_answer_record_run
-from nexus.plans.coverage_ledger import AssessmentReport, CoverageLedger, CoverageResult, FacetFinding
+from nexus.plans.coverage_ledger import AssessmentCall, AssessmentReport, CoverageLedger, CoverageResult, FacetFinding
 from nexus.plans.request_coverage import Facet, RequestCoverage
 from nexus.plans.run_summary import (
     ENGINE_RUN_SUMMARY_LIMIT_BYTES,
@@ -64,7 +64,10 @@ def _coverage(state: str = "partial") -> CoverageResult:
         state=state, reason="unresolved_facets", skip_generation=False,
         ledger=CoverageLedger(
             findings=(FacetFinding("f1", "covered", ("e1",)), FacetFinding("f2", "unsupported", (), "no_supporting_evidence")),
-            assessment=AssessmentReport(outcome="ok", calls=2, facets_per_call=(1, 1), latency_ms=900),
+            assessment=AssessmentReport(
+                outcome="ok", calls=2, facets_per_call=(1, 1), latency_ms=900, accepted_records=2,
+                call_log=(AssessmentCall("vector", 1, "support", 1, 0), AssessmentCall("graph", 1, "neutral_or_contradict", 1, 0)),
+            ),
             rounds=2,
         ),
     )
@@ -177,6 +180,20 @@ class TestChokePointAgainstTheEngine:
         [row] = _rows(tel_store, q)
         assert row["run_summary"]["coverage_partial"] == 1 and row["run_summary"]["repair"]["attempts"] == 1
         assert rec.to_wire()["persisted_coverage_state"] == "partial"
+        assert summary_digest(row["run_summary"]) == rec.digest
+
+    def test_the_measurement_counters_survive_jsonb_and_the_digest_still_matches(self, tel_store):
+        """nexus-jypmj.3.10: the reply classes, the call log (nested lists), the booleans and the cause counts go through
+        the engine's JSONB and come back equal under the canonical-JSON digest."""
+        q, rec = "it-choke-counters", _recorder()
+        _complete(_db(tel_store), rec, question=q)
+        assert rec.persistence == "persisted", rec.detail
+        [row] = _rows(tel_store, q)
+        stored = row["run_summary"]["coverage"]
+        assert stored["reply_classes"] == {"support": 1, "neutral_or_contradict": 1, "all_rejected": 0, "no_records": 0, "raised": 0}
+        assert stored["assessment_call_log"] == [["vector", 1, "support"], ["graph", 1, "neutral_or_contradict"]]
+        assert stored["unassessed_by_cause"]["other"] == 0 and stored["repair_entered"] is False and stored["facets_conflicted"] == 0
+        assert row["run_summary"]["repair"]["entered"] is False and row["run_summary"]["version"] == 1
         assert summary_digest(row["run_summary"]) == rec.digest
 
     def test_degradation_path_is_persisted_by_readback(self, tel_store):

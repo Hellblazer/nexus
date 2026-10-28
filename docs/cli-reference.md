@@ -5957,7 +5957,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   stored. `{version, persistence, detail, returned_coverage_state,
   persisted_coverage_state, digest}`; always an object. The summary (version 1:
   coverage counts and state, request kind, eligibility, per-stream counts, scope,
-  repair, cost and latency; no question text, so a `whole_question` facet is listed
+  repair, cost and latency, and the same assessment counters the `coverage` object
+  carries, additive to version 1; no question text, so a `whole_question` facet is listed
   without its text, and with `trace=False` no facet text or source hint) rides on the run's `/record` and `/complete` write, in the same
   row, and is sent only when the engine's `/version` advertises
   `nx_answer_run_summary_supported` (engine-service-v0.1.167 and later).
@@ -6017,7 +6018,15 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   tumbler, t2_record_id}` and carries identity only, never evidence text;
   `sources` and `scope` are the deterministic source and scope rows; `assessment`
   and `repair` report calls, facets per call, latency and outcome, with counts and
-  closed names only. With `trace=False` the source labels and the `detail` of
+  closed names only. `assessment` also reports what each call came back as
+  (nexus-jypmj.3.10): `reply_classes` (`support`, `neutral_or_contradict`,
+  `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
+  `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,
+  rejected]`, `accepted_records`, `unusable_calls`, `raised_calls` and
+  `failure_cause` (`raised_call`, `unusable_reply`, `mixed` or `none`). The coverage
+  object also has `facets_conflicted` (the conflicted subset of `facets.covered`),
+  `unassessed_by_cause` (`unusable_reply`, `deadline_skip`, `budget_skip`,
+  `raised_call`, `other`) and `repair_entered`. With `trace=False` the source labels and the `detail` of
   `sources` and `scope` are blanked; ids, counts and closed names stay.
 
 - `traverse` under `nx_answer` (nexus-jypmj.1.5): `nx_answer` always supplies the
