@@ -23,7 +23,7 @@ from pathlib import Path
 import structlog
 from nexus._vcrt import MINERU_CHILD_PROLOGUE  # noqa: F401 -- re-exported: the children's shared prologue
 from nexus._winsec import make_user_dir
-from nexus.util.nx_argv import which_off_cwd
+from nexus.util.nx_argv import console_python, which_off_cwd
 
 _log = structlog.get_logger(__name__)
 
@@ -148,18 +148,30 @@ def _resolve_mineru_api_bin() -> str | None:
 
     Every candidate in (a) and (b) is validated with ``is_file()`` AND
     ``os.access(X_OK)``; ``which`` already checks X_OK internally.
+
+    On Windows a console script is ``mineru-api.exe`` and a venv keeps it in ``Scripts`` (a
+    generation's launcher directory is ``bin``), so there (a) names the ``.exe`` beside the
+    interpreter and (b) tries ``Scripts`` and ``bin`` (nexus-vyy65). Before that both looked for
+    an extensionless ``bin/mineru-api``, which Windows never has, and only PATH resolved it.
     """
+    from nexus import _vcrt, install_layout  # noqa: PLC0415 -- stdlib-only; keeps this module's import graph unchanged
+
+    layout_platform = "win32" if _vcrt.is_windows() else "linux"
+    script = install_layout.exe_name("mineru-api", platform=layout_platform)
+    bin_dirs = tuple(dict.fromkeys((install_layout.venv_bin_name(platform=layout_platform), "bin")))
+
     # (a) interpreter-sibling candidate
-    candidate_a = Path(sys.executable).parent / "mineru-api"
+    candidate_a = Path(sys.executable).parent / script
     if candidate_a.is_file() and os.access(str(candidate_a), os.X_OK):
         return str(candidate_a)
 
     # (b) __file__-anchored walk — interpreter-agnostic venv-bin discovery
     _here = Path(__file__).resolve()
     for ancestor in _here.parents[:8]:
-        candidate_b = ancestor / "bin" / "mineru-api"
-        if candidate_b.is_file() and os.access(str(candidate_b), os.X_OK):
-            return str(candidate_b)
+        for bin_dir in bin_dirs:
+            candidate_b = ancestor / bin_dir / script
+            if candidate_b.is_file() and os.access(str(candidate_b), os.X_OK):
+                return str(candidate_b)
 
     # (c) PATH fallback. Off the working directory: on Windows ``shutil.which``
     # answers with a ``mineru-api.exe`` in the cwd first, and this result is spawned
@@ -178,8 +190,11 @@ def mineru_server_argv(mineru_bin: str, port: int, platform: str | None = None) 
     a launcher stub that never imports nexus, so the server could not load onnxruntime or
     torch from nx's app-local VC++ DLLs (nexus-vyy65); the child runs
     :data:`MINERU_SERVER_CHILD_MODULE` under ``python -m`` instead, which imports nexus
-    (the DLL directories) and then mineru-api's own entry point. The interpreter is the one
-    beside the console script (the venv mineru is installed in), else this process's. ``-m``
+    (the DLL directories) and then mineru-api's own entry point. The interpreter is this
+    process's, in its console form (a daemon running under ``pythonw`` has no stdout to give a
+    child): it is the one that has nexus and the PDF stack. The ``python.exe`` beside
+    ``mineru_bin`` is not used: a ``mineru-api.exe`` found on PATH can belong to a foreign
+    install whose python has no nexus, and a shim directory is not an environment. ``-m``
     rather than ``-c`` so a multiprocessing ``spawn`` grandchild re-imports the main module by
     name and so runs the same DLL setup.
     """
@@ -187,9 +202,9 @@ def mineru_server_argv(mineru_bin: str, port: int, platform: str | None = None) 
 
     if not _vcrt.is_windows(platform):
         return [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
-    sibling = Path(mineru_bin).parent / "python.exe"
-    python = str(sibling) if sibling.is_file() else sys.executable
-    return [python, "-m", MINERU_SERVER_CHILD_MODULE, "--host", "127.0.0.1", "--port", str(port)]
+    return [
+        console_python(sys.executable), "-m", MINERU_SERVER_CHILD_MODULE, "--host", "127.0.0.1", "--port", str(port),
+    ]
 
 
 def spawn_server_process(port: int) -> subprocess.Popen | None:
@@ -285,9 +300,13 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
         "started_at": datetime.now(timezone.utc).isoformat(),
         "output_root": str(output_root),
         "mineru_version": _mineru_version,
-        # The interpreter the server runs under: on Windows the one launched with -m (the sibling
-        # of the console script, nexus-vyy65), else the spawner's, as the console script's own.
+        # The interpreter the server was launched under: on Windows the one launched with -m
+        # (nexus-vyy65), else the spawner's, as the console script's own.
         "python": cmd[0] if cmd[0] != mineru_bin else sys.executable,
+        # The shape it was launched in. A Windows read of the process that cannot get its command
+        # line returns the image alone ("python.exe"), which names no server; this field plus the
+        # recorded interpreter and pid is what identifies it then (upgrade_finish._classify_pid).
+        "server_module": MINERU_SERVER_CHILD_MODULE if cmd[0] != mineru_bin else None,
         # nexus-x3m8e: the executable this server runs, beside the interpreter
         # and output root above: `nx mineru status` stats all three, because a
         # tool environment replaced under a running server takes its libraries
@@ -308,12 +327,12 @@ def classify_server_pid(pid: int) -> str:
     runs before it signals the pid's whole process group: ``nx mineru stop`` and
     the extractor's replacement of a broken server share it, so neither can
     signal an unrelated process group that reused the pid."""
-    from nexus.upgrade_finish import _classify, process_command  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.upgrade_finish import _classify_pid, process_command  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     live_cmd = process_command(pid)
     if not live_cmd:
         return "unreadable"
-    return "mineru" if _classify(live_cmd) == "mineru" else "other"
+    return "mineru" if _classify_pid(pid, live_cmd) == "mineru" else "other"
 
 
 #: Seconds the server group gets to exit on SIGTERM before the hard pass.

@@ -30,6 +30,8 @@ from nexus.commands import doctor, self_cmd
 from nexus.indexer import _hold_pdfs_without_stack
 from nexus.pdf_extractor import PDFExtractor
 from nexus.pdf_stack import StackState
+
+pytestmark = pytest.mark.usefixtures("no_mineru_child_probe")  # nexus-vyy65: no real MinerU child import here
 from nexus.upgrade_finish import SkewReport, StaleProcess, restart_stale
 
 GENERATION_ONLY = pdf_stack.INSTALL_COMMAND

@@ -2053,8 +2053,12 @@ def _run_check_mineru_parse() -> bool:
 
 #: What MinerU's own children import first and fail on when a native dependency cannot load:
 #: ``mineru.cli.common`` reaches onnxruntime through magika (the 2026-10-29 Windows failure), and
-#: torch loads its own DLLs (c10.dll). Patched by tests so a suite is not charged a torch import.
-_MINERU_CHILD_PROBE_MODULES: tuple[str, ...] = ("mineru.cli.common", "onnxruntime", "torch")
+#: torch loads its own DLLs (c10.dll). ``mineru.cli.fast_api`` is the module the server child
+#: (``nexus._mineru_api_child``) runs, so a missing or unloadable server entry shows here and not
+#: first as a server that never answers. Patched by tests so a suite is not charged a torch import.
+_MINERU_CHILD_PROBE_MODULES: tuple[str, ...] = (
+    "mineru.cli.common", "mineru.cli.fast_api", "onnxruntime", "torch",
+)
 
 #: How long the child import probe may run before it is reported as hung (a cold torch import
 #: on a slow disk is the long pole).
@@ -2097,6 +2101,32 @@ def _probe_mineru_child_import(timeout_s: float | None = None) -> str | None:
     if proc.returncode < 0:
         return f"the MinerU imports crashed the interpreter (signal {-proc.returncode})"
     return f"the MinerU imports exited {proc.returncode} with no output"
+
+
+def _child_import_remedy(child_error: str) -> str:
+    """What to do when MinerU imports in this process (the row above is green) but not in a fresh child.
+
+    The install is intact, so on Windows a DLL load failure means the child cannot find the VC++
+    runtime: it is not in System32 (no redistributable) and nx's app-local copies are missing or
+    incomplete. Reinstalling does not place them; ``nx init`` and ``nx upgrade --auto`` do
+    (``ensure_vc_runtime``), as does Microsoft's redistributable. Any other child failure, and every
+    non-Windows one, is a native dependency that does not load: reinstall."""
+    from nexus import _vcrt  # noqa: PLC0415 — deferred import (startup cost)
+
+    lowered = child_error.lower()
+    if _vcrt.is_windows() and ("dll load failed" in lowered or "winerror" in lowered):
+        return (
+            "the import works in this process but not in a fresh child, which is how MinerU's worker and "
+            "server run. The child cannot find the Visual C++ runtime DLLs: this machine has no "
+            "redistributable and nx's own copies are missing or incomplete. Run `nx init` (or `nx upgrade "
+            "--auto`) to place them, or install Microsoft's redistributable from "
+            "https://aka.ms/vs/17/release/vc_redist.x64.exe."
+        )
+    return (
+        "the import works in this process but not in a fresh child, which is how MinerU's worker and "
+        "server run, so a native dependency does not load. Reinstall "
+        f"with `{_reinstall_command()}`."
+    )
 
 
 #: How long the cv2 import probe may run before it is reported as hung.
@@ -2201,12 +2231,7 @@ def _run_check_mineru() -> bool:
     if child_error is not None:
         failed = True
         click.echo(_check("MinerU child import", False, child_error))
-        click.echo(
-            "  ↳ the import above works in this process but not in a fresh child, which is how MinerU's "
-            "worker and server run. On Windows without the Visual C++ redistributable the child cannot "
-            "find nx's app-local runtime DLLs; elsewhere a native dependency does not load. Reinstall "
-            f"with `{_reinstall_command()}`. Real-parse check skipped: it would fail on the same import."
-        )
+        click.echo(f"  ↳ {_child_import_remedy(child_error)} Real-parse check skipped: it would fail on the same import.")
     else:
         click.echo(_check("MinerU child import", True, "a fresh interpreter imports MinerU's native stack"))
 

@@ -5120,3 +5120,20 @@ def fake_credentials(value: str = "test-key", *, passthrough: tuple[str, ...] = 
         return value
 
     return _side_effect
+
+
+@pytest.fixture()
+def no_mineru_child_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``nx doctor --check-mineru`` without its fresh-child MinerU import (nexus-vyy65).
+
+    ``_run_check_mineru`` imports MinerU's native stack (mineru, onnxruntime, torch) in a child
+    interpreter, which costs a cold torch import per call and ties a doctor unit test to whatever
+    the host has installed. A test of another row (cv2, the real-parse probe, the not-configured
+    server line) patches the child probe green here; the child probe itself is exercised, against
+    real and fake MinerU packages, only in ``tests/test_mineru_child_dll_dirs.py``.
+    ``tests/test_mineru_child_probe_isolation_lint.py`` fails a test file that runs
+    ``_run_check_mineru`` or ``doctor --check-mineru`` without this fixture.
+    """
+    from nexus.commands import doctor
+
+    monkeypatch.setattr(doctor, "_probe_mineru_child_import", lambda timeout_s=None: None)

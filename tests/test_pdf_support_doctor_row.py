@@ -19,6 +19,8 @@ from nexus import _vcrt, health, pdf_stack
 from nexus.pdf_stack import InstallPlan, StackState
 from tests._module_seam import setattr_in
 
+pytestmark = pytest.mark.usefixtures("no_mineru_child_probe")  # nexus-vyy65: no real MinerU child import here
+
 _PLAN = InstallPlan("generation", True, pdf_stack.INSTALL_COMMAND)
 
 

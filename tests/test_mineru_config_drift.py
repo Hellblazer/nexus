@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import inspect
 from importlib.metadata import version as _pkg_version
 
 import pytest
@@ -458,11 +458,24 @@ def test_legacy_pidfile_without_the_field_still_works(
     assert _live_port() == 49353
 
 
-def test_spawn_records_version_and_interpreter(tmp_path: Path) -> None:
-    """The write side: without these fields the read side can never compare."""
-    src = inspect.getsource(_mineru_spawn)
-    assert '"mineru_version"' in src, "spawn must stamp the mineru version"
-    assert '"python": sys.executable' in src, "spawn must stamp the interpreter"
+def test_spawn_records_version_and_interpreter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The write side: without these fields the read side can never compare.
+
+    Run for real (a fake Popen, the pid-file writer captured) rather than read off the source: the
+    interpreter field is no longer a literal ``sys.executable`` since the Windows server runs under
+    ``python -m`` (nexus-vyy65); off Windows the console script runs under the spawner's own."""
+    class _Proc:
+        pid = 4242
+
+    payloads: list[dict] = []
+    monkeypatch.setattr(_mineru_spawn, "_resolve_mineru_api_bin", lambda: "/v/bin/mineru-api")
+    monkeypatch.setattr(_mineru_spawn, "_write_pid_file", lambda _path, payload: payloads.append(payload))
+    setattr_in(monkeypatch, "nexus._mineru_spawn", "subprocess.Popen", lambda cmd, **kw: _Proc())
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    assert _mineru_spawn.spawn_server_process(8123) is not None
+    (payload,) = payloads
+    assert "mineru_version" in payload, "spawn must stamp the mineru version"
+    assert payload["python"] == sys.executable, "spawn must stamp the interpreter"
 
 
 def test_virtual_vram_unit_is_gb_and_sane() -> None:

@@ -26,6 +26,8 @@ from nexus import pdf_stack
 from nexus.commands import doctor
 from nexus.pdf_stack import StackState
 
+pytestmark = pytest.mark.usefixtures("no_mineru_child_probe")  # nexus-vyy65: no real MinerU child import here
+
 LIBGL_ERROR = "libGL.so.1: cannot open shared object file: No such file or directory"
 
 

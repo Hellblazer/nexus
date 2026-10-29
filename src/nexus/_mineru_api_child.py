@@ -9,17 +9,31 @@ onnxruntime_pybind11_state``) on a box with no VC++ redistributable. Importing n
 (the package init runs ``_add_vc_runtime_dirs``) puts those directories on this process's
 search path before mineru is imported.
 
+The function it runs is the one mineru declares for ``mineru-api`` (its ``console_scripts``
+entry point), so a mineru release that moves ``main`` still starts; ``mineru.cli.fast_api:main``
+is the fallback when no installed distribution declares it.
+
 Nothing here may import mineru, torch, onnxruntime or magika above the ``import nexus`` line.
 """
 from __future__ import annotations
 
+import importlib.metadata
+from collections.abc import Callable
+
 import nexus  # noqa: F401 -- runs _add_vc_runtime_dirs() before any import below it
 
 
-def main() -> None:
-    from mineru.cli.fast_api import main as mineru_api_main  # noqa: PLC0415 -- must follow `import nexus`
+def server_entry() -> Callable[[], object]:
+    """mineru-api's ``main``: its ``console_scripts`` entry point, else ``mineru.cli.fast_api.main``."""
+    for entry_point in importlib.metadata.entry_points(group="console_scripts", name="mineru-api"):
+        return entry_point.load()
+    from mineru.cli.fast_api import main  # noqa: PLC0415 -- must follow `import nexus`
 
-    mineru_api_main()
+    return main
+
+
+def main() -> None:
+    server_entry()()
 
 
 if __name__ == "__main__":

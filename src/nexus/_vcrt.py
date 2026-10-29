@@ -36,8 +36,10 @@ PDF_STACK_DLLS: tuple[str, ...] = (*VC_RUNTIME_DLLS, *PDF_ONLY_DLLS)
 #: process and Python >= 3.8 on Windows does not search PATH for an extension module's
 #: dependent DLLs, so a child that skips this dies with ``ImportError: DLL load failed while
 #: importing onnxruntime_pybind11_state`` on a box with no VC++ redistributable. It must come
-#: before the first mineru/torch/onnxruntime import. Cost: nexus's package init only (stdlib;
-#: on Windows it also primes the OS trust store), no nexus submodule.
+#: before the first mineru/torch/onnxruntime import. Cost: the ``nexus`` package init, which
+#: imports ``nexus._vcrt`` (stdlib only) and, on Windows, also primes the OS trust store
+#: (``truststore.inject_into_ssl()``: no network, it only swaps ssl's context class); it loads no
+#: other nexus submodule.
 MINERU_CHILD_PROLOGUE = "import nexus  # noqa: F401 -- runs _add_vc_runtime_dirs() (nexus-vyy65)\n"
 
 #: Subdirectory of the config dir the provisioner fills.
