@@ -399,6 +399,11 @@ class AssessmentReport:
     the validation kept; ``unusable_calls`` counts calls that came back with no usable record (an empty reply, one
     that is not the check shape, or only rejected records); ``raised_calls`` counts calls that raised. Together they
     split ``outcome == "failed"`` into an unusable reply and a raised call (:attr:`failure_cause`).
+
+    ``skipped_budget_calls`` and ``skipped_deadline_calls`` (shakedown 7.89.0 umbrella class c) count planned calls
+    that never started because the USD allowance or the stage's share of the deadline was spent. They are per call,
+    unlike ``unassessed_by_cause`` (per facet): one call that ran can cover every facet while three others were
+    skipped, and only these counters then say the stage was cut short.
     """
 
     outcome: AssessmentOutcome = "not_attempted"
@@ -413,6 +418,8 @@ class AssessmentReport:
     unusable_calls: int = 0
     raised_calls: int = 0
     call_log: tuple[AssessmentCall, ...] = ()
+    skipped_budget_calls: int = 0
+    skipped_deadline_calls: int = 0
 
     def merged_with(self, later: AssessmentReport) -> AssessmentReport:
         """The sum of two rounds; the later round's outcome and detail stand, except that a later round that
@@ -432,6 +439,8 @@ class AssessmentReport:
             unusable_calls=self.unusable_calls + later.unusable_calls,
             raised_calls=self.raised_calls + later.raised_calls,
             call_log=self.call_log + later.call_log,
+            skipped_budget_calls=self.skipped_budget_calls + later.skipped_budget_calls,
+            skipped_deadline_calls=self.skipped_deadline_calls + later.skipped_deadline_calls,
         )
 
     def reply_classes(self) -> dict[str, int]:
@@ -451,14 +460,20 @@ class AssessmentReport:
 
     @property
     def failure_cause(self) -> str:
-        """What the failed calls were, over every round: ``raised_call``, ``unusable_reply``, ``mixed`` (both) or
-        ``none``. A skipped assessment (deadline, budget) is not a failure and reads ``none``."""
+        """What cut the assessment short, over every round: ``raised_call``, ``unusable_reply``, ``mixed`` (both),
+        else, when calls were skipped unstarted, ``budget_skip`` (the USD allowance was spent; it wins when the
+        deadline cut calls too, the per-call counters carry both) or ``deadline_skip``, else ``none``. A failed
+        call takes precedence over a skip: the skip counts are on the summary beside it."""
         if self.raised_calls and self.unusable_calls:
             return "mixed"
         if self.raised_calls:
             return "raised_call"
         if self.unusable_calls:
             return "unusable_reply"
+        if self.skipped_budget_calls:
+            return "budget_skip"
+        if self.skipped_deadline_calls:
+            return "deadline_skip"
         return "none"
 
     def to_wire(self) -> dict[str, Any]:
@@ -470,6 +485,7 @@ class AssessmentReport:
             "raised_calls": self.raised_calls, "failure_cause": self.failure_cause,
             "reply_classes": self.reply_classes(), "reply_by_stream": self.reply_by_stream(),
             "call_log": [c.to_wire() for c in self.call_log],
+            "skipped_budget_calls": self.skipped_budget_calls, "skipped_deadline_calls": self.skipped_deadline_calls,
         }
 
 
@@ -1296,9 +1312,14 @@ class CoverageBoundary:
         skip_outcome: AssessmentOutcome | None = None
         skip_detail = ""
         raise_detail = ""
+        skipped_budget_n, skipped_deadline_n = 0, 0
         for call, res in zip(planned, outcomes, strict=True):
             stream, group = call.stream, call.group
             if res.skipped:
+                if res.skipped == "skipped_budget":
+                    skipped_budget_n += 1
+                else:
+                    skipped_deadline_n += 1
                 if skip_outcome is None:
                     skip_outcome, skip_detail = res.skipped, res.why  # type: ignore[assignment]
                 mark(group, _UNASSESSED_REASON[res.skipped])
@@ -1390,6 +1411,7 @@ class CoverageBoundary:
             rejected_records=rejected, skipped_items=skipped_items,
             latency_ms=int((time.monotonic() - started) * 1000), detail=detail,
             accepted_records=accepted_total, unusable_calls=unusable_n, raised_calls=raised_n, call_log=tuple(call_log),
+            skipped_budget_calls=skipped_budget_n, skipped_deadline_calls=skipped_deadline_n,
         )
         return findings, report
 

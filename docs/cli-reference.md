@@ -6052,7 +6052,9 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `all_rejected`, `no_records`, `raised`, counted over the attempted calls),
   `reply_by_stream`, an ordered `call_log` of `[stream, facets, class, accepted,
   rejected]`, `accepted_records`, `unusable_calls`, `raised_calls` and
-  `failure_cause` (`raised_call`, `unusable_reply`, `mixed` or `none`). The coverage
+  `failure_cause` (`raised_call`, `unusable_reply`, `mixed`, `budget_skip`, `deadline_skip` or `none`;
+  a failed call outranks a skip), `skipped_budget_calls` and `skipped_deadline_calls` (planned calls that never
+  started because the USD allowance or the deadline share was spent). The coverage
   object also has `facets_conflicted` (the conflicted subset of `facets.covered`),
   `unassessed_by_cause` (`unusable_reply`, `deadline_skip`, `budget_skip`,
   `raised_call`, `stopped_after_failure` (always 0 since nexus-jypmj.17: the assessment
