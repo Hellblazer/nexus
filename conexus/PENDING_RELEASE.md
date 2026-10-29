@@ -47,10 +47,9 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/launch/nx_setup.py` (nexus-b0y6w): the setup credentials page listens with a backlog of twice its connection cap, so a Windows connect is not refused while the page holds a full set of unread connections.
-
 
 ## Deferred to the next client release
 
 - `conexus/commands/setup.md` (nexus-tr1rj.18): the setup command's install-size rows and slim line carry the figures re-measured on 7.89.0, whose PDF support is MinerU and torch alone (Local about 0.8 GB down, 2.6 to 2.9 GB on disk; Cloud and CLI only about 0.5 GB down, 1.9 to 2.2 GB on disk; PDF support 0.27 GB down on macOS, 0.37 GB on Linux). Deferred because the same bead changes user-facing strings in `src/`.
 - `conexus/launch/nx_standin.py` (nexus-tr1rj.18): the stand-in's size rows and slim description carry the same re-measured figures as the real server's `src/nexus/mcp/setup_tools.py`. Deferred because the same bead changes user-facing strings in `src/`.
+- `conexus/launch/nx_setup.py` (nexus-b0y6w): the setup credentials page listens with a backlog of twice its connection cap (a full backlog is a suspected, not reproduced, contributor to a Windows CI flake). Deferred because the same bead changes `src/` and `service/`.

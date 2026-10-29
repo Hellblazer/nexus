@@ -1338,14 +1338,14 @@ def test_sixteen_dripping_connections_that_reconnect_do_not_lock_the_page_out(ma
     down for the new one, so a right request, read in milliseconds, is admitted.
 
     Shakedown 7.89.0 class g: the first form of this test ran 16 free-running reconnect threads and counted how many
-    of 40 timed GETs got through (at least 36). On the Windows leg it served 35 and 31 of 40, run after run, while
-    the same code served 40 of 40 everywhere else: the count measured what a loaded runner's TCP stack and thread
-    scheduler did with a reconnect storm (connects refused or delayed, a thread not run before the next accept), not
-    the page's admission rule. This form takes the storm out of the clock. Every round the drippers refill the page
-    to its cap with unread connections, one at a time and in order, THEN the right GET connects. The listener
-    accepts in connect order, so the GET is the newest connection when it is admitted and nothing else can connect
-    before it is read: it must be answered, every round, with no tolerance. Without the eviction it is closed at the
-    door on round one."""
+    of 40 timed GETs got through (at least 36). On the Windows CI leg it served 35 and 31 of 40 on two runs, while
+    the same code served 40 of 40 elsewhere. The cause was not reproduced; a likely contributor is how a loaded
+    runner's TCP stack and thread scheduler handle a reconnect storm (a connect refused or delayed, a thread not run
+    before the next accept), which that form counted along with the page's admission rule. This form is made
+    deterministic instead: each round waits (bounded) until the page holds its cap of unread connections and asserts
+    it does, THEN the right GET connects, so every round tests at the cap and nothing else is connecting before the
+    GET is read. It must be answered, every round, with no tolerance. Without the eviction it is closed at the door
+    on round one. Whether the Windows leg is now steady is for that CI leg to show."""
     page = make_page()
     cap = page.mod.PAGE_MAX_CONNECTIONS
     rounds = 40
@@ -1359,10 +1359,25 @@ def test_sixteen_dripping_connections_that_reconnect_do_not_lock_the_page_out(ma
         readable, _w, _x = select.select([sock], [], [], 0)
         return bool(readable)
 
+    def unread_at_the_page() -> int:
+        server = page._server
+        with server._conns_lock:
+            return sum(1 for read in server._conns.values() if not read)
+
+    def refilled() -> bool:
+        # Every dripper the page shut reconnects at once, into the slot it lost; true once the page holds the cap.
+        for i, sock in enumerate(held):
+            if closed_by_the_page(sock):
+                sock.close()
+                held[i] = reconnect()
+        return unread_at_the_page() == cap
+
     try:
         for _ in range(cap):
             held.append(reconnect())
         for round_no in range(rounds):
+            _wait_for(refilled, 5, f"round {round_no}: the page to hold {cap} unread connections")
+            assert unread_at_the_page() == cap, f"round {round_no}: the page is not at its cap of {cap}"
             for sock in held:
                 with contextlib.suppress(OSError):
                     sock.sendall(b"G")  # still dripping; a byte is not a request
@@ -1375,20 +1390,16 @@ def test_sixteen_dripping_connections_that_reconnect_do_not_lock_the_page_out(ma
                     assert held[0].recv(1) == b"", "the oldest unread connection was not shut down for the right request"
                 except ConnectionError:
                     pass  # a reset is a shutdown too
-            # Every dripper the page shut reconnects at once, into the slot it lost.
-            for i, sock in enumerate(held):
-                if closed_by_the_page(sock):
-                    sock.close()
-                    held[i] = reconnect()
     finally:
         for sock in held:
             sock.close()
 
 
 def test_the_listen_backlog_holds_a_full_page_of_connections(make_page: Callable[..., Any]) -> None:
-    """Shakedown 7.89.0 class g: socketserver's backlog of 5 is smaller than the 16 connections the page admits, and
-    Windows refuses a connect that finds the backlog full, so a burst of stalled sockets could turn a right request
-    away before the accept loop saw it. Fails with the backlog at its default."""
+    """Shakedown 7.89.0 class g: socketserver's backlog of 5 is smaller than the 16 connections the page admits. A
+    full backlog is a suspected contributor to the Windows CI flake (a connect finding it full may be refused there;
+    not reproduced), so the backlog is sized to the cap. This pins the size only. Fails with the backlog at its
+    default."""
     page = make_page()
     assert page._server.request_queue_size >= page.mod.PAGE_MAX_CONNECTIONS
 

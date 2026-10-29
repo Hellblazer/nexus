@@ -1429,9 +1429,10 @@ class CredentialsPage:
         class Server(http.server.ThreadingHTTPServer):
             allow_reuse_address = False  # on Windows SO_REUSEADDR lets another process take the same port
             daemon_threads = True
-            # socketserver listens with a backlog of 5. The page admits PAGE_MAX_CONNECTIONS at once, and Windows
-            # REFUSES a connect that finds the backlog full (Linux and macOS drop the SYN and the client retries), so
-            # a burst of stalled sockets could turn a right request away before the accept loop saw it.
+            # socketserver listens with a backlog of 5, below the PAGE_MAX_CONNECTIONS the page admits at once. A
+            # full backlog is a suspected contributor to a Windows CI flake (a connect that finds it full may be
+            # refused there, where Linux and macOS drop the SYN and the client retries); that cause was not
+            # reproduced, so the backlog is sized to the cap and the Windows CI leg is the check.
             request_queue_size = 2 * PAGE_MAX_CONNECTIONS
 
             def __init__(self, *args: Any, **kwargs: Any) -> None:
