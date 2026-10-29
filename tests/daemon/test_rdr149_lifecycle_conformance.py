@@ -2406,7 +2406,18 @@ class _Stack:
                 self.close()
                 pytest.fail("the stand-in stack did not come up")
             time.sleep(0.05)
-        info = json.loads(ready.read_text(encoding="utf-8"))
+        # os.replace is atomic, but on Windows a read that lands while the rename is still
+        # settling can be refused with a sharing violation (PermissionError, develop CI
+        # win-release 2026-10-29): retry the read inside the same deadline.
+        while True:
+            try:
+                info = json.loads(ready.read_text(encoding="utf-8"))
+                break
+            except (PermissionError, json.JSONDecodeError):
+                if time.monotonic() > deadline:
+                    self.close()
+                    pytest.fail("the stand-in stack's ready.json never became readable")
+                time.sleep(0.05)
         self.supervisor: int = info["supervisor"]
         self.engine: int = info["engine"]
 
