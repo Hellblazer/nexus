@@ -40,6 +40,11 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
+from nexus.db.t2.http_aspect_queue import AspectTupleCounts
+
+#: The ``aspects`` tuple subspace holds nothing: the queue is table-only.
+_NO_TUPLES = AspectTupleCounts(available=0, claimed=0, dead=0)
+
 
 @pytest.fixture()
 def service_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,6 +312,7 @@ class TestAspectQueueCheckRoutes:
              patch("sqlite3.connect") as sqlite_connect:
             q.return_value.pending_count.return_value = 42
             q.return_value.list_failed.return_value = []
+            q.return_value.tuple_counts.return_value = _NO_TUPLES
             runner = CliRunner()
             with runner.isolation() as (out, _err, _):
                 doctor_mod._run_check_aspect_queue()
@@ -359,6 +365,7 @@ class TestAspectQueueCheckRoutes:
         with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
             q.return_value.pending_count.return_value = 0
             q.return_value.list_failed.return_value = [row]
+            q.return_value.tuple_counts.return_value = _NO_TUPLES
             runner = CliRunner()
             with runner.isolation() as (out, err, _):
                 exit_code = None
@@ -389,6 +396,7 @@ class TestAspectQueueCheckRoutes:
         with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
             q.return_value.pending_count.return_value = 7
             q.return_value.list_failed.return_value = []
+            q.return_value.tuple_counts.return_value = _NO_TUPLES
             runner = CliRunner()
             with runner.isolation() as (out, err, _):
                 exit_code = None
@@ -419,6 +427,7 @@ class TestAspectQueueIdleWarning:
         with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
             q.return_value.pending_count.return_value = pending
             q.return_value.list_failed.return_value = []
+            q.return_value.tuple_counts.return_value = _NO_TUPLES
             runner = CliRunner()
             with runner.isolation() as (out, err, _):
                 exit_code = None
@@ -451,6 +460,135 @@ class TestAspectQueueIdleWarning:
         assert exit_code is None
 
 
+# ── RDR-235 F18 (nexus-5r2sc.3.5): both sides of the queue ──────────────────
+#
+# With NX_ASPECT_QUEUE=tuples the producer writes to the `aspects` tuple
+# subspace and the old table drains out. A check that read only the table would
+# report 0 pending / 0 failed while the real queue filled: the false-clean
+# again. Scenario 21: the table holds pending and failed rows, `aspects` holds
+# available, claimed and dead tasks; the counts are summed and claimed (in
+# flight) is neither pending nor failed.
+
+
+def _failed_row(n: int = 1):
+    from nexus.db.t2.records import QueueRow
+
+    return [
+        QueueRow(collection="knowledge__x", source_path=f"/p{i}.pdf",
+                 content_hash="h", content="", retry_count=1, doc_id=f"1.{i}")
+        for i in range(n)
+    ]
+
+
+def _run_doctor_check(q, *, pending: int, failed: list, tuples) -> tuple[str, int | None]:
+    import click
+
+    from nexus.commands import doctor as doctor_mod
+
+    q.return_value.pending_count.return_value = pending
+    q.return_value.list_failed.return_value = failed
+    if isinstance(tuples, BaseException):
+        q.return_value.tuple_counts.side_effect = tuples
+    else:
+        q.return_value.tuple_counts.return_value = tuples
+    runner = CliRunner()
+    with runner.isolation() as (out, err, _):
+        exit_code = None
+        try:
+            doctor_mod._run_check_aspect_queue()
+        except click.exceptions.Exit as exc:
+            exit_code = exc.exit_code
+        return out.getvalue().decode() + err.getvalue().decode(), exit_code
+
+
+class TestAspectQueueDoctorCountsBothSides:
+    def test_pending_and_failed_are_summed_and_claimed_is_neither(
+        self, service_mode: None,
+    ) -> None:
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            printed, exit_code = _run_doctor_check(
+                q, pending=3, failed=_failed_row(1),
+                tuples=AspectTupleCounts(available=4, claimed=5, dead=2),
+            )
+        # pending = 3 table + 4 available (the 5 claimed are in flight);
+        # failed = 1 table + 2 dead.
+        assert "7 pending, 3 failed" in printed, printed
+        assert exit_code == 1, "a nonzero failed count still fails the check"
+        assert "FAIL: 3 failed" in printed, printed
+
+    def test_claimed_alone_is_not_pending(self, service_mode: None) -> None:
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            printed, exit_code = _run_doctor_check(
+                q, pending=0, failed=[], tuples=AspectTupleCounts(0, 9, 0),
+            )
+        assert "0 pending, 0 failed" in printed, printed
+        assert exit_code is None
+
+    def test_dead_tuple_tasks_alone_fail_the_check(self, service_mode: None) -> None:
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            printed, exit_code = _run_doctor_check(
+                q, pending=0, failed=[], tuples=AspectTupleCounts(0, 0, 2),
+            )
+        assert exit_code == 1, printed
+        assert "2 failed" in printed, printed
+        assert "nx tuple stats aspects" in printed, "dead tasks need a pointer to where they are"
+
+    def test_available_tuple_tasks_are_pending_and_not_a_failure(
+        self, service_mode: None,
+    ) -> None:
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            printed, exit_code = _run_doctor_check(
+                q, pending=0, failed=[], tuples=AspectTupleCounts(1000, 0, 0),
+            )
+        assert "1000 pending, 0 failed" in printed, printed
+        assert exit_code is None, "a routine bulk backlog is not a failure"
+
+    def test_unreadable_tuple_side_is_UNKNOWN_never_zero(self, service_mode: None) -> None:
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            printed, exit_code = _run_doctor_check(
+                q, pending=3, failed=[], tuples=httpx.ConnectError("refused"),
+            )
+        assert "aspects" in printed and "UNKNOWN" in printed, printed
+        assert "3 pending" in printed, "the side that was read is still reported"
+        # No combined figure: a total with a guessed zero would be the false-clean.
+        assert "3 pending, 0 failed" not in printed, printed
+        assert exit_code is None, "an unreadable side is not a failure on its own"
+
+    def test_unreadable_tuple_side_still_fails_on_known_failed_rows(
+        self, service_mode: None,
+    ) -> None:
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            printed, exit_code = _run_doctor_check(
+                q, pending=0, failed=_failed_row(2), tuples=httpx.ConnectError("refused"),
+            )
+        assert exit_code == 1, printed
+        assert "UNKNOWN" in printed
+
+    def test_idle_warning_counts_the_tuple_side(
+        self, service_mode: None, monkeypatch,
+    ) -> None:
+        import nexus.daemon.aspect_worker_daemon as awd
+
+        monkeypatch.setattr(awd, "_claude_available", lambda: False)
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            printed, exit_code = _run_doctor_check(
+                q, pending=0, failed=[], tuples=AspectTupleCounts(6, 0, 0),
+            )
+        assert "aspect extraction is idle: 6 pending" in printed, printed
+        assert exit_code is None
+
+    def test_an_absent_subspace_is_zero_on_the_tuple_side(self, service_mode: None) -> None:
+        """tuple_counts() answers zeros for a subspace that does not exist; the
+        check must report the table side as it always did."""
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            printed, exit_code = _run_doctor_check(
+                q, pending=5, failed=[], tuples=_NO_TUPLES,
+            )
+        assert "5 pending, 0 failed" in printed, printed
+        assert "UNKNOWN" not in printed
+        assert exit_code is None
+
+
 # ── console twin (nexus-k0luu, second surface) ──────────────────────────────
 
 
@@ -464,6 +602,7 @@ class TestConsoleHealthTwin:
              patch("sqlite3.connect") as sqlite_connect:
             q.return_value.pending_count.return_value = 5
             q.return_value.list_failed.return_value = [object(), object()]
+            q.return_value.tuple_counts.return_value = _NO_TUPLES
             data = health_mod._collect_aspect_queue_data()
 
         assert data["backend"] == "service"
@@ -518,9 +657,42 @@ class TestConsoleHealthTwin:
         with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
             q.return_value.pending_count.return_value = 0
             q.return_value.list_failed.return_value = []
+            q.return_value.tuple_counts.return_value = _NO_TUPLES
             data = health_mod._collect_health_data()
 
         assert data["catalog"]["scope"] == "local-cache-frozen", data["catalog"]
+
+
+class TestConsoleCountsBothSides:
+    def test_pending_includes_available_failed_includes_dead_claimed_is_neither(
+        self, service_mode: None,
+    ) -> None:
+        from nexus.console.routes import health as health_mod
+
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            q.return_value.pending_count.return_value = 3
+            q.return_value.list_failed.return_value = _failed_row(1)
+            q.return_value.tuple_counts.return_value = AspectTupleCounts(4, 5, 2)
+            data = health_mod._collect_aspect_queue_data()
+
+        assert data["pending"] == 7
+        assert data["failed_count"] == 3, "the card keys its warn on failed_count"
+        assert data["total"] == 10, "total = pending + failed; claimed is in flight"
+        assert data["backend"] == "service"
+
+    def test_unreadable_tuple_side_is_unavailable_not_a_smaller_count(
+        self, service_mode: None,
+    ) -> None:
+        from nexus.console.routes import health as health_mod
+
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            q.return_value.pending_count.return_value = 3
+            q.return_value.list_failed.return_value = []
+            q.return_value.tuple_counts.side_effect = httpx.ConnectError("refused")
+            data = health_mod._collect_aspect_queue_data()
+
+        assert data["present"] is True and data["unavailable"] is True
+        assert data.get("total") is None and data.get("pending") is None, data
 
 
 # ── Endpoint-unresolvable, not just transport-down (review 2026-07-25) ──────

@@ -1010,6 +1010,133 @@ class TestCheckTupleQueueDepth:
         assert r.ok is False and r.warn is True
 
 
+# ── RDR-235 F18 (bead nexus-5r2sc.3.5): the `aspects` template ───────────────
+#
+# `aspects` is a literal one-segment, take-enabled queue template. The depth
+# and dead-letter row used to admit only `queue/<name>`, so a dead aspect task
+# or a 10,000-row backlog (the template's cap) was invisible to it.
+
+
+def _aspects_template(*, take_enabled: bool = True) -> dict:
+    return {
+        "name": "aspects", "take": {"enabled": take_enabled},
+        "lock": False, "max_live_rows": 10000,
+    }
+
+
+def _hours_ago(hours: float) -> str:
+    return (datetime.now(UTC) - timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
+
+
+class TestAspectsTemplateInTheDepthRow:
+    def test_a_dead_aspect_task_warns(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("aspects", available=3, dead=1)],
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "aspects (dead=1" in r.detail
+        # The dead share of the 10,000-row cap: a dead task counts against
+        # max_live_rows for the 90 days it is kept.
+        assert "of 10000" in r.detail, r.detail
+
+    def test_available_above_the_threshold_warns(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("aspects", available=1001, dead=0)],
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "aspects (available=1001)" in r.detail
+
+    def test_a_backlog_under_the_threshold_is_ok_and_named(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("aspects", available=999, dead=0)],
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is True
+        assert "aspects: available=999" in r.detail
+
+    def test_a_box_without_the_template_is_not_applicable_not_red(self, monkeypatch) -> None:
+        """An engine that predates the template resolves no template for the
+        name; nothing there is queue depth."""
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("aspects", available=5000, dead=3)],
+            templates=_ALL_TEMPLATE_KINDS,
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is True and r.warn is not True
+        assert "informational" in r.detail
+        assert "aspects" in r.detail, "the not-applicable text names every template it looks for"
+
+    def test_a_take_disabled_aspects_template_is_not_a_queue(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("aspects", available=5000, dead=3)],
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template(take_enabled=False)],
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is True
+        assert "informational" in r.detail
+
+    def test_queue_and_aspects_are_both_judged(self, monkeypatch) -> None:
+        store = _FakeTupleStore(
+            subspaces=[
+                _FakeSubspace("queue/work", available=1500, dead=0),
+                _FakeSubspace("aspects", available=0, dead=2),
+            ],
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+        )
+        r = _run_queue_depth(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "queue/work (available=1500)" in r.detail
+        assert "aspects (dead=2" in r.detail
+
+
+class TestAspectsBacklogIsNotAStaleConsumer:
+    """Gate S4. The unclaimed-age row is a flat 3,600 s threshold, and one worker
+    drains about 136 documents an hour, so a routine 1,000-document index leaves
+    the oldest unclaimed task older than an hour for hours while the worker is
+    healthy and busy. A backoff-delayed task also reads as unclaimed: the census
+    counts it as available and `available_at` is not rendered. The depth row is
+    what covers the aspects queue."""
+
+    def test_a_multi_hour_backlog_does_not_fail_the_age_row(self, monkeypatch) -> None:
+        old = _hours_ago(3)
+        rd_calls: list[str] = []
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("aspects", available=800, oldest_created_at=old)],
+            rd_by_subspace={"aspects": [_FakeTupleRow("id1", old, None)]},
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+            rd_calls=rd_calls,
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert r.ok is True, r.detail
+        assert r.warn is not True
+        assert "aspects" not in r.detail
+        assert rd_calls == [], "the skip comes before the per-subspace fetch"
+
+    def test_another_subspace_still_fails_beside_the_aspects_backlog(self, monkeypatch) -> None:
+        """The skip is per template, not per row: a stuck mailbox next to a big
+        aspects backlog still goes red, so the row did not go blind."""
+        old = _hours_ago(3)
+        store = _FakeTupleStore(
+            subspaces=[
+                _FakeSubspace("aspects", available=800, oldest_created_at=old),
+                _FakeSubspace("mailbox/a", available=1, oldest_created_at=old),
+            ],
+            rd_by_subspace={
+                "aspects": [_FakeTupleRow("id1", old, None)],
+                "mailbox/a": [_FakeTupleRow("id2", old, None)],
+            },
+            templates=[*_ALL_TEMPLATE_KINDS, _aspects_template()],
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert r.ok is False
+        assert "mailbox/a" in r.detail and "aspects" not in r.detail
+
+
 def test_rdr211_park_slots_and_queue_depth_rows_are_registered_in_run_health_checks() -> None:
     import inspect
 
