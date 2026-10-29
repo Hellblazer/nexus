@@ -1947,8 +1947,10 @@ def _synthesize_mineru_probe_pdf(directory: Path) -> Path:
 #:   tokenizer files (``model/mfr/unimernet/unimernet_hf/modeling_unimernet.py`` lines 80, 99).
 #: - ``pp_formulanet_plus_m``: opens the ``.pth`` and ``_inference.yml``
 #:   (``model/mfr/pp_formulanet_plus_m/predict_formula.py`` lines 29-45).
-#: - ``pytorch_paddle``: only the detector and recognizer ``models_config.yml`` names for ``lang.en``
-#:   (``model/ocr/pytorch_paddle.py`` lines 184-193); the directory holds whichever languages were fetched.
+#: - ``pytorch_paddle``: the detector and recognizer ``models_config.yml`` names for ``lang.en``
+#:   (``model/ocr/pytorch_paddle.py`` lines 184-193), plus the ``ch_lite`` recognizer: with tables on, the
+#:   orientation classifier builds its own OCR with ``lang="ch_lite"`` whatever the parse language
+#:   (``backend/pipeline/model_init.py`` ``img_orientation_cls_model_init``). Other languages are not needed.
 #: - the four ``.onnx`` paths are opened as they are (``model/table/...``, ``model/ori_cls/paddle_ori_cls.py``).
 #:
 #: ``tests/test_mineru_child_dll_dirs.py`` compares this table with ``download_pipeline_models`` (every path
@@ -1958,7 +1960,7 @@ _MINERU_PIPELINE_FILES: dict[str, tuple[str, ...]] = {
     "pp_doclayout_v2": ("config.json", "model.safetensors"),
     "unimernet_small": ("config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"),
     "pp_formulanet_plus_m": ("PP-FormulaNet_plus-M.pth", "PP-FormulaNet_plus-M_inference.yml"),
-    "pytorch_paddle": ("ch_PP-OCRv5_det_infer.pth", "en_PP-OCRv5_rec_infer.pth"),
+    "pytorch_paddle": ("ch_PP-OCRv5_det_infer.pth", "en_PP-OCRv5_rec_infer.pth", "ch_PP-OCRv5_rec_infer.pth"),
     "slanet_plus": (),
     "unet_structure": (),
     "paddle_table_cls": (),

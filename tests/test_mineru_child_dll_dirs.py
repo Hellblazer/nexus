@@ -702,6 +702,7 @@ def test_console_main_runs_the_named_scripts_entry_with_its_arguments(
     reads ``python -m nexus.<script>``, which is cosmetic.)"""
     from nexus import _mineru_console  # noqa: PLC0415
 
+    monkeypatch.setattr(sys, "argv", list(sys.argv))  # main() rewrites it; restore it after the test
     seen: list[list[str]] = []
 
     def entry() -> int:
@@ -803,6 +804,16 @@ def test_the_console_command_on_windows_escapes_a_quote_in_the_path(monkeypatch:
     monkeypatch.setattr(sys, "executable", r"C:\Users\O'Neil\py\python.exe")
     cmd = _mineru_spawn.mineru_console_command("mineru-models-download")
     assert cmd.startswith(r"& 'C:\Users\O''Neil\py\python.exe' -m "), cmd
+
+
+def test_the_console_command_on_windows_escapes_a_typographic_quote_in_the_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PowerShell also ends a single-quoted string at U+2018..U+201B (a user folder like D’Arcy)."""
+    setattr_in(monkeypatch, "nexus._mineru_spawn", "sys.platform", "win32")
+    monkeypatch.setattr(sys, "executable", "C:\\Users\\D\u2019Arcy\\py\\python.exe")
+    cmd = _mineru_spawn.mineru_console_command("mineru-models-download")
+    assert cmd.startswith("& 'C:\\Users\\D\u2019\u2019Arcy\\py\\python.exe' -m "), cmd
 
 
 def _row_skip_text(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> str:
@@ -920,6 +931,7 @@ _REQUIRED_DEFAULT = (
     "models/MFR/unimernet_hf_small_2503/tokenizer_config.json",
     "models/OCR/paddleocr_torch/ch_PP-OCRv5_det_infer.pth",
     "models/OCR/paddleocr_torch/en_PP-OCRv5_rec_infer.pth",
+    "models/OCR/paddleocr_torch/ch_PP-OCRv5_rec_infer.pth",
     "models/OriCls/paddle_orientation_classification/PP-LCNet_x1_0_doc_ori.onnx",
     "models/TabCls/paddle_table_cls/PP-LCNet_x1_0_table_cls.onnx",
     "models/TabRec/SlanetPlus/slanet-plus.onnx",
@@ -962,6 +974,11 @@ def _no_mineru_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINERU_MODEL_SOURCE", raising=False)
     monkeypatch.delenv("MINERU_FORMULA_CH_SUPPORT", raising=False)
     monkeypatch.setenv("MINERU_TOOLS_CONFIG_JSON", "mineru.json")
+    # config_reader binds the name at import: a box exporting an absolute MINERU_TOOLS_CONFIG_JSON
+    # would still read its real config without this
+    from mineru.utils import config_reader  # noqa: PLC0415
+
+    monkeypatch.setattr(config_reader, "CONFIG_FILE_NAME", "mineru.json")
 
 
 def _use_hf_cache(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
@@ -982,7 +999,7 @@ def test_weights_in_the_hf_cache_count_as_provisioned_without_a_mineru_json(
 def test_the_default_required_set_is_what_the_fixture_marks_required() -> None:
     """Non-vacuity of the removal tests below: every name they remove is a file the cache holds."""
     assert set(_REQUIRED_DEFAULT) <= set(_HF_PIPELINE_FILES)
-    assert len(_REQUIRED_DEFAULT) == 12
+    assert len(_REQUIRED_DEFAULT) == 13
 
 
 @pytest.mark.parametrize("missing", _REQUIRED_DEFAULT)
@@ -1033,14 +1050,13 @@ def test_a_zero_byte_weight_is_not_provisioned(
 def test_files_the_english_pipeline_does_not_load_are_not_required(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _no_mineru_json: None,
 ) -> None:
-    """Not over-strict: another language's recognizer, a README and the layout preprocessor config
-    (mineru falls back to {} without it) may be absent."""
+    """Not over-strict: a language the pipeline does not load (latin), a README and the layout
+    preprocessor config (mineru falls back to {} without it) may be absent."""
     _use_hf_cache(
         monkeypatch,
         _hf_cache_with_weights(
             tmp_path / "hub",
             without=(
-                "models/OCR/paddleocr_torch/ch_PP-OCRv5_rec_infer.pth",
                 "models/OCR/paddleocr_torch/latin_PP-OCRv5_rec_infer.pth",
                 f"{_UNIMERNET}/README.md",
                 f"{_UNIMERNET}/generation_config.json",
@@ -1169,7 +1185,14 @@ def test_the_probe_names_the_english_ocr_files_mineru_loads_for_en() -> None:
         (_mineru_package_dir() / "model/utils/pytorchocr/utils/resources/models_config.yml").read_text("utf-8")
     )
     en = config["lang"]["en"]
-    assert set(doctor._MINERU_PIPELINE_FILES["pytorch_paddle"]) == {en["det"], en["rec"]}
+    # the orientation classifier's own OCR (tables on) is built with lang="ch_lite", whatever the
+    # parse language: its recognizer is loaded too (nexus-vyy65 confirmation round)
+    model_init = (_mineru_package_dir() / "backend/pipeline/model_init.py").read_text("utf-8")
+    orientation = model_init[model_init.index("def img_orientation_cls_model_init"):]
+    orientation = orientation[: orientation.index("\ndef ", 1)]
+    assert 'lang="ch_lite"' in orientation, "the orientation classifier no longer builds a ch_lite OCR"
+    ch_lite = config["lang"]["ch_lite"]
+    assert set(doctor._MINERU_PIPELINE_FILES["pytorch_paddle"]) == {en["det"], en["rec"], ch_lite["det"], ch_lite["rec"]}
     assert 'p_lang_list=["en"]' in (_SRC / "pdf_extractor.py").read_text("utf-8")
     assert 'p_lang_list=["en"]' in (_SRC / "commands" / "doctor.py").read_text("utf-8")
 

@@ -205,12 +205,20 @@ def mineru_console_command(script: str, *args: str) -> str:
     if sys.platform != "win32":
         return shlex.join([sys.executable, "-m", MINERU_CONSOLE_MODULE, script, *args])
 
+    # PowerShell ends a single-quoted string at any of these, the typographic ones included
+    # (a path like C:\Users\D’Arcy): each is doubled to stay literal.
+    single_quotes = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+    def literal(token: str) -> str:
+        for q in single_quotes:
+            token = token.replace(q, q + q)
+        return token
+
     def quote(token: str) -> str:
-        return token if re.fullmatch(r"[A-Za-z0-9_.:=/\\-]+", token) else "'" + token.replace("'", "''") + "'"
+        return token if re.fullmatch(r"[A-Za-z0-9_.:=/\\-]+", token) else "'" + literal(token) + "'"
 
     rest = " ".join(quote(t) for t in ("-m", MINERU_CONSOLE_MODULE, script, *args))
-    exe = console_python(sys.executable).replace("'", "''")
-    return f"& '{exe}' {rest}"
+    return f"& '{literal(console_python(sys.executable))}' {rest}"
 
 
 def mineru_server_argv(mineru_bin: str, port: int, platform: str | None = None) -> list[str]:
