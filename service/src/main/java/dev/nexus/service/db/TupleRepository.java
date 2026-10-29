@@ -2260,6 +2260,23 @@ public final class TupleRepository {
      * ({@code TupleDelayedVisibilityTest.aParkedIn_claimsADelayedRowWithinAboutASecondOfItsDelayPassing}).
      */
     public void nack(String tenant, String claimId, String claimant, Long retryAfterSecondsOrNull) {
+        nack(tenant, claimId, claimant, retryAfterSecondsOrNull, false);
+    }
+
+    /**
+     * {@link #nack(String, String, String, Long)} with {@code dead} (bead nexus-5r2sc.2.3, RDR-235 E4):
+     * {@code true} dead-letters the claim at once, for a failure no retry will fix (a non-retryable
+     * exception, a row the worker cannot attribute). The attempt is counted and the claim log shows
+     * {@value #TRANSITION_NACK} then {@value #TRANSITION_DEAD}, the rows the {@code max_attempts} path
+     * writes, because it IS that path: {@link #releaseOrDeadLetter}'s test is
+     * {@code forceDead || attempts >= maxAttempts}, so a task becomes dead at the same two code sites as
+     * ever. It works under a template with no {@code max_attempts}. Ownership and liveness are checked
+     * first (403, 404 as before). A {@code dead} nack that also carries {@code retry_after_s} dead-letters
+     * and leaves {@code available_at} NULL: a dead row is never retried, so the delay has nothing to delay.
+     * {@code false} is a plain nack.
+     */
+    public void nack(String tenant, String claimId, String claimant, Long retryAfterSecondsOrNull,
+                     boolean dead) {
         checkClaimIdentifiers(claimId, claimant);
         if (retryAfterSecondsOrNull != null && retryAfterSecondsOrNull < 0) {
             throw new SchemaViolationException("retry_after_s", "must be non-negative");
@@ -2282,7 +2299,7 @@ public final class TupleRepository {
 
             ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
                     row.getId(), claimId, claimant, TRANSITION_NACK, now, attempts, maxAttempts,
-                    retryAfterSecondsOrNull);
+                    retryAfterSecondsOrNull, dead);
             if (outcome == ReleaseOutcome.NOT_LIVE) {
                 // The compare-and-swap matched nothing: the sweep or a re-take moved the
                 // row between liveClaimRow's read and this update (RDR-206 Step 1).
@@ -2333,7 +2350,7 @@ public final class TupleRepository {
 
             ReleaseOutcome outcome = releaseOrDeadLetter(ctx, tenant, row.getSubspace(), row.getTemplate(),
                     row.getId(), claimId, claimant, TRANSITION_RELEASE, now, row.getAttempts(), Long.MAX_VALUE,
-                    null);
+                    null, false);
             if (outcome == ReleaseOutcome.NOT_LIVE) {
                 // The compare-and-swap matched nothing: the sweep or a re-take moved the
                 // row between liveClaimRow's read and this update (RDR-206 Step 1).
@@ -2469,7 +2486,10 @@ public final class TupleRepository {
     enum ReleaseOutcome {
         /** Released back to available; one {@code releaseTransition} log row. */
         RELEASED,
-        /** Dead-lettered at {@code max_attempts}; {@code releaseTransition} then {@code dead} log rows. */
+        /**
+         * Dead-lettered at {@code max_attempts}, or at once by {@code nack}'s {@code dead: true};
+         * {@code releaseTransition} then {@code dead} log rows.
+         */
         DEAD_LETTERED,
         /**
          * The compare-and-swap matched zero rows: the row is no longer claimed under
@@ -2501,8 +2521,10 @@ public final class TupleRepository {
     private ReleaseOutcome releaseOrDeadLetter(DSLContext ctx, String tenant, String subspace, String template,
                                                byte[] tupleId, String claimId, String claimant,
                                                String releaseTransition, OffsetDateTime now,
-                                               int attempts, long maxAttempts, Long retryAfterSecondsOrNull) {
-        boolean dead = attempts >= maxAttempts;
+                                               int attempts, long maxAttempts, Long retryAfterSecondsOrNull,
+                                               boolean forceDead) {
+        // nexus-5r2sc.2.3 (RDR-235 E4): forceDead is nack's dead:true. release and the sweep pass false.
+        boolean dead = forceDead || attempts >= maxAttempts;
         // nexus-5r2sc.2.1 (RDR-235 E1): available_at is part of THIS compare-and-swap UPDATE, on
         // the database clock. Every caller that is not a nack with retry_after_s (release, the
         // sweep) passes null, which CLEARS it with claim_id; a dead-letter outcome clears it too.
@@ -2664,7 +2686,7 @@ public final class TupleRepository {
                 try {
                     outcome = withRowSavepoint(ctx, () -> releaseOrDeadLetter(ctx, tenant, row.getSubspace(),
                             row.getTemplate(), row.getId(), row.getClaimId(), row.getClaimant(),
-                            TRANSITION_EXPIRE, now, attempts, maxAttempts, null));
+                            TRANSITION_EXPIRE, now, attempts, maxAttempts, null, false));
                 } catch (RuntimeException ex) {
                     log.warn("event=tuple_sweep_release_row_failed tenant={} subspace={} tuple_id={} "
                                     + "claim_id={} error={}",

@@ -75,11 +75,14 @@ import java.util.Optional;
  *   POST /v1/tuples/inp             {subspace, keys_pattern, claimant, lease_s?} -&gt; same shape as /in
  *   POST /v1/tuples/ack             {claim_id, claimant, reply?{subspace, keys, dims?, body?, ttl_seconds?}}
  *                                   -&gt; {"acked": true, "reply_id": "&lt;hex&gt;"|null}
- *   POST /v1/tuples/nack            {claim_id, claimant, retry_after_s?} -&gt; {"nacked": true}
+ *   POST /v1/tuples/nack            {claim_id, claimant, retry_after_s?, dead?} -&gt; {"nacked": true}
  *                                   retry_after_s (bead nexus-5r2sc.2.1): optional whole seconds, validated as delay_s;
  *                                   the task returns to available but cannot be claimed until now() + retry_after_s
  *                                   on the database clock. The attempt counts as it does without the field; a
  *                                   dead-lettering nack ignores it.
+ *                                   dead (bead nexus-5r2sc.2.3, RDR-235 E4): optional boolean, default false; a
+ *                                   non-boolean value is a 400. true dead-letters the claim at once (the attempt
+ *                                   counted, claim log nack then dead), and wins over retry_after_s.
  *   POST /v1/tuples/renew           {claim_id, claimant, lease_s} -&gt; {"lease_until": "&lt;ISO-8601&gt;"}
  *   POST /v1/tuples/release         {claim_id, claimant} -&gt; {"released": true}
  *   GET  /v1/tuples/registry        -&gt; {"digest", "sources", "templates": [...]}
@@ -466,8 +469,14 @@ public final class TupleHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds, read as lease_s is. Range checks
         // (negative, above retention) are the repository's SchemaViolation, answered 400 by the ladder.
+        // nexus-5r2sc.2.3 (RDR-235 E4): dead is an optional JSON boolean; anything else is a 400, never
+        // coerced ("yes", "true" and 1 are refused rather than guessed at).
+        Object deadRaw = body.get("dead");
+        if (deadRaw != null && !(deadRaw instanceof Boolean)) {
+            throw new IllegalArgumentException("dead must be a boolean");
+        }
         repo.nack(tenant, requireString(body, "claim_id"), requireString(body, "claimant"),
-                wholeSecondsOrNull("retry_after_s", body.get("retry_after_s")));
+                wholeSecondsOrNull("retry_after_s", body.get("retry_after_s")), Boolean.TRUE.equals(deadRaw));
         HttpUtil.send(ex, 200, "{\"nacked\":true}");
     }
 
