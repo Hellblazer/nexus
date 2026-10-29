@@ -3179,6 +3179,14 @@ def _contain_mineru_stop(fn: "Callable[[], int]", file: "Path", stop: _MineruSto
     Same containment shape as :func:`_contain_extraction_quality_gate`; unlike it, the stop also
     short-circuits the remaining PDFs, because each would trip the same breaker after its own
     timeouts. Any other exception propagates unchanged.
+
+    Unlike ``nx index pdf``, this does not roll back a freshly registered catalog row. That is
+    deliberate, not an omission (shakedown 7.89.0 umbrella class b): the repo run registers every
+    file in Pass 1, in one batch, and has no per-file "minted by this call" record, so
+    ``_reconcile_needs_fence`` fail-stamps whatever did not complete (``index_state='failed'``,
+    nexus-hg2dw). A ``failed`` row is what makes the next run re-index the file
+    (``stale_fence_doc_ids``), and the ``--since-head`` base stays put while a PDF is tripped or
+    not attempted (``since_head_base_not_advanced``), so the PDF stays in the next delta.
     """
     from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
 

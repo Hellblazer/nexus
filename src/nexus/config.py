@@ -159,23 +159,28 @@ EXTRACTOR_ALIASES: tuple[str, ...] = ("auto", "docling")
 #: What the CLI choices and the config loader accept.
 EXTRACTOR_CHOICES: tuple[str, ...] = (*EXTRACTORS, *EXTRACTOR_ALIASES)
 
+#: ``repr`` of every unknown ``pdf.extractor`` value already warned about (tests clear it).
+_EXTRACTOR_INVALID_WARNED: set[str] = set()
+
 #: Keys of the one-line notices already printed in this process (tests clear it).
 _NOTICES_SHOWN: set[str] = set()
 _NOTICES_LOCK = threading.Lock()
 
 
 def notice_once(key: str, message: str) -> bool:
-    """Print *message* to stderr and the log, the first time *key* is seen in this process.
+    """Print *message* to stderr the first time *key* is seen in this process.
 
     The accessors that read ``[pdf]`` re-read the config on every call, and an indexing run calls
     them per page, so a deprecation notice has to be remembered or it would print per page. Returns
     whether this call printed it.
+
+    Stderr only, not also a log record: the console renderer prints a warning to stderr, which put
+    the notice on screen twice, the plain line and the log line (shakedown 7.89.0 umbrella class a).
     """
     with _NOTICES_LOCK:
         if key in _NOTICES_SHOWN:
             return False
         _NOTICES_SHOWN.add(key)
-    _log.warning("deprecation_notice", key=key, notice=message)
     click.echo(message, err=True)
     return True
 
@@ -330,7 +335,16 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
     pdf = load_config(repo_root=repo_root).get("pdf", {})
     extractor = pdf.get("extractor", DEFAULT_EXTRACTOR)
     if extractor not in EXTRACTOR_CHOICES:
-        _log.warning("invalid pdf.extractor config", value=extractor)
+        # The accessors re-read the config on every call (13 warnings in one `nx index pdf`), so
+        # warn once per distinct value per process, and say what happens instead.
+        seen = repr(extractor)
+        with _NOTICES_LOCK:
+            first = seen not in _EXTRACTOR_INVALID_WARNED
+            _EXTRACTOR_INVALID_WARNED.add(seen)
+        if first:
+            _log.warning(
+                "invalid pdf.extractor config", value=extractor, fell_back_to=DEFAULT_EXTRACTOR,
+            )
         extractor = DEFAULT_EXTRACTOR
     else:
         extractor = resolve_extractor(extractor, source="pdf.extractor in your config")
