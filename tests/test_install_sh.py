@@ -833,7 +833,7 @@ def test_help_names_slim_and_states_the_default_size(box: Box) -> None:
     assert "0.8 GB" in text and "1.0 GB" in text, "the default local size, macOS and Linux"
     assert "0.5 GB" in text and "0.6 GB" in text, "the default CLI-only and cloud size"
     assert "1.3 GB" not in text and "700 MB" not in text, "the 7.81.0 sizes"
-    assert "measured on 7.86.0" in text and "derived" not in text, "the sizes say they were measured, and are not a gate"
+    assert "measured on 7.89.0" in text and "derived" not in text, "the sizes say they were measured, and are not a gate"
     assert "macOS 14 or later" in text, "the Apple Silicon / macOS 14 floor is stated"
 
 
