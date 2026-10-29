@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The mineru-api server's entry point on Windows (nexus-vyy65).
+
+``python -m nexus._mineru_api_child --host H --port P`` replaces the ``mineru-api`` console
+script there. The script is a launcher stub that never imports nexus, and
+``os.add_dll_directory`` is per process, so a server started from it could not load
+onnxruntime or torch from nx's app-local VC++ DLLs (``DLL load failed while importing
+onnxruntime_pybind11_state``) on a box with no VC++ redistributable. Importing nexus first
+(the package init runs ``_add_vc_runtime_dirs``) puts those directories on this process's
+search path before mineru is imported.
+
+Nothing here may import mineru, torch, onnxruntime or magika above the ``import nexus`` line.
+"""
+from __future__ import annotations
+
+import nexus  # noqa: F401 -- runs _add_vc_runtime_dirs() before any import below it
+
+
+def main() -> None:
+    from mineru.cli.fast_api import main as mineru_api_main  # noqa: PLC0415 -- must follow `import nexus`
+
+    mineru_api_main()
+
+
+if __name__ == "__main__":
+    main()

@@ -477,6 +477,10 @@ def _classify(command: str) -> str:
     # A shebang-wrapped entry point: the kernel rewrites argv to
     # [python, script, ...], so the SCRIPT is the real executable.
     if exe.startswith("python") and rest:
+        # The Windows mineru-api child is ``python -m nexus._mineru_api_child ...`` (nexus-vyy65):
+        # no console script in its argv, so the module name identifies it.
+        if rest[:2] == ["-m", "nexus._mineru_api_child"]:
+            return "mineru"
         exe = executable_stem(rest[0])
         rest = rest[1:]
 

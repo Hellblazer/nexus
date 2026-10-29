@@ -20,6 +20,7 @@ from nexus.bounded_subprocess import run_bounded
 from nexus.doctor_references import DEFAULT_SAMPLE as _REFERENCES_DEFAULT_SAMPLE
 from nexus.doctor_references import MAX_CONCURRENCY as _REFERENCES_MAX_CONCURRENCY
 from nexus.doctor_references import estimated_worst_case_s as _references_estimated_worst_case_s
+from nexus._vcrt import MINERU_CHILD_PROLOGUE
 from nexus.redact import redact_credentials
 
 
@@ -1873,7 +1874,7 @@ _MINERU_DOCTOR_PARSE_TIMEOUT_S = 180
 # dispatcher racing exit is the concrete case) -- a successful parse that
 # then dies in teardown would render as a doctor FAIL for nothing.
 _MINERU_DOCTOR_PARSE_SCRIPT = '''
-import os
+__MINERU_CHILD_PROLOGUE__import os
 import sys
 from pathlib import Path
 from mineru.cli.common import do_parse
@@ -1890,7 +1891,7 @@ do_parse(
     end_page_id=0,
 )
 os._exit(0)
-'''
+'''.replace("__MINERU_CHILD_PROLOGUE__", MINERU_CHILD_PROLOGUE)
 
 
 class _MineruDoctorParseFailed(RuntimeError):
@@ -2050,6 +2051,54 @@ def _run_check_mineru_parse() -> bool:
         return False
 
 
+#: What MinerU's own children import first and fail on when a native dependency cannot load:
+#: ``mineru.cli.common`` reaches onnxruntime through magika (the 2026-10-29 Windows failure), and
+#: torch loads its own DLLs (c10.dll). Patched by tests so a suite is not charged a torch import.
+_MINERU_CHILD_PROBE_MODULES: tuple[str, ...] = ("mineru.cli.common", "onnxruntime", "torch")
+
+#: How long the child import probe may run before it is reported as hung (a cold torch import
+#: on a slow disk is the long pole).
+_MINERU_CHILD_PROBE_TIMEOUT_S = 120.0
+
+
+def _mineru_child_probe_script(modules: tuple[str, ...]) -> str:
+    """The probe child's code: the same prologue as MinerU's worker, then the imports."""
+    return MINERU_CHILD_PROLOGUE + "".join(f"import {m}\n" for m in modules)
+
+
+def _probe_mineru_child_import(timeout_s: float | None = None) -> str | None:
+    """``None`` when a FRESH interpreter, started the way MinerU's worker is, imports MinerU's
+    native stack; else a one-line cause (credentials redacted).
+
+    The ``MinerU import`` row imports in the doctor's own process, which ran ``import nexus``
+    long ago, so on a Windows box with no VC++ redistributable it saw nx's app-local DLL
+    directories while the worker and server children (fresh ``python -c`` / ``-m`` processes)
+    did not, and the row stayed green over an install whose every parse died with ``DLL load
+    failed while importing onnxruntime_pybind11_state`` (nexus-vyy65). The child here starts with
+    the worker's own prologue, so it fails where the worker would. Bounded by a timeout and run
+    in a child, like the cv2 probe: a native import can kill its process.
+    """
+    import subprocess  # noqa: PLC0415 — deferred to keep CLI startup fast
+    import sys  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    timeout = _MINERU_CHILD_PROBE_TIMEOUT_S if timeout_s is None else timeout_s
+    script = _mineru_child_probe_script(_MINERU_CHILD_PROBE_MODULES)
+    try:
+        proc = run_bounded([sys.executable, "-c", script], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"the MinerU imports did not finish within {timeout:g} s"
+    except OSError as exc:
+        return _exc_detail(exc, with_type=True)
+    if proc.returncode == 0:
+        return None
+    tail = [ln for ln in proc.stderr.splitlines() if ln.strip()]
+    if tail:
+        return redact_credentials(tail[-1].strip())
+    if proc.returncode < 0:
+        return f"the MinerU imports crashed the interpreter (signal {-proc.returncode})"
+    return f"the MinerU imports exited {proc.returncode} with no output"
+
+
 #: How long the cv2 import probe may run before it is reported as hung.
 _CV2_PROBE_TIMEOUT_S = 60.0
 
@@ -2068,7 +2117,7 @@ def _probe_cv2(timeout_s: float | None = None) -> tuple[str | None, str]:
     timeout = _CV2_PROBE_TIMEOUT_S if timeout_s is None else timeout_s
     try:
         proc = run_bounded(
-            [sys.executable, "-c", "import cv2; print(cv2.__version__)"], timeout=timeout,
+            [sys.executable, "-c", MINERU_CHILD_PROLOGUE + "import cv2; print(cv2.__version__)"], timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return f"the cv2 import did not finish within {timeout:g} s", ""
@@ -2145,6 +2194,22 @@ def _run_check_mineru() -> bool:
 
     click.echo(_check("MinerU import", True, "mineru.cli.common.do_parse OK"))
 
+    # nexus-vyy65: the row above ran in THIS process. MinerU's worker and server are fresh
+    # children, so import in one the way the worker starts, or a box whose children cannot load
+    # onnxruntime/torch (Windows, no VC++ redistributable) reads green here and fails every parse.
+    child_error = _probe_mineru_child_import()
+    if child_error is not None:
+        failed = True
+        click.echo(_check("MinerU child import", False, child_error))
+        click.echo(
+            "  ↳ the import above works in this process but not in a fresh child, which is how MinerU's "
+            "worker and server run. On Windows without the Visual C++ redistributable the child cannot "
+            "find nx's app-local runtime DLLs; elsewhere a native dependency does not load. Reinstall "
+            f"with `{_reinstall_command()}`. Real-parse check skipped: it would fail on the same import."
+        )
+    else:
+        click.echo(_check("MinerU child import", True, "a fresh interpreter imports MinerU's native stack"))
+
     # nexus-11x9o: MinerU imports cv2 lazily, so the do_parse import above
     # succeeds on a box whose cv2 cannot load (a Linux box without libGL.so.1
     # where the non-headless opencv-python won the shared cv2/ directory).
@@ -2163,7 +2228,9 @@ def _run_check_mineru() -> bool:
         )
     else:
         click.echo(_check("MinerU cv2 import", True, f"cv2 {cv2_version} loads"))
-        if not _mineru_pipeline_model_dir_configured():
+        if child_error is not None:
+            pass  # reported above, with the real-parse skip
+        elif not _mineru_pipeline_model_dir_configured():
             click.echo(
                 "  (MinerU pipeline model weights not downloaded; real-parse "
                 "check skipped — run `mineru-models-download`)"

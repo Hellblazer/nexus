@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
+from nexus._vcrt import MINERU_CHILD_PROLOGUE  # noqa: F401 -- re-exported: the children's shared prologue
 from nexus._winsec import make_user_dir
 from nexus.util.nx_argv import which_off_cwd
 
@@ -166,6 +167,31 @@ def _resolve_mineru_api_bin() -> str | None:
     return which_off_cwd("mineru-api")
 
 
+#: The module a Windows mineru-api child runs under ``python -m`` (nexus-vyy65).
+MINERU_SERVER_CHILD_MODULE = "nexus._mineru_api_child"
+
+
+def mineru_server_argv(mineru_bin: str, port: int, platform: str | None = None) -> list[str]:
+    """The command line of the mineru-api server child.
+
+    Off Windows it is the console script, as it always was. On Windows the console script is
+    a launcher stub that never imports nexus, so the server could not load onnxruntime or
+    torch from nx's app-local VC++ DLLs (nexus-vyy65); the child runs
+    :data:`MINERU_SERVER_CHILD_MODULE` under ``python -m`` instead, which imports nexus
+    (the DLL directories) and then mineru-api's own entry point. The interpreter is the one
+    beside the console script (the venv mineru is installed in), else this process's. ``-m``
+    rather than ``-c`` so a multiprocessing ``spawn`` grandchild re-imports the main module by
+    name and so runs the same DLL setup.
+    """
+    from nexus import _vcrt  # noqa: PLC0415 -- stdlib-only
+
+    if not _vcrt.is_windows(platform):
+        return [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
+    sibling = Path(mineru_bin).parent / "python.exe"
+    python = str(sibling) if sibling.is_file() else sys.executable
+    return [python, "-m", MINERU_SERVER_CHILD_MODULE, "--host", "127.0.0.1", "--port", str(port)]
+
+
 def spawn_server_process(port: int) -> subprocess.Popen | None:
     """Launch the mineru-api child + write its pid file (nexus-1qdb9).
 
@@ -179,7 +205,7 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
     mineru_bin = _resolve_mineru_api_bin()
     if mineru_bin is None:
         return None
-    cmd = [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
+    cmd = mineru_server_argv(mineru_bin, port)
     output_root = _mineru_output_root()
     # RDR-148 Gap 4: the mineru-api server is long-lived; DEVNULL discarded
     # its startup banner and crash tracebacks, the only record of WHY it
@@ -259,7 +285,9 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
         "started_at": datetime.now(timezone.utc).isoformat(),
         "output_root": str(output_root),
         "mineru_version": _mineru_version,
-        "python": sys.executable,
+        # The interpreter the server runs under: on Windows the one launched with -m (the sibling
+        # of the console script, nexus-vyy65), else the spawner's, as the console script's own.
+        "python": cmd[0] if cmd[0] != mineru_bin else sys.executable,
         # nexus-x3m8e: the executable this server runs, beside the interpreter
         # and output root above: `nx mineru status` stats all three, because a
         # tool environment replaced under a running server takes its libraries

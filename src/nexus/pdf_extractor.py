@@ -33,6 +33,7 @@ import time
 import httpx
 import structlog
 
+from nexus._vcrt import MINERU_CHILD_PROLOGUE
 from nexus.config import DEFAULT_EXTRACTOR, resolve_extractor
 from nexus.errors import ExtractionQualityError, UnextractableContentError
 from nexus.redact import redact_credentials
@@ -159,8 +160,13 @@ def _last_stderr_line(tail: str) -> str:
     return ""
 
 
+# nexus-vyy65: the prologue (``import nexus``) comes first, before the first mineru import. The
+# worker is a fresh ``python -c`` child that never imported nexus, so on Windows without the VC++
+# redistributable it could not load onnxruntime/torch from nx's app-local DLLs until it ran
+# ``_add_vc_runtime_dirs`` for itself. ``nx doctor --check-mineru`` starts its child probe the
+# same way (``_mineru_spawn.MINERU_CHILD_PROLOGUE``).
 _MINERU_WORKER_SCRIPT = '''
-import json, sys, os
+__MINERU_CHILD_PROLOGUE__import json, sys, os
 from pathlib import Path
 from mineru.cli.common import do_parse
 
@@ -185,7 +191,7 @@ except MemoryError:
     # MineruMemoryError. os._exit (not sys.exit) to skip pool/daemon-thread teardown.
     os._exit(__MINERU_OOM_EXIT__)
 os._exit(0)
-'''.replace("__MINERU_OOM_EXIT__", str(_MINERU_OOM_EXIT))
+'''.replace("__MINERU_CHILD_PROLOGUE__", MINERU_CHILD_PROLOGUE).replace("__MINERU_OOM_EXIT__", str(_MINERU_OOM_EXIT))
 
 _log = structlog.get_logger(__name__)
 
