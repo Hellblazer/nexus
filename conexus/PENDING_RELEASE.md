@@ -47,6 +47,8 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/launch/nx_setup.py` (nexus-b0y6w): the setup credentials page listens with a backlog of twice its connection cap, so a Windows connect is not refused while the page holds a full set of unread connections.
+
 
 ## Deferred to the next client release
 
