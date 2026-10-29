@@ -713,6 +713,10 @@ final class ManifestLabelStage {
             copy.put("source_uri", o.sourceUri());
         }
         putSpan(copy, o);
+        if (copy.containsKey("span")) {
+            // The line-range fallback of a row with no chunk_text_hash names this owner's lines.
+            copy.put("span", PgVectorRepository.spanFromMeta(copy));
+        }
         if (o.labelsWritten()) {
             copy.put("section_title", o.sectionTitle() == null ? "" : o.sectionTitle());
             copy.put("section_type", o.sectionType() == null ? "" : o.sectionType());

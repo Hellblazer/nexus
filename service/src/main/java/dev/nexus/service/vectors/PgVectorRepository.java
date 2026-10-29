@@ -8102,9 +8102,10 @@ FROM scope s
      * live owner keeps its own span and gets neither key.
      *
      * <p>{@code labelStageFollows}: a {@link ManifestLabelStage} pass will expand each row to its owning
-     * documents, and writes each copy's own {@code doc_id}, {@code position} and span, falling back, for a
-     * NULL manifest field, to the CHUNK ROW's value. This method must then leave those fields as the chunk
-     * row has them, or an owner without a recorded span would inherit the first owner's.
+     * documents, and writes each copy's own {@code doc_id}, {@code position}, {@code source_uri} and span,
+     * falling back, for a NULL manifest field, to the CHUNK ROW's value. This method then runs NO owner
+     * lookup and leaves those fields as the chunk row has them (a null {@code source_uri} when asked for),
+     * or an owner without a recorded span would inherit the first owner's.
      *
      * <p>Field-presence contract:
      * <ul>
@@ -8123,15 +8124,21 @@ FROM scope s
                                   boolean includeSourceUri, boolean labelStageFollows) {
         if (rows.isEmpty()) return;
         // nexus-6pfgb.26: ONE lookup per window, whether or not source_uri was asked for: the owner's
-        // doc_id, position and span come from the same row, so every chunk-level row needs it.
-        Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
-        for (Map<String, Object> row : rows) {
-            if (row.get("id") instanceof String s && HEX64.matcher(s).matches()
-                    && row.get("collection") instanceof String c) {
-                chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(s);
+        // doc_id, position and span come from the same row, so every chunk-level row needs it. Under a
+        // label or document-key filter none: the stage that runs next re-points source_uri, doc_id,
+        // position and span on every row that has an owner (ManifestLabelStage#expanded) from its own
+        // lookup, and a row with no owner keeps the chunk row's values and a null source_uri either way.
+        Map<String, ManifestLabelStage.Occurrence> owners = Map.of();
+        if (!labelStageFollows) {
+            Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
+            for (Map<String, Object> row : rows) {
+                if (row.get("id") instanceof String s && HEX64.matcher(s).matches()
+                        && row.get("collection") instanceof String c) {
+                    chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(s);
+                }
             }
+            owners = ownersByChash(tenant, chashesByCollection);
         }
-        Map<String, ManifestLabelStage.Occurrence> owners = ownersByChash(tenant, chashesByCollection);
         for (Map<String, Object> row : rows) {
             Object idVal = row.get("id");
             // Fail loud if id is not chash-shaped (RDR-180) — document-level
@@ -8149,22 +8156,24 @@ FROM scope s
                     + "— only chunk-level search rows may be enriched");
             }
             row.put("chash", chashStr);
-            // spanFromMeta reads chunk_text_hash / line_start / line_end from the FLATTENED row:
-            // search rows include metadata keys at the top level (via row.putAll(fromJson(...))).
-            // It runs BEFORE the owner's span lands: the citation span is text-determined and the
-            // line form is only its fallback, which nexus-6pfgb.26 leaves as it was.
-            row.put("span", spanFromMeta(row));
             Object coll = row.get("collection");
             ManifestLabelStage.Occurrence owner = coll instanceof String c
                 ? owners.get(ManifestLabelStage.ownerKey(c, chashStr)) : null;
-            if (owner != null && !labelStageFollows) {
+            if (owner != null) {
                 // The row names its owner, and that owner's span replaces the shared chunk row's (the last
                 // writer's); a NULL manifest field keeps the row's value (a legacy manifest row).
                 row.put("doc_id", owner.docId());
                 row.put("position", owner.position());
                 ManifestLabelStage.putSpan(row, owner);
             }
+            // spanFromMeta reads chunk_text_hash / line_start / line_end from the FLATTENED row (search rows
+            // include metadata keys at the top level, via row.putAll(fromJson(...))). It runs AFTER the
+            // owner's span lands: the chash form is text-determined, and the line form, its fallback for a
+            // row with no chunk_text_hash, then names the owner's lines, not the last writer's.
+            row.put("span", spanFromMeta(row));
             if (includeSourceUri) {
+                // Under a label filter owners is empty and the stage overwrites this null with the
+                // expanded row's own document URI; the key exists for it to do so.
                 row.put("source_uri", owner != null ? owner.sourceUri() : null);
             }
         }

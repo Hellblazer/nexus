@@ -71,6 +71,7 @@ class PgVectorOwnerSpanTest {
     private static final String TEXT_K = "spanprobe chunk one document holds at two positions";
     private static final String TEXT_H = "spanprobe chunk a later document holds with no span of its own";
     private static final String TEXT_T = "spanprobe chunk two tumbler-shaped documents hold";
+    private static final String TEXT_S = "spanprobe chunk whose row carries no chunk_text_hash";
     private static final String QUERY = "spanprobe";
 
     private static final String X = Chash.ofText("owner-span-x").toHex();
@@ -79,6 +80,7 @@ class PgVectorOwnerSpanTest {
     private static final String K = Chash.ofText("owner-span-k").toHex();
     private static final String H = Chash.ofText("owner-span-h").toHex();
     private static final String T = Chash.ofText("owner-span-t").toHex();
+    private static final String S = Chash.ofText("owner-span-s").toHex();
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -110,6 +112,8 @@ class PgVectorOwnerSpanTest {
         embedder.register(TEXT_K, 0.6f, 0.8f);
         embedder.register(TEXT_H, 0.28f, 0.96f);
         embedder.register(TEXT_T, 0.0f, 1.0f);
+        // Farthest from the query, so a label-filtered window of ten cuts it before any other fixture row.
+        embedder.register(TEXT_S, -0.28f, 0.96f);
         vec = new PgVectorRepository(tenantScope, embedder, embedder);
 
         try (Connection su = pg.createConnection("")) {
@@ -138,6 +142,9 @@ class PgVectorOwnerSpanTest {
             List.of(xInC, span(7, 8, 70, 80), span(61, 71, 601, 701),
                     span(99, 99, 990, 999), span(5, 6, 50, 60), span(3, 4, 30, 40)));
         vec.upsertChunks(TENANT, COLL_D, List.of(X), List.of(TEXT_X), List.of(xInD));
+        // S: the chunk row carries the last writer's lines (30-35) and NO chunk_text_hash, so the row's
+        // "span" string can only be the N-M line form.
+        vec.upsertChunks(TENANT, COLL_C, List.of(S), List.of(TEXT_S), List.of(span(30, 35, 300, 350)));
         // The same text in the same collection name under another tenant (a chunk row is tenant-keyed).
         Map<String, Object> xOther = span(900, 901, 9000, 9010);
         xOther.put("chunk_text_hash", X);
@@ -161,6 +168,9 @@ class PgVectorOwnerSpanTest {
             // T: written "1.2" first; the text-order owner is "1.10".
             manifest(seed, DOC_T2, COLL_C, 0, T, "body", 200, 201, 2000, 2010);
             manifest(seed, DOC_T10, COLL_C, 0, T, "body", 300, 301, 3000, 3010);
+            // S: P (lines 10-20) is the owner; P2 (30-35) is the last writer, whose lines the chunk row carries.
+            manifest(seed, DOC_P, COLL_C, 6, S, "body", 10, 20, 100, 200);
+            manifest(seed, DOC_P2, COLL_C, 1, S, "body", 30, 35, 300, 350);
             // Another tenant holds X in the same collection name under the lowest doc_id there is.
             manifest(seed, OTHER_TENANT, DOC_OTHER, COLL_C, 0, X, "body", 900, 901, 9000, 9010);
         }
@@ -454,6 +464,72 @@ class PgVectorOwnerSpanTest {
                 .findFirst().orElseThrow();
             assertSpan(p3, 5, 6, 50, 60);
         }
+    }
+
+    // ── a label filter: the stage is the only owner lookup of the window ──
+
+    @Test
+    void aLabelFilteredSearch_runsNoEnrichmentOwnerLookup_theStageAloneAnswersEachRow() {
+        // The hook counts the enrichment lookup (ownersByChash) only; the stage's own lookup is not counted.
+        // Under a label filter the stage re-points every owned row, so the enrichment lookup was a second,
+        // redundant statement per window.
+        vec.resetOwnerLookupCallsForTests();
+        var plain = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, true).value();
+        assertThat(vec.ownerLookupCallCount()).as("unfiltered: enrichment is the lookup").isEqualTo(1);
+        assertThat(plain).isNotEmpty();
+
+        vec.resetOwnerLookupCallsForTests();
+        var rows = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, anyLabel(), true).value();
+        assertThat(vec.ownerLookupCallCount()).as("label filter: no enrichment lookup").isEqualTo(0);
+        var p = rows.stream().filter(r -> X.equals(r.get("id")) && DOC_P.equals(r.get("doc_id")))
+            .findFirst().orElseThrow();
+        assertThat(p.get("source_uri")).isEqualTo(uri(DOC_P));
+        assertSpan(p, 10, 20, 100, 200);
+
+        vec.resetOwnerLookupCallsForTests();
+        var hybrid = vec.hybridSearchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, anyLabel(), true).value();
+        var fan = vec.searchPerCollection(TENANT, QUERY, List.of(COLL_C), 10, 20, null, anyLabel(), true).rows();
+        assertThat(vec.ownerLookupCallCount()).as("hybrid and fan-out under a label filter").isEqualTo(0);
+        for (var r : List.of(hybrid, fan)) {
+            var px = r.stream().filter(x -> X.equals(x.get("id")) && DOC_P.equals(x.get("doc_id")))
+                .findFirst().orElseThrow();
+            assertThat(px.get("source_uri")).isEqualTo(uri(DOC_P));
+            assertSpan(px, 10, 20, 100, 200);
+        }
+    }
+
+    @Test
+    void aRowWithNoLiveOwnerUnderALabelFilter_getsAKeyedNullSourceUri_orIsNotAHitAtAll() {
+        // A chunk with no live manifest row is never a search hit (the live-owner predicate), so under a
+        // label filter every returned row either has an owner the stage re-points, or does not exist.
+        var rows = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, anyLabel(), true).value();
+        for (var r : rows) {
+            assertThat(r).as("source_uri key present").containsKey("source_uri");
+            assertThat(r.get("source_uri")).as("every hit has an owner").isNotNull();
+            assertThat(r.get("doc_id")).isNotNull();
+        }
+    }
+
+    // ── a row with no chunk_text_hash: the N-M fallback span is the owner's lines ──
+
+    @Test
+    void aRowWithNoChunkTextHash_getsTheOwnersLinesAsItsSpanString_notTheLastWritersAndNotChash() {
+        var s = rowFor(vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 10, null, false).value(), S, COLL_C);
+        assertThat(s).doesNotContainKey("chunk_text_hash");
+        assertThat(s.get("doc_id")).isEqualTo(DOC_P);
+        assertSpan(s, 10, 20, 100, 200);
+        assertThat(s.get("span")).isEqualTo("10-20");
+    }
+
+    @Test
+    void aRowWithNoChunkTextHashUnderALabelFilter_getsEachOwnersLinesAsItsSpanString() {
+        var rows = vec.searchWithTokens(TENANT, QUERY, List.of(COLL_C), 20, anyLabel(), false).value();
+        var ss = rows.stream().filter(r -> S.equals(r.get("id"))).toList();
+        assertThat(ss).hasSize(2);
+        var p = ss.stream().filter(r -> DOC_P.equals(r.get("doc_id"))).findFirst().orElseThrow();
+        var p2 = ss.stream().filter(r -> DOC_P2.equals(r.get("doc_id"))).findFirst().orElseThrow();
+        assertThat(p.get("span")).isEqualTo("10-20");
+        assertThat(p2.get("span")).isEqualTo("30-35");
     }
 
     // ── get and get_where: source_uris take the same collection-scoped owner ──
