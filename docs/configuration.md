@@ -246,6 +246,14 @@ aspects:
 
 Every write path — `--enable`/`--disable`, and `--from-config` when it would actually change something — is a TENANT-WIDE setting: every machine indexing the collection sees it, and enabling it means an LLM call per changed prose document from then on. Each prompts for confirmation before writing (`--yes`/`-y` skips the prompt, for scripts); `--dry-run` never prompts, since it never writes. A non-interactive run without `--yes` refuses rather than hanging on a prompt nothing will answer.
 
+### Aspect queue backend (`NX_ASPECT_QUEUE`, RDR-235)
+
+| Env var | Default | Description |
+|---|---|---|
+| `NX_ASPECT_QUEUE` | `table` | Where the producer queues documents for aspect extraction. `table` is the original aspect-queue table. `tuples` writes one task per document to the engine's `aspects` tuple queue (`out` with `mode=replace`; keys `{queue: aspects}`, nonce = the document's tumbler), so a re-enqueue replaces the task and never adds a second. The task body is the document's identity (`collection`, `source_path`, `doc_id`, `content_hash`) and never its text. `tuples` needs engine-service-v0.1.169 or later; against an engine without the `aspects` template it refuses with a message naming that release (unset the variable to go back). Read on every call. An unrecognised value logs one warning per process and means `table`. |
+
+With `NX_ASPECT_QUEUE` unset or `table`, nothing is sent to the tuple space. In `tuples` mode a batch (the indexer's flush) is one `out` per document, at most eight at a time, because the tuple space has no batch `out`; a batch that meets the tenant's `max_live_rows` ceiling (10,000 live and dead `aspects` tasks together) stops, logs `aspect_enqueue_many_aborted` at error level with the counts, and raises `MaxLiveRowsExceededError`. Tasks that already landed stay. A `source_path` too long for the 4,096-byte body is skipped with a warning naming the document. A write to a retired collection name is refused before anything is sent.
+
 ## Daemon environment variables
 
 T2 and T3 both route through the single native `nexus-service` (`nx daemon service`, RDR-152/RDR-155), discovered via `~/.config/nexus/storage_service_addr.<uid>` and overridden with `NX_SERVICE_URL` (see [Managed-Cloud Credentials](#managed-cloud-credentials)). This unified the earlier RDR-120 (conexus 4.34.0) split, where the CLI and MCP server routed T2 through a separate T2 daemon publishing `~/.config/nexus/t2_addr.<uid>`; that daemon and discovery file are retired (RDR-158 — see the `NX_T2_ADDR`/`NX_T2_SOCK` note below). Clients honour these env-var overrides:

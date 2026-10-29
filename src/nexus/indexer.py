@@ -6746,11 +6746,18 @@ def _run_index(
                     lambda t2: t2.aspect_queue.enqueue_many(rows),
                     op="aspect_enqueue",
                 )
-            except Exception:  # noqa: BLE001 — enqueue is best-effort; ingest must never block on it (RDR-089 P0.1)
+            except Exception as _enq_exc:  # noqa: BLE001 — enqueue is best-effort; ingest must never block on it (RDR-089 P0.1)
                 _log.warning(
                     "aspect_enqueue_many_batch_failed",
-                    collection=collection, count=len(rows), exc_info=True,
+                    collection=collection, count=len(rows),
+                    error_type=type(_enq_exc).__name__, exc_info=True,
                 )
+                # RDR-235: a refusal here (MaxLiveRowsExceeded) must be counted,
+                # not only logged; the single-document hook does the same.
+                from nexus.db.t2.http_aspect_queue import aspect_queue_mode  # noqa: PLC0415 — deferred: keeps the table path's imports as they were
+                if aspect_queue_mode() == "tuples":
+                    from nexus.aspect_worker import record_batch_enqueue_failure  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
+                    record_batch_enqueue_failure(collection, len(rows), _enq_exc)
             else:
                 # Auto-spawn gate (mirrors aspect_extraction_enqueue_hook's own
                 # gate exactly — see its docstring for the unit-suite rationale).
