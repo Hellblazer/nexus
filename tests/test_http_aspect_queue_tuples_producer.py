@@ -40,7 +40,9 @@ from nexus.db.t2.http_tuple_store import (
 _KEYS = {"queue": "aspects"}
 _BODY_CAP = 4096
 
-pytestmark = pytest.mark.usefixtures("t2_service_env")
+# The tenant is opt-in (tests/AGENTS.md): only the classes that reach the engine ask for it.
+# The flag parsing and the blank-doc_id refusal run before any request and mint none.
+engine = pytest.mark.usefixtures("t2_service_env")
 
 
 def _coll() -> str:
@@ -118,29 +120,27 @@ class TestFlag:
         assert aspect_queue_mode() == expected
 
     def test_an_unknown_value_warns_once_and_means_table(
-        self, monkeypatch: pytest.MonkeyPatch, queue: HttpAspectQueue,
+        self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A typo falls back to the queue every released engine supports, and
-        says so once per process; it does not fail every ingest hook."""
+        says so once per process; it does not fail every ingest hook. That the
+        enqueue then sends nothing to the tuple space is pinned with the table
+        mode test below, which runs under this same value."""
         monkeypatch.setenv(ASPECT_QUEUE_ENV, "tuple")
-        tuple_posts: list[str] = []
-        monkeypatch.setattr(
-            HttpTupleStore, "_post",
-            lambda self, path, payload, **kw: tuple_posts.append(path),
-        )
         with structlog.testing.capture_logs() as cap:
             assert aspect_queue_mode() == "table"
             assert aspect_queue_mode() == "table"
         warnings = [e for e in cap if e["event"] == "aspect_queue_mode_unknown_falling_back_to_table"]
         assert len(warnings) == 1 and warnings[0]["value"] == "tuple"
-        queue.enqueue(_coll(), "/p/a.md", doc_id=register_real_doc_id())
-        assert tuple_posts == []
 
 
+@engine
 class TestTableModeSendsNothingToTheTupleSpace:
     def test_enqueue_and_enqueue_many_leave_the_tuple_space_alone(
         self, monkeypatch: pytest.MonkeyPatch, queue: HttpAspectQueue, store: HttpTupleStore,
     ) -> None:
+        """Under the default (flag unset) and under an unknown value (a typo
+        means table), nothing goes to ``/v1/tuples``."""
         tuple_posts: list[str] = []
         monkeypatch.setattr(
             HttpTupleStore, "_post",
@@ -148,65 +148,74 @@ class TestTableModeSendsNothingToTheTupleSpace:
         )
         coll = _coll()
         doc = register_real_doc_id()
-        queue.enqueue(coll, "/p/a.md", content="text", doc_id=doc)
-        assert queue.enqueue_many([
-            {"collection": coll, "source_path": f"/p/{i}.md", "doc_id": doc} for i in range(3)
-        ]) == 3
-        assert tuple_posts == []
+        for flag in (None, "tuple"):
+            if flag is not None:
+                monkeypatch.setenv(ASPECT_QUEUE_ENV, flag)
+            queue.enqueue(coll, "/p/a.md", content="text", doc_id=doc)
+            assert queue.enqueue_many([
+                {"collection": coll, "source_path": f"/p/{i}.md", "doc_id": doc} for i in range(3)
+            ]) == 3
+            assert tuple_posts == [], f"flag={flag!r}"
         assert queue.pending_count() >= 1
         monkeypatch.undo()
         assert _tasks(store) == []
 
 
+@engine
 @pytest.mark.usefixtures("tuples_mode")
 class TestIdentityBody:
-    def test_a_cli_row_is_an_identity_body_with_no_content(
+    def test_a_cli_row_and_an_mcp_note_are_identity_bodies_that_never_carry_text(
         self, queue: HttpAspectQueue, store: HttpTupleStore,
     ) -> None:
-        coll, doc = _coll(), _tumbler()
-        queue.enqueue(coll, "/repo/docs/a.md", content_hash="h1", content="", doc_id=doc)
-        (task,) = _tasks(store)
+        """A CLI row, then an MCP note. The MCP path passes the whole note as
+        ``content``: sent, 200 KB would be over the cap; dropped, the task is the
+        same few hundred bytes as a CLI row, and the worker reassembles the text
+        (RDR-235 E2)."""
+        coll, doc, note_doc = _coll(), _tumbler(), _tumbler()
+        # A non-ASCII path rides in the CLI row: it must come back as written.
+        path = "/repo/docs/été-ノート.md"
+        queue.enqueue(coll, path, content_hash="h1", content="", doc_id=doc)
+        queue.enqueue(coll, "note-title", content_hash="h2", content="word " * 40_000, doc_id=note_doc)
+        by_doc = {json.loads(t.body)["doc_id"]: t for t in _tasks(store)}
+        assert set(by_doc) == {doc, note_doc}
+
+        task = by_doc[doc]
         assert task.keys == _KEYS
-        body = json.loads(task.body)
-        assert body == {
-            "collection": coll, "source_path": "/repo/docs/a.md",
+        assert json.loads(task.body) == {
+            "collection": coll, "source_path": path,
             "doc_id": doc, "content_hash": "h1",
-        }
+        }, "the CLI row"
         assert len(task.body.encode()) < _BODY_CAP
 
-    def test_an_mcp_note_never_carries_its_text(
-        self, queue: HttpAspectQueue, store: HttpTupleStore,
-    ) -> None:
-        """The MCP path passes the whole note as ``content``. Sent, 200 KB would
-        be over the cap; dropped, the task is the same few hundred bytes as a
-        CLI row, and the worker reassembles the text (RDR-235 E2)."""
-        coll, doc = _coll(), _tumbler()
-        queue.enqueue(coll, "note-title", content_hash="h2", content="word " * 40_000, doc_id=doc)
-        (task,) = _tasks(store)
-        body = json.loads(task.body)
-        assert set(body) == {"collection", "source_path", "doc_id", "content_hash"}
-        assert len(task.body.encode()) < 600
-        assert "word word" not in task.body
-
-    def test_a_non_ascii_path_round_trips_unescaped(
-        self, queue: HttpAspectQueue, store: HttpTupleStore,
-    ) -> None:
-        coll, doc = _coll(), _tumbler()
-        queue.enqueue(coll, "/repo/docs/été-ノート.md", doc_id=doc)
-        (task,) = _tasks(store)
-        assert json.loads(task.body)["source_path"] == "/repo/docs/été-ノート.md"
-
-    def test_a_blank_doc_id_is_refused(self, queue: HttpAspectQueue, store: HttpTupleStore) -> None:
-        with pytest.raises(ValueError, match="doc_id"):
-            queue.enqueue(_coll(), "/p/a.md", doc_id="")
-        assert _tasks(store) == []
+        note = by_doc[note_doc]
+        assert set(json.loads(note.body)) == {"collection", "source_path", "doc_id", "content_hash"}, (
+            "the MCP note"
+        )
+        assert len(note.body.encode()) < 600
+        assert "word word" not in note.body
 
 
 @pytest.mark.usefixtures("tuples_mode")
+class TestBlankDocIdIsRefused:
+    def test_a_blank_doc_id_is_refused_before_anything_is_sent(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Refused before the registration check and the send: no engine, no tenant."""
+        calls = _spy_out_replace(monkeypatch)
+        q = HttpAspectQueue(base_url="http://mock.test", _token="test-token")
+        with pytest.raises(ValueError, match="doc_id"):
+            q.enqueue(_coll(), "/p/a.md", doc_id="")
+        assert calls == []
+
+
+@engine
+@pytest.mark.usefixtures("tuples_mode")
 class TestReEnqueueReplaces:
-    def test_a_second_enqueue_of_one_document_is_one_task_with_the_new_body(
+    def test_a_second_enqueue_of_one_document_is_one_task_with_the_new_body_and_so_is_a_second_batch(
         self, queue: HttpAspectQueue, store: HttpTupleStore, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """nonce = doc_id: the second enqueue names a RENAMED path, so a nonce
+        built from the path would leave two tasks (and two ``created``)."""
         coll, doc = _coll(), _tumbler()
         outcomes: list[str] = []
         real = HttpAspectQueue._out_task
@@ -217,52 +226,37 @@ class TestReEnqueueReplaces:
             return outcome
 
         monkeypatch.setattr(HttpAspectQueue, "_out_task", spy)
-        queue.enqueue(coll, "/p/a.md", content_hash="old", doc_id=doc)
-        queue.enqueue(coll, "/p/a.md", content_hash="new", doc_id=doc)
-        assert outcomes == ["created", "replaced"]
+        queue.enqueue(coll, "/p/before.md", content_hash="old", doc_id=doc)
+        queue.enqueue(coll, "/p/after.md", content_hash="new", doc_id=doc)
+        assert outcomes == ["created", "replaced"], "the document, not its path, is the identity"
         (task,) = _tasks(store)
-        assert json.loads(task.body)["content_hash"] == "new"
+        body = json.loads(task.body)
+        assert body["content_hash"] == "new", "the replace carries the new body"
+        assert body["source_path"] == "/p/after.md", "the old path does not linger"
 
-    def test_the_document_is_the_identity_not_its_path(
-        self, queue: HttpAspectQueue, store: HttpTupleStore,
-    ) -> None:
-        """nonce = doc_id: a file renamed between two index runs is the same
-        document, so its task is replaced and the old path does not linger."""
-        coll, doc = _coll(), _tumbler()
-        queue.enqueue(coll, "/p/before.md", doc_id=doc)
-        queue.enqueue(coll, "/p/after.md", doc_id=doc)
-        (task,) = _tasks(store)
-        assert json.loads(task.body)["source_path"] == "/p/after.md"
-
-    def test_enqueue_many_replaces_too(self, queue: HttpAspectQueue, store: HttpTupleStore) -> None:
-        coll = _coll()
+        # enqueue_many replaces too (its own path: a bounded fan-out of replaces).
+        many = _coll()
         rows = [
-            {"collection": coll, "source_path": f"/p/{i}.md", "doc_id": _tumbler(), "content_hash": "a"}
+            {"collection": many, "source_path": f"/p/{i}.md", "doc_id": _tumbler(), "content_hash": "a"}
             for i in range(5)
         ]
         assert queue.enqueue_many(rows) == 5
         assert queue.enqueue_many([{**r, "content_hash": "b"} for r in rows]) == 5
-        tasks = _tasks(store)
-        assert len(tasks) == 5
-        assert {json.loads(t.body)["content_hash"] for t in tasks} == {"b"}
+        tasks = [t for t in _tasks(store) if json.loads(t.body)["collection"] == many]
+        assert len(tasks) == 5, "enqueue_many: one task per document"
+        assert {json.loads(t.body)["content_hash"] for t in tasks} == {"b"}, "enqueue_many: the new body"
 
 
+@engine
 @pytest.mark.usefixtures("tuples_mode")
 class TestEnqueueManyFanOut:
-    def test_a_batch_lands_every_row_and_signals_the_wake_once(
+    def test_a_batch_lands_every_row_signals_the_wake_once_and_fans_out_bounded(
         self, monkeypatch: pytest.MonkeyPatch, queue: HttpAspectQueue, store: HttpTupleStore,
     ) -> None:
-        wakes: list[None] = []
-        monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: wakes.append(None))
-        coll = _coll()
-        rows = [{"collection": coll, "source_path": f"/p/{i}.md", "doc_id": _tumbler()} for i in range(40)]
-        assert queue.enqueue_many(rows) == 40
-        assert len(_tasks(store)) == 40
-        assert len(wakes) == 1
-
-    def test_the_fan_out_is_bounded(self, monkeypatch: pytest.MonkeyPatch, queue: HttpAspectQueue) -> None:
         import nexus.db.t2.http_aspect_queue as mod
 
+        wakes: list[None] = []
+        monkeypatch.setattr("nexus.aspect_worker.signal_aspect_wake", lambda *a, **k: wakes.append(None))
         live = peak = 0
         lock = threading.Lock()
         real = HttpTupleStore.out_replace
@@ -280,44 +274,37 @@ class TestEnqueueManyFanOut:
 
         monkeypatch.setattr(HttpTupleStore, "out_replace", wrapper)
         coll = _coll()
-        queue.enqueue_many([{"collection": coll, "source_path": f"/p/{i}.md", "doc_id": _tumbler()} for i in range(48)])
-        assert 1 <= peak <= mod.ENQUEUE_FANOUT_WORKERS
+        rows = [{"collection": coll, "source_path": f"/p/{i}.md", "doc_id": _tumbler()} for i in range(48)]
+        assert queue.enqueue_many(rows) == 48
+        assert len(_tasks(store)) == 48, "every row landed"
+        assert len(wakes) == 1, "one wake for the batch"
+        assert 1 <= peak <= mod.ENQUEUE_FANOUT_WORKERS, f"fan-out peak {peak}"
 
-    def test_malformed_rows_are_skipped_and_not_counted(
-        self, queue: HttpAspectQueue, store: HttpTupleStore,
-    ) -> None:
-        coll = _coll()
-        with structlog.testing.capture_logs() as cap:
-            n = queue.enqueue_many([
-                {"collection": coll, "source_path": "/p/ok.md", "doc_id": _tumbler()},
-                {"collection": "", "source_path": "/p/x.md", "doc_id": _tumbler()},
-                {"collection": coll, "source_path": "/p/nodoc.md"},
-            ])
-        assert n == 1 and len(_tasks(store)) == 1
-        skipped = [e for e in cap if e["event"] == "aspect_enqueue_many_rows_skipped_malformed"]
-        assert skipped and skipped[0]["skipped"] == 2
-
-    def test_an_over_long_path_skips_that_row_and_names_its_doc_id(
+    def test_bad_rows_are_skipped_and_not_counted_and_a_single_over_long_path_raises(
         self, queue: HttpAspectQueue, store: HttpTupleStore,
     ) -> None:
         coll, bad_doc = _coll(), _tumbler()
         rows = [
-            {"collection": coll, "source_path": "/p/a.md", "doc_id": _tumbler()},
+            {"collection": coll, "source_path": "/p/ok.md", "doc_id": _tumbler()},
+            {"collection": "", "source_path": "/p/x.md", "doc_id": _tumbler()},
+            {"collection": coll, "source_path": "/p/nodoc.md"},
             {"collection": coll, "source_path": "/p/" + "x" * 5000, "doc_id": bad_doc},
             {"collection": coll, "source_path": "/p/b.md", "doc_id": _tumbler()},
         ]
         with structlog.testing.capture_logs() as cap:
             assert queue.enqueue_many(rows) == 2
         assert len(_tasks(store)) == 2
+        skipped = [e for e in cap if e["event"] == "aspect_enqueue_many_rows_skipped_malformed"]
+        assert skipped and skipped[0]["skipped"] == 2, "malformed rows are counted in one warning"
         refusals = [e for e in cap if e["event"] == "aspect_enqueue_row_skipped_too_large"]
-        assert [e["doc_id"] for e in refusals] == [bad_doc]
-
-    def test_a_single_over_long_path_raises(self, queue: HttpAspectQueue, store: HttpTupleStore) -> None:
+        assert [e["doc_id"] for e in refusals] == [bad_doc], "the over-long row names its doc_id"
+        # The single form raises where the batch skips.
         with pytest.raises(TooLargeError):
             queue.enqueue(_coll(), "/p/" + "x" * 5000, doc_id=_tumbler())
-        assert _tasks(store) == []
+        assert len(_tasks(store)) == 2, "the refused single sent nothing"
 
 
+@engine
 @pytest.mark.usefixtures("tuples_mode")
 class TestMaxLiveRowsExceededIsLoud:
     def test_a_mid_batch_ceiling_stops_the_batch_and_raises(
@@ -352,11 +339,10 @@ class TestMaxLiveRowsExceededIsLoud:
         assert aborted[0]["unsent"] > 0 and len(calls) < len(rows), "the batch stopped sending"
         assert table_posts == [], "never replayed per row through the table"
         assert len(_tasks(store)) == 6, "rows that landed stay"
-
-    def test_a_single_enqueue_raises_it_too(self, monkeypatch: pytest.MonkeyPatch, queue: HttpAspectQueue) -> None:
-        _spy_out_replace(monkeypatch, fail_after=0, exc=MaxLiveRowsExceededError("full"))
+        # The single form raises it too (the spy is still past its limit).
         with pytest.raises(MaxLiveRowsExceededError):
-            queue.enqueue(_coll(), "/p/a.md", doc_id=_tumbler())
+            queue.enqueue(coll, "/p/single.md", doc_id=_tumbler())
+        assert len(_tasks(store)) == 6
 
     def test_the_hook_logs_the_refusal_with_its_doc_id_and_counts_it(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -385,6 +371,7 @@ class TestMaxLiveRowsExceededIsLoud:
         assert failures["total"] == 1 and coll in str(failures["rows"]), failures
 
 
+@engine
 @pytest.mark.usefixtures("tuples_mode")
 class TestRetiredNameIsRefusedBeforeAnyOut:
     def _retire(self, old: str, new: str) -> None:
@@ -420,6 +407,7 @@ class TestRetiredNameIsRefusedBeforeAnyOut:
         assert _tasks(store) == []
 
 
+@engine
 @pytest.mark.usefixtures("tuples_mode")
 class TestCapabilityCheck:
     def test_an_engine_without_the_template_is_refused_naming_the_release(
@@ -437,6 +425,7 @@ class TestCapabilityCheck:
             ])
 
 
+@engine
 class TestBatchFailureIsCounted:
     def test_record_batch_enqueue_failure_writes_a_hook_failures_row(self) -> None:
         """The indexer's flush hook swallows a failed batch; in tuples mode it

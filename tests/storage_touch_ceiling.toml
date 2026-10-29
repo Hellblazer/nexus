@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4945
+provisioned_tests = 4982
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
@@ -63,6 +63,30 @@ tolerance_tests = 0
 # the integration marker in this commit, outside python_unit. tests/test_z0o2p17_promote_note_write.py's four
 # promote-TTL-cap cases (40000, 10**8, 2**31-1, 10**12) are folded into one test; the module marks every test
 # t2_tenant because each promote writes a real note through put_note, so that one test needs its tenant.
+# 4945 -> 4982 (nexus-5r2sc.3, 2026-10-29, under Sam's 2026-10-25 ruling): the RDR-235 client half adds 37 tests that need
+# the real engine, down from 85 by making the mock-transport and pure-function cases tenant-free and folding
+# near-duplicates into scenarios. Tenant-free now: the nine claim-fence upsert cases in tests/db/test_http_aspects_stores.py
+# (the collection registration that reads the real catalog is stubbed), the flag parsing and the blank-doc_id refusal in
+# the producer file, the nonce-less replace refusal in tests/test_mcp_tuple_tools.py, and the two failure-shape cases of
+# tuple_counts. Each remaining test fails with its code deleted. Per file (count added over merge base 2b7b12bfb):
+#   tests/test_http_aspect_queue_tuples_producer.py +10: table mode sends nothing (default and a typo), a CLI row and an MCP
+#     note are identity bodies, a re-enqueue and a re-batch replace by doc_id, the batch fan-out is bounded, bad rows are
+#     skipped, the tenant ceiling stops a batch and the single form raises, the enqueue hook logs the refusal, a retired
+#     name is refused before any out, a missing template is refused naming the release, a failed batch is a counted row.
+#   tests/test_aspect_worker_tuples.py +9: five slots claim five tasks (one-claimant control inside), the park cap and its
+#     refusal, a deleted document is dropped while a present one is extracted, one pass over four failure classes, renewal
+#     inside the deadline, a hung extraction past it, the 409 arms (release then bounded dead), an MCP note task, and the two
+#     queue alternations.
+#   tests/test_aspect_persist_claim_fence.py +5: persist with a claim (RENAME_LOCK probe inside), without one, the four fence
+#     refusals, a lapse between write and ack, the pair rule.
+#   tests/test_aspects_requeue_failed_tuples.py +5: list, dry-run and revive a dead task (an available one untouched), collection
+#     scope with limit, since-paging, a table failure beside a dead task, the queue-depth sum on the real engine.
+#   tests/test_5r2sc_aspect_flush_batch_failure_tripwire.py +2: the tuples-mode flush counts a refused batch, and its table-mode
+#     control, each through a real index_repository().
+#   tests/test_http_tuple_store_rdr235_transport.py +2 and tests/test_mcp_tuple_tools.py +2: out mode=replace outcomes, and
+#     one scenario each for delay_s, nack dead and retry_after_s against the engine.
+#   tests/test_http_aspect_queue_tuple_counts.py +1 (the three-way census), tests/test_aspect_drain_protocol.py +1 (the drain
+#     CLI against live, dead and failed rows).
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default

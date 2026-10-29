@@ -23,7 +23,8 @@ from nexus.db.t2.http_aspect_queue import (
 )
 from nexus.db.t2.http_tuple_store import HttpTupleStore, UnknownSubspaceError
 
-pytestmark = pytest.mark.usefixtures("t2_service_env")
+# The tenant is opt-in (tests/AGENTS.md): only the census test reaches the engine; the two
+# failure-shape tests stub ``subspace_stats`` and mint none.
 
 
 def _coll() -> str:
@@ -53,11 +54,18 @@ def queue():
     q.close()
 
 
-def test_an_empty_queue_is_zero_on_every_side(queue: HttpAspectQueue) -> None:
-    assert queue.tuple_counts() == AspectTupleCounts(0, 0, 0)
+def _offline_queue() -> HttpAspectQueue:
+    """A queue with an explicit endpoint, so building it resolves nothing; the
+    tests that use it replace ``subspace_stats`` and send no request."""
+    return HttpAspectQueue(base_url="http://mock.test", _token="test-token")
 
 
+@pytest.mark.usefixtures("t2_service_env")
 def test_available_claimed_and_dead_are_three_different_counts(queue: HttpAspectQueue) -> None:
+    # Empty first: zero on every side, from the real census (the control for the
+    # missing-subspace case below, which is zero by exception).
+    assert queue.tuple_counts() == AspectTupleCounts(0, 0, 0), "an empty queue"
+
     coll = _coll()
     for i in range(4):
         queue.enqueue(coll, f"/p/{i}.md", doc_id=_tumbler())
@@ -75,9 +83,9 @@ def test_available_claimed_and_dead_are_three_different_counts(queue: HttpAspect
     )
 
 
-def test_a_missing_subspace_is_zero_not_a_failure(
-    queue: HttpAspectQueue, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_missing_subspace_is_zero_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    queue = _offline_queue()
+
     def refuse(self, subspace):
         raise UnknownSubspaceError("no template for aspects")
 
@@ -86,9 +94,11 @@ def test_a_missing_subspace_is_zero_not_a_failure(
 
 
 def test_any_other_failure_propagates_so_the_caller_can_say_unknown(
-    queue: HttpAspectQueue, monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import httpx
+
+    queue = _offline_queue()
 
     def down(self, subspace):
         raise httpx.ConnectError("refused")

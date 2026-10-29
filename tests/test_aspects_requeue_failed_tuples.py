@@ -93,11 +93,18 @@ class TestRequeueFailedAgainstTheEngine:
         assert before.claim_state == "dead"
         assert store.subspace_stats("aspects").dead == 1
 
+        def snapshot() -> list[tuple]:
+            return [
+                (r.id, r.claim_state, r.attempts, r.expires_at, r.created_at)
+                for r in store.rd("aspects", _KEYS, n=300)
+            ]
+
+        pre_dry = snapshot()
         dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
         assert dry.exit_code == 0, dry.output
         assert "Would re-enqueue 1 dead task(s)" in dry.output
         assert coll in dry.output and "a.pdf" in dry.output
-        assert store.subspace_stats("aspects").dead == 1, "dry-run wrote"
+        assert snapshot() == pre_dry, "dry-run wrote"
 
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output
@@ -112,49 +119,33 @@ class TestRequeueFailedAgainstTheEngine:
         assert after.expires_at > before.expires_at, "the retention clock restarted"
         assert after.created_at >= before.created_at
 
-    def test_dry_run_makes_no_writes_on_either_side(self, _t2: Path) -> None:
-        store = HttpTupleStore()
-        self._make_dead(store, "docs__nx235r-b__bge-base-en-v15-768__v1")
-        snapshot = [
-            (r.id, r.claim_state, r.attempts, r.expires_at, r.created_at)
-            for r in store.rd("aspects", _KEYS, n=300)
-        ]
-        res = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
-        assert res.exit_code == 0, res.output
-        assert snapshot == [
-            (r.id, r.claim_state, r.attempts, r.expires_at, r.created_at)
-            for r in store.rd("aspects", _KEYS, n=300)
-        ]
+        # The revived task is now an available one: a second run finds nothing
+        # dead and never touches it.
+        pre_again = snapshot()
+        again = CliRunner().invoke(aspects_group, ["requeue-failed"])
+        assert again.exit_code == 0, again.output
+        assert "no failed rows" in again.output
+        assert snapshot() == pre_again, "an available task was touched"
+        assert store.subspace_stats("aspects").available == 1
 
-    def test_collection_scope_filters_dead_tasks_on_the_body(self, _t2: Path) -> None:
+    def test_collection_scope_filters_on_the_body_and_the_limit_applies_after_it(
+        self, _t2: Path,
+    ) -> None:
         store = HttpTupleStore()
         a = "docs__nx235r-c1__bge-base-en-v15-768__v1"
         b = "docs__nx235r-c2__bge-base-en-v15-768__v1"
-        self._make_dead(store, a, "a.pdf")
+        # b's task is the OLDEST: a limit applied before the collection filter
+        # would spend a slot on it and revive only one of a's.
         self._make_dead(store, b, "b.pdf")
-        res = CliRunner().invoke(aspects_group, ["requeue-failed", "--collection", a])
-        assert res.exit_code == 0, res.output
-        assert f"Revived 1 dead task(s) in {a}" in res.output
-        assert store.subspace_stats("aspects").dead == 1, "the other collection's task stays dead"
-
-    def test_limit_applies_to_the_combined_list(self, _t2: Path) -> None:
-        store = HttpTupleStore()
         for i in range(3):
-            self._make_dead(store, "docs__nx235r-d__bge-base-en-v15-768__v1", f"{i}.pdf")
-        res = CliRunner().invoke(aspects_group, ["requeue-failed", "--limit", "2"])
+            self._make_dead(store, a, f"{i}.pdf")
+        res = CliRunner().invoke(aspects_group, ["requeue-failed", "--collection", a, "--limit", "2"])
         assert res.exit_code == 0, res.output
-        assert "Revived 2 dead task(s)" in res.output
+        assert f"Revived 2 dead task(s) in {a}" in res.output
         census = store.subspace_stats("aspects")
-        assert (census.dead, census.available) == (1, 2), census
-
-    def test_an_available_task_is_never_touched(self, _t2: Path) -> None:
-        store = HttpTupleStore()
-        doc = _doc()
-        store.out("aspects", _KEYS, None, _body("docs__nx235r-e__x__v1", doc), nonce=doc)
-        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
-        assert res.exit_code == 0, res.output
-        assert "no failed rows" in res.output
-        assert store.subspace_stats("aspects").available == 1
+        assert (census.dead, census.available) == (2, 2), (
+            f"b stays dead, one of a stays dead, two of a are back: {census}"
+        )
 
     def test_since_paging_reaches_dead_tasks_past_a_small_page(
         self, _t2: Path, monkeypatch: pytest.MonkeyPatch,

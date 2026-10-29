@@ -12,9 +12,13 @@ pair rule (one of the two is a ``ValueError``).
 
 VACUITY (each run red, then restored, recorded in the bead): stubbing out the
 claim branch of ``T2Database.complete_aspect`` (calling ``mark_done`` instead of
-``tuples.ack``) fails the claim-path, lapse and RENAME_LOCK tests; dropping the
-pair from ``HttpDocumentAspectsStore.upsert``'s body fails the refusal tests,
-because the engine then writes unfenced and nothing raises.
+``tuples.ack``) fails the claim-path (which also holds the RENAME_LOCK probe) and
+lapse tests; dropping the pair from ``HttpDocumentAspectsStore.upsert``'s body
+fails the refusal test, because the engine then writes unfenced and nothing raises.
+
+Each test is one scenario with several steps, folded to stay under the tenant
+ceiling (tests/storage_touch_ceiling.toml); a failed step names itself in its
+assertion message.
 """
 from __future__ import annotations
 
@@ -105,8 +109,8 @@ def _claimed_task(db: Any, claimant: str = "W:0") -> tuple[str, str]:
 
 
 class TestScenario9Persist:
-    def test_with_a_claim_the_write_and_the_tuple_ack_happen_and_the_table_is_untouched(
-        self, tmp_path: Path,
+    def test_with_a_claim_the_write_and_the_tuple_ack_happen_the_table_is_untouched_and_rename_lock_is_held(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         db = _db(tmp_path)
         try:
@@ -115,14 +119,37 @@ class TestScenario9Persist:
             db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
             assert db.aspect_queue.pending_count() == 1
 
+            # The RENAME_LOCK probe rides the real ack: another thread must block
+            # on the lock while the claim path acks.
+            real_ack = db.tuples.ack
+            probes: list[bool] = []
+
+            def probing_ack(*a: Any, **kw: Any) -> Any:
+                got: list[bool] = []
+
+                def probe() -> None:
+                    ok = db.RENAME_LOCK.acquire(blocking=True, timeout=0.2)
+                    got.append(ok)
+                    if ok:
+                        db.RENAME_LOCK.release()
+
+                t = threading.Thread(target=probe, daemon=True)
+                t.start()
+                t.join(timeout=2.0)
+                probes.append(got == [False])
+                return real_ack(*a, **kw)
+
+            monkeypatch.setattr(db.tuples, "ack", probing_ack)
+
             written = db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
 
             assert written is True
             assert _aspect_row(db, doc_id) is not None
             with pytest.raises(ClaimNotFoundError):  # the ack consumed the claim
-                db.tuples.ack(claim_id, "W:0")
+                real_ack(claim_id, "W:0")
             assert _task_rows(db) == 0
             assert db.aspect_queue.pending_count() == 1, "mark_done must not run on the claim path"
+            assert probes == [True], "another thread must block on RENAME_LOCK during the ack"
         finally:
             db.close()
 
@@ -148,57 +175,45 @@ class TestScenario9Persist:
 
 
 class TestFenceRefusals:
-    @pytest.mark.parametrize("lapse", ["release", "ack"])
-    def test_a_lapsed_claim_raises_not_found_and_writes_nothing(
-        self, tmp_path: Path, lapse: str,
-    ) -> None:
+    def test_each_refusal_of_the_fence_writes_nothing(self, tmp_path: Path) -> None:
+        """Four refusals in turn, each leaving the queue as it found it (the lapse
+        by release goes last: it leaves its task claimable)."""
         db = _db(tmp_path)
         try:
-            doc_id, claim_id = _claimed_task(db)
-            db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
-            if lapse == "release":
-                db.tuples.release(claim_id, "W:0")
-            else:
-                db.tuples.ack(claim_id, "W:0")
-            rows_before = _task_rows(db)
-
-            with pytest.raises(ClaimNotFoundError):
-                db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
-
-            assert _aspect_row(db, doc_id) is None, "a refused fence writes nothing"
-            assert db.aspect_queue.pending_count() == 1, "the table is not touched"
-            assert _task_rows(db) == rows_before
-        finally:
-            db.close()
-
-    def test_another_claimants_pair_raises_ownership_and_leaves_the_claim_live(
-        self, tmp_path: Path,
-    ) -> None:
-        db = _db(tmp_path)
-        try:
+            # 403 ownership: another claimant's pair; the claim stays live.
             doc_id, claim_id = _claimed_task(db, "W:0")
-
             with pytest.raises(ClaimOwnershipError):
                 db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:9")
-
-            assert _aspect_row(db, doc_id) is None
+            assert _aspect_row(db, doc_id) is None, "ownership wrote"
             db.tuples.ack(claim_id, "W:0")  # the rightful holder still holds it
-        finally:
-            db.close()
 
-    def test_a_claim_on_another_documents_task_raises_task_mismatch(
-        self, tmp_path: Path,
-    ) -> None:
-        db = _db(tmp_path)
-        try:
+            # 403 task mismatch: a live claim on another document's task.
             _, claim_id = _claimed_task(db)
             other_doc = register_real_doc_id(title=_stamp_title() + " other")
-
             with pytest.raises(ClaimTaskMismatchError):
                 db.complete_aspect(_fields(other_doc), claim_id=claim_id, claimant="W:0")
-
-            assert _aspect_row(db, other_doc) is None
+            assert _aspect_row(db, other_doc) is None, "task mismatch wrote"
             db.tuples.ack(claim_id, "W:0")
+
+            # 404 not found, the claim acked away.
+            doc_id, claim_id = _claimed_task(db)
+            db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
+            db.tuples.ack(claim_id, "W:0")
+            with pytest.raises(ClaimNotFoundError):
+                db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
+            assert _aspect_row(db, doc_id) is None, "a lapse by ack wrote"
+            assert db.aspect_queue.pending_count() == 1, "the table is not touched (ack lapse)"
+            assert _task_rows(db) == 0
+
+            # 404 not found, the claim released (the task is claimable again).
+            doc_id, claim_id = _claimed_task(db)
+            db.tuples.release(claim_id, "W:0")
+            rows_before = _task_rows(db)
+            with pytest.raises(ClaimNotFoundError):
+                db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
+            assert _aspect_row(db, doc_id) is None, "a lapse by release wrote"
+            assert db.aspect_queue.pending_count() == 1, "the table is not touched (release lapse)"
+            assert _task_rows(db) == rows_before
         finally:
             db.close()
 
@@ -228,54 +243,17 @@ class TestScenario4ClientHalf:
 
 
 class TestPairRule:
-    @pytest.mark.parametrize("pair", [{"claim_id": "c"}, {"claimant": "W:0"}])
-    def test_one_of_the_two_is_a_value_error_and_nothing_is_touched(
-        self, tmp_path: Path, pair: dict[str, str],
-    ) -> None:
+    def test_one_of_the_two_is_a_value_error_and_nothing_is_touched(self, tmp_path: Path) -> None:
         db = _db(tmp_path)
         try:
             doc_id, claim_id = _claimed_task(db)
             db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
 
-            with pytest.raises(ValueError, match="claim_id.*claimant"):
-                db.complete_aspect(_fields(doc_id), **pair)
-
-            assert _aspect_row(db, doc_id) is None
-            assert db.aspect_queue.pending_count() == 1
+            for pair in ({"claim_id": "c"}, {"claimant": "W:0"}):
+                with pytest.raises(ValueError, match="claim_id.*claimant"):
+                    db.complete_aspect(_fields(doc_id), **pair)
+                assert _aspect_row(db, doc_id) is None, f"{pair} wrote"
+                assert db.aspect_queue.pending_count() == 1, f"{pair} touched the table"
             db.tuples.ack(claim_id, "W:0")  # the claim is still live
-        finally:
-            db.close()
-
-
-class TestRenameLock:
-    def test_the_claim_path_holds_rename_lock_across_the_write_and_the_ack(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        db = _db(tmp_path)
-        try:
-            doc_id, claim_id = _claimed_task(db)
-            real_ack = db.tuples.ack
-            probes: list[bool] = []
-
-            def probing_ack(*a: Any, **kw: Any) -> Any:
-                got: list[bool] = []
-
-                def probe() -> None:
-                    ok = db.RENAME_LOCK.acquire(blocking=True, timeout=0.2)
-                    got.append(ok)
-                    if ok:
-                        db.RENAME_LOCK.release()
-
-                t = threading.Thread(target=probe, daemon=True)
-                t.start()
-                t.join(timeout=2.0)
-                probes.append(got == [False])
-                return real_ack(*a, **kw)
-
-            monkeypatch.setattr(db.tuples, "ack", probing_ack)
-
-            db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
-
-            assert probes == [True], "another thread must block on RENAME_LOCK during the ack"
         finally:
             db.close()

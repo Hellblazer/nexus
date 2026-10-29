@@ -132,9 +132,18 @@ class TestHttpDocumentAspectsStore:
 
     # ── RDR-235 E5 client half (nexus-5r2sc.3.1): the claim-fenced upsert ────
 
-    def _capturing_store(self, status: int = 200, body: dict | None = None):
+    def _capturing_store(
+        self, monkeypatch: pytest.MonkeyPatch, status: int = 200, body: dict | None = None,
+    ):
         """A store whose /v1/aspects/upsert answers (*status*, *body*) and
-        whose request bodies are captured, as raw bytes, in the returned list."""
+        whose request bodies are captured, as raw bytes, in the returned list.
+
+        The collection registration that precedes a write reads the real catalog
+        (the embedding profile), which would need an engine and a tenant; these
+        tests pin the request body and the refusal mapping, not registration, so
+        it is stubbed out (``test_upsert_written`` and the queue cases above keep
+        the registered write path under a tenant)."""
+        monkeypatch.setattr("nexus.corpus.ensure_collection_registered", lambda *a, **k: None)
         sent: list[bytes] = []
 
         def handle(request: httpx.Request) -> httpx.Response:
@@ -150,11 +159,10 @@ class TestHttpDocumentAspectsStore:
         store._client = httpx.Client(transport=httpx.MockTransport(handle))
         return store, sent
 
-    @pytest.mark.t2_tenant
-    def test_upsert_without_a_claim_pair_sends_the_unchanged_body(self):
+    def test_upsert_without_a_claim_pair_sends_the_unchanged_body(self, monkeypatch):
         from nexus.db.t2.http_document_aspects_store import _record_to_body
 
-        store, sent = self._capturing_store()
+        store, sent = self._capturing_store(monkeypatch)
         record = _make_aspect()
         assert store.upsert(record) is True
         assert len(sent) == 1
@@ -165,9 +173,8 @@ class TestHttpDocumentAspectsStore:
         assert "claim_id" not in json.loads(sent[0])
         assert "claimant" not in json.loads(sent[0])
 
-    @pytest.mark.t2_tenant
-    def test_upsert_with_a_claim_pair_sends_both_fields(self):
-        store, sent = self._capturing_store()
+    def test_upsert_with_a_claim_pair_sends_both_fields(self, monkeypatch):
+        store, sent = self._capturing_store(monkeypatch)
         assert store.upsert(_make_aspect(), claim_id="c-1", claimant="W:0") is True
         body = json.loads(sent[0])
         assert body["claim_id"] == "c-1"
@@ -180,13 +187,12 @@ class TestHttpDocumentAspectsStore:
         {"claim_id": "c-1", "claimant": ""},
         {"claim_id": "", "claimant": "W:0"},
     ])
-    def test_upsert_refuses_half_a_pair_before_any_request(self, pair):
-        store, sent = self._capturing_store()
+    def test_upsert_refuses_half_a_pair_before_any_request(self, pair, monkeypatch):
+        store, sent = self._capturing_store(monkeypatch)
         with pytest.raises(ValueError, match="claim_id.*claimant"):
             store.upsert(_make_aspect(), **pair)
         assert sent == []
 
-    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("status, wire, expected", [
         (404, {"error": "ClaimNotFound", "detail": "no live claim"}, "ClaimNotFoundError"),
         (403, {"error": "ClaimOwnership", "detail": "held by another"}, "ClaimOwnershipError"),
@@ -196,12 +202,12 @@ class TestHttpDocumentAspectsStore:
         (409, {"error": "constraint violation", "status": "conflict", "sqlstate": "23505"},
          "AspectUpsertConflictError"),
     ])
-    def test_fenced_upsert_maps_each_refusal_to_its_own_typed_error(self, status, wire, expected):
+    def test_fenced_upsert_maps_each_refusal_to_its_own_typed_error(self, status, wire, expected, monkeypatch):
         from nexus.db.t2 import http_document_aspects_store as mod
         from nexus.db.t2 import http_tuple_store as tuples
 
         cls = getattr(mod, expected, None) or getattr(tuples, expected)
-        store, sent = self._capturing_store(status, wire)
+        store, sent = self._capturing_store(monkeypatch, status, wire)
         with pytest.raises(cls):
             store.upsert(_make_aspect(), claim_id="c-1", claimant="W:0")
         assert len(sent) == 1, "a refusal is not retried"
@@ -225,8 +231,7 @@ class TestHttpDocumentAspectsStore:
         assert not issubclass(mod.AspectUpsertBadRequestError, tuples.TupleError)
         assert not issubclass(mod.AspectUpsertConflictError, tuples.TupleError)
 
-    @pytest.mark.t2_tenant
-    def test_fenced_upsert_leaves_a_superseded_collection_refusal_alone(self):
+    def test_fenced_upsert_leaves_a_superseded_collection_refusal_alone(self, monkeypatch):
         from nexus.collection_errors import SupersededCollectionWriteError
         from nexus.db.t2.http_document_aspects_store import AspectUpsertConflictError
 
@@ -235,15 +240,14 @@ class TestHttpDocumentAspectsStore:
             "collection": "test-coll", "superseded_by": "test-coll-2",
             "message": "retired",
         }
-        store, _ = self._capturing_store(409, wire)
+        store, _ = self._capturing_store(monkeypatch, 409, wire)
         with pytest.raises(SupersededCollectionWriteError) as caught:
             store.upsert(_make_aspect(), claim_id="c-1", claimant="W:0")
         assert not isinstance(caught.value, AspectUpsertConflictError)
 
-    @pytest.mark.t2_tenant
-    def test_an_unfenced_refusal_is_not_translated(self):
+    def test_an_unfenced_refusal_is_not_translated(self, monkeypatch):
         # Only the claim-bearing path translates; today's callers see today's error.
-        store, _ = self._capturing_store(404, {"error": "ClaimNotFound", "detail": "x"})
+        store, _ = self._capturing_store(monkeypatch, 404, {"error": "ClaimNotFound", "detail": "x"})
         with pytest.raises(httpx.HTTPStatusError):
             store.upsert(_make_aspect())
 

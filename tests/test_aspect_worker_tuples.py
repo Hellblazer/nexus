@@ -140,8 +140,19 @@ class TestScenario6FiveClaims:
         docs = [_doc(f"s6-{i}") for i in range(5)]
         for d in docs:
             _out(db, d)
-        side = _worker()._tuple_side
 
+        # The control first: ONE claimant claiming five times is its first task
+        # five times (F25), which is what the five slots below must not be.
+        got = [
+            db.tuples.inp(_SUB, dict(_KEYS), claimant="one-claimant", lease_s=600)
+            for _ in range(5)
+        ]
+        assert all(g is not None for g in got)
+        assert len({g[0].id for g in got}) == 1, "F25: a repeat claim by one claimant is its held claim"
+        assert len({g[1] for g in got}) == 1
+        db.tuples.release(got[0][1], "one-claimant")
+
+        side = _worker()._tuple_side
         claims, failed = side.claim_batch(park=False)
 
         assert not failed
@@ -151,22 +162,11 @@ class TestScenario6FiveClaims:
         assert all(c.claimant == f"{side.worker_id}:{c.slot}" for c in claims)
         assert all(c.row is not None and c.row.doc_id in docs for c in claims)
 
-    def test_control_one_claimant_five_times_is_the_first_task_five_times(
-        self, db: Any,
-    ) -> None:
-        for i in range(5):
-            _out(db, _doc(f"s6c-{i}"))
-        got = [
-            db.tuples.inp(_SUB, dict(_KEYS), claimant="one-claimant", lease_s=600)
-            for _ in range(5)
-        ]
-        assert all(g is not None for g in got)
-        assert len({g[0].id for g in got}) == 1, "F25: a repeat claim by one claimant is its held claim"
-        assert len({g[1] for g in got}) == 1
-
 
 class TestScenario15ParkCap:
-    def test_more_than_four_collections_park_once_under_slot_zero(self, db: Any) -> None:
+    def test_more_than_four_collections_park_once_under_slot_zero(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         for i in range(6):
             _out(db, _doc(f"s15-{i}"), collection=f"knowledge__nx235c{i}-{uuid.uuid4().hex[:4]}")
         # drain them, so the idle batch below is the parked case
@@ -187,116 +187,81 @@ class TestScenario15ParkCap:
         assert db.tuples.park_stats().refused_claimant == 0
         assert db.tuples.park_stats().refused_global == 0
 
-    def test_a_park_cap_refusal_is_a_failed_claim_not_a_crash(
-        self, db: Any, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        side = _worker()._tuple_side
 
+        # A park-cap refusal from the engine is a failed claim, not a crash.
         def refuse(*a: Any, **k: Any):
             raise ParkCapExceededError("cap")
 
         monkeypatch.setattr(HttpTupleStore, "in_", refuse)
         got, failed = side.claim_batch(park=True)
-        assert got == [] and failed
+        assert got == [] and failed, "a park-cap refusal is a failed claim"
 
 
 class TestScenario16DeletedDocument:
-    def test_a_task_for_a_document_the_catalog_no_longer_has_is_acked_as_dropped(
+    def test_a_task_for_a_missing_document_is_acked_as_dropped_and_a_present_one_is_extracted(
         self, db: Any, extracted: list[dict], tuple_events: list[str],
     ) -> None:
-        _out(db, "1.99999.99999")  # no such catalog document
+        """The present document is the control: the same pass extracts it, so the
+        missing one's silence is the drop and not a worker that did nothing."""
+        present = _doc("s16-present")
+        _out(db, "1.99999.99999", source="/gone.md")  # no such catalog document
+        _out(db, present, source="/present.md")
         side = _worker()._tuple_side
         claims, _ = side.claim_batch(park=False)
-        assert len(claims) == 1
+        assert len(claims) == 2
 
         side.process(claims)
 
         assert "aspect_task_dropped_missing_doc" in tuple_events, tuple_events
-        assert extracted == [], "no extraction for a document that is gone"
-        assert _tasks(db) == [], "acked as dropped: the task is consumed"
+        assert [c["source_path"] for c in extracted] == ["/present.md"], (
+            "no extraction for a document that is gone; one for the document that is there"
+        )
+        assert _tasks(db) == [], "acked as dropped: both tasks are consumed"
         assert db.document_aspects.get_by_doc_id("1.99999.99999") is None
-
-    def test_a_present_document_is_extracted_and_its_task_acked(
-        self, db: Any, extracted: list[dict],
-    ) -> None:
-        doc = _doc("s16-present")
-        _out(db, doc)
-        side = _worker()._tuple_side
-        claims, _ = side.claim_batch(park=False)
-        side.process(claims)
-        assert len(extracted) == 1
-        assert db.document_aspects.get_by_doc_id(doc) is not None
-        assert _tasks(db) == []
+        assert db.document_aspects.get_by_doc_id(present) is not None
 
 
 class TestGateS3InfraUnavailable:
-    def test_infra_unavailable_is_a_retryable_nack_never_a_drop(
+    def test_each_failure_class_gets_its_own_verdict(
         self, db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        doc = _doc("s3-infra")
-        _out(db, doc)
-        monkeypatch.setattr(
-            "nexus.aspect_worker._extract_aspects",
-            lambda **kw: ExtractFail(uri="nx-note://x", reason="infra_unavailable", detail="T3 down"),
-        )
-        side = _worker()._tuple_side
-        claims, _ = side.claim_batch(park=False)
+        """One pass over four tasks, the extractor failing a different way for
+        each (keyed on source path): infra_unavailable and an unreachable engine
+        are retryable nacks and never a drop; a permanent read failure is acked
+        as dropped; a non-retryable error is dead at once."""
+        docs = {name: _doc(f"s3-{name}") for name in ("infra", "conn", "perm", "dead")}
+        for name, doc in docs.items():
+            _out(db, doc, source=f"/{name}.md")
 
-        side.process(claims)
-
-        rows = _tasks(db)
-        assert len(rows) == 1, "the task is still there: not acked, not dropped"
-        assert rows[0].attempts == 1, "the nack counted an attempt"
-        assert rows[0].claim_state != "dead"
-        assert db.document_aspects.get_by_doc_id(doc) is None
-        # held back by retry_after_s from the RDR-163 ladder (30 s +- 20 %)
-        assert db.tuples.inp(_SUB, dict(_KEYS), claimant="other", lease_s=60) is None
-
-    def test_an_unreachable_engine_during_extraction_is_a_retryable_nack(
-        self, db: Any, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        doc = _doc("s3-conn")
-        _out(db, doc)
-
-        def boom(**kw: Any):
-            raise httpx.ConnectError("T3 unreachable")
-
-        monkeypatch.setattr("nexus.aspect_worker._extract_aspects", boom)
-        side = _worker()._tuple_side
-        claims, _ = side.claim_batch(park=False)
-        side.process(claims)
-        rows = _tasks(db)
-        assert len(rows) == 1 and rows[0].attempts == 1 and rows[0].claim_state != "dead"
-
-    def test_a_permanent_read_failure_is_acked_as_dropped(
-        self, db: Any, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        doc = _doc("s3-perm")
-        _out(db, doc)
-        monkeypatch.setattr(
-            "nexus.aspect_worker._extract_aspects",
-            lambda **kw: ExtractFail(uri="u", reason="unreachable", detail="bad uri"),
-        )
-        side = _worker()._tuple_side
-        claims, _ = side.claim_batch(park=False)
-        side.process(claims)
-        assert _tasks(db) == []
-
-    def test_a_non_retryable_failure_is_dead_at_once(
-        self, db: Any, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        doc = _doc("s3-dead")
-        _out(db, doc)
-
-        def boom(**kw: Any):
+        def fake(content=None, source_path=None, collection=None, **kw: Any):
+            if source_path == "/infra.md":
+                return ExtractFail(uri="nx-note://x", reason="infra_unavailable", detail="T3 down")
+            if source_path == "/conn.md":
+                raise httpx.ConnectError("T3 unreachable")
+            if source_path == "/perm.md":
+                return ExtractFail(uri="u", reason="unreachable", detail="bad uri")
             raise ValueError("malformed")
 
-        monkeypatch.setattr("nexus.aspect_worker._extract_aspects", boom)
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects", fake)
         side = _worker()._tuple_side
         claims, _ = side.claim_batch(park=False)
-        side.process(claims)
-        rows = _tasks(db)
-        assert len(rows) == 1 and rows[0].claim_state == "dead" and rows[0].attempts == 1
+        assert len(claims) == 4
+
+        for claim in claims:  # one at a time: a lone claim takes the single-document extractor
+            side.process([claim])
+
+        rows = {json.loads(r.body)["source_path"]: r for r in _tasks(db)}
+        assert sorted(rows) == ["/conn.md", "/dead.md", "/infra.md"], (
+            f"only the permanent read failure is consumed: {sorted(rows)}"
+        )
+        for path in ("/infra.md", "/conn.md"):
+            assert rows[path].attempts == 1, f"{path}: the nack counted an attempt"
+            assert rows[path].claim_state != "dead", f"{path}: retryable, never dead"
+        assert rows["/dead.md"].claim_state == "dead" and rows["/dead.md"].attempts == 1
+        for doc in docs.values():
+            assert db.document_aspects.get_by_doc_id(doc) is None
+        # held back by retry_after_s from the RDR-163 ladder (30 s +- 20 %)
+        assert db.tuples.inp(_SUB, dict(_KEYS), claimant="other", lease_s=60) is None
 
 
 class TestScenario7Renewal:
@@ -373,7 +338,13 @@ class TestScenario10Superseded:
         with HttpCatalogClient() as cat:
             cat.rename_collection_cascade(old, new)
 
-    def test_409_releases_with_no_attempt_and_the_next_claim_carries_the_new_name(
+    def test_409_releases_with_no_attempt_and_the_next_claim_carries_the_new_name_and_a_repeated_409_is_bounded(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._409_releases_and_the_next_claim_carries_the_new_name(db, monkeypatch)
+        self._a_task_that_keeps_answering_409_is_nacked_dead_on_the_second(db, monkeypatch)
+
+    def _409_releases_and_the_next_claim_carries_the_new_name(
         self, db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         owner = uuid.uuid4().hex[:8]
@@ -410,9 +381,10 @@ class TestScenario10Superseded:
         assert db.document_aspects.get_by_doc_id(doc) is not None
         assert _tasks(db) == []
 
-    def test_a_task_that_keeps_answering_409_is_nacked_dead_on_the_second(
+    def _a_task_that_keeps_answering_409_is_nacked_dead_on_the_second(
         self, db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Second arm of the scenario: runs after the release arm, on a task of its own."""
         owner = uuid.uuid4().hex[:8]
         old = f"knowledge__nx235t-{owner}__bge-base-en-v15-768__v1"
         new = f"knowledge__nx235t-{owner}__bge-base-en-v15-768__v2"
@@ -484,7 +456,14 @@ class TestScenario14NoteTask:
 
 
 class TestAlternationWithTheTable:
-    def test_pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(
+    def test_both_queues_drain_in_tuples_mode_and_a_table_mode_worker_drains_leftover_tasks(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(db, monkeypatch)
+        monkeypatch.delenv("NX_ASPECT_QUEUE")
+        self._a_table_mode_worker_still_drains_leftover_tuple_tasks(db, monkeypatch)
+
+    def _pending_table_rows_and_tuple_tasks_both_drain_in_tuples_mode(
         self, db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         table_docs = [_doc(f"alt-t{i}") for i in range(3)]
@@ -519,7 +498,7 @@ class TestAlternationWithTheTable:
         finally:
             w.stop(timeout=10)
 
-    def test_a_table_mode_worker_still_drains_leftover_tuple_tasks(
+    def _a_table_mode_worker_still_drains_leftover_tuple_tasks(
         self, db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # gate S1 rollback: the flag is unset (table), tasks are on the tuple queue

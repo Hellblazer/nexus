@@ -152,41 +152,43 @@ class TestAgainstTheEngine:
         rows = [r for r in store.rd("aspects", keys, n=300) if r.id == first[0]]
         assert len(rows) == 1 and rows[0].body == '{"v":2}'
 
-    def test_delay_s_holds_a_task_back(self) -> None:
+    def test_delay_and_the_nack_fields_reach_the_engine(self) -> None:
+        """``delay_s``, ``nack(dead=True)``, ``nack(retry_after_s=)`` and a plain
+        ``nack`` on one queue, one branch at a time; each assertion names its own.
+        The delayed task is written FIRST, so a ``delay_s`` the client dropped
+        would be claimed ahead of the dead-letter task."""
         store = HttpTupleStore()
         keys = {"queue": "aspects"}
-        tid = store.out("aspects", keys, None, "{}", nonce=self._doc(), delay_s=3600)
-        assert store.inp("aspects", keys, claimant="rdr235-delay", lease_s=60) is None, (
-            f"task {tid} was delayed an hour and must not be claimable"
-        )
-        assert store.subspace_stats("aspects").total == 1
+        delayed = store.out("aspects", keys, None, "{}", nonce=self._doc(), delay_s=3600)
+        dead_id = store.out("aspects", keys, None, "{}", nonce=self._doc())
 
-    def test_nack_dead_dead_letters_at_once(self) -> None:
-        store = HttpTupleStore()
-        keys = {"queue": "aspects"}
-        tid = store.out("aspects", keys, None, "{}", nonce=self._doc())
+        # delay_s: the immediate task is the one claimed, the delayed one is not.
         row, claim = store.inp("aspects", keys, claimant="rdr235-dead", lease_s=60)
-        assert row.id == tid
+        assert row.id == dead_id, f"task {delayed} was delayed an hour and must not be claimed first"
+
+        # nack(dead=True): dead-lettered at once.
         store.nack(claim, "rdr235-dead", dead=True)
         census = store.subspace_stats("aspects")
-        assert (census.dead, census.available) == (1, 0), census
+        assert (census.dead, census.available, census.total) == (1, 1, 2), census
+        assert store.inp("aspects", keys, claimant="rdr235-delay", lease_s=60) is None, (
+            "the delayed task and the dead one are both unclaimable"
+        )
 
-    def test_nack_retry_after_s_holds_the_task_back(self) -> None:
-        store = HttpTupleStore()
-        keys = {"queue": "aspects"}
-        tid = store.out("aspects", keys, None, "{}", nonce=self._doc())
+        # nack(retry_after_s=): held back, not dead.
+        held_id = store.out("aspects", keys, None, "{}", nonce=self._doc())
         row, claim = store.inp("aspects", keys, claimant="rdr235-retry", lease_s=60)
-        assert row.id == tid
+        assert row.id == held_id
         store.nack(claim, "rdr235-retry", retry_after_s=3600)
-        assert store.inp("aspects", keys, claimant="rdr235-retry", lease_s=60) is None
+        assert store.inp("aspects", keys, claimant="rdr235-retry", lease_s=60) is None, (
+            "retry_after_s held the task back"
+        )
         census = store.subspace_stats("aspects")
-        assert (census.dead, census.total) == (0, 1), census
+        assert (census.dead, census.total) == (1, 3), census
 
-    def test_a_plain_nack_returns_the_task_at_once(self) -> None:
-        store = HttpTupleStore()
-        keys = {"queue": "aspects"}
-        tid = store.out("aspects", keys, None, "{}", nonce=self._doc())
+        # A plain nack returns the task at once.
+        plain_id = store.out("aspects", keys, None, "{}", nonce=self._doc())
         row, claim = store.inp("aspects", keys, claimant="rdr235-plain", lease_s=60)
+        assert row.id == plain_id
         store.nack(claim, "rdr235-plain")
         again = store.inp("aspects", keys, claimant="rdr235-plain", lease_s=60)
-        assert again is not None and again[0].id == tid
+        assert again is not None and again[0].id == plain_id, "a plain nack is claimable at once"
