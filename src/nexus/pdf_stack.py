@@ -3,7 +3,7 @@
 """The PDF stack on demand (nexus-2k66t.4.2).
 
 MinerU, torch, torchvision and pdftext are the ``pdf`` extra. A fresh
-install goes without them (57-65% of the download, 49% of the installed size);
+install goes without them (62-65% of the download, 54-62% of the installed size, measured on 7.89.0);
 the first PDF index fetches them. An EXISTING install carries them forward on
 its first post-split upgrade (``install_layout.receipt_predates_pdf_split``).
 
@@ -151,7 +151,7 @@ VCRT_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
 #: Said once, on stderr, before uv starts (the design's wording).
 INSTALL_NOTICE = (
-    "Installing PDF support for conexus {version}: about 285 MB (macOS) / 390 MB (Linux) "
+    "Installing PDF support for conexus {version}: about 272 MB (macOS) / 374 MB (Linux) "
     "download, 1.0 GB (macOS) / 1.3 GB (Linux) on disk, kept by future upgrades. Model weights follow with "
     "the first PDF you index: about 1.2 GB."
 )
@@ -339,7 +339,7 @@ def state() -> StackState:
 def policy() -> str:
     """``install`` (the default) or ``refuse``. ``NX_PDF_STACK`` wins over the
     ``pdf_stack.auto_install`` config key. An unreadable value refuses: a
-    typo must not start a 390 MB download."""
+    typo must not start a 374 MB download."""
     raw = os.environ.get(POLICY_ENV, "").strip().lower()
     if raw:
         if raw in (POLICY_INSTALL, POLICY_REFUSE):
