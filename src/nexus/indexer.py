@@ -2625,6 +2625,8 @@ def index_repository(
                         chunk_flush_throttled_files=stats.get("chunk_flush_throttled_files", 0),
                         transient_upsert_deferred_files=stats.get("transient_upsert_deferred_files", 0),
                         identity_less_dropped_files=stats.get("identity_less_dropped_files", 0),
+                        pdf_mineru_tripped=stats.get("pdf_mineru_tripped", 0),
+                        pdf_mineru_not_attempted=len(stats.get("pdf_mineru_not_attempted_paths") or ()),
                     )
                 else:
                     _set_owner_head_hash(repo, _current_head(repo))
@@ -3181,12 +3183,15 @@ def _contain_mineru_stop(fn: "Callable[[], int]", file: "Path", stop: _MineruSto
     timeouts. Any other exception propagates unchanged.
 
     Unlike ``nx index pdf``, this does not roll back a freshly registered catalog row. That is
-    deliberate, not an omission (shakedown 7.89.0 umbrella class b): the repo run registers every
-    file in Pass 1, in one batch, and has no per-file "minted by this call" record, so
-    ``_reconcile_needs_fence`` fail-stamps whatever did not complete (``index_state='failed'``,
-    nexus-hg2dw). A ``failed`` row is what makes the next run re-index the file
-    (``stale_fence_doc_ids``), and the ``--since-head`` base stays put while a PDF is tripped or
-    not attempted (``since_head_base_not_advanced``), so the PDF stays in the next delta.
+    deliberate, not an omission (nexus-b0y6w, shakedown 7.89.0 umbrella class b): the repo run
+    registers every file in Pass 1, in one batch, and has no per-file "minted by this call" record.
+    ``_reconcile_needs_fence`` fail-stamps only the documents Pass 1 put in ``needs_fence``, the
+    newly registered and the content-changed ones (``index_state='failed'``, nexus-hg2dw). A
+    ``failed`` row is what makes the next run re-index the file (``stale_fence_doc_ids``). An
+    unchanged, already complete PDF that trips is not in ``needs_fence``: it stays ``complete``
+    with its old chunks, and the next run sees it as unchanged. The ``--since-head`` base stays put
+    while any PDF is tripped or not attempted (``since_head_base_not_advanced``), so the file stays
+    in the next git delta either way.
     """
     from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
 
