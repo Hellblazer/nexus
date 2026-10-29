@@ -119,12 +119,10 @@ class TestScenario9Persist:
             db.aspect_queue.enqueue(_COLLECTION, _SOURCE, "h", doc_id=doc_id)
             assert db.aspect_queue.pending_count() == 1
 
-            # The RENAME_LOCK probe rides the real ack: another thread must block
-            # on the lock while the claim path acks.
-            real_ack = db.tuples.ack
-            probes: list[bool] = []
-
-            def probing_ack(*a: Any, **kw: Any) -> Any:
+            # The RENAME_LOCK probe rides BOTH real calls, the fenced upsert and the
+            # ack: another thread must block on the lock during each, or a lock
+            # that covers only one half (nexus-5r2sc.3.9 M3) would stay green.
+            def lock_is_held_by_the_caller() -> bool:
                 got: list[bool] = []
 
                 def probe() -> None:
@@ -136,10 +134,24 @@ class TestScenario9Persist:
                 t = threading.Thread(target=probe, daemon=True)
                 t.start()
                 t.join(timeout=2.0)
-                probes.append(got == [False])
+                return got == [False]
+
+            real_ack = db.tuples.ack
+            real_upsert = db.document_aspects.upsert
+            probes: list[str] = []
+
+            def probing_ack(*a: Any, **kw: Any) -> Any:
+                if lock_is_held_by_the_caller():
+                    probes.append("ack")
                 return real_ack(*a, **kw)
 
+            def probing_upsert(*a: Any, **kw: Any) -> Any:
+                if lock_is_held_by_the_caller():
+                    probes.append("upsert")
+                return real_upsert(*a, **kw)
+
             monkeypatch.setattr(db.tuples, "ack", probing_ack)
+            monkeypatch.setattr(db.document_aspects, "upsert", probing_upsert)
 
             written = db.complete_aspect(_fields(doc_id), claim_id=claim_id, claimant="W:0")
 
@@ -149,7 +161,9 @@ class TestScenario9Persist:
                 real_ack(claim_id, "W:0")
             assert _task_rows(db) == 0
             assert db.aspect_queue.pending_count() == 1, "mark_done must not run on the claim path"
-            assert probes == [True], "another thread must block on RENAME_LOCK during the ack"
+            assert probes == ["upsert", "ack"], (
+                "another thread must block on RENAME_LOCK during the fenced upsert AND the ack"
+            )
         finally:
             db.close()
 
