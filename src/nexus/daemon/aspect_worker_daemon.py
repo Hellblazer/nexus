@@ -366,7 +366,16 @@ class AspectWorkerDaemon:
         RECLAIM-FIRST, then sleep (review H1, mirroring the T2 predecessor
         nexus-nhqll): a freshly (re)spawned daemon clears the stale-row backlog a
         prior worker death left BEHIND immediately, rather than waiting a full
-        interval — in service mode this daemon is the SOLE reclaim owner."""
+        interval — in service mode this daemon is the SOLE reclaim owner.
+
+        RDR-235: this loop is the TABLE's reclaim and nothing else. It never
+        touches the ``aspects`` tuple queue: a tuple claim lives and dies by its
+        lease (the engine reclaims a lapsed one on the next claim and counts an
+        attempt), so there is nothing here to sweep for it. It keeps running in
+        every mode because the table can still hold rows whatever the producer's
+        flag says (a table-mode producer on another box, rows left by a rollback,
+        ``in_progress`` rows of an older worker), and the worker drains both
+        queues (gate S1)."""
         while True:
             self._reclaim_once()
             if self._stop.wait(self._current_reclaim_wait):
@@ -529,6 +538,28 @@ class AspectWorkerDaemon:
                 self._worker.stop(timeout=timeout)
             except Exception as exc:  # noqa: BLE001 - worker stop is best-effort during teardown
                 _log.warning("aspect_worker_daemon.worker_stop_failed", tenant=self._tenant, error=str(exc))
+            # RDR-235: the tuple half of the stop sweep. A claim on the aspects
+            # queue is the engine's, not a table row: the table sweep below
+            # cannot see it, and its lease would run out (an attempt counted)
+            # before the next daemon could take the task. Each claim is released
+            # by its own claim_id and claimant string, so this runs when FENCED
+            # too: the claimant strings are this process's alone (W is unique per
+            # live process), and a successor cannot hold them. A worker fake
+            # without the hook (the injected-factory protocol) is untouched.
+            release = getattr(self._worker, "release_held_claims", None)
+            if callable(release):
+                try:
+                    released = release()
+                    if released:
+                        _log.info(
+                            "aspect_worker_daemon.released_tuple_claims",
+                            tenant=self._tenant, count=released,
+                        )
+                except Exception as exc:  # noqa: BLE001 - shutdown sweep is best-effort; the leases lapse otherwise
+                    _log.warning(
+                        "aspect_worker_daemon.release_tuple_claims_failed",
+                        tenant=self._tenant, error=str(exc),
+                    )
             self._worker = None
         if self._reclaim_queue is not None and not fenced:
             # RDR-173 P5 item 3 (review): a final sweep makes the daemon's death
