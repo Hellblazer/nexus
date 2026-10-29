@@ -662,18 +662,23 @@ def _pdf_title_is_placeholder(title: str, pdf_path: Path) -> bool:
     """True when the PDF metadata *title* is a producer artifact, not a title.
 
     Rejected: empty or punctuation-only text; ``untitled``, ``Document1``, ``Slide 1`` and kin; anything
-    that ends in a document file extension (a bare or path file name); a title equal to the PDF's own
-    file name or stem; and any ``Microsoft Word - ...`` style title (the prefix marks the rest as a file
+    that ends in a document file extension (a bare or path file name); a one-token title equal to the PDF's
+    own file name or stem; and any ``Microsoft Word - ...`` style title (the prefix marks the rest as a file
     or window name, so the remainder is not used either, even when it has no extension). The sibling of
     :func:`_h1_is_section_heading`: what it rejects falls through to the first H1, then the file name.
     """
+    if not isinstance(title, str):
+        return True
     text = " ".join(title.split()).strip("()[]\"'")
     if not any(ch.isalnum() for ch in text):
         return True
     low = text.lower()
     if _PRODUCER_PREFIX.match(low) or _PLACEHOLDER_WORDS.match(low) or _FILE_NAME_ENDING.search(low):
         return True
-    return low in {pdf_path.stem.lower(), pdf_path.name.lower()}
+    # A title equal to the file name is a producer echo only when the name is one token
+    # ("2512.11001", "report_final"); a file named after the paper's real title
+    # ("Attention Is All You Need.pdf") keeps that title.
+    return " " not in low and low in {pdf_path.stem.lower(), pdf_path.name.lower()}
 
 
 def resolve_pdf_title(metadata: dict, pdf_path: Path, text: str | None) -> str:

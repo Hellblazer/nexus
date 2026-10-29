@@ -285,8 +285,8 @@ def test_a_document_whose_every_page_pymupdf_cannot_read_is_not_told_to_be_ocred
 def test_a_document_mixing_unreadable_and_image_only_pages_names_both_causes(
     stack_absent, tmp_path, monkeypatch,
 ) -> None:
-    """Page 2 raises in PyMuPDF and pages 1 and 3 are real image-only pages: neither "OCR it" nor
-    "repair it" alone is true of the document, so the message says both, each with its pages."""
+    """Page 2 raises in PyMuPDF and pages 1, 3 and 4 are real image-only pages: neither "OCR it" nor
+    "repair it" alone is true of the document, so the message names both causes with their page counts."""
     pdf = _make_pdf(tmp_path / "mixed.pdf", [None, _P1, None, None])
     real = pdfx._pymupdf_page_text
 

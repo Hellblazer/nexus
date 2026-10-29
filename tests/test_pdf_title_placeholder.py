@@ -97,3 +97,15 @@ def test_a_real_metadata_title_still_beats_the_first_heading(title: str) -> None
 
 def test_a_placeholder_then_a_section_heading_h1_falls_to_the_file_name() -> None:
     assert resolve_pdf_title({"pdf_title": "untitled"}, PDF, "# Abstract\n\nWe study.\n") == "2512.11001"
+
+
+def test_a_title_the_file_is_named_after_is_kept() -> None:
+    """A file named after the paper's real title keeps that title; only a one-token name is an echo."""
+    pdf = Path("/data/Attention Is All You Need.pdf")
+    assert resolve_pdf_title({"pdf_title": "Attention Is All You Need"}, pdf, BODY) == "Attention Is All You Need"
+    assert _pdf_title_is_placeholder("report_final", Path("/data/report_final.pdf"))
+
+
+@pytest.mark.parametrize("title", [None, 7, b"untitled", ["x"]])
+def test_a_title_that_is_not_text_is_a_placeholder(title) -> None:
+    assert _pdf_title_is_placeholder(title, PDF)  # type: ignore[arg-type]
