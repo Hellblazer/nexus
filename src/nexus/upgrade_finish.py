@@ -1910,12 +1910,47 @@ def _restart_and_verify(
             + cycle_transcript + " " + _holder_evidence(config_dir)
         )
         return actions
+    if start.returncode != 0 and not after.up:
+        # nexus-bivz3.25: `start` failed and nothing answers, so the service
+        # never started. "restarted but its version could not be confirmed"
+        # was false here, and the engine's own reason (the RDR-231 RAISE and
+        # its runbook URL) sat past the transcript's 300-char fold.
+        actions.append(
+            f"NEEDS HUMAN: the storage service did not start (`nx daemon "
+            f"service start` exited {start.returncode}); the engine is NOT "
+            f"converged to v{req_s}. Its reason: {_start_failure_reason(start)} "
+            "Run `nx daemon service start` to see it again, read the engine "
+            "log, and check `nx doctor`. " + cycle_transcript
+        )
+        return actions
     actions.append(
         "NEEDS HUMAN: the service restarted but its version could not be "
         f"confirmed ({after.reason or 'no /version answer'}) — convergence to "
         f"v{req_s} is UNVERIFIED. Check `nx doctor`. " + cycle_transcript
     )
     return actions
+
+
+#: Bound on the start output carried into a "did not start" line: long enough
+#: for a Liquibase RAISE with its runbook URL, short enough for one line.
+_START_REASON_MAX = 1000
+
+
+def _start_failure_reason(start: subprocess.CompletedProcess[str]) -> str:
+    """The reason a failed ``nx daemon service start`` printed, whole up to
+    :data:`_START_REASON_MAX`.
+
+    ``start`` prefixes its error with an autostart-unit preamble, so the text
+    from the first ``Error:`` on is the reason; with no such marker the whole
+    output is returned.
+    """
+    text = " ".join(((start.stdout or "") + " " + (start.stderr or "")).split())
+    cut = text.find("Error:")
+    if cut != -1:
+        text = text[cut + len("Error:"):].lstrip()
+    if len(text) > _START_REASON_MAX:
+        text = text[:_START_REASON_MAX].rstrip() + "..."
+    return text or "(no output)"
 
 
 def _cycle_transcript(

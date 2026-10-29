@@ -1995,6 +1995,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
         restart_stale,
         unload_stale_t2_launchagent,
     )
+    from nexus.upgrade_finish import _running_engine  # noqa: PLC0415, PLC2701 — the live probe converge_engine verifies with
 
     # nexus-cfgo9: process-skew detection is independent of engine
     # convergence and the diag-view heal below — a `ps`-less environment
@@ -2051,10 +2052,33 @@ def restart_stale_cmd(dry_run: bool) -> None:
                 # true of the RUNNING engine arrives as an action line from
                 # converge_engine, which is what does the live probe.
                 req_s = ".".join(str(p) for p in status.required_version)
-                click.echo(
-                    f"engine: converged — installed engine is v{req_s} "
-                    "(the release dependency)"
-                )
+                # nexus-bivz3.25: the disk fact alone said "converged" while
+                # the new engine had halted at a Liquibase changeset and
+                # served nothing (RDR-231 rehearsal). converge_engine returns
+                # [] for a service that is simply not running, so this branch
+                # reaches here for a dead engine too. Ask the RUNNING engine,
+                # with the probe upgrade_finish itself verifies with.
+                running = _running_engine(config_dir)
+                if running.version == status.required_version:
+                    click.echo(
+                        f"engine: converged — installed engine is v{req_s} "
+                        "(the release dependency) and the running service "
+                        f"reports v{req_s}"
+                    )
+                else:
+                    seen = (
+                        f"the running service reports v{'.'.join(str(p) for p in running.version)}"
+                        if running.version is not None
+                        else running.reason or "the running service did not answer"
+                    )
+                    click.echo(
+                        f"engine: not converged — installed engine is v{req_s} "
+                        f"(the release dependency), but {seen}. Start it with "
+                        "`nx daemon service start` (its output names the "
+                        "reason when the engine halts at startup), read the "
+                        "engine log (logs/storage_service_native.log under "
+                        "the config dir), and run `nx doctor`."
+                    )
         else:
             for line in engine_actions:
                 click.echo(f"  {line}")

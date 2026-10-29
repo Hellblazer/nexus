@@ -2151,6 +2151,76 @@ class TestConvergeEngineLiveVerification:
         assert any("NEEDS HUMAN" in a for a in actions)
         assert not any("verified running" in a for a in actions)
 
+    # ── nexus-bivz3.25: a start that exited non-zero never started ──
+
+    _HALT = (
+        "Error: Storage service supervisor exited with code 2 before the "
+        "service became ready.\n"
+        "RDR-231 note-URI backfill halted and nothing was changed: 1 live "
+        "chroma:// note row(s) have a live nx-note:// twin. Start the "
+        "previous engine binary, merge each pair with POST /v1/catalog/merge, "
+        "then restart on the new engine. Steps for cloud and local installs: "
+        "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
+        "#if-the-rdr-231-note-uri-backfill-halts-startup\n"
+        "Supervisor log: /x/storage_service.log\n"
+    )
+
+    def _cycle_with_failed_start(self, tmp_path, *, running):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(
+                        tmp_path / "service" / "nexus-service",
+                        {"version": _REQUIRED_STR},
+                    ),
+                ), \
+                patch("nexus.upgrade_finish.service_stack_pids", return_value=[]), \
+                patch(
+                    "nexus.upgrade_finish.run_bounded",
+                    side_effect=[
+                        MagicMock(returncode=0, stdout="Storage service stopped (pid(s)=1).", stderr=""),
+                        MagicMock(
+                            returncode=2,
+                            stdout="Not starting through the autostart unit " + "x" * 280,
+                            stderr=self._HALT,
+                        ),
+                    ],
+                ), \
+                patch_time("nexus.upgrade_finish", "sleep"), \
+                patch("nexus.upgrade_finish._running_engine", return_value=running):
+            return converge_engine(tmp_path)
+
+    def test_failed_start_says_it_did_not_start_and_carries_the_reason(
+        self, tmp_path,
+    ):
+        """A start that exited non-zero with no running engine must not read
+        'the service restarted': it never started. The engine's reason (here
+        the RDR-231 RAISE with its runbook URL, which sits past the transcript's
+        300-char fold) must reach the operator whole."""
+        actions = self._cycle_with_failed_start(
+            tmp_path,
+            running=self._running(up=False, version=None, reason="no discoverable storage-service lease"),
+        )
+        text = " ".join(actions)
+        assert "NEEDS HUMAN" in text
+        assert "did not start" in text
+        assert "the service restarted" not in text
+        assert "RDR-231 note-URI backfill halted and nothing was changed" in text
+        assert "#if-the-rdr-231-note-uri-backfill-halts-startup" in text
+        assert "[cycle]" in text          # the transcript stays
+
+    def test_failed_start_reason_is_bounded(self, tmp_path):
+        huge = self._HALT + "z" * 5000
+        with patch.object(type(self), "_HALT", huge):
+            actions = self._cycle_with_failed_start(
+                tmp_path, running=self._running(up=False, version=None),
+            )
+        assert len(" ".join(actions)) < 3000
+
 
 class TestPoisonProbe:
     """nexus-pgdcv: _poison_probe's tri-state classification of
@@ -4433,3 +4503,75 @@ class TestFinishPassUnderNxUpgrade:
         line = self._finish(tmp_path, monkeypatch, ["upgrade", "--skip-t3"])
         assert "NEEDS HUMAN: service (pid 64750) is the storage service — cycle it" in line, line
         assert "data rung 'rdr192-manifest-backfill' pending — this `nx upgrade` runs it next" in line
+
+
+class TestRestartStaleEngineLine:
+    """nexus-bivz3.25: `nx daemon restart-stale` prints "converged" only when
+    the RUNNING engine answers with the required version. The on-disk fact
+    alone read as converged while the new engine had halted and served nothing."""
+
+    def _run(self, tmp_path, monkeypatch, *, running, applicable=True):
+        from click.testing import CliRunner
+
+        import nexus.commands.daemon as daemon_mod
+        from nexus.upgrade_finish import EngineConvergence
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        status = EngineConvergence(
+            applicable=applicable,
+            installed_version=REQUIRED_ENGINE_VERSION if applicable else None,
+            required_version=REQUIRED_ENGINE_VERSION,
+            converged=applicable,
+            reason=None if applicable else "cloud mode",
+        )
+        with patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="9.9.9"),
+        ), patch("nexus.upgrade_finish.install_source", return_value="PyPI"), \
+                patch("nexus.upgrade_finish.converge_engine", return_value=[]), \
+                patch("nexus.upgrade_finish.detect_engine_convergence", return_value=status), \
+                patch("nexus.upgrade_finish._running_engine", return_value=running) as probe, \
+                patch("nexus.upgrade_finish.heal_diag_view", return_value=[]), \
+                patch("nexus.upgrade_finish.unload_stale_t2_launchagent", return_value=[]), \
+                patch("nexus.upgrade_finish.converge_service_autostart_unit", return_value=[]):
+            result = CliRunner().invoke(daemon_mod.daemon_group, ["restart-stale"])
+        assert result.exit_code == 0, result.output
+        return result.output, probe
+
+    def test_running_engine_at_required_version_is_converged(self, tmp_path, monkeypatch):
+        out, probe = self._run(
+            tmp_path, monkeypatch,
+            running=_RunningEngine(up=True, version=REQUIRED_ENGINE_VERSION),
+        )
+        assert "engine: converged" in out and f"v{_REQUIRED_STR}" in out
+        probe.assert_called()
+
+    def test_engine_not_serving_is_not_converged(self, tmp_path, monkeypatch):
+        out, _ = self._run(
+            tmp_path, monkeypatch,
+            running=_RunningEngine(
+                up=False, version=None, reason="no discoverable storage-service lease",
+            ),
+        )
+        assert "engine: converged" not in out
+        assert "not converged" in out
+        assert "no discoverable storage-service lease" in out
+        for pointer in ("nx daemon service start", "nx doctor"):
+            assert pointer in out
+        assert "engine log" in out
+
+    def test_engine_up_but_unanswerable_is_not_converged(self, tmp_path, monkeypatch):
+        out, _ = self._run(
+            tmp_path, monkeypatch,
+            running=_RunningEngine(up=True, version=None, reason="/version timed out"),
+        )
+        assert "engine: converged" not in out
+        assert "/version timed out" in out
+
+    def test_not_applicable_branch_is_unchanged_and_does_not_probe(self, tmp_path, monkeypatch):
+        out, probe = self._run(
+            tmp_path, monkeypatch, applicable=False,
+            running=_RunningEngine(up=False, version=None),
+        )
+        assert "engine: not applicable — cloud mode" in out
+        probe.assert_not_called()
