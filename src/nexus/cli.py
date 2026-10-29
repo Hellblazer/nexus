@@ -142,7 +142,7 @@ class _StorageBackendGuardGroup(click.Group):
             # message names the setting, a traceback buried it. The default `nx doctor` sweep
             # does not: its "PDF settings" row (health._check_pdf_config) catches the error and
             # names the key itself, and so does `nx doctor --check-mineru` (nexus-tr1rj.27), which
-            # prints that row and exits 1.
+            # prints that row and exits 1, with or without the PDF stack installed.
             raise click.ClickException(
                 f"{exc}. Set it with `nx config set pdf.{exc.key}=<integer>`."
             ) from exc

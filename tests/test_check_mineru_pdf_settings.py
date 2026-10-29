@@ -79,3 +79,39 @@ def test_usable_pdf_settings_are_not_reported_red_and_the_mode_still_exits_zero(
     assert result.exit_code == 0, result.output
     assert "PDF settings" not in result.output
     assert _NOT_CONFIGURED in result.output
+
+
+def test_a_bad_pdf_setting_is_named_when_the_pdf_stack_is_not_installed(check_mineru, monkeypatch) -> None:
+    """The settings do not depend on the stack: with it absent the mode still names a bad key and exits 1."""
+    from nexus import pdf_stack
+
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "stubbed"))
+    result = check_mineru(mineru_page_batch="many")
+
+    assert result.exit_code != 0, result.output
+    assert "MinerU import: N/A" in result.output
+    assert "pdf.mineru_page_batch must be an integer" in result.output
+
+
+def test_an_absent_pdf_stack_with_usable_settings_still_exits_zero(check_mineru, monkeypatch) -> None:
+    from nexus import pdf_stack
+
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("absent", "stubbed"))
+    result = check_mineru(mineru_page_batch=1)
+
+    assert result.exit_code == 0, result.output
+    assert "MinerU import: N/A" in result.output and "PDF settings" not in result.output
+
+
+@pytest.mark.parametrize("stack", ["present", "absent"])
+def test_integer_settings_over_the_attempt_bound_are_red_and_exit_nonzero(check_mineru, monkeypatch, stack) -> None:
+    """Integers whose timeout x batch product is above the bound: every MinerU PDF run refuses them."""
+    from nexus import pdf_stack
+
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState(stack, "stubbed"))
+    result = check_mineru(extractor="mineru", mineru_page_timeout_s=300, mineru_page_batch=2)
+
+    assert result.exit_code != 0, result.output
+    row = next((ln for ln in result.output.splitlines() if "PDF settings" in ln), "")
+    assert "✗" in row, result.output
+    assert _NOT_CONFIGURED not in result.output

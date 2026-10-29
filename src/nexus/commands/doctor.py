@@ -2284,25 +2284,29 @@ def _probe_cv2(timeout_s: float | None = None) -> tuple[str | None, str]:
     return f"the cv2 import exited {proc.returncode} with no output", ""
 
 
-def _print_pdf_settings_red(exc: Exception) -> None:
-    """Print the default sweep's own "PDF settings" row for a ``[pdf]`` setting that holds no integer.
+def _print_pdf_settings_red(exc: Exception | None = None) -> bool:
+    """Print the default sweep's own red "PDF settings" row and say whether there was one.
 
-    The row is :func:`nexus.health._check_pdf_config`'s, so the wording and the ``nx config set``
-    remedy are the sweep's and cannot drift from it. It re-reads the same section, so it returns the
-    row for the same error; if it returns nothing (the file changed between the two reads) the
-    exception's own text is printed so the mode still ends red, never silent."""
+    The row is :func:`nexus.health._check_pdf_config`'s, so the wording and the remedy are the
+    sweep's and cannot drift from it: a ``[pdf]`` integer setting that holds no integer, or a
+    timeout x batch product above the bound every MinerU PDF run refuses. When *exc* is given (a
+    ``PdfConfigError`` already caught) and the re-read returns nothing (the file changed between the
+    two reads), the exception's own text is printed so the mode still ends red, never silent."""
     from nexus.health import _check_pdf_config  # noqa: PLC0415 — deferred import (startup cost)
 
     rows = [r for r in _check_pdf_config() if not r.ok and not r.warn]
     if not rows:
+        if exc is None:
+            return False
         click.echo(_check("PDF settings", False, str(exc)))
-        return
+        return True
     for row in rows:
         click.echo(_check(row.label, False, row.detail))
         lines: list[str] = []
         _fix(lines, *row.fix_suggestions)
         for line in lines:
             click.echo(line)
+    return True
 
 
 def _run_check_mineru() -> bool:
@@ -2342,7 +2346,9 @@ def _run_check_mineru() -> bool:
             "MinerU import: N/A (PDF support is not installed; indexing a PDF installs it, "
             f"or run `{pdf_stack.install_plan().command}`)"
         )
-        return False
+        # nexus-tr1rj.27: the [pdf] settings do not depend on the stack, and every PDF run refuses a
+        # bad one whether or not the stack is installed, so this mode names it here too.
+        return _print_pdf_settings_red()
     failed = False
     try:
         from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
@@ -2400,8 +2406,12 @@ def _run_check_mineru() -> bool:
 
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.
+    # nexus-tr1rj.27: a setting every PDF run refuses (no integer, or timeout x batch over the bound)
+    # ends the mode red here; the default sweep's row is the one printed.
+    if _print_pdf_settings_red():
+        return True
+    from nexus.config import PdfConfigError, get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
     try:
-        from nexus.config import PdfConfigError, get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
         # nexus-9xfx5: never probe the built-in default URL on a box where
         # no server was ever provisioned — every fresh install rendered a
         # red ✗ ("unreachable ... OOM-risk") for a service init never set
