@@ -1,0 +1,16 @@
+# RDR-232 oracle labels, DRAFTED provenance (nexus-jypmj.3.10; Sam 2026-10-28, critique S3).
+#
+# Labels an agent drafts from the retrieved items of a measurement run WITHOUT seeing the assessor's ledger. The agent
+# is given only the packet scripts/bench/rdr232_oracle_packet.py writes (qid, question, facet slugs, and per item its
+# item_id, chash and text), so the blindness is by construction. Sam spot-checks a stratified sample (see
+# spot_check_sample in scripts/bench/rdr232_oracle.py) and drafted rates are reported apart from hand rates, each with
+# a 95 percent interval.
+#
+# Format: the hand file's (bench/queries/golden_oracle_labels_v1.yaml), with `provenance: drafted` on every entry,
+# items always present, and only requests the hand file leaves `todo`: a drafted label never shadows a hand label.
+# Items are keyed by `chash` (chunk-level); a drafted entry is written after the run, from the packet's chashes.
+#
+# Empty until a run has produced a packet and an agent has drafted from it.
+oracle_version: 1
+golden_set_version: 1
+requests: {}

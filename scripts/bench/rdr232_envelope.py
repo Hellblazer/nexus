@@ -31,7 +31,10 @@ _BENCH_PARENT = _Path(__file__).resolve().parent.parent
 if str(_BENCH_PARENT) not in _sys.path:
     _sys.path.insert(0, str(_BENCH_PARENT))
 
-from collections.abc import Callable, Mapping
+import json
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from bench.answer_shape_metrics import EvidenceItem, RepairOutcome, RunObservation
@@ -40,6 +43,65 @@ from bench.rdr232_oracle import DocPathOf, RequestOracle
 #: The step operator name of one assessment call (``coverage_ledger.ASSESSMENT_OPERATOR``); duplicated as a literal so
 #: this module imports nothing from ``nexus``.
 ASSESSMENT_OPERATOR = "operator_check"
+
+#: The format stamp of an envelopes file written by the Phase 3 driver. A file without it is the legacy shape
+#: ``{arm: [envelope or null, ...]}`` (request order, no qids, no wall times).
+ENVELOPES_FORMAT = 2
+
+
+@dataclass(frozen=True)
+class EnvelopeRecord:
+    """One call's outcome as the driver wrote it: the request, its wall time (``None`` in a legacy file), the error
+    class name when the call raised, and the structured envelope."""
+
+    qid: str
+    wall_ms: int | None
+    error: str
+    envelope: Mapping[str, Any] | None
+
+
+def write_envelopes_file(path: Path, arms: Mapping[str, Sequence[EnvelopeRecord]]) -> None:
+    """Write the arms' records (the envelopes carry answer text: keep the file out of version control)."""
+    body = {
+        "format": ENVELOPES_FORMAT,
+        "arms": {
+            arm: [{"qid": r.qid, "wall_ms": r.wall_ms, "error": r.error, "envelope": r.envelope} for r in records]
+            for arm, records in arms.items()
+        },
+    }
+    path.write_text(json.dumps(body, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+def read_envelopes_file(path: Path, qids: Sequence[str] | None) -> dict[str, list[EnvelopeRecord]]:
+    """Read an envelopes file in either format. A format-2 file carries its own qids. A legacy file is
+    ``{arm: [envelope or null, ...]}``: *qids* is then the request order the run used (every request once per repeat),
+    and a list of another length is refused rather than guessed at. A ``null`` entry is a call that raised."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, Mapping):
+        raise ValueError(f"{path}: an envelopes file is a JSON object")
+    if data.get("format") == ENVELOPES_FORMAT:
+        return {
+            arm: [EnvelopeRecord(str(r["qid"]), r.get("wall_ms"), str(r.get("error") or ""), r.get("envelope")) for r in rows]
+            for arm, rows in (data.get("arms") or {}).items()
+        }
+    if "format" in data:
+        raise ValueError(f"{path}: envelopes format {data['format']!r} is not {ENVELOPES_FORMAT}")
+    if qids is None:
+        raise ValueError(f"{path}: a legacy envelopes file has no qids; give the request selection the run used")
+    out: dict[str, list[EnvelopeRecord]] = {}
+    for arm, rows in data.items():
+        if not isinstance(rows, list):
+            raise ValueError(f"{path}: arm {arm!r} is not a list of envelopes")
+        if len(rows) != len(qids):
+            raise ValueError(f"{path}: arm {arm!r} holds {len(rows)} envelopes but the selection is {len(qids)} requests (x repeat); pass the --set/--qid/--limit/--repeat the run used")
+        out[arm] = [EnvelopeRecord(q, None, "" if env is not None else "no_envelope", env) for q, env in zip(qids, rows, strict=True)]
+    return out
+
+
+def step_elapsed_sum_ms(envelope: Mapping[str, Any]) -> int:
+    """The sum of the plan steps' ``elapsed_ms``: the run's duration as far as the envelope can say when no wall time
+    was recorded. It leaves out request extraction and plan matching, which are the same in both arms."""
+    return int(sum(float(s.get("elapsed_ms") or 0) for s in envelope.get("steps") or [] if isinstance(s, Mapping)))
 
 
 def _coverage(envelope: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -137,6 +199,16 @@ def assessment_usd(envelope: Mapping[str, Any]) -> float:
     ), 6)
 
 
+def matched_plan_id(envelope: Mapping[str, Any]) -> int:
+    """The library plan the run was MATCHED to, ``0`` when none was (the inline planner ran). This is
+    ``plan_choice.chosen_plan_id``, not the envelope's ``plan_id``: after a plan-miss grows a plan, ``plan_id`` is the
+    grown row's id, which a later run's hit on that row reports too, so two runs that differ in whether the planner ran
+    can carry the same ``plan_id``."""
+    choice = envelope.get("plan_choice")
+    chosen = choice.get("chosen_plan_id") if isinstance(choice, Mapping) else None
+    return int(chosen) if isinstance(chosen, int) and not isinstance(chosen, bool) else 0
+
+
 def envelope_facts(envelope: Mapping[str, Any]) -> dict[str, Any]:
     """The per-run facts the Phase 3 driver tabulates, read from one envelope (closed names and counts; no text)."""
     cov = _coverage(envelope)
@@ -145,6 +217,7 @@ def envelope_facts(envelope: Mapping[str, Any]) -> dict[str, Any]:
     facets = cov.get("facets") if isinstance(cov.get("facets"), Mapping) else {}
     return {
         "answer_shape": envelope.get("answer_shape"),
+        "plan_id": envelope.get("plan_id"), "matched_plan_id": matched_plan_id(envelope),
         "cost_usd": float(envelope.get("cost_usd") or 0.0),
         "assessment_usd": assessment_usd(envelope),
         "state": cov.get("state"), "reason": cov.get("reason"), "skip_generation": bool(cov.get("skip_generation")),

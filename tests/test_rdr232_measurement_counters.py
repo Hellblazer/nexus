@@ -345,6 +345,62 @@ async def test_a_run_with_nothing_unassessed_counts_zero_in_every_cause() -> Non
     assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes()
 
 
+def not_the_check_shape(items: str, instruction: str) -> dict:  # noqa: ARG001
+    """A reply with no evidence list: the unusable reply that stops the assessment."""
+    return {"ok": True}
+
+
+def _reasons(cov: CoverageResult) -> dict[str, str]:
+    return {f.facet_id: f.reason for f in cov.ledger.findings if f.state == "unassessed"}
+
+
+@pytest.mark.asyncio
+async def test_groups_never_attempted_after_a_raised_call_are_stopped_after_failure_not_raised() -> None:
+    """Three facets, two per call: the first call (vector, f1 and f2) raises and ends the pass, so f3's group (and every
+    later stream's) was never attempted. f1 and f2 are the failing call's own facets; f3 is the stop rule's."""
+    d = Dispatcher(raises)
+    cov = _cov(await _run(d, CoverageBoundary(request=_request(3), max_facets_per_call=2)))
+    assert d.tools.count("operator_check") == 1, "the pass stops at the first raise"
+    assert _reasons(cov) == {"f1": "assessment_raised", "f2": "assessment_raised", "f3": "assessment_stopped_after_failure"}
+    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(raised_call=2, stopped_after_failure=1)
+
+
+@pytest.mark.asyncio
+async def test_groups_never_attempted_after_a_malformed_reply_are_stopped_after_failure_not_unusable() -> None:
+    cov = _cov(await _run(Dispatcher(not_the_check_shape), CoverageBoundary(request=_request(3), max_facets_per_call=2)))
+    assert _reasons(cov) == {"f1": "assessment_unusable", "f2": "assessment_unusable", "f3": "assessment_stopped_after_failure"}
+    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(unusable_reply=2, stopped_after_failure=1)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_after_failure_cause_is_absent_when_every_group_was_attempted() -> None:
+    """Non-vacuity of the split: an unusable reply that does NOT stop the pass (an empty evidence list) leaves every
+    group attempted, so nothing is counted as stopped."""
+    cov = _cov(await _run(Dispatcher(returns_no_records), CoverageBoundary(request=_request(3), max_facets_per_call=2)))
+    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(unusable_reply=3)
+
+
+@pytest.mark.asyncio
+async def test_a_facet_whose_own_group_raised_is_raised_even_though_later_streams_were_never_reached() -> None:
+    """Call 1 (vector, f1 and f2) supports; call 2 (vector, f3) raises. f3's own call failed, so f3 is ``raised_call``;
+    the graph groups never ran but every facet in them already has a state, so nothing is ``stopped_after_failure``."""
+    calls = {"n": 0}
+
+    def support_then_raise(items: str, instruction: str):
+        calls["n"] += 1
+        return supports_first_item(items, instruction) if calls["n"] == 1 else RuntimeError("down")
+
+    cov = _cov(await _run(Dispatcher(support_then_raise), CoverageBoundary(request=_request(3), max_facets_per_call=2)))
+    by = {f.facet_id: (f.state, f.reason) for f in cov.ledger.findings}
+    assert by["f1"][0] == by["f2"][0] == "covered"
+    assert by["f3"] == ("unassessed", "assessment_raised")
+    assert _summary(cov)["coverage"]["unassessed_by_cause"] == _causes(raised_call=1)
+
+
+def test_the_new_cause_is_a_member_of_the_enumeration_with_other_still_last() -> None:
+    assert "stopped_after_failure" in UNASSESSED_CAUSES and UNASSESSED_CAUSES[-1] == "other", "other stays the catch-all, last"
+
+
 # ── whether the run entered repair ──────────────────────────────────────────────────────────────────────────
 
 

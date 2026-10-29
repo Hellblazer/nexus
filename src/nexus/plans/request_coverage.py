@@ -1257,9 +1257,11 @@ DEFAULT_EXTRACT_TIMEOUT_S = 20.0
 #: The model the structured call asks for: an alias (haiku, sonnet, opus) or a model id, passed to the
 #: ``--model`` flag as given. Unset or blank means :data:`DEFAULT_EXTRACT_MODEL`.
 EXTRACT_MODEL_ENV = "NX_ANSWER_STRUCTURED_EXTRACT_MODEL"
-#: The default extraction model (nexus-jypmj.2.8): the cheap tier, measured on 56 calls with no timeout or
-#: error (with the prompt before nexus-jypmj.13 changed its lookup/synthesis wording; that figure is to be re-taken). Always passed explicitly, so ``NX_OPERATOR_MODEL_TIERING`` (which only picks the model of a
-#: dispatch that names none) does not change it; a set ``EXTRACT_MODEL_ENV`` wins.
+#: The default extraction model (nexus-jypmj.2.8): the cheap tier. Measured first on 56 calls with no timeout or
+#: error, then re-taken on 2026-10-28 with the lookup/synthesis wording of nexus-jypmj.13: 98 calls (Haiku 67, Opus 31),
+#: no timeout, error or invalid reply, and all five Phase 2 gate thresholds unchanged (T2
+#: ``nexus/rdr232-jypmj13-remeasure-2026-10-28``). Always passed explicitly, so ``NX_OPERATOR_MODEL_TIERING`` (which
+#: only picks the model of a dispatch that names none) does not change it; a set ``EXTRACT_MODEL_ENV`` wins.
 DEFAULT_EXTRACT_MODEL = "haiku"
 
 def extraction_enabled(environ: Mapping[str, str]) -> bool:

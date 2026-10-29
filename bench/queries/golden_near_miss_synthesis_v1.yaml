@@ -1,0 +1,107 @@
+# RDR-232 near-miss synthesis probe v1 (nexus-jypmj.3.10 fix round; critique S7).
+#
+# What this is: 6 labelled requests, all answer_kind synthesis, each naming ONE source and asking for an account that
+# spans its sections or its history (problem, decisions, review, phases). They are the control for the compound-lookup
+# set (golden_compound_lookup_v1.yaml): there, several connected facts from ONE passage of one source are a lookup;
+# here the facts are spread over sections, so a request extraction that calls these lookup has drawn the boundary too
+# wide. Same label fields and golden_set_version as golden_v1, so scripts/bench/schema.py::load_golden_set loads it
+# strictly. The facet slugs are written for this set; the request text carries the three parts.
+#
+# Why a separate file: adding a request to golden_v1 or golden_heldout_v1 changes its size and bumps
+# golden_set_version, which would invalidate the recorded figures. The measurement reads this set with
+# `--set near_miss` (bench.rdr232_extract_measure and bench.rdr232_phase3_measure).
+#
+# Provenance: written 2026-10-28 by the conexus developer agent WITH the boundary in view. IN-SAMPLE: it checks that
+# the extraction prompt keeps this class in synthesis, and does not estimate a rate. Every RDR id named exists under
+# docs/rdr/ (tests/test_rdr232_lookup_boundary.py pins that). Sam should spot-check the labels. No model has run on it.
+golden_set_version: 1
+queries:
+  - qid: S01
+    category: compositional
+    text: "Trace how RDR-064 evolved: the problem it set out to solve, the decisions its design sections record, and what its gate review changed."
+    answer_kind: synthesis
+    required_sources: ["RDR-064"]
+    required_facets: ["original-problem", "recorded-decisions", "gate-review-changes"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: S02
+    category: compositional
+    text: "Explain RDR-180 as a whole: why the chunk natural-ID width changed, how the migration was staged across its phases, and what its research findings showed about collision risk."
+    answer_kind: synthesis
+    required_sources: ["RDR-180"]
+    required_facets: ["width-change-rationale", "migration-staging", "collision-risk-findings"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: S03
+    category: compositional
+    text: "Walk through RDR-103's collection-name grammar end to end: the motivation, the rule for each segment, and how the alternatives section justified the final shape."
+    answer_kind: synthesis
+    required_sources: ["RDR-103"]
+    required_facets: ["motivation", "segment-rules", "alternatives-rationale"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: S04
+    category: compositional
+    text: "Describe RDR-232 as a whole: the failure it names, the containment and eligibility rules it adds, and how its phases are ordered."
+    answer_kind: synthesis
+    required_sources: ["RDR-232"]
+    required_facets: ["named-failure", "containment-and-eligibility-rules", "phase-order"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: S05
+    category: compositional
+    text: "How did RDR-086 get from problem to design: the gap in chunk identity it found, the options it weighed, and what it left open?"
+    answer_kind: synthesis
+    required_sources: ["RDR-086"]
+    required_facets: ["identity-gap", "options-weighed", "left-open"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"
+
+  - qid: S06
+    category: compositional
+    text: "Review RDR-070's taxonomy design from start to finish: the clustering decisions it makes, the assumptions it had to verify, and the follow-up work it records."
+    answer_kind: synthesis
+    required_sources: ["RDR-070"]
+    required_facets: ["clustering-decisions", "verified-assumptions", "recorded-follow-up"]
+    allowed_corpora: ["rdr"]
+    unacceptable_plans:
+      - "lookup:hybrid-factual-lookup"
+      - "grown:hybrid-factual-lookup-473"
+      - "research:corpus-coverage-check"
+      - "research:find-by-author"
+      - "research:citation-traversal"
+      - "research:document-discovery"

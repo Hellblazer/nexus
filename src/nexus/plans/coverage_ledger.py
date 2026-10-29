@@ -38,8 +38,10 @@ What the boundary does, in order:
    a reply class (:data:`REPLY_CLASSES`: ``support``, ``neutral_or_contradict``, ``all_rejected``, ``no_records``,
    ``raised``), so the classes can be counted per call and per stream; ``failure_cause`` splits a failed outcome into an
    unusable reply and a raised call; an unassessed facet carries the reason it is unassessed
-   (``assessment_unusable``, ``assessment_skipped_deadline`` / ``_budget``, ``assessment_raised``, or the older
-   ``assessment_incomplete`` for an item the cap left unread), counted in :attr:`CoverageResult.unassessed_by_cause`;
+   (``assessment_unusable``, ``assessment_skipped_deadline`` / ``_budget``, ``assessment_raised``,
+   ``assessment_stopped_after_failure`` for a group never attempted because an earlier call raised or came back
+   malformed, or the older ``assessment_incomplete`` for an item the cap left unread), counted in
+   :attr:`CoverageResult.unassessed_by_cause`;
    a conflicted facet is counted in ``facets_conflicted`` (a subset of ``facets.covered``); and
    :attr:`CoverageResult.repair_entered` says the run went into the repair step at all. None of this changes a
    state, a skip or an outcome.
@@ -204,6 +206,10 @@ CONFLICTED_REASON = "conflicted"
 UNUSABLE_REASON = "assessment_unusable"
 #: A finding's ``reason`` for a facet left ``unassessed`` because the assessment call for it raised.
 RAISED_REASON = "assessment_raised"
+#: A finding's ``reason`` for a facet left ``unassessed`` because the pass stopped at an earlier failed call (a raised
+#: call or a reply that is not the check shape) before this facet's group was ever attempted. It is not the failing
+#: call's own cause: that call did not fail on this facet (nexus-jypmj.3.10, Phase 3 critique S4).
+STOPPED_REASON = "assessment_stopped_after_failure"
 #: The ``AssessmentReport.detail`` prefix of an unusable reply.
 _UNUSABLE_DETAIL = "assessor_unusable"
 
@@ -215,10 +221,12 @@ _UNUSABLE_DETAIL = "assessor_unusable"
 REPLY_CLASSES: tuple[str, ...] = ("support", "neutral_or_contradict", "all_rejected", "no_records", "raised")
 #: Why a facet is ``unassessed`` in the final ledger, counted in ``CoverageResult.unassessed_by_cause``.
 #: ``other`` is every reason not named here (the item cap left an item unread, an assessment never attempted).
-UNASSESSED_CAUSES: tuple[str, ...] = ("unusable_reply", "deadline_skip", "budget_skip", "raised_call", "other")
+UNASSESSED_CAUSES: tuple[str, ...] = (
+    "unusable_reply", "deadline_skip", "budget_skip", "raised_call", "stopped_after_failure", "other",
+)
 _CAUSE_OF_REASON: dict[str, str] = {
     UNUSABLE_REASON: "unusable_reply", "assessment_skipped_deadline": "deadline_skip",
-    "assessment_skipped_budget": "budget_skip", RAISED_REASON: "raised_call",
+    "assessment_skipped_budget": "budget_skip", RAISED_REASON: "raised_call", STOPPED_REASON: "stopped_after_failure",
 }
 
 #: THE ALL-CONTRADICTED RULE (undecided; Sam is deciding it, RDR-232 critique S1). The finding states that count
@@ -1186,13 +1194,14 @@ class CoverageBoundary:
                     unusable_n += 1
                     call_log.append(AssessmentCall(stream, len(group), "no_records"))
                     mark(group, UNUSABLE_REASON, override=True)
-                    for _s, g in planned[pos + 1:]:
-                        mark(g, UNUSABLE_REASON)
                 else:
                     raised_n += 1
                     call_log.append(AssessmentCall(stream, len(group), "raised"))
-                    for _s, g in planned[pos:]:
-                        mark(g, RAISED_REASON)
+                    mark(group, RAISED_REASON)
+                # The groups after this call were never attempted: the stop rule left them unknown, which is not this
+                # call's failure. A facet that already has a reason (its own group failed earlier, or just now) keeps it.
+                for _s, g in planned[pos + 1:]:
+                    mark(g, STOPPED_REASON)
                 break
             accepted = 0
             rejected_here = 0

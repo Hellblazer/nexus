@@ -19,7 +19,8 @@ classifier was tuned on it), ``heldout`` (``bench/queries/golden_heldout_v1.yaml
 frozen) and ``real`` (recorded ``nx_answer`` runs through :mod:`bench.rdr232_replay`). A fourth, ``compound``
 (``bench/queries/golden_compound_lookup_v1.yaml``, nexus-jypmj.13), is the class probe for the lookup boundary:
 six lookups that each ask two connected facts of one passage of one source, IN-SAMPLE (written with the
-boundary in view).
+boundary in view). A fifth, ``near_miss`` (``bench/queries/golden_near_miss_synthesis_v1.yaml``), is its control: six
+one-source synthesis requests whose parts live in different sections, also IN-SAMPLE.
 
 Bounds: one extraction per DISTINCT question, at most ``MAX_CONCURRENCY`` (2) in flight, and the run stops
 sending after more than ``MAX_CONSECUTIVE_FAILURES`` (10) consecutive failed calls (``timeout`` or ``error``);
@@ -59,11 +60,14 @@ REPO = Path(__file__).resolve().parents[2]
 GOLDEN_PATH = REPO / "bench" / "queries" / "golden_v1.yaml"
 HELDOUT_PATH = REPO / "bench" / "queries" / "golden_heldout_v1.yaml"
 COMPOUND_PATH = REPO / "bench" / "queries" / "golden_compound_lookup_v1.yaml"
+NEAR_MISS_PATH = REPO / "bench" / "queries" / "golden_near_miss_synthesis_v1.yaml"
 #: The labelled sets ``--set`` reads (``real`` is the recorded runs, not a file). ``compound`` is the class probe
-#: of nexus-jypmj.13: six lookups that each ask two connected facts of one passage of one source.
-SET_PATHS: dict[str, Path] = {"golden": GOLDEN_PATH, "heldout": HELDOUT_PATH, "compound": COMPOUND_PATH}
+#: of nexus-jypmj.13: six lookups that each ask two connected facts of one passage of one source. ``near_miss`` is its
+#: control (critique S7): six synthesis requests that each name one source and ask for an account spread over its
+#: sections, which a boundary drawn too wide would call lookups.
+SET_PATHS: dict[str, Path] = {"golden": GOLDEN_PATH, "heldout": HELDOUT_PATH, "compound": COMPOUND_PATH, "near_miss": NEAR_MISS_PATH}
 #: Sets written with the classifier or the lookup boundary in view; their figures are floors, not rates.
-IN_SAMPLE_SETS: frozenset[str] = frozenset({"golden", "compound"})
+IN_SAMPLE_SETS: frozenset[str] = frozenset({"golden", "compound", "near_miss"})
 
 MAX_CONCURRENCY = 2
 MAX_CONSECUTIVE_FAILURES = 10

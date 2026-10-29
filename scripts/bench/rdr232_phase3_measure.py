@@ -57,17 +57,30 @@ from typing import Any
 import click
 
 from bench.answer_shape_metrics import Measure, NotMeasurable, compute_measures
-from bench.rdr232_envelope import envelope_facts, observation_from_envelope
+from bench.rdr232_envelope import (
+    EnvelopeRecord,
+    envelope_facts,
+    observation_from_envelope,
+    read_envelopes_file,
+    step_elapsed_sum_ms,
+    write_envelopes_file,
+)
 from bench.rdr232_facet_map import DEFAULT_MAP_PATH, FacetResolution, load_facet_map, resolve_facets
 from bench.rdr232_oracle import (
+    DEFAULT_DRAFTED_PATH,
     DEFAULT_ORACLE_PATH,
     GOLDEN_PATH,
     HELDOUT_PATH,
     DocPathOf,
     OracleSet,
+    SpotCase,
+    SpotSample,
     aggregate,
     load_oracle,
     score_run,
+    spot_check_sample,
+    wilson_interval,
+    write_spot_check,
 )
 from bench.schema import Query, load_golden_set
 
@@ -76,6 +89,10 @@ ARMS: tuple[str, ...] = ("off", "on")
 ARM_VALUE = {"off": "0", "on": "1"}
 #: The reply classes, duplicated from ``coverage_ledger.REPLY_CLASSES`` so the module imports nothing from ``nexus``.
 REPLY_CLASSES: tuple[str, ...] = ("support", "neutral_or_contradict", "all_rejected", "no_records", "raised")
+#: The classes that are a usable reply (``coverage_ledger``: the first two); duplicated for the same reason.
+USABLE_REPLY_CLASSES: tuple[str, ...] = ("support", "neutral_or_contradict")
+#: Why a facet is unassessed (``coverage_ledger.UNASSESSED_CAUSES``), duplicated for the same reason. A test pins the two equal.
+UNASSESSED_CAUSES: tuple[str, ...] = ("unusable_reply", "deadline_skip", "budget_skip", "raised_call", "stopped_after_failure", "other")
 MVV_QID = "G06-synthesis-art-rdr084"
 
 NOT_MEASURED: tuple[str, ...] = (
@@ -83,6 +100,16 @@ NOT_MEASURED: tuple[str, ...] = (
     "terminal_completeness: needs per-facet addressed or disclosed judgments of the prose, which no label or judge supplies",
     "any_support_wins_precision: only for the facets the oracle labels, in oracle.spurious_contradicts",
     "engine_old_and_cached_capability_rollback_legs: simulated by tests/db/test_rdr232_run_summary_integration.py, not live",
+    # The four preconditions of turning coverage on that the bead's 2026-10-27 18:30 comment lists and an earlier version of this list omitted:
+    "negative_controls_at_scale: the in-sample set bench/queries/golden_negative_controls_v1.yaml (--set negative) is a handful of requests "
+    "whose facets nothing in the corpus bears on, a presence check for false coverage and not a rate; the oracle's own negative_control "
+    "reads only the closed fixture pieces",
+    "accepted_to_rejected_ratio_rule: a decision for Sam, not a measurement; the all-or-nothing unusable test treats one accepted neutral "
+    "record beside many rejected supports as a usable neutral reply, and the report carries the raw accepted and rejected totals only",
+    "single_reply_skip_cause: runs whose skip rests on one usable reply are COUNTED (skip_on_one_usable_reply); whether the unusable "
+    "reassessment that kept the first ledger was the cause is not separable from the envelope",
+    "reassess_only_new_anchors_misses: facets missed because a reassessment read only the anchors added by repair; the envelope carries "
+    "the final ledger's anchors, not which anchors each round assessed",
 )
 
 #: ``(query, arm, scope, bindings) -> the structured envelope``. The live caller sets the coverage switch itself.
@@ -97,6 +124,9 @@ class ArmRun:
     facts: dict[str, Any] = field(default_factory=dict)
     envelope: Mapping[str, Any] | None = None
     error: str = ""
+    #: What ``wall_ms`` is: a measured wall time, or (an envelopes file from before wall times were recorded) the sum
+    #: of the plan steps' ``elapsed_ms``, which leaves out extraction and plan matching.
+    wall_basis: str = "wall_ms"
 
 
 # ── what to call ─────────────────────────────────────────────────────────────────────────────────────────
@@ -129,18 +159,28 @@ def call_shape(q: Query, owners: Mapping[str, str] | None = None) -> tuple[str, 
     return q.scope, bindings
 
 
-def live_caller() -> Caller:
-    """The real ``nx_answer``, one arm at a time. Imports ``nexus.mcp.core`` only here."""
+def live_caller(*, no_plan_growth: bool = False) -> Caller:
+    """The real ``nx_answer``, one arm at a time. Imports ``nexus.mcp.core`` only here.
+
+    *no_plan_growth* stops a plan-miss run from saving the plan it planned inline. ``nx_answer`` grows a plan only
+    while ``core._load_ad_hoc_ttl()`` is above 0 and has no per-call switch for it, so the guard makes that function
+    return 0 for the duration of each call and puts it back (``core.py`` is not this driver's to change). Without it
+    the off arm's grown plan is matched by the on arm, and the pair differs in planner cost and time, not only in
+    the coverage switch (critique S2)."""
     from nexus.mcp import core  # noqa: PLC0415 — heavy; a live run only
 
     async def call(q: Query, *, arm: str, scope: str, bindings: Mapping[str, Any]) -> Mapping[str, Any]:
         saved = os.environ.get(COVERAGE_ENV)
         os.environ[COVERAGE_ENV] = ARM_VALUE[arm]
+        saved_ttl = core._load_ad_hoc_ttl
+        if no_plan_growth:
+            core._load_ad_hoc_ttl = lambda: 0
         try:
             out = await core.nx_answer(
                 question=q.text, scope=scope, bindings=dict(bindings) or None, structured=True, trace=True,
             )
         finally:
+            core._load_ad_hoc_ttl = saved_ttl
             if saved is None:
                 os.environ.pop(COVERAGE_ENV, None)
             else:
@@ -272,14 +312,20 @@ def summarize_arm(
         1 for r in ok
         if (r.facts.get("unassessed_by_cause") or {}).get("deadline_skip") or r.facts.get("assessment_outcome") == "skipped_deadline"
     )
+    skipped = [r for r in ok if r.facts.get("skip_generation")]
+    one_reply = [r for r in skipped if sum(1 for c in r.facts.get("call_log") or [] if c[2] in USABLE_REPLY_CLASSES) == 1]
     summary: dict[str, Any] = {
         "runs": len(runs), "errors": Counter(r.error for r in runs if r.error), "assessed_runs": len(assessed),
+        # A skipped (uncovered) run whose whole ledger rests on ONE usable reply: the first usable-but-neutral reply plus
+        # an unusable reassessment keeps the first ledger, so a skip can rest on a single call (bead comment 2026-10-27).
+        "skip_on_one_usable_reply": {"skipped_runs": len(skipped), "runs": len(one_reply), "qids": [r.qid for r in one_reply]},
+        "records": {"accepted": sum(r.facts.get("accepted_records") or 0 for r in ok), "rejected": sum(r.facts.get("rejected_records") or 0 for r in ok)},
         "states": Counter(str(r.facts.get("state")) for r in ok), "answer_shapes": Counter(str(r.facts.get("answer_shape")) for r in ok),
         "assessment_outcomes": Counter(str(r.facts.get("assessment_outcome")) for r in assessed),
         "failure_causes": Counter(str(r.facts.get("failure_cause")) for r in assessed),
         "assessment_calls": _call_tables(ok),
         "unassessed": {
-            "facets_by_cause": {c: causes.get(c, 0) for c in ("unusable_reply", "deadline_skip", "budget_skip", "raised_call", "other")},
+            "facets_by_cause": {c: causes.get(c, 0) for c in UNASSESSED_CAUSES},
             "facet_share": _share(sum(causes.values()), facet_total),
             "runs_with_unassessed": sum(1 for r in ok if sum((r.facts.get("unassessed_by_cause") or {}).values())),
         },
@@ -296,7 +342,7 @@ def summarize_arm(
         },
         "cost_usd": _stats(cost), "assessment_usd": {"total": round(sum(r.facts["assessment_usd"] for r in ok), 6),
                                                        **_stats([r.facts["assessment_usd"] for r in assessed])},
-        "latency_ms": _stats(wall), "assessment_latency_ms": _stats([float(r.facts["assessment_latency_ms"]) for r in assessed]),
+        "latency_ms": {**_stats(wall), "basis": _basis(ok)}, "assessment_latency_ms": _stats([float(r.facts["assessment_latency_ms"]) for r in assessed]),
         "deadline_skip_incidence": {"runs": skip_incidence, "share": _share(skip_incidence, len(ok))},
         "persistence": Counter(str(r.facts.get("persistence")) for r in ok),
     }
@@ -314,20 +360,55 @@ def summarize_arm(
     return summary
 
 
+def _basis(runs: Sequence[ArmRun]) -> str:
+    """What the runs' ``wall_ms`` is: ``wall_ms``, ``step_elapsed_sum``, or ``mixed``."""
+    kinds = {r.wall_basis for r in runs}
+    return kinds.pop() if len(kinds) == 1 else ("mixed" if kinds else "wall_ms")
+
+
 def compare_arms(off: Sequence[ArmRun], on: Sequence[ArmRun]) -> dict[str, Any]:
-    """Coverage on versus off, paired by position (the same queries in the same order)."""
-    pairs = [(a, b) for a, b in zip(off, on, strict=False) if not a.error and not b.error and a.qid == b.qid]
+    """Coverage on versus off, paired by position (the same queries in the same order), over the pairs whose two arms
+    ran the SAME plan.
+
+    A plan-miss ``nx_answer`` grows a plan, the off arm runs first, and the on arm then matches the plan the off arm
+    grew and skips the inline planner: that pair differs in planner cost and time, not only in the coverage switch
+    (critique S2). So the deltas read the pairs whose ``matched_plan_id`` is equal across the arms
+    (:func:`~bench.rdr232_envelope.matched_plan_id`: the envelope's ``plan_id`` is NOT used, because it is the grown row's
+    id on the off arm and the matched row's id on the on arm, the same number), and the pairs left out are counted and
+    named in ``plan_pairs``. No delta over all the pairs is produced."""
+    pairs: list[tuple[ArmRun, ArmRun]] = []
+    with_error = 0
+    for a, b in zip(off, on, strict=False):
+        if a.qid != b.qid:
+            continue
+        if a.error or b.error:
+            with_error += 1
+            continue
+        pairs.append((a, b))
+    plan_pairs = [
+        {
+            "qid": a.qid, "off_plan_id": a.facts.get("plan_id"), "on_plan_id": b.facts.get("plan_id"),
+            "off_matched_plan_id": a.facts.get("matched_plan_id", 0), "on_matched_plan_id": b.facts.get("matched_plan_id", 0),
+            "matched": a.facts.get("matched_plan_id", 0) == b.facts.get("matched_plan_id", 0),
+        }
+        for a, b in pairs
+    ]
+    kept = [(a, b) for (a, b), p in zip(pairs, plan_pairs, strict=True) if p["matched"]]
 
     def delta(values: Sequence[float]) -> dict[str, Any]:
         return {"n": len(values), "mean": statistics.fmean(values) if values else None, "p50": _pct(values, 0.5), "p90": _pct(values, 0.9)}
 
     return {
-        "pairs": len(pairs),
-        "cost_usd_delta": delta([b.facts["cost_usd"] - a.facts["cost_usd"] for a, b in pairs]),
-        "latency_ms_delta": delta([float(b.wall_ms - a.wall_ms) for a, b in pairs]),
-        "answer_shape_changed": sum(1 for a, b in pairs if a.facts.get("answer_shape") != b.facts.get("answer_shape")),
+        "pairs": len(pairs), "pairs_with_error": with_error,
+        "pairs_plan_matched": len(kept), "pairs_plan_mismatched": len(pairs) - len(kept), "excluded_plan_mismatch": len(pairs) - len(kept),
+        "pairs_both_inline_planned": sum(1 for a, _b in kept if not a.facts.get("matched_plan_id", 0)),
+        "plan_pairs": plan_pairs,
+        "latency_basis": _basis([r for pair in kept for r in pair]),
+        "cost_usd_delta": delta([b.facts["cost_usd"] - a.facts["cost_usd"] for a, b in kept]),
+        "latency_ms_delta": delta([float(b.wall_ms - a.wall_ms) for a, b in kept]),
+        "answer_shape_changed": sum(1 for a, b in kept if a.facts.get("answer_shape") != b.facts.get("answer_shape")),
         "answer_withheld_only_with_coverage_on": sum(
-            1 for a, b in pairs if b.facts.get("answer_shape") in ("uncovered", "insufficient_evidence") and a.facts.get("answer_shape") == "answered"
+            1 for a, b in kept if b.facts.get("answer_shape") in ("uncovered", "insufficient_evidence") and a.facts.get("answer_shape") == "answered"
         ),
     }
 
@@ -369,9 +450,33 @@ def _measures_json(measures: Mapping[str, Measure]) -> dict[str, Any]:
     }
 
 
+def negative_control_facts(runs: Sequence[ArmRun], negative_qids: frozenset[str]) -> dict[str, Any] | None:
+    """For the requests nothing in the corpus answers (``--set negative``), what the assessor made of their facets. By
+    construction every facet of these requests is unsupported, so a ``covered`` one is a false cover and needs no oracle
+    label. ``None`` when the run held none of them."""
+    mine = [r for r in runs if r.qid in negative_qids and not r.error]
+    if not mine:
+        return None
+    states: Counter[str] = Counter()
+    for r in mine:
+        states.update({k: v for k, v in (r.facts.get("facets") or {}).items() if isinstance(v, int)})
+    total = sum(states.values())
+    covered = states["covered"]
+    ci = wilson_interval(covered, total)
+    return {
+        "in_sample": True, "requests": len(mine), "facets": total,
+        **{k: states[k] for k in ("covered", "unsupported", "contradicted", "unassessed")},
+        "falsely_covered": _share(covered, total), "falsely_covered_ci95": None if ci is None else list(ci),
+        "generation_skipped": sum(1 for r in mine if r.facts.get("skip_generation")),
+        "answer_shapes": dict(Counter(str(r.facts.get("answer_shape")) for r in mine)),
+        "note": "a handful of in-sample requests: a presence check for false coverage, not a rate",
+    }
+
+
 def build_report(
     queries: Sequence[Query], off: Sequence[ArmRun], on: Sequence[ArmRun], *, resolutions: Mapping[str, FacetResolution],
     oracle: OracleSet | None, doc_path_of: DocPathOf | None = None, meta: Mapping[str, Any] | None = None,
+    negative_qids: frozenset[str] = frozenset(), spot_sample: SpotSample | None = None,
 ) -> dict[str, Any]:
     by_qid = {q.qid: q for q in queries}
     obs = [
@@ -390,12 +495,27 @@ def build_report(
         "answer_shape_measures_on": _measures_json(compute_measures(list(queries), obs)) if obs else {},
         "facet_map": {"requests_resolved": len(resolutions), "requests_incomplete": len(unresolved), "incomplete": unresolved},
         "oracle_labels": oracle.summary() if oracle else None,
+        "oracle_labels_by_provenance": oracle.provenance_summary() if oracle else None,
+        "drafted_spot_check": None if spot_sample is None else {
+            "sampled": len(spot_sample.pairs), "pool": dict(spot_sample.pool), "shortfall": dict(spot_sample.shortfall),
+            "by_stratum": dict(Counter(p.stratum for p in spot_sample.pairs)),
+        },
+        "negative_controls": negative_control_facts(on, negative_qids),
         "mvv_g06": mvv_facts(on),
         "not_measured": list(NOT_MEASURED),
     }
 
 
 # ── cli ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+_BENCH_QUERIES = Path(__file__).resolve().parents[2] / "bench" / "queries"
+#: The sets besides golden and heldout that ``--set`` reads. All three are IN-SAMPLE and carry no oracle labels.
+EXTRA_SET_PATHS: dict[str, Path] = {
+    "compound": _BENCH_QUERIES / "golden_compound_lookup_v1.yaml",
+    "near_miss": _BENCH_QUERIES / "golden_near_miss_synthesis_v1.yaml",
+    "negative": _BENCH_QUERIES / "golden_negative_controls_v1.yaml",
+}
+SET_CHOICES: tuple[str, ...] = ("golden", "heldout", "both", *EXTRA_SET_PATHS)
 
 
 def _load_queries(which: str, qids: Sequence[str], limit: int | None) -> list[Query]:
@@ -404,9 +524,16 @@ def _load_queries(which: str, qids: Sequence[str], limit: int | None) -> list[Qu
         queries += load_golden_set(GOLDEN_PATH)
     if which in ("heldout", "both"):
         queries += load_golden_set(HELDOUT_PATH)
+    if which in EXTRA_SET_PATHS:
+        queries += load_golden_set(EXTRA_SET_PATHS[which])
     if qids:
         queries = [q for q in queries if q.qid in set(qids)]
     return queries[:limit] if limit else queries
+
+
+def _all_queries() -> list[Query]:
+    """Every request any ``--set`` can name, for the facet-map join (the oracle covers only golden and heldout)."""
+    return [*load_golden_set(GOLDEN_PATH), *load_golden_set(HELDOUT_PATH), *(q for p in EXTRA_SET_PATHS.values() for q in load_golden_set(p))]
 
 
 def _resolutions(all_queries: Sequence[Query], on: Sequence[ArmRun], map_path: Path) -> dict[str, FacetResolution]:
@@ -420,33 +547,91 @@ def _resolutions(all_queries: Sequence[Query], on: Sequence[ArmRun], map_path: P
     return out
 
 
+def runs_from_records(records: Sequence[EnvelopeRecord], arm: str) -> list[ArmRun]:
+    """:class:`ArmRun` objects from an envelopes file's records. A record with no wall time (a legacy file) takes the sum
+    of its plan steps' ``elapsed_ms`` and says so in ``wall_basis``; an entry with no envelope is an error run."""
+    runs: list[ArmRun] = []
+    for r in records:
+        env = r.envelope if isinstance(r.envelope, Mapping) else None
+        error = r.error or ("" if env is not None else "no_envelope")
+        if r.wall_ms is None and env is not None:
+            wall, basis = step_elapsed_sum_ms(env), "step_elapsed_sum"
+        else:
+            wall, basis = int(r.wall_ms or 0), "wall_ms"
+        runs.append(ArmRun(r.qid, arm, wall, facts=envelope_facts(env) if env is not None else {}, envelope=env, error=error, wall_basis=basis))
+    return runs
+
+
+def _spot_cases(oracle: OracleSet, on: Sequence[ArmRun], resolutions: Mapping[str, FacetResolution]) -> list[SpotCase]:
+    seen: set[str] = set()
+    cases: list[SpotCase] = []
+    for r in on:
+        o = oracle.requests.get(r.qid)
+        res = resolutions.get(r.qid)
+        if o is None or o.todo or res is None or r.envelope is None or r.error or r.qid in seen:
+            continue
+        seen.add(r.qid)
+        cases.append(SpotCase(o, r.envelope.get("coverage") or {}, res))
+    return cases
+
+
+def _fail(message: str) -> int:
+    click.echo(f"FAIL: {message}", err=True)
+    return 2
+
+
 async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[[], float], doc_path_of: DocPathOf | None) -> int:
     queries = _load_queries(args.set, args.qid or [], args.limit)
-    if not queries:
-        click.echo("FAIL: no requests selected; a measurement of nothing proves nothing", err=True)
-        return 2
-    if caller is None:
-        if args.stub:
-            caller = stub_caller(args.stub)
-        elif args.live:
-            click.echo("LIVE: model calls and nx_answer_runs telemetry writes against the configured tenant", err=True)
-            caller = live_caller()
-        else:
-            click.echo("FAIL: pass --live (real nx_answer; waits on Sam's go) or --stub FILE (a recorded envelope)", err=True)
-            return 2
-    owners = dict(kv.split("=", 1) for kv in args.owner or [])
-    arms = {a: await run_arm(queries, caller, a, owners=owners, clock=clock, repeat=args.repeat, keep_envelopes=True) for a in ARMS}
-    all_queries = [*load_golden_set(GOLDEN_PATH), *load_golden_set(HELDOUT_PATH)]
-    oracle = None if args.no_oracle else load_oracle(args.oracle, all_queries)
-    if doc_path_of is None and args.live and not args.stub and oracle is not None:
+    if args.from_envelopes:
+        if args.live or args.stub:
+            return _fail("pass exactly one of --live (real nx_answer), --stub FILE (a recorded envelope) or --from-envelopes FILE (re-analyse a run)")
+        try:
+            records = read_envelopes_file(args.from_envelopes, [q.qid for q in queries for _ in range(max(1, args.repeat))])
+        except (ValueError, OSError) as exc:
+            return _fail(str(exc))
+        if set(records) != set(ARMS):
+            return _fail(f"{args.from_envelopes} holds arms {sorted(records)}, not {list(ARMS)}")
+        known = {q.qid: q for q in _all_queries()}
+        order = list(dict.fromkeys(r.qid for r in records["off"]))
+        if unknown := [qid for qid in order if qid not in known]:
+            return _fail(f"{args.from_envelopes} names requests no --set knows: {unknown}")
+        queries = [known[qid] for qid in order]
+        arms = {a: runs_from_records(records[a], a) for a in ARMS}
+        mode, plan_growth = "from_envelopes", "not_recorded"
+    else:
+        if not queries:
+            return _fail("no requests selected; a measurement of nothing proves nothing")
+        if caller is None:
+            if args.stub:
+                caller = stub_caller(args.stub)
+            elif args.live:
+                click.echo("LIVE: model calls and nx_answer_runs telemetry writes against the configured tenant", err=True)
+                caller = live_caller(no_plan_growth=args.no_plan_growth)
+            else:
+                return _fail("pass exactly one of --live (real nx_answer; waits on Sam's go), --stub FILE (a recorded envelope) or --from-envelopes FILE")
+        owners = dict(kv.split("=", 1) for kv in args.owner or [])
+        arms = {a: await run_arm(queries, caller, a, owners=owners, clock=clock, repeat=args.repeat, keep_envelopes=True) for a in ARMS}
+        mode = "live" if args.live and not args.stub else "stub"
+        plan_growth = "not_applicable_stub" if args.stub else ("disabled" if args.no_plan_growth else "enabled")
+    base_queries = [*load_golden_set(GOLDEN_PATH), *load_golden_set(HELDOUT_PATH)]
+    drafted = args.drafted if args.drafted is not None else (DEFAULT_DRAFTED_PATH if DEFAULT_DRAFTED_PATH.is_file() else None)
+    oracle = None if args.no_oracle else load_oracle(args.oracle, base_queries, drafted_path=drafted)
+    if doc_path_of is None and oracle is not None and ((args.live and not args.stub) or args.resolve_paths):
         doc_path_of = catalog_doc_paths([
             a.get("tumbler") for r in arms["on"] if r.envelope for a in (r.envelope.get("coverage") or {}).get("anchors") or []
         ])
-    resolutions = _resolutions(all_queries, arms["on"], args.facet_map)
+    resolutions = _resolutions(_all_queries(), arms["on"], args.facet_map)
+    spot = None
+    if oracle is not None and args.spot_check_out:
+        spot = spot_check_sample(_spot_cases(oracle, arms["on"], resolutions), seed=args.spot_seed, doc_path_of=doc_path_of)
+        write_spot_check(args.spot_check_out, spot)
     report = build_report(
         queries, arms["off"], arms["on"], resolutions=resolutions, oracle=oracle, doc_path_of=doc_path_of,
-        meta={"set": args.set, "requests": len(queries), "repeat": args.repeat, "engine": args.engine, "mode": "live" if args.live and not args.stub else "stub",
-              "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "owners": owners},
+        negative_qids=frozenset(q.qid for q in load_golden_set(EXTRA_SET_PATHS["negative"])), spot_sample=spot,
+        meta={"set": args.set, "requests": len(queries), "repeat": args.repeat, "engine": args.engine, "mode": mode, "plan_growth": plan_growth,
+              "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "owners": dict(kv.split("=", 1) for kv in args.owner or []),
+              "drafted_labels": str(drafted) if drafted is not None and oracle is not None else None,
+              **({"source_envelopes": str(args.from_envelopes)} if args.from_envelopes else {})},
     )
     text = json.dumps(report, indent=2, default=str)
     if args.out:
@@ -455,7 +640,7 @@ async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[
     else:
         click.echo(text)
     if args.envelopes_out:
-        args.envelopes_out.write_text(json.dumps({a: [r.envelope for r in runs] for a, runs in arms.items()}, indent=2, default=str) + "\n", encoding="utf-8")
+        write_envelopes_file(args.envelopes_out, {a: [EnvelopeRecord(r.qid, r.wall_ms, r.error, r.envelope) for r in runs] for a, runs in arms.items()})
     return 0
 
 
@@ -464,16 +649,25 @@ def main(
     doc_path_of: DocPathOf | None = None,
 ) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--set", default="golden", choices=("golden", "heldout", "both"))
+    ap.add_argument("--set", default="golden", choices=SET_CHOICES)
     ap.add_argument("--live", action="store_true", help="call the real nx_answer (model calls, telemetry writes); waits on Sam's go")
     ap.add_argument("--stub", type=Path, help="replay this recorded envelope (JSON) instead of calling nx_answer")
+    ap.add_argument("--from-envelopes", type=Path, help="re-analyse an envelopes file (--envelopes-out of an earlier run): no model, no network. "
+                    "A file written before wall times were recorded needs the same --set/--qid/--limit/--repeat as the run")
+    ap.add_argument("--no-plan-growth", action="store_true", help="--live: stop plan-miss runs from saving the plan they planned, so the off arm "
+                    "cannot hand the on arm a plan to match (critique S2); pairs are still filtered on the plan each arm ran with")
     ap.add_argument("--qid", action="append", help="only this request (repeatable), e.g. a canary of one")
     ap.add_argument("--limit", type=int, help="only the first N selected requests")
     ap.add_argument("--repeat", type=int, default=1, help="calls per request per arm")
     ap.add_argument("--owner", action="append", help="PROJECT=TUMBLER owner binding, e.g. ART=1.2 (repeatable)")
     ap.add_argument("--engine", default="", help="the engine version the run is against, recorded in the report")
     ap.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE_PATH, help="oracle label file")
+    ap.add_argument("--drafted", type=Path, help=f"drafted oracle labels to merge (default: {DEFAULT_DRAFTED_PATH.name} when it exists)")
     ap.add_argument("--no-oracle", action="store_true", help="skip assessor scoring against the oracle")
+    ap.add_argument("--resolve-paths", action="store_true", help="resolve document paths through the catalog (read-only) for the document-level labels, "
+                    "also with --stub or --from-envelopes")
+    ap.add_argument("--spot-check-out", type=Path, help="write the stratified spot-check sample of drafted labels here, every pair unchecked")
+    ap.add_argument("--spot-seed", type=int, default=0, help="seed of the spot-check draw")
     ap.add_argument("--facet-map", type=Path, default=DEFAULT_MAP_PATH)
     ap.add_argument("--out", type=Path, help="write the JSON report here (default: stdout)")
     ap.add_argument("--envelopes-out", type=Path, help="also write every envelope (contains answer text) to this file")

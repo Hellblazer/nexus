@@ -1,13 +1,15 @@
 # RDR-232 item-by-facet oracle labels v1 (nexus-jypmj.3.10). Format and scoring: scripts/bench/rdr232_oracle.py.
 #
 # Labels say which retrieved item bears on which golden facet, independently of any assessor. They are NEVER read
-# off a coverage ledger (that would score the assessor with itself). Three provenances:
+# off a coverage ledger (that would score the assessor with itself). Three hand provenances:
 #   fixture       the authored piece labels of the ART RDR-084 fixture (tests/_rdr232_golden.py). The content is
 #                 synthetic, so these labels score runs over the FIXTURE corpus (a local engine), not the live ART
 #                 RDR-084 in the cloud tenant.
 #   ground_truth  a single-facet request's hand `ground_truth` grade-3 documents (golden_v1.yaml) support its facet.
-#                 Document-level: an item is matched by a substring of its document path.
+#                 Document-level (`level: document`): an item is matched by a substring of its document path, so it says
+#                 the DOCUMENT supports the facet and is scored apart from chunk-level labels.
 #   human         todo: true until a human labels items.
+# A fourth provenance, `drafted`, lives in golden_oracle_labels_drafted_v1.yaml (see rdr232_oracle.py).
 # Regenerate the fixture and ground_truth entries with `python scripts/bench/rdr232_oracle.py scaffold --write`
 # (tests/test_rdr232_oracle.py pins that the committed entries equal the derivation). Edit `human` entries by hand.
 oracle_version: 1
@@ -17,6 +19,7 @@ requests:
     provenance: ground_truth
     items:
     - doc_path_contains: rdr-049-
+      level: document
       closed: false
       facets:
         introducing-rdr: supports
@@ -24,6 +27,7 @@ requests:
     provenance: ground_truth
     items:
     - doc_path_contains: rdr-086-
+      level: document
       closed: false
       facets:
         introducing-rdr: supports
@@ -31,6 +35,7 @@ requests:
     provenance: ground_truth
     items:
     - doc_path_contains: rdr-070-
+      level: document
       closed: false
       facets:
         introducing-rdr: supports

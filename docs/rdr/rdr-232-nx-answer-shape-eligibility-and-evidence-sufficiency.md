@@ -400,9 +400,74 @@ listed under Critical Assumptions before gate.
   from an ART session, an ambiguity with its reason from a host without a
   project, and an explicit owner when the call binds the project. Not settled:
   Haiku reads compound single-paper questions as lookup where Opus says
-  synthesis, and no labelled set covers that class.
+  synthesis, and no labelled set covers that class. [Correction 2026-10-28:
+  a labelled set now covers that class, `bench/queries/golden_compound_lookup_v1.yaml`
+  (six requests, in-sample); the next entry records the re-measure.]
   *Source: extraction measurement and live proof. T2:
   `nexus_rdr/232-research-23`.*
+
+- **✅ Verified** (spike) — A5, the lookup boundary after nexus-jypmj.13. The
+  extraction prompt now says what section 1 says: several connected facts from
+  one passage of one source are a `lookup`, and a `synthesis` spans sections,
+  sources or history. Re-measured on 98 calls (Haiku 67, Opus 31; no timeout,
+  error or invalid reply). With extraction, Haiku reads golden 22 of 24 as
+  labelled (G23 and G24, both labelled unknown), held-out 28 of 29, and the six
+  compound single-passage requests 5 of 6 as lookup (C02 reads synthesis); Opus
+  reads golden 21 of 24, held-out 27 of 29 and the compound six 6 of 6 as
+  lookup. The failure that opened the bead, Opus reading compound single-passage
+  questions as synthesis, is closed on this set. All five Phase 2 gate
+  thresholds read as they did when Sam approved them (golden wrong-shape
+  admission 4 of 24 to 0; held-out 1 of 29 before and after; lookup recall 5 of
+  5 on golden and 2 of 5 held-out; held-out recall 0.724 to 0.690; 0 of 98
+  timeouts or errors). `_weak_lookup` was left unchanged on purpose: the first
+  pass sees the question text and no passage or source, so a deterministic rule
+  that calls a two-facet question `lookup` would override the model on exactly
+  the case the model is there to decide, and where extraction is off or fails the
+  right fallback is the inline planner, not the lookup plan. Not settled: the
+  compound set is in-sample (written with the boundary in view) and has six
+  requests. Its control, six one-source synthesis requests whose parts live in
+  different sections (`bench/queries/golden_near_miss_synthesis_v1.yaml`), is
+  authored and has not been run, so whether the new wording reads synthesis as
+  lookup is unmeasured.
+  *Source: extraction measurement and gate matrix. T2:
+  `nexus/rdr232-jypmj13-remeasure-2026-10-28`,
+  `nexus/rdr232-phase2-thresholds`.*
+
+- **✅ Verified** (spike) — the pre-cap graph scope filter (nexus-jypmj.1.13)
+  departs from the section 3 text in one place. The text says an engine that does
+  not report the filter yields no secondary graph evidence. The client applies
+  that only when the walk may have been cut, that is when the nodes returned plus
+  the seeds the walk lost reach the engine's 500-node cap, because that cut is the
+  only silent cap in the walk. A walk below the cap is complete, so filtering it
+  by scope on the client is exact and omitting it would discard good evidence; the
+  reason for the rule, a cut spent on out-of-scope nodes, does not apply to it.
+  Consequence: against the deployed engine (0.1.167, which does not report the
+  filter) and a cloud edge that has not allowlisted the flag, a capped walk (G06
+  was capped at 500 in the 2026-10-26 canary) returns seed documents only, so the
+  client must not ship ahead of the engine tag and the edge allowlist for that
+  request class.
+  *Source: engine wire change and its review. T2:
+  `nexus/rdr232-engine-wire-three-changes-2026-10-28`,
+  `nexus/review-rdr232-finish-critique-2026-10-28`.*
+
+- **✅ Verified** (spike) — the live canary of the coverage check is slow, and
+  latency is its cost. ART RDR-084 (G06), owner 1.2, engine 0.1.167, 2026-10-28:
+  with coverage off the run answered in 29.4 s for 0.433 USD; with coverage on it
+  answered in 147.3 s for 0.430 USD (assessment 0.0166 USD), 118 s longer. The
+  assessment made four serial calls, one per evidence stream, 118.2 s in all.
+  The primary, T2 and vector streams answered (30, 11 and 16 accepted records)
+  and the graph stream, 65 anchors, timed out at the 60 s call limit, so the
+  outcome was `partial_failure` with cause `raised_call`; the facets were still
+  covered by the other streams (6 of 6, one conflicted). The serial design is
+  recorded as provisional in `src/nexus/plans/coverage_ledger.py`. The summarize
+  step's `elapsed_ms` (140.8 s) includes the assessment wait, so per-step
+  latency in `nx answer-runs` over-attributes to summarize until assessment
+  latency is split out of it. Follow-up nexus-jypmj.17 covers concurrent
+  per-stream calls under the stage deadline, continuing after a raised call and
+  the 65-anchor pack; turning the check on by default waits on it. This is one
+  request on one run.
+  *Source: live canary. T2: `nexus/rdr232-canary-phase1`; bead
+  nexus-jypmj.3.10 comment of 2026-10-28.*
 
 ### Critical Assumptions
 
@@ -471,7 +536,10 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   active-project tier live on the unmodified RDR-084 call (research 23).
   Still open: compound single-paper questions are lookups only because Haiku
   departs from the extraction prompt; the prompt and `_weak_lookup` are
-  aligned with the approved lookup definition in nexus-jypmj.13.
+  aligned with the approved lookup definition in nexus-jypmj.13. [Correction
+  2026-10-28: only the prompt was aligned; `_weak_lookup` was left unchanged on
+  purpose, and the compound set closes the Opus divergence for six requests. See
+  the Key Discoveries entry on the lookup boundary.]
 - [ ] **A6 — traversal can apply scope before its chunk cap without losing
   alignment.** **Status**: Partially verified (research 10). **Method**: Source
   Search plus synthetic graph fixture with >300 out-of-scope ids preceding
@@ -1875,3 +1943,4 @@ remain coherent without it.
 - 2026-10-27: Section 4's coverage-state table row for `unavailable` names the new `uncovered` shape for evidence that covered no facet and keeps `no_evidence` for zero retrieval results, per Sam's ruling (nexus-jypmj.3.12), added with the shape in nexus-jypmj.3.3.
 - 2026-10-27: Section 4 counts a contradicted facet toward a usable answer: the definition and the `unavailable` row say covered or contradicted, so a contradiction-only result is `partial` with the contradiction named ahead of the prose, per Sam's ruling (nexus-jypmj.3.13).
 - 2026-10-27: Phase 3 As run recorded (the coverage check ships off until nexus-jypmj.3.10 and Sam's approval; the section 4 departures as built), and section 4 and the Test Plan corrected where they misdescribed the build (marker bucketing under trace=False, assessment USD in step records, the continuation fallback repay, the unverified and not_recorded persistence states, the coverage_partial count), approved by Sam.
+- 2026-10-28: Key Discoveries record the lookup-boundary re-measure (nexus-jypmj.13), the pre-cap filter's old-engine departure (nexus-jypmj.1.13) and the live canary latency (nexus-jypmj.3.10); two A5 statements are corrected as findings. No decision text changed.

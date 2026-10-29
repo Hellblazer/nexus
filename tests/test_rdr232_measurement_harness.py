@@ -294,11 +294,13 @@ def test_the_scorer_finds_the_assessors_two_known_errors(envelope, oracle) -> No
     assert by_slug["f2"].assessor_state == "covered" and by_slug["f2"].assessor_reason == "conflicted" and by_slug["f2"].spurious_contradict is True
     assert [s.false_negative for s in score.facets] == [False, False, True, False, False, False]
     assert score.skipped is False and score.false_skip is None
-    agg = oracle_mod.aggregate([score])
-    assert agg["false_negative"] == {"rate": 1 / 6, "numerator": 1, "denominator": 6, "supported_but_unassessed": 0}
+    agg = oracle_mod.aggregate([score])["hand"]
+    assert {k: agg["false_negative"][k] for k in ("rate", "numerator", "denominator", "supported_but_unassessed")} == {
+        "rate": 1 / 6, "numerator": 1, "denominator": 6, "supported_but_unassessed": 0}
     assert agg["spurious_contradicts"]["rate"] == 1.0 and agg["spurious_contradicts"]["denominator"] == 1
     assert agg["false_skip"]["rate_of_skips"] is None and agg["false_skip"]["skips"] == 0
-    assert agg["negative_control"] == {"facets": 0, "assessor_state": {}, "falsely_covered": None}
+    assert {k: agg["negative_control"][k] for k in ("facets", "assessor_state", "falsely_covered")} == {"facets": 0, "assessor_state": {}, "falsely_covered": None}
+    assert oracle_mod.aggregate([score])["drafted"]["runs"] == 0, "a fixture label is a hand label: nothing is drafted"
 
 
 def test_a_contradiction_the_oracle_confirms_is_not_spurious_and_an_unlabelled_one_is_not_scored(envelope, oracle) -> None:
@@ -321,7 +323,7 @@ def test_a_skipped_run_over_evidence_the_oracle_says_supports_a_facet_is_a_false
     skipped["findings"] = [dict(f, state="unsupported", evidence_ids=[], reason="no_supporting_evidence") for f in skipped["findings"]]
     s = oracle_mod.score_run(oracle.requests[G06.qid], skipped, res)
     assert s.skipped and s.false_skip is True
-    agg = oracle_mod.aggregate([s])
+    agg = oracle_mod.aggregate([s])["hand"]
     assert agg["false_skip"]["rate_of_skips"] == 1.0 and agg["false_negative"]["rate"] == 1.0
 
 
@@ -341,8 +343,8 @@ def test_a_negative_control_counts_the_assessors_state_where_nothing_bears_on_th
     cov = {"anchors": anchors, "skip_generation": False,
            "findings": [{"facet_id": "f1", "state": "covered", "evidence_ids": ["e1"], "reason": ""}]}
     res = resolve_facets(q, [{"id": "f1", "text": "the locked architecture"}], load_facet_map(DEFAULT_MAP_PATH, ALL)[q.qid])
-    agg = oracle_mod.aggregate([oracle_mod.score_run(base, cov, res)])
-    assert agg["negative_control"] == {"facets": 1, "assessor_state": {"covered": 1}, "falsely_covered": 1.0}
+    agg = oracle_mod.aggregate([oracle_mod.score_run(base, cov, res)])["hand"]
+    assert {k: agg["negative_control"][k] for k in ("facets", "assessor_state", "falsely_covered")} == {"facets": 1, "assessor_state": {"covered": 1}, "falsely_covered": 1.0}
 
 
 # ── the driver ───────────────────────────────────────────────────────────────────────────────────────────
@@ -385,8 +387,10 @@ def test_the_driver_runs_end_to_end_on_a_recorded_envelope(tmp_path: Path) -> No
     assert {"MAX_FACETS_PER_ASSESSMENT_CALL", "MAX_REPAIR_QUERIES"} <= set(report["config"])
     assert any("continuation_fallback" in n for n in report["not_measured"])
     # the oracle labels four requests (G01-G03 by document path, which the stub cannot resolve, and G06 by chunk hash)
-    assert on["oracle"]["runs_scored"] == 4 and on["oracle"]["false_negative"]["numerator"] == 1, "only G06's chashes match the recorded envelope"
-    assert on["oracle"]["oracle_state_counts"]["supported"] == 6 and on["oracle"]["oracle_state_counts"]["unmapped"] == 18, (
+    hand = on["oracle"]["hand"]
+    assert on["oracle"]["runs_scored"] == 4 and hand["false_negative"]["numerator"] == 1, "only G06's chashes match the recorded envelope"
+    assert on["oracle"]["drafted"]["runs"] == 0 and report["oracle_labels_by_provenance"]["drafted"] == {"requests": 0, "pairs": 0}
+    assert hand["oracle_state_counts"]["supported"] == 6 and hand["oracle_state_counts"]["unmapped"] == 18, (
         "the stub replays G06's six facets for G01-G03 too, which the map cannot join to their one slug: unmapped, not guessed")
 
 
