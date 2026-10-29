@@ -7772,7 +7772,8 @@ def tuple_out(
         description=(
             "Caller-minted nonce, its own parameter: never a key or a dim. Required "
             "when the template's id_from is keys+nonce (mailbox/<address>, "
-            "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>); omit "
+            "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>, "
+            "aspects); omit "
             "for a keys-only one (ledger, lock). An id ingredient only, never echoed "
             "back on a read."
         ),

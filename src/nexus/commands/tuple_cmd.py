@@ -86,9 +86,10 @@ def tuple_group() -> None:
 @click.option(
     "--nonce", default=None,
     help=(
-        "Caller-minted nonce. REQUIRED for a keys+nonce template (the "
-        "mailbox) -- refused as SchemaViolation without one; omit for a "
-        "keys-only template (the ledger). An id ingredient only, never "
+        "Caller-minted nonce. REQUIRED for a keys+nonce template (mailbox, "
+        "board, board/ci, queue, directory, aspects) -- refused as "
+        "SchemaViolation without one; omit for a keys-only template (ledger, "
+        "lock). An id ingredient only, never "
         "echoed back on a read."
     ),
 )
