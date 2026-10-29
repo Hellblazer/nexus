@@ -6,7 +6,7 @@ Until this bead the rule read each sibling's id from the ``rdr-frontmatter-v1`` 
 fills asynchronously, then from the file where the host has it. The indexer has the frontmatter when it
 registers the document, so it now writes the raw ``id`` into the document's ``meta`` under
 ``RDR_FRONTMATTER_ID_META_KEY`` and :func:`recorded_frontmatter_id` trusts that key before it asks the aspect
-store. This file is substrate-free; ``test_rdr232_rdr_id_meta_engine.py`` runs the same claims against the engine.
+store. This file is substrate-free; ``tests/integration/test_rdr232_rdr_id_meta_engine.py`` runs the same claims against the engine.
 """
 from __future__ import annotations
 

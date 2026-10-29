@@ -30,7 +30,7 @@ from nexus.plans.evidence import OwnerResolution, SourceRef
 from nexus.plans.primary_evidence import recorded_frontmatter_id, resolve_named_sources
 from tests._catalog_fixture_ops import ActiveCatalog, active_reader
 
-pytestmark = pytest.mark.t2_tenant
+pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
 
 REPO_HASH = "571b8edd"
 COLLECTION = "rdr__nexus-571b8edd"
