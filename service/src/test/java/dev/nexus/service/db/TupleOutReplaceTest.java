@@ -100,6 +100,17 @@ class TupleOutReplaceTest {
                   max_lease_seconds: 300
                 retention_seconds: 3600
                 """, StandardCharsets.UTF_8);
+        Files.writeString(extraTemplateDir.resolve("probe-replock.yaml"), """
+                name: probe-replock/<room>
+                keys:
+                  - id
+                id_from: keys+nonce
+                take:
+                  enabled: true
+                  max_lease_seconds: 300
+                retention_seconds: 3600
+                lock: true
+                """, StandardCharsets.UTF_8);
         repo = new TupleRepository(new TenantScope(svcDs),
                 TemplateRegistry.loadAtBoot(extraTemplateDir.toString(), null,
                         NexusService.SWEEP_INTERVAL_HOURS * 3600L));
@@ -118,6 +129,7 @@ class TupleOutReplaceTest {
     @AfterEach
     void clearHook() {
         TupleRepository.TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
+        repo.testOnlyAtParkLoopTop = null;
     }
 
     // ── fixtures ─────────────────────────────────────────────────────────────
@@ -143,6 +155,44 @@ class TupleOutReplaceTest {
         return repo.outReplace(TENANT, r.subspace(), r.keys(), Map.of(), body, nonce, null, null, delayS);
     }
 
+    private byte[] outAs(Room r, String nonce, String body, String session) {
+        return repo.out(TENANT, r.subspace(), r.keys(), Map.of(), body, nonce, null, session, null);
+    }
+
+    private TupleRepository.OutResult replaceAs(Room r, String nonce, String body, String session) {
+        return repo.outReplace(TENANT, r.subspace(), r.keys(), Map.of(), body, nonce, null, session, null);
+    }
+
+    /** A room on the shipped {@code queue/<name>} template: keys+nonce, dims from (id-bearing), kind, correlation_id. */
+    private static Room newQueueRoom() {
+        String name = "q-" + UUID.randomUUID().toString().substring(0, 10);
+        return new Room("queue/" + name, Map.of("queue", name));
+    }
+
+    private byte[] outQ(Room r, String nonce, Map<String, String> dims) {
+        return repo.out(TENANT, r.subspace(), r.keys(), dims, "b", nonce, null, null, null);
+    }
+
+    private TupleRepository.OutResult replaceQ(Room r, String nonce, Map<String, String> dims) {
+        return repo.outReplace(TENANT, r.subspace(), r.keys(), dims, "b", nonce, null, null, null);
+    }
+
+    /** The stored dims of a row as a plain map, read through the database's own jsonb accessors. */
+    private Map<String, String> dims(byte[] id) throws Exception {
+        return admin(ctx -> {
+            Map<String, String> out = new java.util.TreeMap<>();
+            for (String k : List.of("from", "kind", "correlation_id")) {
+                String v = ctx.select(DSL.jsonbGetAttributeAsText(TUPLES.DIMS, k))
+                        .from(TUPLES).where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.ID.eq(id)))
+                        .fetchOne(0, String.class);
+                if (v != null) {
+                    out.put(k, v);
+                }
+            }
+            return out;
+        });
+    }
+
     private TupleRepository.ClaimedTuple claim(Room r, String claimant) {
         var c = repo.inp(TENANT, r.subspace(), r.keys(), claimant, 60);
         assertThat(c).as("the row must be claimable").isPresent();
@@ -157,7 +207,8 @@ class TupleOutReplaceTest {
 
     private record Row(String body, String claimState, String claimId, String claimant, int attempts,
                        boolean dirty, OffsetDateTime availableAt, OffsetDateTime consumedAt,
-                       OffsetDateTime createdAt, OffsetDateTime expiresAt, OffsetDateTime leaseUntil) {
+                       OffsetDateTime createdAt, OffsetDateTime expiresAt, OffsetDateTime leaseUntil,
+                       String senderSession) {
     }
 
     private Row row(byte[] id) throws Exception {
@@ -166,7 +217,7 @@ class TupleOutReplaceTest {
             assertThat(r).as("the row exists").isNotNull();
             return new Row(r.getBody(), r.getClaimState(), r.getClaimId(), r.getClaimant(), r.getAttempts(),
                     r.getDirty(), r.getAvailableAt(), r.getConsumedAt(), r.getCreatedAt(), r.getExpiresAt(),
-                    r.getLeaseUntil());
+                    r.getLeaseUntil(), r.getSenderSession());
         });
     }
 
@@ -316,19 +367,37 @@ class TupleOutReplaceTest {
         assertThat(transitions(id)).containsExactly("claim", "ack_dirty", "claim", "ack");
     }
 
+    /**
+     * A parked {@code in} re-runs its claim on a one-second timer even with no signal, so a pickup alone
+     * proves nothing. This one proves the signal: the park loop's top hook (a latch) shows the park has
+     * started and its timer is running; the ack lands 150 ms later, so the timer alone would pick the row up
+     * about 850 ms after the ack; the pickup must land within 600 ms of it. A box so loaded that the
+     * signalled claim itself takes over 600 ms fails this, which is the margin chosen on purpose.
+     */
     @Test
-    void ackOfADirtyClaim_wakesAParkedIn() throws Exception {
+    void ackOfADirtyClaim_wakesAParkedIn_withinTheSignalNotTheTimer() throws Exception {
         Room r = newRoom();
         out(r, "doc-1", "v1");
         var c = claim(r, "w1");
         replace(r, "doc-1", "v2");
-        var parked = java.util.concurrent.CompletableFuture.supplyAsync(
-                () -> repo.in(TENANT, r.subspace(), r.keys(), "w2", 60L, 20));
-        Thread.sleep(300);
+        var parkStarted = new java.util.concurrent.CountDownLatch(1);
+        repo.testOnlyAtParkLoopTop = parkStarted::countDown;
+        var parked = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+            var got = repo.in(TENANT, r.subspace(), r.keys(), "w2", 60L, 20);
+            return new Object[] {got, System.nanoTime()};
+        });
+        assertThat(parkStarted.await(10, java.util.concurrent.TimeUnit.SECONDS)).as("the in has parked").isTrue();
+        Thread.sleep(150);
+        long ackedAt = System.nanoTime();
         repo.ack(TENANT, c.claimId(), "w1");
-        var got = parked.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        Object[] result = parked.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        @SuppressWarnings("unchecked")
+        var got = (java.util.Optional<TupleRepository.ClaimedTuple>) result[0];
+        long pickupMillis = (((long) result[1]) - ackedAt) / 1_000_000L;
         assertThat(got).isPresent();
         assertThat(got.get().tuple().body()).isEqualTo("v2");
+        assertThat(pickupMillis).as("picked up on the ack's signal, not the one-second timer")
+                .isLessThan(600L);
     }
 
     @Test
@@ -621,5 +690,122 @@ class TupleOutReplaceTest {
         assertThat(hex(replace(r, "doc-1", "v2").id())).isEqualTo(hex(id));
         claim(r, "w1");
         assertThat(hex(replace(r, "doc-1", "v3").id())).isEqualTo(hex(id));
+    }
+
+    // ── review round: sender_session names the writer of the stored body, on every replace branch ─────
+
+    @Test
+    void replaceStampsTheReplacingWritersSenderSession_onEveryBranch() throws Exception {
+        // available
+        Room avail = newRoom();
+        byte[] a = outAs(avail, "d", "v1", "sess-A");
+        assertThat(row(a).senderSession()).isEqualTo("sess-A");
+        assertThat(replaceAs(avail, "d", "v2", "sess-B").outcome()).isEqualTo(REPLACED);
+        assertThat(row(a).senderSession()).as("available branch: the replacing writer's").isEqualTo("sess-B");
+
+        // claimed with a live lease (dirtied)
+        Room claimed = newRoom();
+        byte[] c = outAs(claimed, "d", "v1", "sess-A");
+        claim(claimed, "w1");
+        assertThat(replaceAs(claimed, "d", "v2", "sess-C").outcome()).isEqualTo(DIRTIED);
+        assertThat(row(c).senderSession()).as("claimed branch: the replacing writer's").isEqualTo("sess-C");
+
+        // claimed whose lease lapsed (plain replace)
+        Room lapsed = newRoom();
+        byte[] l = outAs(lapsed, "d", "v1", "sess-A");
+        claim(lapsed, "w1");
+        lapseLease(l);
+        assertThat(replaceAs(lapsed, "d", "v2", "sess-D").outcome()).isEqualTo(REPLACED);
+        assertThat(row(l).senderSession()).as("lapsed-claim branch: the replacing writer's").isEqualTo("sess-D");
+
+        // consumed (the revival branch)
+        Room consumed = newRoom();
+        byte[] k = outAs(consumed, "d", "v1", "sess-A");
+        repo.ack(TENANT, claim(consumed, "w1").claimId(), "w1");
+        assertThat(replaceAs(consumed, "d", "v2", "sess-E").outcome()).isEqualTo(REPLACED);
+        assertThat(row(k).senderSession()).as("revival branch: the replacing writer's").isEqualTo("sess-E");
+
+        // a replace with no session token stamps NULL: the stored body is not that of the first writer
+        Room unstamped = newRoom();
+        byte[] u = outAs(unstamped, "d", "v1", "sess-A");
+        replaceAs(unstamped, "d", "v2", null);
+        assertThat(row(u).senderSession()).as("no token: the stamp does not name a writer who did not write").isNull();
+    }
+
+    // ── review round: a replace carries the new dims ─────────────────────────────────────────────────
+
+    @Test
+    void replaceOnAnAvailableRow_storesTheNewDims() throws Exception {
+        Room q = newQueueRoom();
+        byte[] id = outQ(q, "doc-1", Map.of("from", "a", "kind", "k1"));
+        assertThat(dims(id)).containsOnly(Map.entry("from", "a"), Map.entry("kind", "k1"));
+
+        var res = replaceQ(q, "doc-1", Map.of("from", "a", "kind", "k2", "correlation_id", "c1"));
+
+        assertThat(res.outcome()).isEqualTo(REPLACED);
+        assertThat(hex(res.id())).as("kind and correlation_id are not id dims: the id holds").isEqualTo(hex(id));
+        assertThat(dims(id)).containsOnly(Map.entry("from", "a"), Map.entry("kind", "k2"),
+                Map.entry("correlation_id", "c1"));
+    }
+
+    @Test
+    void replaceOnAClaimedRow_storesTheNewDims_andDropsOnesTheReplaceOmits() throws Exception {
+        Room q = newQueueRoom();
+        byte[] id = outQ(q, "doc-1", Map.of("from", "a", "kind", "k1", "correlation_id", "c1"));
+        assertThat(repo.inp(TENANT, q.subspace(), q.keys(), "w1", 60L)).isPresent();
+
+        var res = replaceQ(q, "doc-1", Map.of("from", "a", "kind", "k3"));
+
+        assertThat(res.outcome()).isEqualTo(DIRTIED);
+        assertThat(dims(id)).as("the stored dims are the replace's, not a merge")
+                .containsOnly(Map.entry("from", "a"), Map.entry("kind", "k3"));
+    }
+
+    // ── review round: lock templates ─────────────────────────────────────────────────────────────
+
+    @Test
+    void replaceOnALockTemplate_isRefused_whateverItsIdFrom() throws Exception {
+        String name = "l-" + UUID.randomUUID().toString().substring(0, 8);
+        String subspace = "probe-replock/" + name;
+        Map<String, String> keys = Map.of("id", name);
+        assertThatThrownBy(() -> repo.outReplace(TENANT, subspace, keys, Map.of(), "x", "n1", null, null, null))
+                .as("no row yet")
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("mode")
+                .hasMessageContaining("lock");
+        byte[] id = repo.out(TENANT, subspace, keys, Map.of(), "held", "n1", null, null, null);
+        assertThat(repo.inp(TENANT, subspace, keys, "holder", 60L)).isPresent();
+        assertThatThrownBy(() -> repo.outReplace(TENANT, subspace, keys, Map.of(), "stolen", "n1", null, null, null))
+                .as("a held lock's row is not rewritten from under its holder")
+                .isInstanceOf(SchemaViolationException.class)
+                .hasMessageContaining("lock");
+        Row after = row(id);
+        assertThat(after.body()).isEqualTo("held");
+        assertThat(after.dirty()).isFalse();
+        assertThat(after.claimant()).isEqualTo("holder");
+    }
+
+    // ── review round: the lapse-to-dead branch of claimOnce clears dirty ────────────────────────────
+
+    @Test
+    void aDirtyClaimWhoseLeaseLapsesAtMaxAttempts_isDeadLetteredWithDirtyClear() throws Exception {
+        Room r = newRoom();   // max_attempts 3
+        byte[] id = out(r, "doc-1", "v1");
+        repo.nack(TENANT, claim(r, "w1").claimId(), "w1", null);   // attempts 1
+        repo.nack(TENANT, claim(r, "w2").claimId(), "w2", null);   // attempts 2
+        claim(r, "w3");
+        assertThat(replace(r, "doc-1", "v2").outcome()).isEqualTo(DIRTIED);
+        assertThat(row(id).dirty()).isTrue();
+        lapseLease(id);
+
+        // The next claim finds the lapsed lease, counts attempt 3 (== max_attempts), dead-letters, finds nothing.
+        assertThat(repo.inp(TENANT, r.subspace(), r.keys(), "w4", 60L)).isEmpty();
+
+        Row dead = row(id);
+        assertThat(dead.claimState()).isEqualTo("dead");
+        assertThat(dead.attempts()).isEqualTo(3);
+        assertThat(dead.dirty()).as("a dead row holds no claim, so no dirty mark").isFalse();
+        assertThat(dead.body()).as("the new body is kept").isEqualTo("v2");
+        assertThat(transitions(id)).endsWith("expire", "dead");
     }
 }

@@ -37,8 +37,9 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
  * class opens none. The tenant is stated in every predicate beside the row-level security the caller's
  * context already carries.
  *
- * <p><b>Matching.</b> The body is TEXT. The collection is read through {@code CASE WHEN body IS JSON THEN
- * (body::jsonb)->>'collection' END}, so a body that is not JSON matches nothing and is never cast (a bare
+ * <p><b>Matching.</b> The body is TEXT. The collection is read through {@code CASE WHEN pg_input_is_valid(body,
+ * 'jsonb') THEN (body::jsonb)->>'collection' END}, so a body that is not valid jsonb (not JSON, or JSON that
+ * jsonb refuses such as the NUL escape, backslash-u-0000) matches nothing and is never cast (a bare
  * {@code ::jsonb} in a WHERE would abort the statement, and PostgreSQL does not promise to evaluate one
  * predicate before another). Such rows are counted in a {@code aspect_task_refs_non_json_skipped} log event.
  * No index serves the match: each statement scans the tenant's unconsumed {@code aspects} rows, which the
@@ -74,7 +75,21 @@ public final class AspectTaskRefs {
 
     /** A JSON attribute of the body as text; NULL when the body is not JSON or lacks the attribute. */
     private static Field<String> bodyAttribute(String attribute) {
-        return DSL.when(TUPLES.BODY.isJson(), DSL.jsonbGetAttributeAsText(BODY_AS_JSONB, attribute));
+        return DSL.when(bodyIsJsonb(), DSL.jsonbGetAttributeAsText(BODY_AS_JSONB, attribute));
+    }
+
+    /**
+     * True when the body casts to {@code jsonb} without error: {@code pg_input_is_valid(body, 'jsonb')}
+     * (PostgreSQL 16+; the engine bundles 17). Not {@code body IS JSON}: that accepts JSON text jsonb then
+     * refuses (the NUL escape, backslash-u-0000, for one), and the cast would abort the statement. NULL for a NULL body.
+     */
+    private static Condition bodyIsJsonb() {
+        return DSL.condition(DSL.function("pg_input_is_valid", SQLDataType.BOOLEAN, TUPLES.BODY, DSL.inline("jsonb")));
+    }
+
+    /** A body that is present and will not cast to {@code jsonb}: skipped by every match and counted in the log. */
+    private static Condition bodyIsNotJsonb() {
+        return TUPLES.BODY.isNotNull().and(bodyIsJsonb().not());
     }
 
     private static Condition unconsumed(String tenant) {
@@ -102,7 +117,7 @@ public final class AspectTaskRefs {
     private static int count(DSLContext ctx, String tenant, Condition match) {
         var row = ctx.select(
                 DSL.count().filterWhere(match),
-                DSL.count().filterWhere(TUPLES.BODY.isNotNull().and(TUPLES.BODY.isNotJson())))
+                DSL.count().filterWhere(bodyIsNotJsonb()))
             .from(TUPLES)
             .where(unconsumed(tenant))
             .fetchOne();
@@ -162,7 +177,7 @@ public final class AspectTaskRefs {
 
     /** The matching tasks' ids, locked FOR NO KEY UPDATE in id order. */
     private static List<byte[]> lockNaming(DSLContext ctx, String tenant, String collection, Condition extra) {
-        int skipped = ctx.fetchCount(TUPLES, unconsumed(tenant).and(TUPLES.BODY.isNotNull()).and(TUPLES.BODY.isNotJson()));
+        int skipped = ctx.fetchCount(TUPLES, unconsumed(tenant).and(bodyIsNotJsonb()));
         logNonJson(tenant, "lock", skipped);
         return ctx.select(TUPLES.ID)
             .from(TUPLES)

@@ -485,6 +485,87 @@ class AspectTaskRefsRenameTest {
         assertThat(bodies).as("the body that is not JSON is left exactly as it was").contains("this is not json");
     }
 
+    // ── a body that is JSON text but not valid jsonb ────────────────────────
+
+    /**
+     * {@code body IS JSON} accepts a NUL escape (backslash-u-0000) inside a string, but the {@code ::jsonb} cast
+     * refuses it, so a guard of {@code IS JSON} would let the cast run and abort the rename's statement for the
+     * whole tenant. The guard is {@code pg_input_is_valid(body, 'jsonb')}: the body is skipped, counted in the
+     * {@code aspect_task_refs_non_json_skipped} log event, and the rename completes.
+     */
+    @Test
+    void aTaskWhoseBodyIsJsonButNotValidJsonb_isSkippedAndCounted_andTheRenameCompletes() {
+        String tenant = freshTenant("nul-escape");
+        String a = coll("a");
+        String b = coll("b");
+        register(tenant, a);
+        // Java source: the doubled backslash makes the body carry the six characters backslash-u-0 0 0 0.
+        String nulBody = "{\"collection\":\"" + a + "\",\"doc_id\":\"1.10.1\",\"bad\":\"\\u0000\"}";
+        var asText = DSL.cast(DSL.val(nulBody), org.jooq.impl.SQLDataType.CLOB);
+        Boolean isJson = this.<Boolean>su(ctx -> ctx.select(DSL.field(asText.isJson())).fetchOne(0, Boolean.class));
+        Boolean isJsonb = this.<Boolean>su(ctx -> ctx.select(
+            DSL.function("pg_input_is_valid", org.jooq.impl.SQLDataType.BOOLEAN, asText, DSL.inline("jsonb")))
+            .fetchOne(0, Boolean.class));
+        assertThat(isJson).as("premise: IS JSON accepts it").isTrue();
+        assertThat(isJsonb).as("premise: jsonb refuses it").isFalse();
+        tuples.out(tenant, "aspects", Map.of("queue", "aspects"), Map.of(), nulBody, "1.10.1", null);
+        outTask(tenant, a, "1.10.2");
+
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AspectTaskRefs.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        Map<String, Integer> counts;
+        try {
+            counts = catalog.renameCollection(tenant, a, b);
+        } finally {
+            logger.detachAppender(logs);
+        }
+
+        assertThat(counts).as("only the valid task is rewritten").containsEntry("aspects_tasks", 1);
+        assertThat(state(tenant, "1.10.2").collection()).isEqualTo(b);
+        List<String> bodies = su(ctx -> ctx.select(TUPLES.BODY).from(TUPLES)
+            .where(TUPLES.TENANT_ID.eq(tenant)).and(TUPLES.SUBSPACE.eq("aspects")).fetch(TUPLES.BODY));
+        assertThat(bodies).as("the body jsonb refuses is left exactly as it was").contains(nulBody);
+        assertThat(logs.list).extracting(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .as("counted in the non-JSON log event")
+            .anyMatch(m -> m.contains("aspect_task_refs_non_json_skipped") && m.contains("skipped=1"));
+    }
+
+    // ── the re-embed residue and the plan's delete counts see the tasks ─────
+
+    /**
+     * {@code ReembedSourceReader#residue} counts the unconsumed tasks naming the source (the purge deletes them),
+     * and {@code deleteCounts} counts those whose document the job does not move. Document 1.11.1 is in the
+     * source with a manifest, so it moves; 1.11.2 and 1.11.3 have no catalog document, so they stay naming the
+     * source. A task naming another collection counts nowhere.
+     */
+    @Test
+    void theReembedResidueAndDeleteCounts_includeTheTasksNamingTheSource_andTheNotMovedPredicateExcludesAMovedDoc() {
+        String tenant = freshTenant("reembed-counts");
+        String owner = "rc" + seq.incrementAndGet();
+        String src = "knowledge__" + owner + "__" + BGE + "__v1";
+        String other = "knowledge__" + owner + "o__" + BGE + "__v1";
+        register(tenant, src);
+        register(tenant, other);
+        seedDocument(tenant, src, "1.11.1");
+        outTask(tenant, src, "1.11.1");
+        outTask(tenant, src, "1.11.2");
+        outTask(tenant, src, "1.11.3");
+        outTask(tenant, other, "1.11.4");
+        var reader = new ReembedSourceReader(scope);
+
+        var residue = reader.residue(tenant, src);
+        var counts = reader.deleteCounts(tenant, src);
+
+        assertThat(residue.aspectTasks()).as("every unconsumed task naming the source").isEqualTo(3);
+        assertThat(residue.satelliteRows()).isEqualTo(3);
+        assertThat(residue.describeSatellites()).contains("3 aspects task(s)");
+        assertThat(counts.unmatchedSatelliteRows())
+            .as("the two tasks whose document the job does not move, not the moved document's").isEqualTo(2);
+        assertThat(reader.residue(tenant, other).aspectTasks()).as("another collection's own count").isEqualTo(1);
+    }
+
     // ── a re-embed move's fixtures (the combined write, as DocumentMoveTest) ─
 
     void seedDocument(String tenant, String collection, String docId) {

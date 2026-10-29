@@ -337,6 +337,35 @@ class TupleLockFlagTest {
         assertThat(reclaimed).as("nack returns the lock -- a fresh claimant can take it").isPresent();
     }
 
+    /**
+     * Bead nexus-5r2sc.2.3 review: {@code nack dead:true} on a lock claim is refused naming {@code release},
+     * as {@code ack} is, because a lock must never dead-letter (a dead lock row is unobtainable until the
+     * sweep purges it). Nothing is written: the claim stays live, the row is not dead, and the holder can
+     * still release it.
+     */
+    @Test
+    void nackDeadOnALockClaimIsRefusedNamingRelease_andTheClaimStaysLive() throws Exception {
+        String tenant = "tuple-lock-flag-nackdead-" + UUID.randomUUID();
+        String resource = "res-" + UUID.randomUUID();
+        String subspace = "lock-flag/" + resource;
+        byte[] id = repo.out(tenant, subspace, Map.of("resource", resource), Map.of("from", "holder-1"),
+                null, null, null);
+        var claimed = repo.inp(tenant, subspace, Map.of("resource", resource), "holder-1", 60L);
+        assertThat(claimed).isPresent();
+        String claimId = claimed.get().claimId();
+
+        assertThatExceptionOfType(SchemaViolationException.class)
+                .isThrownBy(() -> repo.nack(tenant, claimId, "holder-1", null, true))
+                .satisfies(e -> assertThat(e.getMessage()).contains("release"));
+
+        assertThat(rawRow(id).value2()).as("the claim stays live -- the refused nack wrote nothing")
+                .isEqualTo("claimed");
+        assertThat(transitionsFor(tenant, id)).containsExactly("claim");
+        repo.release(tenant, claimId, "holder-1");
+        assertThat(rawRow(id).value2()).as("released back to available").isNull();
+        // dead:false is the plain nack and stays allowed (nackOnALockReturnsItAndCountsAnAttempt).
+    }
+
     // ── a lapsed lock is reclaimed, never dead-lettered ──────────────────────
 
     /**

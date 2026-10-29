@@ -680,7 +680,9 @@ public final class TupleRepository {
      * absent from every {@code DO UPDATE} (keys refire, lock refire and the lock's reset
      * of an expired row, keys+nonce sameWrite) and from the nonce {@code sameWrite}
      * comparison, so the stamp always names the writer of the stored body and dims: a
-     * retry from another session neither overwrites it nor turns into a conflict.
+     * retry from another session neither overwrites it nor turns into a conflict. The one rewrite
+     * that does move it is {@link #outReplace}'s ({@code writeReplace} stamps the replacing writer on
+     * every branch), because a replace changes the body and dims the stamp describes.
      */
     private byte[] writeOut(DSLContext ctx, String tenant, PreparedOut p, String body, byte[] id,
                             String senderSession) {
@@ -912,8 +914,10 @@ public final class TupleRepository {
      *       instead of consuming it.</li>
      * </ul>
      * No row at all is written as a plain out writes it (outcome {@link OutOutcome#CREATED}), under the
-     * same {@code max_live_rows} check. {@code sender_session} stays the original writer's on the
-     * available and claimed paths, as on every refire.
+     * same {@code max_live_rows} check. Every replace branch stamps {@code sender_session} with THIS
+     * writer's, because the stamp names the writer of the stored body and dims and a replace rewrites
+     * both (unlike a refire, which leaves the body alone and so keeps the first writer's stamp).
+     * {@code out mode=replace} is refused on a {@code lock: true} template whatever its {@code id_from}.
      */
     public OutResult outReplace(String tenant, String subspace, Map<String, String> keys, Map<String, String> dims,
                                 String body, String nonce, Long ttlSecondsOrNull, String senderSession,
@@ -924,6 +928,12 @@ public final class TupleRepository {
             throw new SchemaViolationException("mode", "replace is allowed only on an id_from=keys+nonce "
                     + "template, because the caller's nonce names the row to replace; template '"
                     + prepared.template().name() + "' is id_from=" + prepared.template().idFrom().wire());
+        }
+        if (prepared.template().lock()) {
+            // A lock template resets and refires on its own rules (writeOut's lock arms); a replace would
+            // rewrite a held lock's row from under its holder. Refused whatever the template's id_from.
+            throw new SchemaViolationException("mode", "replace is refused on a lock template; template '"
+                    + prepared.template().name() + "' is lock: true");
         }
         byte[] id = computeId(tenant, prepared.subspace(), prepared.template(),
                 prepared.keys(), prepared.dims(), nonce, body);
@@ -1009,7 +1019,8 @@ public final class TupleRepository {
         }
         var update = ctx.update(TUPLES)
                 .set(TUPLES.BODY, body)
-                .set(TUPLES.DIMS, p.dimsJsonb());
+                .set(TUPLES.DIMS, p.dimsJsonb())
+                .set(TUPLES.SENDER_SESSION, senderSession);
         if (liveClaim) {
             update.set(TUPLES.DIRTY, true);
         }
@@ -2517,7 +2528,9 @@ public final class TupleRepository {
      * ever. It works under a template with no {@code max_attempts}. Ownership and liveness are checked
      * first (403, 404 as before). A {@code dead} nack that also carries {@code retry_after_s} dead-letters
      * and leaves {@code available_at} NULL: a dead row is never retried, so the delay has nothing to delay.
-     * {@code false} is a plain nack.
+     * {@code false} is a plain nack. {@code dead: true} on a claim of a {@code lock: true} template is a
+     * {@link SchemaViolationException} naming {@code release}, as {@link #ack} is refused on one: a lock
+     * must never dead-letter. The claim stays live.
      */
     public void nack(String tenant, String claimId, String claimant, Long retryAfterSecondsOrNull,
                      boolean dead) {
@@ -2534,6 +2547,14 @@ public final class TupleRepository {
                 throw new ClaimOwnershipException(claimId, claimant);
             }
             TemplateSchema t = resolveOrThrow(row.getSubspace());
+            if (dead && t.lock()) {
+                // A lock must never dead-letter: a dead lock row is unobtainable until the sweep purges it,
+                // the same reason ack is refused on one. The claim stays live (nothing is written yet).
+                throw new SchemaViolationException("dead",
+                        "template '" + t.name() + "' is a lock template; nack with dead is refused because a "
+                        + "dead-lettered lock row would be unobtainable until the sweep purges it -- call "
+                        + "release instead to return the lock");
+            }
             checkDelaySeconds("retry_after_s", retryAfterSecondsOrNull, t);
             long maxAttempts = t.take().maxAttempts() == null ? Long.MAX_VALUE : t.take().maxAttempts();
             int attempts = row.getAttempts() + 1;
