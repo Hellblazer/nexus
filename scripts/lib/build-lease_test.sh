@@ -38,6 +38,11 @@ _fake_repo() {
     cp "$HERE/build-lease.sh" "$repo/scripts/lib/build-lease.sh"
 }
 
+# A pid no process can hold: above Linux's maximum pid_max (4194304, 2^22) and macOS's
+# pids (which stay below 100000), so _build_lease_pid_alive and _build_lease_group_alive always read it dead.
+# A reaped child's pid is NOT dead for long: the kernel reuses it (nexus-5aotg).
+NEVER_ALIVE_PID=99999999
+
 # ── Test 1: acquire/release roundtrip ────────────────────────────────────
 echo "Test 1: acquire/release roundtrip"
 repo1="$WORKDIR/repo1"
@@ -88,14 +93,11 @@ echo "Test 3: stale-pid takeover (dead holder, no WARNING-free silent skip)"
 repo3="$WORKDIR/repo3"
 _fake_repo "$repo3"
 leasedir3="$repo3/service/.build-lease/stale"
-# Manufacture a lease left behind by a holder that is definitely dead: spawn
-# a subprocess, let it exit, and record its (now-reusable but currently
-# unassigned) pid -- this is the same "run it, capture its pid, let it
-# finish" technique used for guaranteed-dead pids elsewhere in this repo's
-# shell test suite.
-( exit 0 ) &
-dead_pid=$!
-wait "$dead_pid" 2>/dev/null
+# Manufacture a lease left behind by a holder that is definitely dead. The pid is
+# NEVER_ALIVE_PID, above every kernel's pid ceiling: a reaped child's pid can be
+# handed to a new process within a second on a busy runner, which turned this
+# "dead" holder live (CI shard 5/6, 2026-10-29).
+dead_pid="$NEVER_ALIVE_PID"
 mkdir -p "$leasedir3"
 printf '%s\n' "$dead_pid" > "$leasedir3/pid"
 printf '%s\n' "2020-01-01T00:00:00Z" > "$leasedir3/ts"
@@ -404,7 +406,7 @@ else
             bad "root's group $foreign_pgid read as DEAD: a second user would reclaim a live build lease"
         fi
     fi
-    if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive 3999999"; then
+    if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive $NEVER_ALIVE_PID"; then
         bad "a group that does not exist read as alive"
     else
         ok "a group that does not exist still reads as dead"
@@ -681,8 +683,7 @@ d14=$(( $(date +%s) - t14 ))
 if [[ $rc14c -eq 75 && "$out14c" == *"label=unknown"* && $d14 -le 2 ]]; then ok "14c: a holder that never populates is still refused, after a bounded wait (${d14}s)"; else bad "14c: rc $rc14c after ${d14}s: $out14c"; fi
 # 14d: a DEAD holder with an unpopulated lease is reclaimed without the wait
 rm -rf "${root14:?}/popwin"
-( exit 0 ) & dead14=$!
-wait "$dead14" 2>/dev/null
+dead14="$NEVER_ALIVE_PID"   # a reaped child's pid could be reused and polled as live for the full 2 s
 mkdir -p "$root14/popwin"
 printf '%s\n' "$dead14" > "$root14/popwin/pid"
 t14=$(date +%s)
