@@ -46,6 +46,12 @@ import java.util.Optional;
  *                                   the template's retention_seconds; the new row cannot be claimed (in/inp) until the
  *                                   database clock reaches now() + delay_s. Absent or 0 is no delay. A negative,
  *                                   fractional or non-numeric value is a 400; above retention is a 400 SchemaViolation.
+ *                                   mode (bead nexus-5r2sc.2.2, RDR-235 E4): optional, absent or "replace", any other
+ *                                   value is a 400. "replace" is allowed only on an id_from=keys+nonce template (else a
+ *                                   400 naming it) and answers {"id": "&lt;hex&gt;", "outcome": "created"|"replaced"|"dirtied"}:
+ *                                   the newest body wins on the deterministic id; a claimed row is marked dirty and its
+ *                                   holder's ack returns it to available instead of consuming it. A plain out (no mode)
+ *                                   keeps the {"id": ...} response.
  *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
  *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
  *                                   order (bead nexus-kp5q3): "asc" (default) or "desc". desc returns the
@@ -248,11 +254,23 @@ public final class TupleHandler implements HttpHandler {
         Long ttlSeconds = numberOrNull(body.get("ttl_seconds"));
         // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds. Range checks live in the repository.
         Long delaySeconds = wholeSecondsOrNull("delay_s", body.get("delay_s"));
+        // nexus-5r2sc.2.2 (RDR-235 E4): absent or "replace" only. The value is not echoed back.
+        Object modeRaw = body.get("mode");
+        if (modeRaw != null && !"replace".equals(modeRaw)) {
+            throw new SchemaViolationException("mode", "must be absent or \"replace\"");
+        }
 
         // nexus-fetre (F3 step 2, JDR-002): sender_session is a server-written fact. It comes
         // ONLY from the minted session AuthFilter resolved, never from the request body (a
         // "sender_session" body field is not read), and its absence is not a refusal.
         String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
+        if (modeRaw != null) {
+            var res = repo.outReplace(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
+                    delaySeconds);
+            HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(res.id()))
+                    + ",\"outcome\":" + HttpUtil.jsonString(res.outcome().wire()) + "}");
+            return;
+        }
         byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
                 delaySeconds);
         HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");

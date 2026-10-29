@@ -28,8 +28,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Bead nexus-5r2sc.2.3 (RDR-235 E4) over a real HTTP round trip: the optional boolean {@code dead}
- * on {@code /v1/tuples/nack} (non-boolean is a 400).
+ * Beads nexus-5r2sc.2.2 and nexus-5r2sc.2.3 (RDR-235 E4) over a real HTTP round trip: the
+ * optional {@code mode} on {@code /v1/tuples/out} (absent or {@code "replace"}, else 400) with
+ * the {@code outcome} it adds to the response, and the optional boolean {@code dead} on
+ * {@code /v1/tuples/nack} (non-boolean is a 400). A plain out keeps today's response shape.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TupleReplaceAndDeadHttpTest {
@@ -110,6 +112,65 @@ class TupleReplaceAndDeadHttpTest {
 
     private static String newQueue() {
         return "rd-http-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    // ── out mode ─────────────────────────────────────────────────────────────
+
+    @Test
+    void outWithoutMode_keepsTheTodayResponseShape_noOutcomeField() throws Exception {
+        JsonNode r = post("/v1/tuples/out", outBody(newQueue(), "n-1", "v1"));
+        assertThat(r.has("id")).isTrue();
+        assertThat(r.has("outcome")).as("a plain out keeps today's {\"id\":...}").isFalse();
+        assertThat(r.size()).isEqualTo(1);
+    }
+
+    @Test
+    void outModeReplace_answersTheOutcome_createdThenReplacedThenDirtied() throws Exception {
+        String q = newQueue();
+        Map<String, Object> body = outBody(q, "n-1", "v1");
+        body.put("mode", "replace");
+        JsonNode created = post("/v1/tuples/out", body);
+        assertThat(created.get("outcome").asText()).isEqualTo("created");
+
+        body.put("body", "v2");
+        JsonNode replaced = post("/v1/tuples/out", body);
+        assertThat(replaced.get("outcome").asText()).isEqualTo("replaced");
+        assertThat(replaced.get("id").asText()).isEqualTo(created.get("id").asText());
+
+        JsonNode claim = inp(q);
+        assertThat(claim.get("tuple").get("body").asText()).isEqualTo("v2");
+
+        body.put("body", "v3");
+        JsonNode dirtied = post("/v1/tuples/out", body);
+        assertThat(dirtied.get("outcome").asText()).isEqualTo("dirtied");
+
+        // the holder's ack returns the row to available with the newest body
+        post("/v1/tuples/ack", Map.of("claim_id", claim.get("claim_id").asText(), "claimant", "w"));
+        assertThat(inp(q).get("tuple").get("body").asText()).isEqualTo("v3");
+    }
+
+    @Test
+    void outRefusesAnyOtherMode_with400_andWritesNothing() throws Exception {
+        String q = newQueue();
+        for (Object bad : new Object[] {"x", "REPLACE", "", 1, true}) {
+            Map<String, Object> body = outBody(q, "n-bad", "v1");
+            body.put("mode", bad);
+            var r = send("/v1/tuples/out", body);
+            assertThat(r.statusCode()).as("mode=%s: %s", bad, r.body()).isEqualTo(400);
+        }
+        assertThat(post("/v1/tuples/rdp", Map.of("subspace", "queue/" + q,
+                "keys_pattern", Map.of("queue", q))).get("tuples").size()).as("nothing written").isZero();
+    }
+
+    @Test
+    void outModeReplace_onAKeysOnlyTemplate_is400_namingTheTemplate() throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("subspace", "lock/" + newQueue());
+        body.put("keys", Map.of("resource", body.get("subspace").toString().substring(5)));
+        body.put("mode", "replace");
+        var r = send("/v1/tuples/out", body);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(400);
+        assertThat(r.body()).contains("mode").contains("lock/<resource>");
     }
 
     // ── nack dead ────────────────────────────────────────────────────────────

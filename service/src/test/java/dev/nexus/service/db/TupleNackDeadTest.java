@@ -20,6 +20,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.time.OffsetDateTime;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -260,5 +261,23 @@ class TupleNackDeadTest {
                 .where(TUPLES.TENANT_ID.eq(TENANT).and(TUPLES.SUBSPACE.eq(q.subspace()))).execute());
         repo.release(TENANT, c.claimId(), "w1");
         assertThat(state(q).claimState()).as("a release is not a failure").isNull();
+    }
+
+    // ── a dead row can be revived by replace (the requeue-failed path) ───────
+
+    @Test
+    void aDeadRow_revivedByReplace_isClaimableAgain_withAttemptsZero() {
+        Q q = newQueue();
+        byte[] id = out(q);
+        var c = claimOrFail(q, "w1");
+        repo.nack(TENANT, c.claimId(), "w1", null, true);
+
+        var r = repo.outReplace(TENANT, q.subspace(), q.pattern(), q.dims(), "again", "n-1", null, null, null);
+
+        assertThat(HexFormat.of().formatHex(r.id())).isEqualTo(HexFormat.of().formatHex(id));
+        assertThat(r.outcome()).isEqualTo(TupleRepository.OutOutcome.REPLACED);
+        var again = claimOrFail(q, "w2");
+        assertThat(again.tuple().attempts()).as("the revived row starts at attempt 0").isZero();
+        assertThat(again.tuple().body()).isEqualTo("again");
     }
 }

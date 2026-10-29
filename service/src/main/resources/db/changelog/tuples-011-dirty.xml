@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-5r2sc.2.2 (RDR-235 E4, out mode=replace on a claimed row).
+
+    nexus.tuples.dirty BOOLEAN NOT NULL DEFAULT FALSE: set when an out with mode=replace
+    rewrites the body of a row a worker currently holds a live claim on. The holder's ack
+    then does not consume the row: it returns to available (attempts unchanged, body kept,
+    dirty cleared) so the new content is extracted instead of being lost. Cleared wherever
+    a claim ends or starts (that ack, nack, release, a lapse, a re-claim), so a lapsed
+    holder's mark never carries to the next holder.
+
+    This is its own changeset, and does NOT share tuples-010: the bead's note said to put
+    the column in the E1 changeset, but tuples-010-1 has already shipped on develop, and a
+    shipped changeset's checksum may not change.
+
+    The DEFAULT FALSE is the true prior state of every existing row. There is no backfill.
+    ADD COLUMN with a constant default is a metadata-only change on Postgres 11 and later
+    (no table rewrite), and it is not a data mutation of any existing row's value, so there
+    is no DATA EFFECT line (scripts/data_effect_lint.py's own scope excludes ADD COLUMN),
+    matching tuples-006-announce-columns.xml's announce_count. DDL is unaffected by FORCE
+    ROW LEVEL SECURITY on nexus.tuples.
+
+    Placed after tuples-010-available-at.xml and before the grants-nexus-svc.xml runAlways
+    block (the established late-append convention, D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="tuples-011-1" author="nexus-5r2sc.2.2">
+        <comment>Adds nexus.tuples.dirty BOOLEAN NOT NULL DEFAULT FALSE -- an additive column only (ADD COLUMN with a constant default, no data mutation of any existing row's value), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own scope. FALSE is the true prior state of every existing row. Set by TupleRepository.out (mode=replace) on a live-claimed row, honoured by ack, cleared wherever a claim ends or starts.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.tuples
+    ADD COLUMN dirty BOOLEAN NOT NULL DEFAULT FALSE;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+                ALTER TABLE nexus.tuples DROP COLUMN IF EXISTS dirty;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
