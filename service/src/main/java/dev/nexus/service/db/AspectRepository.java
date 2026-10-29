@@ -1468,6 +1468,10 @@ public final class AspectRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             CatalogRepository.refuseUnderReembedJob(ctx, tenant, "rename", oldColl, newColl);
             ensureCollectionRegisteredAllowingSuperseded(ctx, tenant, newColl);
+            // RDR-235 (nexus-5r2sc.2.6): the unconsumed aspects tasks (available, claimed and dead) name the
+            // collection in their body; they are rewritten in this transaction, as the table rows are below. First
+            // of the statements, so the tuple row locks come before any document_aspects statement.
+            AspectTaskRefs.rewriteCollection(ctx, tenant, oldColl, newColl);
             ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE)
                .where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(newColl)
                    .and(ASPECT_EXTRACTION_QUEUE.SOURCE_PATH.in(

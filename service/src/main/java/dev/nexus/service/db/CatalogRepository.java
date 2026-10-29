@@ -6522,6 +6522,11 @@ public final class CatalogRepository {
         // RDR-231 step 4: the pre-check in the re-embed runner keeps a taken URI from reaching here at all; this is
         // the backstop for a holder that appeared since. Before any UPDATE, so nothing has moved when it throws.
         requireMoveUriFree(ctx, tenant, docId, source, target);
+        // RDR-235 (nexus-5r2sc.2.6): the document's unconsumed aspects tasks (available, claimed and dead) name
+        // the source in their body, so they move with it, in this transaction. FIRST of the satellites: the tuple
+        // row lock comes before any document_aspects statement (the claim-fenced aspect write's own order).
+        // No collision step: a task's id comes from its doc_id, and one document has one tumbler.
+        AspectTaskRefs.rewriteCollectionForDoc(ctx, tenant, source, target, docId);
         int pointed = ctx.update(CATALOG_DOCUMENTS)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, target)
             .set(CATALOG_DOCUMENTS.SOURCE_URI, NoteUri.moveTo(CATALOG_DOCUMENTS.SOURCE_URI, source, target))
@@ -9068,6 +9073,12 @@ public final class CatalogRepository {
         return manifestWriteTxn(tenant, "catalog.deleteCollection " + name, ctx -> {
             deferManifestChunkFk(ctx);
 
+            // RDR-235 (nexus-5r2sc.2.6): the collection's unconsumed aspects tasks (available, claimed and dead)
+            // go with it, in this transaction. FIRST statement of the purge: the tuple row locks come before the
+            // document_aspects delete at step 5 (the claim-fenced aspect write's own order). Deliberately not in
+            // `counts`: the response's key set is a wire contract and the purge reports what it always did.
+            AspectTaskRefs.deleteNaming(ctx, tenant, name);
+
             Map<String, Integer> counts = new LinkedHashMap<>();
             List<String> unregisteredSiblings = new ArrayList<>();
             // 0. RDR-194 P3d (nexus-tk070.p3d): topic_assignments_chunk_fk
@@ -9112,7 +9123,7 @@ public final class CatalogRepository {
                     ? Map.of() : QuarantineOrigin.deleteRowsOf(ctx, tenant, name);
                 counts.put("quarantine_chunks", fromSiblings.values().stream().mapToInt(Integer::intValue).sum());
                 for (String sibling : fromSiblings.keySet()) {
-                    if (!collectionHoldsContent(ctx, sibling)) {
+                    if (!collectionHoldsContent(ctx, tenant, sibling)) {
                         ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
                             .and(CATALOG_COLLECTIONS.NAME.eq(sibling))).execute();
                         unregisteredSiblings.add(sibling);
@@ -9220,7 +9231,7 @@ public final class CatalogRepository {
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
                     .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(frontier))
                     .fetch(CATALOG_COLLECTIONS.NAME)) {
-                if (collectionHoldsContent(ctx, retired) || QuarantineOrigin.holdsRowsOf(ctx, tenant, retired)) {
+                if (collectionHoldsContent(ctx, tenant, retired) || QuarantineOrigin.holdsRowsOf(ctx, tenant, retired)) {
                     continue;
                 }
                 ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
@@ -9636,6 +9647,23 @@ public final class CatalogRepository {
         Map.entry("gc_audit",                CrossModelDisposition.LEAVE));
 
     /**
+     * RDR-235 (bead nexus-5r2sc.2.6): the cross-model disposition of the unconsumed {@code aspects} tasks, which
+     * name their collection in a body field and so cannot be a {@link #COLLECTION_SCOPED_TABLES} entry or a line
+     * of {@link #CROSS_MODEL_DISPOSITIONS} ({@code CrossModelDispositionParityTest} pins that map to five REPOINT
+     * tables, and {@code nexus.tuples} has no collection column). A re-embed move rewrites a document's task to
+     * name the target inside its move transaction: {@link AspectTaskRefs#rewriteCollectionForDoc}. When
+     * {@code aspect_extraction_queue} retires, its registry entry and line go and the tasks stand as the fifth
+     * REPOINT line.
+     */
+    static final CrossModelDisposition ASPECT_TASKS_DISPOSITION = CrossModelDisposition.REPOINT;
+
+    /**
+     * The key the unconsumed {@code aspects} tasks report under: {@link BlockingTable#table()} (so a rename's
+     * merge refusal names it), the rename's counts map and a re-home's per-table maps. Wire-visible.
+     */
+    static final String ASPECT_TASKS_KEY = "aspects_tasks";
+
+    /**
      * The collection-keyed tables that are deliberately NOT in {@link #COLLECTION_SCOPED_TABLES} (the
      * schema-parity gate's {@code _DOCUMENTED_EXCLUSIONS}), with their cross-model disposition: {@code
      * chunk_orphaned_at} goes with the source's chunks through the chunk foreign key's cascade,
@@ -9740,9 +9768,9 @@ public final class CatalogRepository {
         }
     }
 
-    /** RLS-scoped {@link #collectionIsEmpty(DSLContext, String)} for callers outside a txn. */
+    /** RLS-scoped {@link #collectionIsEmpty(DSLContext, String, String)} for callers outside a txn. */
     public boolean collectionIsEmpty(String tenant, String name) {
-        return tenantScope.withTenant(tenant, ctx -> collectionIsEmpty(ctx, name));
+        return tenantScope.withTenant(tenant, ctx -> collectionIsEmpty(ctx, tenant, name));
     }
 
     /**
@@ -9817,11 +9845,11 @@ public final class CatalogRepository {
     }
 
     /**
-     * RLS-scoped {@link #blockingTable(DSLContext, String)} for callers outside a txn
+     * RLS-scoped {@link #blockingTable(DSLContext, String, String)} for callers outside a txn
      * (nexus-34wrg option (c)).
      */
     public java.util.Optional<BlockingTable> blockingTable(String tenant, String name) {
-        return tenantScope.withTenant(tenant, ctx -> blockingTable(ctx, name));
+        return tenantScope.withTenant(tenant, ctx -> blockingTable(ctx, tenant, name));
     }
 
     /**
@@ -9832,14 +9860,27 @@ public final class CatalogRepository {
      * audit table logged against the name in passing; naming the table lets the caller
      * decide.
      */
-    private java.util.Optional<BlockingTable> blockingTable(DSLContext ctx, String name) {
+    private java.util.Optional<BlockingTable> blockingTable(DSLContext ctx, String tenant, String name) {
+        BlockingTable auditHit = null;
         for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
             if (ctx.fetchExists(ctx.selectOne().from(t.table()).where(t.collection().eq(name)))) {
-                return java.util.Optional.of(
-                    new BlockingTable(t.countKey(), AUDIT_ONLY_TABLES.contains(t.countKey())));
+                BlockingTable hit = new BlockingTable(t.countKey(), AUDIT_ONLY_TABLES.contains(t.countKey()));
+                if (!hit.auditOnly()) {
+                    return java.util.Optional.of(hit);
+                }
+                // The audit tables trail the list, so a non-audit table (or the tasks below) still outranks one.
+                if (auditHit == null) {
+                    auditHit = hit;
+                }
             }
         }
-        return java.util.Optional.empty();
+        // RDR-235 (nexus-5r2sc.2.6): an unconsumed aspects task naming the collection is content, under its own
+        // key, and never audit-only. It is not a registry table (the collection is a field of the task body),
+        // so it is asked here, after the registry's non-audit tables and before the audit breadcrumbs.
+        if (AspectTaskRefs.countNaming(ctx, tenant, name) > 0) {
+            return java.util.Optional.of(new BlockingTable(ASPECT_TASKS_KEY, false));
+        }
+        return java.util.Optional.ofNullable(auditHit);
     }
 
     /**
@@ -9869,8 +9910,8 @@ public final class CatalogRepository {
      * everything, because supersede is a pure UPDATE. The column cannot tell them apart.
      * Ask the data instead.
      */
-    private boolean collectionIsEmpty(DSLContext ctx, String name) {
-        return blockingTable(ctx, name).isEmpty();
+    private boolean collectionIsEmpty(DSLContext ctx, String tenant, String name) {
+        return blockingTable(ctx, tenant, name).isEmpty();
     }
 
     /**
@@ -9884,7 +9925,7 @@ public final class CatalogRepository {
      * caller is told WHICH table blocked and decides ({@link BlockingTable}).
      * Same RLS scope and same READ COMMITTED window as {@link #collectionIsEmpty}.
      */
-    private boolean collectionHoldsContent(DSLContext ctx, String name) {
+    private boolean collectionHoldsContent(DSLContext ctx, String tenant, String name) {
         for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
             if (AUDIT_ONLY_TABLES.contains(t.countKey())) {
                 continue;
@@ -9893,7 +9934,9 @@ public final class CatalogRepository {
                 return true;
             }
         }
-        return false;
+        // RDR-235 (nexus-5r2sc.2.6): an unconsumed aspects task naming the collection is content (not an audit
+        // breadcrumb), so a registry row a queued task names is not swept as a ghost.
+        return AspectTaskRefs.countNaming(ctx, tenant, name) > 0;
     }
 
     /** The source_uri column of a collection-scoped table that carries one, else null. */
@@ -10007,7 +10050,7 @@ public final class CatalogRepository {
             // additive: it does not change behavior for any caller that passes null, and it
             // re-verifies — it does not replace — the emptiness check above.
             if (targetRowExists && !liveTargetExists) {
-                var blocker = blockingTable(ctx, newName);
+                var blocker = blockingTable(ctx, tenant, newName);
                 if (blocker.isPresent()) {
                     // nexus-34wrg option (c): name WHICH table blocked so an operator can
                     // tell an audit breadcrumb from real data instead of purging on faith.
@@ -10152,6 +10195,11 @@ public final class CatalogRepository {
             // ends up performing the actual write -- this is a 1:1 rename (every
             // oldName row becomes a newName row, never a merge-with-loss), so the
             // pre-count is exactly the correct post-rename delta regardless.
+            // RDR-235 (nexus-5r2sc.2.6): the unconsumed aspects tasks (available, claimed and dead) name the
+            // collection in their body, not in a registry table, so they are re-homed here, reported under their
+            // own key. BEFORE the loop below, which writes document_aspects: the tuple row locks come first (the
+            // claim-fenced aspect write locks its task row and then writes document_aspects, so the orders agree).
+            counts.put(ASPECT_TASKS_KEY, AspectTaskRefs.rewriteCollection(ctx, tenant, oldName, newName));
             int topicAssignmentsPreCount = ctx.selectCount().from(TOPIC_ASSIGNMENTS)
                 .where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName))
                 .fetchOne(0, Integer.class);
@@ -10437,6 +10485,10 @@ public final class CatalogRepository {
 
             Map<String, Integer> moved = new LinkedHashMap<>();
             Map<String, Integer> leftBehind = new LinkedHashMap<>();
+            // RDR-235 (nexus-5r2sc.2.6): the source's unconsumed aspects tasks (available, claimed and dead) are
+            // re-homed with it, every one movable (a task's id comes from its doc_id, so none can collide). BEFORE
+            // the loop, which writes document_aspects: the tuple row locks come first.
+            moved.put(ASPECT_TASKS_KEY, AspectTaskRefs.rewriteCollection(ctx, tenant, source, target));
             for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
                 if (CASCADE_CARRIED_TABLES.contains(t.countKey())) {
                     continue;
@@ -10446,14 +10498,14 @@ public final class CatalogRepository {
             return new RehomeResult(
                 moved.getOrDefault("chunks", 0),
                 moved.getOrDefault("catalog_documents", 0),
-                moved, leftBehind, rehomeStatus(ctx, source, target));
+                moved, leftBehind, rehomeStatus(ctx, tenant, source, target));
         });
     }
 
     /**
      * What still names {@code source} — the cheap read a caller polls after its
-     * connection is cut. RLS-scoped wrapper over {@link #rehomeStatus(DSLContext,
-     * String)}; see {@link RehomeStatus} for why this is a separate call at all.
+     * connection is cut. RLS-scoped wrapper over {@link #rehomeStatus(DSLContext, String,
+     * String, String)}; see {@link RehomeStatus} for why this is a separate call at all.
      */
     public RehomeStatus rehomeStatus(String tenant, String source) {
         return rehomeStatus(tenant, source, null);
@@ -10461,11 +10513,11 @@ public final class CatalogRepository {
 
     /** {@link #rehomeStatus(String, String)} that can also say what is STUCK, given the target. */
     public RehomeStatus rehomeStatus(String tenant, String source, String target) {
-        return tenantScope.withTenant(tenant, ctx -> rehomeStatus(ctx, source, target));
+        return tenantScope.withTenant(tenant, ctx -> rehomeStatus(ctx, tenant, source, target));
     }
 
-    private RehomeStatus rehomeStatus(DSLContext ctx, String source) {
-        return rehomeStatus(ctx, source, null);
+    private RehomeStatus rehomeStatus(DSLContext ctx, String tenant, String source) {
+        return rehomeStatus(ctx, tenant, source, null);
     }
 
     /**
@@ -10476,10 +10528,18 @@ public final class CatalogRepository {
      *        questions and only the second needs a target. With null, movable
      *        equals remaining — nothing is known to be stuck.
      */
-    private RehomeStatus rehomeStatus(DSLContext ctx, String source, String target) {
+    private RehomeStatus rehomeStatus(DSLContext ctx, String tenant, String source, String target) {
         Map<String, Integer> byTable = new LinkedHashMap<>();
         int total = 0;
         int movable = 0;
+        // RDR-235 (nexus-5r2sc.2.6): the unconsumed aspects tasks naming the source count toward what still names
+        // it, and every one of them is movable (no collision is possible).
+        int tasks = AspectTaskRefs.countNaming(ctx, tenant, source);
+        if (tasks > 0) {
+            byTable.put(ASPECT_TASKS_KEY, tasks);
+        }
+        total += tasks;
+        movable += tasks;
         for (CollectionScopedTable t : COLLECTION_SCOPED_TABLES) {
             int n = ctx.fetchCount(t.table(), t.collection().eq(source));
             if (n > 0) {
@@ -10874,7 +10934,7 @@ public final class CatalogRepository {
                 String name = r.value1();
                 String lifecycleState = r.value2();
                 String supersededBy = r.value3();
-                boolean holdsContent = collectionHoldsContent(ctx, name);
+                boolean holdsContent = collectionHoldsContent(ctx, tenant, name);
                 if (!holdsContent && QuarantineOrigin.holdsRowsOf(ctx, tenant, name)) {
                     // nexus-wbfpw.71: an ORIGIN whose chunks all sit in quarantine holds no content of its own,
                     // so the ghost branch below would delete its registry row and leave those rows with no live
