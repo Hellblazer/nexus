@@ -2284,6 +2284,27 @@ def _probe_cv2(timeout_s: float | None = None) -> tuple[str | None, str]:
     return f"the cv2 import exited {proc.returncode} with no output", ""
 
 
+def _print_pdf_settings_red(exc: Exception) -> None:
+    """Print the default sweep's own "PDF settings" row for a ``[pdf]`` setting that holds no integer.
+
+    The row is :func:`nexus.health._check_pdf_config`'s, so the wording and the ``nx config set``
+    remedy are the sweep's and cannot drift from it. It re-reads the same section, so it returns the
+    row for the same error; if it returns nothing (the file changed between the two reads) the
+    exception's own text is printed so the mode still ends red, never silent."""
+    from nexus.health import _check_pdf_config  # noqa: PLC0415 — deferred import (startup cost)
+
+    rows = [r for r in _check_pdf_config() if not r.ok and not r.warn]
+    if not rows:
+        click.echo(_check("PDF settings", False, str(exc)))
+        return
+    for row in rows:
+        click.echo(_check(row.label, False, row.detail))
+        lines: list[str] = []
+        _fix(lines, *row.fix_suggestions)
+        for line in lines:
+            click.echo(line)
+
+
 def _run_check_mineru() -> bool:
     """Verify MinerU is importable and a real one-page parse succeeds.
 
@@ -2380,13 +2401,19 @@ def _run_check_mineru() -> bool:
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.
     try:
-        from nexus.config import get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+        from nexus.config import PdfConfigError, get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
         # nexus-9xfx5: never probe the built-in default URL on a box where
         # no server was ever provisioned — every fresh install rendered a
         # red ✗ ("unreachable ... OOM-risk") for a service init never set
         # up. Unprovisioned renders as the not-configured skip below; a ✗
         # now means a PROVISIONED server is actually unreachable.
         url = get_mineru_server_url() if mineru_server_provisioned() else None
+    except PdfConfigError as exc:
+        # nexus-tr1rj.27: a [pdf] integer setting holds no integer. This mode returns before the
+        # default sweep, so that sweep's "PDF settings" row never runs; swallowing the error here
+        # printed "no mineru-api server configured" and exited 0 over a config every PDF run refuses.
+        _print_pdf_settings_red(exc)
+        return True
     except Exception:  # noqa: BLE001 — best-effort config read; falls back to None
         url = None
     if url:
