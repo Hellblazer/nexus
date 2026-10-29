@@ -21,7 +21,9 @@ tables reports UNKNOWN and asks you to investigate the engine install.
 tuple per subspace — live, unclaimed, not dead-lettered — over the first
 page (`QUOTAS.MAX_QUERY_RESULTS`, 300 rows) of each subspace; a subspace
 whose oldest unclaimed tuple falls outside that first page is a known,
-documented limitation of a census check, not a silent miss. Subspaces whose
+documented limitation of a census check, not a silent miss. The `aspects`
+queue is skipped (a routine bulk index leaves its oldest task older than an
+hour while the worker is healthy; `tuples.queue_depth` covers it). Subspaces whose
 template disables `take` (`ledger/<session_id>`) are skipped outright —
 "oldest unclaimed" carries no signal on a read-only template.
 
@@ -113,7 +115,7 @@ The three RDR-211 rows. Each has its own gate and threshold, described in
 `tuples.park_slots` warns at 75% of the engine's global park cap, and the
 remedy is to find the callers holding parks open (`nx tuple stats`);
 `tuples.queue_depth` warns above 1,000 available tasks on a `queue/<name>`
-subspace or at any dead-lettered task, so triage as under "Dead-letter triage"
+subspace or on the `aspects` queue (RDR-235), or at any dead-lettered task, so triage as under "Dead-letter triage"
 below; `tuples.channel_delivery` warns when this session's push waiter is not
 alive or last woke more than 75 s ago, and the fix is `/mcp` to restart the
 server (the drain hook still delivers at the next prompt).

@@ -1096,15 +1096,29 @@ def _report_aspect_queue_service() -> None:
     raises ``click.exceptions.Exit(1)`` with a ✗ FAIL: marker (nexus-fylxo),
     matching the 4 sibling supplementary checks (resources / plan-library /
     taxonomy / t1) that already signal failure this way.
+
+    RDR-235 F18: the queue has two sides while ``NX_ASPECT_QUEUE`` moves it from
+    the table onto the ``aspects`` tuple template. Pending is the table's
+    pending plus the tuple side's ``available``; failed is the table's failed
+    plus the tuple side's ``dead``. ``claimed`` is in flight and counts as
+    neither. A tuple side that cannot be read is reported UNKNOWN and no combined
+    figure is printed (a total that guessed zero for it would be the false-clean
+    this check exists to remove); a subspace that does not exist yet is zero.
     """
     import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred to keep CLI startup fast
 
+    tuple_unknown: str | None = None
+    tuple_counts = None
     try:
         q = HttpAspectQueue()
         pending = q.pending_count()
         failed = q.list_failed()
+        try:
+            tuple_counts = q.tuple_counts()
+        except (httpx.HTTPError, RuntimeError) as texc:
+            tuple_unknown = _exc_detail(texc)
     except (httpx.HTTPError, RuntimeError) as exc:
         # RuntimeError is NOT redundant with httpx.HTTPError: constructing the
         # store resolves the endpoint, and an unresolvable one raises
@@ -1123,7 +1137,26 @@ def _report_aspect_queue_service() -> None:
         )
         return
 
-    click.echo(f"aspect_extraction_queue: {pending} pending, {len(failed)} failed (service backend)")
+    n_failed = len(failed)
+    if tuple_counts is not None:
+        pending += tuple_counts.available
+        n_failed += tuple_counts.dead
+        click.echo(f"aspect_extraction_queue: {pending} pending, {n_failed} failed (service backend)")
+        if tuple_counts.available or tuple_counts.claimed or tuple_counts.dead:
+            click.echo(
+                f"  tuple queue (aspects): {tuple_counts.available} available, "
+                f"{tuple_counts.claimed} claimed (in flight, not pending), "
+                f"{tuple_counts.dead} dead"
+            )
+        if tuple_counts.dead:
+            click.echo("  dead tuple tasks: nx tuple stats aspects")
+    else:
+        click.echo(
+            f"aspect_extraction_queue: table side {pending} pending and {n_failed} failed; "
+            f"tuple queue (aspects) UNKNOWN ({tuple_unknown}). "
+            "No combined count: the tuple side was not read.",
+            err=True,
+        )
     # The spawner declines to start the aspect worker when `claude` is not on
     # PATH and notes it once per process at debug level; this is the durable
     # signal. A WARNING, not a failure: rows wait in the queue until a worker
@@ -1140,13 +1173,14 @@ def _report_aspect_queue_service() -> None:
                 "extracted once a worker can run.",
                 err=True,
             )
-    if failed:
-        click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")
-        for row in failed[:20]:
-            click.echo(
-                f"  {row.collection or '?'} :: {row.source_path or '?'} "
-                f"(retries {row.retry_count})"
-            )
+    if n_failed:
+        if failed:
+            click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")
+            for row in failed[:20]:
+                click.echo(
+                    f"  {row.collection or '?'} :: {row.source_path or '?'} "
+                    f"(retries {row.retry_count})"
+                )
         # KNOWN GAP, stated rather than silently omitted: the sqlite branch
         # prints each row's last_error, this one cannot. AspectRepository
         # .listFailed does not select LAST_ERROR, so it never crosses the wire
@@ -1167,7 +1201,7 @@ def _report_aspect_queue_service() -> None:
         # printed the numbers and silently returned 0 regardless of how
         # large the backlog grew. Match the sibling contract.
         click.echo(
-            f"\n✗ FAIL: {len(failed)} failed aspect-extraction row(s) in "
+            f"\n✗ FAIL: {n_failed} failed aspect-extraction row(s) in "
             "the queue.",
             err=True,
         )

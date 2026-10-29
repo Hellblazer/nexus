@@ -29,6 +29,7 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -81,6 +82,20 @@ def aspect_queue_mode() -> str:
             env=ASPECT_QUEUE_ENV, value=raw, allowed=list(ASPECT_QUEUE_MODES),
         )
     return "table"
+
+
+@dataclass(frozen=True)
+class AspectTupleCounts:
+    """The ``aspects`` subspace census, reduced to what the diagnostics need
+    (RDR-235 F18). ``available`` is pending work, ``dead`` is the failed count,
+    and ``claimed`` is in flight: it is NOT pending and NOT failed. A task
+    waiting out a retry delay is counted in ``available`` (the census does not
+    render ``available_at``), so ``available`` is an upper bound on what is
+    claimable this second."""
+
+    available: int
+    claimed: int
+    dead: int
 
 
 class AspectQueueEngineUnsupportedError(RuntimeError):
@@ -493,6 +508,21 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             )
             raise fatal
         return enqueued
+
+    def tuple_counts(self) -> AspectTupleCounts:
+        """The tuple queue's side of the depth, for ``nx doctor`` and the console
+        (RDR-235 F18). Zeros when the ``aspects`` subspace does not exist yet
+        (an engine without the template, or a tenant that never enqueued in
+        ``tuples`` mode): nothing is queued there, so zero is true. Any other
+        failure propagates: the caller must report that side UNKNOWN, never
+        zero."""
+        from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: table mode never loads it
+
+        try:
+            c = self._tuples().subspace_stats(ASPECTS_SUBSPACE)
+        except UnknownSubspaceError:
+            return AspectTupleCounts(0, 0, 0)
+        return AspectTupleCounts(c.available, c.claimed, c.dead)
 
     def close(self) -> None:
         store, self._tuple_store = self._tuple_store, None

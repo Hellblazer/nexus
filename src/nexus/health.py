@@ -8004,6 +8004,14 @@ def _template_take_enabled(templates: list[dict], subspace: str) -> bool:
     return bool(template.get("take", {}).get("enabled", True))
 
 
+def _is_aspects_template(template: dict | None) -> bool:
+    """True for the RDR-235 ``aspects`` queue template (the literal one-segment
+    name, the same spelling the producer writes through)."""
+    from nexus.db.t2.http_aspect_queue import ASPECTS_SUBSPACE  # noqa: PLC0415 — deferred: CLI startup cost
+
+    return template is not None and template.get("name") == ASPECTS_SUBSPACE
+
+
 _TUPLE_UNCLAIMED_LABEL = "tuples.oldest_unclaimed"
 
 
@@ -8022,6 +8030,13 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
     whose oldest unclaimed tuple falls outside the first page is a known,
     documented limitation of a census check, not a silent miss (nothing
     here claims exhaustive coverage past one page).
+
+    RDR-235 gate S4: the ``aspects`` queue template is skipped. It is a bulk
+    backlog by design (about 136 documents an hour per worker), and a retry-
+    delayed task reads as unclaimed because the census counts it as available
+    and ``available_at`` is not rendered, so the flat threshold could not tell
+    a busy healthy consumer from a stuck one. ``_check_tuple_queue_depth``
+    covers aspects instead.
 
     Two review fixes (nexus-em75s.12): a subspace whose resolved template
     has ``take.enabled: false`` (e.g. ``ledger/<session_id>`` — read-only
@@ -8144,6 +8159,16 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
             # nexus-sis0m.2: a lock template's available token IS the idle
             # lock; its age is how long nobody has held it, not stuck work
             # (shakeout 7.64.1 Surface E F7 flagged lock/ci-develop-push).
+            continue
+        if _is_aspects_template(template):
+            # RDR-235 gate S4. The aspects queue is a bulk backlog by design: one
+            # worker drains about 136 documents an hour, so a routine
+            # 1,000-document index leaves the oldest unclaimed task older than
+            # this flat threshold for hours while the consumer is healthy and
+            # busy. A backoff-delayed task reads as unclaimed too (the census
+            # counts it as available and `available_at` is not rendered). The
+            # queue-depth row covers aspects: it warns on available above its
+            # threshold and on any dead task.
             continue
         census_oldest_dt = _parse_tuple_timestamp(census.oldest_created_at)
         if census_oldest_dt is not None:
@@ -8881,18 +8906,20 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
     """RDR-211 Phase 1 Step 3 doctor row 2 (bead nexus-rplay.12): the
     census ``available``/``dead`` counts (``SubspaceCensus``, via
     ``HttpTupleStore.subspace_list``/``registry``) for subspaces that
-    resolve to the take-enabled ``queue/<name>`` template ONLY -- board
-    (take disabled), mailbox, lock, ledger, and directory subspaces never
-    count here regardless of row counts (RDR-211 Scale and Limits item 3:
-    "a doctor row over the census available and dead counts for QUEUE
-    subspaces").
+    resolve to the take-enabled ``queue/<name>`` template or, since RDR-235
+    F18, the take-enabled ``aspects`` template ONLY -- board (take disabled),
+    mailbox, lock, ledger, and directory subspaces never count here
+    regardless of row counts (RDR-211 Scale and Limits item 3: "a doctor row
+    over the census available and dead counts for QUEUE subspaces"). The
+    aspects queue is a queue by the same definition, and this row is the only
+    one that covers it: ``_check_tuple_unclaimed_age`` skips it (gate S4).
 
     WARN above :data:`_TUPLE_QUEUE_DEPTH_WARN_AVAILABLE` available tuples
     on any queue, or at any dead-lettered task on any queue.
 
     Not applicable -- ``ok=True`` with an explicit "informational" detail,
-    never a plain OK -- when the tenant carries no ``queue/<name>``
-    subspace at all (the nexus-7zhag doctrine: a new doctor row is
+    never a plain OK -- when the tenant carries no ``queue/<name>`` or
+    ``aspects`` subspace at all (the nexus-7zhag doctrine: a new doctor row is
     not-applicable, never green-by-default, when its subject is simply
     absent -- a virgin or ordinary box that has never used a queue
     template).
@@ -8962,21 +8989,28 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
         )]
 
     queues = []
+    caps: dict[str, int] = {}
     for census in subspaces:
         template = _resolve_tuple_template(templates, census.subspace)
         if template is None:
             continue
         name = template.get("name", "")
-        if not name.startswith("queue/"):
+        if not (name.startswith("queue/") or _is_aspects_template(template)):
             continue
         if not bool(template.get("take", {}).get("enabled", True)):
             continue
         queues.append(census)
+        max_live = template.get("max_live_rows")
+        if isinstance(max_live, int) and max_live > 0:
+            caps[census.subspace] = max_live
 
     if not queues:
         return [HealthResult(
             label=label, ok=True,
-            detail="informational — no queue/<name> subspaces exist on this tenant",
+            detail=(
+                "informational — no queue/<name> or aspects subspaces exist "
+                "on this tenant"
+            ),
         )]
 
     over_available = [c for c in queues if c.available > _TUPLE_QUEUE_DEPTH_WARN_AVAILABLE]
@@ -8984,7 +9018,15 @@ def _check_tuple_queue_depth() -> list[HealthResult]:
 
     if over_available or with_dead:
         parts = [f"{c.subspace} (available={c.available})" for c in over_available]
-        parts += [f"{c.subspace} (dead={c.dead})" for c in with_dead]
+        # A dead task is unconsumed, so it counts against the template's
+        # max_live_rows for as long as it is kept (aspects: 90 days). Show the
+        # dead share of that cap, where the template states one.
+        parts += [
+            f"{c.subspace} (dead={c.dead}"
+            + (f" of {caps[c.subspace]} max live rows" if c.subspace in caps else "")
+            + ")"
+            for c in with_dead
+        ]
         return [HealthResult(
             label=label, ok=False, warn=True,
             detail=(

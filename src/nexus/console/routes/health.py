@@ -132,6 +132,10 @@ def _collect_aspect_queue_data_service() -> dict[str, Any]:
 
     ``{"present": True, "backend": "service", "total": N, "failed_count": N}``.
 
+    RDR-235 F18: both sides of the queue are counted. ``pending`` is the table's
+    pending plus the ``aspects`` tuple queue's ``available``; ``failed_count``
+    adds its ``dead`` tasks; ``claimed`` (in flight) is neither.
+
     Two deliberate shape differences from the sqlite collector, both because the
     service list endpoint does not carry the data — declared rather than filled
     with zeros, since a zero here is exactly the false-clean being fixed:
@@ -150,6 +154,14 @@ def _collect_aspect_queue_data_service() -> dict[str, Any]:
         q = HttpAspectQueue()
         pending = q.pending_count()
         failed = len(q.list_failed())
+        # RDR-235 F18: the `aspects` tuple queue is the other side of the depth.
+        # `available` is pending, `dead` is failed (the card keys its warn on
+        # failed_count), `claimed` is in flight and is neither. An unreadable
+        # tuple side falls to `unavailable` below: a count without it would
+        # understate the queue, which is the false-clean this collector avoids.
+        tuples = q.tuple_counts()
+        pending += tuples.available
+        failed += tuples.dead
     except (httpx.HTTPError, RuntimeError) as exc:
         return {"present": True, "backend": "service", "unavailable": True,
                 "error": str(exc)[:200]}
