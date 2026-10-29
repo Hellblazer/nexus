@@ -1164,6 +1164,7 @@ nexus-4ti7e
 nexus-4ti7e.1
 nexus-4tosp
 nexus-4tosp.1
+nexus-4tvhk
 nexus-4txh7
 nexus-4u6mt
 nexus-4uv5
@@ -6043,6 +6044,7 @@ nexus-p89h4
 nexus-p8nd5
 nexus-p8nd5.1
 nexus-p905h
+nexus-p909o
 nexus-p9aw6
 nexus-p9aw6.1
 nexus-p9blu
