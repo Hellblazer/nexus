@@ -17,6 +17,7 @@ runner.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -313,6 +314,44 @@ def test_manifest_omission_stays_a_decision() -> None:
                 text = path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
-            if "MINERU_FORMULA_CH_SUPPORT" in text:
+            if _SETS_FORMULA_CH_SUPPORT.search(text):
                 hits.append(str(rel))
     assert hits == [], f"MINERU_FORMULA_CH_SUPPORT set in: {hits}"
+
+
+#: A write of the variable, not a mention: ``NAME=value`` (shell, .env), ``NAME: value`` and
+#: ``"NAME": value`` (YAML env, a dict literal), ``environ["NAME"] = value``, and the setter calls.
+#: ``nx doctor`` READS it (``os.environ.get``) to mirror mineru's own formula-model choice when
+#: it checks for cached weights (nexus-vyy65); reading is not setting, and a text match on the
+#: bare name flagged that read (develop CI, 2026-10-29).
+_SETS_FORMULA_CH_SUPPORT = re.compile(
+    r"""MINERU_FORMULA_CH_SUPPORT["']?\]?\s*(?::|=(?!=))"""
+    r"""|(?:setenv|setdefault|putenv)\(\s*["']MINERU_FORMULA_CH_SUPPORT"""
+)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "MINERU_FORMULA_CH_SUPPORT=true",
+        "  MINERU_FORMULA_CH_SUPPORT: 'true'",
+        'env = {"MINERU_FORMULA_CH_SUPPORT": "1"}',
+        'os.environ["MINERU_FORMULA_CH_SUPPORT"] = "yes"',
+        'os.environ.setdefault("MINERU_FORMULA_CH_SUPPORT", "1")',
+        'monkeypatch.setenv("MINERU_FORMULA_CH_SUPPORT", "true")',
+    ],
+)
+def test_the_sweep_sees_every_way_of_setting_the_variable(line: str) -> None:
+    assert _SETS_FORMULA_CH_SUPPORT.search(line), line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'value = os.environ.get("MINERU_FORMULA_CH_SUPPORT", "False").lower()',
+        "#: ``MINERU_FORMULA_CH_SUPPORT`` values mineru reads as on / off",
+        'if os.getenv("MINERU_FORMULA_CH_SUPPORT") == "1":',
+    ],
+)
+def test_the_sweep_ignores_a_read_of_the_variable(line: str) -> None:
+    assert not _SETS_FORMULA_CH_SUPPORT.search(line), line
