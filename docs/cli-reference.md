@@ -5419,8 +5419,14 @@ executed-failed with `--include-failed`; see above):
 - **by plan** (keyed by `plan_id` as a string, or `"fallback"` for a
   genuine planner-error miss with no `plan_id` at all — `plan_id=0`, the
   ad-hoc inline-planner sentinel, gets its OWN `"0"` key, distinct from
-  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`. The
-  key is the run log's matched plan, so a run that grew and saved a plan
+  `"fallback"`): `run_count`, `median_cost_usd`, `median_elapsed_ms`. A run's
+  elapsed time is the sum of its steps' `elapsed_ms` with the coverage assessment
+  counted once: the assessment's calls run concurrently, each its own
+  `operator_check` step past the plan's own steps, so a row whose run summary
+  carries `coverage.assessment_latency_ms` counts those steps as `min(sum of their
+  elapsed_ms, assessment_latency_ms)`, and a row without it keeps the plain sum
+  (an upper bound). `by_operator` and `by_source` entries still report each
+  call's own time. The key is the run log's matched plan, so a run that grew and saved a plan
   still lands under `"0"` even though its `nx_answer` envelope reported the
   saved id.
 - **cost-consistency violations**: rows where a row's own `cost_usd`
@@ -5510,7 +5516,11 @@ handoff and a budget-exhausted stop. The coverage check is on by default
 `no`) turns it off, and with it off every run is unassessed and `answer_shape`
 is what it was before RDR-232 Phase 3. A value that is neither an on nor an off
 word (`disable`, `off!`) reads as off, not as the default: the safe direction
-for a typo.
+for a typo. With the check on, a run adds model calls, latency and a small USD
+cost, and can come back `uncovered`; one live run of the earlier serial design
+took 147.3 s and 0.430 USD against 29.4 s and 0.433 USD with it off (the
+assessment: 118 s, 0.0166 USD), and the concurrent design has no live figure yet
+(see `docs/configuration.md`, `NX_ANSWER_COVERAGE`).
 Grown plans are additionally gated on identifier agreement at match time
 (nexus-wj12p): a grown plan whose originating question named identifiers
 (RDR/JDR ids, bead ids, engine tags, client versions, GH/PR numbers) is

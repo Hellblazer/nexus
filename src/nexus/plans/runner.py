@@ -4224,7 +4224,7 @@ async def _plan_run_impl(
         # except-handler can record real per-step data instead of a
         # hardcoded []. step_records is empty when the FIRST segment fails
         # before any _record_step call -- that is accurate, not a bug.
-        exc.step_records = list(step_records)
+        exc.step_records = sorted(step_records, key=lambda r: r.step_index)  # stable: concurrent assessment calls finish out of order
         raise
 
     # nexus-4h0oh: computed over the EXECUTED prefix only (step_outputs),
@@ -4247,6 +4247,9 @@ async def _plan_run_impl(
             total_steps=len(steps),
         )
 
+    # The concurrent assessment calls (nexus-jypmj.17) are appended as they finish, in no fixed order; step_index is
+    # unique and assigned in plan order, so listing by it makes the envelope's step order the same on every run.
+    step_records.sort(key=lambda r: r.step_index)
     return PlanResult(
         steps=step_outputs,
         final=step_outputs[-1] if step_outputs else None,

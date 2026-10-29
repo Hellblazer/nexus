@@ -125,6 +125,9 @@ _TRUNCATION_MARKER: str = "...[truncated]"
 #: still outstanding, and proceeds to raise with whatever partial
 #: content had already been captured.
 _TIMEOUT_CLEANUP_GRACE_SECONDS: float = 5.0
+#: Bound on the cleanup after a call is CANCELLED (nexus-jypmj.17): short, because the canceller (a ``wait_for``
+#: cut) is waiting on it to finish before its own timeout can return.
+_CANCEL_CLEANUP_GRACE_SECONDS: float = 1.0
 
 __all__ = [
     "claude_dispatch",
@@ -1521,6 +1524,31 @@ class CliBackend:
                 await asyncio.wait_for(
                     _finish_io(), timeout=_effective_phase_timeout(timeout, deadline),
                 )
+            except asyncio.CancelledError:
+                # nexus-jypmj.17: a call cut from OUTSIDE (the coverage assessment's ``asyncio.wait_for`` at the
+                # stage's share of the deadline, a cancelled sibling) lands here, not in the TimeoutError branch.
+                # Without this the child ran on to the end of its turn with its spend on no record. Kill the
+                # same tree, stop the drain tasks, then re-raise: cancellation is never swallowed.
+                from nexus.util.process_group import kill_tree  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+                if not kill_tree(proc, _dispatch_job):
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001 - best-effort process reap during cancel cleanup; non-fatal
+                        pass
+                _dispatch_job = None
+                for _t in (stdout_task, stderr_task):
+                    _t.cancel()
+                try:
+                    # Bounded and best-effort: reap the leader and let the drains finish their cancellation, so the
+                    # cut leaves no zombie and no pending task. A second cancel or the bound ends it early.
+                    await asyncio.wait_for(
+                        asyncio.gather(proc.wait(), stdout_task, stderr_task, return_exceptions=True),
+                        timeout=_CANCEL_CLEANUP_GRACE_SECONDS,
+                    )
+                except Exception:  # noqa: BLE001 - best-effort cleanup before re-raising the cancellation
+                    pass
+                raise
             except asyncio.TimeoutError:
                 # Search review I-6: reach the whole process tree so any claude
                 # children (nested planners, tool subprocesses) get reaped too.

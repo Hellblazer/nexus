@@ -75,11 +75,16 @@ a call is not started when what is left falls under :data:`MIN_ASSESSMENT_CALL_S
 spent, and its facets are then ``unassessed`` (outcome ``skipped_deadline`` / ``skipped_budget`` when no call
 was made, ``partial_failure`` after some were).
 
-**The calls run concurrently** (nexus-jypmj.17), at most :data:`MAX_CONCURRENT_ASSESSMENT_CALLS` at a time, each started
-in plan order (stream order, then facet group, then pack). Each call decides when it STARTS: the USD allowance
-(spent so far plus the calls in flight at the mean known cost) and the stage allowance left decide whether it runs
+**The calls run concurrently** (nexus-jypmj.17), at most :data:`MAX_CONCURRENT_ASSESSMENT_CALLS` at a time (less when an API backend's configured gate is
+lower; the ``claude -p`` backend's four concurrent subprocesses are unmeasured), each started in plan order (stream order, then facet group, then pack). Each call decides when it STARTS: the USD allowance
+(spent so far plus the calls in flight and the starting call at the mean known cost, or at
+:data:`ASSESSMENT_CALL_COST_PRIOR_USD` before any call reported one; one call always starts when none is in flight and
+the allowance is above zero) and the stage allowance left decide whether it runs
 and what timeout it draws, and it is cut from outside at that timeout, so the stage cannot outlast its share
-whatever the check does with the timeout it is given. The replies are read after all calls end, in plan order, so
+whatever the check does with the timeout it is given. A call cut that way has its process tree killed
+(:class:`nexus.operators.dispatch.CliBackend`) and its ``StepRecord`` is ``ok=False`` with an UNKNOWN cost: the CLI reports
+spend only in its result event, which a killed call never writes, so what it spent before the cut is not knowable and is
+not counted against the USD allowance. The replies are read after all calls end, in plan order, so
 the ledger, ``call_log``, reply classes and unassessed causes do not depend on which call finished first. The 2026-10-28 canary
 measured the serial design at +118 s with a 65-anchor call over the 60 s limit. These values are unmeasured starting
 points. Assessment
@@ -151,6 +156,7 @@ from nexus.plans.reserved_stream import ReservedStream, active_reserved_stream, 
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "ASSESSMENT_CALL_COST_PRIOR_USD",
     "ASSESSMENT_CALL_TIMEOUT_S",
     "ASSESSMENT_MAX_ITEM_CHARS",
     "ASSESSMENT_OPERATOR",
@@ -197,9 +203,18 @@ MIN_ASSESSMENT_CALL_S: float = 5.0
 #: Assessment calls in flight at once (nexus-jypmj.17). The operator dispatch has no process-wide gate of its own for
 #: a ``claude -p`` call; the direct-API backend gates HTTP attempts at ``NX_LLM_MAX_CONCURRENCY`` (default 4,
 #: ``operators/llm_api.DEFAULT_MAX_CONCURRENCY``), and a call past that waits for a permit inside its own timeout. So
-#: the stage never asks for more than that default at once: more would only queue behind the gate and spend the
-#: call's timeout waiting. The canary's four streams fit in one wave.
+#: the stage never asks for more than the smaller of this constant and the configured gate on those backends
+#: (:func:`dispatch_concurrency_cap`): more would only queue behind the gate and spend the call's timeout waiting.
+#: The ``claude -p`` backend has no gate and only this constant bounds it: four concurrent ``claude`` subprocesses
+#: have not been measured (rate limits, memory, host load). The canary's four streams fit in one wave.
 MAX_CONCURRENT_ASSESSMENT_CALLS: int = 4
+#: What one assessment call is assumed to cost until a call has reported a cost (nexus-jypmj.17). Without it the
+#: first wave of up to ``MAX_CONCURRENT_ASSESSMENT_CALLS`` calls starts whenever the USD allowance is above zero. Source:
+#: the live canary of 2026-10-28 (nexus-jypmj.3.10) ran 4 calls for 0.0166 USD (about 0.004 each) and the 40-call
+#: golden run averaged 0.018 USD for a whole run's calls; 0.02 is that whole-run mean for ONE call, several times the
+#: measured per-call cost, so the prior errs towards starting fewer calls, not more. A call that reported its cost
+#: replaces the prior with the mean of the known costs.
+ASSESSMENT_CALL_COST_PRIOR_USD: float = 0.02
 #: Anchors one assessment call reads (nexus-jypmj.17). A stream with more is split into balanced packs of at most this
 #: many, each its own call over the same facet group, so a 65-anchor graph stream is four calls of 16-17 and not
 #: one call that outran the 60 s timeout (nexus-jypmj.3.10 canary: the 10-15 anchor streams answered in about 20 s
@@ -769,6 +784,24 @@ def _norm(ref: str) -> str:
     return re.sub(r"\s+", "", ref).upper()
 
 
+def dispatch_concurrency_cap() -> int | None:
+    """The process-wide gate on the LLM backend's concurrent calls, or ``None`` when there is none to read.
+
+    The API backends (``anthropic``, ``openai_compat``) pass every HTTP attempt through ``NX_LLM_MAX_CONCURRENCY``
+    (:func:`nexus.operators.llm_api.configured_concurrency`); a call past it waits for a permit inside its own timeout.
+    The ``claude -p`` backend has no gate (``None``), and neither does a run where no backend is available or the
+    setting cannot be read: the stage then falls back to :data:`MAX_CONCURRENT_ASSESSMENT_CALLS` alone."""
+    try:
+        from nexus.operators.llm_api import configured_concurrency  # noqa: PLC0415 - deferred: the ledger stays pure at import
+        from nexus.operators.llm_backend import backend_status  # noqa: PLC0415 - deferred, as above
+
+        if backend_status().name in ("cli", "none"):
+            return None
+        return configured_concurrency()
+    except Exception:  # noqa: BLE001 - an unreadable setting or config must not stop the assessment; the constant bounds it
+        return None
+
+
 @dataclass(frozen=True)
 class CoverageBoundary:
     """The configuration of one run's boundary, handed to ``plan_run``.
@@ -796,6 +829,7 @@ class CoverageBoundary:
     stage_share: float = ASSESSMENT_STAGE_DEADLINE_SHARE
     min_call_s: float = MIN_ASSESSMENT_CALL_S
     max_concurrent_calls: int = MAX_CONCURRENT_ASSESSMENT_CALLS
+    call_cost_prior_usd: float = ASSESSMENT_CALL_COST_PRIOR_USD
     max_anchors_per_call: int = MAX_ANCHORS_PER_ASSESSMENT_CALL
 
     def stage_allowance(self, remaining: float | None) -> float | None:
@@ -1198,7 +1232,11 @@ class CoverageBoundary:
         contradicts: dict[str, set[str]] = {f.id: set() for f in facets}
         incomplete: dict[str, str] = {}  # facet id -> the finding reason for why it is not known
         started = time.monotonic()
-        gate = asyncio.Semaphore(max(1, self.max_concurrent_calls))
+        width = max(1, self.max_concurrent_calls)
+        process_gate = dispatch_concurrency_cap()
+        if process_gate is not None:
+            width = min(width, max(1, process_gate))  # an API backend's calls queue for permits past its gate
+        gate = asyncio.Semaphore(width)
         in_flight = 0
 
         async def run_one(call: _PlannedCall) -> _CallOutcome:
@@ -1208,9 +1246,15 @@ class CoverageBoundary:
                 remaining = view.remaining_seconds()
                 stage_left = None if reserve is None or remaining is None else remaining - reserve
                 timeout = self.call_timeout(stage_left)
-                estimate = view.assessment_cost_estimate()
-                if usd is not None and (usd <= 0 or (estimate is not None and usd - estimate * in_flight <= 0)):
-                    return _CallOutcome(skipped="skipped_budget", why="the USD allowance was spent")
+                if usd is not None:
+                    # The calls in flight and this one are each assumed to cost the mean of those that reported a
+                    # cost, or the prior before any did, so a wave cannot start more calls than the allowance holds.
+                    # With none in flight the call starts whenever the allowance is above zero, as the serial loop's
+                    # did (the budget is soft: one call past it is the accepted overshoot).
+                    estimate = view.assessment_cost_estimate()
+                    per_call = self.call_cost_prior_usd if estimate is None else estimate
+                    if usd <= 0 or (in_flight > 0 and usd - per_call * (in_flight + 1) <= 0):
+                        return _CallOutcome(skipped="skipped_budget", why="the USD allowance was spent")
                 if timeout <= 0:
                     return _CallOutcome(skipped="skipped_deadline", why="too little of the assessment's share of the deadline was left")
                 args = {"items": json.dumps(call.payload), "check_instruction": _instruction(call.group)}
@@ -1223,7 +1267,17 @@ class CoverageBoundary:
                 finally:
                     in_flight -= 1
 
-        outcomes = await asyncio.gather(*(run_one(c) for c in planned))
+        tasks = [asyncio.ensure_future(run_one(c)) for c in planned]
+        try:
+            outcomes = await asyncio.gather(*tasks)
+        except BaseException:
+            # A CancelledError that is not our own wait_for's (the caller was cancelled, or a check cancelled itself)
+            # or any other exception that escapes a call: gather re-raises it and leaves the other calls running, so
+            # cancel them and wait for them to unwind (each kills its own child) before leaving the stage.
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         def mark(group: Sequence[Facet], reason: str, *, override: bool = False) -> None:
             for f in group:
@@ -1420,7 +1474,7 @@ def _hits(out: Any) -> list[RepairHit]:
 
 
 class _MalformedReply(ValueError):
-    """A check reply that is not the check shape: an unusable reply that stops the assessment, not a call that raised."""
+    """A check reply that is not the check shape: an unusable reply (that call's facets read ``assessment_unusable``), not a call that raised."""
 
 
 def _records(reply: Any) -> list[Mapping[str, Any]]:

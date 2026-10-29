@@ -704,6 +704,30 @@ def _continuation_pairing_stats(
     }
 
 
+def _run_step_elapsed_ms(row: dict, steps: "list[dict]") -> int:
+    """A run's step time: the sum of its steps' ``elapsed_ms``, with the coverage assessment counted once.
+
+    The assessment's calls run concurrently (nexus-jypmj.17), each its own ``operator_check`` step numbered past the
+    plan's own ``step_count`` steps, so their ``elapsed_ms`` overlap and a plain sum reports more than the run took.
+    When the row's run summary carries ``coverage.assessment_latency_ms`` (the stage's wall time), the assessment
+    steps contribute ``min(their sum, that latency)``: the latency when the calls overlapped, their sum when they did
+    not (the stage's own time also covers repair and queueing, so it can exceed a serial sum). A row without the
+    summary value keeps the plain sum, which is then an upper bound.
+    """
+    total = sum(int(s.get("elapsed_ms") or 0) for s in steps)
+    summary = row.get("run_summary")
+    coverage = summary.get("coverage") if isinstance(summary, dict) else None
+    latency = coverage.get("assessment_latency_ms") if isinstance(coverage, dict) else None
+    plan_steps = row.get("step_count")
+    if isinstance(latency, bool) or not isinstance(latency, (int, float)) or latency != latency or isinstance(plan_steps, bool) or not isinstance(plan_steps, int):
+        return total
+    assessment = sum(
+        int(s.get("elapsed_ms") or 0) for s in steps
+        if s.get("operator") == "operator_check" and isinstance(s.get("step_index"), int) and s["step_index"] >= plan_steps
+    )
+    return total - assessment + min(assessment, int(latency))
+
+
 def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
     """Per-operator / per-source cost+elapsed aggregates (count, sum,
     median), per-plan cost/elapsed medians, and run-vs-sum(steps)
@@ -795,9 +819,7 @@ def _step_breakdown(rows: "list[dict]") -> dict[str, Any]:
             _bump(by_source_raw, src, cost=cost, elapsed_ms=elapsed)
         if step_sum is not None:
             by_plan_costs.setdefault(plan_key, []).append(step_sum)
-        by_plan_elapsed.setdefault(plan_key, []).append(
-            sum(int(s.get("elapsed_ms") or 0) for s in steps)
-        )
+        by_plan_elapsed.setdefault(plan_key, []).append(_run_step_elapsed_ms(row, steps))
 
     by_plan: dict[str, dict[str, Any]] = {}
     for plan_key in set(by_plan_costs) | set(by_plan_elapsed):

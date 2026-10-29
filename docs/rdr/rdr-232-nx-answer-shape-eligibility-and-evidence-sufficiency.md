@@ -464,8 +464,9 @@ listed under Critical Assumptions before gate.
   latency in `nx answer-runs` over-attributes to summarize until assessment
   latency is split out of it. Follow-up nexus-jypmj.17 covers concurrent
   per-stream calls under the stage deadline, continuing after a raised call and
-  the 65-anchor pack; turning the check on by default waits on it. This is one
-  request on one run.
+  the 65-anchor pack; this finding said turning the check on by default waited
+  on it, and on 2026-10-28 Sam turned it on together with that work (the next
+  finding). This is one request on one run.
   *Source: live canary of 2026-10-28, recorded in the bead nexus-jypmj.3.10
   comment of that date (the 2026-10-26 Phase 1 canary is T2
   `nexus/rdr232-canary-phase1`).*
@@ -488,11 +489,15 @@ listed under Critical Assumptions before gate.
   the fixed tree.
   *Source: bead nexus-jypmj.3.17; bead nexus-jypmj.3.10 comment of 2026-10-28.*
 
-- **✅ Verified** (unit-test timing model; no live run) — the coverage check is on
+- **❓ Assumed** (unit-test timing model; no live run; the code behaviour is
+  tested, the latency and accuracy are not measured) — the coverage check is on
   by default as of 2026-10-28, by Sam's decision, taken together with the latency
   fix the canary above asked for (nexus-jypmj.17). The assessment calls now run
-  at most 4 at a time (the direct-API backend's own concurrency default), each cut
-  at the stage's 0.4 share of the deadline left; a stream over 20 anchors is split
+  at most 4 at a time, fewer when an API backend's configured
+  `NX_LLM_MAX_CONCURRENCY` is lower (the `claude -p` backend has no gate and its 4
+  concurrent subprocesses are unmeasured), each cut at the stage's 0.4 share of
+  the deadline left, the cut killing the `claude -p` process tree and reporting an
+  unknown cost; a stream over 20 anchors is split
   into balanced packs, so the canary's 65-anchor graph stream is four calls of 16
   to 17; a call that raises or replies unusably costs only its own facets, so
   `stopped_after_failure` is no longer produced; and the terminal step's
@@ -1178,6 +1183,17 @@ call, and assessment latency in the run summary. As built, assessment USD is
 not a summary field: it is in the run's step records (the `operator_check`
 steps numbered past the plan's own steps).
 
+*Departure, 2026-10-28 (nexus-jypmj.17).* The call count is no longer one per
+evidence stream. A stream of more than 20 anchors is split into balanced packs
+of at most 20, each its own call over the same facet group, and the calls run
+concurrently, at most 4 at a time (fewer when an API backend's
+`NX_LLM_MAX_CONCURRENCY` is lower). The number of calls is the sum over streams
+of the packs times the facet groups, and no constant caps it: what bounds the
+stage is its 0.4 share of the deadline left and the USD stop-line, not the
+design. Under a tight allowance the later streams in plan order (graph, other)
+are the ones left unassessed. The 20-anchor pack size and the 4 concurrent calls
+are unmeasured as accuracy and latency.
+
 The boundary must be runner-owned, before terminal reduction. Two adjacent
 operator steps bundle and expose only their terminal result, so adding
 `check → generate` to plan YAML would hide the ledger from repair logic. The
@@ -1627,10 +1643,16 @@ first phase that claims the complete motivating behavior.
    model-assisted repair does not justify its cost.
 
 As run (2026-10-27): steps 1 to 3 are built (nexus-jypmj.3.1 to .3.6); step 4
-is nexus-jypmj.3.10. The coverage check ships off and `NX_ANSWER_COVERAGE=1`
-opts in: the Phase 3 review found that turning it on before step 4 measured
-it contradicted Phase 1 step 7 and the Phase 2 precedent, so the default flips
-only after nexus-jypmj.3.10 and Sam's approval. Departures from section 4, each
+is nexus-jypmj.3.10. The coverage check shipped off and `NX_ANSWER_COVERAGE=1`
+opted in: the Phase 3 review found that turning it on before step 4 measured
+it contradicted Phase 1 step 7 and the Phase 2 precedent, so the default was to
+flip only after nexus-jypmj.3.10 and Sam's approval. **Amended 2026-10-28:** Sam
+decided on 2026-10-28 (nexus-jypmj.17) that the check is on by default, ahead
+of the step 4 measurement and together with the concurrent assessment calls; it
+shipped off in 7.88.0 and on in the release after it, and `NX_ANSWER_COVERAGE=0`
+turns it off. The step 4 measurements of the shipped call shape (the Key
+Discoveries and Performance Expectations list what is still outstanding) were
+not taken before the flip. Departures from section 4, each
 stated in the code and the published docs: an assessor reply with no usable
 evidence record leaves its facets `unassessed`, not `unsupported`; a facet
 with both supporting and contradicting evidence is covered and marked
@@ -1813,6 +1835,25 @@ evidence stream, with the repair and reassessment bounded to one cycle. Measure
 invocation rates, facets per call, incremental latency, and cost against the
 current run records. No throughput target is asserted without a baseline.
 
+Coverage check on (default from 2026-10-28), what is measured and what is not.
+Measured, one request on one run (ART RDR-084 G06, engine 0.1.167, 2026-10-28,
+the serial design, one `operator_check` call per stream): check off 29.4 s and
+0.433 USD; check on 147.3 s and 0.430 USD, of which the assessment took 118 s
+(four serial calls, one cut at the 60 s limit) and 0.0166 USD. The concurrent
+design with 20-anchor packs has no live figure. Its timing is a unit-test model
+of the canary at 1/100 scale (a call takes 0.15 s plus 7 ms per anchor), under
+which the stage takes 50 model-seconds against 130 for the serial one: a model of
+assumed per-call latencies, not a measurement, and not a prediction to cite.
+Outstanding, in order: the canary on and off on the shipped tree (wall clock, not
+summed step time; calls, peak in flight, cut calls, backend and
+`NX_LLM_MAX_CONCURRENCY`); reply classes per pack against the one-call-per-stream
+baseline (0 unusable of 40 calls); G18 (withheld after assessment while the off
+arm answered), G01, G02 and G04 on the fixed tree; the full golden set on and off
+for latency and cost; a small `budget_usd` and `budget_seconds` for first-wave
+overshoot and cut calls; a persisted run through `nx answer-runs --steps`. The
+`claude -p` backend runs 4 concurrent subprocesses with rate-limit and host-load
+behaviour unmeasured.
+
 ## Finalization Gate
 
 ### Contradiction Check
@@ -1985,4 +2026,4 @@ remain coherent without it.
 - 2026-10-27: Section 4 counts a contradicted facet toward a usable answer: the definition and the `unavailable` row say covered or contradicted, so a contradiction-only result is `partial` with the contradiction named ahead of the prose, per Sam's ruling (nexus-jypmj.3.13).
 - 2026-10-27: Phase 3 As run recorded (the coverage check ships off until nexus-jypmj.3.10 and Sam's approval; the section 4 departures as built), and section 4 and the Test Plan corrected where they misdescribed the build (marker bucketing under trace=False, assessment USD in step records, the continuation fallback repay, the unverified and not_recorded persistence states, the coverage_partial count), approved by Sam.
 - 2026-10-28: Key Discoveries record the lookup-boundary re-measure (nexus-jypmj.13), the pre-cap filter's old-engine departure (nexus-jypmj.1.13) and the live canary latency (nexus-jypmj.3.10); two A5 statements are corrected as findings. No decision text changed.
-- 2026-10-28: Key Discoveries record that the coverage check is on by default (Sam) with concurrent assessment calls and the unit-test timing model of the latency before and after (nexus-jypmj.17). No decision text changed.
+- 2026-10-28: The coverage check is on by default (Sam's decision, nexus-jypmj.17), with concurrent assessment calls. Decision text changed: Phase 3 As run (the check no longer ships off; the amendment names Sam and the date), section 4 (a dated departure: packs of at most 20 anchors, at most 4 concurrent calls, the call count bounded by the stage share and the USD stop-line, not by design) and Performance Expectations (the measured canary figures, the unit-test timing model labelled as a model, the outstanding measurements). The Key Discovery for the timing model is tagged Assumed.

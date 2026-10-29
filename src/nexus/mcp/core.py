@@ -11969,17 +11969,15 @@ async def nx_answer(
 ) -> "str | dict":
     """Answer a knowledge question via plan-match-first, multi-step retrieval.
 
-    Use `search`/`query` directly for a single-step, already-known-shape
-    lookup: this tool reduces from many documents and is NOT sub-second
-    (p50 ~80s, p95 ~217s). Matches the question to a saved retrieval plan
-    (an inline planner grows one on a miss), runs it, and returns the
-    synthesized answer.
+    Use `search`/`query` directly for a single-step, known-shape lookup:
+    this tool reduces from many documents and is NOT sub-second
+    (p50 ~80s, p95 ~217s). Matches a saved plan (an inline planner grows
+    one on a miss), runs it, and returns the synthesized answer.
 
     Returns the final step's output as a string, or with `structured=True`
     an envelope (`{final_text, chunks, plan_id, step_count, answer_shape,
-    coverage, run_summary, ...}`). `plan_id` is the matched library plan or, on a
-    miss, the plan this call grew and saved; 0 when no row exists (ttl 0,
-    a failed save, or a run that ended first).
+    coverage, run_summary, ...}`). `plan_id` is the matched plan or, on a
+    miss, the plan this call grew and saved; 0 when no row exists.
 
     Constraints:
     - `budget_usd` is a soft cost guide (warns, can overshoot);
@@ -11987,18 +11985,20 @@ async def nx_answer(
     - A corpus or collection `scope` narrows each retrieval step's plan-
       declared corpus; a step with nothing under it is skipped and named
       in `scope_diagnostics` (text mode: a `[scope conflict: ...]` line).
-    - `continuation=True` is live for eligible plan cuts and needs a
-      matching `nx_answer_report` call afterward.
+    - `continuation=True` needs a matching `nx_answer_report` call.
+    - The coverage check is on by default: it adds model calls (latency,
+      about 0.02 USD a run; the times above predate it) and can withhold
+      an answer as "uncovered". `NX_ANSWER_COVERAGE=0` turns it off.
     - `answer_shape` says what `final_text` is. Prose follows for
       "answered" and "insufficient_evidence" (opens with
       `[insufficient-evidence: <n> unresolved]`, names each unsettled
-      part, then answers the rest). Any other value, "uncovered" (none of
-      the evidence covers a requested part) included, is a one-line
-      notice, never the raw payload.
+      part, then answers). Any other value, "uncovered" (no
+      part is covered) included, is a one-line notice, never the
+      raw payload.
     - `run_summary.persistence` (persisted, dropped, unsupported,
       unverified, not_recorded): only "persisted" means the engine kept
       the run's coverage summary.
-    - Text mode starts a degraded answer with `[budget exhausted ...]`,
+    - Text mode opens a degraded answer with `[budget exhausted ...]`,
       `[non-answer: <shape>]` or `[insufficient-evidence: ...]`.
     """
     import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site

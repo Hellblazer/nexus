@@ -219,7 +219,7 @@
     6
    ],
    "failure_cause": "none",
-   "latency_ms": 0,
+   "latency_ms": 1,
    "outcome": "ok",
    "raised_calls": 0,
    "rejected_records": 0,
@@ -709,7 +709,7 @@
  "reserved_stream": null,
  "run_summary": {
   "detail": "digest_match",
-  "digest": "sha256:d3b9be6bd5a8fb99a6fbcf61716103cee1ff1d4b83ded0d170d25b8f5d45522c",
+  "digest": "sha256:5189c22536238befaa03b8fdde3a33566219c05370afa8ec89d5a9712cf207ba",
   "persisted_coverage_state": "partial",
   "persistence": "persisted",
   "returned_coverage_state": "partial",
@@ -770,6 +770,20 @@
    "input_tokens": null,
    "model": null,
    "ok": true,
+   "operator": "generate",
+   "output_tokens": null,
+   "source": "llm",
+   "step_index": 3
+  },
+  {
+   "bundled_steps": [],
+   "cache_creation_input_tokens": null,
+   "cache_read_input_tokens": null,
+   "cost_usd": null,
+   "elapsed_ms": 0,
+   "input_tokens": null,
+   "model": null,
+   "ok": true,
    "operator": "operator_check",
    "output_tokens": null,
    "source": "llm",
@@ -802,20 +816,6 @@
    "output_tokens": 0,
    "source": "sql",
    "step_index": 6
-  },
-  {
-   "bundled_steps": [],
-   "cache_creation_input_tokens": null,
-   "cache_read_input_tokens": null,
-   "cost_usd": null,
-   "elapsed_ms": 0,
-   "input_tokens": null,
-   "model": null,
-   "ok": true,
-   "operator": "generate",
-   "output_tokens": null,
-   "source": "llm",
-   "step_index": 3
   }
  ],
  "truncated_chars": null
