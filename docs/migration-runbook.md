@@ -383,9 +383,13 @@ interrupted — the ETL paths are idempotent and re-converge on
 
 ## If the RDR-231 note-URI backfill halts startup
 
-**Symptom.** The new engine does not come up. Its log
-(`~/.config/nexus/logs/storage_service_native.log` on a local install, the
-deployment's engine log in the cloud) ends with:
+**Symptom.** The new engine does not come up. `nx daemon service start` exits 2
+within a few seconds, and the upgrade's own finish pass reports a service that
+did not start (see "How the halt first shows up" below for the exact text). The
+engine's native log (`~/.config/nexus/logs/storage_service_native.log` on a local
+install, the deployment's engine log in the cloud) contains the reason: the
+message below appears in it several times, once for each link of the exception
+chain, with stack frames between the copies.
 
 ```text
 RDR-231 note-URI backfill halted and nothing was changed: N live chroma:// note row(s) have a live nx-note:// twin. ...
@@ -418,14 +422,13 @@ the cloud. It is the guard's own test, one row per pair.
 
 Locally the cluster listens only on TCP at `127.0.0.1` (no Unix socket) and
 every `pg_hba.conf` line is `scram-sha-256`. The superuser role is named for the
-OS login that provisioned the cluster (`$USER`; on Windows, a name derived from
-the service account), not `postgres`. Its password is `PG_SUPERUSER_PASS` and
-the port is `PG_PORT`, both in `<config>/pg_credentials` (`~/.config/nexus`
-unless `NEXUS_CONFIG_DIR` says otherwise). Use the PostgreSQL client nx
-extracted under `<config>/pg-bundle`; nx never falls back to a host `psql`. The
-cluster keeps running when the service stops, so this works while the engine is
-halted. This opens a session without printing the password or putting it on a
-command line:
+OS login that provisioned the cluster (`$USER`), not `postgres`. Its password is
+`PG_SUPERUSER_PASS` and the port is `PG_PORT`, both in `<config>/pg_credentials`
+(`~/.config/nexus` unless `NEXUS_CONFIG_DIR` says otherwise). Use the PostgreSQL
+client nx extracted under `<config>/pg-bundle`; nx never falls back to a host
+`psql`. The cluster keeps running when the service stops, so this works while the
+engine is halted. This opens a session without printing the password or putting
+it on a command line. **It is for Linux and macOS.**
 
 ```bash
 CFG="${NEXUS_CONFIG_DIR:-$HOME/.config/nexus}"
@@ -434,10 +437,28 @@ PGPASSWORD="$(sed -n 's/^PG_SUPERUSER_PASS=//p' "$CFG/pg_credentials")" \
   -p "$(sed -n 's/^PG_PORT=//p' "$CFG/pg_credentials")" -U "$USER" -d nexus
 ```
 
-Paste the query below at its prompt. Liquibase's own tables are in the `public`
-schema, not `nexus`; `SELECT id, exectype FROM public.databasechangelog WHERE
-id = 'note-uri-001-1'` returns no row while the backfill has not run and
-`EXECUTED` after it has (`nexus.databasechangelog` does not exist).
+Three ways this can differ on your machine:
+
+- **Windows.** The command above does not apply. The superuser role there is
+  `nx_` plus the first 16 hex digits of the SHA-256 of the service account's SID
+  (`windows_superuser_name` in `src/nexus/db/pg_provision.py`), not your login
+  name, and the shell syntax is POSIX. A verb that runs this for you is planned
+  (nexus-bivz3.28); until then there is no copy-and-paste command for Windows.
+- **`role "<you>" does not exist`.** The cluster was provisioned from a process
+  with neither `USER` nor `LOGNAME` set (a service manager, `cron`), and
+  `bootstrap_superuser` falls back to `postgres` for the role. Use `-U postgres`
+  with the same password.
+- **A password prompt nobody can answer.** A cluster that predates
+  `PG_SUPERUSER_PASS` was `trust` with no password. The supervisor converts it to
+  `scram-sha-256`, with a generated password written to `pg_credentials`
+  (`harden_cluster_auth`), the first time it provisions the cluster, and it does
+  that before it starts the engine, so by the time you see this halt the key is
+  there. If `pg_credentials` still has no `PG_SUPERUSER_PASS` line, nx refuses to
+  loosen `pg_hba.conf` (`PgAuthLockedError`); its message says to restore the key
+  from a backup of `pg_credentials`, or to reset the role's password in
+  single-user mode and record it there.
+
+Paste the query below at the psql prompt.
 
 ```sql
 WITH o AS (
@@ -467,20 +488,51 @@ and re-points the duplicate's links at the canonical (`CatalogRepository.mergeDo
 It touches only `catalog_documents` and `catalog_links`: it does not move the
 duplicate's chunks and does not change either row's collection.
 
-So choose the canonical by content before you merge. Run
-`nx catalog show <tumbler>` on both rows of a pair and compare `Chunks` and
-`Collection`. Keep, as the canonical, the row that holds the content you want to
-keep. That is usually the `nx_note_row` (the newer write), but a note stored by
-`nx store put` before the upgrade has its chunks on the `chroma_row`, and a
-`nx_note_row` registered without content shows `Chunks: 0` and an empty
-`Collection`. Merging the chunk-holding row into such an empty one leaves the
-note's lookups resolving to a row with no chunks. Then merge the other row (the
-duplicate) into it, in the tenant that owns both. The CLI call is
-`nx catalog merge <duplicate> <canonical>` and the engine route is
-`POST /v1/catalog/merge` with `{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`.
-Run the query again: it must return no rows.
+Compare the two rows of a pair before you merge, because you cannot after.
+`nx catalog show <tumbler>` follows `alias_of`, so once the merge has run, showing
+the duplicate prints the canonical's card. Before the merge, run it on both rows
+and compare `Chunks`, `Collection` and `Indexed`, and read the text each row holds
+(`nx store list` lists the notes with their IDs; `nx store get <id>` prints one).
+Keep, as the canonical, the row whose text you want. That is usually the
+`nx_note_row` (the newer write), but a note stored by `nx store put` before the
+upgrade has its chunks on the `chroma_row`, and a `nx_note_row` registered without
+content shows `Chunks: 0` and an empty `Collection`. Merging the chunk-holding row
+into such an empty one leaves the note's lookups resolving to a row with no chunks.
 
-**3. Restart on the new engine.** The backfill then passes.
+Then merge the other row (the duplicate) into the one you keep, in the tenant that
+owns both. The CLI call is `nx catalog merge <duplicate> <canonical>` and the
+engine route is `POST /v1/catalog/merge` with
+`{"duplicate": "<tumbler>", "canonical": "<tumbler>"}`. Run the step 1 query
+again: it must return no rows.
+
+If both rows have chunks, the merge does not combine them. The duplicate stays a
+live catalog row, and a chunk is live while any live document owns it (a manifest
+row in the chunk's own collection; `nexus.chunk_live_owners`, which does not look
+at `alias_of`). So the duplicate's chunks still come back from `nx search` and
+`nx store get`, and still appear in `nx store list`, next to the canonical's. If
+you would rather keep both versions, do nothing: the other version stays
+searchable under its own tumbler.
+
+To drop the other version's chunks from reads, delete the duplicate after the
+merge with `nx catalog delete <duplicate>`. It tombstones only that row (the
+engine does not follow the alias for a delete). Chunks that no other live document
+owns then stop appearing in search and `store get`; a chunk with identical text in
+the same collection that the canonical also owns stays. The chunks remain stored:
+`nx catalog restore <duplicate>` brings them back until `nx catalog purge-trash`
+reclaims them after its grace window. The confirmation prompt prints the
+canonical's title next to the duplicate's tumbler, because the prompt resolves
+through the alias; the tumbler is what is deleted.
+
+**3. Restart on the new engine.** The backfill then passes. Three checks that it
+did:
+
+- `nx daemon service status` lists `service_release_version` as the new engine's
+  version (the `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`).
+- In psql (step 1), `SELECT id, exectype FROM public.databasechangelog WHERE id =
+  'note-uri-001-1'` returns the row with `EXECUTED`. Liquibase's own tables are in
+  the `public` schema, not `nexus` (`nexus.databasechangelog` does not exist). The
+  query returns no row while the backfill has not run.
+- `nx catalog show <the canonical>` prints `URI:` with an `nx-note://` spelling.
 
 ### Cloud
 
@@ -503,7 +555,7 @@ in the previous client release's changelog entry (`engine-service-v0.1.165` for
 the client release before RDR-231).
 
 ```bash
-nx daemon service stop                                   # normally prints "already stopped" (the supervisor exited with the halted engine); harmless, and makes sure
+nx daemon service stop                                   # normally prints "already stopped": the supervisor exited with the halted engine. Harmless, and it makes sure nothing is retrying
 nx daemon service install-binary engine-service-v0.1.165 --no-pg-bundle   # the PREVIOUS engine tag, binary only
 nx daemon service start                                  # previous engine, same database
 # step 1: list the pairs (psql over TCP as the superuser, see step 1 above)
@@ -514,28 +566,63 @@ nx daemon service start                                  # the backfill passes; 
 ```
 
 **How the halt first shows up.** On a local install you usually meet it in the
-output of the upgrade itself. The first `nx` command after `uv tool upgrade`
-runs the upgrade-finish pass, and `nx daemon restart-stale` repeats it: both
-install the pinned engine and start it, and a halted engine never answers. The
-finish line then reads like this (the reason is the engine's own, carried up to
-about 1,000 characters):
+output of the upgrade itself. The first `nx` command after `uv tool upgrade` runs
+the upgrade-finish pass, which installs the pinned engine and starts it; a halted
+engine never answers. What `nx daemon service start` prints in that case
+(the lines are a rehearsal's; the first is stderr noise from a box with no
+`systemctl`):
 
 ```text
-NEEDS HUMAN: the storage service did not start (`nx daemon service start` exited 2);
-the engine is NOT converged to v0.1.167. Its reason: Storage service supervisor
-exited with code 2 before the service became ready. RDR-231 note-URI backfill
-halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note://
-twin. ... https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup ...
+Not starting through the autostart unit /home/nexus/.config/systemd/user/nexus-service.service (no_manager: systemctl not found on PATH or at /usr/bin/systemctl, /bin/systemctl); starting the supervisor directly.
+Error: Storage service supervisor exited with code 2 before the service became ready.
+Schema migration failed on port 47055: 2026-10-29 13:56:09,901 ERROR [main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration failed". Engine log: /home/nexus/.config/nexus/logs/storage_service_native.log
+The engine reported: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+Supervisor log: /home/nexus/.config/nexus/logs/storage_service.log
+Supervisor stderr: /home/nexus/.config/nexus/logs/storage_service.crash.log
 ```
 
-and `nx daemon restart-stale` ends its engine leg with `engine: not converged —
-installed engine is v0.1.167 (the release dependency), but no discoverable
-storage-service lease. Start it with ...`. Clients before this fix printed
-`engine: converged` there, from the installed binary alone, and said the service
-"restarted but its version could not be confirmed" while it had not started. If
-you see those lines and `nx daemon service status` finds no service, read the
-engine log (`logs/storage_service_native.log`) for the halt text, then follow
-the steps above.
+The finish pass carries that text, up to its first 1,000 characters, in a `NEEDS
+HUMAN` line (wrapped here for the page; the line is one):
+
+```text
+NEEDS HUMAN: the storage service did not start (`nx daemon service start` exited 2); the engine
+is NOT converged to v0.1.167. Its reason: Storage service supervisor exited with code 2 before
+the service became ready. Schema migration failed on port 47055: 2026-10-29 13:56:09,901 ERROR
+[main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration
+failed". Engine log: /home/nexus/.config/nexus/logs/storage_service_native.log The engine
+reported: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s)
+have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST
+/v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs:
+https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+Supervisor log: /home/nexus/.config/nexus/logs/storage_service.log Supervisor stderr:
+/home/nexus/.config/nexus/logs/storage_service.crash.log Run `nx daemon service start` to see it
+again, read the engine log, and check `nx doctor`. [cycle] stop rc=0: Storage service stopped
+(pid(s)=352). | start rc=2: Not starting through the autostart unit
+/home/nexus/.config/systemd/user/nexus-service.service (no_manager: systemctl not found on PATH
+or at /usr/bin/systemctl, /bin/systemctl); starting the supervisor directly. Error: Storage
+service supervisor exited with code 2 before the service became ready. S
+```
+
+A later `nx daemon restart-stale` installs and starts nothing: the pinned engine
+is already on disk, and a stopped service is an ordinary state that command does
+not restart on its own. Its engine line is neutral:
+
+```text
+engine: installed engine is v0.1.167 (the release dependency); the service is not running (no
+discoverable storage-service lease). Start it with `nx daemon service start` (its output names
+the reason if the engine halts at startup).
+```
+
+It says only that the service is not running. `nx daemon service start` is what
+prints the halt, so run it, or read the engine log.
+
+Client 7.88.0 printed `engine: converged` on that line, from the installed binary
+alone, and its finish line said the service "restarted but its version could not
+be confirmed" with the start output cut at 300 characters, so neither named the
+halt. The fix is first in the next client release after 7.88.0. On 7.88.0,
+`nx daemon service start` still prints the supervisor's `Schema migration failed
+... Liquibase migration failed. Engine log: <path>`; read the RAISE in the log it
+names, then follow the steps above.
 
 `install-binary` also swaps the PostgreSQL bundle by default (`--pg-bundle`), and
 the previous tag ships the bundle it was built with, which can be an older
