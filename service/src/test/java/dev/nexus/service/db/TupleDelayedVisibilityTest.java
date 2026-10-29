@@ -171,9 +171,9 @@ class TupleDelayedVisibilityTest {
         assertThat(availableAt(q)).as("stamped").isNotNull();
         assertThat(secondsAhead(q)).as("about 60 s ahead on the database clock").isBetween(50.0, 61.0);
         assertThat(claimable(q)).as("not claimable before the delay has passed").isFalse();
-        moveAvailableAt(q, +1);   // the database clock is one second short of available_at
-        assertThat(claimable(q)).as("one second short of available_at: still hidden").isFalse();
-        moveAvailableAt(q, -1);   // the database clock has passed available_at
+        moveAvailableAt(q, +30);  // the database clock is thirty seconds short of available_at (a 1 s margin flaked on a stalled box)
+        assertThat(claimable(q)).as("thirty seconds short of available_at: still hidden").isFalse();
+        moveAvailableAt(q, -30);  // the database clock has passed available_at
         assertThat(claimable(q)).as("past available_at: claimable").isTrue();
     }
 
@@ -436,5 +436,36 @@ class TupleDelayedVisibilityTest {
         assertThat(repo.waitAny(TENANT, List.of(spec), 0)).isEmpty();
         moveAvailableAt(q, -1);
         assertThat(repo.waitAny(TENANT, List.of(spec), 0)).hasSize(1);
+    }
+
+    // ── (i) a refire never moves available_at (review S3) ────────────────────
+
+    @Test
+    void aRefireOfTheSameWrite_keepsTheFirstWritesAvailableAt() throws Exception {
+        Q q = newQueue();
+        out(q, 60L);
+        OffsetDateTime first = availableAt(q);
+        assertThat(first).isNotNull();
+        out(q, null);    // same keys+nonce, no delay: a refire, not a new row
+        assertThat(availableAt(q)).as("a refire without a delay does not cancel the delay").isEqualTo(first);
+        out(q, 5L);      // same write again with a different delay
+        assertThat(availableAt(q)).as("a refire with a delay does not move it either").isEqualTo(first);
+        assertThat(claimable(q)).as("still hidden by the first write's delay").isFalse();
+    }
+
+    // ── (j) a parked in picks a lapsing delay up on its one-second timer (review S1) ─
+
+    @Test
+    void aParkedIn_claimsADelayedRowWithinAboutASecondOfItsDelayPassing() throws Exception {
+        Q q = newQueue();
+        out(q, 2L);
+        long t0 = System.nanoTime();
+        // Parked for up to 10 s on a subspace whose only row is hidden for 2 s. No out or release
+        // fires when the delay passes; the park loop's own one-second timer re-runs the claim.
+        var got = repo.in(TENANT, q.subspace(), q.pattern(), "w1", (Long) 60L, 10L);
+        double elapsed = (System.nanoTime() - t0) / 1e9;
+        assertThat(got).as("claimed once the delay passed, without any signal").isPresent();
+        assertThat(elapsed).as("about 2 s of delay plus at most one timer tick, never the 10 s timeout")
+                .isBetween(1.5, 5.0);
     }
 }

@@ -394,4 +394,36 @@ class TupleLockFlagTest {
                 .as("expires_at refreshed by the ordinary refire clamp, not reset via the lock branch")
                 .isEqualTo(expiresAtBefore);
     }
+
+    /**
+     * RDR-235 E1 (nexus-5r2sc.2.1, review S3): the lock template's reset of an EXPIRED row is a
+     * fresh row, so it takes the new write's {@code delay_s} (the ordinary refire keeps the first
+     * write's {@code available_at}). retention_seconds is 3 here, so the delay must be at most 3.
+     */
+    @Test
+    void outWithADelayOnAnExpiredLockRowResetsItHiddenUntilTheDelayPasses() throws Exception {
+        String tenant = "tuple-lock-flag-reset-delay-" + UUID.randomUUID();
+        String resource = "res-" + UUID.randomUUID();
+        String subspace = "lock-flag/" + resource;
+        Map<String, String> keys = Map.of("resource", resource);
+        byte[] id = repo.out(tenant, subspace, keys, Map.of("from", "holder-1"), null, null, null);
+        assertThat(repo.inp(tenant, subspace, keys, "holder-1", 1L)).as("must be claimable").isPresent();
+        Thread.sleep(3300);   // past the 1 s lease and the 3 s retention: expired, not merely lapsed
+        assertThat(rawRow(id).value1()).as("row must now be past its own expiry").isBefore(OffsetDateTime.now());
+
+        repo.out(tenant, subspace, keys, Map.of("from", "holder-1"), null, null, null, null, 2L);
+
+        OffsetDateTime availableAt;
+        try (Connection su = pg.createConnection("")) {
+            availableAt = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                    .select(TUPLES.AVAILABLE_AT).from(TUPLES).where(TUPLES.ID.eq(id)).fetchOne(TUPLES.AVAILABLE_AT);
+        }
+        assertThat(rawRow(id).value2()).as("claim state cleared by the reset").isNull();
+        assertThat(availableAt).as("the reset row took this write's delay").isNotNull();
+        assertThat(repo.inp(tenant, subspace, keys, "holder-2", 60L))
+                .as("hidden until the delay passes, even though the lock was reset").isEmpty();
+        Thread.sleep(2500);
+        assertThat(repo.inp(tenant, subspace, keys, "holder-2", 60L))
+                .as("claimable once the delay has passed").isPresent();
+    }
 }

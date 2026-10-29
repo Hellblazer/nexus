@@ -2248,15 +2248,15 @@ public final class TupleRepository {
      * claim stays live. A nack that dead-letters (attempts reach {@code max_attempts}) leaves
      * {@code available_at} NULL whatever {@code retry_after_s} was: a dead row is never retried.
      *
-     * <p><b>What wakes a parked {@code in} when a delayed task becomes claimable: nothing.</b>
-     * The instant {@code available_at} passes, no event fires: {@code nack} (unlike {@code out}
-     * and {@code release}) signals no waiter at all, and a delay expiring is not a write. A
-     * parked {@code in} therefore sees the task on its next re-check, which is its next
-     * signal (any other {@code out} or {@code release} on the subspace) or its own timeout,
-     * whichever comes first: up to {@code timeout_s}, 25 s for the aspect worker. That is
-     * acceptable for retries, whose intervals are minutes (a worker that polls every 25 s loses at
-     * most 25 s on a retry that waited a minute or more). A caller that needs the exact instant
-     * must not park; it should poll with {@code inp}.
+     * <p><b>What wakes a parked {@code in} when a delayed task becomes claimable: no signal,
+     * but the park loop's own timer.</b> The instant {@code available_at} passes, no event
+     * fires: {@code nack} (unlike {@code out} and {@code release}) signals no waiter at all, and
+     * a delay expiring is not a write. A parked {@code in}, however, re-runs {@link #claimOnce}
+     * on every wake, and {@link TupleWaitRegistry} wakes it on a signal OR a one-second timer
+     * ({@code awaitSignalOrTimer}), so the task is picked up within about a second of
+     * {@code available_at} passing, never as late as the caller's {@code timeout_s}. That is
+     * well inside what a retry ladder measured in minutes needs
+     * ({@code TupleDelayedVisibilityTest.aParkedIn_claimsADelayedRowWithinAboutASecondOfItsDelayPassing}).
      */
     public void nack(String tenant, String claimId, String claimant, Long retryAfterSecondsOrNull) {
         checkClaimIdentifiers(claimId, claimant);
