@@ -230,6 +230,11 @@ class TestRequeueFailedAgainstTheEngine:
         with T2Database(_t2) as db:
             assert len(real_list_failed(db.aspect_queue, coll)) == 2, "dry-run wrote"
         assert [r.claim_state for r in store.rd("aspects", _KEYS, n=300)] == ["dead"]
+        # The preview says which row the tuples-mode run will skip, so it and
+        # the run agree (critique r2): the blank row carries the note, the
+        # others do not.
+        assert "blank.pdf" in dry.output and "[would skip: no doc_id]" in dry.output, dry.output
+        assert dry.output.count("[would skip: no doc_id]") == 1, dry.output
 
         res = CliRunner().invoke(aspects_group, ["requeue-failed"])
         assert res.exit_code == 0, res.output

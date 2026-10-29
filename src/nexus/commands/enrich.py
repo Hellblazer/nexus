@@ -333,7 +333,16 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
             for hit in hits:
                 if hit.physical_collection == collection:
                     return str(hit.tumbler)
-        except Exception:  # noqa: BLE001 — best-effort doc_id resolve; any failure degrades to empty string
+        except Exception as exc:  # noqa: BLE001 — best-effort doc_id resolve; a transport failure is surfaced, anything else degrades to empty string
+            from nexus.aspect_readers import (  # noqa: PLC0415 — deferred command-local import
+                TransportReadFailure,
+                is_transport_failure,
+            )
+
+            if is_transport_failure(exc):
+                # The catalog is down, not silent on this document: the reader
+                # maps this to ReadFail(transport) and the caller retries.
+                raise TransportReadFailure(str(exc)) from exc
             return ""
         return ""
 

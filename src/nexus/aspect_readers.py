@@ -958,7 +958,9 @@ def _read_https_uri(
         )
     if status >= 400:
         return ReadFail(
-            reason="transport" if status >= 500 else "unreachable",
+            # 429 and 408 are the rate limit and the request timeout: transient,
+            # like a 5xx, and retried on the ladder (is_transport_failure agrees).
+            reason="transport" if status >= 500 or status in (429, 408) else "unreachable",
             detail=f"HTTP {status} from {uri!r}",
         )
     text = response.text or ""

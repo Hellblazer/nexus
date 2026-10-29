@@ -1946,3 +1946,42 @@ class TestDocsOptInEnrich:
         result = CliRunner().invoke(enrich, ["aspects", "docs__optrepo-feed1234", "--dry-run"])
         assert "Skipping 2 non-prose document(s)" in result.output
         assert "No catalog rows" not in result.output
+
+
+class TestDocIdLookupSurfacesTransportFailures:
+    """nexus-5r2sc.3.10 (critique r2): the catalog doc_id lookup swallowed every
+    exception to "", so a catalog blip read as "no doc_id mapped" and the reader
+    dropped the document; now a transport failure is raised, the same way the
+    manifest lookup raises it, and the reader maps it to ReadFail(transport)."""
+
+    def _lookup_with(self, monkeypatch, exc):
+        import httpx
+
+        from nexus.commands import enrich
+
+        class _Cat:
+            def resolve_doc_id(self, *a, **k):  # noqa: ANN002, ANN003, ANN202
+                raise exc
+
+            def __getattr__(self, name):  # noqa: ANN001, ANN204
+                def _boom(*a, **k):  # noqa: ANN002, ANN003, ANN202
+                    raise exc
+                return _boom
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Cat())
+        lookup = enrich._build_catalog_doc_id_lookup()
+        assert lookup is not None
+        return lookup, httpx
+
+    def test_a_transport_failure_is_raised(self, monkeypatch):
+        import httpx
+
+        from nexus.aspect_readers import TransportReadFailure
+
+        lookup, _ = self._lookup_with(monkeypatch, httpx.ConnectError("catalog down"))
+        with pytest.raises(TransportReadFailure):
+            lookup("docs__x", "a.md")
+
+    def test_any_other_failure_still_degrades_to_empty(self, monkeypatch):
+        lookup, _ = self._lookup_with(monkeypatch, KeyError("no such column"))
+        assert lookup("docs__x", "a.md") == ""

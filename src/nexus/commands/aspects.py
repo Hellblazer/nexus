@@ -384,6 +384,7 @@ def aspects_requeue_failed(
         failed = failed[:limit]
         dead = dead[: max(limit - len(failed), 0)]
 
+    tuples_mode = aspect_queue_mode() == "tuples"
     scope = f" in {collection}" if collection else ""
     if not failed and not dead:
         click.echo(f"aspect_extraction_queue: no failed rows{scope}.")
@@ -393,7 +394,12 @@ def aspects_requeue_failed(
         if failed:
             click.echo(f"Would re-enqueue {len(failed)} failed row(s){scope}:")
             for row in failed:
-                click.echo(f"  {row.collection}  {row.source_path}  (retry_count={row.retry_count})")
+                note = ""
+                if tuples_mode and not row.doc_id:
+                    # The tuples re-enqueue needs the doc_id as its nonce; the real
+                    # run skips this row and says so, so the preview says so too.
+                    note = "  [would skip: no doc_id]"
+                click.echo(f"  {row.collection}  {row.source_path}  (retry_count={row.retry_count}){note}")
         if dead:
             click.echo(f"Would re-enqueue {len(dead)} dead task(s){scope}:")
             for task in dead:
@@ -405,7 +411,6 @@ def aspects_requeue_failed(
         click.echo("Re-run without --dry-run to re-enqueue.")
         return
 
-    tuples_mode = aspect_queue_mode() == "tuples"
     requeued = 0
     skipped = 0
     for row in failed:

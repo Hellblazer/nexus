@@ -1232,8 +1232,10 @@ class TestReadHttpsUri:
             (403, "forbidden", "https://x.example.com", "unauthorized", None),
             (404, "not found", "https://x.example.com/missing", "unreachable", "404"),
             (503, "service unavailable", "https://flaky.example.com", "transport", None),
+            (429, "slow down", "https://limited.example.com", "transport", "429"),
+            (408, "timeout", "https://slow.example.com", "transport", "408"),
         ],
-        ids=["401", "403", "404", "5xx"],
+        ids=["401", "403", "404", "5xx", "429", "408"],
     )
     def test_error_status_maps_to_read_fail_reason(
         self, status, body, url, expected_reason, detail_substring,
