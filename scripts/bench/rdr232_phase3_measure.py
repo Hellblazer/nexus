@@ -655,7 +655,10 @@ def main(
     ap.add_argument("--from-envelopes", type=Path, help="re-analyse an envelopes file (--envelopes-out of an earlier run): no model, no network. "
                     "A file written before wall times were recorded needs the same --set/--qid/--limit/--repeat as the run")
     ap.add_argument("--no-plan-growth", action="store_true", help="--live: stop plan-miss runs from saving the plan they planned, so the off arm "
-                    "cannot hand the on arm a plan to match (critique S2); pairs are still filtered on the plan each arm ran with")
+                    "cannot hand the on arm a plan to match (critique S2); pairs are still filtered on the plan each arm ran with. "
+                    "The default; kept so older command lines still parse")
+    ap.add_argument("--allow-plan-growth", action="store_true", help="--live: let plan-miss runs grow plans in the live library "
+                    "(off by default: measurement traffic should not seed the shared plan library)")
     ap.add_argument("--qid", action="append", help="only this request (repeatable), e.g. a canary of one")
     ap.add_argument("--limit", type=int, help="only the first N selected requests")
     ap.add_argument("--repeat", type=int, default=1, help="calls per request per arm")
@@ -672,6 +675,7 @@ def main(
     ap.add_argument("--out", type=Path, help="write the JSON report here (default: stdout)")
     ap.add_argument("--envelopes-out", type=Path, help="also write every envelope (contains answer text) to this file")
     args = ap.parse_args(argv)
+    args.no_plan_growth = args.no_plan_growth or not args.allow_plan_growth
     return asyncio.run(_run(args, caller, clock, doc_path_of))
 
 

@@ -203,6 +203,9 @@ def test_the_report_records_whether_plan_growth_was_allowed(tmp_path: Path) -> N
     assert driver.main(["--set", "golden", "--qid", "G01-lookup-tumblers", "--out", str(out), "--no-plan-growth"], caller=_growing_caller()) == 0
     assert json.loads(out.read_text(encoding="utf-8"))["meta"]["plan_growth"] == "disabled"
     assert driver.main(["--set", "golden", "--qid", "G01-lookup-tumblers", "--out", str(out)], caller=_growing_caller()) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["meta"]["plan_growth"] == "disabled", "growth is off by default"
+    assert driver.main(["--set", "golden", "--qid", "G01-lookup-tumblers", "--out", str(out), "--allow-plan-growth"],
+                       caller=_growing_caller()) == 0
     assert json.loads(out.read_text(encoding="utf-8"))["meta"]["plan_growth"] == "enabled"
 
 
