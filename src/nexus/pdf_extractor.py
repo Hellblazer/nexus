@@ -181,11 +181,19 @@ def _read_stderr_tail(path: Path) -> str:
 _STDERR_LINE_CAP = 300
 
 
+#: RDR-237: what a progress bar redraw looks like (tqdm: ``45%|####5 | 9/20 [00:03<00:04, 2.9it/s]``).
+#: A worker killed mid-run leaves one of these as its last stderr line, and which frame it is
+#: differs from page to page, so it must never become part of a failure class.
+_STDERR_PROGRESS = re.compile(r"\d+%\||\d+/\d+ \[\d|\b\d+(?:\.\d+)?\s*(?:it/s|s/it)\b")
+
+
 def _last_stderr_line(tail: str) -> str:
-    """The last non-empty line of a (redacted) stderr *tail*; ``""`` when there is none."""
+    """The last non-empty line of a (redacted) stderr *tail* that is not a progress-bar frame;
+    ``""`` when there is none. ``splitlines`` also splits on the carriage returns tqdm redraws with."""
     for line in reversed(tail.splitlines()):
-        if line.strip():
-            return line.strip()[:_STDERR_LINE_CAP]
+        stripped = line.strip()
+        if stripped and not _STDERR_PROGRESS.search(stripped):
+            return stripped[:_STDERR_LINE_CAP]
     return ""
 
 
@@ -282,9 +290,10 @@ class MineruWorkerError(RuntimeError):
     pages of one broken install would never compare equal by it.
 
     *timed_out*: the worker was killed at its per-page budget. *returncode*: its
-    exit status (``None`` for a timeout). *stderr_last_line*: the last non-empty
-    line of its stderr tail (what ``mineru_subprocess_failed`` already logs), the
-    line that names an ``ImportError`` or a missing weight file.
+    exit status (``None`` for a timeout); *signal* (a property) is the signal behind a
+    negative one. *stderr_last_line*: the last non-empty line of its stderr tail that is
+    not a progress-bar frame (what ``mineru_subprocess_failed`` already logs), the line
+    that names an ``ImportError`` or a missing weight file.
     """
 
     def __init__(
@@ -295,6 +304,13 @@ class MineruWorkerError(RuntimeError):
         self.timed_out = timed_out
         self.returncode = returncode
         self.stderr_last_line = stderr_last_line
+
+    @property
+    def signal(self) -> int | None:
+        """The signal that ended the worker (``9`` for SIGKILL), ``None`` for a timeout and for an
+        exit status. A negative ``returncode`` is POSIX's "killed by signal -N"; Windows exit
+        codes are never negative."""
+        return -self.returncode if self.returncode is not None and self.returncode < 0 else None
 
 
 class MineruMemoryError(MineruWorkerError):
@@ -324,14 +340,15 @@ class MineruSystemicFailure(Exception):
     stops instead of being indexed page by page from its text layer. An
     ``Exception`` and not a ``RuntimeError`` on purpose: the ladder's descend
     rule is ``except RuntimeError``, and this must never be read as one page's
-    failure. *failure_class* is the class key (``timeout``, ``exit:<rc>:<line>``,
-    ``oom:<line>``); *stderr_line* the worker's last stderr line, when it had one.
+    failure. *failure_class* is the class key (``timeout``, ``signal:<n>``, ``oom``,
+    ``oom:<rc>:<line>``, ``exit:<rc>:<line>``; see :func:`_failure_class`); *stderr_line* the worker's last stderr line, when it had one.
     """
 
     def __init__(self, failure_class: str, stderr_line: str, pages: list[int], file_name: str) -> None:
         self.failure_class = failure_class
         self.stderr_line = stderr_line
         self.pages = pages
+        self.file_name = file_name
         shown = f"; the worker's last stderr line: {stderr_line!r}" if stderr_line else ""
         kept = (
             "No page was kept, and a rerun starts from page 1, so repair the install first."
@@ -348,6 +365,12 @@ class MineruSystemicFailure(Exception):
             f"`pdf.ladder_breaker` sets how many pages stop a "
             f"document (0 turns the check off)."
         )
+
+    def __reduce__(self) -> tuple:
+        # The base class keeps only the message, so the default reconstruction calls
+        # ``MineruSystemicFailure(message)`` and raises TypeError: a process-pool caller could not
+        # get this exception back. Rebuild it from the four values that make the message.
+        return (type(self), (self.failure_class, self.stderr_line, self.pages, self.file_name))
 
 
 #: What stops a run's MinerU work (nexus-tr1rj.13). Both name the install or the machine, not the
@@ -369,6 +392,28 @@ def mineru_stop_reason(exc: BaseException) -> tuple[str, str, str]:
     # message IS the platform's remedy (``nexus._mineru_health.semaphore_remedy``, about 400 characters).
     # The detail stays short and the remedy appears once, so the Stopped line stays one readable line.
     return ("MinerU cannot run on this machine", "POSIX named semaphores exhausted", str(exc))
+
+
+class AllPagesUnextractedError(UnextractableContentError):
+    """MinerU failed on every page of the document, with and without formulas, and no page has a
+    text layer to fall back to (RDR-237).
+
+    A subclass of :class:`UnextractableContentError` so every caller that already catches that keeps
+    working, and a type of its own because the two mean different things. A plain
+    ``UnextractableContentError`` is a file with nothing in it (blank, image-only under the text-only
+    extractor): a rerun changes nothing, so a batch skips it. This is the extractor failing on a file
+    that probably has text: a rerun after the install is repaired, or an OCR pass, does change it. A
+    batch command reports it as an extraction failure and fails its exit over it (``nx dt index``
+    counts it with the records that failed; ``nx index pdf`` already fails over any exception).
+
+    *total_pages*: the document's page count. *last_error*: what sent the last page down its rungs
+    (``rung 1: <class>; rung 2: <class>``).
+    """
+
+    def __init__(self, message: str, *, total_pages: int = 0, last_error: str = "") -> None:
+        super().__init__(message)
+        self.total_pages = total_pages
+        self.last_error = last_error
 
 
 class MineruServerTimeout(MineruWorkerError):
@@ -436,18 +481,33 @@ _UNCLASSIFIED = "unclassified"
 def _failure_class(exc: BaseException) -> str:
     """The class key of one attempt's failure, built from attributes and never message text.
 
-    ``timeout``; ``oom:<stderr line>`` (a memory ceiling turns ANY non-zero exit into a
-    :class:`MineruMemoryError`, so the line keeps a missing library apart from a real
-    out-of-memory kill); ``exit:<returncode>:<stderr line>``; ``unclassified`` for a failure
-    with no worker facts (no output, a dropped connection), which the breaker never counts.
+    Keyed on what the worker did, in this order, so that two pages failing the same way get the
+    same key and the breaker counts them:
+
+    * ``timeout``: the worker was killed at its page budget.
+    * ``signal:<n>``: the OS killed it (``signal:9`` is the OOM-killer or macOS jetsam). The
+      stderr line is NOT part of the key: a killed worker's last line is whatever progress frame
+      it was on.
+    * ``oom``: it exited with the in-process ``MemoryError`` sentinel; stderr is again no part of it.
+    * ``oom:<returncode>:<stderr line>``: a memory ceiling turns ANY non-zero exit into a
+      :class:`MineruMemoryError`; the line keeps a missing library apart from a real exhaustion.
+    * ``exit:<returncode>:<stderr line>``: any other non-zero exit; the line names an ``ImportError``
+      or a missing weight file.
+    * ``unclassified``: no worker facts (a "produced no output" ``RuntimeError``, a dropped server
+      connection). The breaker never counts it (see :class:`_SystemicFailureCounter`).
+
     There is no ``http:<status>`` class: a server error falls to the subprocess path, so the
     subprocess failure is the terminal one.
     """
-    if isinstance(exc, MineruMemoryError):
-        return f"oom:{exc.stderr_last_line}"
     if isinstance(exc, MineruWorkerError):
         if exc.timed_out:
             return "timeout"
+        if exc.signal is not None:
+            return f"signal:{exc.signal}"
+        if isinstance(exc, MineruMemoryError):
+            if exc.returncode == _MINERU_OOM_EXIT:
+                return "oom"
+            return f"oom:{exc.returncode}:{exc.stderr_last_line}" if exc.returncode is not None else f"oom:{exc.stderr_last_line}"
         if exc.returncode is not None:
             return f"exit:{exc.returncode}:{exc.stderr_last_line}"
     return _UNCLASSIFIED
@@ -470,10 +530,12 @@ def _is_pipeline_cancel(exc: BaseException) -> bool:
 class _SystemicFailureCounter:
     """The breaker's count: pages that failed rungs 1 and 2 with one class, in a row.
 
-    A page counts only when both rungs failed with the same class and that class is not
-    ``unclassified``; it extends the run when the class equals the previous counted page's
-    and restarts it at one otherwise. A page that settled on rung 1 or 2, or whose two
-    rungs failed differently or without a class, resets the count. *threshold* 0 never trips.
+    The rule, stated once: a page counts only when BOTH rungs failed with the SAME class and
+    that class is not ``unclassified``; it extends the run only when the class equals the
+    previous counted page's, and restarts it at one otherwise. A page that settled on rung 1
+    or 2, whose two rungs failed differently, or without a class, resets the count. The
+    ladder passes ``unclassified`` for a page whose rung 1 dropped the server connection, so
+    that page never counts. *threshold* 0 never trips.
     """
 
     def __init__(self, threshold: int) -> None:
@@ -2239,11 +2301,13 @@ class PDFExtractor:
             # there is never read as MinerU failing.
             page = s + 1
             rng_end = e if e is not None else total_pages
-            if isinstance(rung1_exc, _DROPPED_CONNECTION):
+            dropped_first = isinstance(rung1_exc, _DROPPED_CONNECTION)
+            if dropped_first:
                 # The server dropped us. Retry rung 1 ONCE on the subprocess path
-                # with formulas on, before giving up the formulas. The dropped
-                # connection itself is unclassified; the retry's failure, if any,
-                # is a new one and has its own class.
+                # with formulas on, before giving up the formulas. RDR-237 (Bounds): a dropped
+                # connection counts toward neither the restart rule nor the breaker, so this page
+                # is kept out of the breaker count whatever the retry then does; the retry's own
+                # failure class is still logged and named in the page's error.
                 _log.warning("mineru_dropped_connection_retry", page=page, path=str(pdf_path),
                              error=type(rung1_exc).__name__)
                 try:
@@ -2282,7 +2346,7 @@ class PDFExtractor:
             class2 = _failure_class(rung2_exc)
             _log.warning("mineru_page_rung_failed", page=page, rung=2, failure_class=class2,
                          path=str(pdf_path))
-            tripped = breaker.failed(page, class1, class2)
+            tripped = breaker.failed(page, _UNCLASSIFIED if dropped_first else class1, class2)
             if tripped is not None:
                 # The held window is dropped, never flushed: it stays out of the kept buffer.
                 raise MineruSystemicFailure(
@@ -2377,10 +2441,11 @@ class PDFExtractor:
             # Rungs 1 to 3 failed on every page and none has a text layer: indexing
             # this would write nothing, and say so by returning an empty document.
             last = outcomes[max(outcomes)].error
-            raise UnextractableContentError(
+            raise AllPagesUnextractedError(
                 f"every page of {fname} is unextracted: MinerU failed on all {total_pages} "
                 f"pages with and without formulas ({last}) and none has a text layer. "
-                f"Run `nx doctor` for the MinerU install, or OCR the PDF first."
+                f"Run `nx doctor` for the MinerU install, or OCR the PDF first.",
+                total_pages=total_pages, last_error=last or "",
             )
 
         md_text = "\n".join(md_parts)

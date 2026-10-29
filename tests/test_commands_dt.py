@@ -3058,6 +3058,38 @@ class TestAnUnexpectedExceptionFailsOneRecordNotTheBatch:
         assert "1 record(s) failed with RuntimeError or ImportError" in result.output, result.output
 
     @pytest.mark.t2_tenant
+    def test_a_pdf_whose_every_page_failed_extraction_exits_nonzero_unlike_a_no_text_record(
+        self, runner, monkeypatch,
+    ) -> None:
+        """RDR-237 (nexus-q6nw0 item 9): an all-pages-unextracted PDF is MinerU failing, not a
+        document with nothing to index, so the run exits 1 over it. The record is still its own
+        failure (U2 is indexed). A plain UnextractableContentError (a blank or image-only file)
+        keeps its exit 0: that file has no text and a rerun changes nothing."""
+        from nexus.errors import UnextractableContentError
+        from nexus.pdf_extractor import AllPagesUnextractedError
+
+        failed_run, seq = self._file_backed(
+            runner, monkeypatch,
+            AllPagesUnextractedError("every page of a.pdf is unextracted: MinerU failed", total_pages=7),
+        )
+        assert not seq, "U2 was dispatched: one record's failure does not abort the batch"
+        assert "Indexed 1 record(s)" in failed_run.output, failed_run.output
+        assert "1 failed" in failed_run.output, failed_run.output
+        assert "AllPagesUnextractedError: every page of a.pdf is unextracted" in failed_run.output
+        assert failed_run.exit_code == 1, failed_run.output
+        assert "1 record(s) had every page unextracted" in failed_run.output, failed_run.output
+
+        # Non-vacuity: the same harness with a plain no-text record exits 0, so the exit above is
+        # the new type's doing and not the harness's.
+        plain_run, plain_seq = self._file_backed(
+            runner, monkeypatch, UnextractableContentError("a.pdf has no text layer"),
+        )
+        assert not plain_seq
+        assert "1 failed" in plain_run.output, plain_run.output
+        assert plain_run.exit_code == 0, plain_run.output
+        assert "had every page unextracted" not in plain_run.output
+
+    @pytest.mark.t2_tenant
     def test_a_run_level_nexus_error_still_stops_the_run(self, runner, monkeypatch) -> None:
         from nexus.errors import CredentialsMissingError
 

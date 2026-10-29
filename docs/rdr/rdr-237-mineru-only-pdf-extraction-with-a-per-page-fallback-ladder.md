@@ -316,6 +316,28 @@ count from the live MinerU server's `/health` `max_concurrent_requests` (MinerU 
 macOS, else `MINERU_API_MAX_CONCURRENT_REQUESTS`, else three) when the server does not
 answer or reports no positive integer.
 
+**RF-19 (Verified, source and tests; nexus-q6nw0).** Where the ladder as built differs from
+the Systemic failure paragraph, which stays as decided. The failure class keys on what the
+worker did, in this order: `timeout`; `signal:<n>` when the OS killed it (a negative return
+code; the stderr line is not part of the key, because a killed worker's last line is a
+progress-bar frame that differs from page to page and would give two pages killed alike two
+classes); `oom` for the in-process `MemoryError` exit; `oom:<returncode>:<line>` when a memory
+ceiling turned another non-zero exit into `MineruMemoryError`; `exit:<returncode>:<line>` for any
+other exit; `unclassified` for a failure with no worker facts (a "produced no output" error, a
+dropped connection), which the breaker never counts. A stderr line that is a progress-bar frame
+is skipped when the last line is chosen. `http:<status>` was never reachable (a server error falls
+to the subprocess path) and does not exist. A page whose rung 1 dropped the connection never counts toward the
+breaker, even when its subprocess retry then fails with a worker class of its own (the retry's
+class is logged). A rule fixed in `_SystemicFailureCounter`: a page counts only when both rungs fail with the same
+class, and extends the run only when that class equals the previous counted page's. A document
+whose every page is `unextracted` raises `AllPagesUnextractedError`, a subclass of
+`UnextractableContentError` (so existing catches hold): `nx dt index` counts it among the
+records that fail the run's exit, `nx index pdf` already fails over it, and `nx index repo`
+still counts it as a skipped file by its per-file contract (nexus-deyd5). Rung 3 writes the page
+method `pymupdf-text` and the document method `mineru+degraded`, also when every page is on
+rung 3; only `--extractor pymupdf` writes `pymupdf`; nothing writes the legacy
+`pymupdf_normalized`.
+
 ### Critical Assumptions
 
 - [x] A1: MinerU honours `formula_enable=false` per request on the server path
