@@ -995,13 +995,16 @@ def test_embedding_profile_disputed_is_red_with_remedy(monkeypatch) -> None:
 
 
 @pytest.mark.usefixtures("cloud_mode")
-def test_embedding_profile_dormant_is_red_with_remedy(monkeypatch) -> None:
+def test_embedding_profile_dormant_is_a_warn_naming_the_state_with_remedy(monkeypatch) -> None:
+    """shakedown 7.89.0 class d: a dormant row is one the ghost sweep already marked, so it is
+    reported as dormant (a warn, like quarantine), not as a failure the sweep cannot clear."""
     name = "docs__1-1__voyage-context-3__v1"
     health = _patch_profile_check(monkeypatch, _FakeReader(_VOYAGE_PROFILE, [
         _coll(name, "docs", "voyage-context-3", "dormant"),
     ]))
     r = _by_label(health._check_embedding_profile(), "Collections dormant")
-    assert _is_red(r) and name in r.detail
+    assert r.ok is False and r.warn is True and not _is_red(r)
+    assert name in r.detail and "dormant" in r.detail and "marked by the ghost sweep" in r.detail
     assert any("referenced but empty" in s for s in r.fix_suggestions)
     assert any("remove the references" in s for s in r.fix_suggestions)
 

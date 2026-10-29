@@ -391,6 +391,40 @@ class GhostSweepDormantMarkingTest {
         }
     }
 
+    // shakedown 7.89.0 umbrella class d: a row the sweep already marked dormant is not marked again.
+    // Before the fix a second sweep (and every dry run after --apply) listed it as "would mark dormant"
+    // and rewrote lifecycle_state to the value it already held.
+    @Test @Order(26)
+    void alreadyDormantRow_isNotReproposedOrRewrittenByALaterSweep() throws Exception {
+        String tenant = "ghost-sweep-already-dormant";
+        String coll = "knowledge__gs-already-dormant__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
+               .values(tenant, coll).execute();
+        }
+
+        CatalogRepository.GhostSweepResult first = repo.sweepGhostsAndMarkDormant(tenant);
+        assertThat(first.dormantNames()).as("precondition: the first sweep marks it").containsExactly(coll);
+
+        CatalogRepository.GhostSweepResult dry = repo.sweepGhostsAndMarkDormant(tenant, true);
+        assertThat(dry.markedDormant()).as("a dry run after the mark must not re-propose it").isEqualTo(0);
+        assertThat(dry.dormantNames()).isEmpty();
+        CatalogRepository.GhostSweepResult second = repo.sweepGhostsAndMarkDormant(tenant);
+        assertThat(second.markedDormant()).as("a second applied sweep must not mark it again").isEqualTo(0);
+        assertThat(second.dormantNames()).isEmpty();
+        assertThat(second.ghostsDeleted()).isEqualTo(0);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var row = ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne();
+            assertThat(row.value1()).as("the row stays dormant").isEqualTo("dormant");
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // MULTI-TENANT: each tenant is swept at its OWN first request; neither
     // is swept by the other's (TESTS bullet 3).

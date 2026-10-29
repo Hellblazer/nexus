@@ -10857,7 +10857,8 @@ public final class CatalogRepository {
      *       all-tombstoned collection had no row and went dormant (nexus-wbfpw.35, pinned
      *       by {@code GhostSweepDormantMarkingTest#allUnownedCollection_*} and
      *       {@code #allTombstonedCollection_*});</li>
-     *   <li>else leaves it exactly as it was.</li>
+     *   <li>else leaves it exactly as it was, a row already {@code 'dormant'} included (it is reported
+     *       once, by the sweep that marks it, never again).</li>
      * </ul>
      * The attribute walk (content_type/owner_id/embedding_model/dimension) is
      * deliberately NOT this method's job — that is bead nexus-ft04v.4's Liquibase
@@ -10970,8 +10971,12 @@ public final class CatalogRepository {
                     // row still referenced somewhere (the collectionIsEmpty check above was
                     // false) is held here, never relitigated into 'dormant'.
                     out.add(new SweptRow(name, SweepDisposition.HELD_QUARANTINE));
-                } else if (!ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
+                } else if (!"dormant".equals(lifecycleState)
+                        && !ctx.fetchExists(ctx.selectOne().from(COLLECTION_VECTOR_STATS)
                         .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(name)))) {
+                    // A row already marked dormant falls through to UNCHANGED: marking it again changes nothing,
+                    // yet reported it as "marked dormant" on every later sweep and "would mark dormant" on every
+                    // dry run (shakedown 7.89.0 umbrella class d, knowledge__deploy-probes).
                     if (!dryRun) {
                         ctx.update(CATALOG_COLLECTIONS)
                            .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
