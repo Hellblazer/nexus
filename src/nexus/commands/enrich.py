@@ -60,7 +60,19 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     def _lookup(doc_id: str) -> list[Any]:
         try:
             return cat.get_manifest(doc_id)
-        except Exception:  # noqa: BLE001 — best-effort manifest lookup; any failure degrades to empty list
+        except Exception as exc:  # noqa: BLE001 — best-effort manifest lookup; a transport failure is surfaced, anything else degrades to an empty list
+            from nexus.aspect_readers import (  # noqa: PLC0415 — deferred command-local import
+                TransportReadFailure,
+                is_transport_failure,
+            )
+
+            if is_transport_failure(exc):
+                # The manifest is down, not empty. An empty list would read as a
+                # verdict on the document and the aspect worker would drop it
+                # (nexus-5r2sc.3.10); the reader maps this to ReadFail(transport).
+                raise TransportReadFailure(
+                    f"manifest lookup for {doc_id!r}: {type(exc).__name__}: {exc}"
+                ) from exc
             return []
 
     return _lookup

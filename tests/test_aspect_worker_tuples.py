@@ -264,6 +264,102 @@ class TestGateS3InfraUnavailable:
         assert db.tuples.inp(_SUB, dict(_KEYS), claimant="other", lease_s=60) is None
 
 
+def _note_task(db: Any) -> tuple[str, str, str]:
+    """A real MCP note in the catalog and a text-free task for it (scenario 14's shape)."""
+    from nexus.catalog.note_write import write_note
+    from nexus.catalog.store_hook import catalog_store_hook_tracked, note_manifest_metadata
+
+    collection = f"knowledge__nx235t-{uuid.uuid4().hex[:6]}__bge-base-en-v15-768__v1"
+    pieces = ["nx235t alpha paragraph", "nx235t beta paragraph"]
+    first, _ = note_manifest_metadata(pieces)
+    doc, _created = catalog_store_hook_tracked(title="nx235t note", doc_id=first, collection_name=collection)
+    write_note(catalog_doc_id=doc, collection=collection, pieces=pieces)
+    _out(db, doc, collection=collection, source=first)
+    return collection, doc, first
+
+
+class _T3Stub:
+    """A T3 whose collection answers ``get`` with *behaviour* (raise or return a page)."""
+
+    def __init__(self, behaviour: Any) -> None:
+        self.calls = 0
+        outer = self
+
+        class _Coll:
+            def get(self, **kw: Any) -> dict:
+                outer.calls += 1
+                return behaviour(**kw)
+
+        self._coll = _Coll()
+
+    def get_collection(self, name: str) -> Any:
+        return self._coll
+
+
+class TestTransportReadFailureIsRetried:
+    """nexus-5r2sc.3.10 Critical 1: a transport failure reading T3 or the manifest
+    is a fact about the network, not the document. It is retried on the ladder and
+    never acked as dropped. The REAL extractor and reader run; only T3 is a stub."""
+
+    def _run(self, db: Any, monkeypatch: pytest.MonkeyPatch, t3: _T3Stub) -> list:
+        monkeypatch.setattr("nexus.aspect_extractor.get_t3", lambda: t3)
+        side = _worker()._tuple_side
+        claims, _ = side.claim_batch(park=False)
+        assert len(claims) == 1
+        side.process(claims)
+        return _tasks(db)
+
+    def test_a_t3_get_that_raises_a_transport_error_keeps_the_task(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _note_task(db)
+
+        def boom(**kw: Any) -> dict:
+            raise httpx.ConnectError("T3 unreachable")
+
+        t3 = _T3Stub(boom)
+        rows = self._run(db, monkeypatch, t3)
+        assert t3.calls >= 1, "the read reached T3: the failure is the stub's, not an earlier skip"
+        assert len(rows) == 1, "the task survives a transport failure"
+        assert rows[0].attempts == 1 and rows[0].claim_state != "dead"
+        assert rows[0].claim_state is None, "released back to the queue, not held, not dead"
+
+    def test_a_t3_5xx_is_retried_too(self, db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        _note_task(db)
+
+        def boom(**kw: Any) -> dict:
+            req = httpx.Request("POST", "http://t3/v1/vectors/get")
+            raise httpx.HTTPStatusError("500", request=req, response=httpx.Response(500, request=req))
+
+        rows = self._run(db, monkeypatch, _T3Stub(boom))
+        assert len(rows) == 1 and rows[0].attempts == 1 and rows[0].claim_state != "dead"
+
+    def test_a_manifest_lookup_that_raises_a_transport_error_keeps_the_task(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _note_task(db)
+
+        class _Cat:
+            def get_manifest(self, doc_id: str) -> list:
+                raise httpx.ConnectError("catalog unreachable")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: _Cat())
+        t3 = _T3Stub(lambda **kw: {"ids": [], "documents": [], "metadatas": []})
+        rows = self._run(db, monkeypatch, t3)
+        assert len(rows) == 1, "an empty manifest from a failed lookup is not a verdict on the document"
+        assert rows[0].attempts == 1 and rows[0].claim_state != "dead"
+
+    def test_control_an_empty_read_is_still_dropped(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """T3 answers, with nothing: a permanent verdict. The same pass consumes the task."""
+        _note_task(db)
+        t3 = _T3Stub(lambda **kw: {"ids": [], "documents": [], "metadatas": []})
+        rows = self._run(db, monkeypatch, t3)
+        assert t3.calls >= 1
+        assert rows == [], "an empty read is acked as dropped"
+
+
 class TestScenario7Renewal:
     def test_a_claim_is_renewed_past_its_lease_inside_the_deadline(
         self, db: Any, monkeypatch: pytest.MonkeyPatch,

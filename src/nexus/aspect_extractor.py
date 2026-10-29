@@ -161,6 +161,10 @@ class ExtractFail:
     * ``unreachable`` / ``unauthorized`` / ``scheme_unknown`` /
       ``empty`` — passed through from
       :class:`nexus.aspect_readers.ReadFailReason`.
+    * ``transport`` — the network or the service behind the read (T3, the
+      catalog manifest, an HTTP fetch) failed: a transport error, a timeout or a
+      5xx. Retryable: the aspect worker nacks it on the RDR-163 ladder and
+      never drops the extraction (nexus-5r2sc.3.10).
     * ``infra_unavailable`` — T3 client could not be obtained
       (singleton init failure). The URI was constructed but never
       dispatched. Distinct from ``unreachable`` so operators can

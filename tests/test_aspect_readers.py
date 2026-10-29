@@ -1231,7 +1231,7 @@ class TestReadHttpsUri:
             (401, "denied", "https://paywalled.example.com/x", "unauthorized", "401"),
             (403, "forbidden", "https://x.example.com", "unauthorized", None),
             (404, "not found", "https://x.example.com/missing", "unreachable", "404"),
-            (503, "service unavailable", "https://flaky.example.com", "unreachable", None),
+            (503, "service unavailable", "https://flaky.example.com", "transport", None),
         ],
         ids=["401", "403", "404", "5xx"],
     )
@@ -1267,6 +1267,22 @@ class TestReadHttpsUri:
         assert isinstance(result, ReadFail)
         assert result.reason == "unreachable"
         assert "OSError" in result.detail
+
+    def test_httpx_transport_error_returns_read_fail_transport(self):
+        """nexus-5r2sc.3.10: a transport failure is retryable, not a verdict."""
+        import httpx
+
+        from nexus.aspect_readers import ReadFail, _read_https_uri
+
+        class _Down:
+            def get(self, url):
+                raise httpx.ConnectError("no route")
+
+            def close(self):
+                pass
+
+        result = _read_https_uri("https://nope.invalid", http_client=_Down())
+        assert isinstance(result, ReadFail) and result.reason == "transport"
 
     def test_empty_body_returns_read_fail_empty(self):
         from nexus.aspect_readers import ReadFail, _read_https_uri
@@ -1857,3 +1873,93 @@ class TestObsidianVaultRootValidation:
         )
         assert isinstance(result, ReadFail)
         assert result.reason == "unauthorized"
+
+
+class TestTransportClassification:
+    """nexus-5r2sc.3.10: transport failures of T3 and the manifest lookup are
+    ``ReadFail(transport)``; the permanent shapes keep their reasons."""
+
+    @staticmethod
+    def _t3(get):  # noqa: ANN001, ANN205
+        class _Coll:
+            def get(self, **kw):
+                return get(**kw)
+
+        class _T3:
+            def get_collection(self, name):
+                return _Coll()
+
+        return _T3()
+
+    @staticmethod
+    def _status(code: int):  # noqa: ANN205
+        import httpx
+
+        req = httpx.Request("POST", "http://t3/get")
+        return httpx.HTTPStatusError(str(code), request=req, response=httpx.Response(code, request=req))
+
+    def test_coll_get_transport_errors_are_transport_and_a_bug_is_not(self):
+        import httpx
+
+        from nexus.aspect_readers import ReadFail, _read_chroma_uri
+
+        def read(exc):  # noqa: ANN001, ANN202
+            def get(**kw):  # noqa: ANN003
+                raise exc
+            return _read_chroma_uri(
+                "nx-note://knowledge__x/doc", t3=self._t3(get), doc_id_lookup=lambda c, s: "1.1.1",
+            )
+
+        for exc in (httpx.ConnectError("x"), httpx.ReadTimeout("x"), self._status(500), self._status(503)):
+            r = read(exc)
+            assert isinstance(r, ReadFail) and r.reason == "transport", (exc, r)
+        for exc in (self._status(400), ValueError("bad where")):
+            r = read(exc)
+            assert isinstance(r, ReadFail) and r.reason == "unreachable", (exc, r)
+
+    def test_get_collection_failure_is_transport(self):
+        import httpx
+
+        from nexus.aspect_readers import ReadFail, _read_chroma_uri
+
+        class _T3:
+            def get_collection(self, name):
+                raise httpx.ConnectError("down")
+
+        r = _read_chroma_uri("nx-note://knowledge__x/doc", t3=_T3())
+        assert isinstance(r, ReadFail) and r.reason == "transport"
+
+    def test_a_manifest_lookup_that_raises_transport_is_transport_and_one_that_returns_empty_is_not(self):
+        import httpx
+
+        from nexus.aspect_readers import ReadFail, TransportReadFailure, _read_chroma_uri
+
+        def never(**kw):  # noqa: ANN003
+            return {"ids": [], "documents": [], "metadatas": []}
+
+        def down(doc_id):  # noqa: ANN001, ANN202
+            raise TransportReadFailure("catalog down")
+
+        r = _read_chroma_uri(
+            "nx-note://knowledge__x/doc", t3=self._t3(never),
+            doc_id_lookup=lambda c, s: "1.1.1", manifest_lookup=down,
+        )
+        assert isinstance(r, ReadFail) and r.reason == "transport"
+        r = _read_chroma_uri(
+            "nx-note://knowledge__x/doc", t3=self._t3(never),
+            doc_id_lookup=lambda c, s: "1.1.1", manifest_lookup=lambda d: [],
+        )
+        assert isinstance(r, ReadFail) and r.reason == "empty", "an answered, empty manifest is a verdict"
+
+    def test_a_doc_id_lookup_that_raises_transport_is_transport(self):
+        import httpx
+
+        from nexus.aspect_readers import ReadFail, _read_chroma_uri
+
+        def down(c, s):  # noqa: ANN001, ANN202
+            raise httpx.ConnectError("catalog down")
+
+        r = _read_chroma_uri(
+            "nx-note://knowledge__x/doc", t3=self._t3(lambda **kw: {}), doc_id_lookup=down,
+        )
+        assert isinstance(r, ReadFail) and r.reason == "transport"

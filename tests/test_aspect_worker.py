@@ -1382,6 +1382,80 @@ class TestRetryLadderRouting:
         assert db.aspect_queue.calls[0][0] == "failed"
 
 
+class TestTransportReadFailureOnTheTable:
+    """nexus-5r2sc.3.10: on the table path an ``ExtractFail(transport)`` is a
+    backed-off retry (terminal only at the budget), never ``mark_done``. This
+    CHANGES the table path: every ExtractFail reason used to be dropped. A
+    permanent reason (the control) still is."""
+
+    class _Queue(_FakeQueue):
+        def mark_done(self, collection, source_path) -> None:  # noqa: ANN001
+            self.calls.append(("done", collection, source_path))
+
+    class _Db:
+        def __init__(self, queue) -> None:  # noqa: ANN001
+            self.aspect_queue = queue
+
+        def complete_aspect(self, fields) -> None:  # noqa: ANN001
+            raise AssertionError("an unreadable source persists nothing")
+
+    def _env(self, monkeypatch):  # noqa: ANN001
+        import nexus.commands.enrich as enrich
+        import nexus.mcp_infra as infra
+
+        queue = self._Queue()
+        db = self._Db(queue)
+        monkeypatch.setattr(infra, "t2_index_write", lambda fn: fn(db))
+        monkeypatch.setattr(enrich, "_build_catalog_manifest_lookup", lambda: None)
+        return queue
+
+    def _row(self, sp: str, retry_count: int = 0):
+        import types
+
+        return types.SimpleNamespace(
+            collection="knowledge__delos", source_path=sp, content="", doc_id="",
+            retry_count=retry_count,
+        )
+
+    def test_single_row_transport_is_retried_a_permanent_reason_is_done_and_the_budget_is_terminal(
+        self, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.aspect_extractor import ExtractFail
+        from nexus.aspect_worker import _RETRY_MAX_ATTEMPTS, AspectExtractionWorker
+
+        queue = self._env(monkeypatch)
+        reason_for = {"/t.md": "transport", "/p.md": "unreachable", "/cap.md": "transport"}
+        monkeypatch.setattr(
+            "nexus.aspect_worker._extract_aspects",
+            lambda **kw: ExtractFail(uri="u", reason=reason_for[kw["source_path"]], detail="d"),
+        )
+        w = AspectExtractionWorker(poll_interval=10.0)
+        w._process_row(self._row("/t.md"))
+        w._process_row(self._row("/p.md"))
+        w._process_row(self._row("/cap.md", retry_count=_RETRY_MAX_ATTEMPTS))
+        kinds = {c[2]: c[0] for c in queue.calls}
+        assert kinds == {"/t.md": "retry", "/p.md": "done", "/cap.md": "failed"}, queue.calls
+
+    def test_batch_transport_is_retried_beside_a_dropped_neighbour(self, monkeypatch) -> None:  # noqa: ANN001
+        from nexus.aspect_extractor import ExtractFail
+        from nexus.aspect_worker import AspectExtractionWorker
+
+        queue = self._env(monkeypatch)
+
+        def fake_batch(items, *_a, **_k):  # noqa: ANN001, ANN202
+            return [
+                ExtractFail(uri="u", reason="transport" if sp == "/t.md" else "unreachable", detail="d")
+                for _c, sp, *_ in items
+            ]
+
+        monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", fake_batch)
+        AspectExtractionWorker(poll_interval=10.0)._process_batch(
+            [self._row("/t.md"), self._row("/p.md")],
+        )
+        kinds = {c[2]: c[0] for c in queue.calls}
+        assert kinds == {"/t.md": "retry", "/p.md": "done"}, queue.calls
+
+
 # ── nexus-w8lg1: the queue row carries the CATALOG doc_id ────────────────────
 
 
@@ -2390,6 +2464,20 @@ class TestTupleVerdictMap:
             base = _RETRY_BASE_SECONDS * 2 ** attempts
             assert nack[3]["dead"] is False
             assert 0.8 * base - 1 <= nack[3]["retry_after_s"] <= 1.2 * base, "indexed by the claimed tuple's attempts"
+
+    def test_a_transport_read_failure_is_a_ladder_nack_never_a_drop(
+        self, tuple_env, monkeypatch,  # noqa: ANN001
+    ) -> None:
+        from nexus.aspect_extractor import ExtractFail
+
+        r = ExtractFail(uri="u", reason="transport", detail="T3 ConnectError")
+        tuples, _ = self._run(tuple_env, monkeypatch, r, attempts=1)
+        assert tuples.ops("ack") == []
+        (nack,) = tuples.ops("nack")
+        assert nack[3]["dead"] is False and nack[3]["retry_after_s"] > 0
+        tuples, _ = self._run(tuple_env, monkeypatch, r, attempts=5)
+        (nack,) = tuples.ops("nack")
+        assert nack[3] == {"retry_after_s": None, "dead": True}, "the budget (5) is spent: dead"
 
     def test_a_retryable_raise_is_a_ladder_nack_and_the_cap_is_dead(
         self, tuple_env, monkeypatch,  # noqa: ANN001

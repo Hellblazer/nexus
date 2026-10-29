@@ -87,6 +87,7 @@ from nexus.aspect_extractor import (
     extract_aspects as _extract_aspects,
     extract_aspects_batch as _extract_aspects_batch,
 )
+from nexus.aspect_readers import READ_FAIL_TRANSPORT, TransportReadFailure
 from nexus import config as _config
 from nexus.collection_errors import SupersededCollectionWriteError
 
@@ -176,6 +177,8 @@ def _is_retryable(exc: BaseException) -> bool:
         _is_retryable_vector_error,
         _is_retryable_voyage_error,
     )
+    if isinstance(exc, TransportReadFailure):
+        return True
     for predicate in (_is_retryable_vector_error, _is_retryable_voyage_error):
         try:
             if predicate(exc):
@@ -878,6 +881,8 @@ class AspectExtractionWorker:
         # nexus-zir76: one routed write_fn does the whole batch's persist;
         # each row clears via the daemon (``complete_aspect`` /
         # ``mark_done``) instead of a direct memory.db transaction.
+        transport_rows: list[tuple[Any, ExtractFail]] = []
+
         def _persist_all(db):  # noqa: ANN001
             for row, record in zip(rows, records):
                 if record is None:
@@ -892,6 +897,12 @@ class AspectExtractionWorker:
                 # operators re-enqueue manually after fixing source
                 # identity (mirrors _process_row's handling).
                 if isinstance(record, ExtractFail):
+                    if record.reason == READ_FAIL_TRANSPORT:
+                        # A transport failure is not a verdict on the document:
+                        # route it to the backed-off retry after this write
+                        # (nexus-5r2sc.3.10), never mark_done.
+                        transport_rows.append((row, record))
+                        continue
                     _log.info(
                         "aspect_worker_batch_extract_skip",
                         uri=record.uri,
@@ -949,6 +960,20 @@ class AspectExtractionWorker:
                 "aspect_worker_batch_persist_failed",
                 exc_info=True,
             )
+        for row, record in transport_rows:
+            self._route_transport_fail(row, record)
+
+    def _route_transport_fail(self, row, record: ExtractFail) -> None:
+        """A read that failed on the transport (T3, the manifest, an HTTP fetch)
+        takes the same backed-off retry as a raised transient error and is
+        terminal-failed only when the budget is spent (nexus-5r2sc.3.10). Before
+        this the table path ``mark_done``d it, a silent drop of the extraction."""
+        _log.warning(
+            "aspect_worker_extract_transport_failure",
+            uri=record.uri, detail=record.detail,
+            collection=row.collection, source_path=row.source_path,
+        )
+        self._mark_retry_or_fail_routed(row, TransportReadFailure(record.detail))
 
     def _mark_failed_routed(self, row, error: str) -> None:
         """Route a queue ``mark_failed`` through the daemon (nexus-zir76).
@@ -1152,6 +1177,10 @@ class AspectExtractionWorker:
             # Operators can re-enqueue manually after fixing the
             # source identity.
             if isinstance(record, ExtractFail):
+                if record.reason == READ_FAIL_TRANSPORT:
+                    # nexus-5r2sc.3.10: the network failed, not the document.
+                    self._route_transport_fail(row, record)
+                    return
                 _log.info(
                     "aspect_worker_extract_skip",
                     uri=record.uri,

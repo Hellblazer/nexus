@@ -423,9 +423,10 @@ class TupleQueueSide:
             self._ack(claim)
             return
         if isinstance(result, ExtractFail):
-            if result.reason == "infra_unavailable":
-                # Gate S3: the T3 client could not be obtained. A fact about this
-                # process's reach, not about the document: retry, never drop.
+            if result.reason in ("infra_unavailable", "transport"):
+                # Gate S3: the T3 client could not be obtained, or the read hit a
+                # transport failure (T3, the manifest, an HTTP fetch). A fact about
+                # this process's reach, not about the document: retry, never drop.
                 _log.warning(
                     "aspect_worker_extract_infra_unavailable",
                     uri=result.uri, detail=result.detail, task_id=claim.task_id,
