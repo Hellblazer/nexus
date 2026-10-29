@@ -1363,9 +1363,15 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             return rows
         return rows, (r or {}).get("next_cursor")
 
-    def subspace_stats(self, subspace: str) -> SubspaceCensus:
-        """The exact-name form of :meth:`subspace_list` for one subspace."""
+    def subspace_stats(
+        self, subspace: str, *, timeout: float | None = None,
+    ) -> SubspaceCensus:
+        """The exact-name form of :meth:`subspace_list` for one subspace.
+
+        *timeout* (RDR-235, additive): a per-request cap in seconds, for a
+        caller that shares a longer-timeout client (the queue-depth hook shares
+        the index run's). ``None`` sends the request exactly as before."""
         if not subspace:
             raise ValueError("subspace must not be empty")
-        r = self._get("/subspace_stats", {"subspace": subspace})
+        r = self._get("/subspace_stats", {"subspace": subspace}, timeout=timeout)
         return _body_to_census(r)

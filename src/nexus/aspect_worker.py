@@ -284,13 +284,15 @@ def _backoff_interval_seconds(retry_count: int, *, rng=random.random) -> int:
 
 
 class DrainTimeoutError(RuntimeError):
-    """Raised by ``drain_worker`` when the queue still has actionable rows
-    (``status != 'failed'``) after the configured timeout.
+    """Raised by ``drain_worker`` when the queue still has actionable work
+    after the configured timeout.
 
-    Actionable rows are those in ``pending`` or ``in_progress`` state.
-    The operator must triage: inspect ``aspect_extraction_queue`` for
-    stuck ``in_progress`` rows, kill any hung workers, and re-run the
-    drain after the queue is clear.
+    Actionable work is a table row in ``pending`` or ``in_progress`` state
+    (``status != 'failed'``) or an ``aspects`` task that is available or
+    claimed (dead tasks are terminal). ``stuck_count`` is the sum of both
+    sides. The operator must triage: inspect ``aspect_extraction_queue`` for
+    stuck ``in_progress`` rows and ``aspects`` for claimed tasks, kill any
+    hung workers, and re-run the drain after the queue is clear.
     """
 
     def __init__(
@@ -304,8 +306,9 @@ class DrainTimeoutError(RuntimeError):
         self.detail = detail
         msg = (
             f"Drain timeout after {timeout:.1f}s: "
-            f"{stuck_count} actionable row(s) remain in aspect_extraction_queue "
-            f"(status pending or in_progress). "
+            f"{stuck_count} actionable row(s) or task(s) remain: rows in "
+            "aspect_extraction_queue (status pending or in_progress), tasks in "
+            "the 'aspects' tuple queue (available or claimed). "
             "Triage stuck workers before retrying the PK migration."
         )
         if detail:
@@ -1162,10 +1165,17 @@ def drain_worker(
 ) -> None:
     """Stop the singleton worker and wait until the queue is fully drained.
 
-    A queue is considered drained when
-    ``SELECT count(*) FROM aspect_extraction_queue WHERE status != 'failed'``
-    returns 0 — i.e., no rows are pending or in_progress.  Failed rows
-    are terminal and do not block a PK migration.
+    A queue is considered drained when BOTH sides are (RDR-235, which keeps
+    the old table and the ``aspects`` tuple queue side by side until the table
+    retires):
+
+    * the table: ``SELECT count(*) FROM aspect_extraction_queue WHERE
+      status != 'failed'`` returns 0 — no rows are pending or in_progress; and
+    * the tuple queue: ``available + claimed == 0`` on the ``aspects`` subspace.
+      A backoff-delayed task counts as available, so the test is conservative.
+
+    Failed rows and dead tasks are terminal and do not block a PK migration.
+    On an engine with no ``aspects`` template the tuple side reads as empty.
 
     Protocol (RDR-108 Phase 1 S1, nexus-he24; the SIG-5 lock-file
     pre-check that used to lead it was a SQLite-queue concern and died
@@ -1174,14 +1184,15 @@ def drain_worker(
 
       1. Set the stop signal on the singleton worker (if one exists) so
          it claims no new rows.  In-flight row processing continues.
-      2. Poll the queue at ``poll_interval`` (default 100 ms) until
-         ``is_drained()`` returns True or ``timeout`` elapses.
+      2. Poll both sides at ``poll_interval`` (default 100 ms) until the table's
+         ``is_drained()`` returns True and the tuple side shows no live task, or
+         ``timeout`` elapses.
       3. On success: join the worker thread (it has already exited or will
          exit imminently after the last iteration).  If the thread does not
          exit within 2 seconds, log a warning (S-5) and continue — the
          thread is a daemon and will die with the process.
       4. On timeout: raise ``DrainTimeoutError`` so the operator is alerted
-         to inspect stuck ``in_progress`` rows.
+         to inspect stuck ``in_progress`` rows or claimed tasks.
 
     Args:
         queue_path: Legacy path parameter, retained for signature stability.
@@ -1201,8 +1212,9 @@ def drain_worker(
             =sqlite opt-out (RDR-158 P3, nexus-7bomn).
 
     Raises:
-        DrainTimeoutError: Queue still has pending/in_progress rows after
-            ``timeout`` seconds.
+        DrainTimeoutError: The table still has pending/in_progress rows, or
+            ``aspects`` still has available/claimed tasks, after ``timeout``
+            seconds.
 
     Note:
         If no worker has been started in this process (``get_worker()``
@@ -1243,8 +1255,23 @@ def drain_worker(
     # ``is_drained()`` instead. (Local/SQLite mode is unchanged.)
     # Seam COLLAPSED (nexus-i711w Stage 2 sub-stage A): HttpAspectQueue is
     # the only queue — the SQLite AspectExtractionQueue died with the store.
-    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred (optional service dep)
+    from nexus.db.t2.http_aspect_queue import HttpAspectQueue, aspects_census  # noqa: PLC0415 — deferred (optional service dep)
+    from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred (optional service dep)
     queue = HttpAspectQueue()
+    tuples: HttpTupleStore | None = None
+
+    def _tuple_live() -> int:
+        """Tasks that still need a worker: available + claimed on ``aspects``
+        (0 on an engine with no such template). Dead tasks do not count. A read
+        that fails raises: an unreadable side is never read as drained."""
+        census = aspects_census(tuples)
+        return 0 if census is None else census.available + census.claimed
+
+    last_table_drained = [False]  # the table's answer at the most recent poll
+
+    def _drained() -> bool:
+        last_table_drained[0] = queue.is_drained()
+        return last_table_drained[0] and _tuple_live() == 0
 
     def _join_worker_thread(w: AspectExtractionWorker) -> None:
         """Join the worker thread; log a warning if it does not exit in 2s.
@@ -1267,15 +1294,16 @@ def drain_worker(
             )
 
     try:
+        tuples = HttpTupleStore()
         # Short-circuit: if already drained, return immediately.
-        if queue.is_drained():
+        if _drained():
             if worker is not None and worker.is_running():
                 _join_worker_thread(worker)
             return
 
         while time.monotonic() < deadline:
             time.sleep(poll_interval)
-            if queue.is_drained():
+            if _drained():
                 # Join the worker thread: it has stopped claiming and will
                 # exit after its current iteration completes.
                 if worker is not None:
@@ -1296,10 +1324,13 @@ def drain_worker(
         # is_drained() is still False. We detect this gap and include an
         # honest operator hint in the error detail.
         pending = queue.pending_count()
-        if pending == 0:
-            # is_drained() returned False at timeout, but pending_count()
-            # is 0 — rows are stuck in in_progress (crashed-worker case).
-            # pending_count() is a pending-only proxy and cannot see them.
+        census = aspects_census(tuples)
+        tasks_live = 0 if census is None else census.available + census.claimed
+        if pending == 0 and not last_table_drained[0]:
+            # The table's is_drained() was False at the last poll, but
+            # pending_count() is 0 — rows are stuck in in_progress (crashed-
+            # worker case). pending_count() is a pending-only proxy and cannot
+            # see them.
             detail = (
                 "Note (service mode): pending_count is 0, but is_drained() "
                 "is still False — rows may be stuck in in_progress from a "
@@ -1312,9 +1343,23 @@ def drain_worker(
         else:
             detail = None
             stuck_count = pending
+        if tasks_live:
+            # The tuple side reads claimed and lapsed where the table reads
+            # pending_count (RDR-235). A lapsed claim is still counted as
+            # claimed; the next claim releases it.
+            tasks_detail = (
+                f"Tuple queue 'aspects': {census.available} available, "
+                f"{census.claimed} claimed ({census.lapsed} of them lapsed). "
+                "A running aspect worker claims the available tasks and "
+                "releases the lapsed ones; ensure one is up, then retry the drain."
+            )
+            detail = f"{detail} {tasks_detail}" if detail else tasks_detail
+            stuck_count += tasks_live
         raise DrainTimeoutError(stuck_count=stuck_count, timeout=timeout, detail=detail)
     finally:
         queue.close()
+        if tuples is not None:
+            tuples.close()
 
 
 # ── Hook function (wired by hook_registry.install_default_hooks) ────────────
@@ -1752,15 +1797,26 @@ def record_batch_enqueue_failure(collection: str, count: int, exc: BaseException
 
 
 def _best_effort_queue_depth() -> int | None:
-    """Pending-row count for the diagnostic signal (RDR-173 P5), or None if it
-    cannot be obtained cheaply. The service queue is usually reachable even when
-    the WORKER daemon is not (the daemon-spawn path is only reached AFTER a
-    successful enqueue), so this normally answers. A SHORT 2s timeout (review H1)
-    keeps the observability path from blocking the store hook for the client's
-    default 30s in a full outage. (HttpAspectQueue.__init__ emits an info on
-    construct — expected on this diagnostic path.)"""
+    """Pending work for the diagnostic signal (RDR-173 P5), or None if it cannot
+    be obtained cheaply: the old table's pending rows plus the ``aspects`` tuple
+    queue's available tasks (RDR-235 keeps both until the table retires, so a
+    reader of only one goes blind to new work the day the producer flips).
+
+    The service queue is usually reachable even when the WORKER daemon is not
+    (the daemon-spawn path is only reached AFTER a successful enqueue), so this
+    normally answers. A SHORT 2s cap on EACH call (review H1) keeps the
+    observability path from blocking the store hook for the client's default
+    30s in a full outage. (HttpAspectQueue.__init__ emits an info on construct
+    — expected on this diagnostic path.)
+
+    One side failing returns None, never the other side's count alone: a partial
+    sum would pass for the real depth, and None is this function's word for "not
+    known". The one exception is an engine with no ``aspects`` template (it
+    predates ``engine-service-v0.1.169``): that tuple side is genuinely empty
+    and reads as 0, with one log line per process."""
     try:
-        from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred; service-side
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue, aspects_census  # noqa: PLC0415 — deferred; service-side
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred; service-side
         from nexus.mcp_infra import current_index_run_t2_client  # noqa: PLC0415 — deferred to avoid circular import
 
         # nexus-m20mf P3 fold-in (round-2 critique finding 2): the earlier
@@ -1775,19 +1831,23 @@ def _best_effort_queue_depth() -> int | None:
         # THIS call via pending_count(timeout=2.0) instead), falling back
         # to this diagnostic's own dedicated short-timeout client exactly
         # as before when no run is active (e.g. a live MCP store-hook
-        # call, outside any index_repository() run).
+        # call, outside any index_repository() run). The tuple store
+        # follows the same two shapes, and subspace_stats(timeout=2.0)
+        # caps its call the same way.
         shared_client = current_index_run_t2_client()
         if shared_client is not None:
             q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, client=shared_client)
-            try:
-                return int(q.pending_count(timeout=2.0))
-            finally:
-                q.close()  # no-op: shared client is not owned by this store
-        q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, timeout=2.0)
+            t = HttpTupleStore(tenant=_ENQUEUE_TENANT, client=shared_client)
+        else:
+            q = HttpAspectQueue(tenant=_ENQUEUE_TENANT, timeout=2.0)
+            t = HttpTupleStore(tenant=_ENQUEUE_TENANT, timeout=2.0)
         try:
-            return int(q.pending_count())
+            table_pending = int(q.pending_count(timeout=2.0) if shared_client is not None else q.pending_count())
+            census = aspects_census(t, timeout=2.0 if shared_client is not None else None)
+            return table_pending + (0 if census is None else int(census.available))
         finally:
-            q.close()
+            q.close()  # no-op when the shared client is not owned by this store
+            t.close()
     except Exception:  # noqa: BLE001 — diagnostic only; never block the store
         return None
 

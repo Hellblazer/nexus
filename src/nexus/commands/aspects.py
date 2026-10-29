@@ -50,15 +50,17 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
     """Drain the aspect extraction queue.
 
     Stops the singleton AspectExtractionWorker (if running in this process),
-    then waits until all pending and in-progress rows are processed or the
-    timeout elapses.
+    then waits until all pending and in-progress rows are processed AND the
+    ``aspects`` tuple queue has no available or claimed task (RDR-235 keeps
+    both queues until the old table retires), or the timeout elapses. Failed
+    rows and dead tasks do not block it.
 
     Use this before running ``nx upgrade`` when the MigrationError reports
     that the aspect_extraction_queue is not drained.
 
     Exit codes:
-      0  Queue is drained (or was already empty).
-      1  Timeout: queue still has active rows after --timeout seconds.
+      0  Both queues are drained (or were already empty).
+      1  Timeout: a queue still has active rows or tasks after --timeout seconds.
     """
     from nexus.aspect_worker import DrainTimeoutError, drain_worker  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
@@ -69,7 +71,7 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
     try:
         drain_worker(mem_path, timeout=timeout, poll_interval=poll_interval)
     except DrainTimeoutError as e:
-        base = f"Drain timeout: {e.stuck_count} row(s) still active after {timeout}s."
+        base = f"Drain timeout: {e.stuck_count} row(s) or task(s) still active after {timeout}s."
         # Honor the honest service-mode hint (e.g. crashed-worker rows stuck
         # in_progress -> a running worker's stale-reclaim loop resets them). Falls back to the generic re-run
         # advice when no detail was attached.
@@ -226,6 +228,57 @@ def aspects_gc_pre_rdr096(apply: bool) -> None:
     )
 
 
+#: Rows asked of the ``aspects`` subspace per ``rd`` page. The engine clamps ``n``
+#: to its own read cap (TupleRepository, 300 by default), so a page SHORTER than
+#: this is not the last page: the scan stops on an empty page.
+_TASK_PAGE: int = 300
+
+
+def _task_identity(row) -> dict | None:  # noqa: ANN001 — a TupleRow
+    """The identity body of an ``aspects`` task (``collection``, ``source_path``,
+    ``doc_id``, ``content_hash``), or None when the body is not that."""
+    import json  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    try:
+        body = json.loads(row.body or "")
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) and body.get("doc_id") else None
+
+
+def _dead_aspect_tasks(tuples, collection: str | None) -> list:  # noqa: ANN001 — an HttpTupleStore
+    """Dead tasks of the ``aspects`` subspace, oldest first, optionally those of
+    one collection (read from the body: the queue is one per tenant).
+
+    ``rd`` has no state filter, so the scan pages the whole subspace with
+    ``since=(created_at, id)`` and keeps the rows whose ``claim_state`` is
+    ``dead``; the census says first whether there are any, which spares a
+    10,000-row scan on a healthy queue. An engine with no ``aspects`` template
+    has none (RDR-235)."""
+    from nexus.db.t2.http_aspect_queue import ASPECTS_KEYS, ASPECTS_SUBSPACE, aspects_census  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    census = aspects_census(tuples)
+    if census is None or census.dead == 0:
+        return []
+    dead: list = []
+    since = None
+    while True:
+        page = tuples.rd(ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), n=_TASK_PAGE, since=since)
+        if not page:
+            break
+        dead.extend(r for r in page if r.claim_state == "dead")
+        cursor = (page[-1].created_at, page[-1].id)
+        if cursor == since:  # an engine that ignored `since` would loop forever
+            break
+        since = cursor
+    if collection:
+        dead = [
+            r for r in dead
+            if (ident := _task_identity(r)) is not None and ident.get("collection") == collection
+        ]
+    return dead
+
+
 @aspects_group.command(name="requeue-failed")
 @click.option(
     "--collection",
@@ -267,6 +320,15 @@ def aspects_requeue_failed(
     most-recently-failed). ``--limit`` caps how many are re-enqueued.
 
     \b
+    RDR-235: the ``aspects`` tuple queue is read too. A task that died (its
+    attempts ran out, or a worker dead-lettered it) is revived with ``out``
+    ``mode=replace``, which makes it available again with its attempts reset and
+    its retention clock restarted. ``--limit`` caps the two sides together: the
+    table's failed rows first, then dead tasks oldest first. ``--collection``
+    matches a task by the collection in its body. An engine with no ``aspects``
+    template has no dead tasks, and the verb reads the table alone.
+
+    \b
     Examples:
       nx aspects requeue-failed                       # all failed rows
       nx aspects requeue-failed --collection knowledge__x
@@ -288,6 +350,7 @@ def aspects_requeue_failed(
     """
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.t2.http_aspect_queue import ASPECTS_KEYS, ASPECTS_SUBSPACE  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     if limit is not None and limit <= 0:
@@ -302,22 +365,43 @@ def aspects_requeue_failed(
     mem_path = default_db_path()
 
     # Read is concurrent-safe (no single-writer concern); the facade routes
-    # to the PG-service HTTP client.
+    # to the PG-service HTTP client. The dead-task read goes through the same
+    # handle (`db.tuples`): no second T2Database open.
     with T2Database(mem_path) as db:  # boundary-allow: read-only failed-row inspection for requeue-failed; routes to active backend, no WAL writer contention
         failed = db.aspect_queue.list_failed(collection)
+        try:
+            dead = _dead_aspect_tasks(db.tuples, collection)
+        except Exception as exc:  # noqa: BLE001 — fail loud before any write: reporting the table alone would hide the dead tasks
+            click.echo(
+                f"Could not read the dead tasks of the 'aspects' queue: {exc}. "
+                "Nothing was re-enqueued.",
+                err=True,
+            )
+            raise SystemExit(1) from exc
 
+    # --limit caps the two sides together: table rows first, then dead tasks.
     if limit is not None:
         failed = failed[:limit]
+        dead = dead[: max(limit - len(failed), 0)]
 
     scope = f" in {collection}" if collection else ""
-    if not failed:
+    if not failed and not dead:
         click.echo(f"aspect_extraction_queue: no failed rows{scope}.")
         return
 
     if dry_run:
-        click.echo(f"Would re-enqueue {len(failed)} failed row(s){scope}:")
-        for row in failed:
-            click.echo(f"  {row.collection}  {row.source_path}  (retry_count={row.retry_count})")
+        if failed:
+            click.echo(f"Would re-enqueue {len(failed)} failed row(s){scope}:")
+            for row in failed:
+                click.echo(f"  {row.collection}  {row.source_path}  (retry_count={row.retry_count})")
+        if dead:
+            click.echo(f"Would re-enqueue {len(dead)} dead task(s){scope}:")
+            for task in dead:
+                ident = _task_identity(task) or {}
+                click.echo(
+                    f"  {ident.get('collection', '?')}  {ident.get('source_path', '?')}"
+                    f"  (attempts={task.attempts})"
+                )
         click.echo("Re-run without --dry-run to re-enqueue.")
         return
 
@@ -331,4 +415,24 @@ def aspects_requeue_failed(
                 doc_id=_r.doc_id,
             )
         )
-    click.echo(f"Re-enqueued {len(failed)} failed row(s){scope} to pending.")
+    revived = 0
+    for task in dead:
+        ident = _task_identity(task)
+        if ident is None:
+            click.echo(
+                f"Skipped dead task {task.id}: its body is not an identity body.", err=True,
+            )
+            continue
+        # out mode=replace on the same body and nonce: the dead task becomes
+        # available again with attempts reset and a restarted retention clock.
+        t2_index_write(
+            lambda db, _b=task.body, _n=ident["doc_id"]: db.tuples.out_replace(
+                ASPECTS_SUBSPACE, dict(ASPECTS_KEYS), None, _b, nonce=_n,
+            )
+        )
+        revived += 1
+    if failed or not dead:
+        click.echo(f"Re-enqueued {len(failed)} failed row(s){scope} to pending.")
+    if dead:
+        click.echo(f"Revived {revived} dead task(s){scope} to available.")
+
