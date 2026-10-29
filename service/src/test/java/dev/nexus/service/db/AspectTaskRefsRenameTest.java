@@ -300,11 +300,23 @@ class AspectTaskRefsRenameTest {
         assertThat(catalog.rehomeStatus(tenant, a).remainingByTable())
             .as("before the re-home the status counts the tasks").containsEntry("aspects_tasks", 3);
 
+        // The tasks are the only thing naming the source, so the movable total is exactly the three: a status
+        // that left them out of it would report done() for a collection whose tasks have not moved.
+        var before = catalog.rehomeStatus(tenant, a);
+        assertThat(before.remainingRows()).as("the three tasks are all that names the source").isEqualTo(3);
+        assertThat(before.remainingMovableRows()).as("every task is movable").isEqualTo(3);
+        assertThat(before.done()).as("not done while the tasks name the source").isFalse();
+        assertThat(catalog.rehomeStatus(tenant, a, b).remainingMovableRows())
+            .as("movable with the target named: no task can collide").isEqualTo(3);
+
         var result = catalog.rehomeCollection(tenant, a, b);
 
         assertThat(result.movedByTable()).containsEntry("aspects_tasks", 3);
         assertThat(result.status().remainingByTable()).as("nothing names the source afterwards")
             .doesNotContainKey("aspects_tasks");
+        assertThat(result.status().remainingMovableRows()).as("no task is left to move").isZero();
+        assertThat(result.status().done()).isTrue();
+        assertThat(catalog.rehomeStatus(tenant, a).remainingByTable()).doesNotContainKey("aspects_tasks");
         assertThreeNamed(tenant, s, b);
     }
 
@@ -330,6 +342,67 @@ class AspectTaskRefsRenameTest {
         assertThreeNamed(tenant, s, tgt);
         assertThat(state(tenant, "1.4.4").collection()).as("the document that did not move keeps its task on the source")
             .isEqualTo(src);
+    }
+
+    /**
+     * The client's re-index after a rename enqueues with the doc_id as nonce and {@code mode=replace}. The task's
+     * id is keys+nonce, never the collection, so the replace must land on the row the rename already rewrote:
+     * the available and the dead task are {@code replaced}, the claimed one is {@code dirtied}, and the tenant
+     * holds exactly three tasks, each naming the new collection.
+     */
+    @Test
+    void aReenqueueAfterTheRename_replacesTheSameTask() {
+        String tenant = freshTenant("reenqueue");
+        String a = coll("a");
+        String b = coll("b");
+        register(tenant, a);
+        Seeded s = seedThree(tenant, a, "1.12");
+        catalog.renameCollection(tenant, a, b);
+        assertThreeNamed(tenant, s, b);
+
+        var available = reenqueue(tenant, b, s.availableDoc());
+        var dead = reenqueue(tenant, b, s.deadDoc());
+        var claimed = reenqueue(tenant, b, s.claimedDoc());
+
+        assertThat(available.outcome()).as("an available task is replaced, not created again")
+            .isEqualTo(TupleRepository.OutOutcome.REPLACED);
+        assertThat(dead.outcome()).as("a dead task is revived by the replace")
+            .isEqualTo(TupleRepository.OutOutcome.REPLACED);
+        assertThat(claimed.outcome()).as("a live-claimed task takes the body and is marked dirty")
+            .isEqualTo(TupleRepository.OutOutcome.DIRTIED);
+        int rows = su(ctx -> ctx.fetchCount(TUPLES, TUPLES.TENANT_ID.eq(tenant).and(TUPLES.SUBSPACE.eq("aspects"))));
+        assertThat(rows).as("the tenant still holds exactly its three tasks").isEqualTo(3);
+        assertThat(collectionsByDoc(tenant)).as("each task names the new collection, one row per doc_id")
+            .containsOnly(Map.entry(s.claimedDoc(), b), Map.entry(s.deadDoc(), b), Map.entry(s.availableDoc(), b));
+        assertThat(state(tenant, s.claimedDoc()).claimId()).as("the dirtied task keeps its claim").isEqualTo(s.claimId());
+    }
+
+    TupleRepository.OutResult reenqueue(String tenant, String collection, String docId) {
+        return tuples.outReplace(tenant, "aspects", Map.of("queue", "aspects"), Map.of(), taskBody(collection, docId),
+            docId, null, null, null);
+    }
+
+    /**
+     * A name a re-embed job in a lock state holds is not renamed underneath it. The refusal aborts the rename's
+     * own transaction, so no task is rewritten: all three still name the source.
+     */
+    @Test
+    void aRenameUnderAReembedJob_isRefused_andLeavesTheTasksNamingTheSource() {
+        String tenant = freshTenant("reembed-refusal");
+        String a = coll("a");
+        String b = coll("b");
+        String jobTarget = coll("jobtarget");
+        register(tenant, a);
+        Seeded s = seedThree(tenant, a, "1.13");
+        new ReembedJobRepository(scope).start(tenant, a, jobTarget, null, false, false);
+
+        assertThatThrownBy(() -> catalog.renameCollection(tenant, a, b))
+            .isInstanceOf(CatalogRepository.CollectionHeldByReembedJob.class)
+            .hasMessageContaining("cannot rename " + a);
+
+        assertThreeNamed(tenant, s, a);
+        assertThat(registered(tenant, a)).as("the source is still registered").isTrue();
+        assertThat(registered(tenant, b)).as("the target was never created").isFalse();
     }
 
     // ── scenario 18: a collection that only a queued task names ────────────
