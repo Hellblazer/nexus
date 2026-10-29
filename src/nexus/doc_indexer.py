@@ -299,6 +299,34 @@ def _metadata_for_doc_id(col: Any, doc_id: str) -> list[dict]:
     return batch.get("metadatas", [])
 
 
+def _catalog_absolute_identity(doc_id: str) -> str:
+    """The catalog's ABSOLUTE ``file_path`` for *doc_id*, or "" (relative, unresolvable, or a read failure).
+
+    A document outside any repo registers under a curator owner by its absolute path
+    (:func:`_curator_identity`, nexus-njn1a), while a repo document registers relative to its repo root.
+    The post-store document hook must be handed the path the catalog holds: the aspect queue row keys on
+    it, and a relative spelling of an absolute identity made ``nx index rdr <dir>`` outside a repo
+    write a second aspect row beside the one ``nx enrich aspects`` writes (shakedown 7.89.0 class e).
+    Read-only and best-effort: "" means the caller keeps the spelling it already had.
+    """
+    if not doc_id:
+        return ""
+    reader = None
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+
+        reader = make_catalog_reader()
+        entry = reader.by_doc_id(doc_id)
+        fp = str(getattr(entry, "file_path", "") or "") if entry is not None else ""
+        return fp if fp and Path(fp).is_absolute() else ""
+    except Exception:  # noqa: BLE001 — best-effort: a failed read keeps the caller's existing spelling
+        _log.debug("catalog_absolute_identity_lookup_failed", doc_id=doc_id, exc_info=True)
+        return ""
+    finally:
+        if reader is not None:
+            reader.close()
+
+
 def _doc_id_for_path(file_path: Path) -> str:
     """Best-effort READ-ONLY document identity for a source path, or "".
 
@@ -3998,7 +4026,13 @@ def index_markdown(
         _markdown_chunks, doc_id=doc_id, extraction_source=extraction_source,
         collection_name=col_name,
     )
-    source_key = make_relative(md_path, base_path) if base_path else None
+    # The hook chain keys the aspect queue on this path, so it is the catalog's own spelling of the
+    # document: a curator-owned document (outside any repo) registered by its absolute path, so a
+    # base_path-relative key would be a second identity for it (shakedown 7.89.0 class e).
+    source_key = (
+        None if _catalog_absolute_identity(doc_id)
+        else make_relative(md_path, base_path) if base_path else None
+    )
     # The write's completion stamp is sent below, after the catalog enrichment (RDR-223,
     # nexus-z0o2p.34): _index_document hands it back instead of sending it.
     _stamps: "list[_DeferredOwnerWrite]" = []
