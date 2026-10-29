@@ -21,6 +21,7 @@ the developer's own config directory.
 from __future__ import annotations
 
 import ast
+import contextlib
 import html.parser
 import http.client
 import http.server
@@ -28,6 +29,7 @@ import json
 import os
 import re
 import secrets
+import select
 import socket
 import stat
 import subprocess
@@ -1333,52 +1335,62 @@ def test_a_connection_over_the_cap_takes_the_place_of_the_oldest_unread_one(make
 def test_sixteen_dripping_connections_that_reconnect_do_not_lock_the_page_out(make_page: Callable[..., Any]) -> None:
     """Review round 2, I1: a deadline that only closes a dripper lets it reconnect into the slot it lost, so 16 of
     them kept the page shut (5 of 55 right GETs served, measured). Over the cap the oldest unread connection is shut
-    down for the new one, so a right request, read in milliseconds, is admitted. 40 right GETs, one every 0.1 s,
-    each on its own connection: at least 36 (90%) must be served; with the eviction removed 3 to 6 of 40 were."""
+    down for the new one, so a right request, read in milliseconds, is admitted.
+
+    Shakedown 7.89.0 class g: the first form of this test ran 16 free-running reconnect threads and counted how many
+    of 40 timed GETs got through (at least 36). On the Windows leg it served 35 and 31 of 40, run after run, while
+    the same code served 40 of 40 everywhere else: the count measured what a loaded runner's TCP stack and thread
+    scheduler did with a reconnect storm (connects refused or delayed, a thread not run before the next accept), not
+    the page's admission rule. This form takes the storm out of the clock. Every round the drippers refill the page
+    to its cap with unread connections, one at a time and in order, THEN the right GET connects. The listener
+    accepts in connect order, so the GET is the newest connection when it is admitted and nothing else can connect
+    before it is read: it must be answered, every round, with no tolerance. Without the eviction it is closed at the
+    door on round one."""
     page = make_page()
-    stop = threading.Event()
-    drippers: list[threading.Thread] = []
+    cap = page.mod.PAGE_MAX_CONNECTIONS
+    rounds = 40
+    held: list[socket.socket] = []
 
-    def drip() -> None:
-        while not stop.is_set():
-            try:
-                sock = socket.create_connection(("127.0.0.1", page.port), timeout=2)
-            except OSError:
-                time.sleep(0.01)
-                continue
-            try:
-                while not stop.is_set():
-                    sock.sendall(b"G")
-                    sock.settimeout(0.1)
-                    try:
-                        if sock.recv(1) == b"":
-                            break  # closed by the page: reconnect at once
-                    except TimeoutError:
-                        continue
-            except OSError:
-                pass  # reset: reconnect at once
-            finally:
-                sock.close()
+    def reconnect() -> socket.socket:
+        return socket.create_connection(("127.0.0.1", page.port), timeout=5)
 
-    served = 0
-    attempts = 40
+    def closed_by_the_page(sock: socket.socket) -> bool:
+        # The page never writes to an unread connection, so a socket that is readable has reached EOF or a reset.
+        readable, _w, _x = select.select([sock], [], [], 0)
+        return bool(readable)
+
     try:
-        for _ in range(page.mod.PAGE_MAX_CONNECTIONS):
-            thread = threading.Thread(target=drip, daemon=True)
-            thread.start()
-            drippers.append(thread)
-        time.sleep(0.5)  # the drippers hold every slot
-        for _ in range(attempts):
-            try:
-                served += _request(page.address)[0] == 200
-            except (OSError, http.client.HTTPException):
-                pass
-            time.sleep(0.1)
+        for _ in range(cap):
+            held.append(reconnect())
+        for round_no in range(rounds):
+            for sock in held:
+                with contextlib.suppress(OSError):
+                    sock.sendall(b"G")  # still dripping; a byte is not a request
+            status = _request(page.address)[0]
+            assert status == 200, f"round {round_no}: a right GET was not served while {cap} drippers held every slot"
+            if round_no == 0:
+                # Clean state, so the victim is known: the oldest unread connection was shut down for the GET.
+                held[0].settimeout(10)
+                try:
+                    assert held[0].recv(1) == b"", "the oldest unread connection was not shut down for the right request"
+                except ConnectionError:
+                    pass  # a reset is a shutdown too
+            # Every dripper the page shut reconnects at once, into the slot it lost.
+            for i, sock in enumerate(held):
+                if closed_by_the_page(sock):
+                    sock.close()
+                    held[i] = reconnect()
     finally:
-        stop.set()
-        for thread in drippers:
-            thread.join(5)
-    assert served >= 36, f"only {served} of {attempts} right GETs were served while 16 drippers reconnected"
+        for sock in held:
+            sock.close()
+
+
+def test_the_listen_backlog_holds_a_full_page_of_connections(make_page: Callable[..., Any]) -> None:
+    """Shakedown 7.89.0 class g: socketserver's backlog of 5 is smaller than the 16 connections the page admits, and
+    Windows refuses a connect that finds the backlog full, so a burst of stalled sockets could turn a right request
+    away before the accept loop saw it. Fails with the backlog at its default."""
+    page = make_page()
+    assert page._server.request_queue_size >= page.mod.PAGE_MAX_CONNECTIONS
 
 
 def test_sixteen_dripping_connections_do_not_lock_the_page_out(make_page: Callable[..., Any]) -> None:

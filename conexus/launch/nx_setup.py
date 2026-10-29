@@ -1429,6 +1429,10 @@ class CredentialsPage:
         class Server(http.server.ThreadingHTTPServer):
             allow_reuse_address = False  # on Windows SO_REUSEADDR lets another process take the same port
             daemon_threads = True
+            # socketserver listens with a backlog of 5. The page admits PAGE_MAX_CONNECTIONS at once, and Windows
+            # REFUSES a connect that finds the backlog full (Linux and macOS drop the SYN and the client retries), so
+            # a burst of stalled sockets could turn a right request away before the accept loop saw it.
+            request_queue_size = 2 * PAGE_MAX_CONNECTIONS
 
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 # Live connections, oldest first, each with whether its request has been read yet.
