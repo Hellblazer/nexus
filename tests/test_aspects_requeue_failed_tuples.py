@@ -177,6 +177,101 @@ class TestRequeueFailedAgainstTheEngine:
         census = store.subspace_stats("aspects")
         assert (census.dead, census.available) == (0, 10), census
 
+    @staticmethod
+    def _failed_table_row(db, collection: str, source_path: str, doc_id: str) -> None:  # noqa: ANN001
+        q = db.aspect_queue
+        q.enqueue(collection, source_path, content="c", doc_id=doc_id)
+        assert q.claim_next() is not None
+        q.mark_failed(collection, source_path, "boom")
+
+    def test_in_tuples_mode_the_failed_table_row_is_cleared_and_the_doctor_goes_green(
+        self, _t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-5r2sc.3.10 Critical 2 (Test Plan scenario 23's tail): with the flag
+        at tuples the verb writes a task for a failed table row AND deletes the
+        row, or the doctor counts it forever and every run re-extracts it. A blank
+        doc_id row is reported and skipped, never aborts the loop."""
+        import click
+
+        from nexus.commands.doctor import _report_aspect_queue_service
+        from nexus.db.t2 import T2Database
+        from tests._catalog_fixture_ops import register_real_doc_id
+
+        good_doc = register_real_doc_id()
+        other_doc = register_real_doc_id()
+        coll = "knowledge__nx235rt"
+        with T2Database(_t2) as db:
+            self._failed_table_row(db, coll, "good.pdf", good_doc)
+            self._failed_table_row(db, coll, "sibling.pdf", other_doc)
+            # a PENDING row sharing good_doc's doc_id: deleting by doc_id would take it too
+            db.aspect_queue.enqueue(coll, "pending.pdf", content="c", doc_id=good_doc)
+        # The engine refuses a table row with no doc_id, so the legacy blank row
+        # is injected into the listing (the shape an old failed row would have).
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from nexus.db.t2.records import QueueRow
+
+        real_list_failed = HttpAspectQueue.list_failed
+        blank = QueueRow(collection=coll, source_path="blank.pdf", content_hash="h",
+                         content="", retry_count=0, doc_id="")
+
+        def with_blank(self, collection=None):  # noqa: ANN001, ANN202
+            return [*real_list_failed(self, collection), blank]
+
+        monkeypatch.setattr(HttpAspectQueue, "list_failed", with_blank)
+        store = HttpTupleStore()
+        dead_tid = self._make_dead(store, "docs__nx235rt-dead__bge-base-en-v15-768__v1")
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
+
+        with pytest.raises(click.exceptions.Exit):
+            _report_aspect_queue_service()  # before: red (failed rows exist)
+
+        dry = CliRunner().invoke(aspects_group, ["requeue-failed", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        with T2Database(_t2) as db:
+            assert len(real_list_failed(db.aspect_queue, coll)) == 2, "dry-run wrote"
+        assert [r.claim_state for r in store.rd("aspects", _KEYS, n=300)] == ["dead"]
+
+        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
+        assert res.exit_code == 0, res.output
+        assert "blank.pdf" in res.output and "no doc_id" in res.output, "the blank row is reported"
+        assert "Re-enqueued 2 failed row(s)" in res.output and "skipped 1" in res.output, res.output
+        assert "Revived 1 dead task(s)" in res.output
+
+        with T2Database(_t2) as db:
+            left = [r.source_path for r in real_list_failed(db.aspect_queue, coll)]
+        assert left == [], f"the two re-enqueued table rows are gone: {left}"
+        with T2Database(_t2) as db:
+            assert db.aspect_queue.pending_count() == 1, (
+                "the row is deleted by (collection, source_path): a pending sibling with the same doc_id stays"
+            )
+        tasks = store.rd("aspects", _KEYS, n=300)
+        docs = {json.loads(t.body)["doc_id"]: t for t in tasks}
+        assert good_doc in docs and other_doc in docs, "each re-enqueued row has its task"
+        assert all(t.claim_state is None for t in tasks), "all available; the dead one is revived"
+        assert dead_tid in {t.id for t in tasks}
+
+        # A second run: only the blank row is listed, and it is reported, not retried.
+        again = CliRunner().invoke(aspects_group, ["requeue-failed"])
+        assert again.exit_code == 0, again.output
+        assert "Re-enqueued 0 failed row(s)" in again.output and "skipped 1" in again.output, again.output
+
+    def test_in_tuples_mode_with_no_blank_row_the_doctor_exits_zero_and_a_second_run_has_nothing_to_do(
+        self, _t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.commands.doctor import _report_aspect_queue_service
+        from nexus.db.t2 import T2Database
+        from tests._catalog_fixture_ops import register_real_doc_id
+
+        coll = "knowledge__nx235rt2"
+        with T2Database(_t2) as db:
+            self._failed_table_row(db, coll, "only.pdf", register_real_doc_id())
+        monkeypatch.setenv("NX_ASPECT_QUEUE", "tuples")
+        res = CliRunner().invoke(aspects_group, ["requeue-failed"])
+        assert res.exit_code == 0, res.output
+        _report_aspect_queue_service()  # exits 0: no raise
+        again = CliRunner().invoke(aspects_group, ["requeue-failed"])
+        assert again.exit_code == 0 and "no failed rows" in again.output, again.output
+
     def test_a_table_failed_row_and_a_dead_task_are_both_reported(self, _t2: Path) -> None:
         from nexus.db.t2 import T2Database
         from tests._catalog_fixture_ops import register_real_doc_id
