@@ -51,6 +51,11 @@ _STATE_LABEL = {
 }
 
 
+def _clip(text: str, limit: int = _MAX_FACET_CHARS) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 @dataclass(frozen=True)
 class OutcomeVerdict:
     """What ``nx_answer`` does with a finished run.
@@ -116,8 +121,7 @@ def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[
     conflicted = [f for f in coverage.ledger.findings if f.state == "covered" and f.reason == CONFLICTED_REASON]
 
     def clip(facet_id: str) -> str:
-        text = " ".join(str(facet_texts.get(facet_id) or facet_id).split())
-        return text if len(text) <= _MAX_FACET_CHARS else text[: _MAX_FACET_CHARS - 3] + "..."
+        return _clip(str(facet_texts.get(facet_id) or facet_id))
 
     lines = [
         f"{INSUFFICIENT_EVIDENCE_NOTICE_PREFIX} {len(pending)} unresolved]",
@@ -126,6 +130,11 @@ def render_insufficient_evidence(coverage: CoverageResult, facet_texts: Mapping[
     for f in pending:
         label = "the named source was not found" if f.reason == "source_missing" else _STATE_LABEL.get(f.state, f.state)
         lines.append(f"  - {f.facet_id} ({label}): {clip(f.facet_id)}")
+    unresolved = [r for r in coverage.ledger.sources if r.state == "unresolved"]
+    if unresolved:
+        # nexus-jypmj.3.17: an ambiguous or unlookable source blocked nothing; say that it was not read, and why.
+        lines.append("A named source could not be resolved, so nothing of it was read; the parts above rest on other evidence:")
+        lines.extend(f"  - {r.source}: {_clip(r.detail or 'unresolved')}" for r in unresolved)
     if conflicted:
         lines.append("The evidence conflicts on these parts; the answer below follows the supporting evidence:")
         lines.extend(f"  - {f.facet_id} (the evidence conflicts): {clip(f.facet_id)}" for f in conflicted)

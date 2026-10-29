@@ -13,7 +13,8 @@ adds the run summary. The object answers four questions without a model call:
 * **reducer_input**: what the first evidence-consuming operator was actually handed, by stream and
   collection (:class:`ReducerInputRecorder`, fed by the runner's operator hydration);
 * **source_check**: did the named primary document reach the reducer input and survive to the final
-  reduction (``covered``, ``partial`` or ``missing``), and is its lifecycle facet resolved;
+  reduction (``covered``, ``partial`` or ``missing``), and is its lifecycle facet resolved. A source that
+  is ambiguous (candidates) or whose lookup could not run is ``unresolved``: disclosed, never ``missing``;
 * **scope_check**: do the observed collections stay inside the caller's explicit scope. ``satisfied``
   means every item the run examined was attributed to a collection and none is outside; ``violated``,
   ``conflict`` (a step or traversal the scope emptied) and ``widened`` (a named source outside the scope,
@@ -74,7 +75,7 @@ GRAPH_TOOLS: frozenset[str] = frozenset({"traverse", "search_graph_hop"})
 #: ``by_collection`` key for references whose collection the step output does not say per chunk.
 UNATTRIBUTED = ""
 
-_SOURCE_PRIMARY_FIRST = ("missing", "partial", "covered")
+_SOURCE_PRIMARY_FIRST = ("missing", "unresolved", "partial", "covered")
 
 #: The coverage boundary's note to the terminal generation (``coverage_repair.NOTE_PREFIX``) is counted as its own
 #: ``reducer_input.by_stream`` entry, not as an unattributed input.
@@ -469,6 +470,12 @@ def _lifecycle_state(
             "reached_reducer": reached if reached is not None else 0}
 
 
+def _could_not_resolve(s: Any) -> bool:
+    """Whether a named source that did not resolve is unknown rather than absent: several documents fit it
+    (``candidates``), its candidate lookup hit the cap, or the lookup itself failed or ran out of time."""
+    return s.status == "candidates" or bool(getattr(s, "candidates_truncated", False)) or bool(getattr(s, "unverified", False))
+
+
 def _source_check(
     named: Any, primary: Any, lifecycle: Any, att: Sequence[_Attribution] | None,
     reserved: ReservedStream | None = None,
@@ -489,7 +496,12 @@ def _source_check(
         }
         coverage = next((d for d in getattr(primary, "documents", ()) if d.doc_id == s.tumbler), None) if s.tumbler else None
         if s.status != "resolved":
-            row.update(state="missing", detail=f"the source is {s.status}: {s.detail}".rstrip(": "))
+            # RDR-232 Failure Modes: an ambiguous source returns candidates, and a lookup that cannot say the source is
+            # absent is a disclosed unresolved state; neither is a source no document carries (nexus-jypmj.3.17).
+            row.update(
+                state="unresolved" if _could_not_resolve(s) else "missing",
+                detail=f"the source is {s.status}: {s.detail}".rstrip(": "),
+            )
         elif coverage is None or coverage.status != "ok":
             why = "no primary evidence was read for it" if coverage is None else f"its manifest is {coverage.status}"
             row.update(state="missing", detail=why)

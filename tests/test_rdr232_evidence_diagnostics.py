@@ -367,16 +367,37 @@ def test_source_missing_when_the_primary_is_absent_from_the_reducer() -> None:
     assert sc["state"] == "missing" and sc["sources"][0]["reached_reducer"] == 0
 
 
+def test_source_missing_when_no_document_carries_it() -> None:
+    sc = _source_state(primary=None, stream=None, recorder=_recorder(["x"]), resolution=_resolution(status="unresolved"))
+    assert sc["state"] == "missing" and "unresolved" in sc["sources"][0]["detail"]
+
+
 @pytest.mark.parametrize(
-    ("resolution", "why"),
+    "resolution",
     [
-        pytest.param(_resolution(status="unresolved"), "unresolved", id="unresolved"),
-        pytest.param(_resolution(status="candidates"), "candidates", id="ambiguous"),
+        pytest.param(_resolution(status="candidates"), id="ambiguous"),
+        pytest.param(
+            NamedSourceResolution(sources=(ResolvedSource(
+                ref=SourceRef.parse("RDR-084"), status="unresolved", candidates_truncated=True, detail="cap reached"),)),
+            id="candidate-lookup-capped"),
+        pytest.param(NamedSourceResolution.failed([SourceRef.parse("RDR-084")], "TimeoutError"), id="lookup-failed"),
+        pytest.param(NamedSourceResolution.deadline_hit([SourceRef.parse("RDR-084")]), id="deadline"),
     ],
 )
-def test_source_missing_when_it_did_not_resolve(resolution, why) -> None:
+def test_source_unresolved_when_the_lookup_cannot_say_it_is_absent(resolution) -> None:
+    """nexus-jypmj.3.17: an ambiguous or untrusted lookup is disclosed as ``unresolved``, a state of its own; only a
+    source no document carries is ``missing`` (RDR-232 Failure Modes: candidates or a disclosed unresolved state)."""
     sc = _source_state(primary=None, stream=None, recorder=_recorder(["x"]), resolution=resolution)
-    assert sc["state"] == "missing" and why in sc["sources"][0]["detail"]
+    assert sc["state"] == "unresolved" and sc["sources"][0]["state"] == "unresolved"
+    assert sc["sources"][0]["detail"].startswith("the source is ")
+
+
+def test_missing_outranks_unresolved_outranks_partial_in_the_worst_state() -> None:
+    both = NamedSourceResolution(sources=(
+        ResolvedSource(ref=SourceRef.parse("RDR-049"), status="candidates", detail="two projects"),
+        ResolvedSource(ref=SourceRef.parse("RDR-999"), status="unresolved", detail="not in the catalog"),
+    ))
+    assert _source_state(primary=None, stream=None, recorder=_recorder(["x"]), resolution=both)["state"] == "missing"
 
 
 def test_source_missing_when_nothing_was_read_for_it() -> None:

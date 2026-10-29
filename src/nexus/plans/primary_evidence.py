@@ -269,6 +269,9 @@ class ResolvedSource:
     #: The part of ``detail`` that says an inferred qualifier was set aside because the active project holds
     #: no such number (the result is the unqualified one, another project's document). Every origin prints it.
     fallback: str = ""
+    #: The lookup itself failed, timed out or had no catalog (never "no document carries it"): nothing is known about
+    #: the source. The coverage source check reads it as ``unresolved``, not ``missing`` (nexus-jypmj.3.17). Not on the wire.
+    unverified: bool = False
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -313,7 +316,7 @@ class NamedSourceResolution:
         refs = list(sources)
         kept, dropped = refs[: caps.max_named_sources], refs[caps.max_named_sources:]
         return cls(
-            sources=tuple(_unresolved(r, f"the lookup of {r.value} failed: {reason}") for r in kept),
+            sources=tuple(_unresolved(r, f"the lookup of {r.value} failed: {reason}", unverified=True) for r in kept),
             dropped=tuple(r.value for r in dropped), catalog_calls=0, caps=caps,
         )
 
@@ -326,7 +329,7 @@ class NamedSourceResolution:
         refs = list(sources)
         kept, dropped = refs[: caps.max_named_sources], refs[caps.max_named_sources:]
         return cls(
-            sources=tuple(_unresolved(r, _deadline_detail(f"the lookup of {r.value}", caps)) for r in kept),
+            sources=tuple(_unresolved(r, _deadline_detail(f"the lookup of {r.value}", caps), unverified=True) for r in kept),
             dropped=tuple(r.value for r in dropped), catalog_calls=0, caps=caps,
         )
 
@@ -561,7 +564,7 @@ def _resolve_tumbler(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls
         entry = calls.resolve(ref.value)
     except Exception as exc:  # noqa: BLE001 — reported, never raised
         _log.warning("named_source_resolve_failed", **_source_log_fields(ref, exc))
-        return _unresolved(ref, calls.failed(ref.value, exc))
+        return _unresolved(ref, calls.failed(ref.value, exc), unverified=True)
     if entry is None:
         return _unresolved(ref, f"document {ref.value} is not in the catalog")
     if qualifier is not None:
@@ -935,7 +938,7 @@ def _resolve_rdr(
                 break
     except Exception as exc:  # noqa: BLE001 — reported, never raised
         _log.warning("named_source_find_failed", **_source_log_fields(ref, exc))
-        return _unresolved(ref, calls.failed(ref.value, exc))
+        return _unresolved(ref, calls.failed(ref.value, exc), unverified=True)
 
     scoped = [e for e in found if admitted(e)]
     fallback = ""  # why an inferred qualifier was set aside (the active project holds no such RDR)
@@ -1065,9 +1068,9 @@ def resolve_named_sources(
     out: list[ResolvedSource] = []
     for ref in kept:
         if failure:
-            out.append(_unresolved(ref, failure))
+            out.append(_unresolved(ref, failure, unverified=True))
         elif cat is None:
-            out.append(_unresolved(ref, "the catalog is unavailable, so the source cannot be resolved"))
+            out.append(_unresolved(ref, "the catalog is unavailable, so the source cannot be resolved", unverified=True))
         elif ref.kind == "tumbler":
             out.append(_resolve_tumbler(ref, qualifier, calls))
         else:

@@ -47,6 +47,7 @@ from nexus.plans.primary_evidence import (
     PrimaryEvidence,
     ResolvedSource,
     SelectedChunk,
+    SourceCandidate,
 )
 from nexus.plans.request_coverage import Facet, RequestCoverage, _MAX_FACETS
 from nexus.plans.reserved_stream import ReservedStream
@@ -395,6 +396,66 @@ async def test_scenario_6_mixed_one_facet_blocked_one_unassessed_is_partial_not_
     assert by_id["f1"].state == "unsupported" and by_id["f1"].reason == "source_missing"
     assert by_id["f2"].state == "unassessed", "no facet is defaulted to covered"
     assert result.final == {"text": "the answer"}
+
+
+def _ambiguous(ref: str = "RDR-049") -> NamedSourceResolution:
+    """The G01 shape: the number is carried by two projects, so resolution returns candidates and picks nothing."""
+    def cand(tumbler: str) -> SourceCandidate:
+        return SourceCandidate(
+            tumbler=tumbler, title=ref, file_path=f"docs/rdr/{ref.lower()}.md", owner=tumbler.rsplit(".", 1)[0],
+            content_type="rdr", collection=RDR_COLL)
+
+    return NamedSourceResolution(sources=(ResolvedSource(
+        ref=SourceRef.parse(ref), status="candidates", candidates=(cand("1.1.49"), cand("1.2.49")),
+        detail="two projects carry this number; pass owner or project to choose"),))
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_named_source_does_not_block_the_facet_and_is_disclosed() -> None:
+    """nexus-jypmj.3.17: candidates are an unresolved source, not a missing one. The facet is assessed on the evidence
+    that was read (here the secondary streams) and the answer is generated; the ambiguity stays in coverage.sources."""
+    d = Dispatcher(check=supports_first_item)
+    request = _request(1, hints={"f1": ("RDR-049",)})
+    result = await _run(d, CoverageBoundary(request=request, named_sources=_ambiguous()))
+    cov = _cov(result)
+    assert not cov.skip_generation and cov.state == "complete", (cov.state, cov.reason)
+    assert d.tools.count("generate") == 1 and d.args_of("operator_check"), "the facet went through the assessment"
+    assert [(f.facet_id, f.state) for f in cov.ledger.findings] == [("f1", "covered")]
+    [row] = cov.ledger.sources
+    assert (row.source, row.state) == ("RDR-049", "unresolved") and "candidates" in row.detail
+    wire = cov.to_wire()
+    assert wire["primary_source"] == {"state": "unresolved", "sources": 1}
+    assert wire["sources"][0]["state"] == "unresolved"
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_source_with_no_supporting_evidence_is_repairable_not_source_missing() -> None:
+    d = Dispatcher(check=supports_nothing)
+    request = _request(1, hints={"f1": ("RDR-049",)})
+    cov = _cov(await _run(d, CoverageBoundary(request=request, named_sources=_ambiguous())))
+    [finding] = cov.ledger.findings
+    assert finding.state == "unsupported" and finding.reason != "source_missing"
+    assert cov.repair_facet_ids == ("f1",), "an assessed gap is a repair target; a missing source never is"
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_that_could_not_be_trusted_is_unresolved_and_does_not_block() -> None:
+    sources = NamedSourceResolution.failed([SourceRef.parse("RDR-049")], "TimeoutError")
+    request = _request(1, hints={"f1": ("RDR-049",)})
+    cov = _cov(await _run(Dispatcher(), CoverageBoundary(request=request, named_sources=sources)))
+    assert [(s.source, s.state) for s in cov.ledger.sources] == [("RDR-049", "unresolved")]
+    assert not cov.skip_generation and cov.ledger.findings[0].state == "covered"
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_source_does_not_hide_a_missing_one_beside_it() -> None:
+    sources = NamedSourceResolution(sources=(*_ambiguous().sources, *_unresolved("RDR-084").sources))
+    request = _request(2, hints={"f1": ("RDR-049",), "f2": ("RDR-084",)})
+    cov = _cov(await _run(Dispatcher(), CoverageBoundary(request=request, named_sources=sources)))
+    by_id = {f.facet_id: f for f in cov.ledger.findings}
+    assert by_id["f1"].state == "covered", "the ambiguous source blocks nothing"
+    assert (by_id["f2"].state, by_id["f2"].reason) == ("unsupported", "source_missing")
+    assert cov.primary_source_state["state"] == "missing", "missing outranks unresolved in the one-word state"
 
 
 # ── scenario 7: a returned id outside the input is rejected ─────────────────────────────────────────────────

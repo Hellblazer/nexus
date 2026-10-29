@@ -43,12 +43,13 @@ if str(_BENCH_PARENT) not in _sys.path:
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import statistics
 import time
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,11 @@ from bench.rdr232_oracle import (
 from bench.schema import Query, load_golden_set
 
 COVERAGE_ENV = "NX_ANSWER_COVERAGE"
+#: The variable the active-project tier of source resolution reads (``nexus.plans.active_project.PROJECT_DIR_ENV``),
+#: duplicated so the module imports nothing from ``nexus``.
+PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
+#: The project the golden requests are about: this repository. A live run binds it unless told otherwise.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 ARMS: tuple[str, ...] = ("off", "on")
 ARM_VALUE = {"off": "0", "on": "1"}
 #: The reply classes, duplicated from ``coverage_ledger.REPLY_CLASSES`` so the module imports nothing from ``nexus``.
@@ -127,6 +133,8 @@ class ArmRun:
     #: What ``wall_ms`` is: a measured wall time, or (an envelopes file from before wall times were recorded) the sum
     #: of the plan steps' ``elapsed_ms``, which leaves out extraction and plan matching.
     wall_basis: str = "wall_ms"
+    #: How the call got its project (:func:`project_binding`); empty for a run re-analysed from an envelopes file.
+    binding: dict[str, Any] = field(default_factory=dict)
 
 
 # ── what to call ─────────────────────────────────────────────────────────────────────────────────────────
@@ -157,6 +165,41 @@ def call_shape(q: Query, owners: Mapping[str, str] | None = None) -> tuple[str, 
         owner = (owners or {}).get(project)
         bindings["owner" if owner else "project"] = owner or project
     return q.scope, bindings
+
+
+def project_binding(bindings: Mapping[str, Any], project_dir: Path | None) -> dict[str, Any]:
+    """How a call gets its project (nexus-jypmj.3.17), for the report. A request that names a project (``RDR-084@ART``)
+    carries an explicit ``owner`` or ``project`` binding, the first tier of source resolution, and runs as it is.
+    Every other request runs in *project_dir* (:func:`project_context`), which the active-project tier reads; with no
+    directory it has no project at all, and a number two projects carry stays ambiguous."""
+    if "owner" in bindings:
+        return {"kind": "explicit_owner", "value": str(bindings["owner"]), "project_dir": None}
+    if "project" in bindings:
+        return {"kind": "explicit_project", "value": str(bindings["project"]), "project_dir": None}
+    if project_dir is not None:
+        return {"kind": "active_project_dir", "value": project_dir.name, "project_dir": str(project_dir)}
+    return {"kind": "none", "value": None, "project_dir": None}
+
+
+@contextlib.contextmanager
+def project_context(project_dir: Path | None) -> Iterator[None]:
+    """Run the block as a session of *project_dir*: ``CLAUDE_PROJECT_DIR`` names it and the working directory is it, the
+    two things the active-project tier requires to agree (``nexus.plans.active_project``). Both are put back on exit."""
+    if project_dir is None:
+        yield
+        return
+    home = str(project_dir.resolve())
+    saved_env, saved_cwd = os.environ.get(PROJECT_DIR_ENV), os.getcwd()
+    os.environ[PROJECT_DIR_ENV] = home
+    os.chdir(home)
+    try:
+        yield
+    finally:
+        os.chdir(saved_cwd)
+        if saved_env is None:
+            os.environ.pop(PROJECT_DIR_ENV, None)
+        else:
+            os.environ[PROJECT_DIR_ENV] = saved_env
 
 
 def live_caller(*, no_plan_growth: bool = False) -> Caller:
@@ -225,22 +268,27 @@ def stub_caller(path: Path) -> Caller:
 async def run_arm(
     queries: Sequence[Query], caller: Caller, arm: str, *, owners: Mapping[str, str] | None = None,
     clock: Callable[[], float] = time.monotonic, repeat: int = 1, keep_envelopes: bool = False,
+    project_dir: Path | None = None,
 ) -> list[ArmRun]:
-    """Every query *repeat* times under *arm*, in order. A call that raises is recorded as an error, not hidden."""
+    """Every query *repeat* times under *arm*, in order. A call that raises is recorded as an error, not hidden.
+    A request with no project binding of its own runs in *project_dir* (:func:`project_context`)."""
     runs: list[ArmRun] = []
     for q in queries:
         scope, bindings = call_shape(q, owners)
+        binding = project_binding(bindings, project_dir)
+        home = project_dir if binding["kind"] == "active_project_dir" else None
         for _ in range(max(1, repeat)):
             started = clock()
             try:
-                env = await caller(q, arm=arm, scope=scope, bindings=bindings)
+                with project_context(home):
+                    env = await caller(q, arm=arm, scope=scope, bindings=bindings)
                 err = ""
             except Exception as exc:  # noqa: BLE001 — one failed request must not end the sweep
                 env, err = None, type(exc).__name__
             wall = int((clock() - started) * 1000)
             runs.append(ArmRun(
                 q.qid, arm, wall, facts=envelope_facts(env) if env is not None else {},
-                envelope=env if keep_envelopes else None, error=err,
+                envelope=env if keep_envelopes else None, error=err, binding=binding,
             ))
     return runs
 
@@ -598,6 +646,7 @@ async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[
         queries = [known[qid] for qid in order]
         arms = {a: runs_from_records(records[a], a) for a in ARMS}
         mode, plan_growth = "from_envelopes", "not_recorded"
+        project_meta = {"project_dir": "not_recorded", "project_bindings": "not_recorded"}
     else:
         if not queries:
             return _fail("no requests selected; a measurement of nothing proves nothing")
@@ -610,7 +659,17 @@ async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[
             else:
                 return _fail("pass exactly one of --live (real nx_answer; waits on Sam's go), --stub FILE (a recorded envelope) or --from-envelopes FILE")
         owners = dict(kv.split("=", 1) for kv in args.owner or [])
-        arms = {a: await run_arm(queries, caller, a, owners=owners, clock=clock, repeat=args.repeat, keep_envelopes=True) for a in ARMS}
+        project_dir = args.project_dir
+        if project_dir is None and args.live and not args.no_project_dir:
+            project_dir = REPO_ROOT  # the golden requests are about this repository
+        if project_dir is not None and not project_dir.is_dir():
+            return _fail(f"--project-dir {project_dir} is not a directory")
+        arms = {a: await run_arm(queries, caller, a, owners=owners, clock=clock, repeat=args.repeat, keep_envelopes=True,
+                                 project_dir=project_dir) for a in ARMS}
+        project_meta = {
+            "project_dir": str(project_dir) if project_dir is not None else None,
+            "project_bindings": {r.qid: r.binding for r in arms["on"]},
+        }
         mode = "live" if args.live and not args.stub else "stub"
         plan_growth = "not_applicable_stub" if args.stub else ("disabled" if args.no_plan_growth else "enabled")
     base_queries = [*load_golden_set(GOLDEN_PATH), *load_golden_set(HELDOUT_PATH)]
@@ -631,7 +690,7 @@ async def _run(args: argparse.Namespace, caller: Caller | None, clock: Callable[
         meta={"set": args.set, "requests": len(queries), "repeat": args.repeat, "engine": args.engine, "mode": mode, "plan_growth": plan_growth,
               "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "owners": dict(kv.split("=", 1) for kv in args.owner or []),
               "drafted_labels": str(drafted) if drafted is not None and oracle is not None else None,
-              **({"source_envelopes": str(args.from_envelopes)} if args.from_envelopes else {})},
+              **project_meta, **({"source_envelopes": str(args.from_envelopes)} if args.from_envelopes else {})},
     )
     text = json.dumps(report, indent=2, default=str)
     if args.out:
@@ -663,6 +722,10 @@ def main(
     ap.add_argument("--limit", type=int, help="only the first N selected requests")
     ap.add_argument("--repeat", type=int, default=1, help="calls per request per arm")
     ap.add_argument("--owner", action="append", help="PROJECT=TUMBLER owner binding, e.g. ART=1.2 (repeatable)")
+    ap.add_argument("--project-dir", type=Path, help="run requests that bind no project of their own as a session of this directory "
+                    "(CLAUDE_PROJECT_DIR and the working directory), so the active-project tier can resolve a number two projects carry; "
+                    f"--live defaults to this repository ({REPO_ROOT.name}). Each request's binding is in the report's meta.project_bindings")
+    ap.add_argument("--no-project-dir", action="store_true", help="--live: run without a project (a number two projects carry stays ambiguous)")
     ap.add_argument("--engine", default="", help="the engine version the run is against, recorded in the report")
     ap.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE_PATH, help="oracle label file")
     ap.add_argument("--drafted", type=Path, help=f"drafted oracle labels to merge (default: {DEFAULT_DRAFTED_PATH.name} when it exists)")

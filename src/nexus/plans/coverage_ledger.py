@@ -18,7 +18,9 @@ What the boundary does, in order:
 2. **Deterministic rows first.** ``build_evidence_diagnostics`` supplies the named-source and scope rows.
    A facet whose named source is missing is ``unsupported`` with reason ``source_missing`` BEFORE any
    model call, and the deterministic result outranks ``unassessed`` (RDR section 4, decision d of
-   nexus-jypmj.3.1): it is never sent to the model and survives a failed assessment.
+   nexus-jypmj.3.1): it is never sent to the model and survives a failed assessment. A source that is ambiguous
+   or whose lookup could not run is ``unresolved``, not missing: disclosed in the sources, blocking no facet
+   (nexus-jypmj.3.17).
 3. **Facet assessment.** One ``operator_check`` call per evidence stream (primary, t2, vector, graph,
    other), carrying at most :data:`MAX_FACETS_PER_ASSESSMENT_CALL` facets; more facets split into groups.
    ``check.ok`` is never read as coverage. Coverage comes from the evidence records only: each record's
@@ -307,7 +309,8 @@ class FacetFinding:
 
 @dataclass(frozen=True)
 class SourceRow:
-    """A named source's deterministic row: ``covered``, ``partial`` or ``missing``."""
+    """A named source's deterministic row: ``covered``, ``partial``, ``missing`` (no document carries it, or nothing of
+    it was read) or ``unresolved`` (ambiguous or its lookup could not run: disclosed, and it blocks no facet)."""
 
     source: str
     state: str
@@ -517,9 +520,10 @@ class CoverageResult:
     @property
     def primary_source_state(self) -> dict[str, Any]:
         """The named sources' state in one word: ``not_named`` (none), ``missing`` (any source not found),
-        ``partial`` (any partly read), else ``covered``; with the number of named sources."""
+        ``unresolved`` (any ambiguous or not looked up), ``partial`` (any partly read), else ``covered``; with the
+        number of named sources."""
         states = {s.state for s in self.ledger.sources}
-        state = "not_named" if not states else "missing" if "missing" in states else "partial" if "partial" in states else "covered"
+        state = next((w for w in ("missing", "unresolved", "partial") if w in states), "not_named" if not states else "covered")
         return {"state": state, "sources": len(self.ledger.sources)}
 
     @property
@@ -810,6 +814,9 @@ class CoverageBoundary:
     @staticmethod
     def _blocked(facets: Sequence[Facet], sources: Sequence[SourceRow]) -> dict[str, str]:
         """Facet id -> ``source_missing`` for a facet a missing named source decides.
+
+        Only ``missing`` blocks. An ``unresolved`` source (ambiguous, or its lookup could not run) is not known to be
+        absent, so its facets are assessed on the evidence that was read and the ambiguity is disclosed (nexus-jypmj.3.17).
 
         A facet that names a missing source is decided by it; a facet that names none is decided when every
         named source is missing (nothing it could be grounded in was read). A facet that names a source that

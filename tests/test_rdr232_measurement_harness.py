@@ -437,6 +437,78 @@ def test_call_shape_binds_the_art_request_to_an_owner_when_given_one() -> None:
     assert driver.call_shape(BY_QID["G05-lookup-hybridrag-cap"])[1] == {}, "a paper title names no SourceRef"
 
 
+def test_project_binding_names_how_each_request_gets_its_project(tmp_path: Path) -> None:
+    """nexus-jypmj.3.17: a request that names a project (``@ART``) travels with it as a binding; every other request runs
+    in the project directory, so the active-project tier can resolve a number two projects carry."""
+    _, art = driver.call_shape(G06)
+    assert driver.project_binding(art, tmp_path) == {"kind": "explicit_project", "value": "ART", "project_dir": None}
+    _, art_owner = driver.call_shape(G06, {"ART": "1.2"})
+    assert driver.project_binding(art_owner, tmp_path) == {"kind": "explicit_owner", "value": "1.2", "project_dir": None}
+    _, plain = driver.call_shape(BY_QID["G01-lookup-tumblers"])
+    assert driver.project_binding(plain, tmp_path) == {"kind": "active_project_dir", "value": tmp_path.name, "project_dir": str(tmp_path)}
+    assert driver.project_binding(plain, None) == {"kind": "none", "value": None, "project_dir": None}
+
+
+def test_run_arm_runs_each_call_in_its_project_and_restores_the_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    here = os.getcwd()
+    seen: dict[str, tuple[str | None, str]] = {}
+
+    async def caller(q, *, arm, scope, bindings):  # noqa: ARG001
+        seen[q.qid] = (os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd())
+        return {}
+
+    queries = [BY_QID["G01-lookup-tumblers"], G06]
+    runs = asyncio.run(driver.run_arm(queries, caller, "on", project_dir=tmp_path))
+    home = str(tmp_path.resolve())
+    assert seen["G01-lookup-tumblers"] == (home, home), "the active-project tier needs the variable AND the working directory"
+    assert seen[G06.qid] == (None, here), "a request that binds its own project is not given the directory"
+    assert [(r.qid, r.binding["kind"]) for r in runs] == [("G01-lookup-tumblers", "active_project_dir"), (G06.qid, "explicit_project")]
+    assert os.getcwd() == here and "CLAUDE_PROJECT_DIR" not in os.environ
+
+
+def test_the_report_records_the_binding_of_every_request(tmp_path: Path) -> None:
+    async def caller(q, *, arm, scope, bindings):  # noqa: ARG001
+        return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+    out = tmp_path / "r.json"
+    rc = driver.main(
+        ["--set", "golden", "--qid", "G01-lookup-tumblers", "--qid", G06.qid, "--project-dir", str(tmp_path), "--out", str(out)],
+        caller=caller)
+    assert rc == 0
+    meta = json.loads(out.read_text(encoding="utf-8"))["meta"]
+    assert meta["project_dir"] == str(tmp_path)
+    assert {k: v["kind"] for k, v in meta["project_bindings"].items()} == {"G01-lookup-tumblers": "active_project_dir", G06.qid: "explicit_project"}
+
+
+def test_a_missing_project_dir_is_refused(tmp_path: Path, capsys) -> None:
+    assert driver.main(["--set", "golden", "--stub", str(FIXTURE), "--project-dir", str(tmp_path / "nope")]) == 2
+    assert "--project-dir" in capsys.readouterr().err
+
+
+def test_a_live_run_defaults_to_the_repository_as_its_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The golden requests are about this repository; a live run with no ``--project-dir`` binds it (``--no-project-dir``
+    opts out), so the tier is not silently absent."""
+    seen: list[Path | None] = []
+    real = driver.run_arm
+
+    async def spy(queries, caller, arm, **kw):
+        seen.append(kw.get("project_dir"))
+        return await real(queries, caller, arm, **kw)
+
+    monkeypatch.setattr(driver, "run_arm", spy)
+
+    async def caller(q, *, arm, scope, bindings):  # noqa: ARG001
+        return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+    args = ["--set", "golden", "--qid", "G01-lookup-tumblers", "--live", "--no-oracle", "--out", str(tmp_path / "r.json")]
+    assert driver.main(args, caller=caller) == 0
+    assert seen[0] == driver.REPO_ROOT
+    seen.clear()
+    assert driver.main([*args, "--no-project-dir"], caller=caller) == 0
+    assert seen[0] is None
+
+
 def test_the_catalog_path_resolver_maps_a_tumbler_to_its_file_path() -> None:
     class Entry:
         file_path = "docs/rdr/rdr-049-catalog-tumblers.md"
