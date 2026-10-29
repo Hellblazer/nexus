@@ -3557,6 +3557,15 @@ class PDFExtractor:
                 f"repair or re-export the PDF."
             )
         if not any(m == "pymupdf-text" for m in outcomes.values()):
+            if unreadable:
+                # Some pages raised, the rest are image-only: neither "OCR it" nor "repair it" alone is true.
+                raise UnextractableContentError(
+                    f"every page of {fname} is unextracted, from two causes. PyMuPDF could not read "
+                    f"{len(unreadable)} page(s) (the first error: {unreadable[0]}): repair or re-export "
+                    f"the PDF. The other {total_pages - len(unreadable)} page(s) are image-only, with no "
+                    f"text layer: OCR the PDF first, or index it with `--extractor mineru` (needs the "
+                    f"PDF stack)."
+                )
             raise UnextractableContentError(
                 f"every page of {fname} is unextracted: `--extractor pymupdf` reads only a PDF's own "
                 f"text layer, and none of its {total_pages} page(s) has one. OCR the PDF first, or "
