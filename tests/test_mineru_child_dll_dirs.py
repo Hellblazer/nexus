@@ -347,16 +347,25 @@ def test_the_classifiers_module_name_is_the_spawners() -> None:
 
 _IMAGE = r"C:\gen\Scripts\python.exe"
 _PID = 5150
+_STARTED_AT = "2026-10-29T16:00:00+00:00"
+_STARTED_UNIX = 1793289600.0  # _STARTED_AT as a Unix time
 
 
-def _write_pid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **over: object) -> None:
+def _write_pid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, created: float | None = _STARTED_UNIX - 2.0,
+               **over: object) -> None:
     info = {
         "pid": _PID, "port": 8123, "python": _IMAGE, "executable": r"C:\gen\Scripts\mineru-api.exe",
-        "server_module": "nexus._mineru_api_child",
+        "server_module": "nexus._mineru_api_child", "started_at": _STARTED_AT,
     }
     info.update(over)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "mineru.pid").write_text(json.dumps(info), encoding="utf-8")
+    # the server process was created just before the pid file stamped started_at
+    monkeypatch.setattr(upgrade_finish, "_process_start_unix", lambda pid: created)
+
+
+def test_started_at_constant_is_that_instant() -> None:
+    assert upgrade_finish._recorded_start_unix(_STARTED_AT) == _STARTED_UNIX
 
 
 def test_an_image_only_read_of_the_registered_server_is_a_mineru_server(
@@ -384,6 +393,25 @@ def test_the_image_only_rule_is_as_narrow_as_the_pid_file(tmp_path: Path, monkey
     assert upgrade_finish._classify_pid(_PID, _IMAGE) == "other"
     # no pid file at all
     (tmp_path / "mineru.pid").unlink()
+    assert upgrade_finish._classify_pid(_PID, _IMAGE) == "other"
+
+
+def test_a_reused_pid_running_the_same_interpreter_is_not_the_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale pid file whose pid now belongs to a bare run of the same python.exe (a REPL, an
+    unreadable command line) matches pid, image and module; only the creation time tells it apart."""
+    _write_pid(tmp_path, monkeypatch, created=_STARTED_UNIX + 3600.0)
+    assert upgrade_finish._classify_pid(_PID, _IMAGE) == "other"
+    _write_pid(tmp_path, monkeypatch, created=_STARTED_UNIX - 3600.0)
+    assert upgrade_finish._classify_pid(_PID, _IMAGE) == "other"
+    # an unreadable creation time is no match: never stop a process we cannot tie to the server
+    _write_pid(tmp_path, monkeypatch, created=None)
+    assert upgrade_finish._classify_pid(_PID, _IMAGE) == "other"
+    # a pid file with no started_at (or a bad one) is no match either
+    _write_pid(tmp_path, monkeypatch, started_at=None)
+    assert upgrade_finish._classify_pid(_PID, _IMAGE) == "other"
+    _write_pid(tmp_path, monkeypatch, started_at="not a time")
     assert upgrade_finish._classify_pid(_PID, _IMAGE) == "other"
 
 

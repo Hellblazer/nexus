@@ -541,7 +541,47 @@ def _is_registered_server_image(pid: int, command: str) -> bool:
     if info.get("server_module") != MINERU_SERVER_CHILD_MODULE or not isinstance(python, str) or not python:
         return False
     # normcase folds case and separators on Windows only; the recorded text is the one we launched.
-    return os.path.normcase(os.path.normpath(image)) == os.path.normcase(os.path.normpath(python))
+    if os.path.normcase(os.path.normpath(image)) != os.path.normcase(os.path.normpath(python)):
+        return False
+    # A stale pid file whose pid was reused by a bare run of the same interpreter (a REPL, or a
+    # process whose command line is unreadable) would match everything above; the server was
+    # created moments before the pid file stamped started_at, a reused pid was not. Unreadable
+    # either way means no match: leaving our server running beats stopping someone else's process.
+    started = _recorded_start_unix(info.get("started_at"))
+    created = _process_start_unix(pid)
+    if started is None or created is None:
+        return False
+    return abs(started - created) <= _SERVER_START_TOLERANCE_S
+
+
+#: How far a server's creation time may sit from the pid file's started_at (spawn, then the write).
+_SERVER_START_TOLERANCE_S: float = 60.0
+
+
+def _recorded_start_unix(value: object) -> float | None:
+    """The pid file's ``started_at`` (ISO 8601) as a Unix time, or None when absent or unparsable."""
+    if not isinstance(value, str) or not value:
+        return None
+    from datetime import datetime  # noqa: PLC0415 — only on the image-only path
+
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return None
+
+
+def _process_start_unix(pid: int) -> float | None:
+    """When *pid* was created, as a Unix time, or None when unreadable. Windows only: the
+    image-only command read this guards happens nowhere else."""
+    if sys.platform != "win32":
+        return None
+    try:
+        from nexus._install import winproc_core  # noqa: PLC0415 — Windows-only path, deferred
+
+        age = winproc_core.process_age_seconds(pid, winproc_core.ctypes_win_info_api())
+    except Exception:  # noqa: BLE001 — unreadable is no match, never a crash in a stop path
+        return None
+    return None if age is None else time.time() - age
 
 
 def install_dist_info() -> tuple[float, str, Path]:
