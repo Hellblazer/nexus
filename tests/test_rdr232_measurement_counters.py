@@ -223,13 +223,19 @@ async def test_an_unusable_reply_and_a_raised_call_in_one_run_are_mixed() -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_wholly_skipped_assessment_names_the_skip_as_its_cause() -> None:
+async def test_a_skipped_assessment_is_not_a_failure_cause() -> None:
+    """No call ran, so nothing failed: the cause stays ``none`` (the skip counters and the outcome say why)."""
     d = Dispatcher()
     cov = _cov(await _run(d, CoverageBoundary(request=_request(2)), deadline=time.monotonic() + 3.0))
     block = _summary(cov)["coverage"]
-    assert (block["assessment_outcome"], block["failure_cause"]) == ("skipped_deadline", "deadline_skip")
+    assert (block["assessment_outcome"], block["failure_cause"]) == ("skipped_deadline", "none")
     assert block["skipped_deadline_calls"] >= 1 and block["skipped_budget_calls"] == 0
     assert block["reply_classes"] == _classes() and block["assessment_calls"] == 0
+
+
+def test_a_wholly_skipped_assessment_reads_none_whichever_budget_or_deadline_cut_it() -> None:
+    assert AssessmentReport(outcome="skipped_budget", calls=0, skipped_budget_calls=3).failure_cause == "none"
+    assert AssessmentReport(outcome="skipped_deadline", calls=0, skipped_deadline_calls=3).failure_cause == "none"
 
 
 @pytest.mark.asyncio
@@ -256,6 +262,9 @@ async def test_a_budget_cut_run_whose_one_call_covered_every_facet_still_says_wh
     a = cov.ledger.assessment
     block = _summary(cov)["coverage"]
     assert a.calls == started["n"] and a.skipped_budget_calls >= 1, "a call ran and at least one was cut"
+    # The premise of row 898: the one call that ran covered every facet, so the per-facet counter cannot see the cut.
+    assert block["facets"] == {"covered": 2, "unsupported": 0, "contradicted": 0, "unassessed": 0}
+    assert block["unassessed_by_cause"]["budget_skip"] == 0
     assert block["assessment_outcome"] == "partial_failure"
     assert block["failure_cause"] == "budget_skip"
     assert block["skipped_budget_calls"] == a.skipped_budget_calls and block["skipped_deadline_calls"] == 0

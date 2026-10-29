@@ -41,7 +41,9 @@ What the boundary does, in order:
    **The measurement counters** (nexus-jypmj.3.10): every attempted call is logged as an :class:`AssessmentCall` with
    a reply class (:data:`REPLY_CLASSES`: ``support``, ``neutral_or_contradict``, ``all_rejected``, ``no_records``,
    ``raised``), so the classes can be counted per call and per stream; ``failure_cause`` splits a failed outcome into an
-   unusable reply and a raised call; an unassessed facet carries the reason it is unassessed
+   unusable reply and a raised call (or, when some calls ran and others were skipped unstarted, ``budget_skip`` /
+   ``deadline_skip``, with the per-call ``skipped_budget_calls`` / ``skipped_deadline_calls`` beside it; a wholly
+   skipped assessment stays ``none``); an unassessed facet carries the reason it is unassessed
    (``assessment_unusable``, ``assessment_skipped_deadline`` / ``_budget``, ``assessment_raised``, or
    ``assessment_incomplete`` for an item the cap left unread; ``assessment_stopped_after_failure`` is kept in the
    closed list for older records but no pass emits it since nexus-jypmj.17, which does not stop at a failure), counted in
@@ -460,20 +462,22 @@ class AssessmentReport:
 
     @property
     def failure_cause(self) -> str:
-        """What cut the assessment short, over every round: ``raised_call``, ``unusable_reply``, ``mixed`` (both),
-        else, when calls were skipped unstarted, ``budget_skip`` (the USD allowance was spent; it wins when the
-        deadline cut calls too, the per-call counters carry both) or ``deadline_skip``, else ``none``. A failed
-        call takes precedence over a skip: the skip counts are on the summary beside it."""
+        """What the failed calls were, over every round: ``raised_call``, ``unusable_reply``, ``mixed`` (both).
+        Else, when at least one call ran and other planned calls never started, ``budget_skip`` (the USD allowance
+        was spent; it wins when the deadline cut calls too, the per-call counters carry both) or ``deadline_skip``;
+        else ``none``. A failed call takes precedence over a skip. An assessment that was skipped whole (no call
+        ran) is not a failure and reads ``none``, as it always did; its outcome and the skip counters say why."""
         if self.raised_calls and self.unusable_calls:
             return "mixed"
         if self.raised_calls:
             return "raised_call"
         if self.unusable_calls:
             return "unusable_reply"
-        if self.skipped_budget_calls:
-            return "budget_skip"
-        if self.skipped_deadline_calls:
-            return "deadline_skip"
+        if self.calls:
+            if self.skipped_budget_calls:
+                return "budget_skip"
+            if self.skipped_deadline_calls:
+                return "deadline_skip"
         return "none"
 
     def to_wire(self) -> dict[str, Any]:

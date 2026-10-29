@@ -19,11 +19,14 @@ whose source the run never had is ``None``. A summary that had to be cut to fit 
 **Measurement counters (nexus-jypmj.3.10), additive to version 1.** ``coverage`` gains ``reply_classes``,
 ``reply_by_stream``, ``assessment_call_log`` (``[stream, facets, reply_class]`` per call, at most 40, and
 ``assessment_call_log_truncated``), ``accepted_records``, ``unusable_calls``, ``raised_calls``, ``failure_cause``
-(``raised_call``, ``unusable_reply``, ``mixed``, ``budget_skip``, ``deadline_skip`` or ``none``; the two skip values
-are shakedown 7.89.0 umbrella class c, with ``skipped_budget_calls`` and ``skipped_deadline_calls``, per planned
-call that never started), ``facets_conflicted`` (the conflicted subset of
-``facets.covered``), ``unassessed_by_cause`` and ``repair_entered``; ``repair`` gains ``entered``. No existing key
-changed meaning, so the version stays 1. The engine stores ``run_summary`` as opaque JSONB and checks only that it is an
+(``raised_call``, ``unusable_reply``, ``mixed``, ``budget_skip``, ``deadline_skip`` or ``none``), ``facets_conflicted`` (the conflicted subset of
+``facets.covered``), ``unassessed_by_cause`` and ``repair_entered``; ``repair`` gains ``entered``.
+**Skip causes (shakedown 7.89.0 umbrella class c).** ``coverage`` also gains ``skipped_budget_calls`` and
+``skipped_deadline_calls``, per planned call that never started (``unassessed_by_cause`` is per facet and reads 0 when
+the one call that ran covered every facet). ``failure_cause`` gains the values ``budget_skip`` and ``deadline_skip``,
+used only when at least one call ran and other planned calls were skipped, so a run of that shape that used to read
+``none`` now names its cause. An assessment skipped whole (no call ran) still reads ``none``. The key set only grows and
+no existing value is redefined, so the version stays 1. The engine stores ``run_summary`` as opaque JSONB and checks only that it is an
 object, holds no U+0000 and fits the size cap (``TelemetryHandler.parseRunSummary``), so no engine change is needed.
 The cut ladder drops ``coverage.assessment_call_log`` before ``eligibility`` and ``request``; the aggregates survive
 until ``coverage`` itself goes. All of it is closed names and counts: no question, facet or evidence text, with or
