@@ -94,11 +94,11 @@ worker on another host drains.
 
 #### Gap 4: The tuple queue template cannot carry the aspect queue today
 
-The template has none of the following, and the aspect queue needs each one
-(Findings F7 to F12):
+The template lacks the following, or has them only on a condition, and the
+aspect queue needs each one (Findings F7 to F12):
 
 - delayed visibility for the RDR-163 backoff ladder;
-- a body large enough for the MCP path, which puts whole documents in the row;
+- a body that stays under 4,096 bytes only if documents are not put in it (E2);
 - capacity and retention for a bulk index (`max_live_rows` 10,000, retention
   48 h);
 - re-enqueue that resets a finished or failed task;
@@ -589,6 +589,127 @@ the engine's budget for such calls.
   keeps `queue.yaml`'s figure, so the doctor depth row has one scale.
   *Source: T2 nexus/rdr235-prerequisites (CSV paths); src/nexus/indexer.py `_fire_flush_grain_hooks`; src/nexus/db/t2/http_aspect_queue.py `enqueue_many`; src/nexus/db/http_vector_client.py per-collection chunk cap; src/nexus/aspect_worker.py `_DEFAULT_BATCH_SIZE`*
 
+What the Phase 1 client half decided and found while building it is recorded
+in F30 to F38 (beads nexus-5r2sc.3.1 to 3.7, review gate in T2
+`nexus_rdr/235-phase1-client-half-critique-2026-10-29` and its `-r2`, cross-walk
+in T2 `nexus/rdr235-client-review-gate-crosswalk-2026-10-29`). They are
+outcomes, not changes to the design above; the places where the design text
+itself changed are listed in the Revision History.
+
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.6) — F30, the sixth
+  engine surface. The migration rung reads the old table through a read-only
+  route, `GET /v1/aspects/queue/list_waiting` (engine-service-v0.1.170), which
+  returns the `pending` and `in_progress` rows first in, first out, each with
+  `collection`, `source_path`, `content_hash`, `doc_id`, `retry_count`, `status`
+  and `delay_s` (computed on the database clock, 0 for a null or past
+  `next_retry_at`), and no `content`. The rung does not use `reclaim_stale`
+  for this, because `reclaim_stale` flips `in_progress` rows back to `pending`,
+  and a row a live worker holds would be flipped under it. The route flips
+  nothing. The tuple template needs engine-service-v0.1.169; the route rides
+  v0.1.170, and a client that gets 404 from it treats the rung as not
+  applicable, so `develop` stays releasable on a v0.1.169 engine.
+  *Source: nexus-5r2sc.3.6; AspectRepository `listWaiting`; src/nexus/upgrade_ladder/rungs/aspect_queue_tuples.py*
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.6) — F31, what the
+  rung deletes and what it leaves. After each `out` the rung deletes the table
+  row by `(collection, source_path)`, not by `doc_id`: the engine's `markDone`
+  by `doc_id` deletes every row that shares the `doc_id`, a `failed` sibling
+  included, and `failed` rows must stay (Migration). A table row with an empty
+  `doc_id` is not moved, because the task id is the `doc_id` and `out` refuses
+  a blank nonce; it stays in the table, the rung logs one warning with the
+  count, and it does not block the rung from reporting converged. The delay is
+  clamped to whole seconds from 0 up to the template's `retention_seconds`
+  (7,776,000), so one negative, fractional or oversized `next_retry_at` cannot
+  answer 400 and stop the rung.
+  *Source: nexus-5r2sc.3.6; src/nexus/upgrade_ladder/rungs/aspect_queue_tuples.py `clamp_delay`*
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.2) — F32, the
+  producer. `enqueue_many` is a bounded fan-out of eight concurrent `out`
+  `replace` calls, not a batch `out` (the Performance Expectations figures). A
+  malformed row, or one whose body is over 4,096 bytes, is skipped with a
+  warning that names its `doc_id`, and its batch-mates still land.
+  `MaxLiveRowsExceeded`, a retired collection name, a missing template or a
+  transport error stops the batch: tasks already written stay (a `replace`
+  repeat lands on the same ids), the rest are not sent, one
+  `aspect_enqueue_many_aborted` is logged with the counts and the error class,
+  and the typed error is raised; the table is never used as a fallback. The
+  producer refuses a retired collection name before any `out` (O4), as fresh as
+  the registration cache, so a name retired inside that window can still get
+  one `out`; the worker's 409 path covers it. `NX_ASPECT_QUEUE` is read on each
+  call, and an unknown value means `table` with one log line per process,
+  because the enqueue hook swallows errors and a typo that failed loud would
+  silently stop extraction.
+  *Source: nexus-5r2sc.3.2; src/nexus/db/t2/http_aspect_queue.py `_enqueue_many_tuples`, `aspect_queue_mode`*
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.3) — F33, the 409
+  bound. A worker whose write is refused 409 (the collection name was retired)
+  releases the claim once, with no attempt counted. A second 409 for the same
+  task id in the same process is `nack` dead, logged as
+  `aspect_worker_superseded_repeat_dead`. The memory is per process: it holds
+  1,024 task ids, forgets a task on success and does not survive a restart.
+  That is narrow because the producer already refuses a retired name (F32), so
+  a 409 needs a rename that lands between the producer's check and the write.
+  *Source: nexus-5r2sc.3.3; src/nexus/aspect_worker_tuples.py; T2 nexus/rdr235-3.3-worker-decisions*
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.3) — F34, the
+  renewer deadline. The renewer works to `worst_case_extract_seconds(n)` plus
+  120 s. The function takes the worst split of `n` documents: `n` one-document
+  sub-batches, each three attempts of 180 s plus jittered sleeps, which is
+  548.75 s per document and 2,743.75 s for five, with 120 s on top (2,863.75
+  s for five). The 120 s margin covers the T3 reads, the manifest lookup and
+  the persist, which are outside the extractor's own timeouts, and it is
+  chosen, not measured. The first draft's "about 1,270 s" was one sub-batch of
+  five; the split into sub-batches is made inside the extractor, by document
+  size the worker does not hold yet, so the bound must hold for any split. The
+  single-call timeout is one named constant, and a source scan pins that no
+  `timeout=180` literal is left in the extractor module, so the deadline
+  cannot drift from the real timeout.
+  *Source: nexus-5r2sc.3.3; src/nexus/aspect_extractor.py `worst_case_extract_seconds`, `_SINGLE_CALL_TIMEOUT_S`; src/nexus/aspect_worker_tuples.py `RENEW_DEADLINE_MARGIN_S`*
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.3) — F35, scenario
+  14's worker half. The producer half asserts the identity body in full: the
+  four keys, under 4,096 bytes, no document text. The worker half asserts field
+  presence only: the body has the four identity keys, the content is empty, and
+  the catalog has one manifest row per position. The text the model sees is
+  produced by the empty-content path that already existed, and A2 (F28)
+  measured how that reassembly differs from the original, so this scenario
+  does not repeat it.
+  *Source: nexus-5r2sc.3.3; tests/test_aspect_worker_tuples.py*
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.4) — F36,
+  `nx aspects requeue-failed` in tuples mode. The verb re-enqueues each failed
+  table row as a task through `out` `replace`, and then deletes the table row
+  it re-enqueued, by `(collection, source_path)`. The first implementation
+  left the row, which kept `nx doctor --check-aspect-queue` at exit 1, listed
+  and re-extracted the same document on every run, and meant the table could
+  never retire; the review gate found it, and Test Plan scenario 23's tail
+  (a failed row, with the flag at `tuples`) now has a real-engine test. A failed
+  row with a blank `doc_id` is reported and skipped, and does not stop the
+  rest. Under `--dry-run` nothing is written.
+  *Source: nexus-5r2sc.3.4; T2 nexus_rdr/235-phase1-client-half-critique-2026-10-29 (Critical 2) and `-r2`; src/nexus/commands/aspects.py*
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.3; open as
+  nexus-1o3ft) — F37, the foreign key's creation-side guard. On the table,
+  `doc_id` is a real foreign key, so a row for a document whose catalog row had
+  not landed was refused at enqueue. On tuples nothing checks it. The wake is
+  about 11 ms (scenario 24), so an ordering in which the enqueue hook fires
+  before the catalog row commits is possible. The worker's claim-time check
+  (`aspect_task_dropped_missing_doc`) cannot tell a document not yet visible
+  from one that was deleted, and acks the task as dropped with an info log. The
+  fix is not made: a first "gone" answer might be retried on a short `nack`
+  before the drop, or the producer might verify the `doc_id`. nexus-1o3ft
+  decides, before the default flip.
+  *Source: nexus-5r2sc.3.3; nexus-1o3ft; src/nexus/aspect_worker.py `_document_gone`*
+- **✅ Verified** (implementation, 2026-10-29, nexus-5r2sc.3.7) — F38, what the
+  Minimum Viable Validation journey approximates. The seven bullets pass on the
+  engine's own clock (`claimed_at`, `lease_until`), and an eighth, that no body
+  holds document text, is asserted. The journey registers documents and calls
+  `enqueue_many`; it does not index them, so the index, enqueue hook, flush hook
+  and task seam is exercised on success only by the producer tests, and on
+  refusal by the indexer tripwire. The extractor is faked, so a task with empty
+  content reading real chunks through the manifest never runs in a client test.
+  The workers run a batch of one, so the batch-of-five path with a mixed result
+  is covered against a fake tuple store only. Bullet 4 counts every worker
+  started after the first. Scenario 25 enqueues 1,200 tasks for documents not in
+  the catalog, which are acked as dropped, so it proves capacity, retention and
+  drain, not extraction; the 10,000 cap is not made to bite. nexus-fx9k2 holds
+  the three seams, and it is where the six-CI-shard run will be recorded
+  after the push.
+  *Source: nexus-5r2sc.3.7; nexus-fx9k2; tests/test_rdr235_mvv_aspect_queue_tuples.py*
+
 ### Critical Assumptions
 
 - [x] **A1**: Adding a nullable `available_at` column and one claim-predicate arm
@@ -1074,7 +1195,9 @@ client release.
 - An upgrade-ladder rung moves rows one at a time: `out` first, then delete the
   table row, so a crash leaves a row in both places and never in neither. A
   repeat is harmless because the id is the `doc_id` and `replace` takes a
-  repeat. `pending` rows move with `next_retry_at` as the `out` delay (E1).
+  repeat. `pending` rows move with `next_retry_at` as the `out` delay (E1). A
+  migrated row restarts at attempts 0, because `out` has no parameter that sets
+  attempts: a row on its fourth retry gets the full `max_attempts` of 6 again.
   `in_progress` rows move as `pending`: their claim is a table status with no
   tuple claim behind it, so a live old-version worker that finishes one later
   deletes nothing (`markDone` deletes by `doc_id`) and upserts the aspect
@@ -1180,9 +1303,11 @@ RDR's Gap list carries over unchanged.
 **Description**: Use the existing `queue/` template with no engine change.
 
 **Reason for rejection**: It loses work. It has no backoff, so a retryable
-failure would retry at once and burn its 3 attempts. The 4,096-byte body
-cannot hold MCP documents, the 10,000-row cap refuses a bulk index, and the
-48 h retention expires an undrained backlog (F10, F11).
+failure would retry at once and burn its 3 attempts. The 10,000-row cap
+refuses a bulk index, and the 48 h retention expires an undrained backlog (F10,
+F11). The first draft gave a fourth reason, that the 4,096-byte body cannot hold
+MCP documents. That is the shape before E2: with an identity body the row fits
+under the cap, so it is no longer a reason.
 
 ### Alternative 3: Move the pipeline's ownership onto `lock/`
 
@@ -1471,6 +1596,21 @@ No speculative targets. The comparison that matters is wake latency: up to
 300 s today (F6) against about 1 s (F12a). The claim-scan cost under a backlog
 is measured in the A1 spike.
 
+The producer's time per N documents was measured on the client half
+(nexus-5r2sc.3.2). `enqueue_many` is a bounded fan-out of eight concurrent
+`out` `replace` calls over the store's shared keep-alive pool, not a batch `out`:
+on a loopback engine it takes 0.49 to 0.76 ms per document at N of 16, 64, 250
+and 1,000 (250 documents in 123 ms, 1,000 in 676 ms), against 1.23 ms per
+document for today's batched insert (F29). One worker costs 1.9 to 4.3 ms per
+document, and sixteen are slower than eight. Loopback understates the cost where
+it matters. The motivating case is a remote link, where one single insert costs
+a round trip (the `enqueue_many` docstring's 34.7 s per 250 documents is about
+139 ms each), and with eight in flight the cost per document is about that round
+trip divided by eight, or about 17 ms and 4.3 s per 250 documents on that link.
+That figure is derived from the docstring number, not run. A batch that meets
+`MaxLiveRowsExceeded` stops, keeps the tasks already written, logs
+`aspect_enqueue_many_aborted` and raises (F32).
+
 ## Finalization Gate
 
 ### Contradiction Check
@@ -1577,3 +1717,4 @@ so the question is not reopened without new evidence.
 - 2026-10-27: A4b settled by the busy-hour park-slot reading (nexus-5r2sc.1.2): F27 added, A4 (b) marked verified, no park-cap change before activation.
 - 2026-10-27: A2 settled by the two-way extraction sample (nexus-5r2sc.1.4): F28 added, A2 marked verified, the identity-only body stands.
 - 2026-10-27: the bulk backlog measured (nexus-5r2sc.1.3): F29 added; max_live_rows 10,000 proposed on the E3 bead. All four prerequisites settled.
+- 2026-10-29: Phase 1 client half built and gated (beads nexus-5r2sc.3.1 to 3.7, review gate nexus-5r2sc.3.10); text corrections and outcome records by nexus-5r2sc.3.8. Gap 4 and Alternative 2 no longer give the 4,096-byte body as a reason, because E2 removed it (gate S5). Performance Expectations records the producer's time per document (gate S2). Migration records that a migrated row restarts at attempts 0 (gate O3). F30 to F38 record the sixth engine surface `list_waiting`, the rung's delete key, the producer and 409 outcomes, the renewer deadline, scenario 14's worker half, `requeue-failed` in tuples mode, the foreign key's missing creation-side guard and the Minimum Viable Validation's approximations. No decision text changed in this entry.

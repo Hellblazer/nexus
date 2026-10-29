@@ -410,6 +410,7 @@ nexus-1mp5y
 nexus-1n0t
 nexus-1nfsd
 nexus-1nrcu
+nexus-1o3ft
 nexus-1obui
 nexus-1odsl
 nexus-1odsl.1
@@ -3754,6 +3755,7 @@ nexus-fx2d
 nexus-fx2d.1
 nexus-fx5oe
 nexus-fx77g
+nexus-fx9k2
 nexus-fxlov
 nexus-fxmb1
 nexus-fylxo
