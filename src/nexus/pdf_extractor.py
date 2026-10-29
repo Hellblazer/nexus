@@ -92,6 +92,9 @@ def _mineru_do_parse():  # noqa: ANN202 — mineru's callable type is not import
 # substituted into the worker script template below.
 _MINERU_OOM_EXIT = 42
 
+#: How long a restart waits for the replacement server's /health (models are cached by the OS).
+_RESTART_HEALTH_WAIT_S = 60.0
+
 #: nexus-5ny9r: how long a "no live MinerU server" verdict is trusted before
 #: the next page re-probes the endpoint (one cheap /health, no autostart).
 _MINERU_SERVER_RECHECK_S = 60.0
@@ -102,16 +105,27 @@ _MINERU_SERVER_RECHECK_S = 60.0
 _MINERU_DEFAULT_SLOTS = 3
 
 
-def _mineru_server_slots() -> int:
-    """How many requests the MinerU server parses at once, read the way MinerU reads it.
+#: RDR-237: how long the slot count's ``/health`` read waits. The server answers it from its event
+#: loop even with every slot held, so a longer wait only delays a restart that is already due.
+_MINERU_HEALTH_SLOTS_TIMEOUT_S = 2.0
 
-    MinerU (``cli/fast_api.py``) pins the server to ONE slot on macOS whatever the environment
-    says, and elsewhere takes ``MINERU_API_MAX_CONCURRENT_REQUESTS`` when it is a positive
-    integer, else 3. The server inherits the environment of the process that spawned it, which
-    is this one when nexus started it. An abandoned parse holds its slot until it finishes (the
-    parse runs in a thread nothing can cancel), which is what makes the count decide when a
-    server that timed out is replaced (RDR-237).
+
+def _mineru_server_slots(url: str | None = None) -> int:
+    """How many requests the MinerU server parses at once.
+
+    With *url*, the server's own answer wins: ``/health`` reports ``max_concurrent_requests``
+    (MinerU 3.1.11 ``fast_api.py``), and that also covers a server this process did not start (``nx
+    mineru start``, launchd) whose environment is not ours. When the server does not say (it is
+    unreachable, answered with an error, or sent no positive integer), and with no *url*, the count
+    is read the way MinerU reads it: ONE slot on macOS whatever the environment says, else
+    ``MINERU_API_MAX_CONCURRENT_REQUESTS`` when it is a positive integer, else 3. An abandoned
+    parse holds its slot until it finishes (the parse runs in a thread nothing can cancel), which is
+    what makes the count decide when a server that timed out is replaced (RDR-237).
     """
+    if url:
+        live = _live_server_slots(url)
+        if live is not None:
+            return live
     if sys.platform == "darwin":
         return 1
     raw = os.environ.get("MINERU_API_MAX_CONCURRENT_REQUESTS")
@@ -123,6 +137,21 @@ def _mineru_server_slots() -> int:
         if slots > 0:
             return slots
     return _MINERU_DEFAULT_SLOTS
+
+
+def _live_server_slots(url: str) -> int | None:
+    """The positive integer the server at *url* reports as ``max_concurrent_requests``, else None."""
+    try:
+        resp = httpx.get(f"{url.rstrip('/')}/health", timeout=_MINERU_HEALTH_SLOTS_TIMEOUT_S)
+        if resp.status_code != 200:
+            return None
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 — a failed probe is no evidence; the caller keeps its estimate
+        return None
+    slots = payload.get("max_concurrent_requests") if isinstance(payload, dict) else None
+    if isinstance(slots, int) and not isinstance(slots, bool) and slots > 0:
+        return slots
+    return None
 
 
 #: nexus-11x9o: how much of the per-batch worker's stderr (its last bytes) rides
@@ -1710,6 +1739,10 @@ class PDFExtractor:
         # Why the last _restart_broken_mineru_server call replaced nothing (nexus-tr1rj.25); ""
         # when it replaced the server or has not run.
         self._restart_skipped: str = ""
+        # The pid of the server ANOTHER process had already started when the last restart took the
+        # election (a concurrent trigger; this process stopped and spawned nothing); None otherwise
+        # (nexus-tr1rj.26).
+        self._restart_taken_over_by: int | None = None
         # The line a restart prints once it is decided (nexus-tr1rj.25); set only around the
         # timed-out-server restart, which knows the pages. None: nothing is announced.
         self._restart_announce: Callable[[], None] | None = None
@@ -2777,8 +2810,10 @@ class PDFExtractor:
                     _pid_file_path().unlink(missing_ok=True)
                     info = None
                 if info is not None and is_process_alive(info["pid"]):
-                    # A concurrent trigger already restarted — probe it below.
+                    # A concurrent trigger already restarted — probe it below. The caller's
+                    # progress line says another process did it (nexus-tr1rj.26).
                     port = info["port"]
+                    self._restart_taken_over_by = info["pid"]
                 else:
                     if info is not None:
                         _pid_file_path().unlink(missing_ok=True)
@@ -2795,7 +2830,7 @@ class PDFExtractor:
 
         # Poll health for up to 60s (models already cached in memory by OS)
         url = f"http://127.0.0.1:{port}/health"
-        deadline = _time.monotonic() + 60
+        deadline = _time.monotonic() + _RESTART_HEALTH_WAIT_S
         # RDR-237: this wait is an attempt that writes no page. It opens with a heartbeat and
         # ticks again every 60 s (a wait this long ticks once; the interval is the lifecycle's).
         from nexus.daemon.mineru_lifecycle import HEARTBEAT_EVERY_S  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
@@ -2858,7 +2893,7 @@ class PDFExtractor:
         does (the first abandoned parse finishes on its own and delays nothing). Rung 2 requests
         are not counted. *exc* is the ``httpx`` timeout, for the log.
         """
-        from nexus.config import get_mineru_page_timeout_s  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.config import get_mineru_page_timeout_s, get_mineru_server_url  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         pages = self._mineru_attempt_pages(start, end)
         budget_s = get_mineru_page_timeout_s() * pages
@@ -2869,14 +2904,16 @@ class PDFExtractor:
         )
         if rung_one:
             self._server_timeout_pages.append(label)
-            if len(self._server_timeout_pages) >= (1 if _mineru_server_slots() <= 1 else 2):
-                self._restart_timed_out_server()
+            # The slot count is the live server's own (its /health), else the platform estimate.
+            slots = _mineru_server_slots(get_mineru_server_url())
+            if len(self._server_timeout_pages) >= (1 if slots <= 1 else 2):
+                self._restart_timed_out_server(slots=slots)
         return MineruServerTimeout(
             f"MinerU server did not answer within {budget_s}s (pages {start}–{end}, path={pdf_path})",
             timed_out=True,
         )
 
-    def _restart_timed_out_server(self) -> None:
+    def _restart_timed_out_server(self, *, slots: int | None = None) -> None:
         """Replace the registered server whose rung-1 requests timed out, or mark it down.
 
         Only through :meth:`_restart_broken_mineru_server`, so the machine-wide cooldown and the
@@ -2899,7 +2936,7 @@ class PDFExtractor:
                 and spawn_policy_allows(url):
             _log.warning(
                 "mineru_server_timeout_restart", pages=timed_out, old_pid=info.get("pid"),
-                slots=_mineru_server_slots(),
+                slots=slots if slots is not None else _mineru_server_slots(),
             )
             self._restart_skipped = ""
             # "replacing it" is printed from inside the restart, once it is decided (after the
@@ -2914,16 +2951,27 @@ class PDFExtractor:
                 restarted = self._restart_broken_mineru_server(info)
             finally:
                 self._restart_announce = None
+            taken_over_by = self._restart_taken_over_by
             if restarted:
-                _progress(
-                    f"  MinerU server timed out on page(s) {pages} — replaced it "
-                    f"(old pid {info.get('pid')})."
+                # nexus-tr1rj.26: the pid file named a different live server once the election was
+                # held, so another process had already replaced this one; this process spawned nothing.
+                who = (
+                    f"another process already replaced it (old pid {info.get('pid')}, now pid {taken_over_by})"
+                    if taken_over_by is not None else f"replaced it (old pid {info.get('pid')})"
                 )
+                _progress(f"  MinerU server timed out on page(s) {pages} — {who}.")
                 return
-            _progress(
-                f"  MinerU server timed out on page(s) {', '.join(timed_out)} — "
-                f"{_restart_skip_text(self._restart_skipped, info.get('pid'))}"
-            )
+            if taken_over_by is not None:
+                _progress(
+                    f"  MinerU server timed out on page(s) {pages} — another process replaced it "
+                    f"(now pid {taken_over_by}) and that server did not come up; later pages run in a "
+                    "subprocess for now."
+                )
+            else:
+                _progress(
+                    f"  MinerU server timed out on page(s) {', '.join(timed_out)} — "
+                    f"{_restart_skip_text(self._restart_skipped, info.get('pid'))}"
+                )
         else:
             _log.warning(
                 "mineru_server_timeout_not_restartable", pages=timed_out, url=url,
@@ -3054,6 +3102,7 @@ class PDFExtractor:
         from nexus._mineru_health import claim_broken_restart  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
         self._restart_skipped = ""
+        self._restart_taken_over_by = None
         if info is None or not isinstance(info.get("pid"), int):
             self._restart_skipped = "no-pid"
             return False

@@ -122,8 +122,8 @@ def test_a_fenced_flush_inside_the_heartbeat_reaches_the_caller(monkeypatch) -> 
 
 
 def test_the_batch_path_passes_no_heartbeat() -> None:
-    """``index_pdf``'s all-in-memory path has no pipeline row to stamp (the bead decided; the RDR's
-    Progress section says "the same", which the bead overrides)."""
+    """``index_pdf``'s all-in-memory path has no pipeline row to stamp (the RDR's Progress and
+    Step 2 text say so since the 2026-10-27 amendment)."""
     tree = ast.parse(inspect.getsource(doc_indexer))
     calls = [
         n for n in ast.walk(tree)

@@ -3079,7 +3079,7 @@ def _hold_pdfs_without_stack(
                 _log.error(
                     "pdf_not_indexed_mineru_bounds", path=str(path), repo=str(repo), problem=_bounds_problem,
                 )
-            pdf_stack.record_skipped([*already_held, *_needing], repo=repo)
+            pdf_stack.record_skipped([*already_held, *_needing], repo=repo, cause=pdf_stack.SKIP_CAUSE_BOUNDS)
             if on_phase is not None and not already_held:
                 on_phase(
                     f"{len(_needing)} PDF(s) NOT indexed this run (code and prose proceed): {_bounds_problem}"

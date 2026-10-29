@@ -11,6 +11,7 @@ rule, the doctor row and the real CLI under a hidden stack have their own files.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -466,6 +467,31 @@ def test_skipped_record_round_trips_and_counts_per_repo(tmp_path) -> None:
     pdf_stack.record_skipped([], repo=repo_b)
     assert pdf_stack.skipped_count() == 0
     assert not (tmp_path / "cfg" / "pdf-stack-skipped.json").exists()
+
+
+def test_skipped_record_keeps_the_cause_per_repo(tmp_path) -> None:
+    """nexus-tr1rj.26: a hold records why. Two repos held for different reasons count apart; the
+    total is unchanged; a record written before the cause existed is a stack hold."""
+    repo_a, repo_b = tmp_path / "a", tmp_path / "b"
+    pdf_stack.record_skipped([repo_a / "x.pdf", repo_a / "y.pdf"], repo=repo_a)
+    pdf_stack.record_skipped([repo_b / "z.pdf"], repo=repo_b, cause=pdf_stack.SKIP_CAUSE_BOUNDS)
+    assert pdf_stack.skipped_count() == 3
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 2, "the default cause is the stack"
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 1
+
+    record = tmp_path / "cfg" / "pdf-stack-skipped.json"
+    data = json.loads(record.read_text(encoding="utf-8"))
+    del data[str(repo_a)]["cause"]  # as written by a release before the cause existed
+    record.write_text(json.dumps(data), encoding="utf-8")
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 2
+
+
+def test_a_later_run_replaces_the_cause_with_its_own(tmp_path) -> None:
+    repo = tmp_path / "a"
+    pdf_stack.record_skipped([repo / "x.pdf"], repo=repo, cause=pdf_stack.SKIP_CAUSE_BOUNDS)
+    pdf_stack.record_skipped([repo / "x.pdf"], repo=repo)
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 0
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 1
 
 
 def _mcpb_bundle(root: Path) -> Path:

@@ -990,9 +990,17 @@ def _skipped_path() -> Path:
     return _config.nexus_config_dir() / _SKIPPED_RECORD
 
 
-def record_skipped(paths: list[Path], *, repo: Path | None = None) -> None:
+#: Why a run held PDFs (nexus-tr1rj.26): the PDF stack is missing and could not be installed, or an
+#: unusable MinerU time limit (``pdf.mineru_page_timeout_s`` x ``pdf.mineru_page_batch``). The doctor
+#: says which; a record written before the cause existed is a stack hold.
+SKIP_CAUSE_STACK = "stack"
+SKIP_CAUSE_BOUNDS = "mineru_bounds"
+
+
+def record_skipped(paths: list[Path], *, repo: Path | None = None, cause: str = SKIP_CAUSE_STACK) -> None:
     """Write the PDFs a refusing ``nx index repo`` run did not index, so
-    ``nx doctor`` can count them. Replaces the previous record for *repo*."""
+    ``nx doctor`` can count them. Replaces the previous record for *repo*, cause included
+    (*cause* is :data:`SKIP_CAUSE_STACK` or :data:`SKIP_CAUSE_BOUNDS`)."""
     path = _skipped_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1002,7 +1010,9 @@ def record_skipped(paths: list[Path], *, repo: Path | None = None) -> None:
         data = {}
     key = str(repo) if repo is not None else ""
     if paths:
-        data[key] = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "paths": sorted(str(p) for p in paths)}
+        data[key] = {
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "paths": sorted(str(p) for p in paths), "cause": cause,
+        }
     else:
         data.pop(key, None)
     try:
@@ -1015,15 +1025,19 @@ def record_skipped(paths: list[Path], *, repo: Path | None = None) -> None:
         _log.warning("pdf_stack_skipped_record_unwritable", error=str(exc))
 
 
-def skipped_count() -> int:
-    """How many PDFs refusing runs left un-indexed (0 when none, or unreadable)."""
+def skipped_count(cause: str | None = None) -> int:
+    """How many PDFs refusing runs left un-indexed (0 when none, or unreadable); with *cause*,
+    only those held for it (a record that names none is a stack hold)."""
     try:
         data = json.loads(_skipped_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return 0
     if not isinstance(data, dict):
         return 0
-    return sum(len(v.get("paths", [])) for v in data.values() if isinstance(v, dict))
+    return sum(
+        len(v.get("paths", [])) for v in data.values()
+        if isinstance(v, dict) and (cause is None or v.get("cause", SKIP_CAUSE_STACK) == cause)
+    )
 
 
 # ── the upgrade rule: an existing install carries the stack forward ──────────

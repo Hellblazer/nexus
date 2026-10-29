@@ -163,6 +163,8 @@ def test_run_index_under_refuse_holds_the_pdf_and_still_indexes_code(repo, monke
     assert run.housekeeping_keep == [repo / "paper.pdf"], "orphan housekeeping must still see the held PDF as present"
     assert any("NOT indexed" in p and pdf_stack.INSTALL_COMMAND in p for p in phases)
     assert pdf_stack.skipped_count() == 1
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 1
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 0
 
 
 def test_run_index_with_the_stack_present_indexes_the_pdf_and_holds_nothing(repo, monkeypatch) -> None:
@@ -585,6 +587,9 @@ def test_run_index_over_a_bad_mineru_limit_holds_the_pdf_and_still_indexes_code(
     assert run.housekeeping_keep == [repo / "paper.pdf"], "orphan housekeeping still sees the held PDF as present"
     assert any(_BOUNDS in p and "NOT indexed" in p for p in phases), phases
     assert pdf_stack.skipped_count() == 1
+    # nexus-tr1rj.26: the record carries WHY it holds the PDF, so nx doctor does not blame the stack.
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 1
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_STACK) == 0
 
 
 def test_run_index_with_usable_limits_holds_nothing_and_indexes_the_pdf(repo, monkeypatch) -> None:
