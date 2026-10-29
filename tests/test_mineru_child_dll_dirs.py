@@ -629,7 +629,28 @@ def _fake_failing_mineru(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, messag
     root = _fake_mineru(tmp_path, f"raise ImportError({message!r})\n")
     monkeypatch.syspath_prepend(str(root))
     for name in ("mineru", "mineru.cli", "mineru.cli.common"):
-        monkeypatch.delitem(sys.modules, name, raising=False)
+        # setitem first, so teardown puts back exactly what was there, absence included. A bare
+        # delitem undoes only a key that existed: on a worker that had not imported mineru yet,
+        # the fake package the doctor's import then cached stayed in sys.modules and every later
+        # mineru import in that process got it (develop CI shard 3/6, 2026-10-29).
+        monkeypatch.setitem(sys.modules, name, None)
+        monkeypatch.delitem(sys.modules, name)
+
+
+def test_the_in_process_fake_leaves_sys_modules_as_it_found_it(tmp_path: Path) -> None:
+    """The fake's teardown restores every ``mineru*`` key, including the case of a process that
+    had not imported mineru yet: an import of the fake inside the patch must not survive it.
+    Red on the delitem-only helper (the shard 3/6 leak that broke every later mineru import)."""
+    before = {k: v for k, v in sys.modules.items() if k == "mineru" or k.startswith("mineru.")}
+    with pytest.MonkeyPatch.context() as mp:
+        for name in list(before):
+            mp.delitem(sys.modules, name)  # a worker that has not imported mineru yet
+        _fake_failing_mineru(tmp_path, mp, "boom")
+        with pytest.raises(ImportError, match="boom"):
+            import mineru.cli.common  # noqa: F401, PLC0415 -- the fake, cached by this import
+        assert "mineru" in sys.modules
+    after = {k: v for k, v in sys.modules.items() if k == "mineru" or k.startswith("mineru.")}
+    assert after == before, sorted(set(after) ^ set(before))
 
 
 def _in_process_import_remedy(
