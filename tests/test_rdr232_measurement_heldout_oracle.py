@@ -62,8 +62,11 @@ def test_the_heldout_hand_file_is_the_scaffold_derivation() -> None:
 
 def test_the_heldout_drafted_skeleton_loads_and_names_its_own_files() -> None:
     assert om.HELDOUT_DRAFTED_PATH.name == "golden_heldout_oracle_labels_drafted_v1.yaml" and om.HELDOUT_DRAFTED_PATH.is_file()
-    plain = om.load_oracle(om.HELDOUT_ORACLE_PATH, HELDOUT)
-    assert om.load_oracle(om.HELDOUT_ORACLE_PATH, HELDOUT, drafted_path=om.HELDOUT_DRAFTED_PATH).summary() == plain.summary()
+    plain = om.load_oracle(om.HELDOUT_ORACLE_PATH, HELDOUT).summary()
+    drafted = om.load_oracle(om.HELDOUT_ORACLE_PATH, HELDOUT, drafted_path=om.HELDOUT_DRAFTED_PATH).summary()
+    # The committed drafted file holds the 2026-10-29 drafts (21 requests); it only fills hand-todo requests.
+    assert plain["pairs_labelled"] == 0 and drafted["requests"] == plain["requests"] == 29
+    assert drafted["requests_labelled"] == 21 and drafted["pairs_labelled"] > 0
 
 
 def test_each_set_has_its_own_files_and_the_other_sets_qids_are_unknown_to_them() -> None:
@@ -314,7 +317,9 @@ def test_the_default_heldout_run_reads_the_heldout_files_and_a_golden_run_does_n
     envelopes = tmp_path / "env.json"
     write_envelopes_file(envelopes, {a: [EnvelopeRecord("H01", 1000, "", env)] for a in ("off", "on")})
     out = tmp_path / "r.json"
-    assert driver.main(["--set", "heldout", "--from-envelopes", str(envelopes), "--out", str(out)]) == 0
+    empty = tmp_path / "drafted.yaml"
+    empty.write_text("oracle_version: 1\ngolden_set_version: 1\nrequests: {}\n", encoding="utf-8")
+    assert driver.main(["--set", "heldout", "--from-envelopes", str(envelopes), "--heldout-drafted", str(empty), "--out", str(out)]) == 0
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["oracle_labels"]["requests"] == 29 and report["oracle_labels"]["requests_todo"] == 29
     assert report["arms"]["on"]["oracle"]["runs_scored"] == 0, "no label exists for H01: counted as todo, not scored"

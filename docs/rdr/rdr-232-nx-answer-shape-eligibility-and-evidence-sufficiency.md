@@ -515,6 +515,38 @@ listed under Critical Assumptions before gate.
   *Source: bead nexus-jypmj.17; `tests/test_rdr232_coverage_concurrent.py`; bead
   nexus-jypmj.3.10 comment of 2026-10-28.*
 
+- **✅ Verified** (spike, live) — The concurrent default-on coverage check on
+  production (develop 6dd75ec3f, engine 0.1.168, 2026-10-29). G06 canary:
+  assessment 54.3 s for 8 concurrent calls (graph in 4 packs), against 118 s for
+  4 serial calls on 2026-10-28; 0 cut, 0 raised, 6 of 6 facets covered; wall 87.7 s
+  on, 30.0 s off. Held-out set, 29 requests with the check off and on: 0 errors,
+  0 answers withheld, 2 partial, 0 unassessed facets, wall latency p50 +16.8 s and
+  p90 +33.9 s, assessment 0.021 USD a run. The ambiguous-source fix
+  (nexus-jypmj.3.17) holds live, with and without a project context; G18, still
+  withheld, is a correct withhold (retrieval returned test code, and the
+  coverage-off answer addresses a different question).
+  *Source: bead nexus-jypmj.3.10 comments of 2026-10-29; research 24.*
+
+- **✅ Verified** (spike, live) — Facet reliability against labels drafted blind
+  from the items the assessor saw (21 held-out requests): false negative 1 of 31
+  facets (3.2 percent, 95 percent interval 0.6 to 16), false skip 0 of 21 runs.
+  Sam spot-checked 15 drafted pairs: the drafter was wrong on 4, all drafted
+  neutral where Sam read supports, and on the 3 sampled disagreements Sam sided
+  with the assessor. So the drafted supports labels, and the false-negative rate
+  built on them, hold at screening grade; the drafted neutrals under-count support
+  and cannot show the assessor over-covers or over-flags conflicts. Not measured:
+  the five largest held-out requests and the negative-control set.
+  *Source: bead nexus-jypmj.3.10 comments of 2026-10-29; T2
+  `nexus/rdr232-3.10-live-measurement-2026-10-29`; research 24.*
+
+- **✅ Verified** (spike, live) — The run summary and the out-of-step cost column
+  in production: engine 0.1.168 (telemetry-017-1, one nullable column) deployed
+  after a fork rehearsal, STEP-6 green, the cloud client-path gate 13 of 13; every
+  measurement row persisted and read back its summary, and 48 of 71 rows carry a
+  value (1.603811 USD), matched by a read-only production recount. The old-engine
+  and cached-capability rollback legs remain simulated only.
+  *Source: beads nexus-0gc7m, nexus-jypmj.3.10; research 25.*
+
 ### Critical Assumptions
 
 Research 6–10 executed prototypes for A1–A6; A7 has none yet. They establish
@@ -548,16 +580,16 @@ are in `232-research-3`. Behavioral evidence is in `232-research-6` through
   selector derives labels from chunk content in manifest order and never
   trusts stored labels unvalidated. Production resolver/runner integration,
   candidate paging, and more than two real documents remain unverified.
-- [ ] **A3 — existing dispatch can support facet coverage at a new runner-owned
-  pre-reduction boundary.** **Status**: Partially verified (research 8).
+- [x] **A3 — existing dispatch can support facet coverage at a new runner-owned
+  pre-reduction boundary.** **Status**: Verified live 2026-10-29 (research 24); earlier, partially verified (research 8).
   **Method**: Source Search plus deterministic boundary spike using real
   `plan_run` and real bundle composition/dispatch with fake model output.
   Plain `check → generate` hid its intermediate; the proposed boundary preserved
   anchors, executed one prefix/repair/reduction, shared budget/deadline, and
   disclosed failure/scope/continuation states correctly. Production runner
   integration and live-model facet reliability remain unverified.
-- [ ] **A4 — a nullable versioned run summary can extend existing telemetry
-  compatibly.** **Status**: Partially verified (research 9). **Method**: Source
+- [x] **A4 — a nullable versioned run summary can extend existing telemetry
+  compatibly.** **Status**: Verified live 2026-10-29 except the old-engine and cached-capability rollback legs, which stay simulated (research 25); earlier, partially verified (research 9). **Method**: Source
   Search plus private-engine and isolated `TenantScope`/jOOQ repository spike.
   Old-engine silent drop, one-write current completion, nullable JSONB summary
   persistence, rollback, plan counters, imports/readback, and old-client null
