@@ -15,6 +15,7 @@ import org.jooq.JSONB;
 import org.jooq.Record1;
 import org.jooq.Record9;
 import org.jooq.ResultQuery;
+import org.jooq.SelectConditionStep;
 import org.jooq.SelectLimitStep;
 import org.jooq.impl.DSL;
 import org.jooq.types.DayToSecond;
@@ -2797,13 +2798,40 @@ public final class TupleRepository {
      * The ack/nack claim_id lookup's SELECT (nexus-cbo4a), built once so {@link #liveClaimRow} and the plan-shape
      * test share it. Package-private for that test.
      */
-    static ResultQuery<TuplesRecord> liveClaimRowQuery(DSLContext ctx, String tenant, String claimId) {
+    static SelectConditionStep<TuplesRecord> liveClaimRowQuery(DSLContext ctx, String tenant, String claimId) {
         return ctx.selectFrom(TUPLES)
                 .where(TUPLES.TENANT_ID.eq(tenant)
                         .and(TUPLES.CLAIM_ID.eq(claimId))
                         .and(TUPLES.CLAIM_STATE.eq(CLAIM_STATE_CLAIMED))
                         .and(TUPLES.CONSUMED_AT.isNull())
                         .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime())));
+    }
+
+    /**
+     * nexus-5r2sc.2.5 (RDR-235 E5): the claim fence of {@code POST /v1/aspects/upsert}. Looks the claim up with
+     * {@link #liveClaimRowQuery} (the lookup {@code ack}, {@code nack}, {@code renew} and {@code release} use) and
+     * LOCKS the row {@code FOR NO KEY UPDATE}, the level {@code claimOnce} takes with {@code SKIP LOCKED}, so a
+     * re-take of a claim that lapses an instant after this check skips the row until the caller's transaction
+     * commits. The lock is held by the caller's transaction, so {@code ctx} must be the one the caller's write
+     * runs in. Answers what {@code consumeClaim} (ack) answers for the same claim, in the same order: no live
+     * claim is {@link ClaimNotFoundException} (404), a live claim of another claimant is
+     * {@link ClaimOwnershipException} (403), so the write and the ack that follows it agree. Identifier sizes
+     * are checked as {@code ack} checks them. Returns the locked row so the caller can check what the claim is
+     * a claim ON; nothing is written.
+     */
+    static TuplesRecord lockLiveClaimRow(DSLContext ctx, String tenant, String claimId, String claimant) {
+        checkClaimIdentifiers(claimId, claimant);
+        TuplesRecord row = liveClaimRowQuery(ctx, tenant, claimId).forNoKeyUpdate().fetchOne();
+        if (row == null) {
+            throw new ClaimNotFoundException(claimId);
+        }
+        if (!row.getClaimant().equals(claimant)) {
+            throw new ClaimOwnershipException(claimId, claimant);
+        }
+        // TEST-ONLY: the window between the claim read and the mutation it guards; a no-op on every
+        // production path. Here the mutation is the caller's write, which runs after this returns.
+        TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY.run();
+        return row;
     }
 
     /**

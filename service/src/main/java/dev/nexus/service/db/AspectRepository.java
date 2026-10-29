@@ -196,7 +196,34 @@ public final class AspectRepository {
         CollectionRegistry.requireRegistered(ctx, tenant, collection);
     }
 
+    /**
+     * The aspect upsert, optionally fenced by a tuple claim (nexus-5r2sc.2.5, RDR-235 E5).
+     *
+     * <p>{@code claim_id} and {@code claimant} come together or not at all: one without the other is an
+     * {@link IllegalArgumentException} (400) naming both fields, thrown before a transaction opens. Both
+     * absent is today's write, unchanged. Both present, the FIRST statement of the upsert's transaction is
+     * {@link TupleRepository#lockLiveClaimRow}, which locks the claim's tuples row, and the write follows in
+     * the same transaction. The order is fixed: the claim lookup, then {@link #ensureCollectionRegistered}
+     * (a retired name answers 409), then the {@code document_aspects} insert. So a 409 means the claim was
+     * live at that instant, and a lapsed claim on a retired name answers 404.
+     *
+     * <p>Lock order, shared with the rename helper (bead nexus-5r2sc.2.6): the tuples row lock FIRST, then
+     * {@code document_aspects}, in every path, so a rename that rewrites task bodies before its registry
+     * loop cannot deadlock against a persist of the same document.
+     */
     public long upsertAspect(String tenant, Map<String, Object> body) {
+        // Before the confidence gate: a malformed pair is a caller bug whatever the confidence is.
+        Object rawClaimId = body.get("claim_id");
+        Object rawClaimant = body.get("claimant");
+        if ((rawClaimId == null) != (rawClaimant == null)) {
+            throw new IllegalArgumentException("aspect upsert: claim_id and claimant must be given together");
+        }
+        if (rawClaimId != null && !(rawClaimId instanceof String id && !id.isBlank()
+                && rawClaimant instanceof String who && !who.isBlank())) {
+            throw new IllegalArgumentException("aspect upsert: claim_id and claimant must be non-blank strings");
+        }
+        String claimId = (String) rawClaimId;
+        String claimant = (String) rawClaimant;
         // nexus-j0nec: an explicit JSON "confidence": null must be DROPPED like
         // absent/low confidence (Python _MIN_CONFIDENCE gate semantics), never
         // NPE via ((Number) null).doubleValue() -> HTTP 500.
@@ -232,6 +259,14 @@ public final class AspectRepository {
         OffsetDateTime extractedAtTs = parseTs(extractedAt);
 
         return tenantScope.withTenant(tenant, ctx -> {
+            if (claimId != null) {
+                // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST,
+                // then document_aspects, in every path. This lookup takes the first lock; the insert below
+                // takes the second. A rename rewrites task bodies (tuple row locks) before its registry loop
+                // updates document_aspects, so the orders agree and neither can deadlock the other.
+                requireClaimOnTaskFor(TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant),
+                        claimId, docId);
+            }
             ensureCollectionRegistered(ctx, tenant, collection);
             var result = ctx.insertInto(DOCUMENT_ASPECTS,
                     DOCUMENT_ASPECTS.TENANT_ID,
@@ -296,6 +331,42 @@ public final class AspectRepository {
                 .fetch();
             return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
         });
+    }
+
+    /** The aspect-extraction queue's subspace (the literal {@code aspects} template, RDR-235 E3). */
+    private static final String TASK_SUBSPACE = "aspects";
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper CLAIM_BODY_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * A claim id is a credential for one task: the locked claim row must be an {@code aspects} task whose
+     * body names the {@code doc_id} being written. Anything else, a body that is not a JSON object or has no
+     * string {@code doc_id} included, is refused {@link ClaimTaskMismatchException} (403).
+     */
+    private static void requireClaimOnTaskFor(dev.nexus.service.jooq.nexus.tables.records.TuplesRecord claimRow,
+                                              String claimId, String docId) {
+        String subspace = claimRow.getSubspace();
+        if (!TASK_SUBSPACE.equals(subspace)) {
+            throw new ClaimTaskMismatchException(claimId, "an aspects task (it is a claim in '" + subspace + "')");
+        }
+        String taskDocId = null;
+        try {
+            var node = CLAIM_BODY_MAPPER.readTree(claimRow.getBody());
+            if (node != null && node.isObject() && node.path("doc_id").isTextual()) {
+                taskDocId = node.get("doc_id").asText();
+            }
+        } catch (com.fasterxml.jackson.core.JsonProcessingException | IllegalArgumentException e) {
+            // taskDocId stays null: a body that does not parse names no document.
+        }
+        if (taskDocId == null) {
+            throw new ClaimTaskMismatchException(claimId,
+                    "the task for document '" + docId + "' (the task body names no doc_id)");
+        }
+        if (!taskDocId.equals(docId)) {
+            throw new ClaimTaskMismatchException(claimId,
+                    "the task for document '" + docId + "' (it is the task for '" + taskDocId + "')");
+        }
     }
 
     /**
