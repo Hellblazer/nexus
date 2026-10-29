@@ -1082,9 +1082,11 @@ _ENGINE_CAUSED_BY = re.compile(r"^Caused by: [\w.$]+: (?P<message>.*)$")
 
 
 def last_engine_root_cause(log_path: Path, start_offset: int) -> str | None:
-    """The root cause under the engine's last ERROR line: the message of the last
-    ``Caused by:`` in that line's trace, read from what the log gained at or after
-    *start_offset*. ``None`` when there is no ERROR line or its trace has no cause.
+    """The root cause under the engine's last schema-migration ERROR line: the
+    message of the last ``Caused by:`` in that line's trace, read from what the
+    log gained at or after *start_offset*. ``None`` when there is no such line or
+    its trace has no cause. Anchored on ``event=schema_migration_failed`` so a
+    later, unrelated ERROR's cause is never reported as the migration's.
 
     A schema migration that fails logs ``event=schema_migration_failed
     error="Liquibase migration failed"`` and then the exception chain, whose last
@@ -1096,7 +1098,12 @@ def last_engine_root_cause(log_path: Path, start_offset: int) -> str | None:
     """
     lines = _log_lines_since(log_path, start_offset)
     last_error = next(
-        (i for i in range(len(lines) - 1, -1, -1) if _ENGINE_ERROR_LINE.match(lines[i])), None
+        (
+            i
+            for i in range(len(lines) - 1, -1, -1)
+            if _ENGINE_ERROR_LINE.match(lines[i]) and "event=schema_migration_failed" in lines[i]
+        ),
+        None,
     )
     if last_error is None:
         return None

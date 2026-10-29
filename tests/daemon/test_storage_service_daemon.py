@@ -3061,21 +3061,49 @@ class TestExitReasonReaders:
             fh.write("Caused by: java.lang.IllegalStateException: belongs to no ERROR trace\n")
         assert ssd.last_engine_root_cause(log, 0) is None, "a Caused by after a later INFO line is not the ERROR's trace"
 
+    _MIG = (
+        "2026-10-11 02:10:03,114 ERROR [main] dev.nexus.service.Main - "
+        'event=schema_migration_failed error="Liquibase migration failed"'
+    )
+
     def test_root_cause_respects_the_mark_and_redacts(self, tmp_path: Path) -> None:
         from nexus.daemon import storage_service_daemon as ssd
 
         log = tmp_path / "storage_service_native.log"
         log.write_text(
-            self._ERR + "\nCaused by: java.lang.IllegalStateException: an earlier boot\n", encoding="utf-8"
+            self._MIG + "\nCaused by: java.lang.IllegalStateException: an earlier boot\n", encoding="utf-8"
         )
         mark = log.stat().st_size
         assert ssd.last_engine_root_cause(log, mark) is None
         with log.open("a", encoding="utf-8") as fh:
-            fh.write(self._ERR + "\n")
+            fh.write(self._MIG + "\n")
             fh.write("Caused by: org.postgresql.util.PSQLException: ERROR: connection refused password=hunter2 host=x\n")
         cause = ssd.last_engine_root_cause(log, mark)
         assert cause is not None and cause.startswith("connection refused")
         assert "hunter2" not in cause
+
+    def test_root_cause_ignores_a_later_unrelated_error(self, tmp_path: Path) -> None:
+        """nexus-bivz3.25 confirmation round: a later ERROR that is not the
+        migration failure must not lend its cause to the migration's line."""
+        from nexus.daemon import storage_service_daemon as ssd
+        from tests._rdr231_halt import NATIVE_LOG_EXCERPT, RAISE_START
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            NATIVE_LOG_EXCERPT.rstrip("\n") + "\n" + self._ERR + "\n"
+            "Caused by: java.io.IOException: disk full\n",
+            encoding="utf-8",
+        )
+        cause = ssd.last_engine_root_cause(log, 0)
+        assert cause is not None and cause.startswith(RAISE_START)
+        assert "disk full" not in cause
+
+    def test_root_cause_needs_a_migration_failure_line(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(self._ERR + "\nCaused by: java.io.IOException: disk full\n", encoding="utf-8")
+        assert ssd.last_engine_root_cause(log, 0) is None
 
     _INFO ="2026-10-11 02:10:04,000 INFO  [main] d.n.service.Main - shutdown complete"
 
