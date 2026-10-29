@@ -466,8 +466,27 @@ listed under Critical Assumptions before gate.
   per-stream calls under the stage deadline, continuing after a raised call and
   the 65-anchor pack; turning the check on by default waits on it. This is one
   request on one run.
-  *Source: live canary. T2: `nexus/rdr232-canary-phase1`; bead
-  nexus-jypmj.3.10 comment of 2026-10-28.*
+  *Source: live canary of 2026-10-28, recorded in the bead nexus-jypmj.3.10
+  comment of that date (the 2026-10-26 Phase 1 canary is T2
+  `nexus/rdr232-canary-phase1`).*
+
+- **⚠️ Defect found and fixed** (2026-10-28, live golden run) — With the
+  coverage check on, an ambiguous named source was counted as a missing one.
+  G01, G02 and G04 each name an RDR number that two projects carry (nexus 1.1
+  and ART 1.2), so source resolution returned candidates; the coverage source
+  check reported `missing`, the facet was blocked as `source_missing`, and
+  generation was skipped at zero cost while the coverage-off arm answered all
+  three. Per Failure Modes ("Primary source unresolved: return candidates or a
+  disclosed unresolved state") and section 4 (only a missing named source
+  counts as uncovered), an ambiguous source, or one whose lookup failed, timed
+  out or hit its candidate cap, now has its own coverage state `unresolved`:
+  disclosed in `coverage.sources` and the notice, blocking no facet. A source no
+  document carries stays `missing`. The resolver's own `unresolved` status
+  (nothing found) still maps to coverage `missing`, so the word means different
+  things on the two sides. The golden latency and cost deltas recorded for that
+  run include the three withheld pairs, so they read low; they are re-taken on
+  the fixed tree.
+  *Source: bead nexus-jypmj.3.17; bead nexus-jypmj.3.10 comment of 2026-10-28.*
 
 ### Critical Assumptions
 

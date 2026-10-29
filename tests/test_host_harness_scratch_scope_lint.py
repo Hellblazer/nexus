@@ -284,9 +284,10 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     ),
     "scripts/bench/rdr232_phase3_measure.py": (
         1, "READ-ONLY: the hit is live_caller's docstring naming the nexus.mcp.core import; the driver calls "
-           "nx_answer, whose only write is its nx_answer_runs telemetry row (no store_put / index / collection "
-           "path). Plan growth is off by default (--allow-plan-growth opts in), and --live is run only on "
-           "Sam's go (nexus-jypmj.3.10).",
+           "nx_answer, which writes no catalog or T3 data (no store_put / index / collection path). Its T2 "
+           "writes are the nx_answer_runs telemetry row and, on a library-plan hit, that plan's success or "
+           "failure counter; plan growth (a saved plan) is off by default (--allow-plan-growth opts in), and "
+           "--live is run only on Sam's go (nexus-jypmj.3.10).",
     ),
     "scripts/bench/synthesis_tier_study.py": (
         2, "READ-ONLY: line 238 dispatches summarize/generate/compare/aggregate via "

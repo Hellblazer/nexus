@@ -43,6 +43,8 @@ def _env(*, plan_id: int, chosen: int | None, cost: float = 0.4, shape: str = "a
     env = json.loads(json.dumps(RECORDED))
     env["plan_id"] = plan_id
     env["plan_choice"] = None if chosen is None else {**env["plan_choice"], "chosen_plan_id": chosen}
+    if chosen is None:  # a miss: core's record_returned leaves no selected library plan
+        env["plan_eligibility"] = {**env["plan_eligibility"], "selected": None}
     env["cost_usd"] = cost
     env["answer_shape"] = shape
     return env
@@ -61,6 +63,16 @@ def test_the_facts_name_the_plan_the_arm_ran_with_apart_from_the_envelopes_plan_
     miss_then_grown = envelope_facts(_env(plan_id=912, chosen=None))
     assert miss_then_grown["plan_id"] == 912, "the envelope reports the grown row's id after a miss"
     assert miss_then_grown["matched_plan_id"] == 0, "but the arm ran an inline plan: no library plan matched"
+
+
+def test_a_hit_whose_cost_ranking_raised_still_names_its_plan() -> None:
+    """Core leaves ``plan_choice`` unset when cost ranking raises and falls back to the top match, so the hit must not
+    read as inline-planned; ``plan_eligibility.selected`` names it."""
+    env = _env(plan_id=7, chosen=None)
+    env["plan_eligibility"] = {**env["plan_eligibility"], "selected": {**RECORDED["plan_eligibility"]["selected"], "plan_id": 7}}
+    assert envelope_facts(env)["matched_plan_id"] == 7
+    env["plan_eligibility"] = {**env["plan_eligibility"], "selected": None}
+    assert envelope_facts(env)["matched_plan_id"] == 0, "a miss: no plan_choice and no selected library plan"
 
 
 # ── compare_arms ─────────────────────────────────────────────────────────────────────────────────────────

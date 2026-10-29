@@ -203,10 +203,20 @@ def matched_plan_id(envelope: Mapping[str, Any]) -> int:
     """The library plan the run was MATCHED to, ``0`` when none was (the inline planner ran). This is
     ``plan_choice.chosen_plan_id``, not the envelope's ``plan_id``: after a plan-miss grows a plan, ``plan_id`` is the
     grown row's id, which a later run's hit on that row reports too, so two runs that differ in whether the planner ran
-    can carry the same ``plan_id``."""
+    can carry the same ``plan_id``. A hit whose cost ranking raised has no ``plan_choice`` (core falls back to the top
+    match), so ``plan_eligibility.selected.plan_id``, which names any selected library plan and is null on a miss, is
+    read next."""
+    def _as_id(value: Any) -> int | None:
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
     choice = envelope.get("plan_choice")
-    chosen = choice.get("chosen_plan_id") if isinstance(choice, Mapping) else None
-    return int(chosen) if isinstance(chosen, int) and not isinstance(chosen, bool) else 0
+    chosen = _as_id(choice.get("chosen_plan_id")) if isinstance(choice, Mapping) else None
+    if chosen is not None:
+        return chosen
+    eligibility = envelope.get("plan_eligibility")
+    selected = eligibility.get("selected") if isinstance(eligibility, Mapping) else None
+    picked = _as_id(selected.get("plan_id")) if isinstance(selected, Mapping) else None
+    return picked or 0
 
 
 def envelope_facts(envelope: Mapping[str, Any]) -> dict[str, Any]:
