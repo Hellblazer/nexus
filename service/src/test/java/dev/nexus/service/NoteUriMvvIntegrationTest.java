@@ -60,7 +60,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * residue row, each in its own spelling.
  *
  * <p>Not driven: the {@code vectors} routes' {@code include_source_uri}. They return the catalog's stored column
- * through {@code PgVectorRepository.sourceUrisByChash} and take no URI, and seeding a chunk needs the embedding
+ * through {@code PgVectorRepository.ownersByChash} (the first-owner lookup that replaced sourceUrisByChash) and take no URI, and seeding a chunk needs the embedding
  * backend; the stored value they join to is asserted by SQL below.
  *
  * <p>Vacuity control: {@link #theSameWalkIsRedWhenTheBackfillIsSkipped} runs the identical walk with

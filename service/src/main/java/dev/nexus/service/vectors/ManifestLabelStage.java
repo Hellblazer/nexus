@@ -6,7 +6,10 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TenantScope;
 
+import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.Record;
+import org.jooq.ResultQuery;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -471,22 +474,29 @@ final class ManifestLabelStage {
         for (Map<String, Object> row : rows) {
             Object id = row.get("id");
             Object coll = row.get("collection");
-            if (id instanceof String chash && chash.length() == 64 && coll instanceof String c) {
+            if (id instanceof String chash && PgVectorRepository.HEX64.matcher(chash).matches()
+                    && coll instanceof String c) {
                 chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(chash);
             }
         }
-        return occurrences(tenant, chashesByCollection, docKeys);
+        return fetchOccurrences(tenant, chashesByCollection, docKeys, false);
     }
 
     /**
-     * The FIRST live owner of each (collection, chash): the occurrence of the lowest {@code doc_id}, then the
-     * lowest position, among documents that are not tombstoned (nexus-6pfgb.26). This is the one owner a
-     * chunk-level search row's {@code source_uri} and span speak for when no label filter has expanded the row
-     * per document; keyed by {@link #ownerKey}. A chash with no live manifest row has no entry.
+     * The FIRST live owner of each (collection, chash): the occurrence of the lowest {@code doc_id} (in the
+     * database's text collation, so {@code 1.10} sorts before {@code 1.2}), then the lowest position, among
+     * documents that are not tombstoned (nexus-6pfgb.26). This is the one owner a chunk-level search row's
+     * {@code doc_id}, {@code position}, {@code source_uri} and span speak for when no label filter has expanded
+     * the row per document; keyed by {@link #ownerKey}. A chash with no live manifest row has no entry.
+     *
+     * <p>Its own {@code SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}, so the statement
+     * returns one row per chash where {@link #apply}'s lookup returns every occurrence: a boilerplate chunk
+     * held by N documents costs a search window one row, not N.
      */
     Map<String, Occurrence> firstOwners(String tenant, Map<String, Set<String>> chashesByCollection) {
         Map<String, Occurrence> first = new HashMap<>();
-        for (Map.Entry<String, List<Occurrence>> e : occurrences(tenant, chashesByCollection, Set.of()).entrySet()) {
+        for (Map.Entry<String, List<Occurrence>> e : fetchOccurrences(tenant, chashesByCollection, Set.of(), true)
+                .entrySet()) {
             first.put(e.getKey(), e.getValue().get(0));
         }
         return first;
@@ -497,21 +507,20 @@ final class ManifestLabelStage {
         return key(collection, chash);
     }
 
-    private Map<String, List<Occurrence>> occurrences(String tenant, Map<String, Set<String>> chashesByCollection,
-                                                      Set<String> docKeys) {
+    /**
+     * @param firstOnly one occurrence per chash (the first, by {@code doc_id} then position) instead of all
+     *                  of them; both orders are the database's own, so the two shapes agree on that row
+     */
+    private Map<String, List<Occurrence>> fetchOccurrences(String tenant,
+                                                           Map<String, Set<String>> chashesByCollection,
+                                                           Set<String> docKeys, boolean firstOnly) {
         Map<String, List<Occurrence>> out = new HashMap<>();
         if (chashesByCollection.isEmpty()) {
             return out;
         }
         Field<String> chashHex = ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH);
         DocFields docFields = DocFields.of(docKeys);
-        List<Field<?>> select = new ArrayList<>(List.of(chashHex,
-            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-            CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
-            CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
-            CATALOG_DOCUMENTS.SOURCE_URI,
-            CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
-            CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END));
+        List<Field<?>> select = occurrenceFields(chashHex);
         docFields.addTo(select);
         tenantScope.withTenant(tenant, ctx -> {
             for (Map.Entry<String, Set<String>> e : chashesByCollection.entrySet()) {
@@ -522,19 +531,7 @@ final class ManifestLabelStage {
                     for (String hex : batch) {
                         keys.add(Chash.fromHex(hex).toBytes());
                     }
-                    var fetched = ctx.select(select)
-                        .from(CATALOG_DOCUMENT_CHUNKS)
-                        .join(CATALOG_DOCUMENTS)
-                            // A tombstoned document owns nothing (nexus-mqd6t): its occurrence is not a hit.
-                            .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                                .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
-                                .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
-                        .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                            .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(e.getKey()))
-                            .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
-                        .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
-                        .fetch();
-                    for (var r : fetched) {
+                    for (var r : occurrenceQuery(ctx, tenant, e.getKey(), keys, select, firstOnly).fetch()) {
                         out.computeIfAbsent(key(e.getKey(), r.get(chashHex)), k -> new ArrayList<>())
                            .add(new Occurrence(r.get(CATALOG_DOCUMENT_CHUNKS.DOC_ID),
                                                r.get(CATALOG_DOCUMENT_CHUNKS.POSITION),
@@ -554,6 +551,52 @@ final class ManifestLabelStage {
             return null;
         });
         return out;
+    }
+
+    /** The columns every occurrence statement selects, before the document-level fields the filter names. */
+    private static List<Field<?>> occurrenceFields(Field<String> chashHex) {
+        return new ArrayList<>(List.of(chashHex,
+            CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+            CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE,
+            CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER, CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN,
+            CATALOG_DOCUMENTS.SOURCE_URI,
+            CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END,
+            CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END));
+    }
+
+    /**
+     * The one statement behind both lookups, for ONE collection and one batch of chashes. Package-private so
+     * a plan test can EXPLAIN the statement production runs, not a copy of it. {@code firstOnly} is {@code
+     * SELECT DISTINCT ON (chash) ... ORDER BY chash, doc_id, position}; otherwise every occurrence, ordered
+     * by {@code doc_id}, {@code position}.
+     */
+    static ResultQuery<Record> occurrenceQuery(DSLContext ctx, String tenant, String collection,
+                                               List<byte[]> keys, List<Field<?>> select, boolean firstOnly) {
+        var head = firstOnly
+            ? ctx.select(select).distinctOn(CATALOG_DOCUMENT_CHUNKS.CHASH)
+            : ctx.select(select);
+        List<org.jooq.OrderField<?>> order = new ArrayList<>(3);
+        if (firstOnly) {
+            order.add(CATALOG_DOCUMENT_CHUNKS.CHASH);  // DISTINCT ON (chash) needs it as the leading key
+        }
+        order.add(CATALOG_DOCUMENT_CHUNKS.DOC_ID);
+        order.add(CATALOG_DOCUMENT_CHUNKS.POSITION);
+        return head
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .join(CATALOG_DOCUMENTS)
+                // A tombstoned document owns nothing (nexus-mqd6t): its occurrence is not a hit.
+                .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                    .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(keys)))
+            .orderBy(order);
+    }
+
+    /** The first and the full lookup, for a test that compares them. */
+    Map<String, List<Occurrence>> allOccurrences(String tenant, Map<String, Set<String>> chashesByCollection) {
+        return fetchOccurrences(tenant, chashesByCollection, Set.of(), false);
     }
 
     private static String key(String collection, String chash) {
@@ -632,8 +675,12 @@ final class ManifestLabelStage {
     /**
      * Writes the owner's manifest span onto {@code row} (nexus-6pfgb.26): {@code line_start}, {@code line_end},
      * {@code chunk_start_char} and {@code chunk_end_char} are the position's own, where the shared chunk row's
-     * are the last writer's. A NULL manifest value is "never recorded" (a row written before the manifest
-     * carried spans), not "no span": that field keeps the row's own value.
+     * are the last writer's. It writes each field the manifest HAS a value for and nothing else, so a key
+     * the row lacked appears when the owner's manifest holds it; a NULL manifest value leaves that field as
+     * the row has it, which is the row's own value ONLY if the row has not already been given another
+     * owner's (see {@code PgVectorRepository#enrichSearchRows}, {@code labelStageFollows}). NULL is also what
+     * a note, an orphan and a prose or PDF chunk carry for good, not only a row written before the manifest
+     * had spans, so such an owner shows the chunk row's span beside its {@code source_uri}.
      */
     static void putSpan(Map<String, Object> row, Occurrence o) {
         if (o.lineStart() != null) {

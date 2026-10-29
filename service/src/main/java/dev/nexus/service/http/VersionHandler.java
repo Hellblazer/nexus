@@ -387,9 +387,11 @@ public final class VersionHandler implements HttpHandler {
      * nexus-6pfgb.26 capability advertisement (RDR-236 Phase 3): does a chunk-level search row ({@code
      * /v1/vectors/search}, {@code /hybrid-search}, the per-collection fan-out) carry {@code source_uri},
      * {@code line_start}, {@code line_end}, {@code chunk_start_char} and {@code chunk_end_char} from ONE
-     * manifest owner, chosen deterministically inside the searched collection (lowest {@code doc_id}, then
-     * position, tombstoned documents skipped), where an older engine answers the span from the shared chunk
-     * row's last writer and {@code source_uri} from a tenant-wide last-row-wins join?
+     * manifest owner, chosen deterministically inside the searched collection (lowest {@code doc_id} in the
+     * database's text collation, then position, tombstoned documents skipped), and name that owner ({@code
+     * doc_id}, {@code position}) on the row, where an older engine answers the span from the shared chunk
+     * row's last writer, {@code source_uri} from a tenant-wide last-row-wins join, and names no owner on an
+     * unfiltered row?
      *
      * <p>An independent flag, and the only evidence: both engines answer the same keys with HTTP 200, so a
      * client that prints {@code file:line} beside a document it picked itself must read this flag first.

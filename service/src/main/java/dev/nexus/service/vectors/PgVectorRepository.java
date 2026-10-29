@@ -1440,10 +1440,12 @@ public final class PgVectorRepository {
         // nexus-tko2w: section_title / section_type / page_number are answered per manifest occurrence.
         var labelSplit = ManifestLabelStage.split(where);
         if (!labelSplit.active()) {
-            return searchWithTokensUnlabelled(tenant, queryText, collectionNames, nResults, where, includeSourceUri);
+            return searchWithTokensUnlabelled(tenant, queryText, collectionNames, nResults, where, includeSourceUri,
+                                              false);
         }
         var wide = searchWithTokensUnlabelled(tenant, queryText, collectionNames,
-                                              ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri);
+                                              ManifestLabelStage.widen(nResults), labelSplit.rest(), includeSourceUri,
+                                              true);
         return new Tokened<>(labelStage().apply(tenant, wide.value(), labelSplit.labels(), nResults),
                              wide.tokens(), wide.skippedCollections());
     }
@@ -1458,7 +1460,8 @@ public final class PgVectorRepository {
                                                                           List<String> collectionNames,
                                                                           int nResults,
                                                                           Map<String, Object> where,
-                                                                          boolean includeSourceUri) {
+                                                                          boolean includeSourceUri,
+                                                                          boolean labelStageFollows) {
         if (collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
         }
@@ -1500,7 +1503,7 @@ public final class PgVectorRepository {
 
         List<Map<String, Object>> rows = plainSearchRows(result);
         // RDR-169 G5: surface address triple additively (chash + span always; source_uri opt-in)
-        enrichSearchRows(tenant, rows, includeSourceUri);
+        enrichSearchRows(tenant, rows, includeSourceUri, labelStageFollows);
         return new Tokened<>(rows, embedResult.tokens(), skippedCollections);
     }
 
@@ -2593,12 +2596,12 @@ public final class PgVectorRepository {
         if (!labelSplit.active() || !validBounds) {
             // An out-of-range K or limit is refused by the fan-out itself, with its own wording.
             return searchPerCollectionUnlabelled(tenant, queryText, collectionNames, perCollectionK, limit,
-                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings);
+                thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false);
         }
         var wide = searchPerCollectionUnlabelled(tenant, queryText, collectionNames,
             Math.min(MAX_PER_COLLECTION_K, ManifestLabelStage.widen(perCollectionK)),
             Math.min(MAX_FANOUT_LIMIT, ManifestLabelStage.widen(limit)),
-            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings);
+            thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings, true);
         var stage = labelStage();
         List<Map<String, Object>> rows = stage.apply(tenant, wide.rows(), labelSplit.labels(), limit);
         List<Map<String, Object>> lexicalRows = wide.lexicalRows().isEmpty()
@@ -2630,7 +2633,8 @@ public final class PgVectorRepository {
                                                               boolean includeSourceUri,
                                                               boolean includeEmbeddings,
                                                               boolean lexical,
-                                                              FanoutSettings settings) {
+                                                              FanoutSettings settings,
+                                                              boolean labelStageFollows) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
         final int searchBoundMs = settings.searchBoundMs();
@@ -2800,7 +2804,7 @@ public final class PgVectorRepository {
             served.addAll(lexicalRows);
         }
         long enrichStartNanos = System.nanoTime();
-        enrichSearchRows(tenant, served, includeSourceUri);
+        enrichSearchRows(tenant, served, includeSourceUri, labelStageFollows);
         final long enrichMs = (System.nanoTime() - enrichStartNanos) / 1_000_000L;
         long fillStartNanos = System.nanoTime();
         if (includeEmbeddings) {
@@ -3262,7 +3266,7 @@ public final class PgVectorRepository {
         // chunk into one row per document would have each of them overwritten with the same URI. The
         // stage re-points source_uri on the rows it expands, as searchWithTokens and
         // searchPerCollection do.
-        enrichSearchRows(tenant, rows, includeSourceUri);
+        enrichSearchRows(tenant, rows, includeSourceUri, labelSplit.active());
         if (labelSplit.active()) {
             rows = labelStage().apply(tenant, rows, labelSplit.labels(), nResults);
         }
@@ -8033,7 +8037,7 @@ FROM scope s
     }
 
     /** Precompiled hex pattern for chunk_text_hash validation (fix #M1-cr: length+charset). */
-    private static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
+    static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
 
     // nexus-lgdel.l1: HEX32 / isLegacyHex32 (the auto-converge-window 32-hex
     // admission predicate) are RETIRED WITH nexus.chash_alias — the window
@@ -8088,7 +8092,19 @@ FROM scope s
      *
      * <p>Always adds {@code chash} and {@code span} to each row in-place (free — no I/O).
      * Adds {@code source_uri} only when {@code includeSourceUri} is {@code true} (opt-in,
-     * default false — gates the catalog JOIN so the default path pays zero extra I/O).
+     * default false).
+     *
+     * <p>nexus-6pfgb.26: every row also names its manifest owner, from ONE lookup per window ({@link
+     * #ownersByChash}) whether or not {@code source_uri} was asked for: {@code doc_id} and {@code position}
+     * of the owner's first live manifest row in the row's own collection, and that row's span ({@code
+     * line_start}, {@code line_end}, {@code chunk_start_char}, {@code chunk_end_char}) where the manifest
+     * has a value, so the document, the file and the lines on a citation are one owner's. A chunk with no
+     * live owner keeps its own span and gets neither key.
+     *
+     * <p>{@code labelStageFollows}: a {@link ManifestLabelStage} pass will expand each row to its owning
+     * documents, and writes each copy's own {@code doc_id}, {@code position} and span, falling back, for a
+     * NULL manifest field, to the CHUNK ROW's value. This method must then leave those fields as the chunk
+     * row has them, or an owner without a recorded span would inherit the first owner's.
      *
      * <p>Field-presence contract:
      * <ul>
@@ -8101,15 +8117,16 @@ FROM scope s
      * @param tenant           the tenant for the catalog JOIN (RLS-scoped)
      * @param rows             the chunk-level search result rows to enrich (mutated in-place)
      * @param includeSourceUri when true, resolves source_uri via a catalog JOIN
+     * @param labelStageFollows true when a label or document-key filter's stage runs over these rows next
      */
     private void enrichSearchRows(String tenant, List<Map<String, Object>> rows,
-                                  boolean includeSourceUri) {
+                                  boolean includeSourceUri, boolean labelStageFollows) {
         if (rows.isEmpty()) return;
-        // nexus-6pfgb.26: ONE lookup per window, whether or not source_uri was asked for: the span fields
-        // come from the same owner row, so every chunk-level row needs it.
+        // nexus-6pfgb.26: ONE lookup per window, whether or not source_uri was asked for: the owner's
+        // doc_id, position and span come from the same row, so every chunk-level row needs it.
         Map<String, Set<String>> chashesByCollection = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
-            if (row.get("id") instanceof String s && s.length() == 64
+            if (row.get("id") instanceof String s && HEX64.matcher(s).matches()
                     && row.get("collection") instanceof String c) {
                 chashesByCollection.computeIfAbsent(c, k -> new LinkedHashSet<>()).add(s);
             }
@@ -8140,9 +8157,11 @@ FROM scope s
             Object coll = row.get("collection");
             ManifestLabelStage.Occurrence owner = coll instanceof String c
                 ? owners.get(ManifestLabelStage.ownerKey(c, chashStr)) : null;
-            if (owner != null) {
-                // The owner's own span replaces the shared chunk row's (the last writer's); a NULL manifest
-                // field keeps the row's value (a legacy manifest row), and so does a chunk with no owner.
+            if (owner != null && !labelStageFollows) {
+                // The row names its owner, and that owner's span replaces the shared chunk row's (the last
+                // writer's); a NULL manifest field keeps the row's value (a legacy manifest row).
+                row.put("doc_id", owner.docId());
+                row.put("position", owner.position());
                 ManifestLabelStage.putSpan(row, owner);
             }
             if (includeSourceUri) {
@@ -8189,7 +8208,7 @@ FROM scope s
         if (includeSourceUri) {
             Set<String> hexes = new LinkedHashSet<>();
             for (String id : ids) {
-                if (id != null && id.length() == 64) hexes.add(id);
+                if (id != null && HEX64.matcher(id).matches()) hexes.add(id);
             }
             owners = ownersByChash(tenant, hexes.isEmpty() ? Map.of() : Map.of(collection, hexes));
         }

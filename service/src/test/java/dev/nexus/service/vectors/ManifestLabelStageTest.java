@@ -332,7 +332,7 @@ class ManifestLabelStageTest {
     }
 
     @Test
-    void anOwnerWithOnlyLines_replacesTheLines_andAddsNoKeyItDoesNotHave() {
+    void anOwnerWithOnlyLines_writesOnlyTheTwoLineFields_andNoCharField() {
         Map<String, Object> row = w();
 
         ManifestLabelStage.putSpan(row, owner(4, 9, null, null));

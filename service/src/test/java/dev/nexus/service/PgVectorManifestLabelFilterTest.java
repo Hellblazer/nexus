@@ -353,12 +353,20 @@ class PgVectorManifestLabelFilterTest {
     }
 
     @Test
-    void aWhereWithoutLabelKeys_isUntouched_oneRowPerChunk_noDocId() {
+    void aWhereWithoutLabelKeys_isUntouched_oneRowPerChunk_namesItsFirstOwner() {
         var rows = vec.search(TENANT, QUERY, List.of(COLLECTION), 10, null);
 
         assertThat(rows.stream().map(r -> (String) r.get("id")).collect(Collectors.toList()))
             .containsExactly(X, Y, Z, V, W, U);
-        assertThat(rows).allSatisfy(r -> assertThat(r).doesNotContainKey("doc_id"));
+        // nexus-6pfgb.26 changed this pin deliberately: it asserted that an unfiltered row carries NO doc_id.
+        // A row now names the first live owner of its chunk (lowest doc_id, then position), so X, held by
+        // both documents, is A's, one row and not one per document (the label stage's expansion).
+        var owners = rows.stream().collect(Collectors.toMap(r -> (String) r.get("id"),
+            r -> r.get("doc_id") + "@" + r.get("position"), (a, b) -> a, java.util.LinkedHashMap::new));
+        assertThat(owners).containsExactly(
+            java.util.Map.entry(X, DOC_A + "@0"), java.util.Map.entry(Y, DOC_A + "@1"),
+            java.util.Map.entry(Z, DOC_B + "@1"), java.util.Map.entry(V, DOC_A + "@2"),
+            java.util.Map.entry(W, DOC_B + "@2"), java.util.Map.entry(U, DOC_A + "@3"));
     }
 
     @Test
