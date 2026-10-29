@@ -321,3 +321,42 @@ def test_real_queue_with_no_service_is_a_quiet_failure_not_a_raise(tmp_path: Pat
     )
     assert d._reclaim_once() is None
     assert d._current_reclaim_wait == 60.0
+
+
+# ── RDR-235 (nexus-5r2sc.3.3): the table reclaim never touches the tuple queue ─
+
+
+class _TupleTripwireQueue(_FakeQueue):
+    """The reclaim queue handle. Any attribute that names the tuple queue is a
+    failure: the sweep is the TABLE's reclaim and a tuple claim lives by its
+    lease."""
+
+    def __getattr__(self, name: str):
+        if "tuple" in name or name in ("tuples", "_tuples", "out", "inp", "in_", "nack", "release"):
+            raise AssertionError(f"the table reclaim reached for the tuple queue: {name}")
+        raise AttributeError(name)
+
+
+def test_the_reclaim_loop_and_the_stop_sweep_only_call_the_table_queue(tmp_path: Path) -> None:
+    q = _TupleTripwireQueue()
+    held: list[str] = []
+
+    class _Worker(_FakeWorker):
+        def release_held_claims(self) -> int:
+            held.append("released")
+            return 1
+
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="default", worker_factory=_Worker,
+        queue_factory=lambda: q, reclaim_interval=0.02, stale_timeout_seconds=60,
+    )
+    d.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and len(q.reclaim_calls) < 3:
+            time.sleep(0.02)
+        assert len(q.reclaim_calls) >= 3
+    finally:
+        d.stop()
+    assert held == ["released"], "the tuple claims are released by the worker hook, not the queue"
+    assert q.closed == 1

@@ -1642,6 +1642,31 @@ def extract_aspects(
 # headroom (180 + 4 * 60 = 420 s for batch=5) absorbs Claude's variance.
 _BATCH_TIMEOUT_PER_EXTRA_PAPER_S = 60
 
+#: The per-attempt timeout of a single-document call and the base of a batched
+#: one (``extract_aspects_batch`` adds ``_BATCH_TIMEOUT_PER_EXTRA_PAPER_S`` per
+#: further document). Named here so :func:`worst_case_extract_seconds` and the
+#: batch path read one number.
+_SINGLE_CALL_TIMEOUT_S = 180
+
+
+def worst_case_extract_seconds(n_docs: int) -> float:
+    """Upper bound, in seconds, on one extraction call over *n_docs* documents
+    (RDR-235 Worker side step 2: the deadline a claim renewer works to).
+
+    The split into sub-batches happens inside :func:`extract_aspects_batch`
+    (``_split_by_budget``, by document text the caller does not hold yet), so
+    the bound is taken over the worst split. A sub-batch of ``g`` documents is
+    ``_RETRY_ATTEMPTS`` attempts of ``_SINGLE_CALL_TIMEOUT_S +
+    _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (g - 1)`` each, with the jittered sleeps
+    between attempts; the sum over a partition grows with the number of
+    sub-batches, so the worst case is ``n_docs`` one-document sub-batches, which
+    is also the single-document path run once per document. For 5 documents
+    that is 2,743.75 s (not the 1,270 s of one sub-batch of 5)."""
+    if n_docs <= 0:
+        return 0.0
+    sleeps = sum(_RETRY_BASE_SECONDS[: _RETRY_ATTEMPTS - 1]) * (1.0 + _RETRY_JITTER_FRACTION)
+    return n_docs * (_RETRY_ATTEMPTS * _SINGLE_CALL_TIMEOUT_S + sleeps)
+
 
 def extract_aspects_batch(
     items: list[tuple[str, str, str]] | list[tuple[str, str, str, str]],
@@ -1838,7 +1863,7 @@ def extract_aspects_batch(
     ]
     for cfg, group in sub_batches:
         prompt = _build_batch_prompt(group, cfg)
-        timeout = 180 + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(group) - 1)
+        timeout = _SINGLE_CALL_TIMEOUT_S + _BATCH_TIMEOUT_PER_EXTRA_PAPER_S * (len(group) - 1)
         parsed = _retry_subprocess_batch(prompt, cfg, timeout=timeout)
         cfg = _stamped_with_actual_model(cfg)
 
