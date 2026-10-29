@@ -306,8 +306,9 @@ manual took 1.42 s per page on the laptop and 3.2 s on chas. The longest gap bet
 progress writes was 180 s, on the forced timeouts; no run tripped the breaker. A forced
 rung-1 failure settled `mineru-no-formula`. A forced rung-1 and rung-2 timeout settled
 `pymupdf-text` on a page with a text layer and `unextracted` on the scan, which has no
-text layer on any page. The Grossberg & Stone scan and its equation count were not
-run: its DEVONthink database was not open to the run.
+text layer on any page. The 30-page Grossberg & Stone scan (RF-1) finished on both
+hosts with no degraded page and gave 17 of its 20 numbered equations as LaTeX on both,
+the same 17 RF-1 found (equations 11, 12 and 20 are the misses).
 
 ### Critical Assumptions
 
