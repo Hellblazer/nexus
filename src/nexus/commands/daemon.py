@@ -598,6 +598,24 @@ def _supervisor_argv(config_dir: Path, *, nx_bin: list[str] | None = None) -> li
     ]
 
 
+def _migration_halt_cause(supervisor_error: str | None, engine_marks: dict[Path, int]) -> str:
+    """The engine's own root cause, as one ``The engine reported: ...`` line, when the
+    supervisor's error is a schema-migration failure; else ``""``.
+
+    nexus-bivz3.25: the supervisor's line for that failure names only what the engine
+    logged at ERROR (``Liquibase migration failed``). The message that says what to do
+    (a changeset's ``RAISE``, as the RDR-231 note-URI backfill raises, with its runbook
+    URL) sits at the end of the exception chain in the engine's own log, which the
+    caller already marked before it spawned. Any other supervisor error already says why.
+    """
+    from nexus.daemon import storage_service_daemon as _ssd  # noqa: PLC0415 — deferred import — CLI startup cost, only needed on the failure path
+
+    if supervisor_error is None or not supervisor_error.startswith("Schema migration failed"):
+        return ""
+    found = _ssd.engine_root_cause(engine_marks)
+    return "" if found is None else f"The engine reported: {found[1]}\n"
+
+
 def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
@@ -787,7 +805,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
             # is the fallback for a supervisor killed before it could report.
             supervisor_error = _ssd.last_supervisor_error_line(crash_log, crash_mark)
             if supervisor_error is not None:
-                detail = f"{supervisor_error}\n"
+                detail = f"{supervisor_error}\n" + _migration_halt_cause(supervisor_error, engine_marks)
             elif (found := _ssd.engine_exit_reason(engine_marks)) is not None:
                 engine_log, reason = found
                 detail = f"The engine reported: {reason}\nEngine log: {engine_log}\n"
@@ -919,6 +937,7 @@ def _start_via_autostart_unit(
         error_mark = error_log.stat().st_size
     except OSError:
         error_mark = 0
+    engine_marks = _ssd.engine_log_marks(config_dir)
 
     failure = installer.start_autostart_unit(unit_path, tier="service")
     if failure is not None:
@@ -934,7 +953,10 @@ def _start_via_autostart_unit(
             break
         time.sleep(0.5)
     last_error = _ssd.last_supervisor_error_line(error_log, error_mark)
-    detail = f"The supervisor reported: {last_error}\n" if last_error else ""
+    detail = (
+        f"The supervisor reported: {last_error}\n" + _migration_halt_cause(last_error, engine_marks)
+        if last_error else ""
+    )
     raise _ssd.StorageServiceStartError(
         f"The autostart unit {unit_name} was started but the storage service "
         f"did not become ready within {_UNIT_START_WAIT_S:g}s; {retrying}.\n"
@@ -2055,9 +2077,11 @@ def restart_stale_cmd(dry_run: bool) -> None:
                 # nexus-bivz3.25: the disk fact alone said "converged" while
                 # the new engine had halted at a Liquibase changeset and
                 # served nothing (RDR-231 rehearsal). converge_engine returns
-                # [] for a service that is simply not running, so this branch
-                # reaches here for a dead engine too. Ask the RUNNING engine,
-                # with the probe upgrade_finish itself verifies with.
+                # [] for a service that is simply not running (a stopped
+                # service is an ordinary state), so this branch reaches here
+                # for a dead engine too. Ask the RUNNING engine, with the probe
+                # upgrade_finish itself verifies with, and say only what it
+                # answered.
                 running = _running_engine(config_dir)
                 if running.version == status.required_version:
                     click.echo(
@@ -2065,19 +2089,29 @@ def restart_stale_cmd(dry_run: bool) -> None:
                         "(the release dependency) and the running service "
                         f"reports v{req_s}"
                     )
-                else:
-                    seen = (
-                        f"the running service reports v{'.'.join(str(p) for p in running.version)}"
-                        if running.version is not None
-                        else running.reason or "the running service did not answer"
-                    )
+                elif running.version is not None:
+                    got_run = ".".join(str(p) for p in running.version)
                     click.echo(
                         f"engine: not converged — installed engine is v{req_s} "
-                        f"(the release dependency), but {seen}. Start it with "
-                        "`nx daemon service start` (its output names the "
-                        "reason when the engine halts at startup), read the "
-                        "engine log (logs/storage_service_native.log under "
-                        "the config dir), and run `nx doctor`."
+                        f"(the release dependency), but the running service "
+                        f"reports v{got_run}. Check `nx doctor` and "
+                        "`nx daemon service status`."
+                    )
+                elif running.up:
+                    click.echo(
+                        f"engine: installed engine is v{req_s} (the release "
+                        "dependency); the running service did not report a "
+                        f"version ({running.reason or 'no answer'}), so "
+                        "convergence is unverified. Run `nx doctor` and "
+                        "`nx daemon service status`."
+                    )
+                else:
+                    click.echo(
+                        f"engine: installed engine is v{req_s} (the release "
+                        "dependency); the service is not running "
+                        f"({running.reason or 'it did not answer'}). Start it "
+                        "with `nx daemon service start` (its output names the "
+                        "reason if the engine halts at startup)."
                     )
         else:
             for line in engine_actions:

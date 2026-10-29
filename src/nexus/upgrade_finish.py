@@ -28,6 +28,7 @@ the finish choreography triggers from the product side:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1911,14 +1912,28 @@ def _restart_and_verify(
         )
         return actions
     if start.returncode != 0 and not after.up:
-        # nexus-bivz3.25: `start` failed and nothing answers, so the service
-        # never started. "restarted but its version could not be confirmed"
-        # was false here, and the engine's own reason (the RDR-231 RAISE and
-        # its runbook URL) sat past the transcript's 300-char fold.
+        # nexus-bivz3.25: `start` failed and nothing answers. "restarted but its
+        # version could not be confirmed" was false, and the start error (the
+        # RDR-231 RAISE and its runbook URL) sat past the transcript's 300-char
+        # fold. What `start` said tells two failures apart: the supervisor
+        # exited (nothing started), or it is alive and the engine has not
+        # answered within start's 60 s (it may be mid-migration, a verdict
+        # nobody has made yet).
+        reason = _start_failure_reason(start)
+        if "supervisor exited with code" not in reason and "did not become ready within" in reason:
+            actions.append(
+                f"NEEDS HUMAN: nx daemon service start returned {start.returncode} "
+                "and nothing answers yet; the service may still be migrating, so "
+                f"convergence to v{req_s} is UNVERIFIED. Its output: {reason} "
+                "Check the engine log (logs/storage_service_native.log under the "
+                "config dir), then `nx daemon service status` and `nx doctor`. "
+                + cycle_transcript
+            )
+            return actions
         actions.append(
             f"NEEDS HUMAN: the storage service did not start (`nx daemon "
             f"service start` exited {start.returncode}); the engine is NOT "
-            f"converged to v{req_s}. Its reason: {_start_failure_reason(start)} "
+            f"converged to v{req_s}. Its reason: {reason} "
             "Run `nx daemon service start` to see it again, read the engine "
             "log, and check `nx doctor`. " + cycle_transcript
         )
@@ -1941,13 +1956,16 @@ def _start_failure_reason(start: subprocess.CompletedProcess[str]) -> str:
     :data:`_START_REASON_MAX`.
 
     ``start`` prefixes its error with an autostart-unit preamble, so the text
-    from the first ``Error:`` on is the reason; with no such marker the whole
-    output is returned.
+    from the first line that starts ``Error: `` is the reason (the way
+    :func:`~nexus.daemon.storage_service_daemon.last_supervisor_error_line`
+    finds a supervisor's own); ``RuntimeError: boom`` is not that marker. The
+    match is on the raw text, before whitespace is collapsed. With no such
+    line the whole output is returned.
     """
-    text = " ".join(((start.stdout or "") + " " + (start.stderr or "")).split())
-    cut = text.find("Error:")
-    if cut != -1:
-        text = text[cut + len("Error:"):].lstrip()
+    raw = (start.stdout or "") + "\n" + (start.stderr or "")
+    if (marker := re.search(r"^Error: ", raw, re.MULTILINE)) is not None:
+        raw = raw[marker.end():]
+    text = " ".join(raw.split())
     if len(text) > _START_REASON_MAX:
         text = text[:_START_REASON_MAX].rstrip() + "..."
     return text or "(no output)"

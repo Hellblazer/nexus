@@ -1,0 +1,1 @@
+Error: Schema migration failed on port 47055: 2026-10-29 13:56:09,901 ERROR [main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration failed". Engine log: /home/nexus/.config/nexus/logs/storage_service_native.log

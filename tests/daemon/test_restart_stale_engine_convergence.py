@@ -19,7 +19,7 @@ from click.testing import CliRunner
 
 from nexus.commands.daemon import daemon_group
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
-from nexus.upgrade_finish import EngineConvergence, SkewReport
+from nexus.upgrade_finish import EngineConvergence, RunningEngine, SkewReport
 
 
 @pytest.fixture(autouse=True)
@@ -101,10 +101,15 @@ class TestRestartStaleEngineConvergence:
                 applicable=True, installed_version=req, required_version=req,
                 converged=True,
             ),
+        ), patch(
+            # nexus-bivz3.25: "converged" is claimed only of a RUNNING engine
+            # that answered at the required version.
+            "nexus.upgrade_finish._running_engine",
+            return_value=RunningEngine(up=True, version=req),
         ):
             result, converge, _h, _u = _invoke(tmp_path, engine_actions=[])
         assert result.exit_code == 0, result.output
-        assert "converged" in result.output
+        assert "engine: converged" in result.output
         assert "not applicable" not in result.output
         converge.assert_called_once_with(tmp_path, dry_run=False)
 

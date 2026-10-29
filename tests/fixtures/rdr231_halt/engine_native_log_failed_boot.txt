@@ -1,0 +1,249 @@
+Oct 29, 2026 1:56:09 PM liquibase.command
+INFO: Update command encountered an exception.
+Oct 29, 2026 1:56:09 PM liquibase.lockservice
+INFO: Successfully released change log lock
+Oct 29, 2026 1:56:09 PM liquibase.command
+INFO: Logging exception.
+ERROR: Exception Details
+ERROR: Exception Primary Class:  PSQLException
+ERROR: Exception Primary Reason:  ERROR: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+  Where: PL/pgSQL function inline_code_block line 15 at RAISE
+ERROR: Exception Primary Source:  PostgreSQL 17.5
+Oct 29, 2026 1:56:09 PM liquibase.command
+INFO: Command execution complete
+2026-10-29 13:56:09,901 ERROR [main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration failed"
+dev.nexus.service.db.SchemaMigrator$MigrationException: Liquibase migration failed
+	at dev.nexus.service.db.SchemaMigrator.migrate(SchemaMigrator.java:715)
+	at dev.nexus.service.db.SchemaMigrator.migrate(SchemaMigrator.java:495)
+	at dev.nexus.service.db.SchemaMigrator.migrate(SchemaMigrator.java:484)
+	at dev.nexus.service.db.SchemaMigrator.migrate(SchemaMigrator.java:396)
+	at dev.nexus.service.Main.main(Main.java:220)
+	at java.base@25.0.3/java.lang.invoke.LambdaForm$DMH/sa346b79c.invokeStaticInit(LambdaForm$DMH)
+Caused by: liquibase.exception.CommandExecutionException: liquibase.exception.LiquibaseException: liquibase.exception.MigrationFailedException: Migration failed for changeset db/changelog/note-uri-001-backfill.xml::note-uri-001-1::nexus-bivz3.5:
+     Reason: liquibase.exception.DatabaseException: ERROR: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+  Where: PL/pgSQL function inline_code_block line 15 at RAISE [Failed SQL: (0) ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_highlights NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    n BIGINT;
+BEGIN
+    SELECT count(*) INTO n
+      FROM nexus.catalog_documents o
+      JOIN nexus.catalog_documents t
+        ON t.tenant_id = o.tenant_id
+       AND t.deleted_at IS NULL
+       AND t.source_uri = CASE WHEN starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(o.source_uri, 10) WHEN o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(o.source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE o.source_uri END
+     WHERE o.deleted_at IS NULL
+       AND (starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__'))
+            OR o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')));
+    IF n > 0 THEN
+        RAISE EXCEPTION 'RDR-231 note-URI backfill halted and nothing was changed: % live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup', n;
+    END IF;
+END $$;
+
+UPDATE nexus.catalog_documents
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_aspects
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_highlights
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+ALTER TABLE nexus.document_highlights FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY]
+	at liquibase.command.CommandScope.execute(CommandScope.java:258)
+	at liquibase.Liquibase.lambda$update$0(Liquibase.java:216)
+	at liquibase.Scope.lambda$child$0(Scope.java:191)
+	at liquibase.Scope.child(Scope.java:200)
+	at liquibase.Scope.child(Scope.java:190)
+	at liquibase.Scope.child(Scope.java:169)
+	at liquibase.Liquibase.runInScope(Liquibase.java:1290)
+	at liquibase.Liquibase.update(Liquibase.java:205)
+	at liquibase.Liquibase.update(Liquibase.java:188)
+	at dev.nexus.service.db.SchemaMigrator.update(SchemaMigrator.java:726)
+	at dev.nexus.service.db.SchemaMigrator.migrate(SchemaMigrator.java:631)
+	... 5 common frames omitted
+Caused by: liquibase.exception.LiquibaseException: liquibase.exception.MigrationFailedException: Migration failed for changeset db/changelog/note-uri-001-backfill.xml::note-uri-001-1::nexus-bivz3.5:
+     Reason: liquibase.exception.DatabaseException: ERROR: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+  Where: PL/pgSQL function inline_code_block line 15 at RAISE [Failed SQL: (0) ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_highlights NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    n BIGINT;
+BEGIN
+    SELECT count(*) INTO n
+      FROM nexus.catalog_documents o
+      JOIN nexus.catalog_documents t
+        ON t.tenant_id = o.tenant_id
+       AND t.deleted_at IS NULL
+       AND t.source_uri = CASE WHEN starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(o.source_uri, 10) WHEN o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(o.source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE o.source_uri END
+     WHERE o.deleted_at IS NULL
+       AND (starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__'))
+            OR o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')));
+    IF n > 0 THEN
+        RAISE EXCEPTION 'RDR-231 note-URI backfill halted and nothing was changed: % live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup', n;
+    END IF;
+END $$;
+
+UPDATE nexus.catalog_documents
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_aspects
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_highlights
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+ALTER TABLE nexus.document_highlights FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY]
+	at liquibase.changelog.ChangeLogIterator.run(ChangeLogIterator.java:148)
+	at liquibase.command.core.AbstractUpdateCommandStep.lambda$run$0(AbstractUpdateCommandStep.java:113)
+	at liquibase.Scope.lambda$child$0(Scope.java:191)
+	at liquibase.Scope.child(Scope.java:200)
+	at liquibase.Scope.child(Scope.java:190)
+	at liquibase.Scope.child(Scope.java:169)
+	at liquibase.command.core.AbstractUpdateCommandStep.run(AbstractUpdateCommandStep.java:111)
+	at liquibase.command.core.UpdateCommandStep.run(UpdateCommandStep.java:105)
+	at liquibase.command.CommandScope.execute(CommandScope.java:220)
+	... 15 common frames omitted
+Caused by: liquibase.exception.MigrationFailedException: Migration failed for changeset db/changelog/note-uri-001-backfill.xml::note-uri-001-1::nexus-bivz3.5:
+     Reason: liquibase.exception.DatabaseException: ERROR: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+  Where: PL/pgSQL function inline_code_block line 15 at RAISE [Failed SQL: (0) ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_highlights NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    n BIGINT;
+BEGIN
+    SELECT count(*) INTO n
+      FROM nexus.catalog_documents o
+      JOIN nexus.catalog_documents t
+        ON t.tenant_id = o.tenant_id
+       AND t.deleted_at IS NULL
+       AND t.source_uri = CASE WHEN starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(o.source_uri, 10) WHEN o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(o.source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE o.source_uri END
+     WHERE o.deleted_at IS NULL
+       AND (starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__'))
+            OR o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')));
+    IF n > 0 THEN
+        RAISE EXCEPTION 'RDR-231 note-URI backfill halted and nothing was changed: % live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup', n;
+    END IF;
+END $$;
+
+UPDATE nexus.catalog_documents
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_aspects
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_highlights
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+ALTER TABLE nexus.document_highlights FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY]
+	at liquibase.changelog.ChangeSet.execute(ChangeSet.java:819)
+	at liquibase.changelog.visitor.UpdateVisitor.executeAcceptedChange(UpdateVisitor.java:119)
+	at liquibase.changelog.visitor.UpdateVisitor.visit(UpdateVisitor.java:68)
+	at liquibase.changelog.ChangeLogIterator.lambda$run$0(ChangeLogIterator.java:131)
+	at liquibase.Scope.lambda$child$0(Scope.java:191)
+	at liquibase.Scope.child(Scope.java:200)
+	at liquibase.Scope.child(Scope.java:190)
+	at liquibase.Scope.child(Scope.java:169)
+	at liquibase.changelog.ChangeLogIterator.lambda$run$1(ChangeLogIterator.java:120)
+	at liquibase.Scope.lambda$child$0(Scope.java:191)
+	at liquibase.Scope.child(Scope.java:200)
+	at liquibase.Scope.child(Scope.java:190)
+	at liquibase.Scope.child(Scope.java:169)
+	at liquibase.Scope.child(Scope.java:257)
+	at liquibase.Scope.child(Scope.java:261)
+	at liquibase.changelog.ChangeLogIterator.run(ChangeLogIterator.java:89)
+	... 23 common frames omitted
+Caused by: liquibase.exception.DatabaseException: ERROR: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+  Where: PL/pgSQL function inline_code_block line 15 at RAISE [Failed SQL: (0) ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_highlights NO FORCE ROW LEVEL SECURITY;
+
+DO $$
+DECLARE
+    n BIGINT;
+BEGIN
+    SELECT count(*) INTO n
+      FROM nexus.catalog_documents o
+      JOIN nexus.catalog_documents t
+        ON t.tenant_id = o.tenant_id
+       AND t.deleted_at IS NULL
+       AND t.source_uri = CASE WHEN starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(o.source_uri, 10) WHEN o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(o.source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE o.source_uri END
+     WHERE o.deleted_at IS NULL
+       AND (starts_with(o.source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(o.source_uri, 10), '/', 1), 'code__'))
+            OR o.source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(o.source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')));
+    IF n > 0 THEN
+        RAISE EXCEPTION 'RDR-231 note-URI backfill halted and nothing was changed: % live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup', n;
+    END IF;
+END $$;
+
+UPDATE nexus.catalog_documents
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_aspects
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+UPDATE nexus.document_highlights
+   SET source_uri = CASE WHEN starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__')) THEN 'nx-note://' || substr(source_uri, 10) WHEN source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__')) THEN regexp_replace(source_uri, '^(nxexp://[^/]*)/chroma://', '\1/nx-note://') ELSE source_uri END
+ WHERE starts_with(source_uri, 'chroma://') AND NOT (starts_with(split_part(substr(source_uri, 10), '/', 1), 'rdr__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'docs__') OR starts_with(split_part(substr(source_uri, 10), '/', 1), 'code__'))
+    OR source_uri ~ '^nxexp://[^/]*/chroma://' AND NOT (starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'rdr__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'docs__') OR starts_with(substring(source_uri from '^nxexp://[^/]*/chroma://([^/]*)'), 'code__'));
+
+ALTER TABLE nexus.document_highlights FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.document_aspects FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY]
+	at liquibase.executor.jvm.JdbcExecutor$ExecuteStatementCallback.doInStatement(JdbcExecutor.java:476)
+	at liquibase.executor.jvm.JdbcExecutor.execute(JdbcExecutor.java:83)
+	at liquibase.executor.jvm.JdbcExecutor.execute(JdbcExecutor.java:185)
+	at liquibase.executor.AbstractExecutor.execute(AbstractExecutor.java:141)
+	at liquibase.database.AbstractJdbcDatabase.executeStatements(AbstractJdbcDatabase.java:1189)
+	at liquibase.changelog.ChangeSet.execute(ChangeSet.java:775)
+	... 38 common frames omitted
+Caused by: org.postgresql.util.PSQLException: ERROR: RDR-231 note-URI backfill halted and nothing was changed: 1 live chroma:// note row(s) have a live nx-note:// twin. Start the previous engine binary, merge each pair with POST /v1/catalog/merge, then restart on the new engine. Steps for cloud and local installs: https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md#if-the-rdr-231-note-uri-backfill-halts-startup
+  Where: PL/pgSQL function inline_code_block line 15 at RAISE
+	at org.postgresql.core.v3.QueryExecutorImpl.receiveErrorResponse(QueryExecutorImpl.java:2733)
+	at org.postgresql.core.v3.QueryExecutorImpl.processResults(QueryExecutorImpl.java:2420)
+	at org.postgresql.core.v3.QueryExecutorImpl.execute(QueryExecutorImpl.java:372)
+	at org.postgresql.jdbc.PgStatement.executeInternal(PgStatement.java:517)
+	at org.postgresql.jdbc.PgStatement.execute(PgStatement.java:434)
+	at org.postgresql.jdbc.PgStatement.executeWithFlags(PgStatement.java:356)
+	at org.postgresql.jdbc.PgStatement.executeCachedSql(PgStatement.java:341)
+	at org.postgresql.jdbc.PgStatement.executeWithFlags(PgStatement.java:317)
+	at org.postgresql.jdbc.PgStatement.execute(PgStatement.java:312)
+	at com.zaxxer.hikari.pool.ProxyStatement.execute(ProxyStatement.java:95)
+	at com.zaxxer.hikari.pool.HikariProxyStatement.execute(HikariProxyStatement.java)
+	at liquibase.executor.jvm.JdbcExecutor$ExecuteStatementCallback.doInStatement(JdbcExecutor.java:470)
+	... 43 common frames omitted
