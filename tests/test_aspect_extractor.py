@@ -2170,3 +2170,35 @@ class TestContentBound:
         assert [r.problem_formulation for r in records] == ["P /small.pdf", "P /huge.pdf"]
         assert "input_truncated" not in records[0].extras
         assert records[1].extras["input_truncated"] == {"kept_chars": cap, "total_chars": len(items[1][2])}
+
+
+def test_no_timeout_180_literal_is_left_in_the_extractor() -> None:
+    """nexus-5r2sc.3.10: the claim renewer's deadline is computed from
+    ``_SINGLE_CALL_TIMEOUT_S`` (``worst_case_extract_seconds``). A call site that
+    spells ``timeout=180`` can drift from it, and a lease then lapses mid
+    extraction. Every call site and default must go through the constant."""
+    import ast
+    import inspect
+
+    import nexus.aspect_extractor as mod
+
+    tree = ast.parse(inspect.getsource(mod))
+    hits: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            hits += [
+                kw.value.lineno for kw in node.keywords
+                if kw.arg == "timeout" and isinstance(kw.value, ast.Constant) and kw.value.value == 180
+            ]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            named = [*args.posonlyargs, *args.args]
+            pairs = list(zip(reversed(named), reversed(args.defaults))) + [
+                (a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None
+            ]
+            hits += [
+                d.lineno for a, d in pairs
+                if a.arg == "timeout" and isinstance(d, ast.Constant) and d.value == 180
+            ]
+    assert not hits, f"timeout=180 literal(s) at line(s) {hits}: use _SINGLE_CALL_TIMEOUT_S"
+    assert mod._SINGLE_CALL_TIMEOUT_S == 180, "the constant the deadline math uses"

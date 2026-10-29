@@ -2414,10 +2414,10 @@ def _invoke_once(prompt: str, *, model: str | None = None) -> dict:
     """
     api_backend = _selected_api_backend()
     if api_backend is not None:
-        inner_text = _api_inner_text(prompt, api_backend, timeout=180, model=model)
+        inner_text = _api_inner_text(prompt, api_backend, timeout=_SINGLE_CALL_TIMEOUT_S, model=model)
     else:
         try:
-            result = _run_claude_isolated(prompt, timeout=180, model=model)
+            result = _run_claude_isolated(prompt, timeout=_SINGLE_CALL_TIMEOUT_S, model=model)
         except subprocess.TimeoutExpired as exc:
             raise _TransientFailure(f"timeout after 180s: {exc}") from exc
         except OSError as exc:
