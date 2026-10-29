@@ -97,7 +97,7 @@ def test_the_page_says_the_sizes_include_pdf_support_and_are_measured(path: str)
 def test_the_uv_cache_sentence_gives_the_measured_figures(path: str) -> None:
     text = _text(path)
     assert "about 2.1 GB on Linux" in text and "1.9 GB on macOS" in text and "0.83 GB" in text, f"{path} lacks the measured cache sizes"
-    for stale in ("about 2.2 GB on Linux", "1.8 GB on macOS", "2.4 GB on Linux", "3.6 GB on macOS", "2.4 GB, not 4.4 GB", "2.4 GB in uv's cache"):
+    for stale in ("about 2.2 GB on Linux", "1.8 GB on macOS", "2.4 GB on Linux", "3.6 GB on macOS", "2.4 GB, not 4.4 GB", "not 4.5 GB", "2.4 GB in uv's cache"):
         assert stale not in text, f"{path} still quotes {stale!r}"
 
 
