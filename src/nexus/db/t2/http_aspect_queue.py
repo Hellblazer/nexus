@@ -546,12 +546,10 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         (an engine without the template, or a tenant that never enqueued in
         ``tuples`` mode): nothing is queued there, so zero is true. Any other
         failure propagates: the caller must report that side UNKNOWN, never
-        zero."""
-        from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: table mode never loads it
-
-        try:
-            c = self._tuples().subspace_stats(ASPECTS_SUBSPACE)
-        except UnknownSubspaceError:
+        zero. The absent-template rule lives in :func:`aspects_census`, the
+        one reader every table-side consumer shares."""
+        c = aspects_census(self._tuples())
+        if c is None:
             return AspectTupleCounts(0, 0, 0)
         return AspectTupleCounts(c.available, c.claimed, c.dead)
 
