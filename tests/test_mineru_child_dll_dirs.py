@@ -243,7 +243,7 @@ def test_server_entry_is_the_console_scripts_entry_point(monkeypatch: pytest.Mon
         seen.append(kw)
         return [_FakeEntryPoint(sentinel)]
 
-    setattr_in(monkeypatch, "nexus._mineru_api_child", "importlib.metadata.entry_points", fake_entry_points)
+    setattr_in(monkeypatch, "nexus._mineru_console", "importlib.metadata.entry_points", fake_entry_points)
     assert _mineru_api_child.server_entry() is sentinel
     assert seen == [{"group": "console_scripts", "name": "mineru-api"}]
 
@@ -256,7 +256,7 @@ def test_server_entry_falls_back_to_the_known_module_path(monkeypatch: pytest.Mo
     monkeypatch.setitem(sys.modules, "mineru", types.ModuleType("mineru"))
     monkeypatch.setitem(sys.modules, "mineru.cli", types.ModuleType("mineru.cli"))
     monkeypatch.setitem(sys.modules, "mineru.cli.fast_api", fake)
-    setattr_in(monkeypatch, "nexus._mineru_api_child", "importlib.metadata.entry_points", lambda **kw: [])
+    setattr_in(monkeypatch, "nexus._mineru_console", "importlib.metadata.entry_points", lambda **kw: [])
     assert _mineru_api_child.server_entry() is fallback_main
 
 
@@ -566,3 +566,249 @@ def test_a_child_failure_off_windows_keeps_the_reinstall_remedy(
 ) -> None:
     text = _child_row_remedy(monkeypatch, capsys, windows=False, error="ImportError: libGL.so.1: cannot open")
     assert "Reinstall" in text and "nx init" not in text, text
+
+
+# ── round 2: the in-process import row, and the other mineru console scripts ──
+
+
+def _fake_failing_mineru(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, message: str) -> None:
+    """A ``mineru`` whose ``mineru.cli.common`` raises *message* on import, in THIS process."""
+    root = _fake_mineru(tmp_path, f"raise ImportError({message!r})\n")
+    monkeypatch.syspath_prepend(str(root))
+    for name in ("mineru", "mineru.cli", "mineru.cli.common"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+
+def _in_process_import_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], *, windows: bool, message: str,
+) -> str:
+    _fake_failing_mineru(tmp_path, monkeypatch, message)
+    if windows:
+        setattr_in(monkeypatch, "nexus._vcrt", "sys.platform", "win32")
+    assert doctor._run_check_mineru() is True
+    return capsys.readouterr().out
+
+
+def test_an_in_process_dll_failure_on_windows_names_the_runtime_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _stack_present: None,
+) -> None:
+    """On a bare Windows box the app-local DLLs are missing, so the doctor's OWN import fails with
+    ``DLL load failed``. Reinstalling places nothing; ``nx init`` (or ``nx upgrade --auto``) does."""
+    out = _in_process_import_remedy(
+        tmp_path, monkeypatch, capsys, windows=True,
+        message="DLL load failed while importing onnxruntime_pybind11_state: The specified module could not be found.",
+    )
+    assert "MinerU import" in out and "✗" in out, out
+    assert "nx init" in out and "nx upgrade --auto" in out and "vc_redist.x64.exe" in out, out
+    assert "Reinstall" not in out and "--reinstall" not in out, out
+
+
+def test_an_in_process_failure_that_is_not_a_dll_error_keeps_the_reinstall_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _stack_present: None,
+) -> None:
+    out = _in_process_import_remedy(
+        tmp_path, monkeypatch, capsys, windows=True, message="No module named 'torch'",
+    )
+    assert "Reinstall" in out and "nx init" not in out, out
+
+
+def test_an_in_process_dll_failure_off_windows_keeps_the_reinstall_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _stack_present: None,
+) -> None:
+    out = _in_process_import_remedy(
+        tmp_path, monkeypatch, capsys, windows=False, message="DLL load failed while importing x",
+    )
+    assert "Reinstall" in out and "nx init" not in out, out
+
+
+def test_console_module_imports_nexus_before_anything_that_loads_mineru() -> None:
+    """The same guard as for the server child, for the generic launcher: ``python -m nexus._mineru_console``
+    and any other launch form must have the DLL directories set before a console script's entry loads."""
+    tree = ast.parse((_SRC / "_mineru_console.py").read_text(encoding="utf-8"))
+    nexus_at = min(
+        (n.lineno for n in ast.walk(tree) if isinstance(n, ast.Import) and any(a.name == "nexus" for a in n.names)),
+        default=None,
+    )
+    assert nexus_at is not None, "the launcher never imports nexus, so the DLL-directory helper never runs in it"
+    loads = [
+        n.lineno
+        for n in ast.walk(tree)
+        if (isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[0] in _HEAVY)
+        or (isinstance(n, ast.Import) and any(a.name.split(".")[0] in _HEAVY for a in n.names))
+        or (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "load")
+    ]
+    assert loads, "the launcher loads nothing from mineru; the order test has nothing to pin"
+    assert all(nexus_at < at for at in loads), (nexus_at, loads)
+
+
+def test_console_main_runs_the_named_scripts_entry_with_its_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """argv[0] is the script name (click derives its usage line from it) and the rest are the script's
+    arguments; the exit status is the entry's."""
+    from nexus import _mineru_console  # noqa: PLC0415
+
+    seen: list[list[str]] = []
+
+    def entry() -> int:
+        seen.append(list(sys.argv))
+        return 3
+
+    setattr_in(monkeypatch, "nexus._mineru_console", "importlib.metadata.entry_points",
+               lambda **kw: [_FakeEntryPoint(entry)] if kw.get("name") == "mineru-models-download" else [])
+    with pytest.raises(SystemExit) as exc:
+        _mineru_console.main(["mineru-models-download", "--model_type", "pipeline"])
+    assert exc.value.code == 3
+    assert seen == [["mineru-models-download", "--model_type", "pipeline"]]
+
+
+def test_console_main_refuses_an_unknown_script_and_a_non_mineru_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from nexus import _mineru_console  # noqa: PLC0415
+
+    setattr_in(monkeypatch, "nexus._mineru_console", "importlib.metadata.entry_points", lambda **kw: [])
+    for argv in (["mineru-nonesuch"], ["pip"], []):
+        with pytest.raises(SystemExit) as exc:
+            _mineru_console.main(argv)
+        assert exc.value.code == 2, argv
+    assert "mineru-nonesuch" in capsys.readouterr().err
+
+
+def test_the_real_mineru_models_download_runs_under_the_console_module(tmp_path: Path) -> None:
+    """Against the REAL installed mineru: ``python -m nexus._mineru_console mineru-models-download --help``
+    resolves the console script's entry point (via importlib.metadata) and answers, so the command the
+    doctor prints works on a box where the console script itself cannot load torch."""
+    _require_real_mineru("mineru.cli.models_download")
+    proc = subprocess.run(
+        [sys.executable, "-m", "nexus._mineru_console", "mineru-models-download", "--help"],
+        capture_output=True, text=True, timeout=180, cwd=tmp_path,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--model_type" in proc.stdout or "Usage" in proc.stdout, proc.stdout
+
+
+def test_the_console_command_runs_the_script_under_the_console_interpreter() -> None:
+    cmd = _mineru_spawn.mineru_console_command("mineru-models-download")
+    assert cmd.endswith("-m nexus._mineru_console mineru-models-download"), cmd
+    assert console_python(sys.executable) in cmd or f'"{console_python(sys.executable)}"' in cmd, cmd
+
+
+def _row_skip_text(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> str:
+    fake_common = types.ModuleType("mineru.cli.common")
+    fake_common.do_parse = lambda *a, **k: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mineru", types.ModuleType("mineru"))
+    monkeypatch.setitem(sys.modules, "mineru.cli", types.ModuleType("mineru.cli"))
+    monkeypatch.setitem(sys.modules, "mineru.cli.common", fake_common)
+    monkeypatch.setattr(doctor, "_probe_mineru_child_import", lambda timeout_s=None: None)
+    assert doctor._run_check_mineru() is False
+    return capsys.readouterr().out
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_the_real_parse_skip_line_prints_a_command_that_works_on_every_platform(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], _stack_present: None, platform: str,
+) -> None:
+    """The ``mineru-models-download`` console script never imports nexus, so on bare Windows it dies
+    with WinError 126 on torch's c10.dll. The skip line carries the ``-m nexus._mineru_console`` form
+    on every platform and says the plain script also works off Windows."""
+    setattr_in(monkeypatch, "nexus._vcrt", "sys.platform", platform)
+    out = _row_skip_text(monkeypatch, capsys)
+    assert "-m nexus._mineru_console mineru-models-download" in out, out
+    assert "mineru.json" in out and "first use" in out, out
+    assert "mineru-models-download` directly" in out or "plain `mineru-models-download`" in out, out
+
+
+# ── the pipeline weights, with no download and no guessed cache path ────────
+
+
+def _hf_cache_with_weights(root: Path, *, skip: tuple[str, ...] = (), snapshot: bool = True) -> Path:
+    """A Hugging Face cache laid out the way ``huggingface_hub`` lays it out, holding the pipeline weights
+    mineru itself names (``ModelPath``)."""
+    from mineru.utils.enum_class import ModelPath  # noqa: PLC0415
+
+    repo = root / "models--opendatalab--PDF-Extract-Kit-1.0"
+    (repo / "refs").mkdir(parents=True)
+    (repo / "refs" / "main").write_text("a" * 40)
+    if snapshot:
+        snap = repo / "snapshots" / ("a" * 40)
+        for rel in (v for k, v in vars(ModelPath).items() if isinstance(v, str) and v.startswith("models/")):
+            if rel in skip:
+                continue
+            target = snap / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.mkdir(exist_ok=True) if not rel.endswith(".onnx") else target.write_bytes(b"x")
+    return root
+
+
+@pytest.fixture()
+def _no_mineru_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The box MinerU's own first-use download leaves: weights in the HF cache, no mineru.json."""
+    _require_real_mineru("mineru.utils.config_reader")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("MINERU_MODEL_SOURCE", raising=False)
+    monkeypatch.setenv("MINERU_TOOLS_CONFIG_JSON", "mineru.json")
+    monkeypatch.setattr(
+        doctor, "_mineru_pipeline_model_dir_configured", doctor._mineru_pipeline_model_dir_configured
+    )  # the real one: fixtures above this one may have patched it
+
+
+def _use_hf_cache(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    import huggingface_hub.constants as hf_constants  # noqa: PLC0415
+
+    monkeypatch.setattr(hf_constants, "HF_HUB_CACHE", str(root))
+
+
+def test_weights_in_the_hf_cache_count_as_provisioned_without_a_mineru_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _no_mineru_json: None,
+) -> None:
+    """What ``nx index pdf``'s first-use download leaves: no mineru.json, weights in the HF cache. The
+    real parse runs there; a skip would hide the GH #1533 class on every box that has indexed a PDF."""
+    _use_hf_cache(monkeypatch, _hf_cache_with_weights(tmp_path / "hub"))
+    assert doctor._mineru_pipeline_model_dir_configured() is True
+
+
+def test_a_partial_or_absent_hf_cache_is_not_provisioned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _no_mineru_json: None,
+) -> None:
+    from mineru.utils.enum_class import ModelPath  # noqa: PLC0415
+
+    _use_hf_cache(monkeypatch, _hf_cache_with_weights(tmp_path / "partial", skip=(ModelPath.pp_doclayout_v2,)))
+    assert doctor._mineru_pipeline_model_dir_configured() is False
+    _use_hf_cache(monkeypatch, _hf_cache_with_weights(tmp_path / "nosnap", snapshot=False))
+    assert doctor._mineru_pipeline_model_dir_configured() is False
+    (tmp_path / "empty").mkdir()
+    _use_hf_cache(monkeypatch, tmp_path / "empty")
+    assert doctor._mineru_pipeline_model_dir_configured() is False
+
+
+def test_the_weights_probe_never_goes_to_the_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _no_mineru_json: None,
+) -> None:
+    """Checking for weights must not download or even look them up: ``local_files_only`` is passed on
+    every call (a missing cache is the answer ``False``, not a fetch)."""
+    import huggingface_hub  # noqa: PLC0415
+
+    _use_hf_cache(monkeypatch, _hf_cache_with_weights(tmp_path / "hub"))
+    real = huggingface_hub.snapshot_download
+    calls: list[dict] = []
+
+    def spy(*a, **kw):  # noqa: ANN002, ANN003, ANN202
+        calls.append(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", spy)
+    assert doctor._mineru_pipeline_model_dir_configured() is True
+    assert calls and all(kw.get("local_files_only") is True for kw in calls), calls
+
+
+def test_another_model_source_is_not_probed_for_cached_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _no_mineru_json: None,
+) -> None:
+    """A cache is located the way mineru locates it for ``huggingface`` only; ``modelscope`` is not guessed at."""
+    _use_hf_cache(monkeypatch, _hf_cache_with_weights(tmp_path / "hub"))
+    monkeypatch.setenv("MINERU_MODEL_SOURCE", "modelscope")
+    assert doctor._mineru_pipeline_model_dir_configured() is False

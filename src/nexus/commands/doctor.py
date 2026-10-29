@@ -1935,18 +1935,49 @@ def _synthesize_mineru_probe_pdf(directory: Path) -> Path:
     return pdf_path
 
 
+def _mineru_pipeline_weights_cached() -> bool:
+    """Are the pipeline weights in the Hugging Face cache, found without any network access?
+
+    MinerU's own first-use download (``nx index pdf``) writes no ``mineru.json``: it calls
+    ``huggingface_hub.snapshot_download(ModelPath.pipeline_root_hf, allow_patterns=...)`` and uses the
+    returned snapshot folder (``mineru/utils/models_download_utils.py``). The same call with
+    ``local_files_only=True`` returns that folder from the cache or raises, and downloads and
+    looks up nothing; the files MinerU names in ``ModelPath`` (``models/...``) must then exist under
+    it. One MFR (formula) model is enough: which one loads depends on ``MINERU_FORMULA_CH_SUPPORT``.
+    Only ``huggingface`` (MinerU's default source) is probed; no other source's cache layout is guessed."""
+    import os  # noqa: PLC0415 — deferred local import — module has no top-level os import
+
+    if os.environ.get("MINERU_MODEL_SOURCE", "huggingface") != "huggingface":
+        return False
+    try:
+        from huggingface_hub import snapshot_download  # noqa: PLC0415 — optional/heavy dependency deferred (mineru's)
+        from mineru.utils.enum_class import ModelPath  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
+
+        weights = [v for k, v in vars(ModelPath).items() if not k.startswith("_") and isinstance(v, str) and v.startswith("models/")]
+        formula = [w for w in weights if w.startswith("models/MFR/")]
+        required = [w for w in weights if w not in formula]
+        if not required or not formula:
+            return False
+        root = Path(snapshot_download(ModelPath.pipeline_root_hf, local_files_only=True))
+        return all((root / w).exists() for w in required) and any((root / w).exists() for w in formula)
+    except Exception:  # noqa: BLE001 — best-effort probe; an absent cache or a mineru that moved ModelPath reads as unprovisioned
+        return False
+
+
 def _mineru_pipeline_model_dir_configured() -> bool:
-    """Best-effort: has ``mineru-models-download`` actually run on this
-    box? Gates the real-parse check so an operator who has never
-    provisioned pipeline weights sees a skip, not a FAIL for a model
-    download this check never asked for."""
+    """Best-effort: are the pipeline weights on this box? Either ``mineru-models-download`` ran
+    (``mineru.json`` names a pipeline models dir) or MinerU fetched them itself on first use (the
+    Hugging Face cache). Gates the real-parse check so an operator who has never provisioned
+    pipeline weights sees a skip, not a FAIL for a model download this check never asked for."""
     try:
         from mineru.utils.config_reader import get_local_models_dir  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
 
         pipeline_dir = (get_local_models_dir() or {}).get("pipeline")
     except Exception:  # noqa: BLE001 — best-effort probe; an unreadable config reads as unconfigured
-        return False
-    return bool(pipeline_dir) and Path(pipeline_dir).is_dir()
+        return _mineru_pipeline_weights_cached()
+    if pipeline_dir and Path(pipeline_dir).is_dir():
+        return True
+    return _mineru_pipeline_weights_cached()
 
 
 def _mineru_parse_fixture_once(timeout_s: float = _MINERU_DOCTOR_PARSE_TIMEOUT_S) -> None:
@@ -2103,18 +2134,31 @@ def _probe_mineru_child_import(timeout_s: float | None = None) -> str | None:
     return f"the MinerU imports exited {proc.returncode} with no output"
 
 
-def _child_import_remedy(child_error: str) -> str:
-    """What to do when MinerU imports in this process (the row above is green) but not in a fresh child.
+def _child_import_remedy(child_error: str, *, in_process: bool = False) -> str:
+    """What to do when MinerU does not import: in a fresh child only (the row above is green), or, with
+    *in_process*, in the doctor's own process.
 
-    The install is intact, so on Windows a DLL load failure means the child cannot find the VC++
-    runtime: it is not in System32 (no redistributable) and nx's app-local copies are missing or
-    incomplete. Reinstalling does not place them; ``nx init`` and ``nx upgrade --auto`` do
-    (``ensure_vc_runtime``), as does Microsoft's redistributable. Any other child failure, and every
-    non-Windows one, is a native dependency that does not load: reinstall."""
+    On Windows a DLL load failure means the VC++ runtime cannot be found: it is not in System32 (no
+    redistributable) and nx's app-local copies are missing or incomplete. Reinstalling does not place
+    them; ``nx init`` and ``nx upgrade --auto`` do (``ensure_vc_runtime``), as does Microsoft's
+    redistributable. Any other failure, and every non-Windows one, is a native dependency that does not
+    load or a broken install: reinstall."""
     from nexus import _vcrt  # noqa: PLC0415 — deferred import (startup cost)
 
     lowered = child_error.lower()
-    if _vcrt.is_windows() and ("dll load failed" in lowered or "winerror" in lowered):
+    dll_failure = _vcrt.is_windows() and ("dll load failed" in lowered or "winerror" in lowered)
+    if in_process and dll_failure:
+        return (
+            "MinerU cannot find the Visual C++ runtime DLLs it needs: this machine has no redistributable and "
+            "nx's own copies are missing or incomplete. Run `nx init` (or `nx upgrade --auto`) to place them, "
+            "or install Microsoft's redistributable from https://aka.ms/vs/17/release/vc_redist.x64.exe."
+        )
+    if in_process:
+        return (
+            "MinerU ships with PDF support (the pdf extra), so this install is broken. Reinstall with "
+            f"`{_reinstall_command()}`."
+        )
+    if dll_failure:
         return (
             "the import works in this process but not in a fresh child, which is how MinerU's worker and "
             "server run. The child cannot find the Visual C++ runtime DLLs: this machine has no "
@@ -2208,10 +2252,7 @@ def _run_check_mineru() -> bool:
         from mineru.cli.common import do_parse  # noqa: PLC0415 — optional/heavy dependency deferred (mineru)
     except Exception as exc:  # noqa: BLE001 — boundary catch of optional MinerU import failure; surfaced via click.echo
         click.echo(_check("MinerU import", False, _exc_detail(exc, with_type=True)))
-        click.echo(
-            "  ↳ MinerU ships with PDF support (the pdf extra), so this install is broken. Reinstall with "
-            f"`{_reinstall_command()}`."
-        )
+        click.echo(f"  ↳ {_child_import_remedy(_exc_detail(exc, with_type=True), in_process=True)}")
         return True
 
     if do_parse is None:
@@ -2256,9 +2297,15 @@ def _run_check_mineru() -> bool:
         if child_error is not None:
             pass  # reported above, with the real-parse skip
         elif not _mineru_pipeline_model_dir_configured():
+            from nexus._mineru_spawn import mineru_console_command  # noqa: PLC0415 — deferred import (startup cost)
+
             click.echo(
-                "  (MinerU pipeline model weights not downloaded; real-parse "
-                "check skipped — run `mineru-models-download`)"
+                "  (MinerU pipeline model weights not found; real-parse check skipped. MinerU fetches its "
+                "weights on first use, and this check runs once they are in the Hugging Face cache or a models "
+                "dir is configured (mineru.json). To fetch them now, run "
+                f"`{mineru_console_command('mineru-models-download')}`, which works on every platform; off "
+                "Windows the plain `mineru-models-download` script works too. On Windows use the first form: "
+                "the plain script never imports nexus and can fail with WinError 126.)"
             )
         else:
             if _run_check_mineru_parse():

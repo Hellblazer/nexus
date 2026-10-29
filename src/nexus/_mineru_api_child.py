@@ -11,22 +11,24 @@ search path before mineru is imported.
 
 The function it runs is the one mineru declares for ``mineru-api`` (its ``console_scripts``
 entry point), so a mineru release that moves ``main`` still starts; ``mineru.cli.fast_api:main``
-is the fallback when no installed distribution declares it.
+is the fallback when no installed distribution declares it. The lookup is
+``nexus._mineru_console.console_entry``, the launcher for MinerU's other console scripts.
 
 Nothing here may import mineru, torch, onnxruntime or magika above the ``import nexus`` line.
 """
 from __future__ import annotations
 
-import importlib.metadata
 from collections.abc import Callable
 
 import nexus  # noqa: F401 -- runs _add_vc_runtime_dirs() before any import below it
+from nexus import _mineru_console
 
 
 def server_entry() -> Callable[[], object]:
     """mineru-api's ``main``: its ``console_scripts`` entry point, else ``mineru.cli.fast_api.main``."""
-    for entry_point in importlib.metadata.entry_points(group="console_scripts", name="mineru-api"):
-        return entry_point.load()
+    entry = _mineru_console.console_entry("mineru-api")
+    if entry is not None:
+        return entry
     from mineru.cli.fast_api import main  # noqa: PLC0415 -- must follow `import nexus`
 
     return main

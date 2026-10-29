@@ -182,6 +182,24 @@ def _resolve_mineru_api_bin() -> str | None:
 #: The module a Windows mineru-api child runs under ``python -m`` (nexus-vyy65).
 MINERU_SERVER_CHILD_MODULE = "nexus._mineru_api_child"
 
+#: The module that runs any MinerU console script under nx's DLL setup (nexus-vyy65).
+MINERU_CONSOLE_MODULE = "nexus._mineru_console"
+
+
+def mineru_console_command(script: str) -> str:
+    """A command line a user can paste to run MinerU console *script* (``mineru-models-download``)
+    under nx's own console interpreter with nx's DLL directories in place.
+
+    The console script is a launcher that never imports nexus, so on Windows with no VC++
+    redistributable it dies with WinError 126 on torch's ``c10.dll``; this form is the same
+    program run through :data:`MINERU_CONSOLE_MODULE`. It works on every platform."""
+    import shlex  # noqa: PLC0415 -- stdlib-only
+
+    argv = [console_python(sys.executable), "-m", MINERU_CONSOLE_MODULE, script]
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(argv)
+    return shlex.join(argv)
+
 
 def mineru_server_argv(mineru_bin: str, port: int, platform: str | None = None) -> list[str]:
     """The command line of the mineru-api server child.
