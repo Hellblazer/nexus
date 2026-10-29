@@ -40,7 +40,7 @@
 # so no CI step checks [docs_readers] yet; it needs the sweep switch exported on that leg first.
 
 [python_unit]
-provisioned_tests = 4988
+provisioned_tests = 4996
 tolerance_tests = 0
 # 4925 -> 4926 (nexus-wypwq, 2026-10-22): tests/test_doctor_embedding_family_row.py::test_the_default_sweep_prints_the_row
 # runs the real `nx doctor` to prove the Embedding family row is registered in run_health_checks, and every other
@@ -93,6 +93,14 @@ tolerance_tests = 0
 #     doc_id, a worker-held row) with a second run changing nothing; a crash between out and delete leaving one task.
 #   tests/test_rdr235_mvv_aspect_queue_tuples.py +2: the RDR-235 MVV journey (eight bullets, engine-clock timing) and
 #     scenario 24 (a second process's out wakes a parked worker); scenario 25 is slow-marked and runs by name.
+# 4988 -> 4996 (nexus-5r2sc.3.9 and .3.10, 2026-10-29, same ruling): the fix round after the review gate, +8 over merge base
+# 879830218. Each runs against the real engine because the defect was in what the engine's queue does with the verdict.
+#   tests/test_aspect_worker_tuples.py +6: a T3 get that raises a transport error, a T3 5xx and a manifest lookup that raises
+#     each keep the task (attempts 1, not dead), with the empty-read control still dropped (4); a persist 500 is a ladder
+#     retry and a 400 is still dead (2).
+#   tests/test_aspects_requeue_failed_tuples.py +2: requeue-failed with the flag at tuples deletes the failed table row by
+#     (collection, source_path), skips a blank doc_id row and leaves a pending sibling; the doctor goes green and a second
+#     run has nothing to do.
 measured_on = "CI 39558553494 (34f8399db), 39565809153 (4e298abff), 39698506258 (a0d079992), 39713947919 (da8c08fdc)"
 
 # The docs-readers CI leg runs a different selection (lint-marked docs files under the default
