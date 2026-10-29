@@ -46,7 +46,8 @@ class TemplateRegistryTest {
         // board/<topic>, lock/<resource>, queue/<name> beside the three RDR-205/208
         // templates.
         // RDR-220 added board/ci/<topic> (sorts after board/<topic>).
-        assertEquals(List.of("board/<topic>", "board/ci/<topic>", "directory/<name>",
+        // RDR-235 E3 added the literal aspects (sorts first).
+        assertEquals(List.of("aspects", "board/<topic>", "board/ci/<topic>", "directory/<name>",
                 "ledger/<session_id>", "lock/<resource>", "mailbox/<address>", "queue/<name>"), names);
     }
 
@@ -281,7 +282,8 @@ class TemplateRegistryTest {
         // 7 since RDR-220 added board/ci/<topic>, which declares no claim-log
         // override either.
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
-        assertEquals(7, registry.templates().size());
+        // 8 since RDR-235 E3 added the literal aspects (its own 100-day claim-log TTL).
+        assertEquals(8, registry.templates().size());
     }
 
     @Test
@@ -482,6 +484,66 @@ class TemplateRegistryTest {
         assertNull(registry.resolve("mailbox/x"));
     }
 
+    // ── RDR-235 E3 (bead nexus-5r2sc.2.4): the literal aspects template ──
+
+    /** The first one-segment literal name ever resolved: no "/" in the name, so
+     *  {@code resolve} must find it by the literal lookup, not a segment match. */
+    @Test
+    void aspectsOneSegmentLiteralNameResolves() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        TemplateSchema resolved = registry.resolve("aspects");
+        assertNotNull(resolved, "a one-segment literal name must resolve");
+        assertEquals("aspects", resolved.name());
+        assertTrue(resolved.isLiteral());
+        assertNull(registry.resolve("aspects/x"), "the literal is not a prefix of other names");
+        assertNull(registry.resolve("aspectsx"));
+    }
+
+    @Test
+    void aspectsTemplateMatchesItsRdrSpecifiedShape() {
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        TemplateSchema aspects = registry.byName("aspects");
+        assertNotNull(aspects);
+        assertEquals(List.of("queue"), aspects.keys());
+        assertEquals(List.of("aspects"), aspects.keyValues().get("queue"));
+        assertEquals(TemplateSchema.IdFrom.KEYS_NONCE, aspects.idFrom());
+        assertTrue(aspects.dimensions().isEmpty());
+        assertTrue(aspects.idDims().isEmpty());
+        assertTrue(aspects.take().enabled());
+        assertEquals(6L, aspects.take().maxAttempts());
+        assertEquals(900L, aspects.take().maxLeaseSeconds());
+        // Added to the RDR's literal block by this bead (fix-check item 3): the
+        // worker's inp claims and renews send no lease_s.
+        assertEquals(600L, aspects.take().defaultLeaseSeconds());
+        assertEquals(7_776_000L, aspects.retentionSeconds());
+        assertEquals(Long.valueOf(10_000L), aspects.maxLiveRows());
+        assertEquals(Long.valueOf(8_640_000L), aspects.claimLogTtlSeconds());
+        assertFalse(aspects.lock());
+    }
+
+    /** Scenario 20: the engine boots with aspects.yaml at 100 days and refuses at 99. */
+    @Test
+    void aspectsClaimLogTtlBootCheck_bootsAt100Days_refusesAt99NamingTheVariable() {
+        TemplateRegistry at100 = TemplateRegistry.loadAtBoot(null, "100", SWEEP_INTERVAL_SECONDS);
+        // The resolved value, not the env var alone: the template's own TTL is in force.
+        assertEquals(8_640_000L, at100.effectiveClaimLogTtlSeconds("aspects"));
+        assertTrue(at100.effectiveClaimLogTtlSeconds("aspects") > 7_776_000L + SWEEP_INTERVAL_SECONDS,
+                "must exceed retention plus one sweep interval (7,797,600 s)");
+
+        TemplateRegistryException ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.loadAtBoot(null, "99", SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains(TemplateRegistry.CLAIM_LOG_TTL_DAYS_ENV), ex.getMessage());
+        assertTrue(ex.getMessage().contains("NX_TUPLE_CLAIM_LOG_TTL_DAYS"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("aspects"), ex.getMessage());
+    }
+
+    @Test
+    void aspectsClaimLogTtlUnsetEngineDefaultPasses() {
+        // Unset is 180 days, above the template's 100: boots, and the template's own value wins.
+        TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
+        assertEquals(8_640_000L, registry.effectiveClaimLogTtlSeconds("aspects"));
+    }
+
     // ── address grammar (RDR-205 follow-on, nexus-mvfm9) ───────────────
 
     /**
@@ -525,8 +587,8 @@ class TemplateRegistryTest {
         assertTrue(registry.sources().get(1).startsWith("directory:"), registry.sources().get(1));
         // 7, not 4: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
         // lock/<resource>, queue/<name> beside the three bundled resource templates;
-        // 8 since RDR-220 added board/ci/<topic>.
-        assertEquals(8, registry.templates().size());
+        // 8 since RDR-220 added board/ci/<topic>; 9 since RDR-235 E3 added aspects.
+        assertEquals(9, registry.templates().size());
         assertTrue(registry.templates().stream().anyMatch(t -> t.name().equals("test/<id>")));
     }
 

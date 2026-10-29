@@ -15,9 +15,14 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.sql.Connection;
+import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
+import org.jooq.JSONB;
+
+import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
@@ -174,6 +179,82 @@ class TupleMaxLiveRowsTest {
 
         byte[] id = outCap(tenant, room, "e3", null);
         assertThat(id).isNotNull();
+    }
+
+    // ── RDR-235 E3 scenario 12: a dead task counts, then ages out ───────────
+
+    /**
+     * RDR-235 Test Plan scenario 12 on the SHIPPED {@code aspects} template
+     * (bead nexus-5r2sc.2.4): a dead task is unconsumed, so it counts against
+     * {@code max_live_rows} (10,000) until its retention passes; the sweep's
+     * purge arm then removes it and it stops counting. The cap is filled with
+     * 9,999 admin-inserted live rows plus the one real dead task, so the 10,001st
+     * {@code out} is refused while the dead task exists and accepted after the
+     * sweep removed it.
+     */
+    @Test
+    void aspectsDeadTaskCountsAgainstTheCapUntilRetentionPassesThenTheSweepRemovesIt() throws Exception {
+        String tenant = freshTenant("aspects-dead");
+        var pin = Map.of("queue", "aspects");
+        byte[] deadId = repo.out(tenant, "aspects", pin, Map.of(), "task-dead", "1.1.1", null);
+
+        // max_attempts 6: six claim+nack cycles dead-letter it.
+        for (int attempt = 0; attempt < 6; attempt++) {
+            var claimed = repo.inp(tenant, "aspects", pin, "worker-1", (Long) 60L);
+            assertThat(claimed).as("attempt " + attempt + " must still be claimable").isPresent();
+            repo.nack(tenant, claimed.get().claimId(), "worker-1");
+        }
+        assertThat(repo.inp(tenant, "aspects", pin, "worker-2", (Long) 60L))
+                .as("dead-lettered: never claimable again").isEmpty();
+
+        try (Connection su = pg.createConnection("")) {
+            var ctx = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            assertThat(ctx.select(TUPLES.CLAIM_STATE).from(TUPLES).where(TUPLES.ID.eq(deadId))
+                    .fetchOne(TUPLES.CLAIM_STATE)).isEqualTo("dead");
+            assertThat(ctx.select(TUPLES.CONSUMED_AT).from(TUPLES).where(TUPLES.ID.eq(deadId))
+                    .fetchOne(TUPLES.CONSUMED_AT)).isNull();
+
+            // Fill the cap: 9,999 live fillers + the dead task = 10,000.
+            OffsetDateTime now = OffsetDateTime.now();
+            var batch = ctx.batch(ctx.insertInto(TUPLES, TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE,
+                            TUPLES.TEMPLATE, TUPLES.KEYS, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
+                    .values((byte[]) null, (String) null, (String) null, (String) null, (JSONB) null,
+                            (OffsetDateTime) null, (OffsetDateTime) null));
+            var sha = MessageDigest.getInstance("SHA-256");
+            for (int i = 1; i <= 9999; i++) {
+                byte[] fillerId = sha.digest((tenant + "/filler/" + i).getBytes(StandardCharsets.UTF_8));
+                batch.bind(fillerId, tenant, "aspects", "aspects", JSONB.jsonb("{\"queue\":\"aspects\"}"),
+                        now.plusDays(1), now);
+            }
+            assertThat(batch.execute()).hasSize(9999);
+        }
+
+        assertThatExceptionOfType(MaxLiveRowsExceededException.class)
+                .as("the dead task counts: 9,999 + 1 reaches the cap")
+                .isThrownBy(() -> repo.out(tenant, "aspects", pin, Map.of(), "task-new", "2.2.2", null))
+                .satisfies(e -> assertThat(e.maxLiveRows()).isEqualTo(10_000L));
+
+        // Retention passes for the dead task: move its expires_at and created_at back.
+        try (Connection su = pg.createConnection("")) {
+            var ctx = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            OffsetDateTime now = OffsetDateTime.now();
+            assertThat(ctx.update(TUPLES)
+                    .set(TUPLES.EXPIRES_AT, now.minusSeconds(1))
+                    .set(TUPLES.CREATED_AT, now.minusDays(91))
+                    .where(TUPLES.ID.eq(deadId)).execute()).isEqualTo(1);
+        }
+        // Past expires_at it no longer counts even before the sweep (the live predicate), but
+        // the row is still there until the sweep removes it.
+        var result = repo.purgeExpiredTuplesBatch(tenant, 100, java.time.Duration.ofSeconds(30));
+        assertThat(result.purged()).as("only the aged dead task is expired").isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            var ctx = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            assertThat(ctx.fetchExists(ctx.selectOne().from(TUPLES).where(TUPLES.ID.eq(deadId))))
+                    .as("the swept dead task is gone").isFalse();
+        }
+
+        byte[] id = repo.out(tenant, "aspects", pin, Map.of(), "task-new", "2.2.2", null);
+        assertThat(id).as("the swept dead task no longer counts: 9,999 live leaves room").isNotNull();
     }
 
     // ── unbounded without the field ──────────────────────────────────────────

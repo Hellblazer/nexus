@@ -101,8 +101,8 @@ class TupleTemplatesTest {
     @Test
     void registryHasSixTemplatesAndTheThreeNewOnesResolve() {
         // 7 since RDR-220 added board/ci/<topic>; the method name records the
-        // RDR-211 set it was written for.
-        assertThat(registry.templates()).hasSize(7);
+        // RDR-211 set it was written for. 8 since RDR-235 E3 added the literal aspects.
+        assertThat(registry.templates()).hasSize(8);
         assertThat(registry.byName("board/<topic>")).as("board must load").isNotNull();
         assertThat(registry.byName("queue/<name>")).as("queue must load").isNotNull();
         assertThat(registry.byName("lock/<resource>")).as("lock must load").isNotNull();
@@ -228,6 +228,47 @@ class TupleTemplatesTest {
         var rows = repo.rdp(tenant, "queue/" + queue, Map.of("queue", queue), 10, null);
         assertThat(rows).as("dead letter still readable").hasSize(1);
         assertThat(rows.get(0).id()).isEqualTo(id);
+    }
+
+    // ── RDR-235 E3 (bead nexus-5r2sc.2.4): the literal aspects queue ─────────
+
+    @Test
+    void aspectsOutWithQueueAspectsIsAccepted() {
+        String tenant = freshTenant("aspects-out-ok");
+        byte[] id = repo.out(tenant, "aspects", Map.of("queue", "aspects"), Map.of(),
+                "{\"collection\":\"c\"}", "1.2.3", null);
+        assertThat(id).isNotNull();
+        assertThat(repo.rdp(tenant, "aspects", Map.of("queue", "aspects"), 10, null)).hasSize(1);
+    }
+
+    @Test
+    void aspectsOutWithAnotherQueueValueIsRefused() {
+        String tenant = freshTenant("aspects-out-other");
+        assertThatExceptionOfType(SchemaViolationException.class)
+                .isThrownBy(() -> repo.out(tenant, "aspects", Map.of("queue", "other"), Map.of(),
+                        "task", "1.2.3", null));
+    }
+
+    @Test
+    void aspectsInAndInpWithoutPinningQueueAreRefused() {
+        String tenant = freshTenant("aspects-unpinned");
+        repo.out(tenant, "aspects", Map.of("queue", "aspects"), Map.of(), "task", "1.2.3", null);
+        assertThatExceptionOfType(SchemaViolationException.class)
+                .isThrownBy(() -> repo.inp(tenant, "aspects", Map.of(), "worker-1", (Long) 600L));
+        assertThatExceptionOfType(SchemaViolationException.class)
+                .isThrownBy(() -> repo.in(tenant, "aspects", Map.of(), "worker-1", (Long) 600L, 0L));
+    }
+
+    /** Fix-check item 3: the worker's claims send no lease_s; the template's default (600 s) applies. */
+    @Test
+    void aspectsInpWithNoLeaseTakesTheTemplateDefaultOf600Seconds() {
+        String tenant = freshTenant("aspects-default-lease");
+        repo.out(tenant, "aspects", Map.of("queue", "aspects"), Map.of(), "task", "1.2.3", null);
+        java.time.OffsetDateTime before = java.time.OffsetDateTime.now();
+        var claimed = repo.inp(tenant, "aspects", Map.of("queue", "aspects"), "worker-1", (Long) null);
+        assertThat(claimed).as("a claim with no lease_s must succeed, not 400").isPresent();
+        java.time.OffsetDateTime leaseUntil = claimed.get().tuple().leaseUntil();
+        assertThat(leaseUntil).isBetween(before.plusSeconds(590), before.plusSeconds(660));
     }
 
     // ── lock out() is idempotent: one tuple per resource ─────────────────────
