@@ -82,6 +82,8 @@ class World:
     flag: str = "tuples"
     # a read that also returns failed rows: the rung must not trust the route's filter alone
     leak_failed: bool = False
+    # nonce -> an exception the out_replace for that task raises
+    out_errors: dict[str, Exception] = field(default_factory=dict)
 
     # table side ----------------------------------------------------------
     def list_waiting(self, limit: int | None = None) -> list[WaitingRow]:
@@ -112,6 +114,8 @@ class World:
 
     def out_replace(self, subspace, keys, dims, body, *, nonce, ttl_seconds=None, delay_s=None):
         self.events.append(("out_replace", subspace, dict(keys), body, nonce, delay_s))
+        if nonce in self.out_errors:
+            raise self.out_errors[nonce]
         existed = nonce in self.tasks
         self.tasks[nonce] = {"body": body, "delay_s": delay_s, "keys": dict(keys)}
         return "id-" + nonce, "replaced" if existed else "created"
@@ -257,6 +261,47 @@ class TestTheMove:
         assert len(counted) == 1 and counted[0]["count"] == 1
         # and it does not keep the rung from converging
         rung = w.rung()
+        assert rung.detect() == RungStatus(applicable=True, converged=True)
+        assert rung.verify() is True
+
+    def test_a_full_tuple_space_defers_with_a_detail_instead_of_failing(self) -> None:
+        """nexus-5r2sc.3.9 M1: MaxLiveRowsExceeded is not a bug in the rung; it clears
+        as tasks are consumed. DEFERRED, with the rows already moved kept and the
+        rest untouched, never an exception that reads as FAILED on every run."""
+        from nexus.db.t2.http_tuple_store import MaxLiveRowsExceededError
+
+        w = World(
+            rows=[_row(f"/{i}.md", f"1.1.{i}") for i in range(3)],
+            out_errors={"1.1.1": MaxLiveRowsExceededError("ceiling")},
+        )
+        result = w.rung().converge(Report())
+        assert result.outcome is ConvergeOutcome.DEFERRED
+        assert "ceiling" in result.detail or "live" in result.detail, result.detail
+        assert [r.source_path for r in w.rows] == ["/1.md", "/2.md"], "row 0 moved; the refused row and the rest stay"
+        assert list(w.tasks) == ["1.1.0"]
+
+    def test_a_row_too_large_for_a_task_is_left_counted_and_the_rest_move(self, logs) -> None:
+        """nexus-5r2sc.3.9 M1: an identity body over the 4,096-byte cap raised on every
+        run and wedged the rung on the first FIFO row. The producer skips such a
+        row; the rung now logs it, counts it, leaves it in the table and moves
+        its neighbours. It is excluded for the rest of this run, so it is not
+        retried per batch and does not keep the rung from converging."""
+        from nexus.db.t2.http_tuple_store import TooLargeError
+
+        w = World(
+            rows=[_row("/big.md", "1.1.0"), _row("/a.md", "1.1.1"), _row("/b.md", "1.1.2")],
+            out_errors={"1.1.0": TooLargeError("body over the cap")},
+        )
+        rung = w.rung(batch_limit=2)
+        first = rung.converge(Report())
+        assert first.outcome is ConvergeOutcome.RESUMABLE
+        second = rung.converge(Report())
+        assert second.outcome is ConvergeOutcome.COMPLETED, second
+        assert [r.source_path for r in w.rows] == ["/big.md"], "only the oversize row stays"
+        assert sorted(w.tasks) == ["1.1.1", "1.1.2"]
+        assert [c[4] for c in w.calls("out_replace")].count("1.1.0") == 1, "tried once, then excluded this run"
+        (line,) = logs.events("aspect_queue_rung_row_too_large")
+        assert line["doc_id"] == "1.1.0" and line["source_path"] == "/big.md"
         assert rung.detect() == RungStatus(applicable=True, converged=True)
         assert rung.verify() is True
 

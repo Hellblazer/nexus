@@ -34,6 +34,12 @@ WHAT IT DOES.
 
 WHAT STAYS IN THE TABLE.
   * ``failed`` rows never move (``requeue-failed`` re-enqueues them).
+  * A row whose identity body is over the task cap (``TooLargeError``: a very
+    long ``source_path``) stays: it is logged (``aspect_queue_rung_row_too_large``),
+    counted, left in the table for the alternating table worker, and excluded for
+    the rest of the run, so it neither wedges the rung nor is retried per batch.
+    A full tuple space (``MaxLiveRowsExceededError``) is not a row fault: the
+    converge returns DEFERRED and resumes on the next ``nx upgrade``.
   * A row with an EMPTY ``doc_id`` stays: the task's nonce is the doc_id and a
     nonce is not invented. The alternating table worker drains it. One log line
     counts them; they do not keep the rung from converging.
@@ -62,6 +68,7 @@ from typing import Any
 
 import structlog
 
+from nexus.db.t2.http_tuple_store import MaxLiveRowsExceededError, TooLargeError
 from nexus.db.t2.http_aspect_queue import (
     ASPECT_QUEUE_ENV,
     ASPECTS_ENGINE_RELEASE as ASPECTS_ENGINE_TAG,  # aliased: the ladder lint bans identifiers containing 'lease' outside preconditions
@@ -142,6 +149,9 @@ class AspectQueueTuplesRung:
         self._tuples_factory = tuples_factory
         self._batch_limit = batch_limit
         self._moved = 0
+        #: (collection, source_path) of rows the tuple space refused as too large
+        #: this run: left in the table and excluded from :meth:`_movable`.
+        self._oversize: set[tuple[str, str]] = set()
         self._verify_detail = ""
         self._record_detail = ""
 
@@ -189,9 +199,13 @@ class AspectQueueTuplesRung:
             return rows, []
         return "", rows
 
-    @staticmethod
-    def _movable(rows: list[WaitingRow]) -> list[WaitingRow]:
-        return [r for r in rows if r.doc_id and r.status in ("pending", "in_progress")]
+    def _movable(self, rows: list[WaitingRow]) -> list[WaitingRow]:
+        return [
+            r for r in rows
+            if r.doc_id
+            and r.status in ("pending", "in_progress")
+            and (r.collection, r.source_path) not in self._oversize
+        ]
 
     def detect(self) -> RungStatus:
         reason, rows = self._probe()
@@ -240,7 +254,31 @@ class AspectQueueTuplesRung:
                             f"row(s); the move resumes on the next `nx upgrade`"
                         ),
                     )
-                self._move(queue, tuples, row)
+                try:
+                    self._move(queue, tuples, row)
+                except TooLargeError as exc:
+                    _log.warning(
+                        "aspect_queue_rung_row_too_large",
+                        collection=row.collection, source_path=row.source_path,
+                        doc_id=row.doc_id, error=str(exc)[:200],
+                        action="left in the table; the table worker drains it",
+                    )
+                    self._oversize.add((row.collection, row.source_path))
+                    continue
+                except MaxLiveRowsExceededError as exc:
+                    _log.warning(
+                        "aspect_queue_rung_tuple_space_full",
+                        moved=self._moved, error=str(exc)[:200],
+                    )
+                    return ConvergeResult(
+                        ConvergeOutcome.DEFERRED,
+                        detail=(
+                            f"the 'aspects' tuple space is at its live-row ceiling "
+                            f"(MaxLiveRowsExceeded) after {self._moved} row(s); the move "
+                            f"resumes on the next `nx upgrade`, once the worker has "
+                            f"drained tasks"
+                        ),
+                    )
                 self._moved += 1
             report.emit(
                 "aspect_queue_rung_batch", moved=len(batch), remaining=len(movable) - len(batch),
@@ -276,6 +314,8 @@ class AspectQueueTuplesRung:
         text = f"moved {self._moved} row(s) to '{ASPECTS_SUBSPACE}' tasks"
         if left:
             text += f"; {left} row(s) without a doc_id stay in the table"
+        if self._oversize:
+            text += f"; {len(self._oversize)} row(s) too large for a task stay in the table"
         return text
 
     # ── verify ───────────────────────────────────────────────────────────────
