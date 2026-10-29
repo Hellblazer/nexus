@@ -56,7 +56,7 @@ main() {
 	                   as --yes.
 	  --no-autostart   With --local: do not start the service at login. Passed to
 	                   `nx init` as --no-autostart.
-	  --slim           Leave PDF support out: the download falls to about 0.25 GB for the
+	  --slim           Leave PDF support out: the download falls to about 0.2 GB (0.25 GB on Linux) for the
 	                   command-line tool (about 0.55 GB with --local). The first PDF you
 	                   index then fetches it (`nx self install --extras pdf` does it
 	                   ahead of time).

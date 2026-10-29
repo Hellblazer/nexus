@@ -24,7 +24,7 @@ STALE_TABLE = (
     "about 0.55 GB", "1.6 to 2.3 GB", "1.3 to 1.5 GB", "about 0.2 GB down", "about 1.3 GB", "about 0.7 GB down",
     "2.4 to 3.1 GB", "2.1 to 2.3 GB", "about 0.45 GB", "1.8 to 2.2 GB", "2.5 to 2.9 GB", "0.9 GB on Linux)",
 )
-STALE_PROVENANCE = ("derived", "7.81.0-era", "upper bound", "0.8 GB less", "2.4 GB on Linux", "3.6 GB on macOS", "2.4 GB, not 4.4 GB")
+STALE_PROVENANCE = ("derived", "7.81.0-era", "upper bound", "0.8 GB less", "2.4 GB on Linux", "3.6 GB on macOS", "2.4 GB, not 4.4 GB", "not 4.5 GB")
 
 
 def _text(path: str) -> str:
@@ -54,7 +54,7 @@ def test_the_installers_state_the_default_size_the_slim_size_and_that_they_are_m
     text = _text(path)
     assert "about 0.8 GB" in text and "1.0 GB on Linux" in text
     assert "about 0.5 GB on macOS and 0.6 GB on Linux" in text
-    assert "--slim" in text and "about 0.25 GB for the" in text and "about 0.55 GB with --local" in text
+    assert "--slim" in text and "about 0.2 GB (0.25 GB on Linux) for the" in text and "about 0.55 GB with --local" in text
     assert "measured on 7.89.0 on macOS and Linux (2026-10-29)" in text
     assert "1.9 to 2.2 GB for the command-line tool and 2.6 to 2.9 GB with --local" in " ".join(text.split())
     for stale in STALE_PROVENANCE:
